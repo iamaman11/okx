@@ -295,10 +295,8 @@ impl AccountApi {
         let mut requested_fee_group_id = None;
 
         if let Some((instrument_type, instrument)) = selected {
-            requested_instrument_max_leverage =
-                non_empty(&instrument.lever).map(ToOwned::to_owned);
-            requested_fee_group_id =
-                non_empty(&instrument.fee_group_id).map(ToOwned::to_owned);
+            requested_instrument_max_leverage = non_empty(&instrument.lever).map(ToOwned::to_owned);
+            requested_fee_group_id = non_empty(&instrument.fee_group_id).map(ToOwned::to_owned);
 
             match self.leverage(requested_instrument, margin_mode).await {
                 Ok(value) => configured_leverage = value,
