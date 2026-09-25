@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/okx-api",
+    "crates/okx-cli",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
