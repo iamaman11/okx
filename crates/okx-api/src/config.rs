@@ -80,7 +80,9 @@ impl Credentials {
     pub fn from_env() -> Result<Self, OkxError> {
         fn required(name: &str) -> Result<String, OkxError> {
             env::var(name)
-                .map_err(|_| OkxError::Config(format!("required environment variable {name} is missing")))
+                .map_err(|_| {
+                    OkxError::Config(format!("required environment variable {name} is missing"))
+                })
                 .and_then(|value| {
                     if value.trim().is_empty() {
                         Err(OkxError::Config(format!(

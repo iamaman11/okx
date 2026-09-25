@@ -156,6 +156,7 @@ pub struct Position {
 pub struct DerivativeAvailability {
     pub instrument_type: InstrumentType,
     pub instrument_count: usize,
+    pub sample_instruments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,6 +171,8 @@ pub struct AccountCapabilities {
     pub derivatives: Vec<DerivativeAvailability>,
     pub requested_instrument: String,
     pub requested_instrument_available: bool,
+    pub requested_instrument_max_leverage: Option<String>,
+    pub requested_fee_group_id: Option<String>,
     pub configured_leverage: Vec<LeverageInfo>,
     pub fee_rates: Vec<FeeRate>,
     pub non_zero_balance_currencies: usize,
@@ -227,11 +230,11 @@ impl AccountApi {
     pub async fn fee_rates(
         &self,
         instrument_type: InstrumentType,
-        instrument_family: Option<&str>,
+        group_id: Option<&str>,
     ) -> Result<Vec<FeeRate>, OkxError> {
         let mut params = vec![("instType", instrument_type.to_string())];
-        if let Some(family) = instrument_family.filter(|value| !value.is_empty()) {
-            params.push(("instFamily", family.to_owned()));
+        if let Some(group_id) = group_id.filter(|value| !value.is_empty()) {
+            params.push(("groupId", group_id.to_owned()));
         }
 
         self.client
@@ -269,16 +272,10 @@ impl AccountApi {
 
         let mut derivatives = Vec::new();
         if !swap.is_empty() {
-            derivatives.push(DerivativeAvailability {
-                instrument_type: InstrumentType::Swap,
-                instrument_count: swap.len(),
-            });
+            derivatives.push(availability(InstrumentType::Swap, &swap));
         }
         if !futures.is_empty() {
-            derivatives.push(DerivativeAvailability {
-                instrument_type: InstrumentType::Futures,
-                instrument_count: futures.len(),
-            });
+            derivatives.push(availability(InstrumentType::Futures, &futures));
         }
 
         let selected = swap
@@ -294,15 +291,22 @@ impl AccountApi {
         let mut warnings = Vec::new();
         let mut configured_leverage = Vec::new();
         let mut fee_rates = Vec::new();
+        let mut requested_instrument_max_leverage = None;
+        let mut requested_fee_group_id = None;
 
         if let Some((instrument_type, instrument)) = selected {
+            requested_instrument_max_leverage =
+                non_empty(&instrument.lever).map(ToOwned::to_owned);
+            requested_fee_group_id =
+                non_empty(&instrument.fee_group_id).map(ToOwned::to_owned);
+
             match self.leverage(requested_instrument, margin_mode).await {
                 Ok(value) => configured_leverage = value,
                 Err(error) => warnings.push(format!("leverage probe unavailable: {error}")),
             }
 
             match self
-                .fee_rates(instrument_type, Some(&instrument.instrument_family))
+                .fee_rates(instrument_type, requested_fee_group_id.as_deref())
                 .await
             {
                 Ok(value) => fee_rates = value,
@@ -325,6 +329,8 @@ impl AccountApi {
             derivatives,
             requested_instrument: requested_instrument.to_owned(),
             requested_instrument_available: selected.is_some(),
+            requested_instrument_max_leverage,
+            requested_fee_group_id,
             configured_leverage,
             fee_rates,
             non_zero_balance_currencies: balance.details.len(),
@@ -332,6 +338,26 @@ impl AccountApi {
             warnings,
         })
     }
+}
+
+fn availability(
+    instrument_type: InstrumentType,
+    instruments: &[Instrument],
+) -> DerivativeAvailability {
+    DerivativeAvailability {
+        instrument_type,
+        instrument_count: instruments.len(),
+        sample_instruments: instruments
+            .iter()
+            .filter(|instrument| instrument.state == "live")
+            .take(5)
+            .map(|instrument| instrument.instrument_id.clone())
+            .collect(),
+    }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
 }
 
 fn account_mode_name(account_level: &str) -> &'static str {

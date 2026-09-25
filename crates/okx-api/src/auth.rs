@@ -23,8 +23,8 @@ pub fn sign(
         method.to_ascii_uppercase()
     );
 
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|e| OkxError::Crypto(e.to_string()))?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|e| OkxError::Crypto(e.to_string()))?;
     mac.update(prehash.as_bytes());
 
     Ok(STANDARD.encode(mac.finalize().into_bytes()))
@@ -45,9 +45,6 @@ mod tests {
         )
         .expect("signature");
 
-        assert_eq!(
-            signature,
-            "5KlCItRxE039QKll2OJlbYeUcSiPGR/z10UR7bbl68o="
-        );
+        assert_eq!(signature, "5KlCItRxE039QKll2OJlbYeUcSiPGR/z10UR7bbl68o=");
     }
 }

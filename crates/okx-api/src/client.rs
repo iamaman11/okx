@@ -26,9 +26,7 @@ pub struct OkxRestClient {
 
 impl OkxRestClient {
     pub fn new(environment: OkxEnvironment, credentials: Credentials) -> Result<Self, OkxError> {
-        let http = Client::builder()
-            .user_agent("iamaman11-okx/0.1")
-            .build()?;
+        let http = Client::builder().user_agent("iamaman11-okx/0.1").build()?;
 
         Ok(Self {
             http,

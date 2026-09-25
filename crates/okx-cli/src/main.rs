@@ -1,9 +1,7 @@
 use std::str::FromStr;
 
 use clap::Parser;
-use okx_api::{
-    AccountApi, Credentials, MarginMode, OkxEnvironment, OkxRestClient, Region,
-};
+use okx_api::{AccountApi, Credentials, MarginMode, OkxEnvironment, OkxRestClient, Region};
 
 #[derive(Debug, Parser)]
 #[command(name = "okx-capabilities")]
@@ -31,9 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = OkxRestClient::new(OkxEnvironment::new(region, args.demo), credentials)?;
     let account = AccountApi::new(client);
-    let capabilities = account
-        .probe_capabilities(&args.instrument, margin)
-        .await?;
+    let capabilities = account.probe_capabilities(&args.instrument, margin).await?;
 
     println!("{}", serde_json::to_string_pretty(&capabilities)?);
     Ok(())
