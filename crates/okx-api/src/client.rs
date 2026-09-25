@@ -13,7 +13,6 @@ struct ApiEnvelope<T> {
     code: String,
     #[serde(default)]
     msg: String,
-    #[serde(default)]
     data: Vec<T>,
 }
 
