@@ -47,10 +47,7 @@ pub fn store_machine_secret(namespace: &str, name: &str, secret: &[u8]) -> Secre
     }
 }
 
-pub fn load_machine_secret(
-    namespace: &str,
-    name: &str,
-) -> SecretStoreResult<Zeroizing<Vec<u8>>> {
+pub fn load_machine_secret(namespace: &str, name: &str) -> SecretStoreResult<Zeroizing<Vec<u8>>> {
     validate_component(namespace)?;
     validate_component(name)?;
 
@@ -103,8 +100,8 @@ fn secret_path(namespace: &str, name: &str) -> PathBuf {
 mod windows {
     use std::{
         fs,
-        ptr::null_mut,
         process::{Command, Stdio},
+        ptr::null_mut,
         slice,
     };
 
@@ -117,9 +114,7 @@ mod windows {
     };
     use zeroize::{Zeroize, Zeroizing};
 
-    use super::{
-        MACHINE_SECRET_ROOT, SecretStoreError, SecretStoreResult, secret_path,
-    };
+    use super::{MACHINE_SECRET_ROOT, SecretStoreError, SecretStoreResult, secret_path};
 
     struct DpapiBlob(CRYPT_INTEGER_BLOB);
 
@@ -217,9 +212,7 @@ mod windows {
             return Err(SecretStoreError::NullDpapiBuffer);
         }
 
-        Ok(unsafe {
-            slice::from_raw_parts(output.0.pbData, output.0.cbData as usize).to_vec()
-        })
+        Ok(unsafe { slice::from_raw_parts(output.0.pbData, output.0.cbData as usize).to_vec() })
     }
 
     fn unprotect(data: &[u8], entropy: &[u8]) -> SecretStoreResult<Vec<u8>> {
