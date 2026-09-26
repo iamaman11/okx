@@ -105,7 +105,7 @@ pub fn status_value() -> HostControlResult<Value> {
             && xml.contains("<LogonTrigger>")
             && xml.contains("<Repetition>")
             && xml.contains("<Interval>PT1M</Interval>")
-            && xml.contains("<StopAtDurationEnd>false</StopAtDurationEnd>")
+            && !xml.contains("<Duration>")
             && xml.contains("<RestartOnFailure>")
             && xml.contains("<Count>32</Count>")
             && xml.contains("<LogonType>InteractiveToken</LogonType>");
@@ -214,7 +214,7 @@ mod tests {
         assert!(xml.contains("<LogonTrigger>"));
         assert!(xml.contains("<Repetition>"));
         assert!(xml.contains("<Interval>PT1M</Interval>"));
-        assert!(xml.contains("<StopAtDurationEnd>false</StopAtDurationEnd>"));
+        assert!(!xml.contains("<Duration>"));
         assert!(xml.contains("<RestartOnFailure>"));
         assert!(xml.contains("<Count>32</Count>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
