@@ -10,6 +10,7 @@ use okx_host_control::{
     auth::{load_native_github_token, store_native_github_token},
     executor::{HostExecutor, install_current_executable},
     runtime::{process_pending, run_until_shutdown},
+    single_instance::SingleInstanceGuard,
 };
 use zeroize::Zeroize;
 
@@ -73,7 +74,7 @@ async fn run(cli: Cli) -> HostControlResult<()> {
             let token = load_native_github_token()?;
             let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
             github.verify_repository_identity().await?;
-            let mut executor = HostExecutor::canonical();
+            let mut executor = HostExecutor::canonical()?;
             let processed = process_pending(&github, &mut executor).await?;
             executor.shutdown();
             println!(
@@ -85,9 +86,10 @@ async fn run(cli: Cli) -> HostControlResult<()> {
             );
         }
         Command::Run { poll_seconds } => {
+            let _single_instance = SingleInstanceGuard::acquire()?;
             let token = load_native_github_token()?;
             let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
-            let mut executor = HostExecutor::canonical();
+            let mut executor = HostExecutor::canonical()?;
             run_until_shutdown(&github, &mut executor, poll_seconds).await?;
         }
     }

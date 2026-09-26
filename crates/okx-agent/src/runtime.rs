@@ -14,6 +14,7 @@ use crate::{
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RuntimeState {
     ReadyIdle,
+    DegradedMailbox,
     ReadyMailbox,
     ShuttingDown,
 }
@@ -47,10 +48,12 @@ pub async fn run_mailbox_until_shutdown(
         return Err(AgentError::InvalidPollInterval);
     }
 
-    mailbox.verify_repository_identity().await?;
-    mailbox.ensure_identity_published(identity).await?;
+    let mut github_verified = false;
+    let mut identity_published = false;
+    let mut ready_emitted = false;
+
     emit(
-        RuntimeState::ReadyMailbox,
+        RuntimeState::DegradedMailbox,
         config,
         identity,
         Some(mailbox_issue),
@@ -66,6 +69,42 @@ pub async fn run_mailbox_until_shutdown(
                 break;
             }
             _ = ticker.tick() => {
+                if !github_verified {
+                    match mailbox.verify_repository_identity().await {
+                        Ok(()) => {
+                            github_verified = true;
+                            eprintln!("mailbox repository identity verified");
+                        }
+                        Err(error) => {
+                            eprintln!("mailbox identity verification unavailable: {error}");
+                            continue;
+                        }
+                    }
+                }
+
+                if !identity_published {
+                    match mailbox.ensure_identity_published(identity).await {
+                        Ok(()) => {
+                            identity_published = true;
+                        }
+                        Err(error) => {
+                            eprintln!("mailbox identity publication unavailable: {error}");
+                            github_verified = false;
+                            continue;
+                        }
+                    }
+                }
+
+                if !ready_emitted {
+                    emit(
+                        RuntimeState::ReadyMailbox,
+                        config,
+                        identity,
+                        Some(mailbox_issue),
+                    )?;
+                    ready_emitted = true;
+                }
+
                 match mailbox.process_pending(&config.key_id, agent_private_key).await {
                     Ok(processed) if processed > 0 => {
                         eprintln!("mailbox processed {processed} terminal request(s)");
@@ -73,6 +112,9 @@ pub async fn run_mailbox_until_shutdown(
                     Ok(_) => {}
                     Err(error) => {
                         eprintln!("mailbox poll failed: {error}");
+                        github_verified = false;
+                        identity_published = false;
+                        ready_emitted = false;
                     }
                 }
             }

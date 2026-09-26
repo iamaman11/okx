@@ -228,6 +228,11 @@ pub enum HostControlOperation {
     StartAgent,
     StopAgent,
     RestartAgent,
+    InstallAutostart,
+    AutostartStatus,
+    HandoffToAutostart,
+    AcceptanceKillAgent,
+    AcceptanceCrashController,
     TransportStatus,
 }
 

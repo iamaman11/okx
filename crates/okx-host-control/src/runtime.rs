@@ -9,9 +9,16 @@ use okx_protocol::{
 use tokio::time::{MissedTickBehavior, interval};
 
 use crate::{
-    HostControlError, HostControlResult as LocalResult, artifact::deploy_agent,
+    HostControlError, HostControlResult as LocalResult, artifact::deploy_agent, autostart,
     executor::HostExecutor,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessTransition {
+    None,
+    Handoff,
+    Crash,
+}
 
 pub const CONTROL_ISSUE_NUMBER: u64 = 12;
 const MAX_CONTROL_BODY_BYTES: usize = 4096;
@@ -25,13 +32,30 @@ pub async fn run_until_shutdown(
         return Err(HostControlError::InvalidPollInterval);
     }
 
-    github.verify_repository_identity().await?;
+    let mut github_verified = false;
+    let mut initial_state = "DEGRADED";
+
+    if let Err(error) = executor.reconcile_desired() {
+        eprintln!("initial lifecycle reconcile failed: {error}");
+    }
+
+    match github.verify_repository_identity().await {
+        Ok(()) => {
+            github_verified = true;
+            initial_state = "READY";
+        }
+        Err(error) => {
+            eprintln!("initial GitHub identity verification deferred: {error}");
+        }
+    }
+
     println!(
         "{}",
         serde_json::json!({
             "schema": "okx.host-control.runtime/v1",
-            "state": "READY",
-            "control_issue": CONTROL_ISSUE_NUMBER
+            "state": initial_state,
+            "control_issue": CONTROL_ISSUE_NUMBER,
+            "github_identity_verified": github_verified
         })
     );
 
@@ -45,8 +69,28 @@ pub async fn run_until_shutdown(
                 break;
             }
             _ = ticker.tick() => {
+                if let Err(error) = executor.reconcile_desired() {
+                    eprintln!("host lifecycle reconcile failed: {error}");
+                }
+
+                if !github_verified {
+                    match github.verify_repository_identity().await {
+                        Ok(()) => {
+                            github_verified = true;
+                            eprintln!("GitHub repository identity verified");
+                        }
+                        Err(error) => {
+                            eprintln!("GitHub identity verification still unavailable: {error}");
+                            continue;
+                        }
+                    }
+                }
+
                 if let Err(error) = process_pending(github, executor).await {
                     eprintln!("host-control poll failed: {error}");
+                    if matches!(error, HostControlError::Github(_)) {
+                        github_verified = false;
+                    }
                 }
             }
         }
@@ -97,12 +141,12 @@ pub async fn process_pending(
         }
 
         let operation = request.operation;
-        let execution = match &operation {
+        let (execution, transition) = match &operation {
             HostControlOperation::DeployAgent {
                 run_id,
                 artifact_id,
                 expected_source_tree,
-            } => {
+            } => (
                 deploy_agent(
                     github,
                     executor,
@@ -110,9 +154,22 @@ pub async fn process_pending(
                     *artifact_id,
                     expected_source_tree,
                 )
-                .await
+                .await,
+                ProcessTransition::None,
+            ),
+            HostControlOperation::HandoffToAutostart => {
+                (autostart::run_now(), ProcessTransition::Handoff)
             }
-            _ => executor.execute(operation.clone()),
+            HostControlOperation::AcceptanceCrashController => (
+                autostart::ensure_policy_valid().map(|()| {
+                    serde_json::json!({
+                        "autostart_policy_valid": true,
+                        "crash_after_terminal_ack": true
+                    })
+                }),
+                ProcessTransition::Crash,
+            ),
+            _ => (executor.execute(operation.clone()), ProcessTransition::None),
         };
         let (status, details, failure) = match execution {
             Ok(details) => (HostControlStatus::Pass, Some(details), None),
@@ -143,6 +200,14 @@ pub async fn process_pending(
 
         terminal_request_ids.insert(request.request_id);
         processed += 1;
+
+        if result.status == HostControlStatus::Pass {
+            match transition {
+                ProcessTransition::None => {}
+                ProcessTransition::Handoff => std::process::exit(0),
+                ProcessTransition::Crash => std::process::exit(70),
+            }
+        }
     }
 
     Ok(processed)
