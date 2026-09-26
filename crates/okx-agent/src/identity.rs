@@ -8,6 +8,7 @@ use crate::{
     config::{AGENT_IDENTITY_SCHEMA_V1, DEFAULT_AGENT_KEY_ID},
 };
 
+#[cfg(windows)]
 const WINDOWS_CREDENTIAL_SERVICE: &str = "iamaman11.okx-agent";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
