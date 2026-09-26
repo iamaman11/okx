@@ -8,10 +8,13 @@ use clap::{Parser, Subcommand};
 use okx_agent::{
     AgentResult,
     config::{AgentConfig, default_root},
-    github_auth::{load_native_github_token, store_native_github_token},
+    github_auth::{
+        load_runtime_github_token, migrate_github_token_to_machine, store_native_github_token,
+    },
     github_mailbox::GitHubMailboxClient,
     identity::{
-        default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
+        default_key_id, initialize_native_identity, load_native_identity, load_runtime_private_key,
+        migrate_identity_to_machine,
     },
     once::process_once_now,
     runtime::{run_mailbox_until_shutdown, run_until_shutdown},
@@ -43,6 +46,9 @@ enum Command {
 
     /// Store the GitHub mailbox token from stdin in Windows Credential Manager.
     SetGithubToken,
+
+    /// Copy existing user-scoped runtime secrets into the service-safe machine store.
+    MigrateMachineSecrets,
 
     /// Process one encrypted mailbox envelope from a file or stdin.
     Once {
@@ -94,10 +100,22 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 })
             );
         }
+        Command::MigrateMachineSecrets => {
+            migrate_github_token_to_machine()?;
+            migrate_identity_to_machine(&config.key_id)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.agent.machine-secrets/v1",
+                    "migrated": true,
+                    "key_id": config.key_id
+                })
+            );
+        }
         Command::Once { input } => {
             let payload = read_input(input)?;
             let envelope: MailboxEnvelope = serde_json::from_str(&payload)?;
-            let mut private_key = load_native_private_key(&config.key_id)?;
+            let mut private_key = load_runtime_private_key(&config.key_id)?;
             let response = process_once_now(&envelope, &config.key_id, &private_key);
             private_key.zeroize();
             println!("{}", serde_json::to_string_pretty(&response?)?);
@@ -108,9 +126,9 @@ async fn run(cli: Cli) -> AgentResult<()> {
         } => {
             let identity = load_native_identity(&config.key_id)?;
             if let Some(mailbox_issue) = mailbox_issue {
-                let token = load_native_github_token()?;
+                let token = load_runtime_github_token()?;
                 let mailbox = GitHubMailboxClient::new(mailbox_issue, token)?;
-                let mut private_key = load_native_private_key(&config.key_id)?;
+                let mut private_key = load_runtime_private_key(&config.key_id)?;
                 let result = run_mailbox_until_shutdown(
                     &config,
                     &identity,
