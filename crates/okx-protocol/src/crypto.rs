@@ -1,6 +1,6 @@
 use chacha20poly1305::{
-    ChaCha20Poly1305, Nonce,
-    aead::{Aead, KeyInit, Payload},
+    ChaCha20Poly1305,
+    aead::{Aead, KeyInit, Payload, array::Array},
 };
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -76,7 +76,7 @@ pub fn encrypt(
     let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::Encrypt)?;
     cipher
         .encrypt(
-            Nonce::from_slice(nonce),
+            Array(*nonce),
             Payload {
                 msg: plaintext,
                 aad,
@@ -94,7 +94,7 @@ pub fn decrypt(
     let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::Decrypt)?;
     cipher
         .decrypt(
-            Nonce::from_slice(nonce),
+            Array(*nonce),
             Payload {
                 msg: ciphertext,
                 aad,
