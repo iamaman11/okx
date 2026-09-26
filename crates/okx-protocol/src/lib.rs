@@ -252,7 +252,7 @@ fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
-fn validate_agent_key_id(value: &str) -> Result<(), ProtocolError> {
+pub fn validate_agent_key_id(value: &str) -> Result<(), ProtocolError> {
     if (1..=64).contains(&value.len())
         && value
             .bytes()

@@ -1,0 +1,25 @@
+[package]
+name = "okx-agent"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "okx-agent"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+getrandom = "0.4"
+okx-protocol = { path = "../okx-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "4.2", default-features = false, features = ["v1"] }
