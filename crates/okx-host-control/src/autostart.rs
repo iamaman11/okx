@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Command,
 };
 
@@ -182,6 +182,6 @@ mod tests {
 
     #[test]
     fn task_xml_path_is_outside_mutable_repo() {
-        assert!(Path::new(TASK_XML_PATH).starts_with(r"C:\okx-control"));
+        assert!(std::path::Path::new(TASK_XML_PATH).starts_with(r"C:\okx-control"));
     }
 }
