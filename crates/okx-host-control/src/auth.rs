@@ -45,7 +45,7 @@ pub fn load_native_github_token() -> HostControlResult<Zeroizing<String>> {
             Err(error) => return Err(secret_store_error(error)),
         };
 
-        decode_token(secret)
+        decode_token(Zeroizing::new(secret))
     }
 
     #[cfg(not(windows))]
@@ -62,11 +62,12 @@ pub fn migrate_github_token_to_machine() -> HostControlResult<()> {
 
 pub fn load_machine_github_token() -> HostControlResult<Zeroizing<String>> {
     let secret = load_machine_secret(MACHINE_NAMESPACE, MACHINE_GITHUB_TOKEN)?;
-    decode_token(secret.to_vec())
+    decode_token(secret)
 }
 
-fn decode_token(secret: Vec<u8>) -> HostControlResult<Zeroizing<String>> {
-    let token = match String::from_utf8(secret) {
+fn decode_token(mut secret: Zeroizing<Vec<u8>>) -> HostControlResult<Zeroizing<String>> {
+    let bytes = std::mem::take(&mut *secret);
+    let token = match String::from_utf8(bytes) {
         Ok(token) => token,
         Err(error) => {
             let mut bytes = error.into_bytes();
