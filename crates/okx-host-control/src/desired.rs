@@ -48,9 +48,8 @@ impl DesiredStateStore {
         }
 
         let bytes = fs::read(&self.path)?;
-        let state: DesiredFile = serde_json::from_slice(&bytes).map_err(|_| {
-            HostControlError::DesiredStateCorrupt
-        })?;
+        let state: DesiredFile =
+            serde_json::from_slice(&bytes).map_err(|_| HostControlError::DesiredStateCorrupt)?;
 
         if state.schema != DESIRED_STATE_SCHEMA_V1 {
             return Err(HostControlError::DesiredStateCorrupt);
@@ -135,10 +134,7 @@ mod tests {
 
     #[test]
     fn missing_state_fails_closed_to_stopped() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-desired-missing-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("okx-desired-missing-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let store = DesiredStateStore::at(root.join("desired.json"));
 
@@ -147,10 +143,8 @@ mod tests {
 
     #[test]
     fn desired_state_round_trips() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-desired-roundtrip-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("okx-desired-roundtrip-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let store = DesiredStateStore::at(root.join("desired.json"));
 
