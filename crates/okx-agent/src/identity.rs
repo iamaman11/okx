@@ -68,8 +68,8 @@ pub fn load_native_private_key(key_id: &str) -> AgentResult<[u8; 32]> {
 
     #[cfg(windows)]
     {
-        let entry = keyring::Entry::new(WINDOWS_CREDENTIAL_SERVICE, key_id)
-            .map_err(secret_store_error)?;
+        let entry =
+            keyring::Entry::new(WINDOWS_CREDENTIAL_SERVICE, key_id).map_err(secret_store_error)?;
         let mut secret = match entry.get_secret() {
             Ok(secret) => secret,
             Err(keyring::Error::NoEntry) => {
