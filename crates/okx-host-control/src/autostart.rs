@@ -1,5 +1,6 @@
 use std::{fs, path::PathBuf, process::Command};
 
+use chrono::{Duration as ChronoDuration, Local};
 use serde_json::{Value, json};
 
 use crate::{HostControlError, HostControlResult};
@@ -17,7 +18,10 @@ pub fn install() -> HostControlResult<Value> {
     #[cfg(windows)]
     {
         let account = current_account()?;
-        let xml = task_xml(&account);
+        let start_boundary = (Local::now() + ChronoDuration::seconds(10))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        let xml = task_xml(&account, &start_boundary);
         let xml_path = PathBuf::from(TASK_XML_PATH);
 
         if let Some(parent) = xml_path.parent() {
@@ -113,14 +117,21 @@ pub fn status_value() -> HostControlResult<Value> {
 fn exported_policy_valid(xml: &str) -> bool {
     xml.contains(CONTROLLER_PATH)
         && xml.contains("<Arguments>run --poll-seconds 2</Arguments>")
+        && xml.contains("<WorkingDirectory>C:\\okx-control</WorkingDirectory>")
         && xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>")
-        && xml.contains("<LogonTrigger>")
+        && xml.matches("<TimeTrigger>").count() == 1
+        && xml.contains("<StartBoundary>")
         && xml.contains("<Repetition>")
         && xml.contains("<Interval>PT1M</Interval>")
         && !xml.contains("<Duration>")
-        && xml.contains("<RestartOnFailure>")
-        && xml.contains("<Count>32</Count>")
+        && xml.contains("<StartWhenAvailable>true</StartWhenAvailable>")
         && xml.contains("<LogonType>InteractiveToken</LogonType>")
+        && !xml.contains("<RestartOnFailure>")
+        && !xml.contains("<LogonTrigger>")
+        && !xml.contains("<RegistrationTrigger>")
+        && !xml.contains("<BootTrigger>")
+        && !xml.contains("<CalendarTrigger>")
+        && !xml.contains("<EventTrigger>")
 }
 
 fn current_account() -> HostControlResult<String> {
@@ -137,8 +148,9 @@ fn current_account() -> HostControlResult<String> {
     Ok(account)
 }
 
-fn task_xml(account: &str) -> String {
+fn task_xml(account: &str, start_boundary: &str) -> String {
     let account = xml_escape(account);
+    let start_boundary = xml_escape(start_boundary);
     format!(
         r#"<?xml version="1.0" ?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -147,14 +159,13 @@ fn task_xml(account: &str) -> String {
     <Description>OKX native host control plane</Description>
   </RegistrationInfo>
   <Triggers>
-    <LogonTrigger>
+    <TimeTrigger>
+      <StartBoundary>{start_boundary}</StartBoundary>
       <Enabled>true</Enabled>
       <Repetition>
         <Interval>PT1M</Interval>
-        <StopAtDurationEnd>false</StopAtDurationEnd>
       </Repetition>
-      <UserId>{account}</UserId>
-    </LogonTrigger>
+    </TimeTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
@@ -175,10 +186,6 @@ fn task_xml(account: &str) -> String {
     <Hidden>false</Hidden>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>7</Priority>
-    <RestartOnFailure>
-      <Interval>PT1M</Interval>
-      <Count>32</Count>
-    </RestartOnFailure>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -190,6 +197,7 @@ fn task_xml(account: &str) -> String {
 </Task>
 "#,
         account = account,
+        start_boundary = start_boundary,
         controller = xml_escape(CONTROLLER_PATH),
     )
 }
@@ -207,41 +215,64 @@ fn xml_escape(value: &str) -> String {
 mod tests {
     use super::*;
 
+    const TEST_START: &str = "2026-09-27T02:30:00";
+
     #[test]
-    fn task_xml_is_fixed_and_single_instance() {
-        let xml = task_xml(r"HOST\User");
+    fn task_xml_has_one_time_trigger_supervisor() {
+        let xml = task_xml(r"HOST\User", TEST_START);
+
         assert!(xml.starts_with(r#"<?xml version="1.0" ?>"#));
         assert!(!xml.contains("encoding="));
         assert!(xml.contains(CONTROLLER_PATH));
         assert!(xml.contains("run --poll-seconds 2"));
+        assert!(xml.contains("<WorkingDirectory>C:\\okx-control</WorkingDirectory>"));
         assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
-        assert!(xml.contains("<LogonTrigger>"));
+        assert_eq!(xml.matches("<TimeTrigger>").count(), 1);
+        assert!(xml.contains("<StartBoundary>2026-09-27T02:30:00</StartBoundary>"));
         assert!(xml.contains("<Repetition>"));
         assert!(xml.contains("<Interval>PT1M</Interval>"));
         assert!(!xml.contains("<Duration>"));
-        assert!(xml.contains("<RestartOnFailure>"));
-        assert!(xml.contains("<Count>32</Count>"));
+        assert!(xml.contains("<StartWhenAvailable>true</StartWhenAvailable>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
+
+        assert!(!xml.contains("<RestartOnFailure>"));
+        assert!(!xml.contains("<LogonTrigger>"));
+        assert!(!xml.contains("<RegistrationTrigger>"));
     }
 
     #[test]
-    fn exported_policy_accepts_windows_normalized_optional_defaults() {
-        let normalized =
-            task_xml(r"HOST\User").replace("<StopAtDurationEnd>false</StopAtDurationEnd>", "");
-        assert!(exported_policy_valid(&normalized));
+    fn exported_policy_accepts_exact_time_trigger_contract() {
+        assert!(exported_policy_valid(&task_xml(r"HOST\User", TEST_START)));
     }
 
     #[test]
     fn exported_policy_rejects_bounded_or_wrong_repetition() {
-        let bounded = task_xml(r"HOST\User").replace(
+        let bounded = task_xml(r"HOST\User", TEST_START).replace(
             "<Interval>PT1M</Interval>",
             "<Interval>PT1M</Interval><Duration>PT1H</Duration>",
         );
         assert!(!exported_policy_valid(&bounded));
 
-        let wrong_interval = task_xml(r"HOST\User")
+        let wrong_interval = task_xml(r"HOST\User", TEST_START)
             .replace("<Interval>PT1M</Interval>", "<Interval>PT5M</Interval>");
         assert!(!exported_policy_valid(&wrong_interval));
+    }
+
+    #[test]
+    fn exported_policy_rejects_duplicate_recovery_authority() {
+        let duplicate = task_xml(r"HOST\User", TEST_START).replace(
+            "<Priority>7</Priority>",
+            "<Priority>7</Priority><RestartOnFailure><Interval>PT1M</Interval><Count>32</Count></RestartOnFailure>",
+        );
+        assert!(!exported_policy_valid(&duplicate));
+    }
+
+    #[test]
+    fn exported_policy_rejects_non_time_trigger() {
+        let logon = task_xml(r"HOST\User", TEST_START)
+            .replace("<TimeTrigger>", "<LogonTrigger>")
+            .replace("</TimeTrigger>", "</LogonTrigger>");
+        assert!(!exported_policy_valid(&logon));
     }
 
     #[test]
