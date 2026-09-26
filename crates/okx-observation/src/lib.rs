@@ -1,6 +1,6 @@
 pub mod reference;
 
 pub use reference::{
-    InstrumentSpec, ReferenceError, ReferenceGeneration, ReferenceRegistry,
-    REFERENCE_REGISTRY_SCHEMA_V1,
+    InstrumentSpec, REFERENCE_REGISTRY_SCHEMA_V1, ReferenceError, ReferenceGeneration,
+    ReferenceRegistry,
 };
