@@ -22,21 +22,14 @@ pub struct RuntimeEvent<'a> {
     pub public_key: &'a str,
 }
 
-pub async fn run_until_shutdown(
-    config: &AgentConfig,
-    identity: &AgentIdentity,
-) -> AgentResult<()> {
+pub async fn run_until_shutdown(config: &AgentConfig, identity: &AgentIdentity) -> AgentResult<()> {
     emit(RuntimeState::ReadyIdle, config, identity)?;
     tokio::signal::ctrl_c().await?;
     emit(RuntimeState::ShuttingDown, config, identity)?;
     Ok(())
 }
 
-fn emit(
-    state: RuntimeState,
-    config: &AgentConfig,
-    identity: &AgentIdentity,
-) -> AgentResult<()> {
+fn emit(state: RuntimeState, config: &AgentConfig, identity: &AgentIdentity) -> AgentResult<()> {
     let event = RuntimeEvent {
         schema: AGENT_RUNTIME_SCHEMA_V1,
         state,
@@ -54,8 +47,7 @@ mod tests {
 
     #[test]
     fn runtime_event_contains_only_public_identity() {
-        let config =
-            AgentConfig::new(std::path::PathBuf::from("root"), "agent-key-1".to_owned());
+        let config = AgentConfig::new(std::path::PathBuf::from("root"), "agent-key-1".to_owned());
         let identity = AgentIdentity {
             schema: "okx.agent.identity/v1",
             key_id: "agent-key-1".to_owned(),
