@@ -6,6 +6,8 @@ use thiserror::Error;
 pub const MAILBOX_ENVELOPE_SCHEMA_V1: &str = "okx.mailbox.envelope/v1";
 pub const AGENT_REQUEST_SCHEMA_V1: &str = "okx.agent.request/v1";
 pub const AGENT_RESPONSE_SCHEMA_V1: &str = "okx.agent.response/v1";
+pub const HOST_CONTROL_REQUEST_SCHEMA_V1: &str = "okx.windows.control/v1";
+pub const HOST_CONTROL_RESULT_SCHEMA_V1: &str = "okx.windows.control.result/v1";
 pub const MAILBOX_REPOSITORY: &str = "iamaman11/okx";
 pub const KDF_LABEL_CLIENT_TO_AGENT_V1: &str = "okx-mailbox-v1/client-to-agent";
 pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
@@ -35,6 +37,9 @@ pub enum ProtocolError {
 
     #[error("mailbox direction mismatch")]
     DirectionMismatch,
+
+    #[error("invalid host-control request_id")]
+    InvalidHostControlRequestId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +189,74 @@ impl AgentOperation {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostControlRequest {
+    pub schema: String,
+    pub request_id: String,
+    pub operation: HostControlOperation,
+}
+
+impl HostControlRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.schema != HOST_CONTROL_REQUEST_SCHEMA_V1 {
+            return Err(ProtocolError::UnsupportedSchema(self.schema.clone()));
+        }
+        validate_host_control_request_id(&self.request_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HostControlOperation {
+    Status,
+    Sync,
+    BuildAgent,
+    TestWorkspace,
+    InitAgentIdentity,
+    AgentIdentity,
+    BootstrapAgentGithubToken,
+    StartAgent,
+    StopAgent,
+    RestartAgent,
+    TransportStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum HostControlStatus {
+    Pass,
+    Fail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostControlFailure {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostControlResult {
+    pub schema: String,
+    pub request_id: String,
+    pub operation: HostControlOperation,
+    pub status: HostControlStatus,
+    pub observed_at: String,
+    pub details: Option<serde_json::Value>,
+    pub failure: Option<HostControlFailure>,
+}
+
+impl HostControlResult {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.schema != HOST_CONTROL_RESULT_SCHEMA_V1 {
+            return Err(ProtocolError::UnsupportedSchema(self.schema.clone()));
+        }
+        validate_host_control_request_id(&self.request_id)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PositionSide {
@@ -252,6 +325,14 @@ fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
+fn validate_host_control_request_id(value: &str) -> Result<(), ProtocolError> {
+    if value.starts_with("ctl_") && validate_request_id(value).is_ok() {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidHostControlRequestId)
+    }
+}
+
 pub fn validate_agent_key_id(value: &str) -> Result<(), ProtocolError> {
     if (1..=64).contains(&value.len())
         && value
@@ -305,6 +386,39 @@ mod tests {
 
     fn request_id() -> String {
         "req_0123456789abcdef".to_owned()
+    }
+
+    #[test]
+    fn host_control_request_is_strict_and_round_trips() {
+        let request = HostControlRequest {
+            schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "ctl_0123456789abcdef".to_owned(),
+            operation: HostControlOperation::Status,
+        };
+
+        request.validate().expect("valid control request");
+        let json = serde_json::to_string(&request).expect("serialize");
+        let decoded: HostControlRequest = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded, request);
+        decoded.validate().expect("valid decoded control request");
+
+        let arbitrary = r#"{"schema":"okx.windows.control/v1","request_id":"ctl_0123456789abcdef","operation":{"type":"run_shell","command":"whoami"}}"#;
+        assert!(serde_json::from_str::<HostControlRequest>(arbitrary).is_err());
+    }
+
+    #[test]
+    fn host_control_request_requires_ctl_prefix() {
+        let request = HostControlRequest {
+            schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_0123456789abcdef".to_owned(),
+            operation: HostControlOperation::Status,
+        };
+
+        assert_eq!(
+            request.validate(),
+            Err(ProtocolError::InvalidHostControlRequestId)
+        );
     }
 
     #[test]

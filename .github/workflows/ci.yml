@@ -92,13 +92,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy portable crates
-        run: cargo clippy --workspace --exclude okx-agent --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude okx-agent --exclude okx-host-control --all-targets -- -D warnings
 
       - name: Test portable crates
-        run: cargo test --workspace --exclude okx-agent
+        run: cargo test --workspace --exclude okx-agent --exclude okx-host-control
 
   windows-agent:
-    name: windows-agent
+    name: windows-native
     needs: classify
     if: needs.classify.outputs.build_required == 'true'
     runs-on: windows-latest
@@ -112,8 +112,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Clippy native Windows agent
-        run: cargo clippy -p okx-agent --all-targets -- -D warnings
+      - name: Clippy native Windows crates
+        run: cargo clippy -p okx-agent -p okx-host-control --all-targets -- -D warnings
 
-      - name: Test native Windows agent
-        run: cargo test -p okx-agent
+      - name: Test native Windows crates
+        run: cargo test -p okx-agent -p okx-host-control

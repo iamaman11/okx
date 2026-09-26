@@ -4,7 +4,9 @@ members = [
     "crates/okx-api",
     "crates/okx-cli",
     "crates/okx-protocol",
+    "crates/okx-github",
     "crates/okx-agent",
+    "crates/okx-host-control",
 ]
 
 [workspace.package]

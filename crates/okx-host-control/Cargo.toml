@@ -1,22 +1,19 @@
 [package]
-name = "okx-agent"
+name = "okx-host-control"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "okx-agent"
+name = "okx-host-control"
 path = "src/main.rs"
 
 [dependencies]
-base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
-getrandom = "0.4"
 okx-github = { path = "../okx-github" }
 okx-protocol = { path = "../okx-protocol" }
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
