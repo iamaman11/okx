@@ -1,0 +1,118 @@
+name: Windows Control Plane
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: okx-windows-control
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    name: authorize
+    if: github.event.issue.number == 12 && github.event.comment.user.id == 44100369
+    runs-on: ubuntu-latest
+    outputs:
+      request_id: ${{ steps.gate.outputs.request_id }}
+      operation: ${{ steps.gate.outputs.operation }}
+    steps:
+      - name: Validate typed control request
+        id: gate
+        shell: bash
+        env:
+          CONTROL_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+
+          test "${#CONTROL_BODY}" -le 512
+
+          jq -e '
+            type == "object" and
+            (keys | sort) == ["operation", "request_id", "schema"] and
+            .schema == "okx.windows.control/v1" and
+            (.request_id | type == "string" and test("^ctl_[A-Za-z0-9_-]{16,100}$")) and
+            (.operation as $op |
+              ["status", "sync", "build_agent", "init_agent_identity", "agent_identity",
+               "bootstrap_agent_github_token", "start_agent", "stop_agent", "restart_agent",
+               "transport_status"] | index($op) != null)
+          ' <<<"$CONTROL_BODY" >/dev/null
+
+          echo "request_id=$(jq -r .request_id <<<"$CONTROL_BODY")" >> "$GITHUB_OUTPUT"
+          echo "operation=$(jq -r .operation <<<"$CONTROL_BODY")" >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: windows-control
+    needs: authorize
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Execute allowlisted Windows operation
+        id: control
+        continue-on-error: true
+        shell: pwsh
+        env:
+          CONTROL_REQUEST_ID: ${{ needs.authorize.outputs.request_id }}
+          CONTROL_OPERATION: ${{ needs.authorize.outputs.operation }}
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows-control.ps1" `
+            -RequestId "$env:CONTROL_REQUEST_ID" `
+            -Operation "$env:CONTROL_OPERATION"
+
+      - name: Publish bounded control result
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_REQUEST_ID: ${{ needs.authorize.outputs.request_id }}
+          CONTROL_OPERATION: ${{ needs.authorize.outputs.operation }}
+        run: |
+          $resultPath = Join-Path $env:RUNNER_TEMP "okx-control-result.json"
+
+          if (-not (Test-Path -LiteralPath $resultPath)) {
+            $fallback = [ordered]@{
+              schema = "okx.windows.control.result/v1"
+              request_id = $env:CONTROL_REQUEST_ID
+              operation = $env:CONTROL_OPERATION
+              status = "FAIL"
+              observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+              details = $null
+              error = "control script did not produce a result envelope"
+            }
+            $fallback | ConvertTo-Json -Depth 6 -Compress |
+              Set-Content -LiteralPath $resultPath -Encoding utf8NoBOM
+          }
+
+          $body = Get-Content -LiteralPath $resultPath -Raw
+          if ([Text.Encoding]::UTF8.GetByteCount($body) -gt 32768) {
+            throw "control result exceeds the 32 KiB publication limit"
+          }
+
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $payload = @{ body = $body } | ConvertTo-Json -Compress
+
+          Invoke-RestMethod `
+            -Method Post `
+            -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/issues/12/comments" `
+            -Headers $headers `
+            -ContentType "application/json" `
+            -Body $payload | Out-Null
+
+      - name: Preserve failed operation status
+        if: steps.control.outcome != 'success'
+        shell: pwsh
+        run: exit 1
