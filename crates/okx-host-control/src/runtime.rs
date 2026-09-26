@@ -21,6 +21,21 @@ pub async fn run_until_shutdown(
     executor: &mut HostExecutor,
     poll_seconds: u64,
 ) -> LocalResult<()> {
+    run_with_shutdown(github, executor, poll_seconds, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+}
+
+pub async fn run_with_shutdown<F>(
+    github: &GitHubClient,
+    executor: &mut HostExecutor,
+    poll_seconds: u64,
+    shutdown: F,
+) -> LocalResult<()>
+where
+    F: std::future::Future<Output = ()>,
+{
     if !(1..=60).contains(&poll_seconds) {
         return Err(HostControlError::InvalidPollInterval);
     }
@@ -37,11 +52,11 @@ pub async fn run_until_shutdown(
 
     let mut ticker = interval(Duration::from_secs(poll_seconds));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    tokio::pin!(shutdown);
 
     loop {
         tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                result?;
+            _ = &mut shutdown => {
                 break;
             }
             _ = ticker.tick() => {
