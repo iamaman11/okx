@@ -10,7 +10,7 @@ use tokio::time::{MissedTickBehavior, interval};
 
 use crate::{
     HostControlError, HostControlResult as LocalResult, artifact::deploy_agent,
-    executor::HostExecutor,
+    executor::HostExecutor, recovery::controller_crash_probe,
 };
 
 pub const CONTROL_ISSUE_NUMBER: u64 = 12;
@@ -113,6 +113,9 @@ pub async fn process_pending(
 
         let operation = request.operation;
         let execution = match &operation {
+            HostControlOperation::RecoveryProbeControllerCrash => {
+                controller_crash_probe(&request.request_id)
+            }
             HostControlOperation::DeployAgent {
                 run_id,
                 artifact_id,
