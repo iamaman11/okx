@@ -1,3 +1,4 @@
+pub mod artifact;
 pub mod auth;
 pub mod executor;
 pub mod runtime;
@@ -59,6 +60,21 @@ pub enum HostControlError {
 
     #[error("host controller install source is invalid")]
     InvalidInstallSource,
+
+    #[error("artifact archive error: {0}")]
+    ArtifactArchive(#[from] zip::result::ZipError),
+
+    #[error("artifact verification failed: {0}")]
+    ArtifactVerification(&'static str),
+
+    #[error("artifact source tree does not match accepted origin/main")]
+    ArtifactSourceTreeMismatch,
+
+    #[error("artifact binary SHA-256 mismatch")]
+    ArtifactHashMismatch,
+
+    #[error("artifact deployment path is not valid for this execution layer")]
+    InvalidExecutionPath,
 }
 
 impl HostControlError {
@@ -82,6 +98,11 @@ impl HostControlError {
             Self::AgentBinaryMissing => "AGENT_BINARY_MISSING",
             Self::AgentRunning => "AGENT_RUNNING",
             Self::InvalidInstallSource => "INVALID_INSTALL_SOURCE",
+            Self::ArtifactArchive(_) => "ARTIFACT_ARCHIVE_ERROR",
+            Self::ArtifactVerification(_) => "ARTIFACT_VERIFICATION_FAILED",
+            Self::ArtifactSourceTreeMismatch => "ARTIFACT_SOURCE_TREE_MISMATCH",
+            Self::ArtifactHashMismatch => "ARTIFACT_HASH_MISMATCH",
+            Self::InvalidExecutionPath => "INVALID_EXECUTION_PATH",
         }
     }
 }
