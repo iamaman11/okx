@@ -80,7 +80,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
         }
         Command::SetGithubToken => {
             let mut token = read_stdin()?;
-            while token.ends_with(['\r', '\n']) {
+            while matches!(token.as_bytes().last(), Some(b'\r' | b'\n')) {
                 token.pop();
             }
             let result = store_native_github_token(&token);
