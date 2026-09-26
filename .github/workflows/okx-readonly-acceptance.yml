@@ -1,11 +1,7 @@
 name: OKX account acceptance
 
 on:
-  push:
-    branches:
-      - phase-1-account-capabilities
-    paths:
-      - .github/workflows/okx-readonly-acceptance.yml
+  workflow_dispatch:
 
 permissions:
   contents: read
