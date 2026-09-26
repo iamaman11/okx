@@ -229,6 +229,7 @@ pub enum HostControlOperation {
     StopAgent,
     RestartAgent,
     TransportStatus,
+    RecoveryProbeControllerCrash,
 }
 
 impl HostControlOperation {
