@@ -1,4 +1,6 @@
 pub mod config;
+pub mod github_auth;
+pub mod github_mailbox;
 pub mod identity;
 pub mod once;
 pub mod runtime;
@@ -15,6 +17,9 @@ pub enum AgentError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -45,6 +50,27 @@ pub enum AgentError {
 
     #[error("native Windows secret storage is unavailable on this platform")]
     UnsupportedSecretStorePlatform,
+
+    #[error("GitHub mailbox token was not found in native secret storage")]
+    GithubTokenNotFound,
+
+    #[error("GitHub mailbox token is invalid")]
+    InvalidGithubToken,
+
+    #[error("GitHub repository identity does not match the pinned mailbox repository")]
+    GithubRepositoryIdentityMismatch,
+
+    #[error("mailbox issue number must be non-zero")]
+    InvalidMailboxIssue,
+
+    #[error("mailbox history exceeded the bounded scan limit")]
+    MailboxHistoryLimitExceeded,
+
+    #[error("mailbox payload is too large: {0} bytes")]
+    MailboxPayloadTooLarge(usize),
+
+    #[error("poll interval must be between 1 and 60 seconds")]
+    InvalidPollInterval,
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;
