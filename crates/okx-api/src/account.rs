@@ -58,6 +58,24 @@ pub struct AccountConfig {
     pub position_mode: String,
     #[serde(rename = "uid", default)]
     pub uid: String,
+    #[serde(rename = "mainUid", default)]
+    pub main_uid: String,
+    #[serde(rename = "type", default)]
+    pub account_type: String,
+    #[serde(rename = "acctStpMode", default)]
+    pub account_stp_mode: String,
+    #[serde(rename = "autoLoan", default)]
+    pub auto_loan: bool,
+    #[serde(rename = "greeksType", default)]
+    pub greeks_type: String,
+    #[serde(rename = "feeType", default)]
+    pub fee_type: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub ip: String,
+    #[serde(default)]
+    pub perm: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -168,6 +186,15 @@ pub struct AccountCapabilities {
     pub account_level: String,
     pub account_mode: String,
     pub position_mode: String,
+    pub is_subaccount: bool,
+    pub account_type: String,
+    pub account_stp_mode: String,
+    pub auto_loan: bool,
+    pub greeks_type: String,
+    pub fee_type: String,
+    pub api_key_label: String,
+    pub api_key_permissions: Vec<String>,
+    pub api_key_ip_bound: bool,
     pub derivatives: Vec<DerivativeAvailability>,
     pub requested_instrument: String,
     pub requested_instrument_available: bool,
@@ -323,7 +350,23 @@ impl AccountApi {
             rest_base_url: environment.rest_base_url(),
             account_level: config.account_level.clone(),
             account_mode: account_mode_name(&config.account_level).to_owned(),
-            position_mode: config.position_mode,
+            position_mode: config.position_mode.clone(),
+            is_subaccount: !config.uid.is_empty()
+                && !config.main_uid.is_empty()
+                && config.uid != config.main_uid,
+            account_type: account_type_name(&config.account_type).to_owned(),
+            account_stp_mode: config.account_stp_mode,
+            auto_loan: config.auto_loan,
+            greeks_type: config.greeks_type,
+            fee_type: config.fee_type,
+            api_key_label: config.label,
+            api_key_permissions: config
+                .perm
+                .split(',')
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect(),
+            api_key_ip_bound: !config.ip.trim().is_empty(),
             derivatives,
             requested_instrument: requested_instrument.to_owned(),
             requested_instrument_available: selected.is_some(),
@@ -368,9 +411,21 @@ fn account_mode_name(account_level: &str) -> &'static str {
     }
 }
 
+fn account_type_name(account_type: &str) -> &'static str {
+    match account_type {
+        "0" => "main",
+        "1" => "standard_subaccount",
+        "2" => "managed_trading_subaccount",
+        "5" => "custody_copper",
+        "9" => "managed_trading_copper",
+        "12" => "custody_komainu",
+        _ => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::account_mode_name;
+    use super::{account_mode_name, account_type_name};
 
     #[test]
     fn maps_documented_account_levels() {
@@ -379,5 +434,13 @@ mod tests {
         assert_eq!(account_mode_name("3"), "multi_currency_margin");
         assert_eq!(account_mode_name("4"), "portfolio_margin");
         assert_eq!(account_mode_name(""), "unknown");
+    }
+
+    #[test]
+    fn maps_documented_account_types() {
+        assert_eq!(account_type_name("0"), "main");
+        assert_eq!(account_type_name("1"), "standard_subaccount");
+        assert_eq!(account_type_name("2"), "managed_trading_subaccount");
+        assert_eq!(account_type_name(""), "unknown");
     }
 }
