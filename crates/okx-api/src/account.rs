@@ -1,6 +1,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{client::OkxRestClient, config::Region, error::OkxError};
 
@@ -187,6 +188,7 @@ pub struct AccountCapabilities {
     pub account_mode: String,
     pub position_mode: String,
     pub is_subaccount: bool,
+    pub account_uid_fingerprint: String,
     pub account_type: String,
     pub account_stp_mode: String,
     pub auto_loan: bool,
@@ -354,6 +356,7 @@ impl AccountApi {
             is_subaccount: !config.uid.is_empty()
                 && !config.main_uid.is_empty()
                 && config.uid != config.main_uid,
+            account_uid_fingerprint: uid_fingerprint(&config.uid),
             account_type: account_type_name(&config.account_type).to_owned(),
             account_stp_mode: config.account_stp_mode,
             auto_loan: config.auto_loan,
@@ -409,6 +412,11 @@ fn account_mode_name(account_level: &str) -> &'static str {
         "4" => "portfolio_margin",
         _ => "unknown",
     }
+}
+
+fn uid_fingerprint(uid: &str) -> String {
+    let digest = Sha256::digest(uid.as_bytes());
+    format!("{digest:x}")
 }
 
 fn account_type_name(account_type: &str) -> &'static str {
