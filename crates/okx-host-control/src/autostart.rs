@@ -102,8 +102,11 @@ pub fn status_value() -> HostControlResult<Value> {
         let policy_valid = xml.contains(CONTROLLER_PATH)
             && xml.contains("<Arguments>run --poll-seconds 2</Arguments>")
             && xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>")
-            && xml.contains("<RestartOnFailure>")
+            && xml.contains("<LogonTrigger>")
+            && xml.contains("<Repetition>")
             && xml.contains("<Interval>PT1M</Interval>")
+            && xml.contains("<StopAtDurationEnd>false</StopAtDurationEnd>")
+            && xml.contains("<RestartOnFailure>")
             && xml.contains("<Count>32</Count>")
             && xml.contains("<LogonType>InteractiveToken</LogonType>");
 
@@ -142,6 +145,10 @@ fn task_xml(account: &str) -> String {
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
       <UserId>{account}</UserId>
     </LogonTrigger>
   </Triggers>
@@ -204,8 +211,11 @@ mod tests {
         assert!(xml.contains(CONTROLLER_PATH));
         assert!(xml.contains("run --poll-seconds 2"));
         assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
-        assert!(xml.contains("<RestartOnFailure>"));
+        assert!(xml.contains("<LogonTrigger>"));
+        assert!(xml.contains("<Repetition>"));
         assert!(xml.contains("<Interval>PT1M</Interval>"));
+        assert!(xml.contains("<StopAtDurationEnd>false</StopAtDurationEnd>"));
+        assert!(xml.contains("<RestartOnFailure>"));
         assert!(xml.contains("<Count>32</Count>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
     }
