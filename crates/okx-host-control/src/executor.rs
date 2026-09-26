@@ -170,6 +170,12 @@ impl HostExecutor {
         }))
     }
 
+    pub fn migrate_agent_machine_secrets(&self) -> HostControlResult<Value> {
+        self.require_agent_binary()?;
+        let output = self.agent_output(&["migrate-machine-secrets"])?;
+        Ok(serde_json::from_slice(&output.stdout)?)
+    }
+
     fn bootstrap_agent_github_token(&mut self) -> HostControlResult<Value> {
         self.require_agent_binary()?;
         let token = load_native_github_token()?;
