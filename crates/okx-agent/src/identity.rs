@@ -35,8 +35,8 @@ pub fn initialize_native_identity(key_id: &str) -> AgentResult<AgentIdentity> {
 
     #[cfg(windows)]
     {
-        let entry = keyring::Entry::new(WINDOWS_CREDENTIAL_SERVICE, key_id)
-            .map_err(secret_store_error)?;
+        let entry =
+            keyring::Entry::new(WINDOWS_CREDENTIAL_SERVICE, key_id).map_err(secret_store_error)?;
 
         match entry.get_secret() {
             Ok(mut existing) => {
@@ -51,9 +51,7 @@ pub fn initialize_native_identity(key_id: &str) -> AgentResult<AgentIdentity> {
         getrandom::fill(&mut private_key).map_err(|error| AgentError::Random(error.to_string()))?;
 
         let identity = AgentIdentity::from_private_key(key_id, &private_key)?;
-        let store_result = entry
-            .set_secret(&private_key)
-            .map_err(secret_store_error);
+        let store_result = entry.set_secret(&private_key).map_err(secret_store_error);
         private_key.zeroize();
         store_result?;
         Ok(identity)
