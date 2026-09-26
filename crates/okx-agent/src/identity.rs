@@ -1,5 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use okx_protocol::{crypto::public_key_from_private, validate_agent_key_id};
+use okx_windows_secrets::{SecretStoreError, load_machine_secret, store_machine_secret};
 use serde::Serialize;
 use zeroize::Zeroize;
 
@@ -10,6 +11,7 @@ use crate::{
 
 #[cfg(windows)]
 const WINDOWS_CREDENTIAL_SERVICE: &str = "iamaman11.okx-agent";
+const MACHINE_NAMESPACE: &str = "agent";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentIdentity {
@@ -79,16 +81,7 @@ pub fn load_native_private_key(key_id: &str) -> AgentResult<[u8; 32]> {
             Err(error) => return Err(secret_store_error(error)),
         };
 
-        if secret.len() != 32 {
-            let len = secret.len();
-            secret.zeroize();
-            return Err(AgentError::InvalidPrivateKeyLength(len));
-        }
-
-        let mut private_key = [0_u8; 32];
-        private_key.copy_from_slice(&secret);
-        secret.zeroize();
-        Ok(private_key)
+        decode_private_key(&mut secret)
     }
 
     #[cfg(not(windows))]
@@ -97,11 +90,44 @@ pub fn load_native_private_key(key_id: &str) -> AgentResult<[u8; 32]> {
     }
 }
 
-pub fn load_native_identity(key_id: &str) -> AgentResult<AgentIdentity> {
+pub fn migrate_identity_to_machine(key_id: &str) -> AgentResult<()> {
     let mut private_key = load_native_private_key(key_id)?;
+    let result = store_machine_secret(MACHINE_NAMESPACE, &machine_identity_name(key_id), &private_key);
+    private_key.zeroize();
+    result?;
+    Ok(())
+}
+
+pub fn load_runtime_private_key(key_id: &str) -> AgentResult<[u8; 32]> {
+    validate_agent_key_id(key_id)?;
+
+    match load_machine_secret(MACHINE_NAMESPACE, &machine_identity_name(key_id)) {
+        Ok(mut secret) => decode_private_key(&mut secret),
+        Err(SecretStoreError::NotFound) => load_native_private_key(key_id),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn load_native_identity(key_id: &str) -> AgentResult<AgentIdentity> {
+    let mut private_key = load_runtime_private_key(key_id)?;
     let identity = AgentIdentity::from_private_key(key_id, &private_key);
     private_key.zeroize();
     identity
+}
+
+fn machine_identity_name(key_id: &str) -> String {
+    format!("identity-{key_id}")
+}
+
+fn decode_private_key(secret: &mut [u8]) -> AgentResult<[u8; 32]> {
+    if secret.len() != 32 {
+        return Err(AgentError::InvalidPrivateKeyLength(secret.len()));
+    }
+
+    let mut private_key = [0_u8; 32];
+    private_key.copy_from_slice(secret);
+    secret.zeroize();
+    Ok(private_key)
 }
 
 #[cfg(windows)]
