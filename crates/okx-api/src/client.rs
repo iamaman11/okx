@@ -52,10 +52,7 @@ impl OkxPublicClient {
         };
         let url = format!("{}{}", self.environment.rest_base_url(), request_path);
 
-        let mut request = self
-            .http
-            .get(url)
-            .header("Accept", "application/json");
+        let mut request = self.http.get(url).header("Accept", "application/json");
 
         if self.environment.demo {
             request = request.header("x-simulated-trading", "1");
