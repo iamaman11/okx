@@ -231,8 +231,6 @@ pub enum HostControlOperation {
     TransportStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 impl HostControlOperation {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
@@ -251,6 +249,8 @@ impl HostControlOperation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum HostControlStatus {
     Pass,
     Fail,
