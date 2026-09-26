@@ -3,9 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{
-    client::OkxRestClient, config::Region, error::OkxError, instrument::InstrumentType,
-};
+use crate::{client::OkxRestClient, config::Region, error::OkxError, instrument::InstrumentType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
