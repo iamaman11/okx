@@ -99,16 +99,7 @@ pub fn status_value() -> HostControlResult<Value> {
         }
 
         let xml = String::from_utf8_lossy(&output.stdout);
-        let policy_valid = xml.contains(CONTROLLER_PATH)
-            && xml.contains("<Arguments>run --poll-seconds 2</Arguments>")
-            && xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>")
-            && xml.contains("<LogonTrigger>")
-            && xml.contains("<Repetition>")
-            && xml.contains("<Interval>PT1M</Interval>")
-            && !xml.contains("<Duration>")
-            && xml.contains("<RestartOnFailure>")
-            && xml.contains("<Count>32</Count>")
-            && xml.contains("<LogonType>InteractiveToken</LogonType>");
+        let policy_valid = exported_policy_valid(&xml);
 
         Ok(json!({
             "installed": true,
@@ -117,6 +108,19 @@ pub fn status_value() -> HostControlResult<Value> {
             "controller_path": CONTROLLER_PATH
         }))
     }
+}
+
+fn exported_policy_valid(xml: &str) -> bool {
+    xml.contains(CONTROLLER_PATH)
+        && xml.contains("<Arguments>run --poll-seconds 2</Arguments>")
+        && xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>")
+        && xml.contains("<LogonTrigger>")
+        && xml.contains("<Repetition>")
+        && xml.contains("<Interval>PT1M</Interval>")
+        && !xml.contains("<Duration>")
+        && xml.contains("<RestartOnFailure>")
+        && xml.contains("<Count>32</Count>")
+        && xml.contains("<LogonType>InteractiveToken</LogonType>")
 }
 
 fn current_account() -> HostControlResult<String> {
@@ -218,6 +222,26 @@ mod tests {
         assert!(xml.contains("<RestartOnFailure>"));
         assert!(xml.contains("<Count>32</Count>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
+    }
+
+    #[test]
+    fn exported_policy_accepts_windows_normalized_optional_defaults() {
+        let normalized = task_xml(r"HOST\User")
+            .replace("<StopAtDurationEnd>false</StopAtDurationEnd>", "");
+        assert!(exported_policy_valid(&normalized));
+    }
+
+    #[test]
+    fn exported_policy_rejects_bounded_or_wrong_repetition() {
+        let bounded = task_xml(r"HOST\User").replace(
+            "<Interval>PT1M</Interval>",
+            "<Interval>PT1M</Interval><Duration>PT1H</Duration>",
+        );
+        assert!(!exported_policy_valid(&bounded));
+
+        let wrong_interval = task_xml(r"HOST\User")
+            .replace("<Interval>PT1M</Interval>", "<Interval>PT5M</Interval>");
+        assert!(!exported_policy_valid(&wrong_interval));
     }
 
     #[test]
