@@ -30,14 +30,7 @@ pub fn install() -> HostControlResult<Value> {
         fs::write(&xml_path, xml.as_bytes())?;
 
         let status = Command::new("schtasks.exe")
-            .args([
-                "/Create",
-                "/TN",
-                TASK_NAME,
-                "/XML",
-                TASK_XML_PATH,
-                "/F",
-            ])
+            .args(["/Create", "/TN", TASK_NAME, "/XML", TASK_XML_PATH, "/F"])
             .status()?;
 
         if !status.success() {
@@ -97,10 +90,7 @@ fn current_account() -> HostControlResult<String> {
     }
 
     let account = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if account.is_empty()
-        || account.len() > 256
-        || account.chars().any(|ch| ch.is_control())
-    {
+    if account.is_empty() || account.len() > 256 || account.chars().any(|ch| ch.is_control()) {
         return Err(HostControlError::WindowsIdentityUnavailable);
     }
 
