@@ -4,11 +4,7 @@ use okx_protocol::{MailboxDirection, MailboxEnvelope};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::{
-    AgentError, AgentResult,
-    identity::AgentIdentity,
-    once::process_once_now,
-};
+use crate::{AgentError, AgentResult, identity::AgentIdentity, once::process_once_now};
 
 pub const GITHUB_REPOSITORY_ID: u64 = 1_388_071_566;
 pub const GITHUB_OWNER_USER_ID: u64 = 44_100_369;
@@ -84,7 +80,8 @@ impl GitHubMailboxClient {
         });
 
         if !already_published {
-            self.post_comment(&serde_json::to_string(&expected)?).await?;
+            self.post_comment(&serde_json::to_string(&expected)?)
+                .await?;
         }
 
         Ok(())
@@ -100,7 +97,8 @@ impl GitHubMailboxClient {
 
         let mut terminal_request_ids = HashSet::new();
         for comment in &comments {
-            if comment.user.id != GITHUB_OWNER_USER_ID || comment.body.len() > MAX_MAILBOX_BODY_BYTES
+            if comment.user.id != GITHUB_OWNER_USER_ID
+                || comment.body.len() > MAX_MAILBOX_BODY_BYTES
             {
                 continue;
             }
@@ -113,7 +111,8 @@ impl GitHubMailboxClient {
 
         let mut processed = 0usize;
         for comment in comments {
-            if comment.user.id != GITHUB_OWNER_USER_ID || comment.body.len() > MAX_MAILBOX_BODY_BYTES
+            if comment.user.id != GITHUB_OWNER_USER_ID
+                || comment.body.len() > MAX_MAILBOX_BODY_BYTES
             {
                 continue;
             }
@@ -129,7 +128,8 @@ impl GitHubMailboxClient {
 
             match process_once_now(&envelope, expected_key_id, agent_private_key) {
                 Ok(response) => {
-                    self.post_comment(&serde_json::to_string(&response)?).await?;
+                    self.post_comment(&serde_json::to_string(&response)?)
+                        .await?;
                     terminal_request_ids.insert(envelope.request_id);
                     processed += 1;
                 }
