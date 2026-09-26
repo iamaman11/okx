@@ -110,7 +110,7 @@ fn current_account() -> HostControlResult<String> {
 fn task_xml(account: &str) -> String {
     let account = xml_escape(account);
     format!(
-        r#"<?xml version="1.0" encoding="UTF-16"?>
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>{account}</Author>
