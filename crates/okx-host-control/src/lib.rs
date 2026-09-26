@@ -2,6 +2,7 @@ pub mod artifact;
 pub mod auth;
 pub mod executor;
 pub mod runtime;
+pub mod recovery;
 pub mod service;
 
 use thiserror::Error;
@@ -82,6 +83,12 @@ pub enum HostControlError {
 
     #[error("Windows service error: {0}")]
     WindowsService(String),
+
+    #[error("controller crash recovery probe requires SCM service mode")]
+    RecoveryProbeRequiresService,
+
+    #[error("controller crash recovery marker belongs to another request")]
+    RecoveryMarkerConflict,
 }
 
 impl HostControlError {
@@ -112,6 +119,8 @@ impl HostControlError {
             Self::ArtifactHashMismatch => "ARTIFACT_HASH_MISMATCH",
             Self::InvalidExecutionPath => "INVALID_EXECUTION_PATH",
             Self::WindowsService(_) => "WINDOWS_SERVICE_ERROR",
+            Self::RecoveryProbeRequiresService => "RECOVERY_PROBE_REQUIRES_SERVICE",
+            Self::RecoveryMarkerConflict => "RECOVERY_MARKER_CONFLICT",
         }
     }
 }
