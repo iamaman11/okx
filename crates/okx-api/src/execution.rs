@@ -64,7 +64,10 @@ pub struct ClientOrderId(String);
 impl ClientOrderId {
     pub fn new(value: impl Into<String>) -> Result<Self, OkxError> {
         let value = value.into();
-        if value.is_empty() || value.len() > 32 || !value.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        if value.is_empty()
+            || value.len() > 32
+            || !value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        {
             return Err(OkxError::Config(
                 "clOrdId must be 1-32 case-sensitive ASCII alphanumeric characters".to_owned(),
             ));
@@ -264,7 +267,9 @@ impl ExecutionApi {
 
 fn required_decimal(name: &str, raw: &str) -> Result<Decimal, OkxError> {
     optional_decimal(raw)?.ok_or_else(|| {
-        OkxError::Config(format!("instrument metadata is missing required field {name}"))
+        OkxError::Config(format!(
+            "instrument metadata is missing required field {name}"
+        ))
     })
 }
 
@@ -279,16 +284,16 @@ fn optional_decimal(raw: &str) -> Result<Option<Decimal>, OkxError> {
 
 fn validate_positive(name: &str, value: Decimal) -> Result<(), OkxError> {
     if value <= Decimal::ZERO {
-        return Err(OkxError::Config(format!("{name} must be greater than zero")));
+        return Err(OkxError::Config(format!(
+            "{name} must be greater than zero"
+        )));
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ClientOrderId, OrderIntent, OrderType, PositionSide, Side, TradeMode,
-    };
+    use super::{ClientOrderId, OrderIntent, OrderType, PositionSide, Side, TradeMode};
     use crate::account::Instrument;
     use rust_decimal::Decimal;
     use std::str::FromStr;
