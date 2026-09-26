@@ -1,22 +1,15 @@
 #[cfg(windows)]
 mod imp {
-    use std::{
-        ffi::{OsString},
-        fs,
-        path::PathBuf,
-        sync::OnceLock,
-        time::Duration,
-    };
+    use std::{ffi::OsString, fs, path::PathBuf, sync::OnceLock, time::Duration};
 
     use okx_github::GitHubClient;
     use tokio::sync::watch;
     use windows_service::{
         define_windows_service,
         service::{
-            ServiceAccess, ServiceAction, ServiceActionType, ServiceControl,
-            ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
-            ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo,
-            ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+            ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
+            ServiceErrorControl, ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod,
+            ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
         },
         service_control_handler::{self, ServiceControlHandlerResult},
         service_dispatcher,
@@ -24,10 +17,8 @@ mod imp {
     };
 
     use crate::{
-        HostControlError, HostControlResult,
-        auth::load_machine_github_token,
-        executor::HostExecutor,
-        runtime::run_with_shutdown,
+        HostControlError, HostControlResult, auth::load_machine_github_token,
+        executor::HostExecutor, runtime::run_with_shutdown,
     };
 
     pub const SERVICE_NAME: &str = "okx-host-control";
@@ -41,11 +32,9 @@ mod imp {
     define_windows_service!(ffi_service_main, service_main);
 
     pub fn install_service() -> HostControlResult<()> {
-        let manager_access =
-            ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE;
+        let manager_access = ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE;
         let service_manager =
-            ServiceManager::local_computer(None::<&str>, manager_access)
-                .map_err(service_error)?;
+            ServiceManager::local_computer(None::<&str>, manager_access).map_err(service_error)?;
 
         let service_info = ServiceInfo {
             name: OsString::from(SERVICE_NAME),
@@ -73,9 +62,7 @@ mod imp {
         };
 
         service
-            .set_description(
-                "Outbound-only typed Windows control plane for iamaman11/okx",
-            )
+            .set_description("Outbound-only typed Windows control plane for iamaman11/okx")
             .map_err(service_error)?;
         service
             .set_delayed_auto_start(false)
@@ -111,11 +98,9 @@ mod imp {
     }
 
     pub fn start_service() -> HostControlResult<()> {
-        let service_manager = ServiceManager::local_computer(
-            None::<&str>,
-            ServiceManagerAccess::CONNECT,
-        )
-        .map_err(service_error)?;
+        let service_manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+                .map_err(service_error)?;
         let service = service_manager
             .open_service(
                 SERVICE_NAME,
@@ -127,8 +112,7 @@ mod imp {
     }
 
     pub fn run_service_dispatcher() -> HostControlResult<()> {
-        service_dispatcher::start(SERVICE_NAME, ffi_service_main)
-            .map_err(service_error)
+        service_dispatcher::start(SERVICE_NAME, ffi_service_main).map_err(service_error)
     }
 
     fn service_main(_arguments: Vec<OsString>) {
@@ -152,9 +136,8 @@ mod imp {
             }
         };
 
-        let status_handle =
-            service_control_handler::register(SERVICE_NAME, event_handler)
-                .map_err(service_error)?;
+        let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)
+            .map_err(service_error)?;
 
         status_handle
             .set_service_status(ServiceStatus {
@@ -180,8 +163,7 @@ mod imp {
             .set_service_status(ServiceStatus {
                 service_type: ServiceType::OWN_PROCESS,
                 current_state: ServiceState::Running,
-                controls_accepted: ServiceControlAccept::STOP
-                    | ServiceControlAccept::SHUTDOWN,
+                controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
                 exit_code: ServiceExitCode::Win32(0),
                 checkpoint: 0,
                 wait_hint: Duration::default(),
@@ -189,21 +171,16 @@ mod imp {
             })
             .map_err(service_error)?;
 
-        let result = runtime.block_on(run_with_shutdown(
-            &github,
-            &mut executor,
-            2,
-            async move {
-                loop {
-                    if *shutdown_rx.borrow() {
-                        break;
-                    }
-                    if shutdown_rx.changed().await.is_err() {
-                        break;
-                    }
+        let result = runtime.block_on(run_with_shutdown(&github, &mut executor, 2, async move {
+            loop {
+                if *shutdown_rx.borrow() {
+                    break;
                 }
-            },
-        ));
+                if shutdown_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        }));
 
         status_handle
             .set_service_status(ServiceStatus {
