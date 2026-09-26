@@ -154,8 +154,10 @@ mod tests {
     fn sha256_is_lowercase_hex() {
         let value = sha256_hex(b"okx");
         assert_eq!(value.len(), 64);
-        assert!(value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert!(
+            value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
     }
 }
