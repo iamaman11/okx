@@ -1,3 +1,4 @@
+use okx_windows_secrets::{SecretStoreError, load_machine_secret, store_machine_secret};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{AgentError, AgentResult};
@@ -6,6 +7,9 @@ use crate::{AgentError, AgentResult};
 const WINDOWS_GITHUB_CREDENTIAL_SERVICE: &str = "iamaman11.okx-agent.github";
 #[cfg(windows)]
 const WINDOWS_GITHUB_CREDENTIAL_ACCOUNT: &str = "mailbox-token";
+
+const MACHINE_NAMESPACE: &str = "agent";
+const MACHINE_GITHUB_TOKEN: &str = "github-token";
 
 pub fn store_native_github_token(token: &str) -> AgentResult<()> {
     validate_token(token)?;
@@ -47,22 +51,40 @@ pub fn load_native_github_token() -> AgentResult<Zeroizing<String>> {
             Err(error) => return Err(secret_store_error(error)),
         };
 
-        let token = match String::from_utf8(secret) {
-            Ok(token) => token,
-            Err(error) => {
-                let mut bytes = error.into_bytes();
-                bytes.zeroize();
-                return Err(AgentError::InvalidGithubToken);
-            }
-        };
-        validate_token(&token)?;
-        Ok(Zeroizing::new(token))
+        decode_token(secret)
     }
 
     #[cfg(not(windows))]
     {
         Err(AgentError::UnsupportedSecretStorePlatform)
     }
+}
+
+pub fn migrate_github_token_to_machine() -> AgentResult<()> {
+    let token = load_native_github_token()?;
+    store_machine_secret(MACHINE_NAMESPACE, MACHINE_GITHUB_TOKEN, token.as_bytes())?;
+    Ok(())
+}
+
+pub fn load_runtime_github_token() -> AgentResult<Zeroizing<String>> {
+    match load_machine_secret(MACHINE_NAMESPACE, MACHINE_GITHUB_TOKEN) {
+        Ok(secret) => decode_token(secret.to_vec()),
+        Err(SecretStoreError::NotFound) => load_native_github_token(),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn decode_token(secret: Vec<u8>) -> AgentResult<Zeroizing<String>> {
+    let token = match String::from_utf8(secret) {
+        Ok(token) => token,
+        Err(error) => {
+            let mut bytes = error.into_bytes();
+            bytes.zeroize();
+            return Err(AgentError::InvalidGithubToken);
+        }
+    };
+    validate_token(&token)?;
+    Ok(Zeroizing::new(token))
 }
 
 fn validate_token(token: &str) -> AgentResult<()> {
