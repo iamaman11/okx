@@ -133,7 +133,7 @@ fn current_account() -> HostControlResult<String> {
 fn task_xml(account: &str) -> String {
     let account = xml_escape(account);
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+        r#"<?xml version="1.0" ?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>{account}</Author>
@@ -199,6 +199,8 @@ mod tests {
     #[test]
     fn task_xml_is_fixed_and_single_instance() {
         let xml = task_xml(r"HOST\User");
+        assert!(xml.starts_with(r#"<?xml version="1.0" ?>"#));
+        assert!(!xml.contains("encoding="));
         assert!(xml.contains(CONTROLLER_PATH));
         assert!(xml.contains("run --poll-seconds 2"));
         assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
