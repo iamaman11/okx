@@ -78,6 +78,10 @@ impl HostExecutor {
             HostControlOperation::RestartAgent => self.restart_agent(),
             HostControlOperation::InstallAutostart => autostart::install(),
             HostControlOperation::AutostartStatus => autostart::status_value(),
+            HostControlOperation::HandoffToAutostart
+            | HostControlOperation::AcceptanceCrashController => {
+                Err(HostControlError::InvalidExecutionPath)
+            }
             HostControlOperation::AcceptanceKillAgent => self.acceptance_kill_agent(),
             HostControlOperation::TransportStatus => self.transport_status(),
         }
