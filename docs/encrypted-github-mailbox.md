@@ -23,13 +23,21 @@ Version 1 uses:
 - ChaCha20-Poly1305 for authenticated encryption;
 - a fresh 96-bit nonce for every encrypted payload.
 
-Two independent keys are derived from the same shared secret:
+HKDF-SHA256 uses the exact salt:
 
 ```text
-okx-mailbox-v1/client-to-agent
-okx-mailbox-v1/agent-to-client
+okx-mailbox-v1/hkdf-sha256
 ```
 
+and the exact UTF-8 info string:
+
+```text
+repo=iamaman11/okx;request_id=<REQUEST_ID>;agent_key_id=<KEY_ID>;direction=<DIRECTION>
+```
+
+where `DIRECTION` is exactly `client_to_agent` or `agent_to_client`.
+
+This derives two independent 32-byte keys from the same X25519 shared secret.
 Implementations must not reuse one directional key for the opposite direction.
 
 ## Authenticated additional data
@@ -111,5 +119,22 @@ must pass the same fixed test vector containing:
 - plaintext;
 - ciphertext.
 
-The vector will be added when the cryptographic implementation lands. Protocol
-types and the exact AAD/KDF labels are fixed by P0.
+P0 includes a fixed Python-generated vector that Rust must reproduce exactly.
+The vector proves the agent/client public keys, X25519 shared secret, both
+directional HKDF outputs, AAD, nonce and ChaCha20-Poly1305 ciphertext.
+
+The canonical request-side vector currently uses:
+
+```text
+request_id: req_0123456789abcdef
+agent_key_id: agent-key-1
+nonce(base64): AAECAwQFBgcICQoL
+agent_public(base64): B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=
+client_public(base64): WGmv9FBUlzLLqu1eXfmzCm2jHLDldCutWtShp2jxpns=
+shared_secret(base64): qE3Hw8jwWLGy3EzR6bXcCnmH+ItqlWTN4zkfxCEVnnc=
+client_to_agent_key(base64): mxrr1AaS6LTdtcCPzTIjt7ftRrAXE/OI+ogwsZfFEj0=
+agent_to_client_key(base64): W/SGxPP0+HTrkyoK98xwHEnAYqKbTsCjZlbo8fmr+d4=
+```
+
+Private keys in the test vector are deterministic test material only and must
+never be reused for a deployed agent or real request.
