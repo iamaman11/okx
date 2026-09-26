@@ -71,7 +71,10 @@ impl GitHubClient {
         Ok(())
     }
 
-    pub async fn issue_comments(&self, issue_number: u64) -> Result<Vec<IssueComment>, GitHubError> {
+    pub async fn issue_comments(
+        &self,
+        issue_number: u64,
+    ) -> Result<Vec<IssueComment>, GitHubError> {
         validate_issue_number(issue_number)?;
 
         let mut all = Vec::new();
@@ -116,9 +119,7 @@ impl GitHubClient {
             return Err(GitHubError::CommentTooLarge);
         }
 
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments"
-        );
+        let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments");
         self.http
             .post(url)
             .bearer_auth(self.token.as_str())
