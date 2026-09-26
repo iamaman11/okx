@@ -38,6 +38,39 @@ impl OkxRestClient {
         self.environment
     }
 
+    pub(crate) async fn public_get<T>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+    ) -> Result<Vec<T>, OkxError>
+    where
+        T: DeserializeOwned,
+    {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (key, value) in params {
+            serializer.append_pair(key, value);
+        }
+        let query = serializer.finish();
+
+        let request_path = if query.is_empty() {
+            path.to_owned()
+        } else {
+            format!("{path}?{query}")
+        };
+        let url = format!("{}{}", self.environment.rest_base_url(), request_path);
+        let response = self.http.get(url).send().await?.error_for_status()?;
+        let envelope: ApiEnvelope<T> = response.json().await?;
+
+        if envelope.code != "0" {
+            return Err(OkxError::Api {
+                code: envelope.code,
+                message: envelope.msg,
+            });
+        }
+
+        Ok(envelope.data)
+    }
+
     pub(crate) async fn private_get<T>(
         &self,
         path: &str,
