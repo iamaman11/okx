@@ -91,6 +91,9 @@ pub enum HostControlError {
 
     #[error("Windows interactive account identity is unavailable")]
     WindowsIdentityUnavailable,
+
+    #[error("Windows autostart task is missing or does not match the fixed policy")]
+    AutostartPolicyInvalid,
 }
 
 impl HostControlError {
@@ -123,6 +126,7 @@ impl HostControlError {
             Self::JobAssignment(_) => "JOB_ASSIGNMENT_FAILED",
             Self::ControllerAlreadyRunning => "CONTROLLER_ALREADY_RUNNING",
             Self::WindowsIdentityUnavailable => "WINDOWS_IDENTITY_UNAVAILABLE",
+            Self::AutostartPolicyInvalid => "AUTOSTART_POLICY_INVALID",
         }
     }
 }
