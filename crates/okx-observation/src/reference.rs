@@ -261,11 +261,8 @@ mod tests {
             vec![doge.clone(), btc.clone()],
         )
         .expect("registry");
-        let second = ReferenceRegistry::from_public(
-            "2026-09-27T00:01:00.000Z",
-            vec![btc, doge],
-        )
-        .expect("registry");
+        let second = ReferenceRegistry::from_public("2026-09-27T00:01:00.000Z", vec![btc, doge])
+            .expect("registry");
 
         assert_eq!(first.generation(), second.generation());
     }
@@ -286,11 +283,8 @@ mod tests {
         let mut instrument = swap("DOGE-USDT-SWAP");
         instrument.tick_size.clear();
 
-        let error = ReferenceRegistry::from_public(
-            "2026-09-27T00:00:00.000Z",
-            vec![instrument],
-        )
-        .expect_err("missing tick must fail");
+        let error = ReferenceRegistry::from_public("2026-09-27T00:00:00.000Z", vec![instrument])
+            .expect_err("missing tick must fail");
 
         assert!(matches!(
             error,
