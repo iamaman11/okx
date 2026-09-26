@@ -7,9 +7,7 @@ use clap::{Parser, Subcommand};
 use okx_github::GitHubClient;
 use okx_host_control::{
     HostControlResult,
-    auth::{
-        load_native_github_token, migrate_github_token_to_machine, store_native_github_token,
-    },
+    auth::{load_native_github_token, migrate_github_token_to_machine, store_native_github_token},
     executor::{HostExecutor, install_current_executable},
     runtime::{process_pending, run_until_shutdown},
     service::{install_service, run_service_dispatcher, start_service},
