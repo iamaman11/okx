@@ -3,12 +3,15 @@ use std::{collections::HashSet, time::Duration};
 use chrono::{SecondsFormat, Utc};
 use okx_github::{GitHubClient, OWNER_USER_ID};
 use okx_protocol::{
-    HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlRequest, HostControlResult,
-    HostControlStatus,
+    HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlOperation, HostControlRequest,
+    HostControlResult, HostControlStatus,
 };
 use tokio::time::{MissedTickBehavior, interval};
 
-use crate::{HostControlError, HostControlResult as LocalResult, executor::HostExecutor};
+use crate::{
+    HostControlError, HostControlResult as LocalResult, artifact::deploy_agent,
+    executor::HostExecutor,
+};
 
 pub const CONTROL_ISSUE_NUMBER: u64 = 12;
 const MAX_CONTROL_BODY_BYTES: usize = 4096;
@@ -94,7 +97,23 @@ pub async fn process_pending(
         }
 
         let operation = request.operation;
-        let execution = executor.execute(operation);
+        let execution = match &operation {
+            HostControlOperation::DeployAgent {
+                run_id,
+                artifact_id,
+                expected_source_tree,
+            } => {
+                deploy_agent(
+                    github,
+                    executor,
+                    *run_id,
+                    *artifact_id,
+                    expected_source_tree,
+                )
+                .await
+            }
+            _ => executor.execute(operation.clone()),
+        };
         let (status, details, failure) = match execution {
             Ok(details) => (HostControlStatus::Pass, Some(details), None),
             Err(error) => (

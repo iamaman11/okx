@@ -40,6 +40,9 @@ pub enum ProtocolError {
 
     #[error("invalid host-control request_id")]
     InvalidHostControlRequestId,
+
+    #[error("invalid Git source tree id")]
+    InvalidSourceTree,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,16 +205,22 @@ impl HostControlRequest {
         if self.schema != HOST_CONTROL_REQUEST_SCHEMA_V1 {
             return Err(ProtocolError::UnsupportedSchema(self.schema.clone()));
         }
-        validate_host_control_request_id(&self.request_id)
+        validate_host_control_request_id(&self.request_id)?;
+        self.operation.validate()
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostControlOperation {
     Status,
     Sync,
     BuildAgent,
+    DeployAgent {
+        run_id: u64,
+        artifact_id: u64,
+        expected_source_tree: String,
+    },
     TestWorkspace,
     InitAgentIdentity,
     AgentIdentity,
@@ -220,6 +229,24 @@ pub enum HostControlOperation {
     StopAgent,
     RestartAgent,
     TransportStatus,
+}
+
+impl HostControlOperation {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        match self {
+            Self::DeployAgent {
+                run_id,
+                artifact_id,
+                expected_source_tree,
+            } => {
+                if *run_id == 0 || *artifact_id == 0 {
+                    return Err(ProtocolError::InvalidRequestId);
+                }
+                validate_source_tree(expected_source_tree)
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +352,18 @@ fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
+fn validate_source_tree(value: &str) -> Result<(), ProtocolError> {
+    if value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidSourceTree)
+    }
+}
+
 fn validate_host_control_request_id(value: &str) -> Result<(), ProtocolError> {
     if value.starts_with("ctl_") && validate_request_id(value).is_ok() {
         Ok(())
@@ -405,6 +444,31 @@ mod tests {
 
         let arbitrary = r#"{"schema":"okx.windows.control/v1","request_id":"ctl_0123456789abcdef","operation":{"type":"run_shell","command":"whoami"}}"#;
         assert!(serde_json::from_str::<HostControlRequest>(arbitrary).is_err());
+    }
+
+    #[test]
+    fn deploy_agent_requires_bounded_ids_and_exact_tree_shape() {
+        let request = HostControlRequest {
+            schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "ctl_0123456789abcdef".to_owned(),
+            operation: HostControlOperation::DeployAgent {
+                run_id: 123,
+                artifact_id: 456,
+                expected_source_tree: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            },
+        };
+        request.validate().expect("valid deploy request");
+
+        let invalid = HostControlRequest {
+            schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "ctl_0123456789abcdef".to_owned(),
+            operation: HostControlOperation::DeployAgent {
+                run_id: 0,
+                artifact_id: 456,
+                expected_source_tree: "not-a-tree".to_owned(),
+            },
+        };
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
