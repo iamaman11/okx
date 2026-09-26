@@ -1,3 +1,5 @@
+pub mod crypto;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
