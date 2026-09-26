@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use crate::{HostControlError, HostControlResult, auth::load_native_github_token};
 
 const CANONICAL_ROOT: &str = r"C:\okx";
+const RUNTIME_ROOT: &str = r"C:\okx-runtime";
 const AGENT_MAILBOX_ISSUE: &str = "10";
 const ALLOWED_REMOTES: &[&str] = &[
     "https://github.com/iamaman11/okx",
@@ -36,6 +37,7 @@ impl HostExecutor {
             HostControlOperation::Status => self.status(),
             HostControlOperation::Sync => self.sync(),
             HostControlOperation::BuildAgent => self.build_agent(),
+            HostControlOperation::DeployAgent { .. } => Err(HostControlError::InvalidExecutionPath),
             HostControlOperation::TestWorkspace => self.test_workspace(),
             HostControlOperation::InitAgentIdentity => self.init_agent_identity(),
             HostControlOperation::AgentIdentity => self.agent_identity(),
@@ -128,13 +130,18 @@ impl HostExecutor {
             "cargo build",
         )?;
 
-        if !self.agent_binary().is_file() {
+        let local_binary = self.local_build_agent_binary();
+        if !local_binary.is_file() {
             return Err(HostControlError::AgentBinaryMissing);
         }
 
+        let bytes = fs::read(local_binary)?;
+        self.install_verified_agent(&bytes)?;
+
         Ok(json!({
             "head": self.git(&["rev-parse", "HEAD"])?,
-            "agent_binary_present": true
+            "agent_binary_present": true,
+            "deployment": "LOCAL_BOOTSTRAP_ONLY"
         }))
     }
 
@@ -281,6 +288,39 @@ impl HostExecutor {
         Ok(output)
     }
 
+    pub fn fetch_origin_main_tree(&self) -> HostControlResult<String> {
+        self.assert_repo(false, false)?;
+        self.git(&["fetch", "--prune", "origin", "main"])?;
+        self.git(&["rev-parse", "origin/main^{tree}"])
+    }
+
+    pub fn install_verified_agent(&mut self, bytes: &[u8]) -> HostControlResult<()> {
+        self.require_agent_stopped()?;
+        fs::create_dir_all(self.runtime_dir())?;
+
+        let current = self.agent_binary();
+        let staging = self.runtime_dir().join("okx-agent.exe.new");
+        let backup = self.runtime_dir().join("okx-agent.exe.previous");
+
+        fs::write(&staging, bytes)?;
+
+        if backup.exists() {
+            fs::remove_file(&backup)?;
+        }
+        if current.exists() {
+            fs::rename(&current, &backup)?;
+        }
+
+        if let Err(error) = fs::rename(&staging, &current) {
+            if backup.exists() && !current.exists() {
+                let _ = fs::rename(&backup, &current);
+            }
+            return Err(error.into());
+        }
+
+        Ok(())
+    }
+
     fn assert_synced_main(&self) -> HostControlResult<()> {
         self.assert_repo(true, true)?;
         self.git(&["fetch", "--prune", "origin", "main"])?;
@@ -383,15 +423,19 @@ impl HostExecutor {
         }
     }
 
-    fn agent_binary(&self) -> PathBuf {
+    fn local_build_agent_binary(&self) -> PathBuf {
         self.repo_root
             .join("target")
             .join("release")
             .join("okx-agent.exe")
     }
 
+    fn agent_binary(&self) -> PathBuf {
+        PathBuf::from(RUNTIME_ROOT).join("okx-agent.exe")
+    }
+
     fn runtime_dir(&self) -> PathBuf {
-        self.repo_root.join(".runtime")
+        PathBuf::from(RUNTIME_ROOT)
     }
 }
 
