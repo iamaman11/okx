@@ -226,8 +226,8 @@ mod tests {
 
     #[test]
     fn exported_policy_accepts_windows_normalized_optional_defaults() {
-        let normalized = task_xml(r"HOST\User")
-            .replace("<StopAtDurationEnd>false</StopAtDurationEnd>", "");
+        let normalized =
+            task_xml(r"HOST\User").replace("<StopAtDurationEnd>false</StopAtDurationEnd>", "");
         assert!(exported_policy_valid(&normalized));
     }
 
