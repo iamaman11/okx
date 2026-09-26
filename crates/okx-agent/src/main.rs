@@ -8,11 +8,13 @@ use clap::{Parser, Subcommand};
 use okx_agent::{
     AgentResult,
     config::{AgentConfig, default_root},
+    github_auth::{load_native_github_token, store_native_github_token},
+    github_mailbox::GitHubMailboxClient,
     identity::{
         default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
     },
     once::process_once_now,
-    runtime::run_until_shutdown,
+    runtime::{run_mailbox_until_shutdown, run_until_shutdown},
 };
 use okx_protocol::MailboxEnvelope;
 use zeroize::Zeroize;
@@ -39,14 +41,23 @@ enum Command {
     /// Print only the public agent identity.
     Identity,
 
+    /// Store the GitHub mailbox token from stdin in Windows Credential Manager.
+    SetGithubToken,
+
     /// Process one encrypted mailbox envelope from a file or stdin.
     Once {
         #[arg(long)]
         input: Option<PathBuf>,
     },
 
-    /// Start the native Tokio lifecycle shell. No inbound listener is opened.
-    Run,
+    /// Start the native Tokio lifecycle shell. Optionally attach the GitHub mailbox.
+    Run {
+        #[arg(long)]
+        mailbox_issue: Option<u64>,
+
+        #[arg(long, default_value_t = 2)]
+        poll_seconds: u64,
+    },
 }
 
 #[tokio::main]
@@ -67,6 +78,22 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let identity = load_native_identity(&config.key_id)?;
             println!("{}", serde_json::to_string_pretty(&identity)?);
         }
+        Command::SetGithubToken => {
+            let mut token = read_stdin()?;
+            while token.ends_with(['\r', '\n']) {
+                token.pop();
+            }
+            let result = store_native_github_token(&token);
+            token.zeroize();
+            result?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.agent.github-token/v1",
+                    "stored": true
+                })
+            );
+        }
         Command::Once { input } => {
             let payload = read_input(input)?;
             let envelope: MailboxEnvelope = serde_json::from_str(&payload)?;
@@ -75,9 +102,29 @@ async fn run(cli: Cli) -> AgentResult<()> {
             private_key.zeroize();
             println!("{}", serde_json::to_string_pretty(&response?)?);
         }
-        Command::Run => {
+        Command::Run {
+            mailbox_issue,
+            poll_seconds,
+        } => {
             let identity = load_native_identity(&config.key_id)?;
-            run_until_shutdown(&config, &identity).await?;
+            if let Some(mailbox_issue) = mailbox_issue {
+                let token = load_native_github_token()?;
+                let mailbox = GitHubMailboxClient::new(mailbox_issue, token)?;
+                let mut private_key = load_native_private_key(&config.key_id)?;
+                let result = run_mailbox_until_shutdown(
+                    &config,
+                    &identity,
+                    &mailbox,
+                    mailbox_issue,
+                    poll_seconds,
+                    &private_key,
+                )
+                .await;
+                private_key.zeroize();
+                result?;
+            } else {
+                run_until_shutdown(&config, &identity).await?;
+            }
         }
     }
 
@@ -87,10 +134,12 @@ async fn run(cli: Cli) -> AgentResult<()> {
 fn read_input(input: Option<PathBuf>) -> AgentResult<String> {
     match input {
         Some(path) => Ok(fs::read_to_string(path)?),
-        None => {
-            let mut payload = String::new();
-            io::stdin().read_to_string(&mut payload)?;
-            Ok(payload)
-        }
+        None => read_stdin(),
     }
+}
+
+fn read_stdin() -> AgentResult<String> {
+    let mut payload = String::new();
+    io::stdin().read_to_string(&mut payload)?;
+    Ok(payload)
 }
