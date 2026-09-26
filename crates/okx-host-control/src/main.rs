@@ -7,9 +7,12 @@ use clap::{Parser, Subcommand};
 use okx_github::GitHubClient;
 use okx_host_control::{
     HostControlResult,
-    auth::{load_native_github_token, store_native_github_token},
+    auth::{
+        load_native_github_token, migrate_github_token_to_machine, store_native_github_token,
+    },
     executor::{HostExecutor, install_current_executable},
     runtime::{process_pending, run_until_shutdown},
+    service::{install_service, run_service_dispatcher, start_service},
 };
 use zeroize::Zeroize;
 
@@ -30,6 +33,18 @@ enum Command {
 
     /// Store the GitHub control token from stdin in Windows Credential Manager.
     SetGithubToken,
+
+    /// Copy current user-scoped controller and agent secrets to the service-safe machine store.
+    PrepareServiceSecrets,
+
+    /// Install the Windows SCM service. Requires elevation.
+    InstallService,
+
+    /// Start the installed Windows SCM service. Requires service control rights.
+    StartService,
+
+    /// Internal SCM entry point. Do not invoke manually.
+    Service,
 
     /// Process pending typed requests once and exit.
     Once,
@@ -68,6 +83,44 @@ async fn run(cli: Cli) -> HostControlResult<()> {
                     "stored": true
                 })
             );
+        }
+        Command::PrepareServiceSecrets => {
+            migrate_github_token_to_machine()?;
+            let executor = HostExecutor::canonical();
+            let agent = executor.migrate_agent_machine_secrets()?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.host-control.machine-secrets/v1",
+                    "migrated": true,
+                    "agent": agent
+                })
+            );
+        }
+        Command::InstallService => {
+            install_service()?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.host-control.service/v1",
+                    "installed": true,
+                    "service": "okx-host-control"
+                })
+            );
+        }
+        Command::StartService => {
+            start_service()?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.host-control.service/v1",
+                    "started": true,
+                    "service": "okx-host-control"
+                })
+            );
+        }
+        Command::Service => {
+            run_service_dispatcher()?;
         }
         Command::Once => {
             let token = load_native_github_token()?;
