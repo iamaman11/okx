@@ -117,3 +117,48 @@ jobs:
 
       - name: Test native Windows crates
         run: cargo test -p okx-agent -p okx-host-control
+
+      - name: Build deployable Windows binaries
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          cargo build --release -p okx-agent -p okx-host-control
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+
+          Copy-Item "target\release\okx-agent.exe" (Join-Path $dist "okx-agent.exe")
+          Copy-Item "target\release\okx-host-control.exe" (Join-Path $dist "okx-host-control.exe")
+          Copy-Item "Cargo.lock" (Join-Path $dist "Cargo.lock")
+
+          $sourceHead = (git rev-parse HEAD).Trim()
+          $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
+          $agentHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-agent.exe")).Hash.ToLowerInvariant()
+          $controllerHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-host-control.exe")).Hash.ToLowerInvariant()
+          $rustVersion = (rustc --version).Trim()
+
+          $manifest = [ordered]@{
+            schema = "okx.windows.bundle/v1"
+            repository_id = 1388071566
+            source_head_sha = $sourceHead
+            source_tree = $sourceTree
+            rust_version = $rustVersion
+            files = [ordered]@{
+              "okx-agent.exe" = [ordered]@{ sha256 = $agentHash }
+              "okx-host-control.exe" = [ordered]@{ sha256 = $controllerHash }
+            }
+          }
+
+          $manifest |
+            ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $dist "manifest.json") -Encoding utf8NoBOM
+
+      - name: Upload deployable Windows bundle
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}\okx-windows-bundle
+          if-no-files-found: error
+          retention-days: 14
