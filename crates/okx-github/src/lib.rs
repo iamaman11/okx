@@ -37,8 +37,6 @@ pub enum GitHubError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowRun {
     pub id: u64,
     pub name: String,
