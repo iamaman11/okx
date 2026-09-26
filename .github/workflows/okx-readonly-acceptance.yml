@@ -1,0 +1,45 @@
+name: OKX read-only acceptance
+
+on:
+  push:
+    branches:
+      - phase-1-account-capabilities
+    paths:
+      - .github/workflows/okx-readonly-acceptance.yml
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    environment: okx-succession-global-observer
+    env:
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+      OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Read-only OKX probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet -p okx-cli --             --region global             --instrument BTC-USDT-SWAP             --margin cross > /tmp/capabilities.json
+
+          jq '{
+            authenticated,
+            region,
+            demo,
+            account_level,
+            account_mode,
+            position_mode,
+            derivatives: [.derivatives[] | {instrument_type, instrument_count}],
+            requested_instrument,
+            requested_instrument_available,
+            requested_instrument_max_leverage,
+            requested_fee_group_id,
+            configured_leverage,
+            fee_rates,
+            warnings
+          }' /tmp/capabilities.json
