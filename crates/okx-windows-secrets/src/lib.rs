@@ -247,9 +247,7 @@ mod windows {
             return Err(SecretStoreError::NullDpapiBuffer);
         }
 
-        Ok(unsafe {
-            slice::from_raw_parts(output.0.pbData, output.0.cbData as usize).to_vec()
-        })
+        Ok(unsafe { slice::from_raw_parts(output.0.pbData, output.0.cbData as usize).to_vec() })
     }
 
     fn entropy(namespace: &str, name: &str) -> Vec<u8> {
