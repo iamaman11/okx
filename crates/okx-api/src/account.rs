@@ -95,6 +95,20 @@ pub struct Instrument {
     pub contract_type: String,
     #[serde(rename = "groupId", default)]
     pub fee_group_id: String,
+    #[serde(rename = "tickSz", default)]
+    pub tick_size: String,
+    #[serde(rename = "lotSz", default)]
+    pub lot_size: String,
+    #[serde(rename = "minSz", default)]
+    pub min_size: String,
+    #[serde(rename = "maxLmtSz", default)]
+    pub max_limit_size: String,
+    #[serde(rename = "maxMktSz", default)]
+    pub max_market_size: String,
+    #[serde(rename = "ctVal", default)]
+    pub contract_value: String,
+    #[serde(rename = "ctValCcy", default)]
+    pub contract_value_currency: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
