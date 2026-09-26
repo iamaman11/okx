@@ -1,8 +1,12 @@
+use std::time::Duration;
+
 use serde::Serialize;
+use tokio::time::{MissedTickBehavior, interval};
 
 use crate::{
-    AgentResult,
+    AgentError, AgentResult,
     config::{AGENT_RUNTIME_SCHEMA_V1, AgentConfig},
+    github_mailbox::GitHubMailboxClient,
     identity::AgentIdentity,
 };
 
@@ -10,6 +14,7 @@ use crate::{
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RuntimeState {
     ReadyIdle,
+    ReadyMailbox,
     ShuttingDown,
 }
 
@@ -20,22 +25,82 @@ pub struct RuntimeEvent<'a> {
     pub root: &'a std::path::Path,
     pub key_id: &'a str,
     pub public_key: &'a str,
+    pub mailbox_issue: Option<u64>,
 }
 
 pub async fn run_until_shutdown(config: &AgentConfig, identity: &AgentIdentity) -> AgentResult<()> {
-    emit(RuntimeState::ReadyIdle, config, identity)?;
+    emit(RuntimeState::ReadyIdle, config, identity, None)?;
     tokio::signal::ctrl_c().await?;
-    emit(RuntimeState::ShuttingDown, config, identity)?;
+    emit(RuntimeState::ShuttingDown, config, identity, None)?;
     Ok(())
 }
 
-fn emit(state: RuntimeState, config: &AgentConfig, identity: &AgentIdentity) -> AgentResult<()> {
+pub async fn run_mailbox_until_shutdown(
+    config: &AgentConfig,
+    identity: &AgentIdentity,
+    mailbox: &GitHubMailboxClient,
+    mailbox_issue: u64,
+    poll_seconds: u64,
+    agent_private_key: &[u8; 32],
+) -> AgentResult<()> {
+    if !(1..=60).contains(&poll_seconds) {
+        return Err(AgentError::InvalidPollInterval);
+    }
+
+    mailbox.verify_repository_identity().await?;
+    mailbox.ensure_identity_published(identity).await?;
+    emit(
+        RuntimeState::ReadyMailbox,
+        config,
+        identity,
+        Some(mailbox_issue),
+    )?;
+
+    let mut ticker = interval(Duration::from_secs(poll_seconds));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result?;
+                break;
+            }
+            _ = ticker.tick() => {
+                match mailbox.process_pending(&config.key_id, agent_private_key).await {
+                    Ok(processed) if processed > 0 => {
+                        eprintln!("mailbox processed {processed} terminal request(s)");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        eprintln!("mailbox poll failed: {error}");
+                    }
+                }
+            }
+        }
+    }
+
+    emit(
+        RuntimeState::ShuttingDown,
+        config,
+        identity,
+        Some(mailbox_issue),
+    )?;
+    Ok(())
+}
+
+fn emit(
+    state: RuntimeState,
+    config: &AgentConfig,
+    identity: &AgentIdentity,
+    mailbox_issue: Option<u64>,
+) -> AgentResult<()> {
     let event = RuntimeEvent {
         schema: AGENT_RUNTIME_SCHEMA_V1,
         state,
         root: &config.root,
         key_id: &identity.key_id,
         public_key: &identity.public_key,
+        mailbox_issue,
     };
     println!("{}", serde_json::to_string(&event)?);
     Ok(())
@@ -55,14 +120,17 @@ mod tests {
         };
         let event = RuntimeEvent {
             schema: AGENT_RUNTIME_SCHEMA_V1,
-            state: RuntimeState::ReadyIdle,
+            state: RuntimeState::ReadyMailbox,
             root: &config.root,
             key_id: &identity.key_id,
             public_key: &identity.public_key,
+            mailbox_issue: Some(10),
         };
         let json = serde_json::to_string(&event).expect("serialize");
 
-        assert!(json.contains("READY_IDLE"));
+        assert!(json.contains("READY_MAILBOX"));
+        assert!(json.contains("\"mailbox_issue\":10"));
         assert!(!json.contains("private_key"));
+        assert!(!json.contains("token"));
     }
 }
