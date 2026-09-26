@@ -90,13 +90,13 @@ impl HostExecutor {
     pub fn reconcile_desired(&mut self) -> HostControlResult<Value> {
         let running = self.agent_is_running()?;
 
-        if let Some(error) = &self.desired_error {
+        if let Some(error) = self.desired_error.clone() {
             if running {
                 self.terminate_agent_owned()?;
             }
             self.last_reconcile = "DEGRADED_DESIRED_STATE".to_owned();
             return Ok(json!({
-                "disposition": self.last_reconcile,
+                "disposition": self.last_reconcile.clone(),
                 "desired": AgentDesired::Stopped,
                 "error": error
             }));
@@ -178,11 +178,11 @@ impl HostExecutor {
             "agent_owned_running": running,
             "agent_desired": self.desired_agent,
             "desired_state_path": self.desired_store.path(),
-            "desired_state_error": self.desired_error,
+            "desired_state_error": self.desired_error.clone(),
             "job_object_owned": true,
             "restart_attempt": self.restart_attempt,
             "retry_in_ms": self.retry_in_ms(),
-            "last_reconcile": self.last_reconcile
+            "last_reconcile": self.last_reconcile.clone()
         }))
     }
 
