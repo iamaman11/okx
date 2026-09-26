@@ -33,6 +33,9 @@ pub enum AgentError {
     #[error("native secret store error: {0}")]
     SecretStore(String),
 
+    #[error("machine secret store error: {0}")]
+    MachineSecret(#[from] okx_windows_secrets::SecretStoreError),
+
     #[error("agent identity '{0}' already exists")]
     IdentityAlreadyExists(String),
 
