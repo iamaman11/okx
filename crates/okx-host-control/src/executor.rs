@@ -39,9 +39,7 @@ impl HostExecutor {
             HostControlOperation::TestWorkspace => self.test_workspace(),
             HostControlOperation::InitAgentIdentity => self.init_agent_identity(),
             HostControlOperation::AgentIdentity => self.agent_identity(),
-            HostControlOperation::BootstrapAgentGithubToken => {
-                self.bootstrap_agent_github_token()
-            }
+            HostControlOperation::BootstrapAgentGithubToken => self.bootstrap_agent_github_token(),
             HostControlOperation::StartAgent => self.start_agent(),
             HostControlOperation::StopAgent => self.stop_agent(),
             HostControlOperation::RestartAgent => self.restart_agent(),
@@ -386,7 +384,10 @@ impl HostExecutor {
     }
 
     fn agent_binary(&self) -> PathBuf {
-        self.repo_root.join("target").join("release").join("okx-agent.exe")
+        self.repo_root
+            .join("target")
+            .join("release")
+            .join("okx-agent.exe")
     }
 
     fn runtime_dir(&self) -> PathBuf {
