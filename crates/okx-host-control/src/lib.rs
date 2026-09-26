@@ -2,6 +2,7 @@ pub mod artifact;
 pub mod auth;
 pub mod executor;
 pub mod runtime;
+pub mod service;
 
 use thiserror::Error;
 
@@ -78,6 +79,9 @@ pub enum HostControlError {
 
     #[error("artifact deployment path is not valid for this execution layer")]
     InvalidExecutionPath,
+
+    #[error("Windows service error: {0}")]
+    WindowsService(String),
 }
 
 impl HostControlError {
@@ -107,6 +111,7 @@ impl HostControlError {
             Self::ArtifactSourceTreeMismatch => "ARTIFACT_SOURCE_TREE_MISMATCH",
             Self::ArtifactHashMismatch => "ARTIFACT_HASH_MISMATCH",
             Self::InvalidExecutionPath => "INVALID_EXECUTION_PATH",
+            Self::WindowsService(_) => "WINDOWS_SERVICE_ERROR",
         }
     }
 }
