@@ -48,9 +48,7 @@ impl AgentJob {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
 
-        let ok = unsafe {
-            AssignProcessToJobObject(self.handle, child.as_raw_handle() as _)
-        };
+        let ok = unsafe { AssignProcessToJobObject(self.handle, child.as_raw_handle() as _) };
         if ok == 0 {
             let _ = child.kill();
             let _ = child.wait();
