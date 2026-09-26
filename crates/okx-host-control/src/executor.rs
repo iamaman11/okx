@@ -441,11 +441,11 @@ impl HostExecutor {
             return Err(error.into());
         }
 
-        if should_restore {
-            if let Err(error) = self.start_agent_process() {
-                self.schedule_restart();
-                return Err(error);
-            }
+        if should_restore
+            && let Err(error) = self.start_agent_process()
+        {
+            self.schedule_restart();
+            return Err(error);
         }
 
         Ok(())
