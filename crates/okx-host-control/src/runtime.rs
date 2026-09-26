@@ -25,13 +25,30 @@ pub async fn run_until_shutdown(
         return Err(HostControlError::InvalidPollInterval);
     }
 
-    github.verify_repository_identity().await?;
+    let mut github_verified = false;
+    let mut initial_state = "DEGRADED";
+
+    if let Err(error) = executor.reconcile_desired() {
+        eprintln!("initial lifecycle reconcile failed: {error}");
+    }
+
+    match github.verify_repository_identity().await {
+        Ok(()) => {
+            github_verified = true;
+            initial_state = "READY";
+        }
+        Err(error) => {
+            eprintln!("initial GitHub identity verification deferred: {error}");
+        }
+    }
+
     println!(
         "{}",
         serde_json::json!({
             "schema": "okx.host-control.runtime/v1",
-            "state": "READY",
-            "control_issue": CONTROL_ISSUE_NUMBER
+            "state": initial_state,
+            "control_issue": CONTROL_ISSUE_NUMBER,
+            "github_identity_verified": github_verified
         })
     );
 
@@ -45,8 +62,28 @@ pub async fn run_until_shutdown(
                 break;
             }
             _ = ticker.tick() => {
+                if let Err(error) = executor.reconcile_desired() {
+                    eprintln!("host lifecycle reconcile failed: {error}");
+                }
+
+                if !github_verified {
+                    match github.verify_repository_identity().await {
+                        Ok(()) => {
+                            github_verified = true;
+                            eprintln!("GitHub repository identity verified");
+                        }
+                        Err(error) => {
+                            eprintln!("GitHub identity verification still unavailable: {error}");
+                            continue;
+                        }
+                    }
+                }
+
                 if let Err(error) = process_pending(github, executor).await {
                     eprintln!("host-control poll failed: {error}");
+                    if matches!(error, HostControlError::Github(_)) {
+                        github_verified = false;
+                    }
                 }
             }
         }
