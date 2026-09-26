@@ -1,5 +1,4 @@
 use std::{
-    fs,
     io::{self, Read},
     path::PathBuf,
 };
@@ -100,19 +99,4 @@ fn read_stdin() -> HostControlResult<String> {
     let mut payload = String::new();
     io::stdin().read_to_string(&mut payload)?;
     Ok(payload)
-}
-
-#[allow(dead_code)]
-fn _install_parent() -> PathBuf {
-    PathBuf::from(INSTALL_PATH)
-        .parent()
-        .map_or_else(PathBuf::new, PathBuf::from)
-}
-
-#[allow(dead_code)]
-fn _ensure_install_parent_exists() -> std::io::Result<()> {
-    if let Some(parent) = PathBuf::from(INSTALL_PATH).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    Ok(())
 }
