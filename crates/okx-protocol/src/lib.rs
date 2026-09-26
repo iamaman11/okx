@@ -264,9 +264,9 @@ fn validate_agent_key_id(value: &str) -> Result<(), ProtocolError> {
 
 fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     if (3..=64).contains(&value.len())
-        && value.bytes().all(|b| {
-            b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
-        })
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
     {
         Ok(())
     } else {
