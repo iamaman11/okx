@@ -56,9 +56,18 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    run(Cli::parse()).await?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    if matches!(cli.command, Command::Service) {
+        run_service_dispatcher()?;
+        return Ok(());
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(run(cli))?;
     Ok(())
 }
 
@@ -119,9 +128,7 @@ async fn run(cli: Cli) -> HostControlResult<()> {
                 })
             );
         }
-        Command::Service => {
-            run_service_dispatcher()?;
-        }
+        Command::Service => unreachable!("service mode is dispatched before Tokio startup"),
         Command::Once => {
             let token = load_native_github_token()?;
             let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
