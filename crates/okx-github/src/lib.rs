@@ -38,6 +38,7 @@ pub enum GitHubError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowRun {
     pub id: u64,
     pub name: String,
@@ -54,6 +55,7 @@ pub struct WorkflowArtifact {
     pub expired: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueComment {
     pub id: u64,
     pub body: String,
@@ -254,7 +256,6 @@ struct RepositoryOwner {
 }
 
 #[derive(Debug, Deserialize)]
-#[derive(Debug, Deserialize)]
 struct RawWorkflowRun {
     id: u64,
     name: String,
@@ -276,6 +277,7 @@ struct RawWorkflowArtifact {
     expired: bool,
 }
 
+#[derive(Debug, Deserialize)]
 struct RawIssueComment {
     id: u64,
     #[serde(default)]
