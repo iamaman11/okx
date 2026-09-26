@@ -1,8 +1,8 @@
 pub mod artifact;
 pub mod auth;
 pub mod executor;
-pub mod runtime;
 pub mod recovery;
+pub mod runtime;
 pub mod service;
 
 use thiserror::Error;
