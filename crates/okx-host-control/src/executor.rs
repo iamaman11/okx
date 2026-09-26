@@ -46,6 +46,9 @@ impl HostExecutor {
             HostControlOperation::StopAgent => self.stop_agent(),
             HostControlOperation::RestartAgent => self.restart_agent(),
             HostControlOperation::TransportStatus => self.transport_status(),
+            HostControlOperation::RecoveryProbeControllerCrash => {
+                Err(HostControlError::InvalidExecutionPath)
+            }
         }
     }
 
