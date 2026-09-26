@@ -33,7 +33,7 @@ The authenticated account acceptance must prove:
 - Observer key has `read_only` and has neither `trade` nor `withdraw`.
 - Executor key has `read_only,trade` and never `withdraw`.
 - Executor key must be IP-bound before production order submission is enabled.
-- `ALLOW_LIVE_TRADING=true` is an application-side guard; it does not replace exchange-side permissions or risk controls.
+- `ALLOW_LIVE_TRADING=false` is the Phase 1 invariant. Enabling it is a later execution-gate decision and never replaces exchange-side permissions or risk controls.
 
 ## Phase 1 boundary
 
