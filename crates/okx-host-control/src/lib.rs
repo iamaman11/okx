@@ -22,6 +22,9 @@ pub enum HostControlError {
     #[error("native secret store error: {0}")]
     SecretStore(String),
 
+    #[error("machine secret store error: {0}")]
+    MachineSecret(#[from] okx_windows_secrets::SecretStoreError),
+
     #[error("GitHub control token was not found")]
     GithubTokenNotFound,
 
@@ -85,6 +88,7 @@ impl HostControlError {
             Self::Json(_) => "JSON_ERROR",
             Self::Io(_) => "IO_ERROR",
             Self::SecretStore(_) => "SECRET_STORE_ERROR",
+            Self::MachineSecret(_) => "MACHINE_SECRET_ERROR",
             Self::GithubTokenNotFound => "GITHUB_TOKEN_NOT_FOUND",
             Self::InvalidGithubToken => "INVALID_GITHUB_TOKEN",
             Self::UnsupportedPlatform => "UNSUPPORTED_PLATFORM",
