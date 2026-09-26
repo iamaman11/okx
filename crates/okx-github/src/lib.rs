@@ -191,9 +191,8 @@ impl GitHubClient {
     }
 
     pub async fn download_artifact_zip(&self, artifact_id: u64) -> Result<Vec<u8>, GitHubError> {
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip"
-        );
+        let url =
+            format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip");
         let bytes = self
             .http
             .get(url)
