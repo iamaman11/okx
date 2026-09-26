@@ -57,7 +57,6 @@ jobs:
       fingerprint: ${{ steps.probe.outputs.fingerprint }}
     environment: okx-succession-global-executor
     env:
-      ALLOW_LIVE_TRADING: ${{ vars.ALLOW_LIVE_TRADING }}
       OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
       OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
       OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
@@ -92,7 +91,6 @@ jobs:
             greeks_type, fee_type, api_key_label, api_key_permissions,
             api_key_ip_bound
           }' /tmp/c.json
-          test "$ALLOW_LIVE_TRADING" = "true"
 
   identity-match:
     runs-on: ubuntu-latest
