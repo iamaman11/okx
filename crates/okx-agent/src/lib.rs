@@ -18,8 +18,8 @@ pub enum AgentError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("GitHub transport error: {0}")]
+    Github(#[from] okx_github::GitHubError),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -57,17 +57,8 @@ pub enum AgentError {
     #[error("GitHub mailbox token is invalid")]
     InvalidGithubToken,
 
-    #[error("GitHub repository identity does not match the pinned mailbox repository")]
-    GithubRepositoryIdentityMismatch,
-
     #[error("mailbox issue number must be non-zero")]
     InvalidMailboxIssue,
-
-    #[error("mailbox history exceeded the bounded scan limit")]
-    MailboxHistoryLimitExceeded,
-
-    #[error("mailbox payload is too large: {0} bytes")]
-    MailboxPayloadTooLarge(usize),
 
     #[error("poll interval must be between 1 and 60 seconds")]
     InvalidPollInterval,
