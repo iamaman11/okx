@@ -51,7 +51,7 @@ pub fn load_native_github_token() -> AgentResult<Zeroizing<String>> {
             Err(error) => return Err(secret_store_error(error)),
         };
 
-        decode_token(secret)
+        decode_token(Zeroizing::new(secret))
     }
 
     #[cfg(not(windows))]
@@ -68,14 +68,15 @@ pub fn migrate_github_token_to_machine() -> AgentResult<()> {
 
 pub fn load_runtime_github_token() -> AgentResult<Zeroizing<String>> {
     match load_machine_secret(MACHINE_NAMESPACE, MACHINE_GITHUB_TOKEN) {
-        Ok(secret) => decode_token(secret.to_vec()),
+        Ok(secret) => decode_token(secret),
         Err(SecretStoreError::NotFound) => load_native_github_token(),
         Err(error) => Err(error.into()),
     }
 }
 
-fn decode_token(secret: Vec<u8>) -> AgentResult<Zeroizing<String>> {
-    let token = match String::from_utf8(secret) {
+fn decode_token(mut secret: Zeroizing<Vec<u8>>) -> AgentResult<Zeroizing<String>> {
+    let bytes = std::mem::take(&mut *secret);
+    let token = match String::from_utf8(bytes) {
         Ok(token) => token,
         Err(error) => {
             let mut bytes = error.into_bytes();
