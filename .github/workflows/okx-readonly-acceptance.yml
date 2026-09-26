@@ -1,0 +1,108 @@
+name: OKX account acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  observer:
+    runs-on: ubuntu-latest
+    outputs:
+      fingerprint: ${{ steps.probe.outputs.fingerprint }}
+    environment: okx-succession-global-observer
+    env:
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+      OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Verify observer account contract
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet -p okx-cli -- --region global --instrument BTC-USDT-SWAP --margin cross > /tmp/c.json
+          jq -e '
+            .authenticated == true and
+            .region == "global" and
+            .demo == false and
+            .account_mode == "futures" and
+            .position_mode == "long_short_mode" and
+            .is_subaccount == true and
+            .account_type == "standard_subaccount" and
+            .account_stp_mode == "cancel_maker" and
+            .auto_loan == false and
+            .greeks_type == "PA" and
+            (.api_key_permissions | index("read_only")) != null and
+            (.api_key_permissions | index("trade")) == null and
+            (.api_key_permissions | index("withdraw")) == null and
+            .requested_instrument_available == true
+          ' /tmp/c.json > /dev/null
+          echo "fingerprint=$(jq -r .account_uid_fingerprint /tmp/c.json)" >> "$GITHUB_OUTPUT"
+          jq '{
+            authenticated, region, demo, account_mode, position_mode,
+            is_subaccount, account_type, account_stp_mode, auto_loan,
+            greeks_type, fee_type, api_key_label, api_key_permissions,
+            api_key_ip_bound, requested_instrument,
+            requested_instrument_available, requested_instrument_max_leverage,
+            configured_leverage, fee_rates, warnings
+          }' /tmp/c.json
+
+  executor:
+    runs-on: ubuntu-latest
+    outputs:
+      fingerprint: ${{ steps.probe.outputs.fingerprint }}
+    environment: okx-succession-global-executor
+    env:
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+      OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Verify executor account contract without trading
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet -p okx-cli -- --region global --instrument BTC-USDT-SWAP --margin cross > /tmp/c.json
+          jq -e '
+            .authenticated == true and
+            .region == "global" and
+            .demo == false and
+            .account_mode == "futures" and
+            .position_mode == "long_short_mode" and
+            .is_subaccount == true and
+            .account_type == "standard_subaccount" and
+            .account_stp_mode == "cancel_maker" and
+            .auto_loan == false and
+            .greeks_type == "PA" and
+            (.api_key_permissions | index("read_only")) != null and
+            (.api_key_permissions | index("trade")) != null and
+            (.api_key_permissions | index("withdraw")) == null
+          ' /tmp/c.json > /dev/null
+          echo "fingerprint=$(jq -r .account_uid_fingerprint /tmp/c.json)" >> "$GITHUB_OUTPUT"
+          jq '{
+            authenticated, region, demo, account_mode, position_mode,
+            is_subaccount, account_type, account_stp_mode, auto_loan,
+            greeks_type, fee_type, api_key_label, api_key_permissions,
+            api_key_ip_bound
+          }' /tmp/c.json
+
+  identity-match:
+    runs-on: ubuntu-latest
+    needs: [observer, executor]
+    if: always() && needs.observer.outputs.fingerprint != '' && needs.executor.outputs.fingerprint != ''
+    steps:
+      - name: Verify both credentials target the same OKX account
+        env:
+          OBSERVER_FINGERPRINT: ${{ needs.observer.outputs.fingerprint }}
+          EXECUTOR_FINGERPRINT: ${{ needs.executor.outputs.fingerprint }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$OBSERVER_FINGERPRINT" = "$EXECUTOR_FINGERPRINT"
+          echo "ACCOUNT_IDENTITY_MATCH=PASS"
