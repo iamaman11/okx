@@ -8,8 +8,7 @@ use thiserror::Error;
 use x25519_dalek::{X25519_BASEPOINT_BYTES, x25519};
 
 use crate::{
-    MAILBOX_REPOSITORY, MailboxDirection, ProtocolError, validate_agent_key_id,
-    validate_request_id,
+    MAILBOX_REPOSITORY, MailboxDirection, ProtocolError, validate_agent_key_id, validate_request_id,
 };
 
 pub const HKDF_SALT_V1: &[u8] = b"okx-mailbox-v1/hkdf-sha256";
@@ -76,7 +75,13 @@ pub fn encrypt(
 ) -> Result<Vec<u8>, CryptoError> {
     let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::Encrypt)?;
     cipher
-        .encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .encrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::Encrypt)
 }
 
@@ -88,7 +93,13 @@ pub fn decrypt(
 ) -> Result<Vec<u8>, CryptoError> {
     let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::Decrypt)?;
     cipher
-        .decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .decrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::Decrypt)
 }
 
@@ -111,20 +122,13 @@ mod tests {
 
     #[test]
     fn python_and_rust_match_fixed_x25519_hkdf_chacha20poly1305_vector() {
-        let agent_private =
-            decode_32("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=");
-        let expected_agent_public =
-            decode_32("B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=");
-        let client_private =
-            decode_32("ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=");
-        let expected_client_public =
-            decode_32("WGmv9FBUlzLLqu1eXfmzCm2jHLDldCutWtShp2jxpns=");
-        let expected_shared =
-            decode_32("qE3Hw8jwWLGy3EzR6bXcCnmH+ItqlWTN4zkfxCEVnnc=");
-        let expected_client_to_agent =
-            decode_32("mxrr1AaS6LTdtcCPzTIjt7ftRrAXE/OI+ogwsZfFEj0=");
-        let expected_agent_to_client =
-            decode_32("W/SGxPP0+HTrkyoK98xwHEnAYqKbTsCjZlbo8fmr+d4=");
+        let agent_private = decode_32("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=");
+        let expected_agent_public = decode_32("B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=");
+        let client_private = decode_32("ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=");
+        let expected_client_public = decode_32("WGmv9FBUlzLLqu1eXfmzCm2jHLDldCutWtShp2jxpns=");
+        let expected_shared = decode_32("qE3Hw8jwWLGy3EzR6bXcCnmH+ItqlWTN4zkfxCEVnnc=");
+        let expected_client_to_agent = decode_32("mxrr1AaS6LTdtcCPzTIjt7ftRrAXE/OI+ogwsZfFEj0=");
+        let expected_agent_to_client = decode_32("W/SGxPP0+HTrkyoK98xwHEnAYqKbTsCjZlbo8fmr+d4=");
 
         assert_eq!(
             public_key_from_private(agent_private),
@@ -178,15 +182,15 @@ mod tests {
             .expect("12 byte nonce");
         let plaintext = br#"{"schema":"okx.agent.request/v1","request_id":"req_0123456789abcdef","operation":{"type":"market_snapshot","instrument":"DOGE-USDT-SWAP"}}"#;
 
-        let ciphertext = encrypt(&client_to_agent, &nonce, aad.as_bytes(), plaintext)
-            .expect("encrypt");
+        let ciphertext =
+            encrypt(&client_to_agent, &nonce, aad.as_bytes(), plaintext).expect("encrypt");
         assert_eq!(
             STANDARD.encode(&ciphertext),
             "42cQjQ+x3qsct69xRscwOYvBJ7WEfLKME5e83cAnthCc6uUJGoPh1uQBIP5/tCgWPKkE1gLMtYSTy/U3Tiuse/RpvA3MZFRWAptiNwhDOLkRN3vcxzA7jecvBezBUUd0tAMlGosLlIuyVA5xIC4AztiKeiutYqK8nUAYjro7BsmYmgzvrIyyGoJ91TIolZavZh18ifCmDarlag=="
         );
 
-        let decrypted = decrypt(&client_to_agent, &nonce, aad.as_bytes(), &ciphertext)
-            .expect("decrypt");
+        let decrypted =
+            decrypt(&client_to_agent, &nonce, aad.as_bytes(), &ciphertext).expect("decrypt");
         assert_eq!(decrypted, plaintext);
     }
 
