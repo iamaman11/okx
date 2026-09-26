@@ -1,7 +1,11 @@
 pub mod artifact;
 pub mod auth;
+pub mod autostart;
+pub mod desired;
 pub mod executor;
+pub mod job;
 pub mod runtime;
+pub mod single_instance;
 
 use thiserror::Error;
 
@@ -75,6 +79,18 @@ pub enum HostControlError {
 
     #[error("artifact deployment path is not valid for this execution layer")]
     InvalidExecutionPath,
+
+    #[error("desired lifecycle state is corrupt or unsupported")]
+    DesiredStateCorrupt,
+
+    #[error("agent process could not be assigned to the controller job object: {0}")]
+    JobAssignment(String),
+
+    #[error("another host-controller instance is already running")]
+    ControllerAlreadyRunning,
+
+    #[error("Windows interactive account identity is unavailable")]
+    WindowsIdentityUnavailable,
 }
 
 impl HostControlError {
@@ -103,6 +119,10 @@ impl HostControlError {
             Self::ArtifactSourceTreeMismatch => "ARTIFACT_SOURCE_TREE_MISMATCH",
             Self::ArtifactHashMismatch => "ARTIFACT_HASH_MISMATCH",
             Self::InvalidExecutionPath => "INVALID_EXECUTION_PATH",
+            Self::DesiredStateCorrupt => "DESIRED_STATE_CORRUPT",
+            Self::JobAssignment(_) => "JOB_ASSIGNMENT_FAILED",
+            Self::ControllerAlreadyRunning => "CONTROLLER_ALREADY_RUNNING",
+            Self::WindowsIdentityUnavailable => "WINDOWS_IDENTITY_UNAVAILABLE",
         }
     }
 }
