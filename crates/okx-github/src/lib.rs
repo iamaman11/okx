@@ -28,9 +28,32 @@ pub enum GitHubError {
 
     #[error("GitHub issue comment exceeds the bounded payload limit")]
     CommentTooLarge,
+
+    #[error("GitHub workflow run does not satisfy the trusted artifact policy")]
+    UntrustedWorkflowRun,
+
+    #[error("GitHub workflow artifact does not satisfy the trusted artifact policy")]
+    UntrustedArtifact,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRun {
+    pub id: u64,
+    pub name: String,
+    pub event: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub head_sha: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowArtifact {
+    pub id: u64,
+    pub name: String,
+    pub expired: bool,
+}
+
 pub struct IssueComment {
     pub id: u64,
     pub body: String,
@@ -108,6 +131,83 @@ impl GitHubClient {
         Err(GitHubError::HistoryLimitExceeded)
     }
 
+    pub async fn workflow_run(&self, run_id: u64) -> Result<WorkflowRun, GitHubError> {
+        let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/runs/{run_id}");
+        let run: RawWorkflowRun = self
+            .http
+            .get(url)
+            .bearer_auth(self.token.as_str())
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        if run.id != run_id {
+            return Err(GitHubError::UntrustedWorkflowRun);
+        }
+
+        Ok(WorkflowRun {
+            id: run.id,
+            name: run.name,
+            event: run.event,
+            status: run.status,
+            conclusion: run.conclusion,
+            head_sha: run.head_sha,
+        })
+    }
+
+    pub async fn workflow_artifact(
+        &self,
+        run_id: u64,
+        artifact_id: u64,
+    ) -> Result<WorkflowArtifact, GitHubError> {
+        let url = format!(
+            "{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/runs/{run_id}/artifacts?per_page=100"
+        );
+        let response: RawArtifactsResponse = self
+            .http
+            .get(url)
+            .bearer_auth(self.token.as_str())
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let artifact = response
+            .artifacts
+            .into_iter()
+            .find(|artifact| artifact.id == artifact_id)
+            .ok_or(GitHubError::UntrustedArtifact)?;
+
+        Ok(WorkflowArtifact {
+            id: artifact.id,
+            name: artifact.name,
+            expired: artifact.expired,
+        })
+    }
+
+    pub async fn download_artifact_zip(&self, artifact_id: u64) -> Result<Vec<u8>, GitHubError> {
+        let url = format!(
+            "{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip"
+        );
+        let bytes = self
+            .http
+            .get(url)
+            .bearer_auth(self.token.as_str())
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+
+        Ok(bytes.to_vec())
+    }
+
     pub async fn post_issue_comment(
         &self,
         issue_number: u64,
@@ -154,6 +254,28 @@ struct RepositoryOwner {
 }
 
 #[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize)]
+struct RawWorkflowRun {
+    id: u64,
+    name: String,
+    event: String,
+    status: String,
+    conclusion: Option<String>,
+    head_sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawArtifactsResponse {
+    artifacts: Vec<RawWorkflowArtifact>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawWorkflowArtifact {
+    id: u64,
+    name: String,
+    expired: bool,
+}
+
 struct RawIssueComment {
     id: u64,
     #[serde(default)]
