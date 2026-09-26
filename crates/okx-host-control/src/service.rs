@@ -28,6 +28,7 @@ mod imp {
         r"C:\ProgramData\iamaman11\okx\logs\host-control-service-error.log";
 
     static SERVICE_SHUTDOWN: OnceLock<watch::Sender<bool>> = OnceLock::new();
+    static SERVICE_MODE: AtomicBool = AtomicBool::new(false);
 
     define_windows_service!(ffi_service_main, service_main);
 
@@ -121,7 +122,12 @@ mod imp {
         }
     }
 
+    pub fn is_service_mode() -> bool {
+        SERVICE_MODE.load(Ordering::SeqCst)
+    }
+
     fn run_service() -> HostControlResult<()> {
+        SERVICE_MODE.store(true, Ordering::SeqCst);
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let _ = SERVICE_SHUTDOWN.set(shutdown_tx.clone());
 
@@ -215,7 +221,12 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{install_service, run_service_dispatcher, start_service};
+pub use imp::{install_service, is_service_mode, run_service_dispatcher, start_service};
+
+#[cfg(not(windows))]
+pub fn is_service_mode() -> bool {
+    false
+}
 
 #[cfg(not(windows))]
 pub fn install_service() -> crate::HostControlResult<()> {
