@@ -95,10 +95,7 @@ impl GitHubMailboxClient {
             match process_once_now(&envelope, expected_key_id, agent_private_key) {
                 Ok(response) => {
                     self.github
-                        .post_issue_comment(
-                            self.issue_number,
-                            &serde_json::to_string(&response)?,
-                        )
+                        .post_issue_comment(self.issue_number, &serde_json::to_string(&response)?)
                         .await?;
                     terminal_request_ids.insert(envelope.request_id);
                     processed += 1;
