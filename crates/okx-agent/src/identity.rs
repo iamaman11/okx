@@ -92,7 +92,11 @@ pub fn load_native_private_key(key_id: &str) -> AgentResult<[u8; 32]> {
 
 pub fn migrate_identity_to_machine(key_id: &str) -> AgentResult<()> {
     let mut private_key = load_native_private_key(key_id)?;
-    let result = store_machine_secret(MACHINE_NAMESPACE, &machine_identity_name(key_id), &private_key);
+    let result = store_machine_secret(
+        MACHINE_NAMESPACE,
+        &machine_identity_name(key_id),
+        &private_key,
+    );
     private_key.zeroize();
     result?;
     Ok(())
