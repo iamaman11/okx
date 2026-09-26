@@ -76,7 +76,7 @@ pub fn encrypt(
     let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::Encrypt)?;
     cipher
         .encrypt(
-            Array(*nonce),
+            &Array(*nonce),
             Payload {
                 msg: plaintext,
                 aad,
@@ -94,7 +94,7 @@ pub fn decrypt(
     let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::Decrypt)?;
     cipher
         .decrypt(
-            Array(*nonce),
+            &Array(*nonce),
             Payload {
                 msg: ciphertext,
                 aad,
