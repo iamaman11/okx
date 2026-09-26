@@ -157,10 +157,9 @@ pub async fn process_pending(
                 .await,
                 ProcessTransition::None,
             ),
-            HostControlOperation::HandoffToAutostart => (
-                autostart::run_now(),
-                ProcessTransition::Handoff,
-            ),
+            HostControlOperation::HandoffToAutostart => {
+                (autostart::run_now(), ProcessTransition::Handoff)
+            }
             HostControlOperation::AcceptanceCrashController => (
                 autostart::ensure_policy_valid().map(|()| {
                     serde_json::json!({
