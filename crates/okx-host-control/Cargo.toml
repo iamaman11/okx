@@ -1,0 +1,23 @@
+[package]
+name = "okx-host-control"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "okx-host-control"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+okx-github = { path = "../okx-github" }
+okx-protocol = { path = "../okx-protocol" }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "4.2", default-features = false, features = ["v1"] }
