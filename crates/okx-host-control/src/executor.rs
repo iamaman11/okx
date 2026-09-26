@@ -10,8 +10,11 @@ use okx_protocol::HostControlOperation;
 use serde_json::{Value, json};
 
 use crate::{
-    HostControlError, HostControlResult, auth::load_native_github_token, autostart,
-    desired::{AgentDesired, DesiredStateStore}, job::AgentJob,
+    HostControlError, HostControlResult,
+    auth::load_native_github_token,
+    autostart,
+    desired::{AgentDesired, DesiredStateStore},
+    job::AgentJob,
 };
 
 const CANONICAL_ROOT: &str = r"C:\okx";
@@ -110,10 +113,9 @@ impl HostExecutor {
             }
             AgentDesired::Running => {
                 if running {
-                    if self
-                        .agent_started_at
-                        .is_some_and(|started| started.elapsed() >= Duration::from_secs(HEALTHY_AGENT_SECS))
-                    {
+                    if self.agent_started_at.is_some_and(|started| {
+                        started.elapsed() >= Duration::from_secs(HEALTHY_AGENT_SECS)
+                    }) {
                         self.restart_attempt = 0;
                         self.next_restart_at = None;
                     }
@@ -512,13 +514,13 @@ impl HostExecutor {
     }
 
     fn restart_due(&self) -> bool {
-        self.next_restart_at.is_none_or(|when| Instant::now() >= when)
+        self.next_restart_at
+            .is_none_or(|when| Instant::now() >= when)
     }
 
     fn retry_in_ms(&self) -> Option<u128> {
-        self.next_restart_at.map(|when| {
-            when.saturating_duration_since(Instant::now()).as_millis()
-        })
+        self.next_restart_at
+            .map(|when| when.saturating_duration_since(Instant::now()).as_millis())
     }
 
     fn assert_synced_main(&self) -> HostControlResult<()> {
