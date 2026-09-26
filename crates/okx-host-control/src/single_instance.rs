@@ -14,12 +14,10 @@ impl SingleInstanceGuard {
             System::Threading::CreateMutexW,
         };
 
-        let name: Vec<u16> = std::ffi::OsStr::new(
-            r"Local\iamaman11-okx-host-control"
-        )
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+        let name: Vec<u16> = std::ffi::OsStr::new(r"Local\iamaman11-okx-host-control")
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
 
         let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
         if handle.is_null() {
