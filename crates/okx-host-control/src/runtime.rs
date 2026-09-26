@@ -9,9 +9,16 @@ use okx_protocol::{
 use tokio::time::{MissedTickBehavior, interval};
 
 use crate::{
-    HostControlError, HostControlResult as LocalResult, artifact::deploy_agent,
+    HostControlError, HostControlResult as LocalResult, artifact::deploy_agent, autostart,
     executor::HostExecutor,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessTransition {
+    None,
+    Handoff,
+    Crash,
+}
 
 pub const CONTROL_ISSUE_NUMBER: u64 = 12;
 const MAX_CONTROL_BODY_BYTES: usize = 4096;
@@ -134,12 +141,12 @@ pub async fn process_pending(
         }
 
         let operation = request.operation;
-        let execution = match &operation {
+        let (execution, transition) = match &operation {
             HostControlOperation::DeployAgent {
                 run_id,
                 artifact_id,
                 expected_source_tree,
-            } => {
+            } => (
                 deploy_agent(
                     github,
                     executor,
@@ -147,9 +154,23 @@ pub async fn process_pending(
                     *artifact_id,
                     expected_source_tree,
                 )
-                .await
-            }
-            _ => executor.execute(operation.clone()),
+                .await,
+                ProcessTransition::None,
+            ),
+            HostControlOperation::HandoffToAutostart => (
+                autostart::run_now(),
+                ProcessTransition::Handoff,
+            ),
+            HostControlOperation::AcceptanceCrashController => (
+                autostart::ensure_policy_valid().map(|()| {
+                    serde_json::json!({
+                        "autostart_policy_valid": true,
+                        "crash_after_terminal_ack": true
+                    })
+                }),
+                ProcessTransition::Crash,
+            ),
+            _ => (executor.execute(operation.clone()), ProcessTransition::None),
         };
         let (status, details, failure) = match execution {
             Ok(details) => (HostControlStatus::Pass, Some(details), None),
@@ -180,6 +201,14 @@ pub async fn process_pending(
 
         terminal_request_ids.insert(request.request_id);
         processed += 1;
+
+        if result.status == HostControlStatus::Pass {
+            match transition {
+                ProcessTransition::None => {}
+                ProcessTransition::Handoff => std::process::exit(0),
+                ProcessTransition::Crash => std::process::exit(70),
+            }
+        }
     }
 
     Ok(processed)
