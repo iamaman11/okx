@@ -41,6 +41,43 @@ pub fn install() -> HostControlResult<Value> {
     }
 }
 
+pub fn run_now() -> HostControlResult<Value> {
+    #[cfg(not(windows))]
+    {
+        return Err(HostControlError::UnsupportedPlatform);
+    }
+
+    #[cfg(windows)]
+    {
+        ensure_policy_valid()?;
+        let status = Command::new("schtasks.exe")
+            .args(["/Run", "/TN", TASK_NAME])
+            .status()?;
+
+        if !status.success() {
+            return Err(HostControlError::CommandFailed("schtasks run"));
+        }
+
+        Ok(json!({
+            "task_name": TASK_NAME,
+            "run_requested": true
+        }))
+    }
+}
+
+pub fn ensure_policy_valid() -> HostControlResult<()> {
+    let status = status_value()?;
+    if status
+        .get("policy_valid")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(HostControlError::AutostartPolicyInvalid)
+    }
+}
+
 pub fn status_value() -> HostControlResult<Value> {
     #[cfg(not(windows))]
     {
