@@ -2,7 +2,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentRequest, AgentResponse,
-    AgentResponseStatus, DataQuality, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
+    AgentResponseStatus, DataQuality, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection,
+    MailboxEnvelope,
     crypto::{decrypt, derive_directional_key, encrypt, shared_secret},
 };
 
@@ -37,12 +38,7 @@ pub fn process_once(
     )?;
     let ciphertext = STANDARD.decode(&envelope.ciphertext)?;
     let aad = envelope.aad()?;
-    let plaintext = decrypt(
-        &request_key,
-        &request_nonce,
-        aad.as_bytes(),
-        &ciphertext,
-    )?;
+    let plaintext = decrypt(&request_key, &request_nonce, aad.as_bytes(), &ciphertext)?;
 
     let request: AgentRequest = serde_json::from_slice(&plaintext)?;
     request.validate()?;
@@ -197,8 +193,9 @@ mod tests {
         )
         .expect("response key");
         let response_aad = response_envelope.aad().expect("response aad");
-        let response_ciphertext =
-            STANDARD.decode(&response_envelope.ciphertext).expect("response ciphertext");
+        let response_ciphertext = STANDARD
+            .decode(&response_envelope.ciphertext)
+            .expect("response ciphertext");
         let response_plaintext = decrypt(
             &response_key,
             &response_nonce,
