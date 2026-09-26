@@ -40,16 +40,17 @@ where
         return Err(HostControlError::InvalidPollInterval);
     }
 
-    github.verify_repository_identity().await?;
     println!(
         "{}",
         serde_json::json!({
             "schema": "okx.host-control.runtime/v1",
-            "state": "READY",
+            "state": "DEGRADED",
+            "reason": "REPOSITORY_IDENTITY_NOT_VERIFIED",
             "control_issue": CONTROL_ISSUE_NUMBER
         })
     );
 
+    let mut repository_verified = false;
     let mut ticker = interval(Duration::from_secs(poll_seconds));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     tokio::pin!(shutdown);
@@ -60,6 +61,26 @@ where
                 break;
             }
             _ = ticker.tick() => {
+                if !repository_verified {
+                    match github.verify_repository_identity().await {
+                        Ok(()) => {
+                            repository_verified = true;
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "schema": "okx.host-control.runtime/v1",
+                                    "state": "READY",
+                                    "control_issue": CONTROL_ISSUE_NUMBER
+                                })
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!("host-control repository verification pending: {error}");
+                            continue;
+                        }
+                    }
+                }
+
                 if let Err(error) = process_pending(github, executor).await {
                     eprintln!("host-control poll failed: {error}");
                 }
