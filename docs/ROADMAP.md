@@ -61,7 +61,20 @@ Authority: #42
 
 Module-split `okx-runtime::public` inside the same crate. No behavior, schema or lifecycle-owner change. Accepted via PR #45; #42 CLOSED/PASS.
 
-### M4 Private read-only Account + Order State — CURRENT
+### Q0 Current-environment query/transport efficiency — CURRENT
+
+Authority: #47
+
+Before M4, harden the existing encrypted GitHub mailbox instead of introducing another transport:
+
+- incremental/high-water mailbox cursor instead of full-history polling;
+- bounded mailbox transport metrics;
+- typed instrument discovery;
+- composite MarketOverview query;
+- retention/rotation/compaction policy with replay safety;
+- physical DATA #10 acceptance after migration.
+
+### M4 Private read-only Account + Order State — NEXT
 
 - balances/equity;
 - positions;
@@ -80,11 +93,9 @@ Planned after M4.
 - stop/TP;
 - hypothetical scenarios.
 
-### M6 MCP
+### Access transport decision
 
-Planned after stable typed Query API.
-
-MCP becomes the normal ChatGPT access adapter. The encrypted GitHub mailbox remains fallback/diagnostic transport.
+No MCP stage is planned. The encrypted GitHub mailbox is the normal access path in the current Windows/GitHub environment. Future transport work must improve this path incrementally rather than introduce a second access stack.
 
 ## Explicit deferred lifecycle debt
 
