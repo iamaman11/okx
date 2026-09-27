@@ -4,9 +4,7 @@ use okx_observation::ReferenceRegistry;
 
 use crate::AgentResult;
 
-pub async fn bootstrap_reference(
-    environment: OkxEnvironment,
-) -> AgentResult<ReferenceRegistry> {
+pub async fn bootstrap_reference(environment: OkxEnvironment) -> AgentResult<ReferenceRegistry> {
     let client = OkxPublicClient::new(environment)?;
     let public = PublicDataApi::new(client);
     let instruments = public.derivative_instruments().await?;
