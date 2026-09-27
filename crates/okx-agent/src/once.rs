@@ -575,6 +575,68 @@ async fn response_for(
             }
         }
         AgentOperation::AccountSnapshot => {
+            let assembled = match assemble_account_snapshot(context).await {
+                Ok(value) => value,
+                Err(error) => return Ok(account_query_failure(request, generated_at, error)),
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: assembled.quality,
+                result_schema: Some(assembled.result_schema.to_owned()),
+                result: Some(serde_json::to_value(assembled.snapshot)?),
+                failure: None,
+                warnings: assembled.warnings,
+            })
+        }
+        AgentOperation::PortfolioRisk => {
+            let assembled = match assemble_account_snapshot(context).await {
+                Ok(value) => value,
+                Err(error) => return Ok(account_query_failure(request, generated_at, error)),
+            };
+            let result = match analyze_account_risk(&assembled.snapshot) {
+                Ok(value) => value,
+                Err(error) => return Ok(analysis_failure(request, generated_at, error)),
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: assembled.quality,
+                result_schema: Some(ACCOUNT_RISK_ANALYSIS_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(result)?),
+                failure: None,
+                warnings: assembled.warnings,
+            })
+        }
+        AgentOperation::AnalyzeCandidateOrder {
+            instrument,
+            side,
+            entry_price,
+            stop_price,
+            max_settle_notional,
+            max_loss_settle,
+            target_rr,
+            entry_liquidity_role,
+            exit_liquidity_role,
+        } => {
+            let rules = if let Some(public_ws) = context.public_ws {
+                let Some(rules) = public_ws.instrument_rules(instrument).await else {
+                    return Ok(reference_not_found(request, generated_at, instrument));
+                };
+                rules
+            } else if let Some(reference) = context.standalone_reference {
+                let Some(rules) = reference.instrument_rules(instrument) else {
+                    return Ok(reference_not_found(request, generated_at, instrument));
+                };
+                rules
+            } else {
+                return Ok(unavailable(request, generated_at));
+            };
+
             let Some(account) = context.account_fallback else {
                 return Ok(failure_response(
                     request,
@@ -586,82 +648,38 @@ async fn response_for(
                     false,
                 ));
             };
-
-            let convergence_cursor = match context.private_ws {
-                Some(private_ws) => private_ws.convergence_cursor().await.ok(),
-                None => None,
+            let fees = match account.fee_schedule(&rules).await {
+                Ok(value) => value,
+                Err(error) => return Ok(fee_schedule_failure(request, generated_at, error)),
             };
-
-            let rest = match account.snapshot().await {
-                Ok(result) => result,
-                Err(error) => return Ok(account_failure(request, generated_at, error)),
+            let assumptions = CandidateOrderAssumptions {
+                direction: match side {
+                    PositionSide::Long => PositionDirection::Long,
+                    PositionSide::Short => PositionDirection::Short,
+                },
+                entry_price: entry_price.clone(),
+                stop_price: stop_price.clone(),
+                max_settle_notional: max_settle_notional.clone(),
+                max_loss_settle: max_loss_settle.clone(),
+                target_rr: target_rr.clone(),
+                entry_liquidity_role: analysis_liquidity_role(*entry_liquidity_role),
+                exit_liquidity_role: analysis_liquidity_role(*exit_liquidity_role),
             };
-
-            if let (Some(private_ws), Some(cursor)) = (context.private_ws, convergence_cursor) {
-                match private_ws.convergence_window(cursor).await {
-                    Ok(window) => {
-                        if let (Some(connection_fingerprint), Some(last_inbound_ms)) = (
-                            window.status.connection_id_fingerprint.as_deref(),
-                            window.status.last_inbound_ms,
-                        ) {
-                            match rest.converge_private_ws(
-                                window.generation,
-                                connection_fingerprint,
-                                last_inbound_ms,
-                                &window.events,
-                            ) {
-                                Ok(result) => {
-                                    return Ok(AgentResponse {
-                                        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-                                        request_id: request.request_id.clone(),
-                                        status: AgentResponseStatus::Completed,
-                                        generated_at: generated_at.to_owned(),
-                                        quality: DataQuality::Fresh,
-                                        result_schema: Some(ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned()),
-                                        result: Some(serde_json::to_value(result)?),
-                                        failure: None,
-                                        warnings: Vec::new(),
-                                    });
-                                }
-                                Err(error) => {
-                                    return Ok(failure_response(
-                                        request,
-                                        generated_at,
-                                        AgentResponseStatus::Failed,
-                                        ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE,
-                                        error.to_string(),
-                                        false,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    Err(PrivateConvergenceError::GenerationChanged) => {
-                        return account_rest_response(
-                            request,
-                            generated_at,
-                            rest,
-                            ACCOUNT_WS_GENERATION_CHANGED_WARNING,
-                        );
-                    }
-                    Err(PrivateConvergenceError::JournalGap) => {
-                        return account_rest_response(
-                            request,
-                            generated_at,
-                            rest,
-                            ACCOUNT_WS_JOURNAL_GAP_WARNING,
-                        );
-                    }
-                    Err(PrivateConvergenceError::NotReady) => {}
-                }
-            }
-
-            Ok(account_rest_response(
-                request,
-                generated_at,
-                rest,
-                ACCOUNT_REST_BOOTSTRAP_WARNING,
-            )?)
+            let result = match analyze_candidate_order(&rules, &fees, &assumptions) {
+                Ok(value) => value,
+                Err(error) => return Ok(analysis_failure(request, generated_at, error)),
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: DataQuality::Degraded,
+                result_schema: Some(CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(result)?),
+                failure: None,
+                warnings: vec![CANDIDATE_EXPLICIT_ASSUMPTIONS_WARNING.to_owned()],
+            })
         }
         AgentOperation::MailboxTelemetry => {
             let Some(telemetry) = context.mailbox_telemetry else {
