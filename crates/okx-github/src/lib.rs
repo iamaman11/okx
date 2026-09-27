@@ -9,6 +9,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -330,15 +331,78 @@ impl IssueCursorStore {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommentRequestKey {
+    issue_number: u64,
+    since: Option<String>,
+    page: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct GitHubCommentFetchStats {
+    pub ok_responses: u64,
+    pub conditional_attempts: u64,
+    pub not_modified_responses: u64,
+}
+
+#[derive(Debug, Default)]
+struct CommentConditionalState {
+    validator: Option<(CommentRequestKey, String)>,
+    stats: GitHubCommentFetchStats,
+}
+
+impl CommentConditionalState {
+    fn etag_for(&mut self, key: &CommentRequestKey) -> Option<String> {
+        let etag = self
+            .validator
+            .as_ref()
+            .filter(|(stored, _)| stored == key)
+            .map(|(_, etag)| etag.clone());
+        if etag.is_some() {
+            self.stats.conditional_attempts = self.stats.conditional_attempts.saturating_add(1);
+        }
+        etag
+    }
+
+    fn clear(&mut self) {
+        self.validator = None;
+    }
+
+    fn arm(&mut self, key: CommentRequestKey, etag: String) {
+        self.validator = Some((key, etag));
+    }
+
+    fn record_ok(&mut self) {
+        self.stats.ok_responses = self.stats.ok_responses.saturating_add(1);
+    }
+
+    fn record_not_modified(&mut self) {
+        self.stats.not_modified_responses = self.stats.not_modified_responses.saturating_add(1);
+    }
+}
+
+enum CommentPageFetch {
+    NotModified,
+    Modified {
+        comments: Vec<RawIssueComment>,
+        etag: Option<String>,
+    },
+}
+
 pub struct GitHubClient {
     http: Client,
     token: Zeroizing<String>,
+    comment_conditional: Mutex<CommentConditionalState>,
 }
 
 impl GitHubClient {
     pub fn new(token: Zeroizing<String>, user_agent: &str) -> Result<Self, GitHubError> {
         let http = Client::builder().user_agent(user_agent).build()?;
-        Ok(Self { http, token })
+        Ok(Self {
+            http,
+            token,
+            comment_conditional: Mutex::new(CommentConditionalState::default()),
+        })
     }
 
     async fn send_checked(&self, request: RequestBuilder) -> Result<Response, GitHubError> {
@@ -383,7 +447,45 @@ impl GitHubClient {
         &self,
         issue_number: u64,
     ) -> Result<Vec<IssueComment>, GitHubError> {
-        let comments = self.issue_comments(issue_number).await?;
+        validate_issue_number(issue_number)?;
+
+        let metadata_url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}");
+        let metadata: RawIssueMetadata = self
+            .send_checked(
+                self.http
+                    .get(metadata_url)
+                    .bearer_auth(self.token.as_str())
+                    .header("Accept", "application/vnd.github+json"),
+            )
+            .await?
+            .json()
+            .await?;
+
+        if metadata.comments == 0 {
+            return Ok(Vec::new());
+        }
+
+        let page = tail_page(metadata.comments);
+        let mut comments = self.issue_comment_page(issue_number, page).await?;
+
+        // If the counted tail page filled exactly while a new comment raced the
+        // metadata read, check exactly one following page. This remains a
+        // bounded tail lookup and is never used as replay authority.
+        if comments.len() == COMMENTS_PER_PAGE as usize {
+            let next = self
+                .issue_comment_page(issue_number, page.saturating_add(1))
+                .await?;
+            if !next.is_empty() {
+                comments.extend(next);
+                let keep_from = comments.len().saturating_sub(COMMENTS_PER_PAGE as usize);
+                comments = comments.split_off(keep_from);
+            }
+        } else if comments.is_empty() && page > 1 {
+            // A manual deletion can shrink the last page between metadata and
+            // page fetch. Fall back by one page rather than scanning history.
+            comments = self.issue_comment_page(issue_number, page - 1).await?;
+        }
+
         let keep_from = comments.len().saturating_sub(COMMENTS_PER_PAGE as usize);
         Ok(comments[keep_from..].to_vec())
     }
@@ -397,29 +499,27 @@ impl GitHubClient {
 
         let since = cursor.map(cursor_overlap_since).transpose()?;
         let mut fresh = Vec::new();
+        let mut first_page_etag = None;
+        let first_key = CommentRequestKey {
+            issue_number,
+            since: since.clone(),
+            page: 1,
+        };
 
         for page in 1..=MAX_COMMENT_PAGES {
-            let url =
-                format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments");
-            let mut query = vec![
-                ("per_page", COMMENTS_PER_PAGE.to_string()),
-                ("page", page.to_string()),
-            ];
-            if let Some(since) = since.as_ref() {
-                query.push(("since", since.clone()));
-            }
-
-            let page_comments: Vec<RawIssueComment> = self
-                .send_checked(
-                    self.http
-                        .get(url)
-                        .query(&query)
-                        .bearer_auth(self.token.as_str())
-                        .header("Accept", "application/vnd.github+json"),
-                )
-                .await?
-                .json()
+            let conditional = cursor.is_some() && page == 1;
+            let page_fetch = self
+                .fetch_comment_page(issue_number, since.as_deref(), page, conditional)
                 .await?;
+
+            let (page_comments, etag) = match page_fetch {
+                CommentPageFetch::NotModified => return Ok(Vec::new()),
+                CommentPageFetch::Modified { comments, etag } => (comments, etag),
+            };
+
+            if conditional {
+                first_page_etag = etag;
+            }
 
             let count = page_comments.len();
             fresh.extend(
@@ -431,11 +531,125 @@ impl GitHubClient {
 
             if count < COMMENTS_PER_PAGE as usize {
                 fresh.sort_by_key(IssueComment::cursor);
+                // A page-1 validator can only prove the whole post-cursor
+                // representation unchanged when the previous idle fetch fit
+                // entirely on page 1. If page 2+ was required, page 1 could
+                // remain unchanged while new comments are appended later.
+                if cursor.is_some()
+                    && can_arm_comment_validator(page, fresh.is_empty(), first_page_etag.is_some())
+                    && let Some(etag) = first_page_etag
+                {
+                    self.arm_comment_validator(first_key, etag);
+                }
                 return Ok(fresh);
             }
         }
 
         Err(GitHubError::HistoryLimitExceeded)
+    }
+
+    pub fn comment_fetch_stats(&self) -> GitHubCommentFetchStats {
+        self.conditional_state().stats
+    }
+
+    async fn issue_comment_page(
+        &self,
+        issue_number: u64,
+        page: u32,
+    ) -> Result<Vec<IssueComment>, GitHubError> {
+        match self
+            .fetch_comment_page(issue_number, None, page, false)
+            .await?
+        {
+            CommentPageFetch::NotModified => unreachable!("unconditional page returned 304"),
+            CommentPageFetch::Modified { comments, .. } => Ok(comments
+                .into_iter()
+                .map(RawIssueComment::into_issue_comment)
+                .collect()),
+        }
+    }
+
+    async fn fetch_comment_page(
+        &self,
+        issue_number: u64,
+        since: Option<&str>,
+        page: u32,
+        conditional: bool,
+    ) -> Result<CommentPageFetch, GitHubError> {
+        let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments");
+        let mut query = vec![
+            ("per_page", COMMENTS_PER_PAGE.to_string()),
+            ("page", page.to_string()),
+        ];
+        if let Some(since) = since {
+            query.push(("since", since.to_owned()));
+        }
+
+        let key = CommentRequestKey {
+            issue_number,
+            since: since.map(str::to_owned),
+            page,
+        };
+        let mut request = self
+            .http
+            .get(url)
+            .query(&query)
+            .bearer_auth(self.token.as_str())
+            .header("Accept", "application/vnd.github+json");
+
+        if conditional && let Some(etag) = self.comment_validator_etag(&key) {
+            request = request.header("If-None-Match", etag);
+        }
+
+        let response = request.send().await?;
+        if response.status().as_u16() == 304 {
+            self.record_comment_not_modified();
+            return Ok(CommentPageFetch::NotModified);
+        }
+        if !response.status().is_success() {
+            return Err(GitHubError::Response(classify_response_error(&response)));
+        }
+
+        // A conditional 200 proves that the cached representation is no
+        // longer authoritative. Clear it before parsing so even a decode
+        // failure cannot let a stale validator hide a later replay.
+        if conditional {
+            self.clear_comment_validator();
+        }
+        self.record_comment_ok();
+        let etag = header_text(response.headers(), "etag");
+        let comments = response.json().await?;
+        Ok(CommentPageFetch::Modified { comments, etag })
+    }
+
+    fn comment_validator_etag(&self, key: &CommentRequestKey) -> Option<String> {
+        self.conditional_state_mut().etag_for(key)
+    }
+
+    fn clear_comment_validator(&self) {
+        self.conditional_state_mut().clear();
+    }
+
+    fn arm_comment_validator(&self, key: CommentRequestKey, etag: String) {
+        self.conditional_state_mut().arm(key, etag);
+    }
+
+    fn record_comment_ok(&self) {
+        self.conditional_state_mut().record_ok();
+    }
+
+    fn record_comment_not_modified(&self) {
+        self.conditional_state_mut().record_not_modified();
+    }
+
+    fn conditional_state(&self) -> std::sync::MutexGuard<'_, CommentConditionalState> {
+        self.comment_conditional
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn conditional_state_mut(&self) -> std::sync::MutexGuard<'_, CommentConditionalState> {
+        self.conditional_state()
     }
 
     pub async fn workflow_run(&self, run_id: u64) -> Result<WorkflowRun, GitHubError> {
@@ -631,6 +845,15 @@ fn cursor_overlap_since(cursor: &IssueCommentCursor) -> Result<String, GitHubErr
     Ok(timestamp.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
+fn can_arm_comment_validator(page: u32, fresh_is_empty: bool, etag_present: bool) -> bool {
+    page == 1 && fresh_is_empty && etag_present
+}
+
+fn tail_page(comment_count: u64) -> u32 {
+    let page = ((comment_count.saturating_sub(1)) / u64::from(COMMENTS_PER_PAGE)) + 1;
+    page.min(u64::from(u32::MAX)) as u32
+}
+
 fn validate_issue_number(issue_number: u64) -> Result<(), GitHubError> {
     if issue_number == 0 {
         Err(GitHubError::InvalidIssueNumber)
@@ -649,6 +872,11 @@ struct RepositoryIdentity {
 #[derive(Debug, Deserialize)]
 struct RepositoryOwner {
     id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawIssueMetadata {
+    comments: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -790,6 +1018,79 @@ mod tests {
         assert!(backoff.ready());
         assert_eq!(backoff.remaining(), None);
         assert_eq!(backoff.last_class(), None);
+    }
+
+    #[test]
+    fn conditional_validator_only_matches_exact_committed_query() {
+        let mut state = CommentConditionalState::default();
+        let first = CommentRequestKey {
+            issue_number: 10,
+            since: Some("2026-09-27T12:00:00Z".to_owned()),
+            page: 1,
+        };
+        let moved = CommentRequestKey {
+            issue_number: 10,
+            since: Some("2026-09-27T12:00:01Z".to_owned()),
+            page: 1,
+        };
+
+        state.arm(first.clone(), "etag-a".to_owned());
+        assert_eq!(state.etag_for(&first).as_deref(), Some("etag-a"));
+        assert_eq!(state.stats.conditional_attempts, 1);
+        assert_eq!(state.etag_for(&moved), None);
+        assert_eq!(state.stats.conditional_attempts, 1);
+    }
+
+    #[test]
+    fn fresh_200_disarms_validator_until_idle_result_rearms_it() {
+        let mut state = CommentConditionalState::default();
+        let key = CommentRequestKey {
+            issue_number: 10,
+            since: Some("2026-09-27T12:00:00Z".to_owned()),
+            page: 1,
+        };
+        state.arm(key.clone(), "etag-a".to_owned());
+
+        // This models the first action after any 200 response. If processing
+        // later fails, the same cursor cannot issue a conditional request.
+        state.clear();
+        assert_eq!(state.etag_for(&key), None);
+
+        // Only a fully observed idle result may arm the representation again.
+        state.arm(key.clone(), "etag-b".to_owned());
+        assert_eq!(state.etag_for(&key).as_deref(), Some("etag-b"));
+    }
+
+    #[test]
+    fn validator_only_arms_for_single_page_idle_representation() {
+        assert!(can_arm_comment_validator(1, true, true));
+        assert!(!can_arm_comment_validator(2, true, true));
+        assert!(!can_arm_comment_validator(1, false, true));
+        assert!(!can_arm_comment_validator(1, true, false));
+    }
+
+    #[test]
+    fn comment_fetch_stats_are_bounded_counters() {
+        let mut state = CommentConditionalState::default();
+        state.record_ok();
+        state.record_not_modified();
+        assert_eq!(
+            state.stats,
+            GitHubCommentFetchStats {
+                ok_responses: 1,
+                conditional_attempts: 0,
+                not_modified_responses: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn tail_page_is_constant_time_and_one_based() {
+        assert_eq!(tail_page(1), 1);
+        assert_eq!(tail_page(100), 1);
+        assert_eq!(tail_page(101), 2);
+        assert_eq!(tail_page(242), 3);
+        assert_eq!(tail_page(1_000), 10);
     }
 
     #[test]
