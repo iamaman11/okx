@@ -6,8 +6,8 @@ use okx_api::{
     PublicOpenInterest, PublicTicker,
 };
 use okx_observation::{
-    FundingRequirement, InstrumentRulesSnapshot, LiveMarketSnapshot, MarketStreamState,
-    ReferenceRegistry,
+    FundingRequirement, InstrumentRulesSnapshot, InstrumentSearchSnapshot, LiveMarketSnapshot,
+    MarketStreamState, ReferenceRegistry,
 };
 use okx_ws::{
     InboundMessage, PublicChannel, PublicWsConnection, PublicWsError, Subscription, WsArg,
@@ -20,7 +20,7 @@ use tokio::{
 use super::{
     PublicRuntimeError,
     decode::{decode_book, now_ms},
-    state::{PublicQualitySnapshot, PublicRuntimeState},
+    state::{PublicMarketOverviewView, PublicQualitySnapshot, PublicRuntimeState},
     subscriptions::{desired_subscriptions, subscription_from_arg},
 };
 
@@ -104,6 +104,31 @@ impl PublicWsHandle {
             .await
             .reference
             .instrument_rules(instrument_id)
+    }
+
+    pub async fn find_instruments(
+        &self,
+        asset: &str,
+        quote: Option<&str>,
+        limit: usize,
+    ) -> InstrumentSearchSnapshot {
+        self.state
+            .read()
+            .await
+            .find_instruments(asset, quote, limit)
+    }
+
+    pub async fn market_overview_view(
+        &self,
+        instrument_id: &str,
+        now_ms: u64,
+        max_age_ms: u64,
+        source_received_at: impl Into<String>,
+    ) -> Result<PublicMarketOverviewView, PublicRuntimeError> {
+        self.state
+            .read()
+            .await
+            .market_overview_view(instrument_id, now_ms, max_age_ms, source_received_at)
     }
 
     pub async fn quality_snapshot(
