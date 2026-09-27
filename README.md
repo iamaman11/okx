@@ -81,7 +81,33 @@ Task Scheduler TimeTrigger
 
 No SCM service, PowerShell watchdog, RestartOnFailure, LogonTrigger recovery, or second custom watchdog.
 
-Disruptive recovery tests R3 (external network/GitHub loss) and R4 (Windows reboot + sign-in) are intentionally DEFERRED, not PASS; see #16.
+R4 (Windows reboot + sign-in) is PASS. R3 (external network/GitHub loss) remains DEFERRED; see #16.
+
+## Windows filesystem layout
+
+The installed Windows system intentionally separates mutable source, controller, and runtime binary:
+
+```text
+C:\okx
+  canonical Git checkout / workspace / working directory
+
+C:\okx-control
+  installed okx-host-control.exe
+  desired.json and controller-owned lifecycle state
+
+C:\okx-runtime
+  installed okx-agent.exe
+  previous/staging agent binaries
+  agent stdout/stderr logs
+
+C:\okx-upgrade
+  temporary manual bootstrap/upgrade staging only
+  NOT part of the runtime architecture
+```
+
+`C:\okx-upgrade` was created by earlier one-time manual controller-upgrade instructions. The current Scheduler action points to `C:\okx-control\okx-host-control.exe`, and the agent is installed under `C:\okx-runtime`; therefore the upgrade directory is not required for normal operation and may be removed after confirming no manual process is running from it.
+
+Keeping the first three directories separate is intentional: a mutable Git checkout must not be the installed controller or agent binary.
 
 ## Documentation
 
