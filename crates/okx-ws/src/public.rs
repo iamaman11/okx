@@ -195,12 +195,13 @@ impl PublicWsRuntime {
                     };
                     let message = message?;
                     last_received = Instant::now();
-                    awaiting_pong_since = None;
 
                     match message {
                         Message::Text(text) => {
                             match parse_text(text.as_str())? {
-                                InboundMessage::Pong => {}
+                                InboundMessage::Pong => {
+                                    awaiting_pong_since = None;
+                                }
                                 InboundMessage::Subscribed { arg, connection_id } => {
                                     self.emit(PublicWsEvent::Subscribed {
                                         generation,
