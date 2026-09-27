@@ -234,9 +234,7 @@ impl AgentOperation {
                 validate_decimal_text(contracts, "contracts")?;
                 validate_decimal_text(entry_price, "entry_price")?;
                 match (exit_price, entry_move_ratio) {
-                    (Some(exit_price), None) => {
-                        validate_decimal_text(exit_price, "exit_price")
-                    }
+                    (Some(exit_price), None) => validate_decimal_text(exit_price, "exit_price"),
                     (None, Some(entry_move_ratio)) => {
                         validate_decimal_text(entry_move_ratio, "entry_move_ratio")
                     }
