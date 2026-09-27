@@ -1,5 +1,10 @@
+mod candidate;
 mod risk;
 
+pub use candidate::{
+    CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderAssumptions,
+    SizingConstraint, analyze_candidate_order,
+};
 pub use risk::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, PositionRiskAnalysis,
     analyze_account_risk,
@@ -106,6 +111,34 @@ pub enum AnalysisError {
         "estimated liquidation price is on the non-adverse side of mark price for instrument '{0}'"
     )]
     InconsistentLiquidationPrice(String),
+    #[error("settlement currency is missing")]
+    MissingSettlementCurrency,
+    #[error("contract value currency is missing")]
+    MissingContractValueCurrency,
+    #[error("price field '{field}' value '{value}' is not aligned to tick size '{tick_size}'")]
+    PriceNotTickAligned {
+        field: &'static str,
+        value: String,
+        tick_size: String,
+    },
+    #[error("stop price is not adverse to entry for instrument '{0}'")]
+    InvalidStopDirection(String),
+    #[error("derived target price is not profitable relative to entry for instrument '{0}'")]
+    InvalidTargetDirection(String),
+    #[error("stop scenario does not produce a loss for instrument '{0}'")]
+    StopDoesNotLose(String),
+    #[error("target scenario does not produce a profit for instrument '{0}'")]
+    TargetDoesNotProfit(String),
+    #[error("candidate size for instrument '{instrument_id}' rounded to '{contracts}', below min size '{min_size}'")]
+    CandidateBelowMinimumSize {
+        instrument_id: String,
+        contracts: String,
+        min_size: String,
+    },
+    #[error("invalid target price for '{0}'")]
+    InvalidTargetPrice(String),
+    #[error("fee rate '{0}' makes deterministic candidate math undefined")]
+    InvalidFeeRate(&'static str),
 }
 
 pub fn analyze_cost(
