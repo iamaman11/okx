@@ -1,16 +1,17 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_observation::{
-    INSTRUMENT_RULES_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketReadiness,
-    ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
+    INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
+    MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketReadiness, MarketSnapshot, ReferenceRegistry,
+    SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
 };
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
-    AgentResponse, AgentResponseStatus, DataQuality, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection,
-    MailboxEnvelope,
+    AgentResponse, AgentResponseStatus, DataQuality, InstrumentTypeFilter,
+    MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
     crypto::{decrypt, derive_directional_key, encrypt, shared_secret},
 };
-use okx_runtime::{PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PublicWsHandle};
+use okx_runtime::{PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PublicQualitySnapshot, PublicWsHandle};
 
 use crate::{
     AgentError, AgentResult,
@@ -23,12 +24,22 @@ pub const MARKET_REFERENCE_INCOMPLETE_CODE: &str = "MARKET_REFERENCE_INCOMPLETE"
 pub const MARKET_PUBLIC_API_UNAVAILABLE_CODE: &str = "MARKET_PUBLIC_API_UNAVAILABLE";
 pub const MARKET_BOOTSTRAP_INCONSISTENT_CODE: &str = "MARKET_BOOTSTRAP_INCONSISTENT";
 pub const MARKET_INSTRUMENT_NOT_LIVE_CODE: &str = "MARKET_INSTRUMENT_NOT_LIVE";
+pub const MARKET_OVERVIEW_INCONSISTENT_CODE: &str = "MARKET_OVERVIEW_INCONSISTENT";
+pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
 
 const REFERENCE_BOOTSTRAP_WARNING: &str =
     "reference data is REST-bootstrap only; live instruments continuity is not connected until M3";
 const MARKET_REST_BOOTSTRAP_WARNING: &str = "market data is bounded public REST bootstrap; persistent WebSocket continuity is not connected until M3";
 const REFERENCE_RUNTIME_WARNING: &str = "instrument rules come from the live ReferenceRegistry; market FRESH readiness is reported separately";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
+
+#[derive(serde::Serialize)]
+struct MarketOverviewResult {
+    instrument_rules: InstrumentRulesSnapshot,
+    market: MarketSnapshot,
+    quality: PublicQualitySnapshot,
+    market_source: &'static str,
+}
 
 #[derive(Clone, Copy)]
 pub struct ObservationQueryContext<'a> {
@@ -289,6 +300,166 @@ async fn response_for(
             }
 
             Ok(reference_not_found(request, generated_at, instrument))
+        }
+        AgentOperation::FindInstruments {
+            asset,
+            settle_currency,
+            instrument_type,
+        } => {
+            let reference = if let Some(public_ws) = context.public_ws {
+                public_ws.reference_snapshot().await
+            } else if let Some(reference) = context.standalone_reference {
+                reference.clone()
+            } else {
+                return Ok(unavailable(request, generated_at));
+            };
+
+            let instrument_type = instrument_type.map(|kind| match kind {
+                InstrumentTypeFilter::Swap => okx_api::InstrumentType::Swap,
+                InstrumentTypeFilter::Futures => okx_api::InstrumentType::Futures,
+            });
+            let result =
+                reference.find_instruments(asset, settle_currency.as_deref(), instrument_type);
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: DataQuality::Degraded,
+                result_schema: Some(INSTRUMENT_SEARCH_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(result)?),
+                failure: None,
+                warnings: vec![REFERENCE_RUNTIME_WARNING.to_owned()],
+            })
+        }
+        AgentOperation::MarketOverview { instrument } => {
+            let Some(public_ws) = context.public_ws else {
+                return Ok(unavailable(request, generated_at));
+            };
+            let Some(instrument_rules) = public_ws.instrument_rules(instrument).await else {
+                return Ok(reference_not_found(request, generated_at, instrument));
+            };
+
+            public_ws.demand_instrument(instrument.clone()).await?;
+            let now_ms = utc_now_ms();
+            let quality = public_ws
+                .quality_snapshot(instrument, now_ms, PUBLIC_MARKET_MAX_AGE_MS, true)
+                .await?;
+
+            if instrument_rules.reference_generation != quality.reference_generation {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    MARKET_OVERVIEW_INCONSISTENT_CODE,
+                    "reference generation changed while building market overview".to_owned(),
+                    true,
+                ));
+            }
+
+            if quality.quality == MarketReadiness::Fresh {
+                let live = public_ws
+                    .fresh_snapshot(
+                        instrument,
+                        now_ms,
+                        PUBLIC_MARKET_MAX_AGE_MS,
+                        generated_at.to_owned(),
+                    )
+                    .await?;
+                if live.market.reference_generation != quality.reference_generation {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        MARKET_OVERVIEW_INCONSISTENT_CODE,
+                        "market snapshot references a different ReferenceRegistry generation"
+                            .to_owned(),
+                        true,
+                    ));
+                }
+
+                let result = MarketOverviewResult {
+                    instrument_rules,
+                    market: live.market,
+                    quality,
+                    market_source: "websocket",
+                };
+                return Ok(AgentResponse {
+                    schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                    request_id: request.request_id.clone(),
+                    status: AgentResponseStatus::Completed,
+                    generated_at: generated_at.to_owned(),
+                    quality: DataQuality::Fresh,
+                    result_schema: Some(MARKET_OVERVIEW_SCHEMA_V1.to_owned()),
+                    result: Some(serde_json::to_value(result)?),
+                    failure: None,
+                    warnings: Vec::new(),
+                });
+            }
+
+            let Some(market) = context.market_fallback else {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    MARKET_PUBLIC_API_UNAVAILABLE_CODE,
+                    format!(
+                        "persistent WebSocket state is not FRESH: {}",
+                        quality.reason
+                    ),
+                    true,
+                ));
+            };
+            let reference = public_ws.reference_snapshot().await;
+            if reference.generation().as_str() != quality.reference_generation
+                || instrument_rules.reference_generation != quality.reference_generation
+            {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    MARKET_OVERVIEW_INCONSISTENT_CODE,
+                    "reference generation changed before REST fallback".to_owned(),
+                    true,
+                ));
+            }
+
+            match market.snapshot(&reference, instrument).await {
+                Ok(snapshot) => {
+                    if snapshot.reference_generation != quality.reference_generation {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            MARKET_OVERVIEW_INCONSISTENT_CODE,
+                            "REST fallback references a different ReferenceRegistry generation"
+                                .to_owned(),
+                            true,
+                        ));
+                    }
+                    let reason = quality.reason.clone();
+                    let result = MarketOverviewResult {
+                        instrument_rules,
+                        market: snapshot,
+                        quality,
+                        market_source: "rest_fallback",
+                    };
+                    Ok(AgentResponse {
+                        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id.clone(),
+                        status: AgentResponseStatus::Completed,
+                        generated_at: generated_at.to_owned(),
+                        quality: DataQuality::Degraded,
+                        result_schema: Some(MARKET_OVERVIEW_SCHEMA_V1.to_owned()),
+                        result: Some(serde_json::to_value(result)?),
+                        failure: None,
+                        warnings: vec![format!(
+                            "persistent WebSocket state is not FRESH ({reason}); returned bounded public REST fallback"
+                        )],
+                    })
+                }
+                Err(error) => Ok(market_failure(request, generated_at, error)),
+            }
         }
         AgentOperation::SnapshotQuality { instrument } => {
             if let Some(public_ws) = context.public_ws {
@@ -604,6 +775,44 @@ mod tests {
         );
         assert!(response.failure.is_none());
         assert_eq!(response.warnings, vec![REFERENCE_BOOTSTRAP_WARNING]);
+    }
+
+    #[tokio::test]
+    async fn find_instruments_uses_reference_registry_without_guessing_ids() {
+        let request = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_find_012345678901".to_owned(),
+            operation: AgentOperation::FindInstruments {
+                asset: "DOGE".to_owned(),
+                settle_currency: Some("USDT".to_owned()),
+                instrument_type: Some(InstrumentTypeFilter::Swap),
+            },
+        };
+        let registry = reference();
+
+        let response = response_for(
+            &request,
+            ObservationQueryContext {
+                standalone_reference: Some(&registry),
+                market_fallback: None,
+                public_ws: None,
+            },
+            "2026-09-27T00:00:01.000Z",
+        )
+        .await
+        .expect("response");
+
+        assert_eq!(response.status, AgentResponseStatus::Completed);
+        assert_eq!(
+            response.result_schema.as_deref(),
+            Some(INSTRUMENT_SEARCH_SCHEMA_V1)
+        );
+        let result = response.result.expect("result");
+        assert_eq!(
+            result["instruments"].as_array().expect("instruments").len(),
+            1
+        );
+        assert_eq!(result["instruments"][0]["instrument_id"], "DOGE-USDT-SWAP");
     }
 
     #[tokio::test]

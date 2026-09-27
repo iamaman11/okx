@@ -26,6 +26,9 @@ pub enum ProtocolError {
     #[error("invalid instrument")]
     InvalidInstrument,
 
+    #[error("invalid asset code")]
+    InvalidAssetCode,
+
     #[error("invalid history bar")]
     InvalidHistoryBar,
 
@@ -124,6 +127,13 @@ impl AgentRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum InstrumentTypeFilter {
+    Swap,
+    Futures,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentOperation {
@@ -131,6 +141,14 @@ pub enum AgentOperation {
         instrument: String,
     },
     InstrumentRules {
+        instrument: String,
+    },
+    FindInstruments {
+        asset: String,
+        settle_currency: Option<String>,
+        instrument_type: Option<InstrumentTypeFilter>,
+    },
+    MarketOverview {
         instrument: String,
     },
     MarketHistory {
@@ -157,7 +175,19 @@ impl AgentOperation {
         match self {
             Self::MarketSnapshot { instrument }
             | Self::InstrumentRules { instrument }
+            | Self::MarketOverview { instrument }
             | Self::SnapshotQuality { instrument } => validate_instrument(instrument),
+            Self::FindInstruments {
+                asset,
+                settle_currency,
+                ..
+            } => {
+                validate_asset_code(asset)?;
+                if let Some(settle_currency) = settle_currency {
+                    validate_asset_code(settle_currency)?;
+                }
+                Ok(())
+            }
             Self::MarketHistory {
                 instrument,
                 bar,
@@ -389,6 +419,18 @@ pub fn validate_agent_key_id(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
+fn validate_asset_code(value: &str) -> Result<(), ProtocolError> {
+    if (2..=16).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidAssetCode)
+    }
+}
+
 fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     if (3..=64).contains(&value.len())
         && value
@@ -510,6 +552,28 @@ mod tests {
 
         assert_eq!(decoded, request);
         decoded.validate().expect("valid decoded request");
+    }
+
+    #[test]
+    fn discovery_and_overview_requests_are_typed_and_validated() {
+        let discovery = AgentOperation::FindInstruments {
+            asset: "DOGE".to_owned(),
+            settle_currency: Some("USDT".to_owned()),
+            instrument_type: Some(InstrumentTypeFilter::Swap),
+        };
+        assert!(discovery.validate().is_ok());
+
+        let invalid = AgentOperation::FindInstruments {
+            asset: "doge".to_owned(),
+            settle_currency: None,
+            instrument_type: None,
+        };
+        assert_eq!(invalid.validate(), Err(ProtocolError::InvalidAssetCode));
+
+        let overview = AgentOperation::MarketOverview {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+        };
+        assert!(overview.validate().is_ok());
     }
 
     #[test]
