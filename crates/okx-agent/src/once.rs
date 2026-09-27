@@ -3,10 +3,9 @@ use chrono::{SecondsFormat, Utc};
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V1, INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1,
-    InstrumentRulesSnapshot,
-    MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
-    MarketReadiness, MarketSnapshot, ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1,
-    SnapshotQualityReport,
+    InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError,
+    MarketHistoryError, MarketReadiness, MarketSnapshot, ReferenceRegistry,
+    SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
 };
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
@@ -32,8 +31,7 @@ pub const MARKET_OVERVIEW_INCONSISTENT_CODE: &str = "MARKET_OVERVIEW_INCONSISTEN
 pub const MARKET_HISTORY_INCONSISTENT_CODE: &str = "MARKET_HISTORY_INCONSISTENT";
 pub const ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE: &str =
     "ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE";
-pub const ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE: &str =
-    "ACCOUNT_OBSERVER_PERMISSION_REJECTED";
+pub const ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE: &str = "ACCOUNT_OBSERVER_PERMISSION_REJECTED";
 pub const ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE: &str = "ACCOUNT_PRIVATE_API_UNAVAILABLE";
 pub const ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE: &str = "ACCOUNT_BOOTSTRAP_INCONSISTENT";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
@@ -44,8 +42,7 @@ const MARKET_REST_BOOTSTRAP_WARNING: &str = "market data is bounded public REST 
 const REFERENCE_RUNTIME_WARNING: &str = "instrument rules come from the live ReferenceRegistry; market FRESH readiness is reported separately";
 const MARKET_HISTORY_UNCONFIRMED_WARNING: &str =
     "OKX history response contains at least one unconfirmed candlestick";
-const ACCOUNT_REST_BOOTSTRAP_WARNING: &str =
-    "private account state is a bounded authenticated REST bootstrap; private WebSocket convergence is not connected until M4-C";
+const ACCOUNT_REST_BOOTSTRAP_WARNING: &str = "private account state is a bounded authenticated REST bootstrap; private WebSocket convergence is not connected until M4-C";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
 
 #[derive(serde::Serialize)]
@@ -562,7 +559,8 @@ async fn response_for(
                     generated_at,
                     AgentResponseStatus::Rejected,
                     ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE,
-                    "OKX observer credential is not provisioned in native secret storage".to_owned(),
+                    "OKX observer credential is not provisioned in native secret storage"
+                        .to_owned(),
                     false,
                 ));
             };
