@@ -288,7 +288,10 @@ fn analyze_candidate_values(
     })
 }
 
-pub(crate) fn fee_rate(fees: &FeeScheduleSnapshot, role: LiquidityRole) -> Result<Decimal, AnalysisError> {
+pub(crate) fn fee_rate(
+    fees: &FeeScheduleSnapshot,
+    role: LiquidityRole,
+) -> Result<Decimal, AnalysisError> {
     let value = match role {
         LiquidityRole::Maker => &fees.maker_rate,
         LiquidityRole::Taker => &fees.taker_rate,
