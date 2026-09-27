@@ -83,13 +83,11 @@ impl IssuePollTelemetryStore {
                 .comments_scanned_total
                 .saturating_add(comments_scanned as u64)
         });
-        let last_terminal_request_id = last_terminal_request_id
-            .map(str::to_owned)
-            .or_else(|| {
-                previous
-                    .as_ref()
-                    .and_then(|value| value.last_terminal_request_id.clone())
-            });
+        let last_terminal_request_id = last_terminal_request_id.map(str::to_owned).or_else(|| {
+            previous
+                .as_ref()
+                .and_then(|value| value.last_terminal_request_id.clone())
+        });
         let last_request_latency_ms = last_request_latency_ms.or_else(|| {
             previous
                 .as_ref()
