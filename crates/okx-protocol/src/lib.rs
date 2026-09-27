@@ -38,6 +38,9 @@ pub enum ProtocolError {
     #[error("invalid history limit")]
     InvalidHistoryLimit,
 
+    #[error("position scenario requires exactly one exit_price or entry_move_ratio")]
+    InvalidPositionScenarioExit,
+
     #[error("mailbox direction mismatch")]
     DirectionMismatch,
 
@@ -167,6 +170,16 @@ pub enum AgentOperation {
     MailboxTelemetry,
     AccountSnapshot,
     PortfolioRisk,
+    PositionScenario {
+        instrument: String,
+        side: PositionSide,
+        contracts: String,
+        entry_price: String,
+        exit_price: Option<String>,
+        entry_move_ratio: Option<String>,
+        entry_liquidity_role: LiquidityRole,
+        exit_liquidity_role: LiquidityRole,
+    },
     AnalyzeCandidateOrder {
         instrument: String,
         side: PositionSide,
@@ -209,6 +222,25 @@ impl AgentOperation {
                 limit,
             } => validate_history_request(instrument, bar, *limit),
             Self::MailboxTelemetry | Self::AccountSnapshot | Self::PortfolioRisk => Ok(()),
+            Self::PositionScenario {
+                instrument,
+                contracts,
+                entry_price,
+                exit_price,
+                entry_move_ratio,
+                ..
+            } => {
+                validate_instrument(instrument)?;
+                validate_decimal_text(contracts, "contracts")?;
+                validate_decimal_text(entry_price, "entry_price")?;
+                match (exit_price, entry_move_ratio) {
+                    (Some(exit_price), None) => validate_decimal_text(exit_price, "exit_price"),
+                    (None, Some(entry_move_ratio)) => {
+                        validate_decimal_text(entry_move_ratio, "entry_move_ratio")
+                    }
+                    _ => Err(ProtocolError::InvalidPositionScenarioExit),
+                }
+            }
             Self::AnalyzeCandidateOrder {
                 instrument,
                 entry_price,
@@ -768,6 +800,67 @@ mod tests {
         assert_eq!(
             envelope.validate(MailboxDirection::AgentToClient),
             Err(ProtocolError::DirectionMismatch)
+        );
+    }
+
+    #[test]
+    fn position_scenario_requires_exactly_one_typed_exit_assumption() {
+        let explicit_price = AgentOperation::PositionScenario {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            side: PositionSide::Long,
+            contracts: "2".to_owned(),
+            entry_price: "0.2".to_owned(),
+            exit_price: Some("0.206".to_owned()),
+            entry_move_ratio: None,
+            entry_liquidity_role: LiquidityRole::Taker,
+            exit_liquidity_role: LiquidityRole::Maker,
+        };
+        assert!(explicit_price.validate().is_ok());
+
+        let signed_move = AgentOperation::PositionScenario {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            side: PositionSide::Short,
+            contracts: "2".to_owned(),
+            entry_price: "0.2".to_owned(),
+            exit_price: None,
+            entry_move_ratio: Some("-0.03".to_owned()),
+            entry_liquidity_role: LiquidityRole::Maker,
+            exit_liquidity_role: LiquidityRole::Taker,
+        };
+        assert!(signed_move.validate().is_ok());
+
+        let json = serde_json::to_string(&signed_move).expect("serialize");
+        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, signed_move);
+
+        let missing_exit = AgentOperation::PositionScenario {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            side: PositionSide::Long,
+            contracts: "2".to_owned(),
+            entry_price: "0.2".to_owned(),
+            exit_price: None,
+            entry_move_ratio: None,
+            entry_liquidity_role: LiquidityRole::Taker,
+            exit_liquidity_role: LiquidityRole::Taker,
+        };
+        assert_eq!(
+            missing_exit.validate(),
+            Err(ProtocolError::InvalidPositionScenarioExit)
+        );
+
+        let ambiguous_exit = AgentOperation::PositionScenario {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            side: PositionSide::Long,
+            contracts: "2".to_owned(),
+            entry_price: "0.2".to_owned(),
+            exit_price: Some("0.21".to_owned()),
+            entry_move_ratio: Some("0.05".to_owned()),
+            entry_liquidity_role: LiquidityRole::Taker,
+            exit_liquidity_role: LiquidityRole::Taker,
+        };
+        assert_eq!(
+            ambiguous_exit.validate(),
+            Err(ProtocolError::InvalidPositionScenarioExit)
         );
     }
 

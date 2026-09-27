@@ -2,7 +2,9 @@ use chrono::Utc;
 use okx_analysis::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
     CandidateOrderAssumptions, HISTORY_BEHAVIOR_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
-    PositionDirection, analyze_account_risk, analyze_candidate_order, analyze_history_behavior,
+    POSITION_SCENARIO_SCHEMA_V1, PositionDirection, PositionScenarioAssumptions,
+    ScenarioExitAssumption, analyze_account_risk, analyze_candidate_order,
+    analyze_history_behavior, analyze_position_scenario,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
@@ -59,6 +61,7 @@ const ACCOUNT_REST_BOOTSTRAP_WARNING: &str = "private account state is a bounded
 const ACCOUNT_WS_GENERATION_CHANGED_WARNING: &str = "private WebSocket generation changed during REST bootstrap; returning coherent REST snapshot only";
 const ACCOUNT_WS_JOURNAL_GAP_WARNING: &str = "private WebSocket delta journal advanced beyond the REST bootstrap cursor; returning coherent REST snapshot only";
 const CANDIDATE_EXPLICIT_ASSUMPTIONS_WARNING: &str = "candidate analysis uses explicit hypothetical entry/stop prices and exact account fee evidence; it does not assume a current fill price, funding event, slippage, spread, margin or FX conversion";
+const POSITION_SCENARIO_EXPLICIT_ASSUMPTIONS_WARNING: &str = "position scenario uses explicit hypothetical entry/exit assumptions and exact account fee evidence; funding, slippage, spread, margin, FX conversion and execution price are not included";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
 
 #[derive(serde::Serialize)]
@@ -164,7 +167,7 @@ pub(crate) async fn dispatch(
         AgentOperation::AccountSnapshot | AgentOperation::PortfolioRisk => {
             account::dispatch(request, context, generated_at).await
         }
-        AgentOperation::AnalyzeCandidateOrder { .. } => {
+        AgentOperation::PositionScenario { .. } | AgentOperation::AnalyzeCandidateOrder { .. } => {
             analysis::dispatch(request, context, generated_at).await
         }
         AgentOperation::MailboxTelemetry => {
