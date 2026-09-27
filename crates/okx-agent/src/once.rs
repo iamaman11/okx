@@ -756,7 +756,6 @@ async fn response_for(
                 )),
             }
         }
-        _ => Ok(unavailable(request, generated_at)),
     }
 }
 
