@@ -55,15 +55,13 @@ The disruptive physical forced-network-loss proof is DEFERRED with #16 R3, not P
 
 Checksum validation is explicitly forbidden for current OKX JSON order-book channels because OKX deprecated it in production on 2026-06-23.
 
-### Post-M3 runtime readability cleanup — CURRENT
+### Post-M3 runtime readability cleanup — PASS
 
 Authority: #42
 
-Module-split `okx-runtime::public` inside the same crate. No behavior, schema or lifecycle-owner change. This is the gate before M4.
+Module-split `okx-runtime::public` inside the same crate. No behavior, schema or lifecycle-owner change. Accepted via PR #45; #42 CLOSED/PASS.
 
-### M4 Private read-only Account + Order State
-
-Planned after #42.
+### M4 Private read-only Account + Order State — CURRENT
 
 - balances/equity;
 - positions;
