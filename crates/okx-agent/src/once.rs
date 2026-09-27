@@ -1,5 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
+use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
     INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
     MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
@@ -50,6 +51,7 @@ pub struct ObservationQueryContext<'a> {
     standalone_reference: Option<&'a ReferenceRegistry>,
     market_fallback: Option<&'a MarketBootstrapper>,
     public_ws: Option<&'a PublicWsHandle>,
+    mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
 }
 
 impl<'a> ObservationQueryContext<'a> {
@@ -58,6 +60,7 @@ impl<'a> ObservationQueryContext<'a> {
             standalone_reference: None,
             market_fallback: None,
             public_ws: None,
+            mailbox_telemetry: None,
         }
     }
 
@@ -69,6 +72,7 @@ impl<'a> ObservationQueryContext<'a> {
             standalone_reference: Some(reference),
             market_fallback: Some(market),
             public_ws: None,
+            mailbox_telemetry: None,
         }
     }
 
@@ -80,6 +84,20 @@ impl<'a> ObservationQueryContext<'a> {
             standalone_reference: None,
             market_fallback: Some(market_fallback),
             public_ws: Some(public_ws),
+            mailbox_telemetry: None,
+        }
+    }
+
+    pub const fn live_with_mailbox_telemetry(
+        public_ws: &'a PublicWsHandle,
+        market_fallback: &'a MarketBootstrapper,
+        mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
+    ) -> Self {
+        Self {
+            standalone_reference: None,
+            market_fallback: Some(market_fallback),
+            public_ws: Some(public_ws),
+            mailbox_telemetry,
         }
     }
 }
@@ -510,6 +528,22 @@ async fn response_for(
                 }
                 Err(error) => Ok(market_failure(request, generated_at, error)),
             }
+        }
+        AgentOperation::MailboxTelemetry => {
+            let Some(telemetry) = context.mailbox_telemetry else {
+                return Ok(unavailable(request, generated_at));
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: DataQuality::Fresh,
+                result_schema: Some(ISSUE_POLL_TELEMETRY_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(telemetry)?),
+                failure: None,
+                warnings: Vec::new(),
+            })
         }
         AgentOperation::SnapshotQuality { instrument } => {
             if let Some(public_ws) = context.public_ws {
