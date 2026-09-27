@@ -1,5 +1,5 @@
 use chrono::{SecondsFormat, Utc};
-use okx_api::{AccountApi, OkxError, OkxRestClient};
+use okx_api::{AccountApi, FeeRate, OkxError, OkxRestClient};
 use okx_observation::{
     AccountError, AccountSnapshot, FeeScheduleError, FeeScheduleInput, FeeScheduleSnapshot,
     InstrumentRulesSnapshot,
@@ -72,49 +72,16 @@ impl AccountBootstrapper {
             .api
             .fee_rates_for_family(instrument.instrument_type, family)
             .await?;
-        let expected_type = instrument.instrument_type.to_string();
-        let mut matching_rows = rows
-            .into_iter()
-            .filter(|row| row.instrument_type == expected_type)
-            .collect::<Vec<_>>();
-        if matching_rows.len() != 1 {
-            return Err(FeeScheduleBootstrapError::ResponseInconsistent(format!(
-                "expected one fee-rate row for {expected_type}/{family}, found {}",
-                matching_rows.len()
-            )));
-        }
-        let row = matching_rows.pop().expect("length checked");
-
-        if row.timestamp_ms.trim().is_empty() {
-            return Err(FeeScheduleBootstrapError::ResponseInconsistent(
-                "fee-rate row is missing exchange timestamp".to_owned(),
-            ));
-        }
-
-        let mut groups = row
-            .fee_groups
-            .into_iter()
-            .filter(|group| group.group_id == expected_group)
-            .collect::<Vec<_>>();
-        if groups.len() != 1 {
-            return Err(FeeScheduleBootstrapError::ResponseInconsistent(format!(
-                "expected one fee group '{expected_group}', found {}",
-                groups.len()
-            )));
-        }
-        let group = groups.pop().expect("length checked");
-
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        Ok(FeeScheduleSnapshot::from_input(FeeScheduleInput {
-            instrument_id: instrument.instrument_id.clone(),
-            reference_generation: rules.reference_generation.clone(),
+        normalize_fee_schedule(
+            &instrument.instrument_id,
+            &rules.reference_generation,
+            &instrument.instrument_type.to_string(),
+            family,
+            expected_group,
             source_received_at,
-            exchange_timestamp_ms: row.timestamp_ms,
-            level: row.level,
-            maker_rate: group.maker,
-            taker_rate: group.taker,
-            exact_for_instrument: true,
-        })?)
+            rows,
+        )
     }
 
     pub async fn snapshot(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
@@ -137,6 +104,57 @@ impl AccountBootstrapper {
             permissions,
         )?)
     }
+}
+
+fn normalize_fee_schedule(
+    instrument_id: &str,
+    reference_generation: &str,
+    expected_type: &str,
+    family: &str,
+    expected_group: &str,
+    source_received_at: String,
+    rows: Vec<FeeRate>,
+) -> Result<FeeScheduleSnapshot, FeeScheduleBootstrapError> {
+    let mut matching_rows = rows
+        .into_iter()
+        .filter(|row| row.instrument_type == expected_type)
+        .collect::<Vec<_>>();
+    if matching_rows.len() != 1 {
+        return Err(FeeScheduleBootstrapError::ResponseInconsistent(format!(
+            "expected one fee-rate row for {expected_type}/{family}, found {}",
+            matching_rows.len()
+        )));
+    }
+    let row = matching_rows.pop().expect("length checked");
+    if row.timestamp_ms.trim().is_empty() {
+        return Err(FeeScheduleBootstrapError::ResponseInconsistent(
+            "fee-rate row is missing exchange timestamp".to_owned(),
+        ));
+    }
+
+    let mut groups = row
+        .fee_groups
+        .into_iter()
+        .filter(|group| group.group_id == expected_group)
+        .collect::<Vec<_>>();
+    if groups.len() != 1 {
+        return Err(FeeScheduleBootstrapError::ResponseInconsistent(format!(
+            "expected one fee group '{expected_group}', found {}",
+            groups.len()
+        )));
+    }
+    let group = groups.pop().expect("length checked");
+
+    Ok(FeeScheduleSnapshot::from_input(FeeScheduleInput {
+        instrument_id: instrument_id.to_owned(),
+        reference_generation: reference_generation.to_owned(),
+        source_received_at,
+        exchange_timestamp_ms: row.timestamp_ms,
+        level: row.level,
+        maker_rate: group.maker,
+        taker_rate: group.taker,
+        exact_for_instrument: true,
+    })?)
 }
 
 fn strict_read_only_permissions(value: &str) -> Result<Vec<String>, AccountBootstrapError> {
