@@ -224,9 +224,7 @@ fn analyze_position_values(
         PositionDirection::Short => floor_to_increment(raw_break_even, mechanics.tick_size),
     };
     if tick_break_even <= Decimal::ZERO {
-        return Err(AnalysisError::InvalidTargetPrice(
-            instrument_id.to_owned(),
-        ));
+        return Err(AnalysisError::InvalidTargetPrice(instrument_id.to_owned()));
     }
 
     Ok(PositionScenarioAnalysis {
@@ -439,7 +437,10 @@ mod tests {
         )
         .expect("scenario");
 
-        assert_eq!(result.scenario_price_source, ScenarioPriceSource::EntryMoveRatio);
+        assert_eq!(
+            result.scenario_price_source,
+            ScenarioPriceSource::EntryMoveRatio
+        );
         assert_eq!(result.exit_price, "0.0925");
         assert_eq!(result.requested_move_ratio.as_deref(), Some("-0.075"));
         assert!(decimal("pnl", &result.net_pnl_settle).expect("pnl") < Decimal::ZERO);
@@ -461,7 +462,14 @@ mod tests {
         assert_eq!(error, AnalysisError::ScenarioMoveAtOrBelowNegativeOne);
     }
 
-    fn candle(ts: &str, open: &str, high: &str, low: &str, close: &str, confirmed: bool) -> HistoryCandle {
+    fn candle(
+        ts: &str,
+        open: &str,
+        high: &str,
+        low: &str,
+        close: &str,
+        confirmed: bool,
+    ) -> HistoryCandle {
         HistoryCandle {
             open_time_ms: ts.to_owned(),
             open: open.to_owned(),
@@ -511,7 +519,10 @@ mod tests {
         assert_eq!(result.total_close_return_ratio, "-0.05");
         assert_eq!(result.highest_high, "112");
         assert_eq!(result.lowest_low, "88");
-        assert_eq!(result.max_close_drawdown_ratio, "0.1818181818181818181818181818");
+        assert_eq!(
+            result.max_close_drawdown_ratio,
+            "0.1818181818181818181818181818"
+        );
     }
 
     #[test]
