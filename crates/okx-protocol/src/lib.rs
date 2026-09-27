@@ -194,13 +194,36 @@ impl AgentOperation {
                 limit,
             } => {
                 validate_instrument(instrument)?;
-                if bar.is_empty()
-                    || bar.len() > 16
-                    || !bar.bytes().all(|b| b.is_ascii_alphanumeric())
-                {
+                if !matches!(
+                    bar.as_str(),
+                    "1s" | "1m"
+                        | "3m"
+                        | "5m"
+                        | "15m"
+                        | "30m"
+                        | "1H"
+                        | "2H"
+                        | "4H"
+                        | "6H"
+                        | "12H"
+                        | "1D"
+                        | "2D"
+                        | "3D"
+                        | "1W"
+                        | "1M"
+                        | "3M"
+                        | "6Hutc"
+                        | "12Hutc"
+                        | "1Dutc"
+                        | "2Dutc"
+                        | "3Dutc"
+                        | "1Wutc"
+                        | "1Mutc"
+                        | "3Mutc"
+                ) {
                     return Err(ProtocolError::InvalidHistoryBar);
                 }
-                if matches!(limit, Some(0)) {
+                if matches!(limit, Some(0 | 101..)) {
                     return Err(ProtocolError::InvalidHistoryLimit);
                 }
                 Ok(())
@@ -574,6 +597,37 @@ mod tests {
             instrument: "DOGE-USDT-SWAP".to_owned(),
         };
         assert!(overview.validate().is_ok());
+    }
+
+    #[test]
+    fn market_history_is_bounded_and_uses_supported_bars() {
+        let valid = AgentOperation::MarketHistory {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            bar: "4H".to_owned(),
+            limit: Some(100),
+        };
+        assert!(valid.validate().is_ok());
+
+        let utc = AgentOperation::MarketHistory {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            bar: "1Dutc".to_owned(),
+            limit: None,
+        };
+        assert!(utc.validate().is_ok());
+
+        let bad_bar = AgentOperation::MarketHistory {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            bar: "7H".to_owned(),
+            limit: Some(50),
+        };
+        assert_eq!(bad_bar.validate(), Err(ProtocolError::InvalidHistoryBar));
+
+        let too_many = AgentOperation::MarketHistory {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            bar: "1H".to_owned(),
+            limit: Some(101),
+        };
+        assert_eq!(too_many.validate(), Err(ProtocolError::InvalidHistoryLimit));
     }
 
     #[test]

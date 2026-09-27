@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{self, Deserializer},
+};
 
 use crate::{client::OkxPublicClient, error::OkxError, instrument::InstrumentType};
 
@@ -120,6 +123,75 @@ pub struct PublicOpenInterest {
     pub ts: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PublicCandle {
+    pub timestamp_ms: String,
+    pub open: String,
+    pub high: String,
+    pub low: String,
+    pub close: String,
+    pub volume: String,
+    pub volume_currency: String,
+    pub volume_quote: Option<String>,
+    pub confirm: String,
+}
+
+impl<'de> Deserialize<'de> for PublicCandle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let row = Vec::<String>::deserialize(deserializer)?;
+        match row.as_slice() {
+            [
+                timestamp_ms,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                volume_currency,
+                confirm,
+            ] => Ok(Self {
+                timestamp_ms: timestamp_ms.clone(),
+                open: open.clone(),
+                high: high.clone(),
+                low: low.clone(),
+                close: close.clone(),
+                volume: volume.clone(),
+                volume_currency: volume_currency.clone(),
+                volume_quote: None,
+                confirm: confirm.clone(),
+            }),
+            [
+                timestamp_ms,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                volume_currency,
+                volume_quote,
+                confirm,
+            ] => Ok(Self {
+                timestamp_ms: timestamp_ms.clone(),
+                open: open.clone(),
+                high: high.clone(),
+                low: low.clone(),
+                close: close.clone(),
+                volume: volume.clone(),
+                volume_currency: volume_currency.clone(),
+                volume_quote: Some(volume_quote.clone()),
+                confirm: confirm.clone(),
+            }),
+            _ => Err(de::Error::custom(format!(
+                "history candle row has {} fields; expected 8 or 9",
+                row.len()
+            ))),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MarketDataApi {
     client: OkxPublicClient,
@@ -203,6 +275,30 @@ impl MarketDataApi {
             "open interest",
         )
     }
+
+    pub async fn history_candles(
+        &self,
+        instrument_id: &str,
+        bar: &str,
+        limit: u16,
+    ) -> Result<Vec<PublicCandle>, OkxError> {
+        if !(1..=100).contains(&limit) {
+            return Err(OkxError::Response(
+                "history candle limit must be between 1 and 100".to_owned(),
+            ));
+        }
+
+        self.client
+            .public_get(
+                "/api/v5/market/history-candles",
+                &[
+                    ("instId", instrument_id.to_owned()),
+                    ("bar", bar.to_owned()),
+                    ("limit", limit.to_string()),
+                ],
+            )
+            .await
+    }
 }
 
 fn one<T>(mut rows: Vec<T>, label: &'static str) -> Result<T, OkxError> {
@@ -275,6 +371,37 @@ mod tests {
         assert_eq!(funding.funding_rate, "0.00001234");
         assert_eq!(funding.premium, "0.00000001");
         assert_eq!(funding.max_funding_rate, "0.003");
+    }
+
+    #[test]
+    fn history_candle_accepts_current_nine_field_shape() {
+        let row: PublicCandle = serde_json::from_str(
+            r#"["1790467200000","0.12","0.13","0.11","0.125","100","12.5","12.5","1"]"#,
+        )
+        .expect("history candle");
+
+        assert_eq!(row.timestamp_ms, "1790467200000");
+        assert_eq!(row.close, "0.125");
+        assert_eq!(row.volume_quote.as_deref(), Some("12.5"));
+        assert_eq!(row.confirm, "1");
+    }
+
+    #[test]
+    fn history_candle_accepts_documented_eight_field_shape() {
+        let row: PublicCandle = serde_json::from_str(
+            r#"["1790467200000","0.12","0.13","0.11","0.125","100","12.5","1"]"#,
+        )
+        .expect("history candle");
+
+        assert_eq!(row.volume_quote, None);
+        assert_eq!(row.confirm, "1");
+    }
+
+    #[test]
+    fn history_candle_rejects_unknown_shape() {
+        let error = serde_json::from_str::<PublicCandle>(r#"["1790467200000","0.12","0.13"]"#)
+            .expect_err("invalid history candle");
+        assert!(error.to_string().contains("expected 8 or 9"));
     }
 
     #[test]

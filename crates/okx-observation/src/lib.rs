@@ -1,8 +1,13 @@
+pub mod history;
 pub mod market;
 pub mod order_book;
 pub mod reference;
 pub mod stream;
 
+pub use history::{
+    HistoryCandle, MARKET_HISTORY_SCHEMA_V1, MARKET_HISTORY_SOURCE_V1, MarketHistoryError,
+    MarketHistorySnapshot,
+};
 pub use market::{
     FundingState, IndexPriceState, M2_REST_BOOTSTRAP_REASON, MARKET_SNAPSHOT_SCHEMA_V1,
     MarkPriceState, MarketBootstrap, MarketError, MarketGeneration, MarketSnapshot,

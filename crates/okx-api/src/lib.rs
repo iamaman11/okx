@@ -16,7 +16,7 @@ pub use config::{Credentials, OkxEnvironment, Region};
 pub use error::OkxError;
 pub use instrument::InstrumentType;
 pub use market_data::{
-    MarketDataApi, PublicFundingRate, PublicIndexTicker, PublicMarkPrice, PublicOpenInterest,
-    PublicTicker,
+    MarketDataApi, PublicCandle, PublicFundingRate, PublicIndexTicker, PublicMarkPrice,
+    PublicOpenInterest, PublicTicker,
 };
 pub use public_data::{PublicDataApi, PublicInstrument};
