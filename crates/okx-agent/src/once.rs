@@ -1,17 +1,17 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_analysis::{
-    ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, AnalysisError,
+    ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
     CandidateOrderAssumptions, LiquidityRole as AnalysisLiquidityRole, PositionDirection,
     analyze_account_risk, analyze_candidate_order,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountError, AccountSnapshot,
-    INSTRUMENT_RULES_SCHEMA_V1,
-    INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1,
-    MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError, MarketReadiness, MarketSnapshot,
-    ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
+    INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
+    MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
+    MarketReadiness, MarketSnapshot, ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1,
+    SnapshotQualityReport,
 };
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
@@ -27,9 +27,7 @@ use okx_runtime::{
 
 use crate::{
     AgentError, AgentResult,
-    account_bootstrap::{
-        AccountBootstrapError, AccountBootstrapper, FeeScheduleBootstrapError,
-    },
+    account_bootstrap::{AccountBootstrapError, AccountBootstrapper, FeeScheduleBootstrapError},
     market_bootstrap::{MarketBootstrapError, MarketBootstrapper},
 };
 
