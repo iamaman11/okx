@@ -1,7 +1,9 @@
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
-use okx_github::{GitHubClient, OWNER_USER_ID};
+use okx_github::{
+    GitHubClient, GitHubError, IssueComment, IssueCommentCursor, IssueCursorStore, OWNER_USER_ID,
+};
 use okx_protocol::{
     HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlOperation, HostControlRequest,
     HostControlResult, HostControlStatus,
@@ -21,6 +23,7 @@ enum ProcessTransition {
 }
 
 pub const CONTROL_ISSUE_NUMBER: u64 = 12;
+const CONTROL_CURSOR_PATH: &str = r"C:\okx-control\github-control-issue-12-cursor.json";
 const MAX_CONTROL_BODY_BYTES: usize = 4096;
 
 pub async fn run_until_shutdown(
@@ -111,24 +114,19 @@ pub async fn process_pending(
     github: &GitHubClient,
     executor: &mut HostExecutor,
 ) -> LocalResult<usize> {
-    let mut comments = github.issue_comments(CONTROL_ISSUE_NUMBER).await?;
-    comments.sort_by_key(|comment| comment.id);
-
-    let mut terminal_request_ids = HashSet::new();
-    for comment in &comments {
-        if comment.user_id != OWNER_USER_ID || comment.body.len() > MAX_CONTROL_BODY_BYTES {
-            continue;
-        }
-
-        if let Ok(result) = serde_json::from_str::<HostControlResult>(&comment.body)
-            && result.validate().is_ok()
-        {
-            terminal_request_ids.insert(result.request_id);
-        }
+    let cursor_store = control_cursor_store()?;
+    let cursor = load_cursor_for_poll(&cursor_store)?;
+    let comments = github
+        .issue_comments_after(CONTROL_ISSUE_NUMBER, cursor.as_ref())
+        .await?;
+    if comments.is_empty() {
+        return Ok(0);
     }
 
+    let mut terminal_request_ids = terminal_request_ids(&comments);
     let mut processed = 0usize;
-    for comment in comments {
+
+    for comment in &comments {
         if comment.user_id != OWNER_USER_ID || comment.body.len() > MAX_CONTROL_BODY_BYTES {
             continue;
         }
@@ -210,7 +208,57 @@ pub async fn process_pending(
         }
     }
 
+    if let Some(cursor) = completed_batch_cursor(&comments) {
+        cursor_store.save(&cursor)?;
+    }
+
     Ok(processed)
+}
+
+fn control_cursor_store() -> LocalResult<IssueCursorStore> {
+    Ok(IssueCursorStore::new(
+        PathBuf::from(CONTROL_CURSOR_PATH),
+        CONTROL_ISSUE_NUMBER,
+    )?)
+}
+
+fn load_cursor_for_poll(
+    cursor_store: &IssueCursorStore,
+) -> LocalResult<Option<IssueCommentCursor>> {
+    match cursor_store.load() {
+        Ok(cursor) => Ok(cursor),
+        Err(GitHubError::CursorJson(error)) => {
+            eprintln!(
+                "control cursor JSON invalid at {}: {}; falling back to bounded bootstrap scan",
+                cursor_store.path().display(),
+                error
+            );
+            Ok(None)
+        }
+        Err(GitHubError::CursorStateMismatch) => {
+            eprintln!(
+                "control cursor state mismatch at {}; falling back to bounded bootstrap scan",
+                cursor_store.path().display()
+            );
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn terminal_request_ids(comments: &[IssueComment]) -> HashSet<String> {
+    comments
+        .iter()
+        .filter(|comment| comment.user_id == OWNER_USER_ID)
+        .filter(|comment| comment.body.len() <= MAX_CONTROL_BODY_BYTES)
+        .filter_map(|comment| serde_json::from_str::<HostControlResult>(&comment.body).ok())
+        .filter(|result| result.validate().is_ok())
+        .map(|result| result.request_id)
+        .collect()
+}
+
+fn completed_batch_cursor(comments: &[IssueComment]) -> Option<IssueCommentCursor> {
+    comments.last().map(IssueComment::cursor)
 }
 
 #[cfg(test)]
@@ -221,5 +269,53 @@ mod tests {
     fn control_issue_is_pinned() {
         assert_eq!(CONTROL_ISSUE_NUMBER, 12);
         assert_eq!(OWNER_USER_ID, 44_100_369);
+        assert_eq!(
+            CONTROL_CURSOR_PATH,
+            r"C:\okx-control\github-control-issue-12-cursor.json"
+        );
+    }
+
+    #[test]
+    fn replay_batch_with_terminal_ack_is_idempotent() {
+        let request = serde_json::json!({
+            "schema": "okx.windows.control/v1",
+            "request_id": "ctl-1",
+            "operation": { "type": "transport_status" }
+        })
+        .to_string();
+        let terminal = serde_json::json!({
+            "schema": "okx.windows.control.result/v1",
+            "request_id": "ctl-1",
+            "operation": { "type": "transport_status" },
+            "status": "pass",
+            "observed_at": "2026-09-27T12:00:01.000Z",
+            "details": {},
+            "failure": null
+        })
+        .to_string();
+
+        let comments = vec![
+            IssueComment {
+                id: 10,
+                body: request,
+                user_id: OWNER_USER_ID,
+                created_at: "2026-09-27T12:00:00Z".to_owned(),
+            },
+            IssueComment {
+                id: 11,
+                body: terminal,
+                user_id: OWNER_USER_ID,
+                created_at: "2026-09-27T12:00:01Z".to_owned(),
+            },
+        ];
+
+        assert!(terminal_request_ids(&comments).contains("ctl-1"));
+        assert_eq!(
+            completed_batch_cursor(&comments),
+            Some(IssueCommentCursor {
+                created_at: "2026-09-27T12:00:01Z".to_owned(),
+                id: 11,
+            })
+        );
     }
 }
