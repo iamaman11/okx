@@ -3,8 +3,8 @@ use okx_analysis::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
     CandidateOrderAssumptions, HISTORY_BEHAVIOR_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
     POSITION_SCENARIO_SCHEMA_V1, PositionDirection, PositionScenarioAssumptions,
-    ScenarioExitAssumption, analyze_account_risk, analyze_candidate_order, analyze_history_behavior,
-    analyze_position_scenario,
+    ScenarioExitAssumption, analyze_account_risk, analyze_candidate_order,
+    analyze_history_behavior, analyze_position_scenario,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
