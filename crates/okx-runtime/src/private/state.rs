@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, VecDeque};
 
-use okx_api::{BalanceSnapshot, PendingOrder, Position};
-use okx_ws::{PrivateChannel, PrivateSubscription, PrivateWsArg};
+use okx_observation::AccountWsEvent;
+use okx_ws::{PrivateSubscription, PrivateWsArg};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -34,12 +34,7 @@ pub struct PrivateWsStatus {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub enum PrivateWsEvent {
-    Account(Vec<BalanceSnapshot>),
-    Positions(Vec<Position>),
-    Orders(Vec<PendingOrder>),
-}
+pub type PrivateWsEvent = AccountWsEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrivateConvergenceCursor {
