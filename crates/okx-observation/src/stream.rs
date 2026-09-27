@@ -116,6 +116,14 @@ impl MarketStreamState {
         self.generation
     }
 
+    pub fn order_book_seq_id(&self) -> Option<i64> {
+        self.order_book.last_seq_id()
+    }
+
+    pub fn order_book_exchange_timestamp_ms(&self) -> Option<&str> {
+        self.order_book.exchange_timestamp_ms()
+    }
+
     pub fn apply_ticker(
         &mut self,
         generation: u64,

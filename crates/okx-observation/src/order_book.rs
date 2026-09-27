@@ -183,6 +183,10 @@ impl OrderBookState {
         self.last_seq_id
     }
 
+    pub fn exchange_timestamp_ms(&self) -> Option<&str> {
+        self.exchange_timestamp_ms.as_deref()
+    }
+
     pub fn snapshot(&self) -> OrderBookSnapshot {
         OrderBookSnapshot {
             generation: self.generation,
