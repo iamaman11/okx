@@ -6,7 +6,11 @@ pub struct WsArg {
     pub channel: String,
     #[serde(rename = "instType", default, skip_serializing_if = "Option::is_none")]
     pub instrument_type: Option<String>,
-    #[serde(rename = "instFamily", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "instFamily",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub instrument_family: Option<String>,
     #[serde(rename = "instId", default, skip_serializing_if = "Option::is_none")]
     pub instrument_id: Option<String>,
@@ -93,9 +97,7 @@ pub fn parse_text(text: &str) -> Result<InboundMessage, serde_json::Error> {
 
     match event {
         Some("subscribe") => {
-            let arg = serde_json::from_value(
-                value.get("arg").cloned().unwrap_or(Value::Null),
-            )?;
+            let arg = serde_json::from_value(value.get("arg").cloned().unwrap_or(Value::Null))?;
             Ok(InboundMessage::Subscribed {
                 arg,
                 connection_id: string_field(&value, "connId"),
@@ -119,9 +121,7 @@ pub fn parse_text(text: &str) -> Result<InboundMessage, serde_json::Error> {
             let arg = serde_json::from_value(
                 value.get("arg").cloned().unwrap_or(Value::Null),
             )?;
-            let data = serde_json::from_value(
-                value.get("data").cloned().unwrap_or(Value::Null),
-            )?;
+            let data = serde_json::from_value(value.get("data").cloned().unwrap_or(Value::Null))?;
             Ok(InboundMessage::Data {
                 arg,
                 action: string_field(&value, "action"),
@@ -173,10 +173,9 @@ mod tests {
             } if id == "abc"
         ));
 
-        let notice = parse_text(
-            r#"{"event":"notice","code":"64008","msg":"upgrade","connId":"abc"}"#,
-        )
-        .expect("notice");
+        let notice =
+            parse_text(r#"{"event":"notice","code":"64008","msg":"upgrade","connId":"abc"}"#)
+                .expect("notice");
         assert!(matches!(
             notice,
             InboundMessage::Notice {
