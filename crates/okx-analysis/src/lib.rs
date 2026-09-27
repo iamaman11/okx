@@ -1,3 +1,10 @@
+mod risk;
+
+pub use risk::{
+    ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, PositionRiskAnalysis,
+    analyze_account_risk,
+};
+
 use std::str::FromStr;
 
 use okx_observation::{
@@ -67,6 +74,38 @@ pub enum AnalysisError {
     InvalidDecimal { field: &'static str, value: String },
     #[error("decimal field '{0}' must be positive")]
     NonPositive(&'static str),
+    #[error("decimal field '{0}' must not be negative")]
+    Negative(&'static str),
+    #[error("unsupported account mode '{0}' for derivative risk analysis")]
+    UnsupportedAccountMode(String),
+    #[error("unsupported position mode '{0}'")]
+    UnsupportedPositionMode(String),
+    #[error(
+        "unsupported non-zero position type '{instrument_type}' for instrument '{instrument_id}'"
+    )]
+    UnsupportedPositionType {
+        instrument_id: String,
+        instrument_type: String,
+    },
+    #[error("unsupported position side '{position_side}' for instrument '{instrument_id}'")]
+    UnsupportedPositionSide {
+        instrument_id: String,
+        position_side: String,
+    },
+    #[error(
+        "position direction is inconsistent for instrument '{instrument_id}': side '{position_side}', position '{position}'"
+    )]
+    InconsistentPositionDirection {
+        instrument_id: String,
+        position_side: String,
+        position: String,
+    },
+    #[error("non-zero position '{0}' is missing notionalUsd")]
+    MissingPositionNotional(String),
+    #[error(
+        "estimated liquidation price is on the non-adverse side of mark price for instrument '{0}'"
+    )]
+    InconsistentLiquidationPrice(String),
 }
 
 pub fn analyze_cost(
