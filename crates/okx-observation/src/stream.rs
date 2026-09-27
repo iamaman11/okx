@@ -100,11 +100,7 @@ impl MarketStreamState {
         }
     }
 
-    pub fn reset_generation(
-        &mut self,
-        generation: u64,
-        reference_generation: impl Into<String>,
-    ) {
+    pub fn reset_generation(&mut self, generation: u64, reference_generation: impl Into<String>) {
         self.generation = generation;
         self.reference_generation = reference_generation.into();
         self.ticker = None;
@@ -256,7 +252,8 @@ impl MarketStreamState {
             return self.report(fallback_quality(), "FUNDING_SEMANTICS_UNKNOWN", None);
         }
 
-        let Some(received_times) = self.required_receive_times(instrument.funding_requirement) else {
+        let Some(received_times) = self.required_receive_times(instrument.funding_requirement)
+        else {
             return self.report(fallback_quality(), "WS_DEPENDENCIES_INCOMPLETE", None);
         };
         if self.order_book.status() != OrderBookStatus::Contiguous {
@@ -284,10 +281,18 @@ impl MarketStreamState {
             })
             .is_err()
         {
-            return self.report(fallback_quality(), "WS_DEPENDENCY_INCONSISTENT", Some(oldest));
+            return self.report(
+                fallback_quality(),
+                "WS_DEPENDENCY_INCONSISTENT",
+                Some(oldest),
+            );
         }
 
-        self.report(MarketReadiness::Fresh, "WS_CURRENT_GENERATION_COMPLETE", Some(oldest))
+        self.report(
+            MarketReadiness::Fresh,
+            "WS_CURRENT_GENERATION_COMPLETE",
+            Some(oldest),
+        )
     }
 
     pub fn publish(
@@ -382,23 +387,29 @@ impl MarketStreamState {
             .map(|observed| &observed.value)
     }
 
-    fn required_receive_times(
-        &self,
-        funding_requirement: FundingRequirement,
-    ) -> Option<Vec<u64>> {
+    fn required_receive_times(&self, funding_requirement: FundingRequirement) -> Option<Vec<u64>> {
         let mut times = vec![
-            self.ticker.as_ref()?.received_at_ms,
-            self.mark_price.as_ref()?.received_at_ms,
-            self.index_ticker.as_ref()?.received_at_ms,
-            self.open_interest.as_ref()?.received_at_ms,
+            self.current_received_at(&self.ticker)?,
+            self.current_received_at(&self.mark_price)?,
+            self.current_received_at(&self.index_ticker)?,
+            self.current_received_at(&self.open_interest)?,
             self.order_book_received_at_ms?,
         ];
         match funding_requirement {
-            FundingRequirement::Required => times.push(self.funding_rate.as_ref()?.received_at_ms),
+            FundingRequirement::Required => {
+                times.push(self.current_received_at(&self.funding_rate)?)
+            }
             FundingRequirement::NotApplicable => {}
             FundingRequirement::Unknown => return None,
         }
         Some(times)
+    }
+
+    fn current_received_at<T>(&self, value: &Option<Observed<T>>) -> Option<u64> {
+        value
+            .as_ref()
+            .filter(|observed| observed.generation == self.generation)
+            .map(|observed| observed.received_at_ms)
     }
 
     fn report(
@@ -548,7 +559,9 @@ mod tests {
     }
 
     fn complete(state: &mut MarketStreamState, generation: u64, received: u64) {
-        state.apply_ticker(generation, received, ticker()).expect("ticker");
+        state
+            .apply_ticker(generation, received, ticker())
+            .expect("ticker");
         state
             .apply_mark_price(generation, received, mark())
             .expect("mark");
@@ -569,11 +582,8 @@ mod tests {
     #[test]
     fn complete_current_generation_becomes_fresh() {
         let reference = reference();
-        let mut state = MarketStreamState::new(
-            "DOGE-USDT-SWAP",
-            7,
-            reference.generation().as_str(),
-        );
+        let mut state =
+            MarketStreamState::new("DOGE-USDT-SWAP", 7, reference.generation().as_str());
         complete(&mut state, 7, 1_000);
 
         let report = state.readiness(&reference, 1_500, 1_000, true, true, true);
@@ -591,11 +601,7 @@ mod tests {
     #[test]
     fn incomplete_ws_is_degraded_only_when_rest_fallback_exists() {
         let reference = reference();
-        let state = MarketStreamState::new(
-            "DOGE-USDT-SWAP",
-            7,
-            reference.generation().as_str(),
-        );
+        let state = MarketStreamState::new("DOGE-USDT-SWAP", 7, reference.generation().as_str());
 
         assert_eq!(
             state
