@@ -1,3 +1,9 @@
+pub mod telemetry;
+
+pub use telemetry::{
+    ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus, IssuePollTelemetryStore,
+};
+
 use std::{
     collections::BTreeSet,
     fs::{self, File},
@@ -52,6 +58,18 @@ pub enum GitHubError {
 
     #[error("GitHub issue cursor I/O error: {0}")]
     CursorIo(#[from] std::io::Error),
+
+    #[error("GitHub issue poll telemetry JSON is invalid: {0}")]
+    TelemetryJson(serde_json::Error),
+
+    #[error("GitHub issue poll telemetry does not match the pinned repository/issue")]
+    TelemetryStateMismatch,
+
+    #[error("GitHub issue poll telemetry timestamp is invalid: {0}")]
+    TelemetryTimestamp(chrono::ParseError),
+
+    #[error("GitHub issue poll telemetry I/O error: {0}")]
+    TelemetryIo(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
