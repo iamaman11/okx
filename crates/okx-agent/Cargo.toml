@@ -14,6 +14,7 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.4"
+okx-analysis = { path = "../okx-analysis" }
 okx-api = { path = "../okx-api" }
 okx-github = { path = "../okx-github" }
 okx-observation = { path = "../okx-observation" }
