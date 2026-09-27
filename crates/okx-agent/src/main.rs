@@ -23,7 +23,7 @@ use okx_agent::{
 };
 use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, Region};
 use okx_protocol::MailboxEnvelope;
-use okx_runtime::PublicWsCoordinator;
+use okx_runtime::{PrivateWsCoordinator, PublicWsCoordinator};
 use zeroize::Zeroize;
 
 #[derive(Debug, Parser)]
@@ -162,7 +162,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     reference.len()
                 );
                 let market = MarketBootstrapper::new(public_client);
-                let account = optional_account_bootstrapper(environment);
+                let (account, private_ws_coordinator) = optional_private_components(environment);
                 let (public_ws_coordinator, public_ws) =
                     PublicWsCoordinator::new(environment, reference);
                 let mut private_key = load_native_private_key(&config.key_id)?;
@@ -178,6 +178,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                         account: account.as_ref(),
                     },
                     public_ws_coordinator,
+                    private_ws_coordinator,
                     poll_seconds,
                 )
                 .await;
@@ -190,6 +191,33 @@ async fn run(cli: Cli) -> AgentResult<()> {
     }
 
     Ok(())
+}
+
+fn optional_private_components(
+    environment: OkxEnvironment,
+) -> (Option<AccountBootstrapper>, Option<PrivateWsCoordinator>) {
+    match load_native_okx_credentials() {
+        Ok(credentials) => match OkxRestClient::new(environment, credentials.clone()) {
+            Ok(client) => {
+                let account = AccountBootstrapper::new(client);
+                let (private_ws_coordinator, _private_ws) =
+                    PrivateWsCoordinator::new(environment, credentials);
+                (Some(account), Some(private_ws_coordinator))
+            }
+            Err(error) => {
+                eprintln!("OKX observer REST client unavailable: {error}");
+                (None, None)
+            }
+        },
+        Err(AgentError::OkxCredentialsNotFound) => {
+            eprintln!("OKX observer credential not provisioned; private queries are NOT_READY");
+            (None, None)
+        }
+        Err(error) => {
+            eprintln!("OKX observer credential unavailable: {error}");
+            (None, None)
+        }
+    }
 }
 
 fn optional_account_bootstrapper(environment: OkxEnvironment) -> Option<AccountBootstrapper> {
