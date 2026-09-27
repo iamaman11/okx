@@ -159,6 +159,35 @@ pub fn analyze_cost(
 }
 
 fn decimal(field: &'static str, value: &str) -> Result<Decimal, AnalysisError> {
+    if value.is_empty() || value.len() > 64 {
+        return Err(AnalysisError::InvalidDecimal {
+            field,
+            value: value.to_owned(),
+        });
+    }
+
+    let mut dots = 0_usize;
+    let mut digits = 0_usize;
+    for (index, byte) in value.bytes().enumerate() {
+        match byte {
+            b'0'..=b'9' => digits += 1,
+            b'.' if dots == 0 => dots += 1,
+            b'+' | b'-' if index == 0 => {}
+            _ => {
+                return Err(AnalysisError::InvalidDecimal {
+                    field,
+                    value: value.to_owned(),
+                });
+            }
+        }
+    }
+    if digits == 0 {
+        return Err(AnalysisError::InvalidDecimal {
+            field,
+            value: value.to_owned(),
+        });
+    }
+
     Decimal::from_str(value).map_err(|_| AnalysisError::InvalidDecimal {
         field,
         value: value.to_owned(),
