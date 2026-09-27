@@ -9,6 +9,7 @@ members = [
     "crates/okx-host-control",
     "crates/okx-observation",
     "crates/okx-ws",
+    "crates/okx-runtime",
 ]
 
 [workspace.package]
