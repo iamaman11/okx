@@ -144,8 +144,10 @@ mod tests {
 
     #[test]
     fn credentials_reject_empty_components_without_echoing_secret() {
-        let error = Credentials::new("api-key".to_owned(), String::new(), "pass".to_owned())
-            .expect_err("empty secret rejected");
+        let error = match Credentials::new("api-key".to_owned(), String::new(), "pass".to_owned()) {
+            Ok(_) => panic!("empty secret must be rejected"),
+            Err(error) => error,
+        };
         assert_eq!(error.to_string(), "configuration error: API secret is invalid");
     }
 }
