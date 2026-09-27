@@ -187,7 +187,7 @@ impl AgentOperation {
                     validate_asset_code(settle_currency)?;
                 }
                 Ok(())
-            },
+            }
             Self::MarketHistory {
                 instrument,
                 bar,
