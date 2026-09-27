@@ -2,7 +2,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
-    INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
+    ACCOUNT_SNAPSHOT_SCHEMA_V1, INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1,
+    InstrumentRulesSnapshot,
     MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
     MarketReadiness, MarketSnapshot, ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1,
     SnapshotQualityReport,
@@ -17,6 +18,7 @@ use okx_runtime::{PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PublicQualitySnapshot, Publ
 
 use crate::{
     AgentError, AgentResult,
+    account_bootstrap::{AccountBootstrapError, AccountBootstrapper},
     market_bootstrap::{MarketBootstrapError, MarketBootstrapper},
 };
 
@@ -28,6 +30,12 @@ pub const MARKET_BOOTSTRAP_INCONSISTENT_CODE: &str = "MARKET_BOOTSTRAP_INCONSIST
 pub const MARKET_INSTRUMENT_NOT_LIVE_CODE: &str = "MARKET_INSTRUMENT_NOT_LIVE";
 pub const MARKET_OVERVIEW_INCONSISTENT_CODE: &str = "MARKET_OVERVIEW_INCONSISTENT";
 pub const MARKET_HISTORY_INCONSISTENT_CODE: &str = "MARKET_HISTORY_INCONSISTENT";
+pub const ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE: &str =
+    "ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE";
+pub const ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE: &str =
+    "ACCOUNT_OBSERVER_PERMISSION_REJECTED";
+pub const ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE: &str = "ACCOUNT_PRIVATE_API_UNAVAILABLE";
+pub const ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE: &str = "ACCOUNT_BOOTSTRAP_INCONSISTENT";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
 
 const REFERENCE_BOOTSTRAP_WARNING: &str =
@@ -36,6 +44,8 @@ const MARKET_REST_BOOTSTRAP_WARNING: &str = "market data is bounded public REST 
 const REFERENCE_RUNTIME_WARNING: &str = "instrument rules come from the live ReferenceRegistry; market FRESH readiness is reported separately";
 const MARKET_HISTORY_UNCONFIRMED_WARNING: &str =
     "OKX history response contains at least one unconfirmed candlestick";
+const ACCOUNT_REST_BOOTSTRAP_WARNING: &str =
+    "private account state is a bounded authenticated REST bootstrap; private WebSocket convergence is not connected until M4-C";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
 
 #[derive(serde::Serialize)]
@@ -52,6 +62,7 @@ pub struct ObservationQueryContext<'a> {
     market_fallback: Option<&'a MarketBootstrapper>,
     public_ws: Option<&'a PublicWsHandle>,
     mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
+    account_fallback: Option<&'a AccountBootstrapper>,
 }
 
 impl<'a> ObservationQueryContext<'a> {
@@ -61,6 +72,7 @@ impl<'a> ObservationQueryContext<'a> {
             market_fallback: None,
             public_ws: None,
             mailbox_telemetry: None,
+            account_fallback: None,
         }
     }
 
@@ -68,11 +80,20 @@ impl<'a> ObservationQueryContext<'a> {
         reference: &'a ReferenceRegistry,
         market: &'a MarketBootstrapper,
     ) -> Self {
+        Self::standalone_with_account(reference, market, None)
+    }
+
+    pub const fn standalone_with_account(
+        reference: &'a ReferenceRegistry,
+        market: &'a MarketBootstrapper,
+        account_fallback: Option<&'a AccountBootstrapper>,
+    ) -> Self {
         Self {
             standalone_reference: Some(reference),
             market_fallback: Some(market),
             public_ws: None,
             mailbox_telemetry: None,
+            account_fallback,
         }
     }
 
@@ -80,12 +101,7 @@ impl<'a> ObservationQueryContext<'a> {
         public_ws: &'a PublicWsHandle,
         market_fallback: &'a MarketBootstrapper,
     ) -> Self {
-        Self {
-            standalone_reference: None,
-            market_fallback: Some(market_fallback),
-            public_ws: Some(public_ws),
-            mailbox_telemetry: None,
-        }
+        Self::live_with_private(public_ws, market_fallback, None, None)
     }
 
     pub const fn live_with_mailbox_telemetry(
@@ -93,11 +109,21 @@ impl<'a> ObservationQueryContext<'a> {
         market_fallback: &'a MarketBootstrapper,
         mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
     ) -> Self {
+        Self::live_with_private(public_ws, market_fallback, mailbox_telemetry, None)
+    }
+
+    pub const fn live_with_private(
+        public_ws: &'a PublicWsHandle,
+        market_fallback: &'a MarketBootstrapper,
+        mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
+        account_fallback: Option<&'a AccountBootstrapper>,
+    ) -> Self {
         Self {
             standalone_reference: None,
             market_fallback: Some(market_fallback),
             public_ws: Some(public_ws),
             mailbox_telemetry,
+            account_fallback,
         }
     }
 }
@@ -529,6 +555,33 @@ async fn response_for(
                 Err(error) => Ok(market_failure(request, generated_at, error)),
             }
         }
+        AgentOperation::AccountSnapshot => {
+            let Some(account) = context.account_fallback else {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE,
+                    "OKX observer credential is not provisioned in native secret storage".to_owned(),
+                    false,
+                ));
+            };
+
+            match account.snapshot().await {
+                Ok(result) => Ok(AgentResponse {
+                    schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                    request_id: request.request_id.clone(),
+                    status: AgentResponseStatus::Completed,
+                    generated_at: generated_at.to_owned(),
+                    quality: DataQuality::Degraded,
+                    result_schema: Some(ACCOUNT_SNAPSHOT_SCHEMA_V1.to_owned()),
+                    result: Some(serde_json::to_value(result)?),
+                    failure: None,
+                    warnings: vec![ACCOUNT_REST_BOOTSTRAP_WARNING.to_owned()],
+                }),
+                Err(error) => Ok(account_failure(request, generated_at, error)),
+            }
+        }
         AgentOperation::MailboxTelemetry => {
             let Some(telemetry) = context.mailbox_telemetry else {
                 return Ok(unavailable(request, generated_at));
@@ -619,6 +672,39 @@ fn data_quality(quality: MarketReadiness) -> DataQuality {
 
 fn utc_now_ms() -> u64 {
     Utc::now().timestamp_millis().max(0) as u64
+}
+
+fn account_failure(
+    request: &AgentRequest,
+    generated_at: &str,
+    error: AccountBootstrapError,
+) -> AgentResponse {
+    match error {
+        AccountBootstrapError::PermissionRejected => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE,
+            "OKX observer API key must have read_only permission only".to_owned(),
+            false,
+        ),
+        AccountBootstrapError::Api(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE,
+            error.to_string(),
+            true,
+        ),
+        AccountBootstrapError::Normalize(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE,
+            error.to_string(),
+            false,
+        ),
+    }
 }
 
 fn market_failure(
