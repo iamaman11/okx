@@ -1,6 +1,4 @@
-use okx_api::{
-    FundingRate, IndexTicker, InstrumentType, MarkPrice, OpenInterest, Ticker,
-};
+use okx_api::{FundingRate, IndexTicker, InstrumentType, MarkPrice, OpenInterest, Ticker};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
