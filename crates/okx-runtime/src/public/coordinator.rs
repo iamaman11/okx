@@ -1,8 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
@@ -10,7 +6,9 @@ use okx_api::{
     PublicOpenInterest, PublicTicker,
 };
 use okx_observation::{FundingRequirement, MarketStreamState, ReferenceRegistry};
-use okx_ws::{InboundMessage, PublicChannel, PublicWsConnection, PublicWsError, Subscription, WsArg};
+use okx_ws::{
+    InboundMessage, PublicChannel, PublicWsConnection, PublicWsError, Subscription, WsArg,
+};
 use tokio::{
     sync::{RwLock, mpsc, watch},
     time::{Instant, interval, sleep_until},
@@ -20,9 +18,7 @@ use super::{
     PublicRuntimeError,
     decode::{RawBookData, decode_book, now_ms},
     state::PublicRuntimeState,
-    subscriptions::{
-        desired_subscriptions, subscription_from_arg,
-    },
+    subscriptions::{desired_subscriptions, subscription_from_arg},
 };
 
 pub const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
