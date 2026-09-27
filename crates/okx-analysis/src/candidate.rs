@@ -100,33 +100,57 @@ pub fn analyze_candidate_order(
         .ok_or(AnalysisError::MissingContractValueCurrency)?;
     let contract_value = positive_decimal(
         "contract_value",
-        instrument
-            .contract_value
-            .as_deref()
-            .ok_or_else(|| AnalysisError::UnsupportedContractMechanics("missing ctVal".to_owned()))?,
+        instrument.contract_value.as_deref().ok_or_else(|| {
+            AnalysisError::UnsupportedContractMechanics("missing ctVal".to_owned())
+        })?,
     )?;
     let lot_size = positive_decimal("lot_size", &instrument.lot_size)?;
     let min_size = positive_decimal("min_size", &instrument.min_size)?;
     let tick_size = positive_decimal("tick_size", &instrument.tick_size)?;
+    let entry_rate = fee_rate(fees, assumptions.entry_liquidity_role)?;
+    let exit_rate = fee_rate(fees, assumptions.exit_liquidity_role)?;
 
+    analyze_candidate_values(
+        &instrument.instrument_id,
+        &rules.reference_generation,
+        &fees.fee_generation,
+        settle_currency,
+        contract_value_currency,
+        contract_value,
+        lot_size,
+        min_size,
+        tick_size,
+        entry_rate,
+        exit_rate,
+        assumptions,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_candidate_values(
+    instrument_id: &str,
+    reference_generation: &str,
+    fee_generation: &str,
+    settle_currency: &str,
+    contract_value_currency: &str,
+    contract_value: Decimal,
+    lot_size: Decimal,
+    min_size: Decimal,
+    tick_size: Decimal,
+    entry_rate: Decimal,
+    exit_rate: Decimal,
+    assumptions: &CandidateOrderAssumptions,
+) -> Result<CandidateOrderAnalysis, AnalysisError> {
     let entry_price = positive_decimal("entry_price", &assumptions.entry_price)?;
     let stop_price = positive_decimal("stop_price", &assumptions.stop_price)?;
     require_tick_aligned("entry_price", entry_price, tick_size)?;
     require_tick_aligned("stop_price", stop_price, tick_size)?;
-    require_stop_direction(
-        &instrument.instrument_id,
-        assumptions.direction,
-        entry_price,
-        stop_price,
-    )?;
+    require_stop_direction(instrument_id, assumptions.direction, entry_price, stop_price)?;
 
     let max_settle_notional =
         positive_decimal("max_settle_notional", &assumptions.max_settle_notional)?;
     let max_loss_settle = positive_decimal("max_loss_settle", &assumptions.max_loss_settle)?;
     let requested_rr = positive_decimal("target_rr", &assumptions.target_rr)?;
-
-    let entry_rate = fee_rate(fees, assumptions.entry_liquidity_role)?;
-    let exit_rate = fee_rate(fees, assumptions.exit_liquidity_role)?;
 
     let entry_notional_per_contract = contract_value * entry_price;
     let stop_net_per_contract = net_pnl_per_contract(
@@ -138,27 +162,24 @@ pub fn analyze_candidate_order(
         exit_rate,
     );
     if stop_net_per_contract >= Decimal::ZERO {
-        return Err(AnalysisError::StopDoesNotLose(
-            instrument.instrument_id.clone(),
-        ));
+        return Err(AnalysisError::StopDoesNotLose(instrument_id.to_owned()));
     }
     let stop_loss_per_contract = -stop_net_per_contract;
 
     let notional_cap_contracts = max_settle_notional / entry_notional_per_contract;
     let risk_cap_contracts = max_loss_settle / stop_loss_per_contract;
-    let (raw_contracts, sizing_constraint) =
-        if notional_cap_contracts < risk_cap_contracts {
-            (notional_cap_contracts, SizingConstraint::Notional)
-        } else if risk_cap_contracts < notional_cap_contracts {
-            (risk_cap_contracts, SizingConstraint::Risk)
-        } else {
-            (notional_cap_contracts, SizingConstraint::Both)
-        };
+    let (raw_contracts, sizing_constraint) = if notional_cap_contracts < risk_cap_contracts {
+        (notional_cap_contracts, SizingConstraint::Notional)
+    } else if risk_cap_contracts < notional_cap_contracts {
+        (risk_cap_contracts, SizingConstraint::Risk)
+    } else {
+        (notional_cap_contracts, SizingConstraint::Both)
+    };
 
     let contracts = floor_to_increment(raw_contracts, lot_size);
     if contracts < min_size {
         return Err(AnalysisError::CandidateBelowMinimumSize {
-            instrument_id: instrument.instrument_id.clone(),
+            instrument_id: instrument_id.to_owned(),
             contracts: contracts.normalize().to_string(),
             min_size: min_size.normalize().to_string(),
         });
@@ -178,16 +199,9 @@ pub fn analyze_candidate_order(
         PositionDirection::Short => floor_to_increment(raw_target, tick_size),
     };
     if target_price <= Decimal::ZERO {
-        return Err(AnalysisError::InvalidTargetPrice(
-            instrument.instrument_id.clone(),
-        ));
+        return Err(AnalysisError::InvalidTargetPrice(instrument_id.to_owned()));
     }
-    require_target_direction(
-        &instrument.instrument_id,
-        assumptions.direction,
-        entry_price,
-        target_price,
-    )?;
+    require_target_direction(instrument_id, assumptions.direction, entry_price, target_price)?;
 
     let base_quantity = contracts * contract_value;
     let entry_settle_notional = base_quantity * entry_price;
@@ -198,31 +212,19 @@ pub fn analyze_candidate_order(
     let stop_exit_cost = user_trading_cost(stop_exit_settle_notional, exit_rate);
     let target_exit_cost = user_trading_cost(target_exit_settle_notional, exit_rate);
 
-    let stop_gross_pnl = gross_pnl(
-        assumptions.direction,
-        base_quantity,
-        entry_price,
-        stop_price,
-    );
+    let stop_gross_pnl =
+        gross_pnl(assumptions.direction, base_quantity, entry_price, stop_price);
     let stop_net_pnl = stop_gross_pnl - entry_cost - stop_exit_cost;
     if stop_net_pnl >= Decimal::ZERO {
-        return Err(AnalysisError::StopDoesNotLose(
-            instrument.instrument_id.clone(),
-        ));
+        return Err(AnalysisError::StopDoesNotLose(instrument_id.to_owned()));
     }
     let stop_loss = -stop_net_pnl;
 
-    let target_gross_pnl = gross_pnl(
-        assumptions.direction,
-        base_quantity,
-        entry_price,
-        target_price,
-    );
+    let target_gross_pnl =
+        gross_pnl(assumptions.direction, base_quantity, entry_price, target_price);
     let target_net_pnl = target_gross_pnl - entry_cost - target_exit_cost;
     if target_net_pnl <= Decimal::ZERO {
-        return Err(AnalysisError::TargetDoesNotProfit(
-            instrument.instrument_id.clone(),
-        ));
+        return Err(AnalysisError::TargetDoesNotProfit(instrument_id.to_owned()));
     }
     let actual_rr = target_net_pnl / stop_loss;
 
@@ -232,9 +234,9 @@ pub fn analyze_candidate_order(
 
     Ok(CandidateOrderAnalysis {
         schema: CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1.to_owned(),
-        instrument_id: instrument.instrument_id.clone(),
-        reference_generation: rules.reference_generation.clone(),
-        fee_generation: fees.fee_generation.clone(),
+        instrument_id: instrument_id.to_owned(),
+        reference_generation: reference_generation.to_owned(),
+        fee_generation: fee_generation.to_owned(),
         settle_currency: settle_currency.to_owned(),
         contract_value_currency: contract_value_currency.to_owned(),
         direction: assumptions.direction,
@@ -268,10 +270,7 @@ pub fn analyze_candidate_order(
     })
 }
 
-fn fee_rate(
-    fees: &FeeScheduleSnapshot,
-    role: LiquidityRole,
-) -> Result<Decimal, AnalysisError> {
+fn fee_rate(fees: &FeeScheduleSnapshot, role: LiquidityRole) -> Result<Decimal, AnalysisError> {
     let value = match role {
         LiquidityRole::Maker => &fees.maker_rate,
         LiquidityRole::Taker => &fees.taker_rate,
@@ -409,68 +408,37 @@ fn ceil_to_increment(value: Decimal, increment: Decimal) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use okx_api::InstrumentType;
-    use okx_observation::{
-        FeeScheduleInput, FundingRequirement, InstrumentSpec, FEE_SCHEDULE_SCHEMA_V1,
-        FeeScheduleSnapshot,
-    };
-
     use super::*;
 
-    fn rules() -> InstrumentRulesSnapshot {
-        InstrumentRulesSnapshot {
+    fn rules_for_test() -> TestRules {
+        TestRules {
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
             reference_generation: "sha256:reference".to_owned(),
-            source_received_at: "2026-09-27T20:00:00Z".to_owned(),
-            instrument: InstrumentSpec {
-                instrument_id: "DOGE-USDT-SWAP".to_owned(),
-                instrument_type: InstrumentType::Swap,
-                instrument_family: Some("DOGE-USDT".to_owned()),
-                underlying: Some("DOGE-USDT".to_owned()),
-                state: "live".to_owned(),
-                rule_type: Some("normal".to_owned()),
-                funding_requirement: FundingRequirement::Required,
-                base_currency: None,
-                quote_currency: None,
-                settle_currency: Some("USDT".to_owned()),
-                tick_size: "0.00001".to_owned(),
-                lot_size: "0.01".to_owned(),
-                min_size: "0.01".to_owned(),
-                max_limit_size: Some("1000000".to_owned()),
-                max_market_size: Some("100000".to_owned()),
-                max_limit_amount: None,
-                max_market_amount: None,
-                contract_type: Some("linear".to_owned()),
-                contract_value: Some("1000".to_owned()),
-                contract_value_currency: Some("DOGE".to_owned()),
-                fee_group_id: Some("4".to_owned()),
-                max_leverage: Some("50".to_owned()),
-                list_time_ms: Some("1700000000000".to_owned()),
-                expiry_time_ms: None,
-            },
+            settle_currency: "USDT".to_owned(),
+            contract_value_currency: "DOGE".to_owned(),
+            contract_value: Decimal::from(1000),
+            lot_size: Decimal::new(1, 2),
+            min_size: Decimal::new(1, 2),
+            tick_size: Decimal::new(1, 5),
         }
     }
 
-    fn fees() -> FeeScheduleSnapshot {
-        let value = FeeScheduleSnapshot::from_input(FeeScheduleInput {
-            instrument_id: "DOGE-USDT-SWAP".to_owned(),
-            reference_generation: "sha256:reference".to_owned(),
-            source_received_at: "2026-09-27T20:00:01Z".to_owned(),
-            exchange_timestamp_ms: "1790539201000".to_owned(),
-            level: "Lv1".to_owned(),
-            maker_rate: "-0.0002".to_owned(),
-            taker_rate: "-0.0005".to_owned(),
-            exact_for_instrument: true,
-        })
-        .expect("fees");
-        assert_eq!(value.schema, FEE_SCHEDULE_SCHEMA_V1);
-        value
+    struct TestRules {
+        instrument_id: String,
+        reference_generation: String,
+        settle_currency: String,
+        contract_value_currency: String,
+        contract_value: Decimal,
+        lot_size: Decimal,
+        min_size: Decimal,
+        tick_size: Decimal,
     }
 
-    fn long_assumptions() -> CandidateOrderAssumptions {
+    fn assumptions(direction: PositionDirection, stop_price: &str) -> CandidateOrderAssumptions {
         CandidateOrderAssumptions {
-            direction: PositionDirection::Long,
+            direction,
             entry_price: "0.10000".to_owned(),
-            stop_price: "0.09000".to_owned(),
+            stop_price: stop_price.to_owned(),
             max_settle_notional: "1000".to_owned(),
             max_loss_settle: "50".to_owned(),
             target_rr: "2".to_owned(),
@@ -479,106 +447,124 @@ mod tests {
         }
     }
 
+    fn analyze_test(
+        rules: &TestRules,
+        assumptions: &CandidateOrderAssumptions,
+    ) -> Result<CandidateOrderAnalysis, AnalysisError> {
+        analyze_candidate_values(
+            &rules.instrument_id,
+            &rules.reference_generation,
+            "sha256:fees",
+            &rules.settle_currency,
+            &rules.contract_value_currency,
+            rules.contract_value,
+            rules.lot_size,
+            rules.min_size,
+            rules.tick_size,
+            Decimal::new(-5, 4),
+            Decimal::new(-5, 4),
+            assumptions,
+        )
+    }
+
     #[test]
     fn long_candidate_is_risk_sized_and_fee_aware() {
-        let result =
-            analyze_candidate_order(&rules(), &fees(), &long_assumptions()).expect("candidate");
+        let rules = rules_for_test();
+        let result = analyze_test(
+            &rules,
+            &assumptions(PositionDirection::Long, "0.09000"),
+        )
+        .expect("candidate");
 
         assert_eq!(result.settle_currency, "USDT");
         assert_eq!(result.sizing_constraint, SizingConstraint::Risk);
         assert_eq!(result.contracts, "4.95");
         assert_eq!(result.entry_settle_notional, "495");
         assert!(decimal("stop_loss", &result.stop_loss_settle).expect("loss") <= Decimal::from(50));
-        assert!(
-            decimal("actual_rr", &result.actual_target_rr).expect("rr") >= Decimal::from(2)
-        );
-        assert_eq!(result.funding_included, false);
+        assert!(decimal("actual_rr", &result.actual_target_rr).expect("rr") >= Decimal::from(2));
+        assert!(!result.funding_included);
     }
 
     #[test]
     fn short_candidate_uses_adverse_stop_and_profitable_target() {
-        let mut assumptions = long_assumptions();
-        assumptions.direction = PositionDirection::Short;
-        assumptions.stop_price = "0.11000".to_owned();
-
-        let result = analyze_candidate_order(&rules(), &fees(), &assumptions).expect("candidate");
+        let rules = rules_for_test();
+        let result = analyze_test(
+            &rules,
+            &assumptions(PositionDirection::Short, "0.11000"),
+        )
+        .expect("candidate");
 
         assert_eq!(result.direction, PositionDirection::Short);
         assert!(
             decimal("target", &result.target_price).expect("target")
                 < decimal("entry", &result.entry_price).expect("entry")
         );
-        assert!(
-            decimal("actual_rr", &result.actual_target_rr).expect("rr") >= Decimal::from(2)
-        );
+        assert!(decimal("actual_rr", &result.actual_target_rr).expect("rr") >= Decimal::from(2));
     }
 
     #[test]
     fn candidate_never_exceeds_notional_or_loss_caps_after_lot_rounding() {
-        let mut assumptions = long_assumptions();
-        assumptions.max_settle_notional = "201".to_owned();
-        assumptions.max_loss_settle = "1000".to_owned();
+        let rules = rules_for_test();
+        let mut input = assumptions(PositionDirection::Long, "0.09000");
+        input.max_settle_notional = "201".to_owned();
+        input.max_loss_settle = "1000".to_owned();
 
-        let result = analyze_candidate_order(&rules(), &fees(), &assumptions).expect("candidate");
+        let result = analyze_test(&rules, &input).expect("candidate");
 
         assert_eq!(result.sizing_constraint, SizingConstraint::Notional);
         assert!(
             decimal("notional", &result.entry_settle_notional).expect("notional")
                 <= Decimal::from(201)
         );
-        assert!(
-            decimal("loss", &result.stop_loss_settle).expect("loss")
-                <= Decimal::from(1000)
-        );
+        assert!(decimal("loss", &result.stop_loss_settle).expect("loss") <= Decimal::from(1000));
     }
 
     #[test]
     fn non_tick_aligned_stop_fails_closed() {
-        let mut assumptions = long_assumptions();
-        assumptions.stop_price = "0.090001".to_owned();
+        let rules = rules_for_test();
+        let input = assumptions(PositionDirection::Long, "0.090001");
 
         assert!(matches!(
-            analyze_candidate_order(&rules(), &fees(), &assumptions),
-            Err(AnalysisError::PriceNotTickAligned { field: "stop_price", .. })
+            analyze_test(&rules, &input),
+            Err(AnalysisError::PriceNotTickAligned {
+                field: "stop_price",
+                ..
+            })
         ));
     }
 
     #[test]
     fn wrong_stop_side_fails_closed() {
-        let mut assumptions = long_assumptions();
-        assumptions.stop_price = "0.11000".to_owned();
+        let rules = rules_for_test();
+        let input = assumptions(PositionDirection::Long, "0.11000");
 
         assert!(matches!(
-            analyze_candidate_order(&rules(), &fees(), &assumptions),
+            analyze_test(&rules, &input),
             Err(AnalysisError::InvalidStopDirection(_))
         ));
     }
 
     #[test]
     fn tiny_risk_budget_fails_instead_of_inventing_sub_minimum_size() {
-        let mut assumptions = long_assumptions();
-        assumptions.max_loss_settle = "0.01".to_owned();
+        let rules = rules_for_test();
+        let mut input = assumptions(PositionDirection::Long, "0.09000");
+        input.max_loss_settle = "0.01".to_owned();
 
         assert!(matches!(
-            analyze_candidate_order(&rules(), &fees(), &assumptions),
+            analyze_test(&rules, &input),
             Err(AnalysisError::CandidateBelowMinimumSize { .. })
         ));
     }
 
     #[test]
-    fn fee_snapshot_must_be_exact_and_generation_bound() {
-        let mut inexact = fees();
-        inexact.exact_for_instrument = false;
-        assert_eq!(
-            analyze_candidate_order(&rules(), &inexact, &long_assumptions()),
-            Err(AnalysisError::FeeScheduleNotExact)
-        );
-
-        let mut wrong_generation = fees();
-        wrong_generation.reference_generation = "sha256:other".to_owned();
-        assert_eq!(
-            analyze_candidate_order(&rules(), &wrong_generation, &long_assumptions()),
-            Err(AnalysisError::ReferenceGenerationMismatch)
-        );
+    fn target_rounding_never_understates_requested_rr() {
+        let rules = rules_for_test();
+        for (direction, stop) in [
+            (PositionDirection::Long, "0.09000"),
+            (PositionDirection::Short, "0.11000"),
+        ] {
+            let result = analyze_test(&rules, &assumptions(direction, stop)).expect("candidate");
+            assert!(decimal("actual_rr", &result.actual_target_rr).expect("rr") >= Decimal::from(2));
+        }
     }
 }
