@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, path::Path, time::Instant};
 
+use chrono::{DateTime, Utc};
 use okx_github::{
     GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCommentCursor, IssueCursorStore,
     IssuePollTelemetryStatus, IssuePollTelemetryStore, OWNER_USER_ID, REPOSITORY_ID,
@@ -118,7 +119,13 @@ impl GitHubMailboxClient {
                     true,
                 )?;
             }
-            self.record_poll_telemetry(fetch_latency, 0, checkpoint.cursor.as_ref(), None);
+            self.record_poll_telemetry(
+                fetch_latency,
+                0,
+                checkpoint.cursor.as_ref(),
+                None,
+                None,
+            );
             return Ok(0);
         }
 
@@ -127,6 +134,7 @@ impl GitHubMailboxClient {
         let mut processed = 0usize;
         let mut batch_complete = true;
         let mut last_terminal_request_id = last_terminal_request_id(&comments);
+        let mut last_request_latency_ms = None;
         let mailbox_telemetry = self.telemetry_for_query();
 
         for comment in &comments {
@@ -160,6 +168,7 @@ impl GitHubMailboxClient {
                         .post_issue_comment(self.issue_number, &serde_json::to_string(&response)?)
                         .await?;
                     last_terminal_request_id = Some(envelope.request_id.clone());
+                    last_request_latency_ms = request_latency_ms(&comment.created_at);
                     terminal_ids.insert(envelope.request_id);
                     processed += 1;
                 }
@@ -184,6 +193,7 @@ impl GitHubMailboxClient {
             comments.len(),
             effective_cursor,
             last_terminal_request_id.as_deref(),
+            last_request_latency_ms,
         );
 
         Ok(processed)
@@ -205,12 +215,14 @@ impl GitHubMailboxClient {
         comments_scanned: usize,
         cursor: Option<&IssueCommentCursor>,
         last_terminal_request_id: Option<&str>,
+        last_request_latency_ms: Option<u64>,
     ) {
         if let Err(error) = self.telemetry_store.record_success(
             fetch_latency,
             comments_scanned,
             cursor,
             last_terminal_request_id,
+            last_request_latency_ms,
         ) {
             eprintln!("mailbox telemetry update failed: {error}");
         }
@@ -248,8 +260,14 @@ fn last_terminal_request_id(comments: &[IssueComment]) -> Option<String> {
             envelope.direction == MailboxDirection::AgentToClient
                 && envelope.validate(MailboxDirection::AgentToClient).is_ok()
         })
-        .last()
+        .next_back()
         .map(|envelope| envelope.request_id)
+}
+
+fn request_latency_ms(created_at: &str) -> Option<u64> {
+    let created_at = DateTime::parse_from_rfc3339(created_at).ok()?;
+    let latency = Utc::now().signed_duration_since(created_at).num_milliseconds();
+    Some(latency.max(0) as u64)
 }
 
 fn terminal_request_ids(comments: &[IssueComment]) -> BTreeSet<String> {
@@ -361,6 +379,12 @@ mod tests {
                 id: 10,
             })
         );
+    }
+
+    #[test]
+    fn request_latency_is_non_negative_for_valid_timestamp() {
+        assert!(request_latency_ms("2026-09-27T00:00:00Z").is_some());
+        assert_eq!(request_latency_ms("not-a-timestamp"), None);
     }
 
     #[test]
