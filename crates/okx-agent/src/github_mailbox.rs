@@ -237,9 +237,11 @@ mod tests {
             .insert("req_0123456789abcdef".to_owned());
         checkpoint.ledger_initialized = true;
 
-        assert!(checkpoint
-            .terminal_request_ids
-            .contains("req_0123456789abcdef"));
+        assert!(
+            checkpoint
+                .terminal_request_ids
+                .contains("req_0123456789abcdef")
+        );
     }
 
     #[test]
