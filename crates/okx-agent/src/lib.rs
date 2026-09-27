@@ -1,3 +1,4 @@
+pub mod account_bootstrap;
 pub mod config;
 pub mod github_auth;
 pub mod github_mailbox;
