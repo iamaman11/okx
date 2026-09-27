@@ -113,6 +113,18 @@ ONE okx-agent
 
 Task Scheduler supervises the controller only. The Rust controller supervises the agent only.
 
+## Windows filesystem boundaries
+
+```text
+C:\okx          mutable canonical Git workspace
+C:\okx-control  installed controller + desired lifecycle state
+C:\okx-runtime  installed agent + runtime logs/staging
+```
+
+These are deliberately separate trust/lifecycle boundaries. Installed binaries must not execute from the mutable repository checkout.
+
+`C:\okx-upgrade` is not a canonical boundary. It is temporary staging left from an earlier one-time manual controller upgrade and is not referenced by normal Scheduler/controller/agent operation.
+
 ## Market-data evolution
 
 ### M1 — Reference Data
