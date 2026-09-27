@@ -57,7 +57,9 @@ fn strict_read_only_permissions(value: &str) -> Result<Vec<String>, AccountBoots
         .collect::<Vec<_>>();
 
     if permissions.is_empty()
-        || permissions.iter().any(|permission| *permission != "read_only")
+        || permissions
+            .iter()
+            .any(|permission| *permission != "read_only")
         || permissions.len() != 1
     {
         return Err(AccountBootstrapError::PermissionRejected);
