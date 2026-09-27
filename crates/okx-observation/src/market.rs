@@ -107,9 +107,9 @@ pub enum MarketError {
     #[error("instrument '{0}' has no underlying/index id in reference data")]
     MissingUnderlying(String),
 
-    #[error("{source} instrument mismatch: expected '{expected}', got '{actual}'")]
+    #[error("{origin} instrument mismatch: expected '{expected}', got '{actual}'")]
     InstrumentMismatch {
-        source: &'static str,
+        origin: &'static str,
         expected: String,
         actual: String,
     },
@@ -117,9 +117,9 @@ pub enum MarketError {
     #[error("index ticker mismatch: expected '{expected}', got '{actual}'")]
     IndexMismatch { expected: String, actual: String },
 
-    #[error("{source} is missing required field '{field}'")]
+    #[error("{origin} is missing required field '{field}'")]
     MissingField {
-        source: &'static str,
+        origin: &'static str,
         field: &'static str,
     },
 
@@ -257,7 +257,7 @@ impl MarketSnapshot {
 }
 
 fn require_instrument(
-    source: &'static str,
+    origin: &'static str,
     expected: &str,
     actual: &str,
 ) -> Result<(), MarketError> {
@@ -265,7 +265,7 @@ fn require_instrument(
         Ok(())
     } else {
         Err(MarketError::InstrumentMismatch {
-            source,
+            origin,
             expected: expected.to_owned(),
             actual: actual.to_owned(),
         })
@@ -273,12 +273,12 @@ fn require_instrument(
 }
 
 fn required(
-    source: &'static str,
+    origin: &'static str,
     field: &'static str,
     value: String,
 ) -> Result<String, MarketError> {
     if value.trim().is_empty() {
-        Err(MarketError::MissingField { source, field })
+        Err(MarketError::MissingField { origin, field })
     } else {
         Ok(value)
     }
