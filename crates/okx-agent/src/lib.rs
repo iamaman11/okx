@@ -3,6 +3,7 @@ pub mod github_auth;
 pub mod github_mailbox;
 pub mod identity;
 pub mod once;
+pub mod reference_bootstrap;
 pub mod runtime;
 
 use thiserror::Error;
@@ -20,6 +21,12 @@ pub enum AgentError {
 
     #[error("GitHub transport error: {0}")]
     Github(#[from] okx_github::GitHubError),
+
+    #[error("OKX API error: {0}")]
+    Okx(#[from] okx_api::OkxError),
+
+    #[error("reference data error: {0}")]
+    Reference(#[from] okx_observation::ReferenceError),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

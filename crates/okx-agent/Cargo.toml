@@ -14,7 +14,9 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.4"
+okx-api = { path = "../okx-api" }
 okx-github = { path = "../okx-github" }
+okx-observation = { path = "../okx-observation" }
 okx-protocol = { path = "../okx-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
