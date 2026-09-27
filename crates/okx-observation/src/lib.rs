@@ -1,4 +1,5 @@
 pub mod account;
+pub mod fee;
 pub mod history;
 pub mod market;
 pub mod order_book;
@@ -11,6 +12,7 @@ pub use account::{
     AccountPositionState, AccountSnapshot, AccountWsEvent, M4_REST_BOOTSTRAP_REASON,
     M4_REST_WS_CONVERGED_REASON, PendingOrderState,
 };
+pub use fee::{FEE_SCHEDULE_SCHEMA_V1, FeeScheduleError, FeeScheduleSnapshot};
 pub use history::{
     HistoryCandle, MARKET_HISTORY_SCHEMA_V1, MARKET_HISTORY_SOURCE_V1, MarketHistoryError,
     MarketHistorySnapshot,
