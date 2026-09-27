@@ -95,7 +95,7 @@ Authority: #16
 Not PASS:
 
 - [ ] R3 external network/GitHub-loss physical recovery;
-- [ ] R4 Windows reboot + sign-in physical recovery;
+- [x] R4 Windows reboot + sign-in physical recovery — PASS;
 - [ ] final no-duplicate count associated with those disruptive tests.
 
 This debt is intentionally visible. It does not invalidate the completed non-disruptive M3 acceptance, but remains open before final lifecycle closure.
