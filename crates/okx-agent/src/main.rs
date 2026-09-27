@@ -14,11 +14,12 @@ use okx_agent::{
     identity::{
         default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
     },
+    market_bootstrap::MarketBootstrapper,
     once::process_once_now,
     reference_bootstrap::bootstrap_reference,
     runtime::{run_mailbox_until_shutdown, run_until_shutdown},
 };
-use okx_api::{OkxEnvironment, Region};
+use okx_api::{OkxEnvironment, OkxPublicClient, Region};
 use okx_protocol::MailboxEnvelope;
 use zeroize::Zeroize;
 
@@ -108,9 +109,17 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let payload = read_input(input)?;
             let envelope: MailboxEnvelope = serde_json::from_str(&payload)?;
             let mut private_key = load_native_private_key(&config.key_id)?;
-            let reference = bootstrap_reference(environment).await?;
-            let response =
-                process_once_now(&envelope, &config.key_id, &private_key, Some(&reference));
+            let public_client = OkxPublicClient::new(environment)?;
+            let reference = bootstrap_reference(public_client.clone()).await?;
+            let market = MarketBootstrapper::new(public_client);
+            let response = process_once_now(
+                &envelope,
+                &config.key_id,
+                &private_key,
+                Some(&reference),
+                Some(&market),
+            )
+            .await;
             private_key.zeroize();
             println!("{}", serde_json::to_string_pretty(&response?)?);
         }
@@ -122,7 +131,9 @@ async fn run(cli: Cli) -> AgentResult<()> {
             if let Some(mailbox_issue) = mailbox_issue {
                 let token = load_native_github_token()?;
                 let mailbox = GitHubMailboxClient::new(mailbox_issue, token)?;
-                let reference = bootstrap_reference(environment).await?;
+                let public_client = OkxPublicClient::new(environment)?;
+                let reference = bootstrap_reference(public_client.clone()).await?;
+                let market = MarketBootstrapper::new(public_client);
                 eprintln!(
                     "reference registry ready generation={} instruments={}",
                     reference.generation().as_str(),
@@ -137,6 +148,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     poll_seconds,
                     &private_key,
                     &reference,
+                    &market,
                 )
                 .await;
                 private_key.zeroize();

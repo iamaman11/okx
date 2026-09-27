@@ -6,7 +6,10 @@ use okx_protocol::{MailboxDirection, MailboxEnvelope};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::{AgentError, AgentResult, identity::AgentIdentity, once::process_once_now};
+use crate::{
+    AgentError, AgentResult, identity::AgentIdentity, market_bootstrap::MarketBootstrapper,
+    once::process_once_now,
+};
 
 pub const GITHUB_MAILBOX_IDENTITY_SCHEMA_V1: &str = "okx.github-mailbox.identity/v1";
 
@@ -63,6 +66,7 @@ impl GitHubMailboxClient {
         expected_key_id: &str,
         agent_private_key: &[u8; 32],
         reference: &ReferenceRegistry,
+        market: &MarketBootstrapper,
     ) -> AgentResult<usize> {
         let mut comments = self.github.issue_comments(self.issue_number).await?;
         comments.sort_by_key(|comment| comment.id);
@@ -99,7 +103,10 @@ impl GitHubMailboxClient {
                 expected_key_id,
                 agent_private_key,
                 Some(reference),
-            ) {
+                Some(market),
+            )
+            .await
+            {
                 Ok(response) => {
                     self.github
                         .post_issue_comment(self.issue_number, &serde_json::to_string(&response)?)
