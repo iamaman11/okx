@@ -25,8 +25,8 @@ immutable snapshot
 ACCESS PLANE
 ChatGPT / CLI / UI
   -> typed Query API
-  -> encrypted mailbox now
-  -> MCP later
+  -> encrypted GitHub mailbox
+  -> canonical current access path
 ```
 
 ## Crate boundaries
