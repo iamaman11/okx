@@ -246,16 +246,15 @@ impl GitHubMailboxClient {
 }
 
 fn last_terminal_request_id(comments: &[IssueComment]) -> Option<String> {
-    comments
-        .iter()
-        .filter(|comment| comment.user_id == OWNER_USER_ID)
-        .filter_map(|comment| serde_json::from_str::<MailboxEnvelope>(&comment.body).ok())
-        .filter(|envelope| {
-            envelope.direction == MailboxDirection::AgentToClient
-                && envelope.validate(MailboxDirection::AgentToClient).is_ok()
-        })
-        .next_back()
-        .map(|envelope| envelope.request_id)
+    comments.iter().rev().find_map(|comment| {
+        if comment.user_id != OWNER_USER_ID {
+            return None;
+        }
+        let envelope = serde_json::from_str::<MailboxEnvelope>(&comment.body).ok()?;
+        (envelope.direction == MailboxDirection::AgentToClient
+            && envelope.validate(MailboxDirection::AgentToClient).is_ok())
+        .then_some(envelope.request_id)
+    })
 }
 
 fn request_latency_ms(created_at: &str) -> Option<u64> {
