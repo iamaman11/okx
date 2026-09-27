@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
-    sync::{RwLock, mpsc, oneshot, watch},
+    sync::{RwLock, mpsc, watch},
     time::{Instant, interval, sleep_until},
 };
 
@@ -88,10 +88,7 @@ pub struct PublicWsCoordinator {
 
 #[derive(Debug)]
 enum CoordinatorCommand {
-    DemandInstrument {
-        instrument_id: String,
-        applied: oneshot::Sender<()>,
-    },
+    DemandInstrument(String),
 }
 
 #[derive(Debug)]
@@ -124,6 +121,9 @@ pub enum PublicRuntimeError {
 
     #[error("public runtime command channel is closed")]
     CommandChannelClosed,
+
+    #[error("public runtime command queue is full")]
+    CommandQueueFull,
 
     #[error("system clock is before Unix epoch")]
     ClockBeforeEpoch,
@@ -326,17 +326,30 @@ impl PublicWsHandle {
         &self,
         instrument_id: impl Into<String>,
     ) -> Result<(), PublicRuntimeError> {
-        let (applied, observed) = oneshot::channel();
+        let instrument_id = instrument_id.into();
+        if self.state.read().await.markets.contains_key(&instrument_id) {
+            return Ok(());
+        }
+
         self.commands
-            .send(CoordinatorCommand::DemandInstrument {
-                instrument_id: instrument_id.into(),
-                applied,
-            })
-            .await
-            .map_err(|_| PublicRuntimeError::CommandChannelClosed)?;
-        observed
-            .await
-            .map_err(|_| PublicRuntimeError::CommandChannelClosed)
+            .try_send(CoordinatorCommand::DemandInstrument(instrument_id.clone()))
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Closed(_) => PublicRuntimeError::CommandChannelClosed,
+                mpsc::error::TrySendError::Full(_) => PublicRuntimeError::CommandQueueFull,
+            })?;
+
+        let mut state = self.state.write().await;
+        if state.reference.get(&instrument_id).is_some()
+            && !state.markets.contains_key(&instrument_id)
+        {
+            let generation = state.generation;
+            let reference_generation = state.reference.generation().as_str().to_owned();
+            state.markets.insert(
+                instrument_id.clone(),
+                MarketStreamState::new(instrument_id, generation, reference_generation),
+            );
+        }
+        Ok(())
     }
 
     pub async fn reference_snapshot(&self) -> ReferenceRegistry {
@@ -648,10 +661,7 @@ impl PublicWsCoordinator {
 
     async fn apply_command(&mut self, command: CoordinatorCommand) {
         match command {
-            CoordinatorCommand::DemandInstrument {
-                instrument_id,
-                applied,
-            } => {
+            CoordinatorCommand::DemandInstrument(instrument_id) => {
                 self.demands.insert(instrument_id.clone());
                 let mut state = self.state.write().await;
 
@@ -671,7 +681,6 @@ impl PublicWsCoordinator {
                         );
                     }
                 }
-                let _ = applied.send(());
             }
         }
     }
