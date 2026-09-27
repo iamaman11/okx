@@ -2,16 +2,17 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_analysis::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
-    CandidateOrderAssumptions, LiquidityRole as AnalysisLiquidityRole, PositionDirection,
-    analyze_account_risk, analyze_candidate_order,
+    CandidateOrderAssumptions, HISTORY_BEHAVIOR_SCHEMA_V1,
+    LiquidityRole as AnalysisLiquidityRole, PositionDirection, analyze_account_risk,
+    analyze_candidate_order, analyze_history_behavior,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountError, AccountSnapshot,
     INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
     MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
-    MarketReadiness, MarketSnapshot, ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1,
-    SnapshotQualityReport,
+    MarketHistorySnapshot, MarketReadiness, MarketSnapshot, ReferenceRegistry,
+    SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
 };
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
@@ -531,46 +532,57 @@ async fn response_for(
             bar,
             limit,
         } => {
-            let Some(market) = context.market_fallback else {
-                return Ok(unavailable(request, generated_at));
-            };
-            let reference = if let Some(public_ws) = context.public_ws {
-                public_ws.reference_snapshot().await
-            } else if let Some(reference) = context.standalone_reference {
-                reference.clone()
-            } else {
-                return Ok(unavailable(request, generated_at));
-            };
-
-            let requested_limit = limit.unwrap_or(100);
-            match market
-                .history(&reference, instrument, bar, requested_limit)
-                .await
-            {
-                Ok(result) => {
-                    let all_confirmed = result.all_confirmed;
-                    Ok(AgentResponse {
-                        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-                        request_id: request.request_id.clone(),
-                        status: AgentResponseStatus::Completed,
-                        generated_at: generated_at.to_owned(),
-                        quality: if all_confirmed {
-                            DataQuality::Fresh
-                        } else {
-                            DataQuality::Degraded
-                        },
-                        result_schema: Some(MARKET_HISTORY_SCHEMA_V1.to_owned()),
-                        result: Some(serde_json::to_value(result)?),
-                        failure: None,
-                        warnings: if all_confirmed {
-                            Vec::new()
-                        } else {
-                            vec![MARKET_HISTORY_UNCONFIRMED_WARNING.to_owned()]
-                        },
-                    })
+            let assembled =
+                match assemble_market_history(context, instrument, bar, limit.unwrap_or(100)).await {
+                    Ok(Some(value)) => value,
+                    Ok(None) => return Ok(unavailable(request, generated_at)),
+                    Err(error) => return Ok(market_failure(request, generated_at, error)),
+                };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: assembled.quality,
+                result_schema: Some(MARKET_HISTORY_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(assembled.snapshot)?),
+                failure: None,
+                warnings: assembled.warnings,
+            })
+        }
+        AgentOperation::HistoryBehavior {
+            instrument,
+            bar,
+            limit,
+        } => {
+            let assembled =
+                match assemble_market_history(context, instrument, bar, limit.unwrap_or(100)).await {
+                    Ok(Some(value)) => value,
+                    Ok(None) => return Ok(unavailable(request, generated_at)),
+                    Err(error) => return Ok(market_failure(request, generated_at, error)),
+                };
+            let result = match analyze_history_behavior(&assembled.snapshot) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(analysis_failure(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        error,
+                    ));
                 }
-                Err(error) => Ok(market_failure(request, generated_at, error)),
-            }
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: assembled.quality,
+                result_schema: Some(HISTORY_BEHAVIOR_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(result)?),
+                failure: None,
+                warnings: assembled.warnings,
+            })
         }
         AgentOperation::AccountSnapshot => {
             let assembled = match assemble_account_snapshot(context).await {
@@ -769,6 +781,48 @@ async fn response_for(
             }
         }
     }
+}
+
+struct AssembledMarketHistory {
+    snapshot: MarketHistorySnapshot,
+    quality: DataQuality,
+    warnings: Vec<String>,
+}
+
+async fn assemble_market_history(
+    context: ObservationQueryContext<'_>,
+    instrument: &str,
+    bar: &str,
+    requested_limit: u16,
+) -> Result<Option<AssembledMarketHistory>, MarketBootstrapError> {
+    let Some(market) = context.market_fallback else {
+        return Ok(None);
+    };
+    let reference = if let Some(public_ws) = context.public_ws {
+        public_ws.reference_snapshot().await
+    } else if let Some(reference) = context.standalone_reference {
+        reference.clone()
+    } else {
+        return Ok(None);
+    };
+
+    let snapshot = market
+        .history(&reference, instrument, bar, requested_limit)
+        .await?;
+    let all_confirmed = snapshot.all_confirmed;
+    Ok(Some(AssembledMarketHistory {
+        snapshot,
+        quality: if all_confirmed {
+            DataQuality::Fresh
+        } else {
+            DataQuality::Degraded
+        },
+        warnings: if all_confirmed {
+            Vec::new()
+        } else {
+            vec![MARKET_HISTORY_UNCONFIRMED_WARNING.to_owned()]
+        },
+    }))
 }
 
 struct AssembledAccountSnapshot {
