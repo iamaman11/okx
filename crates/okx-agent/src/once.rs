@@ -7,7 +7,7 @@ use okx_analysis::{
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
-    ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot,
+    ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountError, AccountSnapshot,
     INSTRUMENT_RULES_SCHEMA_V1,
     INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1,
     MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError, MarketReadiness, MarketSnapshot,
@@ -760,23 +760,180 @@ async fn response_for(
     }
 }
 
-fn account_rest_response(
+struct AssembledAccountSnapshot {
+    snapshot: AccountSnapshot,
+    quality: DataQuality,
+    result_schema: &'static str,
+    warnings: Vec<String>,
+}
+
+enum AccountQueryError {
+    CredentialUnavailable,
+    Bootstrap(AccountBootstrapError),
+    Convergence(AccountError),
+}
+
+async fn assemble_account_snapshot(
+    context: ObservationQueryContext<'_>,
+) -> Result<AssembledAccountSnapshot, AccountQueryError> {
+    let account = context
+        .account_fallback
+        .ok_or(AccountQueryError::CredentialUnavailable)?;
+    let convergence_cursor = match context.private_ws {
+        Some(private_ws) => private_ws.convergence_cursor().await.ok(),
+        None => None,
+    };
+    let rest = account
+        .snapshot()
+        .await
+        .map_err(AccountQueryError::Bootstrap)?;
+
+    if let (Some(private_ws), Some(cursor)) = (context.private_ws, convergence_cursor) {
+        match private_ws.convergence_window(cursor).await {
+            Ok(window) => {
+                if let (Some(connection_fingerprint), Some(last_inbound_ms)) = (
+                    window.status.connection_id_fingerprint.as_deref(),
+                    window.status.last_inbound_ms,
+                ) {
+                    let snapshot = rest
+                        .converge_private_ws(
+                            window.generation,
+                            connection_fingerprint,
+                            last_inbound_ms,
+                            &window.events,
+                        )
+                        .map_err(AccountQueryError::Convergence)?;
+                    return Ok(AssembledAccountSnapshot {
+                        snapshot,
+                        quality: DataQuality::Fresh,
+                        result_schema: ACCOUNT_SNAPSHOT_SCHEMA_V2,
+                        warnings: Vec::new(),
+                    });
+                }
+            }
+            Err(PrivateConvergenceError::GenerationChanged) => {
+                return Ok(AssembledAccountSnapshot {
+                    snapshot: rest,
+                    quality: DataQuality::Degraded,
+                    result_schema: ACCOUNT_SNAPSHOT_SCHEMA_V1,
+                    warnings: vec![ACCOUNT_WS_GENERATION_CHANGED_WARNING.to_owned()],
+                });
+            }
+            Err(PrivateConvergenceError::JournalGap) => {
+                return Ok(AssembledAccountSnapshot {
+                    snapshot: rest,
+                    quality: DataQuality::Degraded,
+                    result_schema: ACCOUNT_SNAPSHOT_SCHEMA_V1,
+                    warnings: vec![ACCOUNT_WS_JOURNAL_GAP_WARNING.to_owned()],
+                });
+            }
+            Err(PrivateConvergenceError::NotReady) => {}
+        }
+    }
+
+    Ok(AssembledAccountSnapshot {
+        snapshot: rest,
+        quality: DataQuality::Degraded,
+        result_schema: ACCOUNT_SNAPSHOT_SCHEMA_V1,
+        warnings: vec![ACCOUNT_REST_BOOTSTRAP_WARNING.to_owned()],
+    })
+}
+
+fn account_query_failure(
     request: &AgentRequest,
     generated_at: &str,
-    result: okx_observation::AccountSnapshot,
-    warning: &str,
-) -> AgentResult<AgentResponse> {
-    Ok(AgentResponse {
-        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-        request_id: request.request_id.clone(),
-        status: AgentResponseStatus::Completed,
-        generated_at: generated_at.to_owned(),
-        quality: DataQuality::Degraded,
-        result_schema: Some(ACCOUNT_SNAPSHOT_SCHEMA_V1.to_owned()),
-        result: Some(serde_json::to_value(result)?),
-        failure: None,
-        warnings: vec![warning.to_owned()],
-    })
+    error: AccountQueryError,
+) -> AgentResponse {
+    match error {
+        AccountQueryError::CredentialUnavailable => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE,
+            "OKX observer credential is not provisioned in native secret storage".to_owned(),
+            false,
+        ),
+        AccountQueryError::Bootstrap(error) => account_failure(request, generated_at, error),
+        AccountQueryError::Convergence(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE,
+            error.to_string(),
+            false,
+        ),
+    }
+}
+
+fn fee_schedule_failure(
+    request: &AgentRequest,
+    generated_at: &str,
+    error: FeeScheduleBootstrapError,
+) -> AgentResponse {
+    match error {
+        FeeScheduleBootstrapError::PermissionRejected => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE,
+            "OKX observer API key must have read_only permission only".to_owned(),
+            false,
+        ),
+        FeeScheduleBootstrapError::Api(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE,
+            error.to_string(),
+            true,
+        ),
+        FeeScheduleBootstrapError::ReferenceIncomplete(field) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE,
+            format!("instrument reference is missing required fee selector '{field}'"),
+            false,
+        ),
+        FeeScheduleBootstrapError::ResponseInconsistent(message) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE,
+            message,
+            true,
+        ),
+        FeeScheduleBootstrapError::Normalize(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ANALYSIS_INPUT_INCONSISTENT_CODE,
+            error.to_string(),
+            false,
+        ),
+    }
+}
+
+fn analysis_failure(
+    request: &AgentRequest,
+    generated_at: &str,
+    error: AnalysisError,
+) -> AgentResponse {
+    failure_response(
+        request,
+        generated_at,
+        AgentResponseStatus::Rejected,
+        ANALYSIS_INPUT_INCONSISTENT_CODE,
+        error.to_string(),
+        false,
+    )
+}
+
+const fn analysis_liquidity_role(role: ProtocolLiquidityRole) -> AnalysisLiquidityRole {
+    match role {
+        ProtocolLiquidityRole::Maker => AnalysisLiquidityRole::Maker,
+        ProtocolLiquidityRole::Taker => AnalysisLiquidityRole::Taker,
+    }
 }
 
 fn data_quality(quality: MarketReadiness) -> DataQuality {
