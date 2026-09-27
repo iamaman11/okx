@@ -6,8 +6,18 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const ACCOUNT_SNAPSHOT_SCHEMA_V1: &str = "okx.account-snapshot/v1";
+pub const ACCOUNT_SNAPSHOT_SCHEMA_V2: &str = "okx.account-snapshot/v2";
 pub const ACCOUNT_REST_SOURCE_V1: &str = "okx_private_rest_bootstrap";
+pub const ACCOUNT_CONVERGED_SOURCE_V2: &str = "okx_private_rest_plus_ws";
 pub const M4_REST_BOOTSTRAP_REASON: &str = "M4_PRIVATE_REST_BOOTSTRAP_ONLY";
+pub const M4_REST_WS_CONVERGED_REASON: &str = "M4_PRIVATE_REST_WS_CONVERGED";
+
+#[derive(Debug, Clone)]
+pub enum AccountWsEvent {
+    Account(Vec<BalanceSnapshot>),
+    Positions(Vec<Position>),
+    Orders(Vec<PendingOrder>),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +101,12 @@ pub struct AccountSnapshot {
     pub account_generation: String,
     pub quality_reason: String,
     pub private_ws_connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_ws_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_ws_last_inbound_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_ws_events_applied: Option<u64>,
     pub account_level: String,
     pub position_mode: String,
     pub account_type: String,
@@ -133,6 +149,9 @@ pub enum AccountError {
     #[error("pending order reduceOnly value '{0}' is invalid")]
     InvalidReduceOnly(String),
 
+    #[error("private account timestamp '{field}' is invalid: '{value}'")]
+    InvalidTimestamp { field: &'static str, value: String },
+
     #[error("failed to serialize normalized account snapshot: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -157,106 +176,11 @@ impl AccountSnapshot {
         let uid = required_config("uid", config.uid)?;
         let account_uid_fingerprint = format!("{:x}", Sha256::digest(uid.as_bytes()));
 
-        let mut balance_currencies = BTreeSet::new();
-        let mut details = Vec::with_capacity(balance.details.len());
-        for detail in balance.details {
-            let currency = required_balance_detail("ccy", detail.ccy)?;
-            if !balance_currencies.insert(currency.clone()) {
-                return Err(AccountError::DuplicateBalanceCurrency(currency));
-            }
-            details.push(AccountBalanceDetail {
-                currency,
-                equity: required_balance_detail("eq", detail.equity)?,
-                cash_balance: optional(detail.cash_balance),
-                available_equity: optional(detail.available_equity),
-                available_balance: optional(detail.available_balance),
-                frozen_balance: optional(detail.frozen_balance),
-                equity_usd: optional(detail.equity_usd),
-                unrealized_pnl: optional(detail.unrealized_pnl),
-                update_time_ms: optional(detail.update_time),
-            });
-        }
-        details.sort_by(|a, b| a.currency.cmp(&b.currency));
+        let balance = normalize_balance(balance)?;
 
-        let balance = AccountBalanceState {
-            total_equity_usd: required_balance("totalEq", balance.total_equity)?,
-            adjusted_equity_usd: optional(balance.adjusted_equity),
-            isolated_equity_usd: optional(balance.isolated_equity),
-            initial_margin_requirement_usd: optional(balance.initial_margin_requirement),
-            maintenance_margin_requirement_usd: optional(balance.maintenance_margin_requirement),
-            margin_ratio: optional(balance.margin_ratio),
-            notional_usd: optional(balance.notional_usd),
-            update_time_ms: optional(balance.update_time),
-            details,
-        };
+        let normalized_positions = normalize_positions(positions)?;
 
-        let mut position_ids = BTreeSet::new();
-        let mut normalized_positions = Vec::with_capacity(positions.len());
-        for position in positions {
-            let instrument_id = required_position("instId", position.instrument_id)?;
-            let position_side = required_position("posSide", position.position_side)?;
-            let margin_mode = required_position("mgnMode", position.margin_mode)?;
-            let identity = format!("{instrument_id}|{position_side}|{margin_mode}");
-            if !position_ids.insert(identity.clone()) {
-                return Err(AccountError::DuplicatePosition(identity));
-            }
-            normalized_positions.push(AccountPositionState {
-                instrument_type: required_position("instType", position.instrument_type)?,
-                instrument_id,
-                position: required_position("pos", position.pos)?,
-                position_side,
-                margin_mode,
-                average_price: optional(position.average_price),
-                mark_price: optional(position.mark_price),
-                liquidation_price: optional(position.liquidation_price),
-                unrealized_pnl: optional(position.unrealized_pnl),
-                unrealized_pnl_ratio: optional(position.unrealized_pnl_ratio),
-                leverage: optional(position.lever),
-                margin: optional(position.margin),
-                initial_margin_requirement: optional(position.initial_margin_requirement),
-                maintenance_margin_requirement: optional(position.maintenance_margin_requirement),
-                margin_ratio: optional(position.margin_ratio),
-                notional_usd: optional(position.notional_usd),
-                margin_currency: optional(position.ccy),
-                creation_time_ms: optional(position.creation_time),
-                update_time_ms: optional(position.update_time),
-            });
-        }
-        normalized_positions.sort_by(|a, b| {
-            (&a.instrument_id, &a.position_side, &a.margin_mode).cmp(&(
-                &b.instrument_id,
-                &b.position_side,
-                &b.margin_mode,
-            ))
-        });
-
-        let mut order_ids = BTreeSet::new();
-        let mut normalized_orders = Vec::with_capacity(pending_orders.len());
-        for order in pending_orders {
-            let order_id = required_order("ordId", order.order_id)?;
-            if !order_ids.insert(order_id.clone()) {
-                return Err(AccountError::DuplicateOrder(order_id));
-            }
-            normalized_orders.push(PendingOrderState {
-                order_id,
-                client_order_id: optional(order.client_order_id),
-                instrument_type: required_order("instType", order.instrument_type)?,
-                instrument_id: required_order("instId", order.instrument_id)?,
-                side: required_order("side", order.side)?,
-                position_side: optional(order.position_side),
-                trade_mode: required_order("tdMode", order.trade_mode)?,
-                order_type: required_order("ordType", order.order_type)?,
-                price: optional(order.px),
-                size: required_order("sz", order.sz)?,
-                accumulated_fill_size: required_order("accFillSz", order.accumulated_fill_size)?,
-                average_fill_price: optional(order.average_fill_price),
-                state: required_order("state", order.state)?,
-                reduce_only: parse_optional_bool(order.reduce_only)?,
-                creation_time_ms: required_order("cTime", order.creation_time)?,
-                update_time_ms: required_order("uTime", order.update_time)?,
-            });
-        }
-        normalized_orders.sort_by(|a, b| a.order_id.cmp(&b.order_id));
+        let normalized_orders = normalize_orders(pending_orders)?;
 
         let mut permissions = api_key_permissions;
         permissions.sort();
@@ -269,6 +193,9 @@ impl AccountSnapshot {
             account_generation: String::new(),
             quality_reason: M4_REST_BOOTSTRAP_REASON.to_owned(),
             private_ws_connected: false,
+            private_ws_generation: None,
+            private_ws_last_inbound_ms: None,
+            private_ws_events_applied: None,
             account_level,
             position_mode,
             account_type,
@@ -281,6 +208,302 @@ impl AccountSnapshot {
         snapshot.account_generation = generation_for(&snapshot)?;
         Ok(snapshot)
     }
+
+    pub fn converge_private_ws(
+        mut self,
+        private_ws_generation: u64,
+        private_ws_last_inbound_ms: u64,
+        events: &[AccountWsEvent],
+    ) -> Result<Self, AccountError> {
+        for event in events {
+            match event {
+                AccountWsEvent::Account(updates) => {
+                    for update in updates {
+                        self.apply_balance_update(update.clone())?;
+                    }
+                }
+                AccountWsEvent::Positions(updates) => {
+                    for update in updates {
+                        self.apply_position_update(update.clone())?;
+                    }
+                }
+                AccountWsEvent::Orders(updates) => {
+                    for update in updates {
+                        self.apply_order_update(update.clone())?;
+                    }
+                }
+            }
+        }
+
+        self.schema = ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned();
+        self.source = ACCOUNT_CONVERGED_SOURCE_V2.to_owned();
+        self.quality_reason = M4_REST_WS_CONVERGED_REASON.to_owned();
+        self.private_ws_connected = true;
+        self.private_ws_generation = Some(private_ws_generation);
+        self.private_ws_last_inbound_ms = Some(private_ws_last_inbound_ms);
+        self.private_ws_events_applied = Some(events.len() as u64);
+        self.positions.sort_by(position_sort);
+        self.pending_orders.sort_by(|a, b| a.order_id.cmp(&b.order_id));
+        self.balance.details.sort_by(|a, b| a.currency.cmp(&b.currency));
+        self.account_generation = generation_for(&self)?;
+        Ok(self)
+    }
+
+    fn apply_balance_update(&mut self, update: BalanceSnapshot) -> Result<(), AccountError> {
+        let incoming = normalize_balance(update)?;
+        if timestamp_is_newer_or_equal(
+            incoming.update_time_ms.as_deref(),
+            self.balance.update_time_ms.as_deref(),
+            "balance.uTime",
+        )? {
+            let existing_details = std::mem::take(&mut self.balance.details);
+            self.balance = AccountBalanceState {
+                details: existing_details,
+                ..incoming.clone()
+            };
+        }
+
+        for detail in incoming.details {
+            match self
+                .balance
+                .details
+                .iter()
+                .position(|current| current.currency == detail.currency)
+            {
+                Some(index)
+                    if timestamp_is_newer_or_equal(
+                        detail.update_time_ms.as_deref(),
+                        self.balance.details[index].update_time_ms.as_deref(),
+                        "balance.details.uTime",
+                    )? =>
+                {
+                    self.balance.details[index] = detail;
+                }
+                Some(_) => {}
+                None => self.balance.details.push(detail),
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_position_update(&mut self, update: Position) -> Result<(), AccountError> {
+        let incoming = normalize_position(update)?;
+        required_event_timestamp(incoming.update_time_ms.as_deref(), "position.uTime")?;
+        let identity = position_identity(&incoming);
+
+        let existing = self
+            .positions
+            .iter()
+            .position(|current| position_identity(current) == identity);
+
+        if let Some(index) = existing {
+            if !timestamp_is_newer_or_equal(
+                incoming.update_time_ms.as_deref(),
+                self.positions[index].update_time_ms.as_deref(),
+                "position.uTime",
+            )? {
+                return Ok(());
+            }
+            if is_zero_decimal_text(&incoming.position) {
+                self.positions.remove(index);
+            } else {
+                self.positions[index] = incoming;
+            }
+        } else if !is_zero_decimal_text(&incoming.position) {
+            self.positions.push(incoming);
+        }
+        Ok(())
+    }
+
+    fn apply_order_update(&mut self, update: PendingOrder) -> Result<(), AccountError> {
+        let incoming = normalize_order(update)?;
+        required_event_timestamp(Some(incoming.update_time_ms.as_str()), "order.uTime")?;
+
+        let existing = self
+            .pending_orders
+            .iter()
+            .position(|current| current.order_id == incoming.order_id);
+
+        if let Some(index) = existing {
+            if !timestamp_is_newer_or_equal(
+                Some(incoming.update_time_ms.as_str()),
+                Some(self.pending_orders[index].update_time_ms.as_str()),
+                "order.uTime",
+            )? {
+                return Ok(());
+            }
+            if is_terminal_order_state(&incoming.state) {
+                self.pending_orders.remove(index);
+            } else {
+                self.pending_orders[index] = incoming;
+            }
+        } else if !is_terminal_order_state(&incoming.state) {
+            self.pending_orders.push(incoming);
+        }
+        Ok(())
+    }
+}
+
+fn normalize_balance(balance: BalanceSnapshot) -> Result<AccountBalanceState, AccountError> {
+    let mut balance_currencies = BTreeSet::new();
+    let mut details = Vec::with_capacity(balance.details.len());
+    for detail in balance.details {
+        let currency = required_balance_detail("ccy", detail.ccy)?;
+        if !balance_currencies.insert(currency.clone()) {
+            return Err(AccountError::DuplicateBalanceCurrency(currency));
+        }
+        details.push(AccountBalanceDetail {
+            currency,
+            equity: required_balance_detail("eq", detail.equity)?,
+            cash_balance: optional(detail.cash_balance),
+            available_equity: optional(detail.available_equity),
+            available_balance: optional(detail.available_balance),
+            frozen_balance: optional(detail.frozen_balance),
+            equity_usd: optional(detail.equity_usd),
+            unrealized_pnl: optional(detail.unrealized_pnl),
+            update_time_ms: optional(detail.update_time),
+        });
+    }
+    details.sort_by(|a, b| a.currency.cmp(&b.currency));
+
+    Ok(AccountBalanceState {
+        total_equity_usd: required_balance("totalEq", balance.total_equity)?,
+        adjusted_equity_usd: optional(balance.adjusted_equity),
+        isolated_equity_usd: optional(balance.isolated_equity),
+        initial_margin_requirement_usd: optional(balance.initial_margin_requirement),
+        maintenance_margin_requirement_usd: optional(balance.maintenance_margin_requirement),
+        margin_ratio: optional(balance.margin_ratio),
+        notional_usd: optional(balance.notional_usd),
+        update_time_ms: optional(balance.update_time),
+        details,
+    })
+}
+
+fn normalize_positions(positions: Vec<Position>) -> Result<Vec<AccountPositionState>, AccountError> {
+    let mut position_ids = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(positions.len());
+    for position in positions {
+        let position = normalize_position(position)?;
+        let identity = position_identity(&position);
+        if !position_ids.insert(identity.clone()) {
+            return Err(AccountError::DuplicatePosition(identity));
+        }
+        normalized.push(position);
+    }
+    normalized.sort_by(position_sort);
+    Ok(normalized)
+}
+
+fn normalize_position(position: Position) -> Result<AccountPositionState, AccountError> {
+    Ok(AccountPositionState {
+        instrument_type: required_position("instType", position.instrument_type)?,
+        instrument_id: required_position("instId", position.instrument_id)?,
+        position: required_position("pos", position.pos)?,
+        position_side: required_position("posSide", position.position_side)?,
+        margin_mode: required_position("mgnMode", position.margin_mode)?,
+        average_price: optional(position.average_price),
+        mark_price: optional(position.mark_price),
+        liquidation_price: optional(position.liquidation_price),
+        unrealized_pnl: optional(position.unrealized_pnl),
+        unrealized_pnl_ratio: optional(position.unrealized_pnl_ratio),
+        leverage: optional(position.lever),
+        margin: optional(position.margin),
+        initial_margin_requirement: optional(position.initial_margin_requirement),
+        maintenance_margin_requirement: optional(position.maintenance_margin_requirement),
+        margin_ratio: optional(position.margin_ratio),
+        notional_usd: optional(position.notional_usd),
+        margin_currency: optional(position.ccy),
+        creation_time_ms: optional(position.creation_time),
+        update_time_ms: optional(position.update_time),
+    })
+}
+
+fn normalize_orders(orders: Vec<PendingOrder>) -> Result<Vec<PendingOrderState>, AccountError> {
+    let mut order_ids = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(orders.len());
+    for order in orders {
+        let order = normalize_order(order)?;
+        if !order_ids.insert(order.order_id.clone()) {
+            return Err(AccountError::DuplicateOrder(order.order_id));
+        }
+        normalized.push(order);
+    }
+    normalized.sort_by(|a, b| a.order_id.cmp(&b.order_id));
+    Ok(normalized)
+}
+
+fn normalize_order(order: PendingOrder) -> Result<PendingOrderState, AccountError> {
+    Ok(PendingOrderState {
+        order_id: required_order("ordId", order.order_id)?,
+        client_order_id: optional(order.client_order_id),
+        instrument_type: required_order("instType", order.instrument_type)?,
+        instrument_id: required_order("instId", order.instrument_id)?,
+        side: required_order("side", order.side)?,
+        position_side: optional(order.position_side),
+        trade_mode: required_order("tdMode", order.trade_mode)?,
+        order_type: required_order("ordType", order.order_type)?,
+        price: optional(order.px),
+        size: required_order("sz", order.sz)?,
+        accumulated_fill_size: required_order("accFillSz", order.accumulated_fill_size)?,
+        average_fill_price: optional(order.average_fill_price),
+        state: required_order("state", order.state)?,
+        reduce_only: parse_optional_bool(order.reduce_only)?,
+        creation_time_ms: required_order("cTime", order.creation_time)?,
+        update_time_ms: required_order("uTime", order.update_time)?,
+    })
+}
+
+fn position_identity(position: &AccountPositionState) -> String {
+    format!(
+        "{}|{}|{}",
+        position.instrument_id, position.position_side, position.margin_mode
+    )
+}
+
+fn position_sort(a: &AccountPositionState, b: &AccountPositionState) -> std::cmp::Ordering {
+    (&a.instrument_id, &a.position_side, &a.margin_mode)
+        .cmp(&(&b.instrument_id, &b.position_side, &b.margin_mode))
+}
+
+fn required_event_timestamp(value: Option<&str>, field: &'static str) -> Result<u64, AccountError> {
+    let value = value.unwrap_or_default();
+    value.parse::<u64>().map_err(|_| AccountError::InvalidTimestamp {
+        field,
+        value: value.to_owned(),
+    })
+}
+
+fn timestamp_is_newer_or_equal(
+    incoming: Option<&str>,
+    current: Option<&str>,
+    field: &'static str,
+) -> Result<bool, AccountError> {
+    let incoming = required_event_timestamp(incoming, field)?;
+    match current {
+        Some(current) if !current.is_empty() => {
+            let current = required_event_timestamp(Some(current), field)?;
+            Ok(incoming >= current)
+        }
+        _ => Ok(true),
+    }
+}
+
+fn is_zero_decimal_text(value: &str) -> bool {
+    let value = value.trim().trim_start_matches(['+', '-']);
+    let mut saw_digit = false;
+    for byte in value.bytes() {
+        match byte {
+            b'0' => saw_digit = true,
+            b'.' => {}
+            b'1'..=b'9' => return false,
+            _ => return false,
+        }
+    }
+    saw_digit
+}
+
+fn is_terminal_order_state(state: &str) -> bool {
+    matches!(state, "filled" | "canceled" | "mmp_canceled")
 }
 
 fn required_config(field: &'static str, value: String) -> Result<String, AccountError> {
@@ -339,10 +562,12 @@ fn parse_optional_bool(value: String) -> Result<Option<bool>, AccountError> {
 fn generation_for(snapshot: &AccountSnapshot) -> Result<String, AccountError> {
     #[derive(Serialize)]
     struct GenerationInput<'a> {
-        schema: &'static str,
-        source: &'static str,
-        quality_reason: &'static str,
+        schema: &'a str,
+        source: &'a str,
+        quality_reason: &'a str,
         private_ws_connected: bool,
+        private_ws_generation: Option<u64>,
+        private_ws_last_inbound_ms: Option<u64>,
         account_level: &'a str,
         position_mode: &'a str,
         account_type: &'a str,
@@ -354,10 +579,12 @@ fn generation_for(snapshot: &AccountSnapshot) -> Result<String, AccountError> {
     }
 
     let encoded = serde_json::to_vec(&GenerationInput {
-        schema: ACCOUNT_SNAPSHOT_SCHEMA_V1,
-        source: ACCOUNT_REST_SOURCE_V1,
-        quality_reason: M4_REST_BOOTSTRAP_REASON,
-        private_ws_connected: false,
+        schema: &snapshot.schema,
+        source: &snapshot.source,
+        quality_reason: &snapshot.quality_reason,
+        private_ws_connected: snapshot.private_ws_connected,
+        private_ws_generation: snapshot.private_ws_generation,
+        private_ws_last_inbound_ms: snapshot.private_ws_last_inbound_ms,
         account_level: &snapshot.account_level,
         position_mode: &snapshot.position_mode,
         account_type: &snapshot.account_type,
