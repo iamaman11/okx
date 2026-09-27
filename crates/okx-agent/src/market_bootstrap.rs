@@ -18,6 +18,14 @@ pub enum MarketBootstrapError {
     #[error("instrument '{0}' has no underlying/index id in reference data")]
     MissingUnderlying(String),
 
+    #[error(
+        "instrument '{instrument_id}' has unknown funding semantics for ruleType '{rule_type}'"
+    )]
+    UnknownFundingRequirement {
+        instrument_id: String,
+        rule_type: String,
+    },
+
     #[error("public OKX market API error: {0}")]
     Api(#[from] okx_api::OkxError),
 
@@ -41,6 +49,19 @@ impl MarketBootstrapper {
             MarketBootstrapError::ReferenceInstrumentNotFound(instrument_id.to_owned())
         })?;
         let instrument_type = instrument.instrument_type;
+        let funding_required = match instrument.funding_requirement {
+            FundingRequirement::Required => true,
+            FundingRequirement::NotApplicable => false,
+            FundingRequirement::Unknown => {
+                return Err(MarketBootstrapError::UnknownFundingRequirement {
+                    instrument_id: instrument_id.to_owned(),
+                    rule_type: instrument
+                        .rule_type
+                        .clone()
+                        .unwrap_or_else(|| "<missing>".to_owned()),
+                });
+            }
+        };
         let underlying = instrument
             .underlying
             .as_deref()
@@ -55,9 +76,10 @@ impl MarketBootstrapper {
             self.api.open_interest(instrument_type, instrument_id),
         )?;
 
-        let funding_rate = match instrument.funding_requirement {
-            FundingRequirement::Required => Some(self.api.funding_rate(instrument_id).await?),
-            FundingRequirement::NotApplicable | FundingRequirement::Unknown => None,
+        let funding_rate = if funding_required {
+            Some(self.api.funding_rate(instrument_id).await?)
+        } else {
+            None
         };
 
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -111,6 +133,29 @@ mod tests {
             }],
         )
         .expect("reference")
+    }
+
+    #[test]
+    fn unknown_funding_semantics_fail_before_market_bootstrap() {
+        let mut instrument = reference()
+            .get("DOGE-USDT-SWAP")
+            .expect("instrument")
+            .clone();
+        instrument.funding_requirement = FundingRequirement::Unknown;
+        instrument.rule_type = Some("future_rule".to_owned());
+
+        let error = match instrument.funding_requirement {
+            FundingRequirement::Unknown => MarketBootstrapError::UnknownFundingRequirement {
+                instrument_id: instrument.instrument_id.clone(),
+                rule_type: instrument.rule_type.clone().expect("rule"),
+            },
+            _ => panic!("expected unknown"),
+        };
+
+        assert!(matches!(
+            error,
+            MarketBootstrapError::UnknownFundingRequirement { .. }
+        ));
     }
 
     #[test]
