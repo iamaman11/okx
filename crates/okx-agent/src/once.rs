@@ -598,7 +598,14 @@ async fn response_for(
             };
             let result = match analyze_account_risk(&assembled.snapshot) {
                 Ok(value) => value,
-                Err(error) => return Ok(analysis_failure(request, generated_at, error)),
+                Err(error) => {
+                    return Ok(analysis_failure(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        error,
+                    ));
+                }
             };
             Ok(AgentResponse {
                 schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
@@ -667,7 +674,14 @@ async fn response_for(
             };
             let result = match analyze_candidate_order(&rules, &fees, &assumptions) {
                 Ok(value) => value,
-                Err(error) => return Ok(analysis_failure(request, generated_at, error)),
+                Err(error) => {
+                    return Ok(analysis_failure(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Rejected,
+                        error,
+                    ));
+                }
             };
             Ok(AgentResponse {
                 schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
@@ -916,12 +930,13 @@ fn fee_schedule_failure(
 fn analysis_failure(
     request: &AgentRequest,
     generated_at: &str,
+    status: AgentResponseStatus,
     error: AnalysisError,
 ) -> AgentResponse {
     failure_response(
         request,
         generated_at,
-        AgentResponseStatus::Rejected,
+        status,
         ANALYSIS_INPUT_INCONSISTENT_CODE,
         error.to_string(),
         false,
