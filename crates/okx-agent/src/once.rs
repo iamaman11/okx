@@ -52,9 +52,7 @@ pub async fn process_once(
     let plaintext = decrypt(&request_key, &request_nonce, aad.as_bytes(), &ciphertext)?;
 
     let response = match serde_json::from_slice::<AgentRequest>(&plaintext) {
-        Ok(request)
-            if request.validate().is_ok() && request.request_id == envelope.request_id =>
-        {
+        Ok(request) if request.validate().is_ok() && request.request_id == envelope.request_id => {
             debug_assert_eq!(request.schema, AGENT_REQUEST_SCHEMA_V1);
             dispatch(&request, context, generated_at).await?
         }
@@ -101,8 +99,9 @@ fn invalid_request_response(request_id: &str, generated_at: &str) -> AgentRespon
         result: None,
         failure: Some(AgentFailure {
             code: INVALID_REQUEST_CODE.to_owned(),
-            message: "authenticated request payload does not match the supported typed query contract"
-                .to_owned(),
+            message:
+                "authenticated request payload does not match the supported typed query contract"
+                    .to_owned(),
             retryable: false,
         }),
         warnings: Vec::new(),
@@ -175,13 +174,8 @@ mod tests {
         };
         let aad = request_envelope.aad().expect("request aad");
         request_envelope.ciphertext = STANDARD.encode(
-            encrypt(
-                &request_key,
-                &request_nonce,
-                aad.as_bytes(),
-                plaintext,
-            )
-            .expect("encrypt request"),
+            encrypt(&request_key, &request_nonce, aad.as_bytes(), plaintext)
+                .expect("encrypt request"),
         );
 
         let response_envelope = process_once(
