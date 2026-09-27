@@ -9,6 +9,7 @@ use tokio::{
 
 use crate::{
     AgentError, AgentResult,
+    account_bootstrap::AccountBootstrapper,
     config::{AGENT_RUNTIME_SCHEMA_V1, AgentConfig},
     github_mailbox::GitHubMailboxClient,
     identity::AgentIdentity,
@@ -49,6 +50,7 @@ pub struct MailboxRuntimeContext<'a> {
     pub agent_private_key: &'a [u8; 32],
     pub public_ws: &'a PublicWsHandle,
     pub market: &'a MarketBootstrapper,
+    pub account: Option<&'a AccountBootstrapper>,
 }
 
 pub async fn run_mailbox_until_shutdown(
@@ -64,6 +66,7 @@ pub async fn run_mailbox_until_shutdown(
         agent_private_key,
         public_ws,
         market,
+        account,
     } = context;
     if !(1..=60).contains(&poll_seconds) {
         return Err(AgentError::InvalidPollInterval);
@@ -145,7 +148,13 @@ pub async fn run_mailbox_until_shutdown(
                 }
 
                 match mailbox
-                    .process_pending(&config.key_id, agent_private_key, public_ws, market)
+                    .process_pending(
+                        &config.key_id,
+                        agent_private_key,
+                        public_ws,
+                        market,
+                        account,
+                    )
                     .await
                 {
                     Ok(processed) if processed > 0 => {
