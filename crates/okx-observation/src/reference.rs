@@ -7,6 +7,7 @@ use thiserror::Error;
 
 pub const REFERENCE_REGISTRY_SCHEMA_V1: &str = "okx.reference-registry/v1";
 pub const INSTRUMENT_RULES_SCHEMA_V1: &str = "okx.instrument-rules/v1";
+pub const INSTRUMENT_SEARCH_SCHEMA_V1: &str = "okx.instrument-search/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -52,6 +53,16 @@ pub struct InstrumentSpec {
     pub max_leverage: Option<String>,
     pub list_time_ms: Option<String>,
     pub expiry_time_ms: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstrumentSearchSnapshot {
+    pub reference_generation: String,
+    pub source_received_at: String,
+    pub asset: String,
+    pub settle_currency: Option<String>,
+    pub instrument_type: Option<InstrumentType>,
+    pub instruments: Vec<InstrumentSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -173,6 +184,38 @@ impl ReferenceRegistry {
                 source_received_at: self.source_received_at.clone(),
                 instrument,
             })
+    }
+
+    pub fn find_instruments(
+        &self,
+        asset: &str,
+        settle_currency: Option<&str>,
+        instrument_type: Option<InstrumentType>,
+    ) -> InstrumentSearchSnapshot {
+        let instruments = self
+            .instruments
+            .values()
+            .filter(|instrument| {
+                instrument.base_currency.as_deref() == Some(asset)
+                    || instrument.contract_value_currency.as_deref() == Some(asset)
+            })
+            .filter(|instrument| {
+                settle_currency.is_none_or(|settle| instrument.settle_currency == settle)
+            })
+            .filter(|instrument| {
+                instrument_type.is_none_or(|expected| instrument.instrument_type == expected)
+            })
+            .cloned()
+            .collect();
+
+        InstrumentSearchSnapshot {
+            reference_generation: self.generation.as_str().to_owned(),
+            source_received_at: self.source_received_at.clone(),
+            asset: asset.to_owned(),
+            settle_currency: settle_currency.map(ToOwned::to_owned),
+            instrument_type,
+            instruments,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -402,6 +445,22 @@ mod tests {
         );
         assert_eq!(registry.generation().as_str(), before);
         assert!(registry.get("BTC-USDT-SWAP").is_none());
+    }
+
+    #[test]
+    fn instrument_search_uses_normalized_asset_and_settlement_fields() {
+        let registry = ReferenceRegistry::from_public(
+            "2026-09-27T00:00:00.000Z",
+            vec![swap("DOGE-USDT-SWAP"), swap("BTC-USDT-SWAP")],
+        )
+        .expect("registry");
+
+        let result = registry.find_instruments("DOGE", Some("USDT"), Some(InstrumentType::Swap));
+        assert_eq!(result.instruments.len(), 1);
+        assert_eq!(result.instruments[0].instrument_id, "DOGE-USDT-SWAP");
+
+        let none = registry.find_instruments("DOGE", Some("USDC"), None);
+        assert!(none.instruments.is_empty());
     }
 
     #[test]
