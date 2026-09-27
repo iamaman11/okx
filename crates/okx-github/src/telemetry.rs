@@ -74,14 +74,11 @@ impl IssuePollTelemetryStore {
         let polls_completed = previous
             .as_ref()
             .map_or(1, |value| value.polls_completed.saturating_add(1));
-        let comments_scanned_total = previous.as_ref().map_or(
-            comments_scanned as u64,
-            |value| {
-                value
-                    .comments_scanned_total
-                    .saturating_add(comments_scanned as u64)
-            },
-        );
+        let comments_scanned_total = previous.as_ref().map_or(comments_scanned as u64, |value| {
+            value
+                .comments_scanned_total
+                .saturating_add(comments_scanned as u64)
+        });
         let last_terminal_request_id = last_terminal_request_id
             .map(str::to_owned)
             .or_else(|| previous.and_then(|value| value.last_terminal_request_id));
@@ -133,8 +130,8 @@ impl IssuePollTelemetryStore {
             return Ok(None);
         }
 
-        let bytes = fs::read(&self.path)
-            .map_err(|error| GitHubError::TelemetryIo(error.to_string()))?;
+        let bytes =
+            fs::read(&self.path).map_err(|error| GitHubError::TelemetryIo(error.to_string()))?;
         let value: PersistedIssuePollTelemetry =
             serde_json::from_slice(&bytes).map_err(GitHubError::TelemetryJson)?;
         if value.schema != ISSUE_POLL_TELEMETRY_SCHEMA_V1
