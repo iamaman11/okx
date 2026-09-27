@@ -14,7 +14,7 @@ pub(super) async fn dispatch(
         } => {
             let assembled =
                 match assemble_current_market(request, context, generated_at, instrument).await? {
-                    CurrentMarketAssembly::Ready(value) => value,
+                    CurrentMarketAssembly::Ready(value) => *value,
                     CurrentMarketAssembly::Response(response) => return Ok(response),
                     CurrentMarketAssembly::Unavailable => {
                         return Ok(unavailable(request, generated_at));
