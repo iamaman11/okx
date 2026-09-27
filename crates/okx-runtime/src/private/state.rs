@@ -75,10 +75,7 @@ impl PrivateRuntimeState {
             connection_state: self.connection_state,
             connection_generation: self.generation,
             logged_in: self.logged_in,
-            connection_id_fingerprint: self
-                .connection_id
-                .as_deref()
-                .map(connection_fingerprint),
+            connection_id_fingerprint: self.connection_id.as_deref().map(connection_fingerprint),
             acknowledged_subscriptions: self.acknowledged_subscriptions.len(),
             subscriptions_complete: baseline_private_subscriptions()
                 .iter()
@@ -207,11 +204,13 @@ mod tests {
         assert!(first.subscriptions_complete);
         assert!(first.account_data_seen);
         assert!(first.positions_data_seen);
-        assert!(!first
-            .connection_id_fingerprint
-            .as_deref()
-            .unwrap_or_default()
-            .contains("conn-secret"));
+        assert!(
+            !first
+                .connection_id_fingerprint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("conn-secret")
+        );
 
         state.begin_generation(2);
         let second = state.status();
