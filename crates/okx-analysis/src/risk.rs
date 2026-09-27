@@ -2,7 +2,7 @@ use okx_observation::{AccountPositionState, AccountSnapshot};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
-use super::{decimal, positive_decimal, AnalysisError, PositionDirection};
+use super::{AnalysisError, PositionDirection, decimal, positive_decimal};
 
 pub const ACCOUNT_RISK_ANALYSIS_SCHEMA_V1: &str = "okx.account-risk-analysis/v1";
 
@@ -54,7 +54,9 @@ struct PositionWork {
     notional: Decimal,
 }
 
-pub fn analyze_account_risk(account: &AccountSnapshot) -> Result<AccountRiskAnalysis, AnalysisError> {
+pub fn analyze_account_risk(
+    account: &AccountSnapshot,
+) -> Result<AccountRiskAnalysis, AnalysisError> {
     match account.account_level.as_str() {
         "2" | "3" | "4" => {}
         other => return Err(AnalysisError::UnsupportedAccountMode(other.to_owned())),
@@ -79,7 +81,10 @@ pub fn analyze_account_risk(account: &AccountSnapshot) -> Result<AccountRiskAnal
     )?;
     let account_mmr = optional_non_negative_decimal(
         "maintenance_margin_requirement_usd",
-        account.balance.maintenance_margin_requirement_usd.as_deref(),
+        account
+            .balance
+            .maintenance_margin_requirement_usd
+            .as_deref(),
     )?;
     let account_margin_ratio = optional_non_negative_decimal(
         "exchange_margin_ratio",
@@ -107,10 +112,9 @@ pub fn analyze_account_risk(account: &AccountSnapshot) -> Result<AccountRiskAnal
         }
 
         let direction = direction_for(position, &account.position_mode, size)?;
-        let notional_text = position
-            .notional_usd
-            .as_deref()
-            .ok_or_else(|| AnalysisError::MissingPositionNotional(position.instrument_id.clone()))?;
+        let notional_text = position.notional_usd.as_deref().ok_or_else(|| {
+            AnalysisError::MissingPositionNotional(position.instrument_id.clone())
+        })?;
         let notional = positive_decimal("position_notional_usd", notional_text)?;
 
         let signed_notional = match direction {
@@ -134,13 +138,18 @@ pub fn analyze_account_risk(account: &AccountSnapshot) -> Result<AccountRiskAnal
             "position_exchange_margin_ratio",
             position.margin_ratio.as_deref(),
         )?;
-        let mark_price = optional_positive_decimal("position_mark_price", position.mark_price.as_deref())?;
+        let mark_price =
+            optional_positive_decimal("position_mark_price", position.mark_price.as_deref())?;
         let liquidation_price = optional_positive_decimal(
             "estimated_liquidation_price",
             position.liquidation_price.as_deref(),
         )?;
-        let liquidation_distance =
-            estimated_liquidation_distance(&position.instrument_id, direction, mark_price, liquidation_price)?;
+        let liquidation_distance = estimated_liquidation_distance(
+            &position.instrument_id,
+            direction,
+            mark_price,
+            liquidation_price,
+        )?;
 
         work.push(PositionWork {
             output: PositionRiskAnalysis {
@@ -172,10 +181,10 @@ pub fn analyze_account_risk(account: &AccountSnapshot) -> Result<AccountRiskAnal
         };
     }
 
-    let gross_to_equity = (total_equity > Decimal::ZERO)
-        .then(|| (gross / total_equity).normalize().to_string());
-    let net_to_equity = (total_equity > Decimal::ZERO)
-        .then(|| (net / total_equity).normalize().to_string());
+    let gross_to_equity =
+        (total_equity > Decimal::ZERO).then(|| (gross / total_equity).normalize().to_string());
+    let net_to_equity =
+        (total_equity > Decimal::ZERO).then(|| (net / total_equity).normalize().to_string());
 
     let positions = work.into_iter().map(|item| item.output).collect::<Vec<_>>();
 
@@ -218,11 +227,13 @@ fn direction_for(
         }
         ("long_short_mode", "long") if size > Decimal::ZERO => Ok(PositionDirection::Long),
         ("long_short_mode", "short") if size > Decimal::ZERO => Ok(PositionDirection::Short),
-        ("long_short_mode", "long" | "short") => Err(AnalysisError::InconsistentPositionDirection {
-            instrument_id: position.instrument_id.clone(),
-            position_side: position.position_side.clone(),
-            position: position.position.clone(),
-        }),
+        ("long_short_mode", "long" | "short") => {
+            Err(AnalysisError::InconsistentPositionDirection {
+                instrument_id: position.instrument_id.clone(),
+                position_side: position.position_side.clone(),
+                position: position.position.clone(),
+            })
+        }
         (_, side) => Err(AnalysisError::UnsupportedPositionSide {
             instrument_id: position.instrument_id.clone(),
             position_side: side.to_owned(),
@@ -264,7 +275,9 @@ fn optional_positive_decimal(
     field: &'static str,
     value: Option<&str>,
 ) -> Result<Option<Decimal>, AnalysisError> {
-    value.map(|value| positive_decimal(field, value)).transpose()
+    value
+        .map(|value| positive_decimal(field, value))
+        .transpose()
 }
 
 fn optional_non_negative_decimal(
