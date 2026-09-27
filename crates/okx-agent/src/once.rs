@@ -226,6 +226,19 @@ fn market_failure(
             format!("instrument '{instrument}' has no underlying/index id in reference data"),
             false,
         ),
+        MarketBootstrapError::UnknownFundingRequirement {
+            instrument_id,
+            rule_type,
+        } => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            MARKET_REFERENCE_INCOMPLETE_CODE,
+            format!(
+                "instrument '{instrument_id}' has unknown funding semantics for ruleType '{rule_type}'"
+            ),
+            false,
+        ),
         MarketBootstrapError::Api(error) => failure_response(
             request,
             generated_at,
