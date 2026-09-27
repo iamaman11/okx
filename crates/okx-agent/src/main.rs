@@ -7,7 +7,8 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use okx_agent::{
-    AgentResult,
+    AgentError, AgentResult,
+    account_bootstrap::AccountBootstrapper,
     config::{AgentConfig, default_root},
     github_auth::{load_native_github_token, store_native_github_token},
     github_mailbox::GitHubMailboxClient,
@@ -15,11 +16,12 @@ use okx_agent::{
         default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
     },
     market_bootstrap::MarketBootstrapper,
+    okx_credentials::{load_native_okx_credentials, store_native_okx_credentials},
     once::{ObservationQueryContext, process_once_now},
     reference_bootstrap::bootstrap_reference,
     runtime::{MailboxRuntimeContext, run_mailbox_until_shutdown, run_until_shutdown},
 };
-use okx_api::{OkxEnvironment, OkxPublicClient, Region};
+use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, Region};
 use okx_protocol::MailboxEnvelope;
 use okx_runtime::PublicWsCoordinator;
 use zeroize::Zeroize;
@@ -54,6 +56,9 @@ enum Command {
 
     /// Store the GitHub mailbox token from stdin in Windows Credential Manager.
     SetGithubToken,
+
+    /// Store the read-only OKX observer credential payload from stdin.
+    SetOkxCredentials,
 
     /// Process one encrypted mailbox envelope from a file or stdin.
     Once {
@@ -106,6 +111,19 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 })
             );
         }
+        Command::SetOkxCredentials => {
+            let mut payload = read_stdin()?;
+            let result = store_native_okx_credentials(&payload);
+            payload.zeroize();
+            result?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.agent.okx-credentials/v1",
+                    "stored": true
+                })
+            );
+        }
         Command::Once { input } => {
             let payload = read_input(input)?;
             let envelope: MailboxEnvelope = serde_json::from_str(&payload)?;
@@ -113,11 +131,16 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let public_client = OkxPublicClient::new(environment)?;
             let reference = bootstrap_reference(public_client.clone()).await?;
             let market = MarketBootstrapper::new(public_client);
+            let account = optional_account_bootstrapper(environment);
             let response = process_once_now(
                 &envelope,
                 &config.key_id,
                 &private_key,
-                ObservationQueryContext::standalone(&reference, &market),
+                ObservationQueryContext::standalone_with_account(
+                    &reference,
+                    &market,
+                    account.as_ref(),
+                ),
             )
             .await;
             private_key.zeroize();
@@ -139,6 +162,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     reference.len()
                 );
                 let market = MarketBootstrapper::new(public_client);
+                let account = optional_account_bootstrapper(environment);
                 let (public_ws_coordinator, public_ws) =
                     PublicWsCoordinator::new(environment, reference);
                 let mut private_key = load_native_private_key(&config.key_id)?;
@@ -151,6 +175,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                         agent_private_key: &private_key,
                         public_ws: &public_ws,
                         market: &market,
+                        account: account.as_ref(),
                     },
                     public_ws_coordinator,
                     poll_seconds,
@@ -165,6 +190,26 @@ async fn run(cli: Cli) -> AgentResult<()> {
     }
 
     Ok(())
+}
+
+fn optional_account_bootstrapper(environment: OkxEnvironment) -> Option<AccountBootstrapper> {
+    match load_native_okx_credentials() {
+        Ok(credentials) => match OkxRestClient::new(environment, credentials) {
+            Ok(client) => Some(AccountBootstrapper::new(client)),
+            Err(error) => {
+                eprintln!("OKX observer REST client unavailable: {error}");
+                None
+            }
+        },
+        Err(AgentError::OkxCredentialsNotFound) => {
+            eprintln!("OKX observer credential not provisioned; private queries are NOT_READY");
+            None
+        }
+        Err(error) => {
+            eprintln!("OKX observer credential unavailable: {error}");
+            None
+        }
+    }
 }
 
 fn read_input(input: Option<PathBuf>) -> AgentResult<String> {
