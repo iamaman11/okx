@@ -1,7 +1,7 @@
 use std::{env, str::FromStr};
 
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{auth::sign, error::OkxError};
 
@@ -70,7 +70,7 @@ impl OkxEnvironment {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 pub struct WsLoginMaterial {
     #[serde(rename = "apiKey")]
