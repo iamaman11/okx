@@ -138,7 +138,9 @@ fn response_for(
                 result: None,
                 failure: Some(AgentFailure {
                     code: REFERENCE_INSTRUMENT_NOT_FOUND_CODE.to_owned(),
-                    message: format!("instrument '{instrument}' is not present in the reference registry"),
+                    message: format!(
+                        "instrument '{instrument}' is not present in the reference registry"
+                    ),
                     retryable: false,
                 }),
                 warnings: Vec::new(),
@@ -179,8 +181,8 @@ mod tests {
     use super::*;
     use okx_api::PublicInstrument;
     use okx_observation::ReferenceRegistry;
-    use okx_protocol::{
-        crypto::{derive_directional_key, encrypt, public_key_from_private, shared_secret},
+    use okx_protocol::crypto::{
+        derive_directional_key, encrypt, public_key_from_private, shared_secret,
     };
 
     #[test]
@@ -282,14 +284,11 @@ mod tests {
                 instrument: "DOGE-USDT-SWAP".to_owned(),
             },
         };
-        let registry = ReferenceRegistry::from_public(
-            "2026-09-27T00:00:00.000Z",
-            vec![swap()],
-        )
-        .expect("registry");
+        let registry = ReferenceRegistry::from_public("2026-09-27T00:00:00.000Z", vec![swap()])
+            .expect("registry");
 
-        let response = response_for(&request, Some(&registry), "2026-09-27T00:00:01.000Z")
-            .expect("response");
+        let response =
+            response_for(&request, Some(&registry), "2026-09-27T00:00:01.000Z").expect("response");
 
         assert_eq!(response.status, AgentResponseStatus::Completed);
         assert_eq!(response.quality, DataQuality::Degraded);
