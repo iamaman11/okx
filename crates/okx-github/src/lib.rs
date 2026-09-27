@@ -259,10 +259,13 @@ impl GitHubClient {
             let mut crossed_cursor_time = false;
             for raw in page_comments {
                 let comment = raw.into_issue_comment();
-                if cursor.is_none_or(|current| comment.cursor() > *current) {
+                let is_new = cursor.is_none_or(|current| comment.cursor() > *current);
+                let is_older_than_cursor =
+                    cursor.is_some_and(|current| comment.created_at < current.created_at);
+                if is_new {
                     fresh.push(comment);
                 }
-                if cursor.is_some_and(|current| comment.created_at < current.created_at) {
+                if is_older_than_cursor {
                     crossed_cursor_time = true;
                 }
             }
