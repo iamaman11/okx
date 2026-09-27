@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const REFERENCE_REGISTRY_SCHEMA_V1: &str = "okx.reference-registry/v1";
+pub const INSTRUMENT_RULES_SCHEMA_V1: &str = "okx.instrument-rules/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -42,6 +43,13 @@ pub struct InstrumentSpec {
     pub max_leverage: Option<String>,
     pub list_time_ms: Option<String>,
     pub expiry_time_ms: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstrumentRulesSnapshot {
+    pub reference_generation: String,
+    pub source_received_at: String,
+    pub instrument: InstrumentSpec,
 }
 
 #[derive(Debug)]
@@ -110,6 +118,16 @@ impl ReferenceRegistry {
 
     pub fn get(&self, instrument_id: &str) -> Option<&InstrumentSpec> {
         self.instruments.get(instrument_id)
+    }
+
+    pub fn instrument_rules(&self, instrument_id: &str) -> Option<InstrumentRulesSnapshot> {
+        self.get(instrument_id)
+            .cloned()
+            .map(|instrument| InstrumentRulesSnapshot {
+                reference_generation: self.generation.as_str().to_owned(),
+                source_received_at: self.source_received_at.clone(),
+                instrument,
+            })
     }
 
     pub fn len(&self) -> usize {
@@ -246,6 +264,13 @@ mod tests {
         assert_eq!(spec.contract_value.as_deref(), Some("1000"));
         assert_eq!(spec.contract_value_currency.as_deref(), Some("DOGE"));
         assert_eq!(registry.len(), 1);
+
+        let rules = registry
+            .instrument_rules("DOGE-USDT-SWAP")
+            .expect("instrument rules");
+        assert_eq!(rules.reference_generation, registry.generation().as_str());
+        assert_eq!(rules.source_received_at, registry.source_received_at());
+        assert_eq!(rules.instrument.instrument_id, "DOGE-USDT-SWAP");
     }
 
     #[test]
