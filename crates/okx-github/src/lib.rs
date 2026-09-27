@@ -536,8 +536,7 @@ impl GitHubClient {
                 // entirely on page 1. If page 2+ was required, page 1 could
                 // remain unchanged while new comments are appended later.
                 if cursor.is_some()
-                    && page == 1
-                    && fresh.is_empty()
+                    && can_arm_comment_validator(page, fresh.is_empty(), first_page_etag.is_some())
                     && let Some(etag) = first_page_etag
                 {
                     self.arm_comment_validator(first_key, etag);
@@ -846,6 +845,10 @@ fn cursor_overlap_since(cursor: &IssueCommentCursor) -> Result<String, GitHubErr
     Ok(timestamp.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
+fn can_arm_comment_validator(page: u32, fresh_is_empty: bool, etag_present: bool) -> bool {
+    page == 1 && fresh_is_empty && etag_present
+}
+
 fn tail_page(comment_count: u64) -> u32 {
     let page = ((comment_count.saturating_sub(1)) / u64::from(COMMENTS_PER_PAGE)) + 1;
     page.min(u64::from(u32::MAX)) as u32
@@ -1059,13 +1062,11 @@ mod tests {
     }
 
     #[test]
-    fn validator_is_not_safe_for_multi_page_idle_window() {
-        // The ETag key intentionally covers one page only. A full first page
-        // means later pages may change without page 1 changing, so H1-B must
-        // never arm page-1 conditional polling for that representation.
-        let first_page_count = COMMENTS_PER_PAGE as usize;
-        assert_eq!(first_page_count, COMMENTS_PER_PAGE as usize);
-        assert!(first_page_count >= COMMENTS_PER_PAGE as usize);
+    fn validator_only_arms_for_single_page_idle_representation() {
+        assert!(can_arm_comment_validator(1, true, true));
+        assert!(!can_arm_comment_validator(2, true, true));
+        assert!(!can_arm_comment_validator(1, false, true));
+        assert!(!can_arm_comment_validator(1, true, false));
     }
 
     #[test]
