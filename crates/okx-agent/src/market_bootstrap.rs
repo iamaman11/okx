@@ -119,10 +119,7 @@ mod tests {
         let instrument = reference.get("DOGE-USDT-SWAP").expect("instrument");
 
         assert_eq!(instrument.instrument_type, okx_api::InstrumentType::Swap);
-        assert_eq!(
-            instrument.funding_requirement,
-            FundingRequirement::Required
-        );
+        assert_eq!(instrument.funding_requirement, FundingRequirement::Required);
         assert_eq!(instrument.underlying.as_deref(), Some("DOGE-USDT"));
     }
 }
