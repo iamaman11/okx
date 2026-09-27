@@ -1,9 +1,9 @@
 use std::{env, str::FromStr};
 
-use serde::Serialize;
-use zeroize::Zeroizing;
+use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::error::OkxError;
+use crate::{auth::sign, error::OkxError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +70,16 @@ impl OkxEnvironment {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub struct WsLoginMaterial {
+    #[serde(rename = "apiKey")]
+    pub api_key: String,
+    pub passphrase: String,
+    pub timestamp: String,
+    pub sign: String,
+}
+
 #[derive(Clone)]
 pub struct Credentials {
     api_key: Zeroizing<String>,
@@ -87,6 +97,34 @@ impl Credentials {
             api_key: Zeroizing::new(api_key),
             secret_key: Zeroizing::new(secret_key),
             passphrase: Zeroizing::new(passphrase),
+        })
+    }
+
+    pub fn websocket_login_material(
+        &self,
+        timestamp_seconds: &str,
+    ) -> Result<WsLoginMaterial, OkxError> {
+        if timestamp_seconds.trim().is_empty()
+            || !timestamp_seconds.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(OkxError::Config(
+                "websocket login timestamp must be Unix epoch seconds".to_owned(),
+            ));
+        }
+
+        let signature = sign(
+            timestamp_seconds,
+            "GET",
+            "/users/self/verify",
+            "",
+            self.secret_key(),
+        )?;
+
+        Ok(WsLoginMaterial {
+            api_key: self.api_key().to_owned(),
+            passphrase: self.passphrase().to_owned(),
+            timestamp: timestamp_seconds.to_owned(),
+            sign: signature,
         })
     }
 
@@ -137,6 +175,24 @@ fn validate_secret_component(label: &str, value: &str) -> Result<(), OkxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn websocket_login_material_uses_okx_verify_path() {
+        let credentials =
+            Credentials::new("key".to_owned(), "secret".to_owned(), "pass".to_owned())
+                .expect("credentials");
+        let material = credentials
+            .websocket_login_material("1538054050")
+            .expect("login material");
+
+        assert_eq!(material.api_key, "key");
+        assert_eq!(material.passphrase, "pass");
+        assert_eq!(material.timestamp, "1538054050");
+        assert_eq!(
+            material.sign,
+            sign("1538054050", "GET", "/users/self/verify", "", "secret").expect("signature")
+        );
+    }
 
     #[test]
     fn credentials_reject_empty_components_without_echoing_secret() {

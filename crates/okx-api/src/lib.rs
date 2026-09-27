@@ -12,7 +12,7 @@ pub use account::{
     Instrument, LeverageInfo, MarginMode, PendingOrder, Position,
 };
 pub use client::{OkxPublicClient, OkxRestClient};
-pub use config::{Credentials, OkxEnvironment, Region};
+pub use config::{Credentials, OkxEnvironment, Region, WsLoginMaterial};
 pub use error::OkxError;
 pub use instrument::InstrumentType;
 pub use market_data::{
