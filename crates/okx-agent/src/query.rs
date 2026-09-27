@@ -1,10 +1,10 @@
 use chrono::Utc;
 use okx_analysis::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
-    CandidateOrderAssumptions, HISTORY_BEHAVIOR_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
-    POSITION_SCENARIO_SCHEMA_V1, PositionDirection, PositionScenarioAssumptions,
-    ScenarioExitAssumption, analyze_account_risk, analyze_candidate_order,
-    analyze_history_behavior, analyze_position_scenario,
+    COST_ANALYSIS_SCHEMA_V1, CandidateOrderAssumptions, HISTORY_BEHAVIOR_SCHEMA_V1,
+    LiquidityRole as AnalysisLiquidityRole, POSITION_SCENARIO_SCHEMA_V1, PositionDirection,
+    PositionScenarioAssumptions, ScenarioExitAssumption, analyze_account_risk,
+    analyze_candidate_order, analyze_cost, analyze_history_behavior, analyze_position_scenario,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
@@ -62,6 +62,7 @@ const ACCOUNT_WS_GENERATION_CHANGED_WARNING: &str = "private WebSocket generatio
 const ACCOUNT_WS_JOURNAL_GAP_WARNING: &str = "private WebSocket delta journal advanced beyond the REST bootstrap cursor; returning coherent REST snapshot only";
 const CANDIDATE_EXPLICIT_ASSUMPTIONS_WARNING: &str = "candidate analysis uses explicit hypothetical entry/stop prices and exact account fee evidence; it does not assume a current fill price, funding event, slippage, spread, margin or FX conversion";
 const POSITION_SCENARIO_EXPLICIT_ASSUMPTIONS_WARNING: &str = "position scenario uses explicit hypothetical entry/exit assumptions and exact account fee evidence; funding, slippage, spread, margin, FX conversion and execution price are not included";
+const CURRENT_COST_MARK_OBSERVATION_WARNING: &str = "current cost uses the current mark/reference market snapshot and exact account fee evidence; it is not a promised execution price, and funding is current event evidence only with no holding horizon";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
 
 #[derive(serde::Serialize)]
@@ -167,7 +168,9 @@ pub(crate) async fn dispatch(
         AgentOperation::AccountSnapshot | AgentOperation::PortfolioRisk => {
             account::dispatch(request, context, generated_at).await
         }
-        AgentOperation::PositionScenario { .. } | AgentOperation::AnalyzeCandidateOrder { .. } => {
+        AgentOperation::CurrentCost { .. }
+        | AgentOperation::PositionScenario { .. }
+        | AgentOperation::AnalyzeCandidateOrder { .. } => {
             analysis::dispatch(request, context, generated_at).await
         }
         AgentOperation::MailboxTelemetry => {
@@ -186,6 +189,118 @@ pub(crate) async fn dispatch(
                 warnings: Vec::new(),
             })
         }
+    }
+}
+
+struct AssembledCurrentMarket {
+    rules: InstrumentRulesSnapshot,
+    snapshot: MarketSnapshot,
+    quality: DataQuality,
+    warnings: Vec<String>,
+}
+
+enum CurrentMarketAssembly {
+    Ready(Box<AssembledCurrentMarket>),
+    Response(Box<AgentResponse>),
+    Unavailable,
+}
+
+async fn assemble_current_market(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    instrument: &str,
+) -> AgentResult<CurrentMarketAssembly> {
+    if let Some(public_ws) = context.public_ws {
+        let Some(rules) = public_ws.instrument_rules(instrument).await else {
+            return Ok(CurrentMarketAssembly::Response(Box::new(
+                reference_not_found(request, generated_at, instrument),
+            )));
+        };
+        public_ws.demand_instrument(instrument.to_owned()).await?;
+
+        let now_ms = utc_now_ms();
+        let quality = public_ws
+            .quality_snapshot(instrument, now_ms, PUBLIC_MARKET_MAX_AGE_MS, true)
+            .await?;
+
+        if quality.quality == MarketReadiness::Fresh {
+            let live = public_ws
+                .fresh_snapshot(
+                    instrument,
+                    now_ms,
+                    PUBLIC_MARKET_MAX_AGE_MS,
+                    generated_at.to_owned(),
+                )
+                .await?;
+            return Ok(CurrentMarketAssembly::Ready(Box::new(
+                AssembledCurrentMarket {
+                    rules,
+                    snapshot: live.market,
+                    quality: DataQuality::Fresh,
+                    warnings: Vec::new(),
+                },
+            )));
+        }
+
+        let Some(market) = context.market_fallback else {
+            return Ok(CurrentMarketAssembly::Response(Box::new(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                MARKET_PUBLIC_API_UNAVAILABLE_CODE,
+                format!(
+                    "persistent WebSocket state is not FRESH: {}",
+                    quality.reason
+                ),
+                true,
+            ))));
+        };
+        let reference = public_ws.reference_snapshot().await;
+        return match market.snapshot(&reference, instrument).await {
+            Ok(snapshot) => Ok(CurrentMarketAssembly::Ready(Box::new(
+                AssembledCurrentMarket {
+                    rules,
+                    snapshot,
+                    quality: DataQuality::Degraded,
+                    warnings: vec![format!(
+                        "persistent WebSocket state is not FRESH ({}); returned bounded public REST fallback",
+                        quality.reason
+                    )],
+                },
+            ))),
+            Err(error) => Ok(CurrentMarketAssembly::Response(Box::new(market_failure(
+                request,
+                generated_at,
+                error,
+            )))),
+        };
+    }
+
+    let (Some(reference), Some(market)) = (context.standalone_reference, context.market_fallback)
+    else {
+        return Ok(CurrentMarketAssembly::Unavailable);
+    };
+    let Some(rules) = reference.instrument_rules(instrument) else {
+        return Ok(CurrentMarketAssembly::Response(Box::new(
+            reference_not_found(request, generated_at, instrument),
+        )));
+    };
+
+    match market.snapshot(reference, instrument).await {
+        Ok(snapshot) => Ok(CurrentMarketAssembly::Ready(Box::new(
+            AssembledCurrentMarket {
+                rules,
+                snapshot,
+                quality: DataQuality::Degraded,
+                warnings: vec![MARKET_REST_BOOTSTRAP_WARNING.to_owned()],
+            },
+        ))),
+        Err(error) => Ok(CurrentMarketAssembly::Response(Box::new(market_failure(
+            request,
+            generated_at,
+            error,
+        )))),
     }
 }
 
