@@ -620,11 +620,8 @@ mod tests {
     #[test]
     fn reconnect_generation_revokes_fresh_until_rebuilt() {
         let reference = reference();
-        let mut state = MarketStreamState::new(
-            "DOGE-USDT-SWAP",
-            7,
-            reference.generation().as_str(),
-        );
+        let mut state =
+            MarketStreamState::new("DOGE-USDT-SWAP", 7, reference.generation().as_str());
         complete(&mut state, 7, 1_000);
         assert_eq!(
             state
@@ -646,11 +643,8 @@ mod tests {
     #[test]
     fn aged_required_dependency_is_stale() {
         let reference = reference();
-        let mut state = MarketStreamState::new(
-            "DOGE-USDT-SWAP",
-            7,
-            reference.generation().as_str(),
-        );
+        let mut state =
+            MarketStreamState::new("DOGE-USDT-SWAP", 7, reference.generation().as_str());
         complete(&mut state, 7, 1_000);
 
         let report = state.readiness(&reference, 3_001, 2_000, true, true, true);
