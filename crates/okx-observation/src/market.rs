@@ -108,10 +108,7 @@ pub struct SnapshotQualityReport {
 }
 
 impl SnapshotQualityReport {
-    pub fn m2(
-        reference: &ReferenceRegistry,
-        instrument_id: &str,
-    ) -> Result<Self, MarketError> {
+    pub fn m2(reference: &ReferenceRegistry, instrument_id: &str) -> Result<Self, MarketError> {
         let instrument = reference
             .get(instrument_id)
             .ok_or_else(|| MarketError::InstrumentNotFound(instrument_id.to_owned()))?;

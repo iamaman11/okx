@@ -35,11 +35,9 @@ impl MarketBootstrapper {
         reference: &ReferenceRegistry,
         instrument_id: &str,
     ) -> Result<MarketSnapshot, MarketBootstrapError> {
-        let instrument = reference
-            .get(instrument_id)
-            .ok_or_else(|| {
-                MarketBootstrapError::ReferenceInstrumentNotFound(instrument_id.to_owned())
-            })?;
+        let instrument = reference.get(instrument_id).ok_or_else(|| {
+            MarketBootstrapError::ReferenceInstrumentNotFound(instrument_id.to_owned())
+        })?;
         let instrument_type = instrument.instrument_type;
         let underlying = instrument
             .underlying

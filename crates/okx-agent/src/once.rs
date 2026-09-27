@@ -25,8 +25,7 @@ pub const MARKET_INSTRUMENT_NOT_LIVE_CODE: &str = "MARKET_INSTRUMENT_NOT_LIVE";
 
 const REFERENCE_BOOTSTRAP_WARNING: &str =
     "reference data is REST-bootstrap only; live instruments continuity is not connected until M3";
-const MARKET_REST_BOOTSTRAP_WARNING: &str =
-    "market data is bounded public REST bootstrap; persistent WebSocket continuity is not connected until M3";
+const MARKET_REST_BOOTSTRAP_WARNING: &str = "market data is bounded public REST bootstrap; persistent WebSocket continuity is not connected until M3";
 
 pub async fn process_once(
     envelope: &MailboxEnvelope,
@@ -416,14 +415,9 @@ mod tests {
         };
         let registry = reference();
 
-        let response = response_for(
-            &request,
-            Some(&registry),
-            None,
-            "2026-09-27T00:00:01.000Z",
-        )
-        .await
-        .expect("response");
+        let response = response_for(&request, Some(&registry), None, "2026-09-27T00:00:01.000Z")
+            .await
+            .expect("response");
 
         assert_eq!(response.status, AgentResponseStatus::Completed);
         assert_eq!(response.quality, DataQuality::Degraded);
@@ -446,14 +440,9 @@ mod tests {
         };
         let registry = reference();
 
-        let response = response_for(
-            &request,
-            Some(&registry),
-            None,
-            "2026-09-27T00:00:01.000Z",
-        )
-        .await
-        .expect("response");
+        let response = response_for(&request, Some(&registry), None, "2026-09-27T00:00:01.000Z")
+            .await
+            .expect("response");
 
         assert_eq!(response.status, AgentResponseStatus::Completed);
         assert_eq!(response.quality, DataQuality::Degraded);
@@ -468,8 +457,7 @@ mod tests {
     }
 
     fn reference() -> ReferenceRegistry {
-        ReferenceRegistry::from_public("2026-09-27T00:00:00.000Z", vec![swap()])
-            .expect("registry")
+        ReferenceRegistry::from_public("2026-09-27T00:00:00.000Z", vec![swap()]).expect("registry")
     }
 
     fn swap() -> PublicInstrument {
