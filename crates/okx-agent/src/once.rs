@@ -588,10 +588,7 @@ async fn response_for(
             if let (Some(private_ws), Some(cursor)) = (context.private_ws, convergence_cursor) {
                 match private_ws.convergence_window(cursor).await {
                     Ok(window) => {
-                        if let (
-                            Some(connection_fingerprint),
-                            Some(last_inbound_ms),
-                        ) = (
+                        if let (Some(connection_fingerprint), Some(last_inbound_ms)) = (
                             window.status.connection_id_fingerprint.as_deref(),
                             window.status.last_inbound_ms,
                         ) {
