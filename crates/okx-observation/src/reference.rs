@@ -200,7 +200,9 @@ impl ReferenceRegistry {
                     || instrument.contract_value_currency.as_deref() == Some(asset)
             })
             .filter(|instrument| {
-                settle_currency.is_none_or(|settle| instrument.settle_currency == settle)
+                settle_currency.is_none_or(|settle| {
+                    instrument.settle_currency.as_deref() == Some(settle)
+                })
             })
             .filter(|instrument| {
                 instrument_type.is_none_or(|expected| instrument.instrument_type == expected)
