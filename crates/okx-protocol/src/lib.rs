@@ -196,8 +196,7 @@ impl AgentOperation {
                 validate_instrument(instrument)?;
                 if !matches!(
                     bar.as_str(),
-                    "1s"
-                        | "1m"
+                    "1s" | "1m"
                         | "3m"
                         | "5m"
                         | "15m"
@@ -628,10 +627,7 @@ mod tests {
             bar: "1H".to_owned(),
             limit: Some(101),
         };
-        assert_eq!(
-            too_many.validate(),
-            Err(ProtocolError::InvalidHistoryLimit)
-        );
+        assert_eq!(too_many.validate(), Err(ProtocolError::InvalidHistoryLimit));
     }
 
     #[test]
