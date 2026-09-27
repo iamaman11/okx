@@ -22,7 +22,7 @@ pub(super) async fn dispatch(
                         warnings: assembled.warnings,
                     })
                 }
-                CurrentMarketAssembly::Response(response) => Ok(response),
+                CurrentMarketAssembly::Response(response) => Ok(*response),
                 CurrentMarketAssembly::Unavailable => Ok(unavailable(request, generated_at)),
             }
         }
