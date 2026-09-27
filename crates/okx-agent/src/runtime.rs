@@ -1,8 +1,11 @@
 use std::time::Duration;
 
-use okx_observation::ReferenceRegistry;
+use okx_runtime::{PublicWsCoordinator, PublicWsHandle};
 use serde::Serialize;
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::{
+    sync::watch,
+    time::{MissedTickBehavior, interval},
+};
 
 use crate::{
     AgentError, AgentResult,
@@ -44,12 +47,13 @@ pub struct MailboxRuntimeContext<'a> {
     pub mailbox: &'a GitHubMailboxClient,
     pub mailbox_issue: u64,
     pub agent_private_key: &'a [u8; 32],
-    pub reference: &'a ReferenceRegistry,
+    pub public_ws: &'a PublicWsHandle,
     pub market: &'a MarketBootstrapper,
 }
 
 pub async fn run_mailbox_until_shutdown(
     context: MailboxRuntimeContext<'_>,
+    public_ws_coordinator: PublicWsCoordinator,
     poll_seconds: u64,
 ) -> AgentResult<()> {
     let MailboxRuntimeContext {
@@ -58,12 +62,15 @@ pub async fn run_mailbox_until_shutdown(
         mailbox,
         mailbox_issue,
         agent_private_key,
-        reference,
+        public_ws,
         market,
     } = context;
     if !(1..=60).contains(&poll_seconds) {
         return Err(AgentError::InvalidPollInterval);
     }
+
+    let (public_shutdown_tx, public_shutdown_rx) = watch::channel(false);
+    let mut public_runtime_task = tokio::spawn(public_ws_coordinator.run(public_shutdown_rx));
 
     let mut github_verified = false;
     let mut identity_published = false;
@@ -84,6 +91,21 @@ pub async fn run_mailbox_until_shutdown(
             result = tokio::signal::ctrl_c() => {
                 result?;
                 break;
+            }
+            runtime_result = &mut public_runtime_task => {
+                emit(
+                    RuntimeState::ShuttingDown,
+                    config,
+                    identity,
+                    Some(mailbox_issue),
+                )?;
+                return match runtime_result {
+                    Ok(Ok(())) => Err(AgentError::PublicRuntimeTask(
+                        "public WebSocket coordinator exited before agent shutdown".to_owned(),
+                    )),
+                    Ok(Err(error)) => Err(error.into()),
+                    Err(error) => Err(AgentError::PublicRuntimeTask(error.to_string())),
+                };
             }
             _ = ticker.tick() => {
                 if !github_verified {
@@ -123,7 +145,7 @@ pub async fn run_mailbox_until_shutdown(
                 }
 
                 match mailbox
-                    .process_pending(&config.key_id, agent_private_key, reference, market)
+                    .process_pending(&config.key_id, agent_private_key, public_ws, market)
                     .await
                 {
                     Ok(processed) if processed > 0 => {
@@ -139,6 +161,13 @@ pub async fn run_mailbox_until_shutdown(
                 }
             }
         }
+    }
+
+    let _ = public_shutdown_tx.send(true);
+    match public_runtime_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(error.into()),
+        Err(error) => return Err(AgentError::PublicRuntimeTask(error.to_string())),
     }
 
     emit(

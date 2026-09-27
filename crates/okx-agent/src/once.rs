@@ -1,8 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_observation::{
-    INSTRUMENT_RULES_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, ReferenceRegistry,
-    SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
+    INSTRUMENT_RULES_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketReadiness,
+    ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
 };
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
@@ -10,6 +10,7 @@ use okx_protocol::{
     MailboxEnvelope,
     crypto::{decrypt, derive_directional_key, encrypt, shared_secret},
 };
+use okx_runtime::{PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PublicWsHandle};
 
 use crate::{
     AgentError, AgentResult,
@@ -26,13 +27,53 @@ pub const MARKET_INSTRUMENT_NOT_LIVE_CODE: &str = "MARKET_INSTRUMENT_NOT_LIVE";
 const REFERENCE_BOOTSTRAP_WARNING: &str =
     "reference data is REST-bootstrap only; live instruments continuity is not connected until M3";
 const MARKET_REST_BOOTSTRAP_WARNING: &str = "market data is bounded public REST bootstrap; persistent WebSocket continuity is not connected until M3";
+const REFERENCE_RUNTIME_WARNING: &str = "instrument rules come from the live ReferenceRegistry; market FRESH readiness is reported separately";
+pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
+
+#[derive(Clone, Copy)]
+pub struct ObservationQueryContext<'a> {
+    standalone_reference: Option<&'a ReferenceRegistry>,
+    market_fallback: Option<&'a MarketBootstrapper>,
+    public_ws: Option<&'a PublicWsHandle>,
+}
+
+impl<'a> ObservationQueryContext<'a> {
+    pub const fn unavailable() -> Self {
+        Self {
+            standalone_reference: None,
+            market_fallback: None,
+            public_ws: None,
+        }
+    }
+
+    pub const fn standalone(
+        reference: &'a ReferenceRegistry,
+        market: &'a MarketBootstrapper,
+    ) -> Self {
+        Self {
+            standalone_reference: Some(reference),
+            market_fallback: Some(market),
+            public_ws: None,
+        }
+    }
+
+    pub const fn live(
+        public_ws: &'a PublicWsHandle,
+        market_fallback: &'a MarketBootstrapper,
+    ) -> Self {
+        Self {
+            standalone_reference: None,
+            market_fallback: Some(market_fallback),
+            public_ws: Some(public_ws),
+        }
+    }
+}
 
 pub async fn process_once(
     envelope: &MailboxEnvelope,
     expected_key_id: &str,
     agent_private_key: &[u8; 32],
-    reference: Option<&ReferenceRegistry>,
-    market: Option<&MarketBootstrapper>,
+    context: ObservationQueryContext<'_>,
     response_nonce: [u8; 12],
     generated_at: &str,
 ) -> AgentResult<MailboxEnvelope> {
@@ -65,7 +106,7 @@ pub async fn process_once(
     }
     debug_assert_eq!(request.schema, AGENT_REQUEST_SCHEMA_V1);
 
-    let response = response_for(&request, reference, market, generated_at).await?;
+    let response = response_for(&request, context, generated_at).await?;
     response.validate()?;
     let response_plaintext = serde_json::to_vec(&response)?;
     let response_key = derive_directional_key(
@@ -100,8 +141,7 @@ pub async fn process_once_now(
     envelope: &MailboxEnvelope,
     expected_key_id: &str,
     agent_private_key: &[u8; 32],
-    reference: Option<&ReferenceRegistry>,
-    market: Option<&MarketBootstrapper>,
+    context: ObservationQueryContext<'_>,
 ) -> AgentResult<MailboxEnvelope> {
     let mut nonce = [0_u8; 12];
     getrandom::fill(&mut nonce).map_err(|error| AgentError::Random(error.to_string()))?;
@@ -111,8 +151,7 @@ pub async fn process_once_now(
         envelope,
         expected_key_id,
         agent_private_key,
-        reference,
-        market,
+        context,
         nonce,
         &generated_at,
     )
@@ -121,13 +160,80 @@ pub async fn process_once_now(
 
 async fn response_for(
     request: &AgentRequest,
-    reference: Option<&ReferenceRegistry>,
-    market: Option<&MarketBootstrapper>,
+    context: ObservationQueryContext<'_>,
     generated_at: &str,
 ) -> AgentResult<AgentResponse> {
     match &request.operation {
         AgentOperation::MarketSnapshot { instrument } => {
-            let (Some(reference), Some(market)) = (reference, market) else {
+            if let Some(public_ws) = context.public_ws {
+                if public_ws.instrument_rules(instrument).await.is_none() {
+                    return Ok(reference_not_found(request, generated_at, instrument));
+                }
+                public_ws.demand_instrument(instrument.clone()).await?;
+
+                let now_ms = utc_now_ms();
+                let quality = public_ws
+                    .quality_snapshot(instrument, now_ms, PUBLIC_MARKET_MAX_AGE_MS, true)
+                    .await?;
+
+                if quality.quality == MarketReadiness::Fresh {
+                    let live = public_ws
+                        .fresh_snapshot(
+                            instrument,
+                            now_ms,
+                            PUBLIC_MARKET_MAX_AGE_MS,
+                            generated_at.to_owned(),
+                        )
+                        .await?;
+                    return Ok(AgentResponse {
+                        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id.clone(),
+                        status: AgentResponseStatus::Completed,
+                        generated_at: generated_at.to_owned(),
+                        quality: DataQuality::Fresh,
+                        result_schema: Some(MARKET_SNAPSHOT_SCHEMA_V1.to_owned()),
+                        result: Some(serde_json::to_value(live.market)?),
+                        failure: None,
+                        warnings: Vec::new(),
+                    });
+                }
+
+                let Some(market) = context.market_fallback else {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        MARKET_PUBLIC_API_UNAVAILABLE_CODE,
+                        format!(
+                            "persistent WebSocket state is not FRESH: {}",
+                            quality.reason
+                        ),
+                        true,
+                    ));
+                };
+                let reference = public_ws.reference_snapshot().await;
+                return match market.snapshot(&reference, instrument).await {
+                    Ok(result) => Ok(AgentResponse {
+                        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id.clone(),
+                        status: AgentResponseStatus::Completed,
+                        generated_at: generated_at.to_owned(),
+                        quality: DataQuality::Degraded,
+                        result_schema: Some(MARKET_SNAPSHOT_SCHEMA_V1.to_owned()),
+                        result: Some(serde_json::to_value(result)?),
+                        failure: None,
+                        warnings: vec![format!(
+                            "persistent WebSocket state is not FRESH ({}); returned bounded public REST fallback",
+                            quality.reason
+                        )],
+                    }),
+                    Err(error) => Ok(market_failure(request, generated_at, error)),
+                };
+            }
+
+            let (Some(reference), Some(market)) =
+                (context.standalone_reference, context.market_fallback)
+            else {
                 return Ok(unavailable(request, generated_at));
             };
 
@@ -147,7 +253,24 @@ async fn response_for(
             }
         }
         AgentOperation::InstrumentRules { instrument } => {
-            let Some(reference) = reference else {
+            if let Some(public_ws) = context.public_ws {
+                if let Some(result) = public_ws.instrument_rules(instrument).await {
+                    return Ok(AgentResponse {
+                        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id.clone(),
+                        status: AgentResponseStatus::Completed,
+                        generated_at: generated_at.to_owned(),
+                        quality: DataQuality::Degraded,
+                        result_schema: Some(INSTRUMENT_RULES_SCHEMA_V1.to_owned()),
+                        result: Some(serde_json::to_value(result)?),
+                        failure: None,
+                        warnings: vec![REFERENCE_RUNTIME_WARNING.to_owned()],
+                    });
+                }
+                return Ok(reference_not_found(request, generated_at, instrument));
+            }
+
+            let Some(reference) = context.standalone_reference else {
                 return Ok(unavailable(request, generated_at));
             };
 
@@ -168,7 +291,28 @@ async fn response_for(
             Ok(reference_not_found(request, generated_at, instrument))
         }
         AgentOperation::SnapshotQuality { instrument } => {
-            let Some(reference) = reference else {
+            if let Some(public_ws) = context.public_ws {
+                if public_ws.instrument_rules(instrument).await.is_none() {
+                    return Ok(reference_not_found(request, generated_at, instrument));
+                }
+                public_ws.demand_instrument(instrument.clone()).await?;
+                let result = public_ws
+                    .quality_snapshot(instrument, utc_now_ms(), PUBLIC_MARKET_MAX_AGE_MS, true)
+                    .await?;
+                return Ok(AgentResponse {
+                    schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                    request_id: request.request_id.clone(),
+                    status: AgentResponseStatus::Completed,
+                    generated_at: generated_at.to_owned(),
+                    quality: data_quality(result.quality),
+                    result_schema: Some(PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2.to_owned()),
+                    result: Some(serde_json::to_value(result)?),
+                    failure: None,
+                    warnings: Vec::new(),
+                });
+            }
+
+            let Some(reference) = context.standalone_reference else {
                 return Ok(unavailable(request, generated_at));
             };
 
@@ -207,6 +351,19 @@ async fn response_for(
         }
         _ => Ok(unavailable(request, generated_at)),
     }
+}
+
+fn data_quality(quality: MarketReadiness) -> DataQuality {
+    match quality {
+        MarketReadiness::NotReady => DataQuality::NotReady,
+        MarketReadiness::Fresh => DataQuality::Fresh,
+        MarketReadiness::Stale => DataQuality::Stale,
+        MarketReadiness::Degraded => DataQuality::Degraded,
+    }
+}
+
+fn utc_now_ms() -> u64 {
+    Utc::now().timestamp_millis().max(0) as u64
 }
 
 fn market_failure(
@@ -379,8 +536,7 @@ mod tests {
             &request_envelope,
             "agent-key-1",
             &agent_private,
-            None,
-            None,
+            ObservationQueryContext::unavailable(),
             response_nonce,
             "2026-09-26T18:00:00.000Z",
         )
@@ -428,9 +584,17 @@ mod tests {
         };
         let registry = reference();
 
-        let response = response_for(&request, Some(&registry), None, "2026-09-27T00:00:01.000Z")
-            .await
-            .expect("response");
+        let response = response_for(
+            &request,
+            ObservationQueryContext {
+                standalone_reference: Some(&registry),
+                market_fallback: None,
+                public_ws: None,
+            },
+            "2026-09-27T00:00:01.000Z",
+        )
+        .await
+        .expect("response");
 
         assert_eq!(response.status, AgentResponseStatus::Completed);
         assert_eq!(response.quality, DataQuality::Degraded);
@@ -453,9 +617,17 @@ mod tests {
         };
         let registry = reference();
 
-        let response = response_for(&request, Some(&registry), None, "2026-09-27T00:00:01.000Z")
-            .await
-            .expect("response");
+        let response = response_for(
+            &request,
+            ObservationQueryContext {
+                standalone_reference: Some(&registry),
+                market_fallback: None,
+                public_ws: None,
+            },
+            "2026-09-27T00:00:01.000Z",
+        )
+        .await
+        .expect("response");
 
         assert_eq!(response.status, AgentResponseStatus::Completed);
         assert_eq!(response.quality, DataQuality::Degraded);

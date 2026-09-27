@@ -10,14 +10,15 @@ use okx_api::{
     PublicMarkPrice, PublicOpenInterest, PublicTicker,
 };
 use okx_observation::{
-    BookLevelUpdate, FundingRequirement, LiveMarketSnapshot, MarketReadiness,
-    MarketReadinessReport, MarketStreamError, MarketStreamState, OrderBookMessage, ReferenceError,
-    ReferenceRegistry,
+    BookLevelUpdate, FundingRequirement, InstrumentRulesSnapshot, LiveMarketSnapshot,
+    MarketReadiness, MarketReadinessReport, MarketStreamError, MarketStreamState, OrderBookMessage,
+    ReferenceError, ReferenceRegistry,
 };
 use okx_ws::{
     InboundMessage, PublicChannel, PublicWsConnection, PublicWsError, Subscription, WsArg,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
     sync::{RwLock, mpsc, watch},
@@ -25,18 +26,39 @@ use tokio::{
 };
 
 pub const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
+pub const PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2: &str = "okx.snapshot-quality/v2";
 const HEARTBEAT_TICK_SECONDS: u64 = 1;
 const IDLE_BEFORE_PING_SECONDS: u64 = 20;
 const PONG_TIMEOUT_SECONDS: u64 = 10;
 const SERVICE_UPGRADE_NOTICE_CODE: &str = "64008";
 const COMMAND_CAPACITY: usize = 128;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PublicConnectionState {
     Disconnected,
     Connecting,
     Connected,
     Reconnecting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PublicQualitySnapshot {
+    pub schema: String,
+    pub instrument_id: String,
+    pub quality: MarketReadiness,
+    pub reference_generation: String,
+    pub reference_source_received_at: String,
+    pub market_mode: String,
+    pub persistent_ws_connected: bool,
+    pub connection_state: PublicConnectionState,
+    pub connection_generation: u64,
+    pub connection_id_fingerprint: Option<String>,
+    pub acknowledged_subscriptions: usize,
+    pub sequence_continuity_proven: bool,
+    pub oldest_required_receive_ms: Option<u64>,
+    pub reason: String,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -99,6 +121,9 @@ pub enum PublicRuntimeError {
 
     #[error("public runtime command channel is closed")]
     CommandChannelClosed,
+
+    #[error("public runtime command queue is full")]
+    CommandQueueFull,
 
     #[error("system clock is before Unix epoch")]
     ClockBeforeEpoch,
@@ -249,6 +274,34 @@ impl PublicRuntimeState {
         ))
     }
 
+    pub fn quality_snapshot(
+        &self,
+        instrument_id: &str,
+        now_ms: u64,
+        max_age_ms: u64,
+        rest_fallback_available: bool,
+    ) -> Result<PublicQualitySnapshot, PublicRuntimeError> {
+        let readiness =
+            self.readiness(instrument_id, now_ms, max_age_ms, rest_fallback_available)?;
+        Ok(PublicQualitySnapshot {
+            schema: PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2.to_owned(),
+            instrument_id: instrument_id.to_owned(),
+            quality: readiness.quality,
+            reference_generation: self.reference.generation().as_str().to_owned(),
+            reference_source_received_at: self.reference.source_received_at().to_owned(),
+            market_mode: "websocket".to_owned(),
+            persistent_ws_connected: self.connection_state == PublicConnectionState::Connected,
+            connection_state: self.connection_state,
+            connection_generation: self.generation,
+            connection_id_fingerprint: self.connection_id.as_deref().map(connection_fingerprint),
+            acknowledged_subscriptions: self.acknowledged_subscriptions.len(),
+            sequence_continuity_proven: readiness.sequence_continuity_proven,
+            oldest_required_receive_ms: readiness.oldest_required_receive_ms,
+            reason: readiness.reason,
+            last_error: self.last_error.clone(),
+        })
+    }
+
     pub fn fresh_snapshot(
         &self,
         instrument_id: &str,
@@ -273,10 +326,72 @@ impl PublicWsHandle {
         &self,
         instrument_id: impl Into<String>,
     ) -> Result<(), PublicRuntimeError> {
+        let instrument_id = instrument_id.into();
+        if self.state.read().await.markets.contains_key(&instrument_id) {
+            return Ok(());
+        }
+
         self.commands
-            .send(CoordinatorCommand::DemandInstrument(instrument_id.into()))
+            .try_send(CoordinatorCommand::DemandInstrument(instrument_id.clone()))
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Closed(_) => PublicRuntimeError::CommandChannelClosed,
+                mpsc::error::TrySendError::Full(_) => PublicRuntimeError::CommandQueueFull,
+            })?;
+
+        let mut state = self.state.write().await;
+        if state.reference.get(&instrument_id).is_some()
+            && !state.markets.contains_key(&instrument_id)
+        {
+            let generation = state.generation;
+            let reference_generation = state.reference.generation().as_str().to_owned();
+            state.markets.insert(
+                instrument_id.clone(),
+                MarketStreamState::new(instrument_id, generation, reference_generation),
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn reference_snapshot(&self) -> ReferenceRegistry {
+        self.state.read().await.reference.clone()
+    }
+
+    pub async fn instrument_rules(&self, instrument_id: &str) -> Option<InstrumentRulesSnapshot> {
+        self.state
+            .read()
             .await
-            .map_err(|_| PublicRuntimeError::CommandChannelClosed)
+            .reference
+            .instrument_rules(instrument_id)
+    }
+
+    pub async fn quality_snapshot(
+        &self,
+        instrument_id: &str,
+        now_ms: u64,
+        max_age_ms: u64,
+        rest_fallback_available: bool,
+    ) -> Result<PublicQualitySnapshot, PublicRuntimeError> {
+        self.state.read().await.quality_snapshot(
+            instrument_id,
+            now_ms,
+            max_age_ms,
+            rest_fallback_available,
+        )
+    }
+
+    pub async fn fresh_snapshot(
+        &self,
+        instrument_id: &str,
+        now_ms: u64,
+        max_age_ms: u64,
+        source_received_at: impl Into<String>,
+    ) -> Result<LiveMarketSnapshot, PublicRuntimeError> {
+        self.state.read().await.fresh_snapshot(
+            instrument_id,
+            now_ms,
+            max_age_ms,
+            source_received_at,
+        )
     }
 
     pub fn state(&self) -> Arc<RwLock<PublicRuntimeState>> {
@@ -786,6 +901,11 @@ fn subscription_from_arg(arg: &WsArg) -> Subscription {
     }
 }
 
+fn connection_fingerprint(connection_id: &str) -> String {
+    let digest = Sha256::digest(connection_id.as_bytes());
+    format!("{digest:x}")
+}
+
 #[derive(Debug, Deserialize)]
 struct RawBookData {
     asks: Vec<[String; 4]>,
@@ -860,6 +980,37 @@ mod tests {
     fn reference(instrument: PublicInstrument) -> ReferenceRegistry {
         ReferenceRegistry::from_public("2026-09-27T00:00:00.000Z", vec![instrument])
             .expect("reference")
+    }
+
+    #[test]
+    fn connection_fingerprint_is_stable_and_does_not_expose_conn_id() {
+        let first = connection_fingerprint("conn-secret-value");
+        let second = connection_fingerprint("conn-secret-value");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert!(!first.contains("conn-secret-value"));
+    }
+
+    #[tokio::test]
+    async fn demand_registration_is_local_idempotent_and_network_independent() {
+        let reference = reference(instrument("DOGE-USDT-SWAP", "SWAP", "normal"));
+        let (_coordinator, handle) = PublicWsCoordinator::new(
+            OkxEnvironment::new(okx_api::Region::Global, false),
+            reference,
+        );
+
+        handle
+            .demand_instrument("DOGE-USDT-SWAP")
+            .await
+            .expect("first demand");
+        handle
+            .demand_instrument("DOGE-USDT-SWAP")
+            .await
+            .expect("repeat demand");
+
+        let state = handle.state.read().await;
+        assert!(state.markets.contains_key("DOGE-USDT-SWAP"));
+        assert_eq!(state.markets.len(), 1);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod public;
 
 pub use public::{
-    PublicConnectionState, PublicRuntimeError, PublicRuntimeState, PublicWsCoordinator,
-    PublicWsHandle, RECONNECT_BACKOFF_SECONDS, reconnect_delay,
+    PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PublicConnectionState, PublicQualitySnapshot,
+    PublicRuntimeError, PublicRuntimeState, PublicWsCoordinator, PublicWsHandle,
+    RECONNECT_BACKOFF_SECONDS, reconnect_delay,
 };

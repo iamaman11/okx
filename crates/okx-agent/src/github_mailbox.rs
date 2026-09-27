@@ -1,14 +1,16 @@
 use std::collections::HashSet;
 
 use okx_github::{GitHubClient, OWNER_USER_ID, REPOSITORY_ID};
-use okx_observation::ReferenceRegistry;
 use okx_protocol::{MailboxDirection, MailboxEnvelope};
+use okx_runtime::PublicWsHandle;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::{
-    AgentError, AgentResult, identity::AgentIdentity, market_bootstrap::MarketBootstrapper,
-    once::process_once_now,
+    AgentError, AgentResult,
+    identity::AgentIdentity,
+    market_bootstrap::MarketBootstrapper,
+    once::{ObservationQueryContext, process_once_now},
 };
 
 pub const GITHUB_MAILBOX_IDENTITY_SCHEMA_V1: &str = "okx.github-mailbox.identity/v1";
@@ -65,7 +67,7 @@ impl GitHubMailboxClient {
         &self,
         expected_key_id: &str,
         agent_private_key: &[u8; 32],
-        reference: &ReferenceRegistry,
+        public_ws: &PublicWsHandle,
         market: &MarketBootstrapper,
     ) -> AgentResult<usize> {
         let mut comments = self.github.issue_comments(self.issue_number).await?;
@@ -102,8 +104,7 @@ impl GitHubMailboxClient {
                 &envelope,
                 expected_key_id,
                 agent_private_key,
-                Some(reference),
-                Some(market),
+                ObservationQueryContext::live(public_ws, market),
             )
             .await
             {
