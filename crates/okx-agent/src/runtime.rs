@@ -9,6 +9,7 @@ use crate::{
     config::{AGENT_RUNTIME_SCHEMA_V1, AgentConfig},
     github_mailbox::GitHubMailboxClient,
     identity::AgentIdentity,
+    market_bootstrap::MarketBootstrapper,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -37,15 +38,29 @@ pub async fn run_until_shutdown(config: &AgentConfig, identity: &AgentIdentity) 
     Ok(())
 }
 
+pub struct MailboxRuntimeContext<'a> {
+    pub config: &'a AgentConfig,
+    pub identity: &'a AgentIdentity,
+    pub mailbox: &'a GitHubMailboxClient,
+    pub mailbox_issue: u64,
+    pub agent_private_key: &'a [u8; 32],
+    pub reference: &'a ReferenceRegistry,
+    pub market: &'a MarketBootstrapper,
+}
+
 pub async fn run_mailbox_until_shutdown(
-    config: &AgentConfig,
-    identity: &AgentIdentity,
-    mailbox: &GitHubMailboxClient,
-    mailbox_issue: u64,
+    context: MailboxRuntimeContext<'_>,
     poll_seconds: u64,
-    agent_private_key: &[u8; 32],
-    reference: &ReferenceRegistry,
 ) -> AgentResult<()> {
+    let MailboxRuntimeContext {
+        config,
+        identity,
+        mailbox,
+        mailbox_issue,
+        agent_private_key,
+        reference,
+        market,
+    } = context;
     if !(1..=60).contains(&poll_seconds) {
         return Err(AgentError::InvalidPollInterval);
     }
@@ -108,7 +123,7 @@ pub async fn run_mailbox_until_shutdown(
                 }
 
                 match mailbox
-                    .process_pending(&config.key_id, agent_private_key, reference)
+                    .process_pending(&config.key_id, agent_private_key, reference, market)
                     .await
                 {
                     Ok(processed) if processed > 0 => {

@@ -9,6 +9,8 @@ use thiserror::Error;
 use crate::ReferenceRegistry;
 
 pub const MARKET_SNAPSHOT_SCHEMA_V1: &str = "okx.market-snapshot/v1";
+pub const SNAPSHOT_QUALITY_SCHEMA_V1: &str = "okx.snapshot-quality/v1";
+pub const M2_REST_BOOTSTRAP_REASON: &str = "M2_REST_BOOTSTRAP_ONLY";
 
 #[derive(Debug, Clone)]
 pub struct MarketBootstrap {
@@ -91,6 +93,40 @@ pub struct MarketSnapshot {
     pub index_price: IndexPriceState,
     pub funding: Option<FundingState>,
     pub open_interest: OpenInterestState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SnapshotQualityReport {
+    pub schema: String,
+    pub instrument_id: String,
+    pub reference_generation: String,
+    pub reference_source_received_at: String,
+    pub market_mode: String,
+    pub persistent_ws_connected: bool,
+    pub sequence_continuity_proven: bool,
+    pub reason: String,
+}
+
+impl SnapshotQualityReport {
+    pub fn m2(reference: &ReferenceRegistry, instrument_id: &str) -> Result<Self, MarketError> {
+        let instrument = reference
+            .get(instrument_id)
+            .ok_or_else(|| MarketError::InstrumentNotFound(instrument_id.to_owned()))?;
+        if instrument.state != "live" {
+            return Err(MarketError::InstrumentNotLive(instrument_id.to_owned()));
+        }
+
+        Ok(Self {
+            schema: SNAPSHOT_QUALITY_SCHEMA_V1.to_owned(),
+            instrument_id: instrument_id.to_owned(),
+            reference_generation: reference.generation().as_str().to_owned(),
+            reference_source_received_at: reference.source_received_at().to_owned(),
+            market_mode: "rest_bootstrap".to_owned(),
+            persistent_ws_connected: false,
+            sequence_continuity_proven: false,
+            reason: M2_REST_BOOTSTRAP_REASON.to_owned(),
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -480,6 +516,18 @@ mod tests {
         .expect_err("mismatch");
 
         assert!(matches!(error, MarketError::IndexMismatch { .. }));
+    }
+
+    #[test]
+    fn snapshot_quality_reports_m2_rest_only_readiness() {
+        let reference = reference();
+        let report =
+            SnapshotQualityReport::m2(&reference, "DOGE-USDT-SWAP").expect("quality report");
+
+        assert_eq!(report.reason, M2_REST_BOOTSTRAP_REASON);
+        assert_eq!(report.market_mode, "rest_bootstrap");
+        assert!(!report.persistent_ws_connected);
+        assert!(!report.sequence_continuity_proven);
     }
 
     #[test]
