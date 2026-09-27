@@ -145,7 +145,12 @@ fn analyze_candidate_values(
     let stop_price = positive_decimal("stop_price", &assumptions.stop_price)?;
     require_tick_aligned("entry_price", entry_price, tick_size)?;
     require_tick_aligned("stop_price", stop_price, tick_size)?;
-    require_stop_direction(instrument_id, assumptions.direction, entry_price, stop_price)?;
+    require_stop_direction(
+        instrument_id,
+        assumptions.direction,
+        entry_price,
+        stop_price,
+    )?;
 
     let max_settle_notional =
         positive_decimal("max_settle_notional", &assumptions.max_settle_notional)?;
@@ -201,7 +206,12 @@ fn analyze_candidate_values(
     if target_price <= Decimal::ZERO {
         return Err(AnalysisError::InvalidTargetPrice(instrument_id.to_owned()));
     }
-    require_target_direction(instrument_id, assumptions.direction, entry_price, target_price)?;
+    require_target_direction(
+        instrument_id,
+        assumptions.direction,
+        entry_price,
+        target_price,
+    )?;
 
     let base_quantity = contracts * contract_value;
     let entry_settle_notional = base_quantity * entry_price;
@@ -212,16 +222,24 @@ fn analyze_candidate_values(
     let stop_exit_cost = user_trading_cost(stop_exit_settle_notional, exit_rate);
     let target_exit_cost = user_trading_cost(target_exit_settle_notional, exit_rate);
 
-    let stop_gross_pnl =
-        gross_pnl(assumptions.direction, base_quantity, entry_price, stop_price);
+    let stop_gross_pnl = gross_pnl(
+        assumptions.direction,
+        base_quantity,
+        entry_price,
+        stop_price,
+    );
     let stop_net_pnl = stop_gross_pnl - entry_cost - stop_exit_cost;
     if stop_net_pnl >= Decimal::ZERO {
         return Err(AnalysisError::StopDoesNotLose(instrument_id.to_owned()));
     }
     let stop_loss = -stop_net_pnl;
 
-    let target_gross_pnl =
-        gross_pnl(assumptions.direction, base_quantity, entry_price, target_price);
+    let target_gross_pnl = gross_pnl(
+        assumptions.direction,
+        base_quantity,
+        entry_price,
+        target_price,
+    );
     let target_net_pnl = target_gross_pnl - entry_cost - target_exit_cost;
     if target_net_pnl <= Decimal::ZERO {
         return Err(AnalysisError::TargetDoesNotProfit(instrument_id.to_owned()));
@@ -470,11 +488,8 @@ mod tests {
     #[test]
     fn long_candidate_is_risk_sized_and_fee_aware() {
         let rules = rules_for_test();
-        let result = analyze_test(
-            &rules,
-            &assumptions(PositionDirection::Long, "0.09000"),
-        )
-        .expect("candidate");
+        let result = analyze_test(&rules, &assumptions(PositionDirection::Long, "0.09000"))
+            .expect("candidate");
 
         assert_eq!(result.settle_currency, "USDT");
         assert_eq!(result.sizing_constraint, SizingConstraint::Risk);
@@ -488,11 +503,8 @@ mod tests {
     #[test]
     fn short_candidate_uses_adverse_stop_and_profitable_target() {
         let rules = rules_for_test();
-        let result = analyze_test(
-            &rules,
-            &assumptions(PositionDirection::Short, "0.11000"),
-        )
-        .expect("candidate");
+        let result = analyze_test(&rules, &assumptions(PositionDirection::Short, "0.11000"))
+            .expect("candidate");
 
         assert_eq!(result.direction, PositionDirection::Short);
         assert!(
@@ -564,7 +576,9 @@ mod tests {
             (PositionDirection::Short, "0.11000"),
         ] {
             let result = analyze_test(&rules, &assumptions(direction, stop)).expect("candidate");
-            assert!(decimal("actual_rr", &result.actual_target_rr).expect("rr") >= Decimal::from(2));
+            assert!(
+                decimal("actual_rr", &result.actual_target_rr).expect("rr") >= Decimal::from(2)
+            );
         }
     }
 }
