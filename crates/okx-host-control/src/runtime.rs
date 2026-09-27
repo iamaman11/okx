@@ -2,8 +2,7 @@ use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use okx_github::{
-    GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCommentCursor, IssueCursorStore,
-    OWNER_USER_ID,
+    GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCursorStore, OWNER_USER_ID,
 };
 use okx_protocol::{
     HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlOperation, HostControlRequest,
