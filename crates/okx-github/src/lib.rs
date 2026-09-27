@@ -474,7 +474,9 @@ impl GitHubClient {
         if comments.len() == COMMENTS_PER_PAGE as usize {
             let next = self.issue_comment_page(issue_number, page.saturating_add(1)).await?;
             if !next.is_empty() {
-                comments = next;
+                comments.extend(next);
+                let keep_from = comments.len().saturating_sub(COMMENTS_PER_PAGE as usize);
+                comments = comments.split_off(keep_from);
             }
         } else if comments.is_empty() && page > 1 {
             // A manual deletion can shrink the last page between metadata and
@@ -514,10 +516,6 @@ impl GitHubClient {
             };
 
             if conditional {
-                // Any 200 response invalidates the previous representation
-                // immediately. A fresh batch is deliberately never re-armed,
-                // so processing/cursor failure cannot be hidden by a later 304.
-                self.clear_comment_validator();
                 first_page_etag = etag;
             }
 
@@ -608,6 +606,12 @@ impl GitHubClient {
             return Err(GitHubError::Response(classify_response_error(&response)));
         }
 
+        // A conditional 200 proves that the cached representation is no
+        // longer authoritative. Clear it before parsing so even a decode
+        // failure cannot let a stale validator hide a later replay.
+        if conditional {
+            self.clear_comment_validator();
+        }
         self.record_comment_ok();
         let etag = header_text(response.headers(), "etag");
         let comments = response.json().await?;
