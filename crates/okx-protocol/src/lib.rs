@@ -38,6 +38,9 @@ pub enum ProtocolError {
     #[error("invalid history limit")]
     InvalidHistoryLimit,
 
+    #[error("market research requires 2..=8 unique instruments")]
+    InvalidMarketResearchInstruments,
+
     #[error("position scenario requires exactly one exit_price or entry_move_ratio")]
     InvalidPositionScenarioExit,
 
@@ -154,6 +157,11 @@ pub enum AgentOperation {
     MarketOverview {
         instrument: String,
     },
+    MarketResearch {
+        instruments: Vec<String>,
+        bar: String,
+        limit: Option<u16>,
+    },
     MarketHistory {
         instrument: String,
         bar: String,
@@ -217,6 +225,11 @@ impl AgentOperation {
                 }
                 Ok(())
             }
+            Self::MarketResearch {
+                instruments,
+                bar,
+                limit,
+            } => validate_market_research(instruments, bar, *limit),
             Self::MarketHistory {
                 instrument,
                 bar,
@@ -489,6 +502,23 @@ fn validate_asset_code(value: &str) -> Result<(), ProtocolError> {
     } else {
         Err(ProtocolError::InvalidAssetCode)
     }
+}
+
+fn validate_market_research(
+    instruments: &[String],
+    bar: &str,
+    limit: Option<u16>,
+) -> Result<(), ProtocolError> {
+    if !(2..=8).contains(&instruments.len()) {
+        return Err(ProtocolError::InvalidMarketResearchInstruments);
+    }
+    for (index, instrument) in instruments.iter().enumerate() {
+        validate_history_request(instrument, bar, limit)?;
+        if instruments[..index].contains(instrument) {
+            return Err(ProtocolError::InvalidMarketResearchInstruments);
+        }
+    }
+    Ok(())
 }
 
 fn validate_history_request(
@@ -814,6 +844,44 @@ mod tests {
         assert_eq!(
             envelope.validate(MailboxDirection::AgentToClient),
             Err(ProtocolError::DirectionMismatch)
+        );
+    }
+
+    #[test]
+    fn market_research_is_bounded_unique_and_round_trips() {
+        let request = AgentOperation::MarketResearch {
+            instruments: vec![
+                "DOGE-USDT-SWAP".to_owned(),
+                "QNT-USDT-SWAP".to_owned(),
+                "BTC-USDT-SWAP".to_owned(),
+            ],
+            bar: "1H".to_owned(),
+            limit: Some(48),
+        };
+        assert!(request.validate().is_ok());
+
+        let json = serde_json::to_string(&request).expect("serialize");
+        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, request);
+
+        let too_short = AgentOperation::MarketResearch {
+            instruments: vec!["DOGE-USDT-SWAP".to_owned()],
+            bar: "1H".to_owned(),
+            limit: Some(48),
+        };
+        assert_eq!(
+            too_short.validate(),
+            Err(ProtocolError::InvalidMarketResearchInstruments)
+        );
+
+        let duplicate = AgentOperation::MarketResearch {
+            instruments: vec!["DOGE-USDT-SWAP".to_owned(), "DOGE-USDT-SWAP".to_owned()],
+            bar: "1H".to_owned(),
+            limit: Some(48),
+        };
+        assert_eq!(
+            duplicate.validate(),
+            Err(ProtocolError::InvalidMarketResearchInstruments)
         );
     }
 

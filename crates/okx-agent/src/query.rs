@@ -2,8 +2,8 @@ use chrono::Utc;
 use okx_analysis::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
     COST_ANALYSIS_SCHEMA_V1, CandidateOrderAssumptions, HISTORY_BEHAVIOR_SCHEMA_V1,
-    LiquidityRole as AnalysisLiquidityRole, POSITION_SCENARIO_SCHEMA_V1, PositionDirection,
-    PositionScenarioAssumptions, ScenarioExitAssumption, analyze_account_risk,
+    HistoryBehaviorAnalysis, LiquidityRole as AnalysisLiquidityRole, POSITION_SCENARIO_SCHEMA_V1,
+    PositionDirection, PositionScenarioAssumptions, ScenarioExitAssumption, analyze_account_risk,
     analyze_candidate_order, analyze_cost, analyze_history_behavior, analyze_position_scenario,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
@@ -42,6 +42,7 @@ pub const MARKET_BOOTSTRAP_INCONSISTENT_CODE: &str = "MARKET_BOOTSTRAP_INCONSIST
 pub const MARKET_INSTRUMENT_NOT_LIVE_CODE: &str = "MARKET_INSTRUMENT_NOT_LIVE";
 pub const MARKET_OVERVIEW_INCONSISTENT_CODE: &str = "MARKET_OVERVIEW_INCONSISTENT";
 pub const MARKET_HISTORY_INCONSISTENT_CODE: &str = "MARKET_HISTORY_INCONSISTENT";
+pub const MARKET_RESEARCH_INCONSISTENT_CODE: &str = "MARKET_RESEARCH_INCONSISTENT";
 pub const ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE: &str =
     "ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE";
 pub const ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE: &str = "ACCOUNT_OBSERVER_PERMISSION_REJECTED";
@@ -50,6 +51,7 @@ pub const ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE: &str = "ACCOUNT_BOOTSTRAP_INCONSI
 pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT";
 pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
+pub const MARKET_RESEARCH_SCHEMA_V1: &str = "okx.market-research/v1";
 
 const REFERENCE_BOOTSTRAP_WARNING: &str =
     "reference data is REST-bootstrap only; live instruments continuity is not connected until M3";
@@ -160,6 +162,7 @@ pub(crate) async fn dispatch(
         | AgentOperation::InstrumentRules { .. }
         | AgentOperation::FindInstruments { .. }
         | AgentOperation::MarketOverview { .. }
+        | AgentOperation::MarketResearch { .. }
         | AgentOperation::MarketHistory { .. }
         | AgentOperation::HistoryBehavior { .. }
         | AgentOperation::SnapshotQuality { .. } => {
@@ -195,6 +198,7 @@ pub(crate) async fn dispatch(
 struct AssembledCurrentMarket {
     rules: InstrumentRulesSnapshot,
     snapshot: MarketSnapshot,
+    source: &'static str,
     quality: DataQuality,
     warnings: Vec<String>,
 }
@@ -237,6 +241,7 @@ async fn assemble_current_market(
                 AssembledCurrentMarket {
                     rules,
                     snapshot: live.market,
+                    source: "websocket",
                     quality: DataQuality::Fresh,
                     warnings: Vec::new(),
                 },
@@ -262,6 +267,7 @@ async fn assemble_current_market(
                 AssembledCurrentMarket {
                     rules,
                     snapshot,
+                    source: "rest_fallback",
                     quality: DataQuality::Degraded,
                     warnings: vec![format!(
                         "persistent WebSocket state is not FRESH ({}); returned bounded public REST fallback",
@@ -292,6 +298,7 @@ async fn assemble_current_market(
             AssembledCurrentMarket {
                 rules,
                 snapshot,
+                source: "rest_bootstrap",
                 quality: DataQuality::Degraded,
                 warnings: vec![MARKET_REST_BOOTSTRAP_WARNING.to_owned()],
             },

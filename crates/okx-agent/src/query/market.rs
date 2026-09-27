@@ -1,5 +1,35 @@
 use super::*;
 
+#[derive(serde::Serialize)]
+struct MarketResearchResult {
+    schema: String,
+    bar: String,
+    history_limit: u16,
+    instruments: Vec<MarketResearchInstrumentResult>,
+}
+
+#[derive(serde::Serialize)]
+struct MarketResearchInstrumentResult {
+    instrument_id: String,
+    instrument_rules: InstrumentRulesSnapshot,
+    market: MarketSnapshot,
+    market_source: &'static str,
+    market_quality: DataQuality,
+    market_warnings: Vec<String>,
+    history_behavior: HistoryBehaviorAnalysis,
+    history_quality: DataQuality,
+    history_warnings: Vec<String>,
+    quality: DataQuality,
+}
+
+const fn research_quality(market: DataQuality, history: DataQuality) -> DataQuality {
+    if matches!(market, DataQuality::Fresh) && matches!(history, DataQuality::Fresh) {
+        DataQuality::Fresh
+    } else {
+        DataQuality::Degraded
+    }
+}
+
 pub(super) async fn dispatch(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
@@ -223,6 +253,112 @@ pub(super) async fn dispatch(
                 }
                 Err(error) => Ok(market_failure(request, generated_at, error)),
             }
+        }
+        AgentOperation::MarketResearch {
+            instruments,
+            bar,
+            limit,
+        } => {
+            let history_limit = limit.unwrap_or(100);
+            let mut results = Vec::with_capacity(instruments.len());
+            let mut response_quality = DataQuality::Fresh;
+            let mut response_warnings = Vec::new();
+
+            for instrument in instruments {
+                let current =
+                    match assemble_current_market(request, context, generated_at, instrument)
+                        .await?
+                    {
+                        CurrentMarketAssembly::Ready(value) => *value,
+                        CurrentMarketAssembly::Response(response) => return Ok(*response),
+                        CurrentMarketAssembly::Unavailable => {
+                            return Ok(unavailable(request, generated_at));
+                        }
+                    };
+
+                let history =
+                    match assemble_market_history(context, instrument, bar, history_limit).await {
+                        Ok(Some(value)) => value,
+                        Ok(None) => return Ok(unavailable(request, generated_at)),
+                        Err(error) => return Ok(market_failure(request, generated_at, error)),
+                    };
+
+                if current.rules.reference_generation != history.snapshot.reference_generation
+                    || current.snapshot.reference_generation
+                        != history.snapshot.reference_generation
+                {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        MARKET_RESEARCH_INCONSISTENT_CODE,
+                        format!(
+                            "reference generation changed while assembling market research for '{instrument}'"
+                        ),
+                        true,
+                    ));
+                }
+
+                let history_behavior = match analyze_history_behavior(&history.snapshot) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(analysis_failure(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            error,
+                        ));
+                    }
+                };
+
+                let quality = research_quality(current.quality, history.quality);
+                if !matches!(quality, DataQuality::Fresh) {
+                    response_quality = DataQuality::Degraded;
+                }
+                response_warnings.extend(
+                    current
+                        .warnings
+                        .iter()
+                        .map(|warning| format!("{instrument}: market: {warning}")),
+                );
+                response_warnings.extend(
+                    history
+                        .warnings
+                        .iter()
+                        .map(|warning| format!("{instrument}: history: {warning}")),
+                );
+
+                results.push(MarketResearchInstrumentResult {
+                    instrument_id: instrument.clone(),
+                    instrument_rules: current.rules,
+                    market: current.snapshot,
+                    market_source: current.source,
+                    market_quality: current.quality,
+                    market_warnings: current.warnings,
+                    history_behavior,
+                    history_quality: history.quality,
+                    history_warnings: history.warnings,
+                    quality,
+                });
+            }
+
+            let result = MarketResearchResult {
+                schema: MARKET_RESEARCH_SCHEMA_V1.to_owned(),
+                bar: bar.clone(),
+                history_limit,
+                instruments: results,
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: response_quality,
+                result_schema: Some(MARKET_RESEARCH_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(result)?),
+                failure: None,
+                warnings: response_warnings,
+            })
         }
         AgentOperation::MarketHistory {
             instrument,
