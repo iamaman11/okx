@@ -146,11 +146,7 @@ pub async fn process_pending(
         if let Some(cursor) = checkpoint.cursor.as_ref()
             && checkpoint.ledger_initialized
         {
-            cursor_store.save_checkpoint(
-                cursor,
-                &checkpoint.terminal_request_ids,
-                true,
-            )?;
+            cursor_store.save_checkpoint(cursor, &checkpoint.terminal_request_ids, true)?;
         }
         return Ok(0);
     }
