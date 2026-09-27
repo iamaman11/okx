@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
@@ -92,6 +93,13 @@ impl IssueComment {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IssueCheckpoint {
+    pub cursor: Option<IssueCommentCursor>,
+    pub terminal_request_ids: BTreeSet<String>,
+    pub ledger_initialized: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedIssueCursor {
@@ -99,6 +107,10 @@ struct PersistedIssueCursor {
     repository_id: u64,
     issue_number: u64,
     cursor: IssueCommentCursor,
+    #[serde(default)]
+    terminal_request_ids: BTreeSet<String>,
+    #[serde(default)]
+    ledger_initialized: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -121,8 +133,12 @@ impl IssueCursorStore {
     }
 
     pub fn load(&self) -> Result<Option<IssueCommentCursor>, GitHubError> {
+        Ok(self.load_checkpoint()?.cursor)
+    }
+
+    pub fn load_checkpoint(&self) -> Result<IssueCheckpoint, GitHubError> {
         if !self.path.exists() {
-            return Ok(None);
+            return Ok(IssueCheckpoint::default());
         }
 
         let bytes = fs::read(&self.path)?;
@@ -136,10 +152,28 @@ impl IssueCursorStore {
             return Err(GitHubError::CursorStateMismatch);
         }
 
-        Ok(Some(persisted.cursor))
+        Ok(IssueCheckpoint {
+            cursor: Some(persisted.cursor),
+            terminal_request_ids: persisted.terminal_request_ids,
+            ledger_initialized: persisted.ledger_initialized,
+        })
     }
 
     pub fn save(&self, cursor: &IssueCommentCursor) -> Result<(), GitHubError> {
+        let checkpoint = self.load_checkpoint()?;
+        self.save_checkpoint(
+            cursor,
+            &checkpoint.terminal_request_ids,
+            checkpoint.ledger_initialized,
+        )
+    }
+
+    pub fn save_checkpoint(
+        &self,
+        cursor: &IssueCommentCursor,
+        terminal_request_ids: &BTreeSet<String>,
+        ledger_initialized: bool,
+    ) -> Result<(), GitHubError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -149,6 +183,8 @@ impl IssueCursorStore {
             repository_id: REPOSITORY_ID,
             issue_number: self.issue_number,
             cursor: cursor.clone(),
+            terminal_request_ids: terminal_request_ids.clone(),
+            ledger_initialized,
         };
         let bytes = serde_json::to_vec(&persisted).map_err(GitHubError::CursorJson)?;
 
@@ -498,14 +534,62 @@ mod tests {
             created_at: "2026-09-27T12:00:00Z".to_owned(),
             id: 123,
         };
-        store.save(&cursor).expect("save");
-        assert_eq!(store.load().expect("load"), Some(cursor));
+        let terminal_ids = BTreeSet::from([
+            "req_0123456789abcdef".to_owned(),
+            "req_fedcba9876543210".to_owned(),
+        ]);
+        store
+            .save_checkpoint(&cursor, &terminal_ids, true)
+            .expect("save");
+        let checkpoint = store.load_checkpoint().expect("load checkpoint");
+        assert_eq!(checkpoint.cursor, Some(cursor));
+        assert_eq!(checkpoint.terminal_request_ids, terminal_ids);
+        assert!(checkpoint.ledger_initialized);
 
         let wrong = IssueCursorStore::new(&path, 12).expect("wrong store");
         assert!(matches!(
             wrong.load(),
             Err(GitHubError::CursorStateMismatch)
         ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_cursor_without_ledger_migrates_as_uninitialized() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-github-legacy-cursor-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp root");
+        let path = root.join("cursor.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "schema": ISSUE_CURSOR_SCHEMA_V1,
+                "repository_id": REPOSITORY_ID,
+                "issue_number": 10,
+                "cursor": {
+                    "created_at": "2026-09-27T12:00:00Z",
+                    "id": 123
+                }
+            })
+            .to_string(),
+        )
+        .expect("legacy write");
+
+        let store = IssueCursorStore::new(&path, 10).expect("store");
+        let checkpoint = store.load_checkpoint().expect("legacy load");
+        assert_eq!(
+            checkpoint.cursor,
+            Some(IssueCommentCursor {
+                created_at: "2026-09-27T12:00:00Z".to_owned(),
+                id: 123,
+            })
+        );
+        assert!(checkpoint.terminal_request_ids.is_empty());
+        assert!(!checkpoint.ledger_initialized);
 
         let _ = fs::remove_dir_all(root);
     }
