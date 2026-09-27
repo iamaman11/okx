@@ -6,9 +6,10 @@ pub mod reference;
 pub mod stream;
 
 pub use account::{
-    ACCOUNT_REST_SOURCE_V1, ACCOUNT_SNAPSHOT_SCHEMA_V1, AccountBalanceDetail, AccountBalanceState,
-    AccountError, AccountPositionState, AccountSnapshot, M4_REST_BOOTSTRAP_REASON,
-    PendingOrderState,
+    ACCOUNT_CONVERGED_SOURCE_V2, ACCOUNT_REST_SOURCE_V1, ACCOUNT_SNAPSHOT_SCHEMA_V1,
+    ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountBalanceDetail, AccountBalanceState, AccountError,
+    AccountPositionState, AccountSnapshot, AccountWsEvent, M4_REST_BOOTSTRAP_REASON,
+    M4_REST_WS_CONVERGED_REASON, PendingOrderState,
 };
 pub use history::{
     HistoryCandle, MARKET_HISTORY_SCHEMA_V1, MARKET_HISTORY_SOURCE_V1, MarketHistoryError,
