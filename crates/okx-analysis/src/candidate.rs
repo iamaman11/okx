@@ -288,7 +288,10 @@ fn analyze_candidate_values(
     })
 }
 
-fn fee_rate(fees: &FeeScheduleSnapshot, role: LiquidityRole) -> Result<Decimal, AnalysisError> {
+pub(crate) fn fee_rate(
+    fees: &FeeScheduleSnapshot,
+    role: LiquidityRole,
+) -> Result<Decimal, AnalysisError> {
     let value = match role {
         LiquidityRole::Maker => &fees.maker_rate,
         LiquidityRole::Taker => &fees.taker_rate,
@@ -296,11 +299,11 @@ fn fee_rate(fees: &FeeScheduleSnapshot, role: LiquidityRole) -> Result<Decimal, 
     decimal("fee_rate", value)
 }
 
-fn user_trading_cost(notional: Decimal, exchange_rate: Decimal) -> Decimal {
+pub(crate) fn user_trading_cost(notional: Decimal, exchange_rate: Decimal) -> Decimal {
     -(notional * exchange_rate)
 }
 
-fn gross_pnl(
+pub(crate) fn gross_pnl(
     direction: PositionDirection,
     base_quantity: Decimal,
     entry_price: Decimal,
@@ -327,7 +330,7 @@ fn net_pnl_per_contract(
     gross - entry_cost - exit_cost
 }
 
-fn target_price_for_net_pnl(
+pub(crate) fn target_price_for_net_pnl(
     direction: PositionDirection,
     contract_value: Decimal,
     entry_price: Decimal,
@@ -416,11 +419,11 @@ fn require_target_direction(
     }
 }
 
-fn floor_to_increment(value: Decimal, increment: Decimal) -> Decimal {
+pub(crate) fn floor_to_increment(value: Decimal, increment: Decimal) -> Decimal {
     (value / increment).floor() * increment
 }
 
-fn ceil_to_increment(value: Decimal, increment: Decimal) -> Decimal {
+pub(crate) fn ceil_to_increment(value: Decimal, increment: Decimal) -> Decimal {
     (value / increment).ceil() * increment
 }
 
