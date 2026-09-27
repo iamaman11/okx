@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    client::OkxPublicClient, error::OkxError, instrument::InstrumentType,
-};
+use crate::{client::OkxPublicClient, error::OkxError, instrument::InstrumentType};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Ticker {
