@@ -198,9 +198,16 @@ impl MarketStreamState {
         value: OrderBookMessage,
     ) -> Result<(), MarketStreamError> {
         self.require_generation(generation)?;
-        self.order_book.apply_snapshot(generation, value)?;
-        self.order_book_received_at_ms = Some(received_at_ms);
-        Ok(())
+        match self.order_book.apply_snapshot(generation, value) {
+            Ok(()) => {
+                self.order_book_received_at_ms = Some(received_at_ms);
+                Ok(())
+            }
+            Err(error) => {
+                self.order_book_received_at_ms = None;
+                Err(error.into())
+            }
+        }
     }
 
     pub fn apply_book_update(
@@ -210,9 +217,16 @@ impl MarketStreamState {
         value: OrderBookMessage,
     ) -> Result<(), MarketStreamError> {
         self.require_generation(generation)?;
-        self.order_book.apply_update(generation, value)?;
-        self.order_book_received_at_ms = Some(received_at_ms);
-        Ok(())
+        match self.order_book.apply_update(generation, value) {
+            Ok(()) => {
+                self.order_book_received_at_ms = Some(received_at_ms);
+                Ok(())
+            }
+            Err(error) => {
+                self.order_book_received_at_ms = None;
+                Err(error.into())
+            }
+        }
     }
 
     pub fn readiness(
