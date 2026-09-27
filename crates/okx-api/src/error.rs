@@ -8,6 +8,9 @@ pub enum OkxError {
     #[error("OKX API error {code}: {message}")]
     Api { code: String, message: String },
 
+    #[error("OKX response error: {0}")]
+    Response(String),
+
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
