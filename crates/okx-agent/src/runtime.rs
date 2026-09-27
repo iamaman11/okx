@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use okx_observation::ReferenceRegistry;
 use serde::Serialize;
 use tokio::time::{MissedTickBehavior, interval};
 
@@ -43,6 +44,7 @@ pub async fn run_mailbox_until_shutdown(
     mailbox_issue: u64,
     poll_seconds: u64,
     agent_private_key: &[u8; 32],
+    reference: &ReferenceRegistry,
 ) -> AgentResult<()> {
     if !(1..=60).contains(&poll_seconds) {
         return Err(AgentError::InvalidPollInterval);
@@ -105,7 +107,10 @@ pub async fn run_mailbox_until_shutdown(
                     ready_emitted = true;
                 }
 
-                match mailbox.process_pending(&config.key_id, agent_private_key).await {
+                match mailbox
+                    .process_pending(&config.key_id, agent_private_key, reference)
+                    .await
+                {
                     Ok(processed) if processed > 0 => {
                         eprintln!("mailbox processed {processed} terminal request(s)");
                     }
