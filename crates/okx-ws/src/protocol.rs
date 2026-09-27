@@ -118,9 +118,7 @@ pub fn parse_text(text: &str) -> Result<InboundMessage, serde_json::Error> {
             connection_id: string_field(&value, "connId"),
         }),
         _ if value.get("arg").is_some() && value.get("data").is_some() => {
-            let arg = serde_json::from_value(
-                value.get("arg").cloned().unwrap_or(Value::Null),
-            )?;
+            let arg = serde_json::from_value(value.get("arg").cloned().unwrap_or(Value::Null))?;
             let data = serde_json::from_value(value.get("data").cloned().unwrap_or(Value::Null))?;
             Ok(InboundMessage::Data {
                 arg,
