@@ -1,13 +1,15 @@
 use std::collections::HashSet;
 
 use okx_github::{GitHubClient, OWNER_USER_ID, REPOSITORY_ID};
-use okx_runtime::PublicWsHandle;
 use okx_protocol::{MailboxDirection, MailboxEnvelope};
+use okx_runtime::PublicWsHandle;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::{
-    AgentError, AgentResult, identity::AgentIdentity, market_bootstrap::MarketBootstrapper,
+    AgentError, AgentResult,
+    identity::AgentIdentity,
+    market_bootstrap::MarketBootstrapper,
     once::{ObservationQueryContext, process_once_now},
 };
 
