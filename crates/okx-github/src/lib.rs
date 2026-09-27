@@ -577,9 +577,9 @@ fn classify_status(
 ) -> GitHubFailureClass {
     match status {
         401 => GitHubFailureClass::Authentication,
+        403 | 429 if retry_after_seconds.is_some() => GitHubFailureClass::SecondaryRateLimit,
         403 | 429 if rate_limit_remaining == Some(0) => GitHubFailureClass::PrimaryRateLimit,
         429 => GitHubFailureClass::SecondaryRateLimit,
-        403 if retry_after_seconds.is_some() => GitHubFailureClass::SecondaryRateLimit,
         403 | 404 => GitHubFailureClass::PermissionOrResource,
         500..=599 => GitHubFailureClass::TransientServer,
         400..=499 => GitHubFailureClass::PermissionOrResource,
