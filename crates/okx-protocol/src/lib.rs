@@ -875,10 +875,7 @@ mod tests {
         );
 
         let duplicate = AgentOperation::MarketResearch {
-            instruments: vec![
-                "DOGE-USDT-SWAP".to_owned(),
-                "DOGE-USDT-SWAP".to_owned(),
-            ],
+            instruments: vec!["DOGE-USDT-SWAP".to_owned(), "DOGE-USDT-SWAP".to_owned()],
             bar: "1H".to_owned(),
             limit: Some(48),
         };
