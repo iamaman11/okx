@@ -131,6 +131,20 @@ pub struct FeeRate {
 pub struct BalanceSnapshot {
     #[serde(rename = "totalEq", default)]
     pub total_equity: String,
+    #[serde(rename = "adjEq", default)]
+    pub adjusted_equity: String,
+    #[serde(rename = "isoEq", default)]
+    pub isolated_equity: String,
+    #[serde(rename = "imr", default)]
+    pub initial_margin_requirement: String,
+    #[serde(rename = "mmr", default)]
+    pub maintenance_margin_requirement: String,
+    #[serde(rename = "mgnRatio", default)]
+    pub margin_ratio: String,
+    #[serde(rename = "notionalUsd", default)]
+    pub notional_usd: String,
+    #[serde(rename = "uTime", default)]
+    pub update_time: String,
     #[serde(default)]
     pub details: Vec<BalanceDetail>,
 }
@@ -141,10 +155,26 @@ pub struct BalanceDetail {
     pub ccy: String,
     #[serde(rename = "eq", default)]
     pub equity: String,
+    #[serde(rename = "cashBal", default)]
+    pub cash_balance: String,
+    #[serde(rename = "availEq", default)]
+    pub available_equity: String,
+    #[serde(rename = "availBal", default)]
+    pub available_balance: String,
+    #[serde(rename = "frozenBal", default)]
+    pub frozen_balance: String,
+    #[serde(rename = "eqUsd", default)]
+    pub equity_usd: String,
+    #[serde(rename = "upl", default)]
+    pub unrealized_pnl: String,
+    #[serde(rename = "uTime", default)]
+    pub update_time: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Position {
+    #[serde(rename = "instType", default)]
+    pub instrument_type: String,
     #[serde(rename = "instId", default)]
     pub instrument_id: String,
     #[serde(default)]
@@ -153,6 +183,70 @@ pub struct Position {
     pub position_side: String,
     #[serde(rename = "mgnMode", default)]
     pub margin_mode: String,
+    #[serde(rename = "avgPx", default)]
+    pub average_price: String,
+    #[serde(rename = "markPx", default)]
+    pub mark_price: String,
+    #[serde(rename = "liqPx", default)]
+    pub liquidation_price: String,
+    #[serde(rename = "upl", default)]
+    pub unrealized_pnl: String,
+    #[serde(rename = "uplRatio", default)]
+    pub unrealized_pnl_ratio: String,
+    #[serde(default)]
+    pub lever: String,
+    #[serde(default)]
+    pub margin: String,
+    #[serde(rename = "imr", default)]
+    pub initial_margin_requirement: String,
+    #[serde(rename = "mmr", default)]
+    pub maintenance_margin_requirement: String,
+    #[serde(rename = "mgnRatio", default)]
+    pub margin_ratio: String,
+    #[serde(rename = "notionalUsd", default)]
+    pub notional_usd: String,
+    #[serde(default)]
+    pub ccy: String,
+    #[serde(rename = "cTime", default)]
+    pub creation_time: String,
+    #[serde(rename = "uTime", default)]
+    pub update_time: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PendingOrder {
+    #[serde(rename = "instType", default)]
+    pub instrument_type: String,
+    #[serde(rename = "instId", default)]
+    pub instrument_id: String,
+    #[serde(rename = "ordId", default)]
+    pub order_id: String,
+    #[serde(rename = "clOrdId", default)]
+    pub client_order_id: String,
+    #[serde(default)]
+    pub side: String,
+    #[serde(rename = "posSide", default)]
+    pub position_side: String,
+    #[serde(rename = "tdMode", default)]
+    pub trade_mode: String,
+    #[serde(rename = "ordType", default)]
+    pub order_type: String,
+    #[serde(default)]
+    pub px: String,
+    #[serde(default)]
+    pub sz: String,
+    #[serde(rename = "accFillSz", default)]
+    pub accumulated_fill_size: String,
+    #[serde(rename = "avgPx", default)]
+    pub average_fill_price: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(rename = "reduceOnly", default)]
+    pub reduce_only: String,
+    #[serde(rename = "cTime", default)]
+    pub creation_time: String,
+    #[serde(rename = "uTime", default)]
+    pub update_time: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -268,6 +362,58 @@ impl AccountApi {
         self.client
             .private_get("/api/v5/account/positions", &[])
             .await
+    }
+
+    pub async fn pending_orders(&self) -> Result<Vec<PendingOrder>, OkxError> {
+        const PAGE_LIMIT: usize = 100;
+        const MAX_PAGES: usize = 10;
+
+        let mut orders = Vec::new();
+        let mut after: Option<String> = None;
+
+        for _ in 0..MAX_PAGES {
+            let mut params = vec![("limit", PAGE_LIMIT.to_string())];
+            if let Some(after) = after.as_ref() {
+                params.push(("after", after.clone()));
+            }
+
+            let page: Vec<PendingOrder> = self
+                .client
+                .private_get("/api/v5/trade/orders-pending", &params)
+                .await?;
+            let page_len = page.len();
+
+            if page_len == 0 {
+                return Ok(orders);
+            }
+
+            let next_after = page
+                .last()
+                .map(|order| order.order_id.trim())
+                .filter(|order_id| !order_id.is_empty())
+                .ok_or_else(|| {
+                    OkxError::Response(
+                        "pending-order page is missing a terminal order id".to_owned(),
+                    )
+                })?
+                .to_owned();
+
+            if after.as_deref() == Some(next_after.as_str()) {
+                return Err(OkxError::Response(
+                    "pending-order pagination did not advance".to_owned(),
+                ));
+            }
+
+            orders.extend(page);
+            if page_len < PAGE_LIMIT {
+                return Ok(orders);
+            }
+            after = Some(next_after);
+        }
+
+        Err(OkxError::Response(
+            "pending orders exceed bounded bootstrap capacity of 1000".to_owned(),
+        ))
     }
 
     pub async fn probe_capabilities(
