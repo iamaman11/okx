@@ -2,8 +2,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_observation::{
     INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
-    MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketReadiness, MarketSnapshot, ReferenceRegistry,
-    SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
+    MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
+    MarketReadiness, MarketSnapshot, ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1,
+    SnapshotQualityReport,
 };
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
@@ -25,12 +26,15 @@ pub const MARKET_PUBLIC_API_UNAVAILABLE_CODE: &str = "MARKET_PUBLIC_API_UNAVAILA
 pub const MARKET_BOOTSTRAP_INCONSISTENT_CODE: &str = "MARKET_BOOTSTRAP_INCONSISTENT";
 pub const MARKET_INSTRUMENT_NOT_LIVE_CODE: &str = "MARKET_INSTRUMENT_NOT_LIVE";
 pub const MARKET_OVERVIEW_INCONSISTENT_CODE: &str = "MARKET_OVERVIEW_INCONSISTENT";
+pub const MARKET_HISTORY_INCONSISTENT_CODE: &str = "MARKET_HISTORY_INCONSISTENT";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
 
 const REFERENCE_BOOTSTRAP_WARNING: &str =
     "reference data is REST-bootstrap only; live instruments continuity is not connected until M3";
 const MARKET_REST_BOOTSTRAP_WARNING: &str = "market data is bounded public REST bootstrap; persistent WebSocket continuity is not connected until M3";
 const REFERENCE_RUNTIME_WARNING: &str = "instrument rules come from the live ReferenceRegistry; market FRESH readiness is reported separately";
+const MARKET_HISTORY_UNCONFIRMED_WARNING: &str =
+    "OKX history response contains at least one unconfirmed candlestick";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
 
 #[derive(serde::Serialize)]
@@ -461,6 +465,52 @@ async fn response_for(
                 Err(error) => Ok(market_failure(request, generated_at, error)),
             }
         }
+        AgentOperation::MarketHistory {
+            instrument,
+            bar,
+            limit,
+        } => {
+            let Some(market) = context.market_fallback else {
+                return Ok(unavailable(request, generated_at));
+            };
+            let reference = if let Some(public_ws) = context.public_ws {
+                public_ws.reference_snapshot().await
+            } else if let Some(reference) = context.standalone_reference {
+                reference.clone()
+            } else {
+                return Ok(unavailable(request, generated_at));
+            };
+
+            let requested_limit = limit.unwrap_or(100);
+            match market
+                .history(&reference, instrument, bar, requested_limit)
+                .await
+            {
+                Ok(result) => {
+                    let all_confirmed = result.all_confirmed;
+                    Ok(AgentResponse {
+                        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id.clone(),
+                        status: AgentResponseStatus::Completed,
+                        generated_at: generated_at.to_owned(),
+                        quality: if all_confirmed {
+                            DataQuality::Fresh
+                        } else {
+                            DataQuality::Degraded
+                        },
+                        result_schema: Some(MARKET_HISTORY_SCHEMA_V1.to_owned()),
+                        result: Some(serde_json::to_value(result)?),
+                        failure: None,
+                        warnings: if all_confirmed {
+                            Vec::new()
+                        } else {
+                            vec![MARKET_HISTORY_UNCONFIRMED_WARNING.to_owned()]
+                        },
+                    })
+                }
+                Err(error) => Ok(market_failure(request, generated_at, error)),
+            }
+        }
         AgentOperation::SnapshotQuality { instrument } => {
             if let Some(public_ws) = context.public_ws {
                 if public_ws.instrument_rules(instrument).await.is_none() {
@@ -580,6 +630,27 @@ fn market_failure(
             generated_at,
             AgentResponseStatus::Failed,
             MARKET_BOOTSTRAP_INCONSISTENT_CODE,
+            error.to_string(),
+            true,
+        ),
+        MarketBootstrapError::HistoryNormalize(MarketHistoryError::InstrumentNotFound(
+            instrument,
+        )) => reference_not_found(request, generated_at, &instrument),
+        MarketBootstrapError::HistoryNormalize(MarketHistoryError::InstrumentNotLive(
+            instrument,
+        )) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            MARKET_INSTRUMENT_NOT_LIVE_CODE,
+            format!("instrument '{instrument}' is not live"),
+            false,
+        ),
+        MarketBootstrapError::HistoryNormalize(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            MARKET_HISTORY_INCONSISTENT_CODE,
             error.to_string(),
             true,
         ),
