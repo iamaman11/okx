@@ -365,9 +365,55 @@ impl AccountApi {
     }
 
     pub async fn pending_orders(&self) -> Result<Vec<PendingOrder>, OkxError> {
-        self.client
-            .private_get("/api/v5/trade/orders-pending", &[])
-            .await
+        const PAGE_LIMIT: usize = 100;
+        const MAX_PAGES: usize = 10;
+
+        let mut orders = Vec::new();
+        let mut after: Option<String> = None;
+
+        for _ in 0..MAX_PAGES {
+            let mut params = vec![("limit", PAGE_LIMIT.to_string())];
+            if let Some(after) = after.as_ref() {
+                params.push(("after", after.clone()));
+            }
+
+            let page: Vec<PendingOrder> = self
+                .client
+                .private_get("/api/v5/trade/orders-pending", &params)
+                .await?;
+            let page_len = page.len();
+
+            if page_len == 0 {
+                return Ok(orders);
+            }
+
+            let next_after = page
+                .last()
+                .map(|order| order.order_id.trim())
+                .filter(|order_id| !order_id.is_empty())
+                .ok_or_else(|| {
+                    OkxError::Response(
+                        "pending-order page is missing a terminal order id".to_owned(),
+                    )
+                })?
+                .to_owned();
+
+            if after.as_deref() == Some(next_after.as_str()) {
+                return Err(OkxError::Response(
+                    "pending-order pagination did not advance".to_owned(),
+                ));
+            }
+
+            orders.extend(page);
+            if page_len < PAGE_LIMIT {
+                return Ok(orders);
+            }
+            after = Some(next_after);
+        }
+
+        Err(OkxError::Response(
+            "pending orders exceed bounded bootstrap capacity of 1000".to_owned(),
+        ))
     }
 
     pub async fn probe_capabilities(
