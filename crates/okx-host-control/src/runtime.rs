@@ -279,15 +279,15 @@ mod tests {
     fn replay_batch_with_terminal_ack_is_idempotent() {
         let request = serde_json::json!({
             "schema": "okx.windows.control/v1",
-            "request_id": "ctl-1",
+            "request_id": "ctl_replay_test_20260927a",
             "operation": { "type": "transport_status" }
         })
         .to_string();
         let terminal = serde_json::json!({
             "schema": "okx.windows.control.result/v1",
-            "request_id": "ctl-1",
+            "request_id": "ctl_replay_test_20260927a",
             "operation": { "type": "transport_status" },
-            "status": "pass",
+            "status": "PASS",
             "observed_at": "2026-09-27T12:00:01.000Z",
             "details": {},
             "failure": null
@@ -309,7 +309,7 @@ mod tests {
             },
         ];
 
-        assert!(terminal_request_ids(&comments).contains("ctl-1"));
+        assert!(terminal_request_ids(&comments).contains("ctl_replay_test_20260927a"));
         assert_eq!(
             completed_batch_cursor(&comments),
             Some(IssueCommentCursor {
