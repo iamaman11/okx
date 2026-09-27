@@ -114,7 +114,9 @@ pub enum AnalysisError {
     InconsistentLiquidationPrice(String),
     #[error("linear candidate analysis requires a settlement currency")]
     MissingSettlementCurrency,
-    #[error("candidate price field '{field}' value '{value}' is not aligned to tick size '{tick_size}'")]
+    #[error(
+        "candidate price field '{field}' value '{value}' is not aligned to tick size '{tick_size}'"
+    )]
     PriceNotOnTick {
         field: &'static str,
         value: String,
