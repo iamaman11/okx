@@ -7,6 +7,7 @@ use thiserror::Error;
 
 pub const REFERENCE_REGISTRY_SCHEMA_V1: &str = "okx.reference-registry/v1";
 pub const INSTRUMENT_RULES_SCHEMA_V1: &str = "okx.instrument-rules/v1";
+pub const INSTRUMENT_SEARCH_SCHEMA_V1: &str = "okx.instrument-search/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -59,6 +60,16 @@ pub struct InstrumentRulesSnapshot {
     pub reference_generation: String,
     pub source_received_at: String,
     pub instrument: InstrumentSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstrumentSearchSnapshot {
+    pub reference_generation: String,
+    pub source_received_at: String,
+    pub asset: String,
+    pub quote: Option<String>,
+    pub truncated: bool,
+    pub instruments: Vec<InstrumentSpec>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +186,31 @@ impl ReferenceRegistry {
             })
     }
 
+    pub fn find_instruments(
+        &self,
+        asset: &str,
+        quote: Option<&str>,
+        limit: usize,
+    ) -> InstrumentSearchSnapshot {
+        let mut matches: Vec<_> = self
+            .instruments
+            .values()
+            .filter(|instrument| instrument_matches(instrument, asset, quote))
+            .cloned()
+            .collect();
+        let truncated = matches.len() > limit;
+        matches.truncate(limit);
+
+        InstrumentSearchSnapshot {
+            reference_generation: self.generation.as_str().to_owned(),
+            source_received_at: self.source_received_at.clone(),
+            asset: asset.to_owned(),
+            quote: quote.map(ToOwned::to_owned),
+            truncated,
+            instruments: matches,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.instruments.len()
     }
@@ -243,6 +279,34 @@ fn funding_requirement(
             _ => FundingRequirement::Unknown,
         },
     }
+}
+
+fn instrument_matches(instrument: &InstrumentSpec, asset: &str, quote: Option<&str>) -> bool {
+    let asset_matches = instrument.base_currency.as_deref() == Some(asset)
+        || instrument.contract_value_currency.as_deref() == Some(asset)
+        || pair_component_matches(instrument.instrument_family.as_deref(), asset, None)
+        || pair_component_matches(instrument.underlying.as_deref(), asset, None);
+
+    if !asset_matches {
+        return false;
+    }
+
+    quote.is_none_or(|quote| {
+        instrument.quote_currency.as_deref() == Some(quote)
+            || instrument.settle_currency.as_deref() == Some(quote)
+            || pair_component_matches(instrument.instrument_family.as_deref(), asset, Some(quote))
+            || pair_component_matches(instrument.underlying.as_deref(), asset, Some(quote))
+    })
+}
+
+fn pair_component_matches(value: Option<&str>, asset: &str, quote: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let Some((base, paired)) = value.split_once('-') else {
+        return false;
+    };
+    base == asset && quote.is_none_or(|quote| paired == quote)
 }
 
 fn require<'a>(
@@ -402,6 +466,34 @@ mod tests {
         );
         assert_eq!(registry.generation().as_str(), before);
         assert!(registry.get("BTC-USDT-SWAP").is_none());
+    }
+
+    #[test]
+    fn instrument_search_uses_normalized_structured_fields_and_is_bounded() {
+        let mut future = swap("DOGE-USDT-261225");
+        future.instrument_type = "FUTURES".to_owned();
+        future.rule_type = "normal".to_owned();
+
+        let registry = ReferenceRegistry::from_public(
+            "2026-09-27T00:00:00.000Z",
+            vec![swap("DOGE-USDT-SWAP"), future, swap("BTC-USDT-SWAP")],
+        )
+        .expect("registry");
+
+        let all = registry.find_instruments("DOGE", Some("USDT"), 10);
+        assert_eq!(all.instruments.len(), 2);
+        assert!(!all.truncated);
+        assert!(all
+            .instruments
+            .iter()
+            .all(|instrument| instrument.instrument_id.starts_with("DOGE-")));
+
+        let bounded = registry.find_instruments("DOGE", Some("USDT"), 1);
+        assert_eq!(bounded.instruments.len(), 1);
+        assert!(bounded.truncated);
+
+        let absent = registry.find_instruments("QNT", Some("USDT"), 10);
+        assert!(absent.instruments.is_empty());
     }
 
     #[test]
