@@ -103,8 +103,15 @@ impl OrderBookState {
             ));
         }
 
-        let asks = levels_from_snapshot(message.asks)?;
-        let bids = levels_from_snapshot(message.bids)?;
+        let normalized = levels_from_snapshot(message.asks)
+            .and_then(|asks| levels_from_snapshot(message.bids).map(|bids| (asks, bids)));
+        let (asks, bids) = match normalized {
+            Ok(levels) => levels,
+            Err(error) => {
+                self.invalidate();
+                return Err(error);
+            }
+        };
 
         self.generation = generation;
         self.status = OrderBookStatus::Contiguous;
@@ -269,6 +276,26 @@ mod tests {
         assert_eq!(published.asks[1].price, "10");
         assert_eq!(published.bids[0].price, "10");
         assert_eq!(published.bids[1].price, "2");
+    }
+
+    #[test]
+    fn malformed_replacement_snapshot_revokes_previous_continuity() {
+        let mut state = OrderBookState::waiting(7);
+        state.apply_snapshot(7, snapshot(10)).expect("snapshot");
+
+        let mut malformed = snapshot(20);
+        malformed.bids = vec![level("not-a-price", "1")];
+        let error = state
+            .apply_snapshot(7, malformed)
+            .expect_err("malformed snapshot");
+
+        assert!(matches!(error, OrderBookError::InvalidDecimal { .. }));
+        let published = state.snapshot();
+        assert_eq!(published.status, OrderBookStatus::Invalid);
+        assert_eq!(published.seq_id, None);
+        assert_eq!(published.exchange_timestamp_ms, None);
+        assert!(published.asks.is_empty());
+        assert!(published.bids.is_empty());
     }
 
     #[test]
