@@ -23,6 +23,8 @@ struct PersistedIssuePollTelemetry {
     last_comments_scanned: u64,
     last_poll_completed_at: String,
     last_fetch_latency_ms: u64,
+    #[serde(default)]
+    last_request_latency_ms: Option<u64>,
     cursor: Option<IssueCommentCursor>,
     last_terminal_request_id: Option<String>,
 }
@@ -38,6 +40,7 @@ pub struct IssuePollTelemetryStatus {
     pub last_poll_completed_at: String,
     pub poll_age_ms: u64,
     pub last_fetch_latency_ms: u64,
+    pub last_request_latency_ms: Option<u64>,
     pub cursor: Option<IssueCommentCursor>,
     pub last_terminal_request_id: Option<String>,
 }
@@ -69,6 +72,7 @@ impl IssuePollTelemetryStore {
         comments_scanned: usize,
         cursor: Option<&IssueCommentCursor>,
         last_terminal_request_id: Option<&str>,
+        last_request_latency_ms: Option<u64>,
     ) -> Result<(), GitHubError> {
         let previous = self.load_persisted()?;
         let polls_completed = previous
@@ -81,7 +85,16 @@ impl IssuePollTelemetryStore {
         });
         let last_terminal_request_id = last_terminal_request_id
             .map(str::to_owned)
-            .or_else(|| previous.and_then(|value| value.last_terminal_request_id));
+            .or_else(|| {
+                previous
+                    .as_ref()
+                    .and_then(|value| value.last_terminal_request_id.clone())
+            });
+        let last_request_latency_ms = last_request_latency_ms.or_else(|| {
+            previous
+                .as_ref()
+                .and_then(|value| value.last_request_latency_ms)
+        });
 
         let telemetry = PersistedIssuePollTelemetry {
             schema: ISSUE_POLL_TELEMETRY_SCHEMA_V1.to_owned(),
@@ -92,6 +105,7 @@ impl IssuePollTelemetryStore {
             last_comments_scanned: comments_scanned as u64,
             last_poll_completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             last_fetch_latency_ms: fetch_latency.as_millis().min(u64::MAX as u128) as u64,
+            last_request_latency_ms,
             cursor: cursor.cloned(),
             last_terminal_request_id,
         };
@@ -120,6 +134,7 @@ impl IssuePollTelemetryStore {
             last_poll_completed_at: value.last_poll_completed_at,
             poll_age_ms: age,
             last_fetch_latency_ms: value.last_fetch_latency_ms,
+            last_request_latency_ms: value.last_request_latency_ms,
             cursor: value.cursor,
             last_terminal_request_id: value.last_terminal_request_id,
         }))
@@ -196,10 +211,11 @@ mod tests {
                 3,
                 Some(&cursor),
                 Some("req_0123456789abcdef"),
+                Some(1234),
             )
             .expect("first");
         store
-            .record_success(Duration::from_millis(11), 0, Some(&cursor), None)
+            .record_success(Duration::from_millis(11), 0, Some(&cursor), None, None)
             .expect("second");
 
         let status = store.status().expect("status").expect("present");
@@ -207,6 +223,7 @@ mod tests {
         assert_eq!(status.comments_scanned_total, 3);
         assert_eq!(status.last_comments_scanned, 0);
         assert_eq!(status.last_fetch_latency_ms, 11);
+        assert_eq!(status.last_request_latency_ms, Some(1234));
         assert_eq!(status.cursor, Some(cursor));
         assert_eq!(
             status.last_terminal_request_id.as_deref(),
@@ -222,7 +239,7 @@ mod tests {
         let _ = fs::remove_file(&path);
         let store = IssuePollTelemetryStore::new(&path, 10).expect("store");
         store
-            .record_success(Duration::from_millis(1), 0, None, None)
+            .record_success(Duration::from_millis(1), 0, None, None, None)
             .expect("record");
 
         let other = IssuePollTelemetryStore::new(&path, 12).expect("other");
