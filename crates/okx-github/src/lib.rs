@@ -256,18 +256,18 @@ impl GitHubClient {
                 .await?;
 
             let count = page_comments.len();
-            let mut reached_cursor = false;
+            let mut crossed_cursor_time = false;
             for raw in page_comments {
                 let comment = raw.into_issue_comment();
                 if cursor.is_none_or(|current| comment.cursor() > *current) {
                     fresh.push(comment);
-                } else {
-                    reached_cursor = true;
-                    break;
+                }
+                if cursor.is_some_and(|current| comment.created_at < current.created_at) {
+                    crossed_cursor_time = true;
                 }
             }
 
-            if reached_cursor || count < COMMENTS_PER_PAGE as usize {
+            if crossed_cursor_time || count < COMMENTS_PER_PAGE as usize {
                 fresh.sort_by_key(IssueComment::cursor);
                 return Ok(fresh);
             }
