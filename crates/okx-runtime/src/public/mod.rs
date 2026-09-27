@@ -10,7 +10,9 @@ use thiserror::Error;
 pub use coordinator::{
     PublicWsCoordinator, PublicWsHandle, RECONNECT_BACKOFF_SECONDS, reconnect_delay,
 };
-pub use state::{PublicConnectionState, PublicQualitySnapshot, PublicRuntimeState};
+pub use state::{
+    PublicConnectionState, PublicMarketOverviewView, PublicQualitySnapshot, PublicRuntimeState,
+};
 
 pub const PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2: &str = "okx.snapshot-quality/v2";
 
