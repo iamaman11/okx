@@ -85,7 +85,8 @@ impl Default for GitHubBackoff {
 
 impl GitHubBackoff {
     pub fn ready(&self) -> bool {
-        self.next_retry_at.is_none_or(|deadline| Instant::now() >= deadline)
+        self.next_retry_at
+            .is_none_or(|deadline| Instant::now() >= deadline)
     }
 
     pub fn remaining(&self) -> Option<Duration> {
@@ -780,14 +781,8 @@ mod tests {
         );
 
         let server = response_error(503, Some(100), None, None);
-        assert_eq!(
-            retry_delay_for(&server, 0, 1_000),
-            Duration::from_secs(1)
-        );
-        assert_eq!(
-            retry_delay_for(&server, 99, 1_000),
-            Duration::from_secs(60)
-        );
+        assert_eq!(retry_delay_for(&server, 0, 1_000), Duration::from_secs(1));
+        assert_eq!(retry_delay_for(&server, 99, 1_000), Duration::from_secs(60));
     }
 
     #[test]
@@ -795,7 +790,10 @@ mod tests {
         let mut backoff = GitHubBackoff::default();
         let error = response_error(401, Some(100), None, None);
         assert_eq!(backoff.on_error(&error), Duration::from_secs(60));
-        assert_eq!(backoff.last_class(), Some(GitHubFailureClass::Authentication));
+        assert_eq!(
+            backoff.last_class(),
+            Some(GitHubFailureClass::Authentication)
+        );
         assert!(!backoff.ready());
 
         backoff.on_success();
