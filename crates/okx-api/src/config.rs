@@ -1,6 +1,7 @@
 use std::{env, str::FromStr};
 
 use serde::Serialize;
+use zeroize::Zeroizing;
 
 use crate::error::OkxError;
 
@@ -71,12 +72,28 @@ impl OkxEnvironment {
 
 #[derive(Clone)]
 pub struct Credentials {
-    api_key: String,
-    secret_key: String,
-    passphrase: String,
+    api_key: Zeroizing<String>,
+    secret_key: Zeroizing<String>,
+    passphrase: Zeroizing<String>,
 }
 
 impl Credentials {
+    pub fn new(
+        api_key: String,
+        secret_key: String,
+        passphrase: String,
+    ) -> Result<Self, OkxError> {
+        validate_secret_component("API key", &api_key)?;
+        validate_secret_component("API secret", &secret_key)?;
+        validate_secret_component("API passphrase", &passphrase)?;
+
+        Ok(Self {
+            api_key: Zeroizing::new(api_key),
+            secret_key: Zeroizing::new(secret_key),
+            passphrase: Zeroizing::new(passphrase),
+        })
+    }
+
     pub fn from_env() -> Result<Self, OkxError> {
         fn required(name: &str) -> Result<String, OkxError> {
             env::var(name)
@@ -94,22 +111,41 @@ impl Credentials {
                 })
         }
 
-        Ok(Self {
-            api_key: required("OKX_API_KEY")?,
-            secret_key: required("OKX_API_SECRET")?,
-            passphrase: required("OKX_API_PASSPHRASE")?,
-        })
+        Self::new(
+            required("OKX_API_KEY")?,
+            required("OKX_API_SECRET")?,
+            required("OKX_API_PASSPHRASE")?,
+        )
     }
 
     pub(crate) fn api_key(&self) -> &str {
-        &self.api_key
+        self.api_key.as_str()
     }
 
     pub(crate) fn secret_key(&self) -> &str {
-        &self.secret_key
+        self.secret_key.as_str()
     }
 
     pub(crate) fn passphrase(&self) -> &str {
-        &self.passphrase
+        self.passphrase.as_str()
+    }
+}
+
+fn validate_secret_component(label: &str, value: &str) -> Result<(), OkxError> {
+    if value.trim().is_empty() || value.len() > 4096 || value.bytes().any(|byte| byte == 0) {
+        return Err(OkxError::Config(format!("{label} is invalid")));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credentials_reject_empty_components_without_echoing_secret() {
+        let error = Credentials::new("api-key".to_owned(), String::new(), "pass".to_owned())
+            .expect_err("empty secret rejected");
+        assert_eq!(error.to_string(), "configuration error: API secret is invalid");
     }
 }
