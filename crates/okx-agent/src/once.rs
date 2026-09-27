@@ -953,6 +953,7 @@ mod tests {
                 market_fallback: None,
                 public_ws: None,
                 mailbox_telemetry: None,
+                account_fallback: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -989,6 +990,7 @@ mod tests {
                 market_fallback: None,
                 public_ws: None,
                 mailbox_telemetry: None,
+                account_fallback: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1026,6 +1028,7 @@ mod tests {
                 market_fallback: None,
                 public_ws: None,
                 mailbox_telemetry: None,
+                account_fallback: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
