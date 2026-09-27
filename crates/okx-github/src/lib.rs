@@ -472,7 +472,9 @@ impl GitHubClient {
         // metadata read, check exactly one following page. This remains a
         // bounded tail lookup and is never used as replay authority.
         if comments.len() == COMMENTS_PER_PAGE as usize {
-            let next = self.issue_comment_page(issue_number, page.saturating_add(1)).await?;
+            let next = self
+                .issue_comment_page(issue_number, page.saturating_add(1))
+                .await?;
             if !next.is_empty() {
                 comments.extend(next);
                 let keep_from = comments.len().saturating_sub(COMMENTS_PER_PAGE as usize);
@@ -591,9 +593,7 @@ impl GitHubClient {
             .bearer_auth(self.token.as_str())
             .header("Accept", "application/vnd.github+json");
 
-        if conditional
-            && let Some(etag) = self.comment_validator_etag(&key)
-        {
+        if conditional && let Some(etag) = self.comment_validator_etag(&key) {
             request = request.header("If-None-Match", etag);
         }
 
