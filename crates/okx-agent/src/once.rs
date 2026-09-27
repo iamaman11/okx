@@ -1,8 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_observation::{
-    INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1,
-    InstrumentRulesSnapshot, MarketError, MarketReadiness, MarketSnapshot, ReferenceRegistry,
+    INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
+    MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketReadiness, MarketSnapshot, ReferenceRegistry,
     SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
 };
 use okx_protocol::{
@@ -11,9 +11,7 @@ use okx_protocol::{
     MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
     crypto::{decrypt, derive_directional_key, encrypt, shared_secret},
 };
-use okx_runtime::{
-    PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PublicQualitySnapshot, PublicWsHandle,
-};
+use okx_runtime::{PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PublicQualitySnapshot, PublicWsHandle};
 
 use crate::{
     AgentError, AgentResult,
@@ -810,7 +808,10 @@ mod tests {
             Some(INSTRUMENT_SEARCH_SCHEMA_V1)
         );
         let result = response.result.expect("result");
-        assert_eq!(result["instruments"].as_array().expect("instruments").len(), 1);
+        assert_eq!(
+            result["instruments"].as_array().expect("instruments").len(),
+            1
+        );
         assert_eq!(result["instruments"][0]["instrument_id"], "DOGE-USDT-SWAP");
     }
 
