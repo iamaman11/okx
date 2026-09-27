@@ -38,6 +38,8 @@ typed Query API
 Ownership is strict:
 
 - `okx-api`: typed OKX exchange primitives;
+- `okx-ws`: OKX WebSocket protocol/transport only;
+- `okx-runtime`: one Tokio owner for WS lifecycle/reconnect/subscriptions;
 - `okx-observation`: normalized reference/market/account/order state, reconciliation and readiness;
 - `okx-agent`: composition and access transport;
 - `okx-host-control`: Windows lifecycle/deploy/diagnostics only;
@@ -47,7 +49,7 @@ Ownership is strict:
 
 - M1 Reference Data Registry — PASS / closed (#23).
 - M2 Public REST Market State — PASS / closed (#26).
-- M3 Persistent Public OKX WebSocket — current stage (#32).
+- M3 Persistent Public OKX WebSocket — current stage (#30).
 - M4 Private read-only Account + Order State — planned.
 - M5 Deterministic Cost/Risk/Scenario — planned.
 - M6 MCP adapter — planned.
@@ -91,4 +93,4 @@ Canonical GitHub issues:
 - #7 native Windows runtime/deployment;
 - #10 encrypted temporary analytical transport;
 - #16 deferred Windows recovery acceptance debt;
-- #32 current M3 WebSocket stage.
+- #30 current M3 WebSocket stage.
