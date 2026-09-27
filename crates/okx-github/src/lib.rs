@@ -9,10 +9,11 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat};
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder, Response, header::HeaderMap};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -27,10 +28,99 @@ const MAX_COMMENT_PAGES: u32 = 10;
 pub const MAX_COMMENT_BODY_BYTES: usize = 64 * 1024;
 pub const ISSUE_CURSOR_SCHEMA_V1: &str = "okx.github.issue-cursor/v1";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum GitHubFailureClass {
+    Authentication,
+    PrimaryRateLimit,
+    SecondaryRateLimit,
+    PermissionOrResource,
+    TransientServer,
+    Network,
+    UnexpectedResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubResponseError {
+    pub class: GitHubFailureClass,
+    pub status: u16,
+    pub rate_limit_limit: Option<u64>,
+    pub rate_limit_remaining: Option<u64>,
+    pub rate_limit_reset: Option<u64>,
+    pub retry_after_seconds: Option<u64>,
+    pub request_id: Option<String>,
+}
+
+impl std::fmt::Display for GitHubResponseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "class={:?} status={} remaining={:?} reset={:?} retry_after={:?} request_id={:?}",
+            self.class,
+            self.status,
+            self.rate_limit_remaining,
+            self.rate_limit_reset,
+            self.retry_after_seconds,
+            self.request_id
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GitHubBackoff {
+    failure_count: u32,
+    next_retry_at: Option<Instant>,
+    last_class: Option<GitHubFailureClass>,
+}
+
+impl Default for GitHubBackoff {
+    fn default() -> Self {
+        Self {
+            failure_count: 0,
+            next_retry_at: None,
+            last_class: None,
+        }
+    }
+}
+
+impl GitHubBackoff {
+    pub fn ready(&self) -> bool {
+        self.next_retry_at.is_none_or(|deadline| Instant::now() >= deadline)
+    }
+
+    pub fn remaining(&self) -> Option<Duration> {
+        self.next_retry_at
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .filter(|duration| !duration.is_zero())
+    }
+
+    pub const fn last_class(&self) -> Option<GitHubFailureClass> {
+        self.last_class
+    }
+
+    pub fn on_success(&mut self) {
+        self.failure_count = 0;
+        self.next_retry_at = None;
+        self.last_class = None;
+    }
+
+    pub fn on_error(&mut self, error: &GitHubError) -> Duration {
+        let class = error.failure_class();
+        let delay = retry_delay_for(error, self.failure_count, unix_now_seconds());
+        self.failure_count = self.failure_count.saturating_add(1);
+        self.next_retry_at = Some(Instant::now() + delay);
+        self.last_class = Some(class);
+        delay
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum GitHubError {
-    #[error("GitHub HTTP error: {0}")]
+    #[error("GitHub HTTP transport error: {0}")]
     Http(#[from] reqwest::Error),
+
+    #[error("GitHub response rejected: {0}")]
+    Response(GitHubResponseError),
 
     #[error("GitHub repository identity mismatch")]
     RepositoryIdentityMismatch,
@@ -70,6 +160,35 @@ pub enum GitHubError {
 
     #[error("GitHub issue poll telemetry I/O error: {0}")]
     TelemetryIo(String),
+}
+
+impl GitHubError {
+    pub const fn failure_class(&self) -> GitHubFailureClass {
+        match self {
+            Self::Http(_) => GitHubFailureClass::Network,
+            Self::Response(error) => error.class,
+            Self::RepositoryIdentityMismatch => GitHubFailureClass::UnexpectedResponse,
+            Self::InvalidIssueNumber
+            | Self::HistoryLimitExceeded
+            | Self::CommentTooLarge
+            | Self::UntrustedWorkflowRun
+            | Self::UntrustedArtifact
+            | Self::CursorJson(_)
+            | Self::CursorStateMismatch
+            | Self::CursorIo(_)
+            | Self::TelemetryJson(_)
+            | Self::TelemetryStateMismatch
+            | Self::TelemetryTimestamp(_)
+            | Self::TelemetryIo(_) => GitHubFailureClass::UnexpectedResponse,
+        }
+    }
+
+    pub const fn response_error(&self) -> Option<&GitHubResponseError> {
+        match self {
+            Self::Response(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,16 +350,24 @@ impl GitHubClient {
         Ok(Self { http, token })
     }
 
+    async fn send_checked(&self, request: RequestBuilder) -> Result<Response, GitHubError> {
+        let response = request.send().await?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        Err(GitHubError::Response(classify_response_error(&response)))
+    }
+
     pub async fn verify_repository_identity(&self) -> Result<(), GitHubError> {
         let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}");
         let repository: RepositoryIdentity = self
-            .http
-            .get(url)
-            .bearer_auth(self.token.as_str())
-            .header("Accept", "application/vnd.github+json")
-            .send()
+            .send_checked(
+                self.http
+                    .get(url)
+                    .bearer_auth(self.token.as_str())
+                    .header("Accept", "application/vnd.github+json"),
+            )
             .await?
-            .error_for_status()?
             .json()
             .await?;
 
@@ -292,14 +419,14 @@ impl GitHubClient {
             }
 
             let page_comments: Vec<RawIssueComment> = self
-                .http
-                .get(url)
-                .query(&query)
-                .bearer_auth(self.token.as_str())
-                .header("Accept", "application/vnd.github+json")
-                .send()
+                .send_checked(
+                    self.http
+                        .get(url)
+                        .query(&query)
+                        .bearer_auth(self.token.as_str())
+                        .header("Accept", "application/vnd.github+json"),
+                )
                 .await?
-                .error_for_status()?
                 .json()
                 .await?;
 
@@ -323,13 +450,13 @@ impl GitHubClient {
     pub async fn workflow_run(&self, run_id: u64) -> Result<WorkflowRun, GitHubError> {
         let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/runs/{run_id}");
         let run: RawWorkflowRun = self
-            .http
-            .get(url)
-            .bearer_auth(self.token.as_str())
-            .header("Accept", "application/vnd.github+json")
-            .send()
+            .send_checked(
+                self.http
+                    .get(url)
+                    .bearer_auth(self.token.as_str())
+                    .header("Accept", "application/vnd.github+json"),
+            )
             .await?
-            .error_for_status()?
             .json()
             .await?;
 
@@ -356,13 +483,13 @@ impl GitHubClient {
             "{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/runs/{run_id}/artifacts?per_page=100"
         );
         let response: RawArtifactsResponse = self
-            .http
-            .get(url)
-            .bearer_auth(self.token.as_str())
-            .header("Accept", "application/vnd.github+json")
-            .send()
+            .send_checked(
+                self.http
+                    .get(url)
+                    .bearer_auth(self.token.as_str())
+                    .header("Accept", "application/vnd.github+json"),
+            )
             .await?
-            .error_for_status()?
             .json()
             .await?;
 
@@ -383,13 +510,13 @@ impl GitHubClient {
         let url =
             format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip");
         let bytes = self
-            .http
-            .get(url)
-            .bearer_auth(self.token.as_str())
-            .header("Accept", "application/vnd.github+json")
-            .send()
+            .send_checked(
+                self.http
+                    .get(url)
+                    .bearer_auth(self.token.as_str())
+                    .header("Accept", "application/vnd.github+json"),
+            )
             .await?
-            .error_for_status()?
             .bytes()
             .await?;
 
@@ -408,17 +535,102 @@ impl GitHubClient {
         }
 
         let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments");
-        self.http
-            .post(url)
-            .bearer_auth(self.token.as_str())
-            .header("Accept", "application/vnd.github+json")
-            .json(&serde_json::json!({ "body": body }))
-            .send()
-            .await?
-            .error_for_status()?;
+        self.send_checked(
+            self.http
+                .post(url)
+                .bearer_auth(self.token.as_str())
+                .header("Accept", "application/vnd.github+json")
+                .json(&serde_json::json!({ "body": body })),
+        )
+        .await?;
 
         Ok(())
     }
+}
+
+fn classify_response_error(response: &Response) -> GitHubResponseError {
+    let status = response.status().as_u16();
+    let headers = response.headers();
+    let rate_limit_limit = header_u64(headers, "x-ratelimit-limit");
+    let rate_limit_remaining = header_u64(headers, "x-ratelimit-remaining");
+    let rate_limit_reset = header_u64(headers, "x-ratelimit-reset");
+    let retry_after_seconds = header_u64(headers, "retry-after");
+    let request_id = header_text(headers, "x-github-request-id");
+
+    let class = classify_status(status, rate_limit_remaining, retry_after_seconds);
+
+    GitHubResponseError {
+        class,
+        status,
+        rate_limit_limit,
+        rate_limit_remaining,
+        rate_limit_reset,
+        retry_after_seconds,
+        request_id,
+    }
+}
+
+fn classify_status(
+    status: u16,
+    rate_limit_remaining: Option<u64>,
+    retry_after_seconds: Option<u64>,
+) -> GitHubFailureClass {
+    match status {
+        401 => GitHubFailureClass::Authentication,
+        403 | 429 if rate_limit_remaining == Some(0) => GitHubFailureClass::PrimaryRateLimit,
+        429 => GitHubFailureClass::SecondaryRateLimit,
+        403 if retry_after_seconds.is_some() => GitHubFailureClass::SecondaryRateLimit,
+        403 | 404 => GitHubFailureClass::PermissionOrResource,
+        500..=599 => GitHubFailureClass::TransientServer,
+        400..=499 => GitHubFailureClass::PermissionOrResource,
+        _ => GitHubFailureClass::UnexpectedResponse,
+    }
+}
+
+fn header_u64(headers: &HeaderMap, name: &'static str) -> Option<u64> {
+    headers.get(name)?.to_str().ok()?.trim().parse().ok()
+}
+
+fn header_text(headers: &HeaderMap, name: &'static str) -> Option<String> {
+    let value = headers.get(name)?.to_str().ok()?.trim();
+    (!value.is_empty()).then(|| value.chars().take(128).collect())
+}
+
+fn retry_delay_for(error: &GitHubError, attempt: u32, now_epoch_seconds: u64) -> Duration {
+    const TRANSIENT: [u64; 5] = [1, 5, 15, 30, 60];
+    const SLOW: [u64; 4] = [60, 120, 300, 300];
+
+    let response = error.response_error();
+    if let Some(retry_after) = response.and_then(|value| value.retry_after_seconds) {
+        return Duration::from_secs(retry_after.max(1));
+    }
+
+    match error.failure_class() {
+        GitHubFailureClass::PrimaryRateLimit => {
+            let reset = response.and_then(|value| value.rate_limit_reset);
+            Duration::from_secs(
+                reset
+                    .map(|value| value.saturating_sub(now_epoch_seconds).max(1))
+                    .unwrap_or(60),
+            )
+        }
+        GitHubFailureClass::SecondaryRateLimit
+        | GitHubFailureClass::Authentication
+        | GitHubFailureClass::PermissionOrResource
+        | GitHubFailureClass::UnexpectedResponse => {
+            Duration::from_secs(SLOW[attempt.min((SLOW.len() - 1) as u32) as usize])
+        }
+        GitHubFailureClass::TransientServer | GitHubFailureClass::Network => {
+            Duration::from_secs(TRANSIENT[attempt.min((TRANSIENT.len() - 1) as u32) as usize])
+        }
+    }
+}
+
+fn unix_now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn cursor_overlap_since(cursor: &IssueCommentCursor) -> Result<String, GitHubError> {
@@ -498,6 +710,99 @@ struct CommentUser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn response_error(
+        status: u16,
+        remaining: Option<u64>,
+        reset: Option<u64>,
+        retry_after: Option<u64>,
+    ) -> GitHubError {
+        GitHubError::Response(GitHubResponseError {
+            class: classify_status(status, remaining, retry_after),
+            status,
+            rate_limit_limit: Some(5_000),
+            rate_limit_remaining: remaining,
+            rate_limit_reset: reset,
+            retry_after_seconds: retry_after,
+            request_id: Some("REQ_TEST".to_owned()),
+        })
+    }
+
+    #[test]
+    fn classifies_auth_permission_and_rate_limit_responses() {
+        assert_eq!(
+            response_error(401, Some(100), None, None).failure_class(),
+            GitHubFailureClass::Authentication
+        );
+        assert_eq!(
+            response_error(403, Some(0), Some(2_000), None).failure_class(),
+            GitHubFailureClass::PrimaryRateLimit
+        );
+        assert_eq!(
+            response_error(403, Some(100), None, Some(90)).failure_class(),
+            GitHubFailureClass::SecondaryRateLimit
+        );
+        assert_eq!(
+            response_error(429, Some(100), None, None).failure_class(),
+            GitHubFailureClass::SecondaryRateLimit
+        );
+        assert_eq!(
+            response_error(403, Some(100), None, None).failure_class(),
+            GitHubFailureClass::PermissionOrResource
+        );
+    }
+
+    #[test]
+    fn retry_policy_honors_retry_after_and_primary_reset() {
+        let secondary = response_error(429, Some(100), None, Some(73));
+        assert_eq!(
+            retry_delay_for(&secondary, 0, 1_000),
+            Duration::from_secs(73)
+        );
+
+        let primary = response_error(403, Some(0), Some(1_120), None);
+        assert_eq!(
+            retry_delay_for(&primary, 0, 1_000),
+            Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn retry_policy_uses_bounded_slow_and_transient_backoff() {
+        let permission = response_error(403, Some(100), None, None);
+        assert_eq!(
+            retry_delay_for(&permission, 0, 1_000),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            retry_delay_for(&permission, 99, 1_000),
+            Duration::from_secs(300)
+        );
+
+        let server = response_error(503, Some(100), None, None);
+        assert_eq!(
+            retry_delay_for(&server, 0, 1_000),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            retry_delay_for(&server, 99, 1_000),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn backoff_success_resets_failure_state() {
+        let mut backoff = GitHubBackoff::default();
+        let error = response_error(401, Some(100), None, None);
+        assert_eq!(backoff.on_error(&error), Duration::from_secs(60));
+        assert_eq!(backoff.last_class(), Some(GitHubFailureClass::Authentication));
+        assert!(!backoff.ready());
+
+        backoff.on_success();
+        assert!(backoff.ready());
+        assert_eq!(backoff.remaining(), None);
+        assert_eq!(backoff.last_class(), None);
+    }
 
     #[test]
     fn repository_identity_constants_are_pinned() {
