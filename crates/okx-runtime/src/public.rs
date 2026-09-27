@@ -283,6 +283,9 @@ impl PublicRuntimeState {
         max_age_ms: u64,
         rest_fallback_available: bool,
     ) -> Result<PublicQualitySnapshot, PublicRuntimeError> {
+        let market = self.markets.get(instrument_id).ok_or_else(|| {
+            PublicRuntimeError::MarketStateNotInitialized(instrument_id.to_owned())
+        })?;
         let readiness =
             self.readiness(instrument_id, now_ms, max_age_ms, rest_fallback_available)?;
         Ok(PublicQualitySnapshot {
