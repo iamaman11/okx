@@ -1,13 +1,8 @@
-use std::{
-    collections::BTreeSet,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use okx_github::{
-    GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCursorStore,
-    IssuePollTelemetryStore, OWNER_USER_ID,
+    GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCursorStore, OWNER_USER_ID,
 };
 use okx_protocol::{
     HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlOperation, HostControlRequest,
@@ -30,8 +25,6 @@ enum ProcessTransition {
 pub const CONTROL_ISSUE_NUMBER: u64 = 12;
 const MAX_CONTROL_BODY_BYTES: usize = 4096;
 const CONTROL_CURSOR_PATH: &str = r"C:\okx-control\github-control-issue-12-cursor.json";
-pub const CONTROL_TELEMETRY_PATH: &str =
-    r"C:\okx-control\github-control-issue-12-telemetry.json";
 
 pub async fn run_until_shutdown(
     github: &GitHubClient,
@@ -124,7 +117,6 @@ pub async fn process_pending(
     let cursor_store =
         IssueCursorStore::new(PathBuf::from(CONTROL_CURSOR_PATH), CONTROL_ISSUE_NUMBER)?;
     let mut checkpoint = load_checkpoint_for_poll(&cursor_store)?;
-    let fetch_started = Instant::now();
 
     let comments = if checkpoint.ledger_initialized {
         github
@@ -145,7 +137,6 @@ pub async fn process_pending(
                 .await?
         }
     };
-    let fetch_latency = fetch_started.elapsed();
 
     if comments.is_empty() {
         if let Some(cursor) = checkpoint.cursor.as_ref()
@@ -153,12 +144,6 @@ pub async fn process_pending(
         {
             cursor_store.save_checkpoint(cursor, &checkpoint.terminal_request_ids, true)?;
         }
-        record_control_telemetry(
-            fetch_latency,
-            0,
-            checkpoint.cursor.as_ref(),
-            None,
-        );
         return Ok(0);
     }
 
@@ -166,7 +151,6 @@ pub async fn process_pending(
     terminal_ids.extend(control_terminal_request_ids(&comments));
 
     let mut processed = 0usize;
-    let mut last_terminal_request_id = last_control_terminal_request_id(&comments);
     for comment in &comments {
         if comment.user_id != OWNER_USER_ID || comment.body.len() > MAX_CONTROL_BODY_BYTES {
             continue;
@@ -237,7 +221,6 @@ pub async fn process_pending(
             .post_issue_comment(CONTROL_ISSUE_NUMBER, &serde_json::to_string(&result)?)
             .await?;
 
-        last_terminal_request_id = Some(request.request_id.clone());
         terminal_ids.insert(request.request_id);
         processed += 1;
 
@@ -250,51 +233,11 @@ pub async fn process_pending(
         }
     }
 
-    let completed_cursor = comments.last().map(IssueComment::cursor);
-    if let Some(cursor) = completed_cursor.as_ref() {
-        cursor_store.save_checkpoint(cursor, &terminal_ids, true)?;
+    if let Some(cursor) = comments.last().map(IssueComment::cursor) {
+        cursor_store.save_checkpoint(&cursor, &terminal_ids, true)?;
     }
-    record_control_telemetry(
-        fetch_latency,
-        comments.len(),
-        completed_cursor.as_ref().or(checkpoint.cursor.as_ref()),
-        last_terminal_request_id.as_deref(),
-    );
 
     Ok(processed)
-}
-
-fn record_control_telemetry(
-    fetch_latency: Duration,
-    comments_scanned: usize,
-    cursor: Option<&okx_github::IssueCommentCursor>,
-    last_terminal_request_id: Option<&str>,
-) {
-    let Ok(store) =
-        IssuePollTelemetryStore::new(PathBuf::from(CONTROL_TELEMETRY_PATH), CONTROL_ISSUE_NUMBER)
-    else {
-        return;
-    };
-    if let Err(error) = store.record_success(
-        fetch_latency,
-        comments_scanned,
-        cursor,
-        last_terminal_request_id,
-    ) {
-        eprintln!("control telemetry update failed: {error}");
-    }
-}
-
-fn last_control_terminal_request_id(comments: &[IssueComment]) -> Option<String> {
-    comments
-        .iter()
-        .filter(|comment| {
-            comment.user_id == OWNER_USER_ID && comment.body.len() <= MAX_CONTROL_BODY_BYTES
-        })
-        .filter_map(|comment| serde_json::from_str::<HostControlResult>(&comment.body).ok())
-        .filter(|result| result.validate().is_ok())
-        .last()
-        .map(|result| result.request_id)
 }
 
 fn load_checkpoint_for_poll(store: &IssueCursorStore) -> LocalResult<IssueCheckpoint> {
