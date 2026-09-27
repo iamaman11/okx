@@ -484,11 +484,8 @@ mod tests {
 
     #[test]
     fn cursor_store_round_trips_and_rejects_wrong_issue() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-github-cursor-{}-{}",
-            std::process::id(),
-            47
-        ));
+        let root =
+            std::env::temp_dir().join(format!("okx-github-cursor-{}-{}", std::process::id(), 47));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("temp root");
 
