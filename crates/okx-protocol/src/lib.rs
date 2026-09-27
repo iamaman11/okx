@@ -736,22 +736,30 @@ mod tests {
         let valid = AgentOperation::AnalyzeCandidateOrder {
             instrument: "DOGE-USDT-SWAP".to_owned(),
             side: PositionSide::Short,
-            notional_usd: "500.25".to_owned(),
-            max_risk_usd: "20.00".to_owned(),
+            entry_price: "0.2".to_owned(),
+            stop_price: "0.22".to_owned(),
+            max_settle_notional: "500.25".to_owned(),
+            max_loss_settle: "20.00".to_owned(),
             target_rr: "3.0".to_owned(),
+            entry_liquidity_role: LiquidityRole::Taker,
+            exit_liquidity_role: LiquidityRole::Maker,
         };
         assert!(valid.validate().is_ok());
 
         let invalid = AgentOperation::AnalyzeCandidateOrder {
             instrument: "DOGE-USDT-SWAP".to_owned(),
             side: PositionSide::Short,
-            notional_usd: "5e2".to_owned(),
-            max_risk_usd: "20".to_owned(),
+            entry_price: "2e-1".to_owned(),
+            stop_price: "0.22".to_owned(),
+            max_settle_notional: "500".to_owned(),
+            max_loss_settle: "20".to_owned(),
             target_rr: "3".to_owned(),
+            entry_liquidity_role: LiquidityRole::Taker,
+            exit_liquidity_role: LiquidityRole::Taker,
         };
         assert_eq!(
             invalid.validate(),
-            Err(ProtocolError::InvalidDecimalInput("notional_usd"))
+            Err(ProtocolError::InvalidDecimalInput("entry_price"))
         );
     }
 }
