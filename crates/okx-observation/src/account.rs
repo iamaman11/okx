@@ -243,8 +243,11 @@ impl AccountSnapshot {
         self.private_ws_last_inbound_ms = Some(private_ws_last_inbound_ms);
         self.private_ws_events_applied = Some(events.len() as u64);
         self.positions.sort_by(position_sort);
-        self.pending_orders.sort_by(|a, b| a.order_id.cmp(&b.order_id));
-        self.balance.details.sort_by(|a, b| a.currency.cmp(&b.currency));
+        self.pending_orders
+            .sort_by(|a, b| a.order_id.cmp(&b.order_id));
+        self.balance
+            .details
+            .sort_by(|a, b| a.currency.cmp(&b.currency));
         self.account_generation = generation_for(&self)?;
         Ok(self)
     }
@@ -379,7 +382,9 @@ fn normalize_balance(balance: BalanceSnapshot) -> Result<AccountBalanceState, Ac
     })
 }
 
-fn normalize_positions(positions: Vec<Position>) -> Result<Vec<AccountPositionState>, AccountError> {
+fn normalize_positions(
+    positions: Vec<Position>,
+) -> Result<Vec<AccountPositionState>, AccountError> {
     let mut position_ids = BTreeSet::new();
     let mut normalized = Vec::with_capacity(positions.len());
     for position in positions {
@@ -461,16 +466,21 @@ fn position_identity(position: &AccountPositionState) -> String {
 }
 
 fn position_sort(a: &AccountPositionState, b: &AccountPositionState) -> std::cmp::Ordering {
-    (&a.instrument_id, &a.position_side, &a.margin_mode)
-        .cmp(&(&b.instrument_id, &b.position_side, &b.margin_mode))
+    (&a.instrument_id, &a.position_side, &a.margin_mode).cmp(&(
+        &b.instrument_id,
+        &b.position_side,
+        &b.margin_mode,
+    ))
 }
 
 fn required_event_timestamp(value: Option<&str>, field: &'static str) -> Result<u64, AccountError> {
     let value = value.unwrap_or_default();
-    value.parse::<u64>().map_err(|_| AccountError::InvalidTimestamp {
-        field,
-        value: value.to_owned(),
-    })
+    value
+        .parse::<u64>()
+        .map_err(|_| AccountError::InvalidTimestamp {
+            field,
+            value: value.to_owned(),
+        })
 }
 
 fn timestamp_is_newer_or_equal(
@@ -712,11 +722,7 @@ mod tests {
         stale.details[0].update_time = "1790519999999".to_owned();
 
         let converged = rest
-            .converge_private_ws(
-                7,
-                1790520000100,
-                &[AccountWsEvent::Account(vec![stale])],
-            )
+            .converge_private_ws(7, 1790520000100, &[AccountWsEvent::Account(vec![stale])])
             .expect("converged");
 
         assert_eq!(converged.schema, ACCOUNT_SNAPSHOT_SCHEMA_V2);
@@ -741,11 +747,7 @@ mod tests {
 
         let canceled = pending_order("123", "canceled", "1790520000100");
         let converged = rest
-            .converge_private_ws(
-                8,
-                1790520000200,
-                &[AccountWsEvent::Orders(vec![canceled])],
-            )
+            .converge_private_ws(8, 1790520000200, &[AccountWsEvent::Orders(vec![canceled])])
             .expect("converged");
 
         assert!(converged.pending_orders.is_empty());
