@@ -2,9 +2,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_analysis::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
-    CandidateOrderAssumptions, HISTORY_BEHAVIOR_SCHEMA_V1,
-    LiquidityRole as AnalysisLiquidityRole, PositionDirection, analyze_account_risk,
-    analyze_candidate_order, analyze_history_behavior,
+    CandidateOrderAssumptions, HISTORY_BEHAVIOR_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
+    PositionDirection, analyze_account_risk, analyze_candidate_order, analyze_history_behavior,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
@@ -533,7 +532,8 @@ async fn response_for(
             limit,
         } => {
             let assembled =
-                match assemble_market_history(context, instrument, bar, limit.unwrap_or(100)).await {
+                match assemble_market_history(context, instrument, bar, limit.unwrap_or(100)).await
+                {
                     Ok(Some(value)) => value,
                     Ok(None) => return Ok(unavailable(request, generated_at)),
                     Err(error) => return Ok(market_failure(request, generated_at, error)),
@@ -556,7 +556,8 @@ async fn response_for(
             limit,
         } => {
             let assembled =
-                match assemble_market_history(context, instrument, bar, limit.unwrap_or(100)).await {
+                match assemble_market_history(context, instrument, bar, limit.unwrap_or(100)).await
+                {
                     Ok(Some(value)) => value,
                     Ok(None) => return Ok(unavailable(request, generated_at)),
                     Err(error) => return Ok(market_failure(request, generated_at, error)),
