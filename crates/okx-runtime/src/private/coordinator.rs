@@ -2,9 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
 use okx_api::{Credentials, OkxEnvironment};
-use okx_ws::{
-    PrivateInboundMessage, PrivateWsConnection, PrivateWsError,
-};
+use okx_ws::{PrivateInboundMessage, PrivateWsConnection, PrivateWsError};
 use tokio::{
     sync::{RwLock, watch},
     time::{Instant, interval, sleep_until},
@@ -49,10 +47,7 @@ impl PrivateWsHandle {
 }
 
 impl PrivateWsCoordinator {
-    pub fn new(
-        environment: OkxEnvironment,
-        credentials: Credentials,
-    ) -> (Self, PrivateWsHandle) {
+    pub fn new(environment: OkxEnvironment, credentials: Credentials) -> (Self, PrivateWsHandle) {
         let state = Arc::new(RwLock::new(PrivateRuntimeState::new()));
         (
             Self {
@@ -84,10 +79,7 @@ impl PrivateWsCoordinator {
             let outcome = match PrivateWsConnection::connect(self.environment).await {
                 Ok(mut connection) => {
                     self.generation = self.generation.saturating_add(1);
-                    self.state
-                        .write()
-                        .await
-                        .begin_generation(self.generation);
+                    self.state.write().await.begin_generation(self.generation);
 
                     match self.run_generation(&mut connection, &mut shutdown).await {
                         Ok(outcome) => outcome,
@@ -288,10 +280,7 @@ pub fn private_reconnect_delay(attempt: usize) -> Duration {
     Duration::from_secs(PRIVATE_RECONNECT_BACKOFF_SECONDS[index])
 }
 
-async fn backoff_until(
-    deadline: Instant,
-    shutdown: &mut watch::Receiver<bool>,
-) -> bool {
+async fn backoff_until(deadline: Instant, shutdown: &mut watch::Receiver<bool>) -> bool {
     tokio::select! {
         _ = sleep_until(deadline) => false,
         changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
