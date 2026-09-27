@@ -61,7 +61,7 @@ pub struct InstrumentRulesSnapshot {
     pub instrument: InstrumentSpec,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReferenceRegistry {
     source_received_at: String,
     generation: ReferenceGeneration,
