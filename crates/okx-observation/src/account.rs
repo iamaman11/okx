@@ -223,8 +223,11 @@ impl AccountSnapshot {
             });
         }
         normalized_positions.sort_by(|a, b| {
-            (&a.instrument_id, &a.position_side, &a.margin_mode)
-                .cmp(&(&b.instrument_id, &b.position_side, &b.margin_mode))
+            (&a.instrument_id, &a.position_side, &a.margin_mode).cmp(&(
+                &b.instrument_id,
+                &b.position_side,
+                &b.margin_mode,
+            ))
         });
 
         let mut order_ids = BTreeSet::new();
@@ -245,10 +248,7 @@ impl AccountSnapshot {
                 order_type: required_order("ordType", order.order_type)?,
                 price: optional(order.px),
                 size: required_order("sz", order.sz)?,
-                accumulated_fill_size: required_order(
-                    "accFillSz",
-                    order.accumulated_fill_size,
-                )?,
+                accumulated_fill_size: required_order("accFillSz", order.accumulated_fill_size)?,
                 average_fill_price: optional(order.average_fill_price),
                 state: required_order("state", order.state)?,
                 reduce_only: parse_optional_bool(order.reduce_only)?,
