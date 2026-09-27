@@ -386,10 +386,12 @@ impl PublicWsHandle {
         max_age_ms: u64,
         source_received_at: impl Into<String>,
     ) -> Result<LiveMarketSnapshot, PublicRuntimeError> {
-        self.state
-            .read()
-            .await
-            .fresh_snapshot(instrument_id, now_ms, max_age_ms, source_received_at)
+        self.state.read().await.fresh_snapshot(
+            instrument_id,
+            now_ms,
+            max_age_ms,
+            source_received_at,
+        )
     }
 
     pub fn state(&self) -> Arc<RwLock<PublicRuntimeState>> {
@@ -992,8 +994,10 @@ mod tests {
     #[tokio::test]
     async fn demand_registration_is_local_idempotent_and_network_independent() {
         let reference = reference(instrument("DOGE-USDT-SWAP", "SWAP", "normal"));
-        let (_coordinator, handle) =
-            PublicWsCoordinator::new(OkxEnvironment::new(okx_api::Region::Global, false), reference);
+        let (_coordinator, handle) = PublicWsCoordinator::new(
+            OkxEnvironment::new(okx_api::Region::Global, false),
+            reference,
+        );
 
         handle
             .demand_instrument("DOGE-USDT-SWAP")
