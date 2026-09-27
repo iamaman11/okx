@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use okx_github::{GitHubClient, OWNER_USER_ID, REPOSITORY_ID};
+use okx_observation::ReferenceRegistry;
 use okx_protocol::{MailboxDirection, MailboxEnvelope};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -61,6 +62,7 @@ impl GitHubMailboxClient {
         &self,
         expected_key_id: &str,
         agent_private_key: &[u8; 32],
+        reference: &ReferenceRegistry,
     ) -> AgentResult<usize> {
         let mut comments = self.github.issue_comments(self.issue_number).await?;
         comments.sort_by_key(|comment| comment.id);
@@ -92,7 +94,12 @@ impl GitHubMailboxClient {
                 continue;
             }
 
-            match process_once_now(&envelope, expected_key_id, agent_private_key) {
+            match process_once_now(
+                &envelope,
+                expected_key_id,
+                agent_private_key,
+                Some(reference),
+            ) {
                 Ok(response) => {
                     self.github
                         .post_issue_comment(self.issue_number, &serde_json::to_string(&response)?)
