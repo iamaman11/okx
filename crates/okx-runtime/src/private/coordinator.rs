@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
-use okx_api::{Credentials, OkxEnvironment};
+use okx_api::{BalanceSnapshot, Credentials, OkxEnvironment, PendingOrder, Position};
 use okx_ws::{PrivateInboundMessage, PrivateWsConnection, PrivateWsError};
 use tokio::{
     sync::{RwLock, watch},
@@ -10,7 +10,10 @@ use tokio::{
 
 use super::{
     PrivateRuntimeError,
-    state::{PrivateRuntimeState, PrivateWsStatus, baseline_private_subscriptions},
+    state::{
+        PrivateConvergenceCursor, PrivateConvergenceError, PrivateConvergenceWindow,
+        PrivateRuntimeState, PrivateWsEvent, PrivateWsStatus, baseline_private_subscriptions,
+    },
 };
 
 pub const PRIVATE_RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
@@ -43,6 +46,19 @@ impl PrivateWsHandle {
 
     pub fn state(&self) -> Arc<RwLock<PrivateRuntimeState>> {
         Arc::clone(&self.state)
+    }
+
+    pub async fn convergence_cursor(
+        &self,
+    ) -> Result<PrivateConvergenceCursor, PrivateConvergenceError> {
+        self.state.read().await.convergence_cursor()
+    }
+
+    pub async fn convergence_window(
+        &self,
+        cursor: PrivateConvergenceCursor,
+    ) -> Result<PrivateConvergenceWindow, PrivateConvergenceError> {
+        self.state.read().await.convergence_window(cursor)
     }
 }
 
@@ -234,18 +250,43 @@ impl PrivateWsCoordinator {
                                     });
                                 }
                             }
-                            PrivateInboundMessage::Data { arg, data: _ } => {
+                            PrivateInboundMessage::Data { arg, data } => {
                                 if !self.state.read().await.logged_in {
                                     return Ok(GenerationOutcome::Reconnect {
                                         saw_data,
                                         reason: "private data arrived before login".to_owned(),
                                     });
                                 }
+
+                                let event = match arg.channel {
+                                    okx_ws::PrivateChannel::Account => {
+                                        let updates = data
+                                            .into_iter()
+                                            .map(serde_json::from_value::<BalanceSnapshot>)
+                                            .collect::<Result<Vec<_>, _>>()?;
+                                        PrivateWsEvent::Account(updates)
+                                    }
+                                    okx_ws::PrivateChannel::Positions => {
+                                        let updates = data
+                                            .into_iter()
+                                            .map(serde_json::from_value::<Position>)
+                                            .collect::<Result<Vec<_>, _>>()?;
+                                        PrivateWsEvent::Positions(updates)
+                                    }
+                                    okx_ws::PrivateChannel::Orders => {
+                                        let updates = data
+                                            .into_iter()
+                                            .map(serde_json::from_value::<PendingOrder>)
+                                            .collect::<Result<Vec<_>, _>>()?;
+                                        PrivateWsEvent::Orders(updates)
+                                    }
+                                };
+
                                 saw_data = true;
                                 self.state
                                     .write()
                                     .await
-                                    .observe_data(arg.channel, now_ms());
+                                    .observe_event(event, now_ms());
                             }
                             PrivateInboundMessage::Other(_) => {}
                         },
