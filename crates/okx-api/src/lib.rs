@@ -4,6 +4,7 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod instrument;
+pub mod market_data;
 pub mod public_data;
 
 pub use account::{
@@ -14,4 +15,8 @@ pub use client::{OkxPublicClient, OkxRestClient};
 pub use config::{Credentials, OkxEnvironment, Region};
 pub use error::OkxError;
 pub use instrument::InstrumentType;
+pub use market_data::{
+    MarketDataApi, PublicFundingRate, PublicIndexTicker, PublicMarkPrice, PublicOpenInterest,
+    PublicTicker,
+};
 pub use public_data::{PublicDataApi, PublicInstrument};
