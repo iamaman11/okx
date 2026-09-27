@@ -90,7 +90,6 @@ pub enum InboundMessage {
 
 #[derive(Debug, Serialize)]
 struct SubscriptionRequest<'a> {
-    id: &'static str,
     op: &'static str,
     args: &'a [Subscription],
 }
@@ -108,7 +107,6 @@ fn subscription_payload(
     subscriptions: &[Subscription],
 ) -> Result<String, serde_json::Error> {
     serde_json::to_string(&SubscriptionRequest {
-        id: "m3-public",
         op: operation,
         args: subscriptions,
     })
@@ -191,6 +189,8 @@ mod tests {
 
         assert_eq!(subscribe["op"], "subscribe");
         assert_eq!(unsubscribe["op"], "unsubscribe");
+        assert!(subscribe.get("id").is_none());
+        assert!(unsubscribe.get("id").is_none());
         assert_eq!(subscribe["args"][0]["channel"], "tickers");
         assert_eq!(subscribe["args"][1]["channel"], "books");
     }
