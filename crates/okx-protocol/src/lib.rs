@@ -159,6 +159,7 @@ pub enum AgentOperation {
     SnapshotQuality {
         instrument: String,
     },
+    MailboxTelemetry,
     AccountSnapshot,
     PortfolioRisk,
     AnalyzeCandidateOrder {
@@ -228,7 +229,7 @@ impl AgentOperation {
                 }
                 Ok(())
             }
-            Self::AccountSnapshot | Self::PortfolioRisk => Ok(()),
+            Self::MailboxTelemetry | Self::AccountSnapshot | Self::PortfolioRisk => Ok(()),
             Self::AnalyzeCandidateOrder {
                 instrument,
                 notional_usd,
@@ -628,6 +629,14 @@ mod tests {
             limit: Some(101),
         };
         assert_eq!(too_many.validate(), Err(ProtocolError::InvalidHistoryLimit));
+    }
+
+    #[test]
+    fn mailbox_telemetry_request_is_typed() {
+        let request = AgentOperation::MailboxTelemetry;
+        assert!(request.validate().is_ok());
+        let json = serde_json::to_string(&request).expect("serialize");
+        assert_eq!(json, r#"{"type":"mailbox_telemetry"}"#);
     }
 
     #[test]
