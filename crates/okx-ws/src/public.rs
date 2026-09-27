@@ -43,10 +43,7 @@ impl PublicWsConnection {
         Ok(Self { socket })
     }
 
-    pub async fn subscribe(
-        &mut self,
-        subscriptions: &[Subscription],
-    ) -> Result<(), PublicWsError> {
+    pub async fn subscribe(&mut self, subscriptions: &[Subscription]) -> Result<(), PublicWsError> {
         let payload = subscribe_payload(subscriptions)?;
         validate_subscription_payload(subscriptions, &payload)?;
         self.socket.send(Message::Text(payload.into())).await?;
