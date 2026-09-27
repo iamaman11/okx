@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::PathBuf, time::Duration};
+use std::{collections::BTreeSet, future::Future, path::PathBuf, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use okx_github::{
@@ -9,7 +9,7 @@ use okx_protocol::{
     HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlOperation, HostControlRequest,
     HostControlResult, HostControlStatus,
 };
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::{Interval, MissedTickBehavior, interval};
 
 use crate::{
     HostControlError, HostControlResult as LocalResult, artifact::deploy_agent, autostart,
@@ -24,8 +24,22 @@ enum ProcessTransition {
 }
 
 pub const CONTROL_ISSUE_NUMBER: u64 = 12;
+pub const DEFAULT_CONTROL_POLL_SECONDS: u64 = 5;
+const LOCAL_RECONCILE_SECONDS: u64 = 1;
 const MAX_CONTROL_BODY_BYTES: usize = 4096;
 const CONTROL_CURSOR_PATH: &str = r"C:\okx-control\github-control-issue-12-cursor.json";
+
+#[derive(Debug)]
+enum NetworkWait<T> {
+    Completed(T),
+    Shutdown,
+}
+
+struct PendingControlBatch {
+    cursor_store: IssueCursorStore,
+    checkpoint: IssueCheckpoint,
+    comments: Vec<IssueComment>,
+}
 
 pub async fn run_until_shutdown(
     github: &GitHubClient,
@@ -40,23 +54,39 @@ pub async fn run_until_shutdown(
     let mut github_backoff = GitHubBackoff::default();
     let mut initial_state = "DEGRADED";
 
+    let mut reconcile_ticker = interval(Duration::from_secs(LOCAL_RECONCILE_SECONDS));
+    reconcile_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Tokio intervals tick immediately once. Consume that edge so the explicit
+    // initial reconcile below remains the first lifecycle action.
+    reconcile_ticker.tick().await;
+
     if let Err(error) = executor.reconcile_desired() {
         eprintln!("initial lifecycle reconcile failed: {error}");
     }
 
-    match github.verify_repository_identity().await {
-        Ok(()) => {
+    match await_network_with_reconcile(
+        github.verify_repository_identity(),
+        executor,
+        &mut reconcile_ticker,
+    )
+    .await?
+    {
+        NetworkWait::Completed(Ok(())) => {
             github_backoff.on_success();
             github_verified = true;
             initial_state = "READY";
         }
-        Err(error) => {
+        NetworkWait::Completed(Err(error)) => {
             let delay = github_backoff.on_error(&error);
             eprintln!(
                 "initial GitHub identity verification deferred: {error}; class={:?}; retry_in_ms={}",
                 github_backoff.last_class(),
                 delay.as_millis()
             );
+        }
+        NetworkWait::Shutdown => {
+            emit_shutdown(executor);
+            return Ok(());
         }
     }
 
@@ -66,12 +96,14 @@ pub async fn run_until_shutdown(
             "schema": "okx.host-control.runtime/v1",
             "state": initial_state,
             "control_issue": CONTROL_ISSUE_NUMBER,
-            "github_identity_verified": github_verified
+            "github_identity_verified": github_verified,
+            "local_reconcile_seconds": LOCAL_RECONCILE_SECONDS,
+            "github_poll_seconds": poll_seconds
         })
     );
 
-    let mut ticker = interval(Duration::from_secs(poll_seconds));
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut github_ticker = interval(Duration::from_secs(poll_seconds));
+    github_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -79,23 +111,28 @@ pub async fn run_until_shutdown(
                 result?;
                 break;
             }
-            _ = ticker.tick() => {
-                if let Err(error) = executor.reconcile_desired() {
-                    eprintln!("host lifecycle reconcile failed: {error}");
-                }
-
+            _ = reconcile_ticker.tick() => {
+                reconcile_lifecycle(executor);
+            }
+            _ = github_ticker.tick() => {
                 if !github_backoff.ready() {
                     continue;
                 }
 
                 if !github_verified {
-                    match github.verify_repository_identity().await {
-                        Ok(()) => {
+                    match await_network_with_reconcile(
+                        github.verify_repository_identity(),
+                        executor,
+                        &mut reconcile_ticker,
+                    )
+                    .await?
+                    {
+                        NetworkWait::Completed(Ok(())) => {
                             github_backoff.on_success();
                             github_verified = true;
                             eprintln!("GitHub repository identity verified");
                         }
-                        Err(error) => {
+                        NetworkWait::Completed(Err(error)) => {
                             let delay = github_backoff.on_error(&error);
                             eprintln!(
                                 "GitHub identity verification still unavailable: {error}; class={:?}; retry_in_ms={}",
@@ -104,12 +141,19 @@ pub async fn run_until_shutdown(
                             );
                             continue;
                         }
+                        NetworkWait::Shutdown => break,
                     }
                 }
 
-                match process_pending(github, executor).await {
-                    Ok(_) => github_backoff.on_success(),
-                    Err(error) => {
+                let batch = match await_network_with_reconcile(
+                    fetch_pending_control(github),
+                    executor,
+                    &mut reconcile_ticker,
+                )
+                .await?
+                {
+                    NetworkWait::Completed(Ok(batch)) => batch,
+                    NetworkWait::Completed(Err(error)) => {
                         if let HostControlError::Github(github_error) = &error {
                             let delay = github_backoff.on_error(github_error);
                             eprintln!(
@@ -121,12 +165,64 @@ pub async fn run_until_shutdown(
                         } else {
                             eprintln!("host-control poll failed: {error}");
                         }
+                        continue;
+                    }
+                    NetworkWait::Shutdown => break,
+                };
+
+                match process_control_batch(github, executor, batch).await {
+                    Ok(_) => github_backoff.on_success(),
+                    Err(error) => {
+                        if let HostControlError::Github(github_error) = &error {
+                            let delay = github_backoff.on_error(github_error);
+                            eprintln!(
+                                "host-control operation failed: {error}; class={:?}; retry_in_ms={}",
+                                github_backoff.last_class(),
+                                delay.as_millis()
+                            );
+                            github_verified = false;
+                        } else {
+                            eprintln!("host-control operation failed: {error}");
+                        }
                     }
                 }
             }
         }
     }
 
+    emit_shutdown(executor);
+    Ok(())
+}
+
+async fn await_network_with_reconcile<F>(
+    future: F,
+    executor: &mut HostExecutor,
+    reconcile_ticker: &mut Interval,
+) -> LocalResult<NetworkWait<F::Output>>
+where
+    F: Future,
+{
+    tokio::pin!(future);
+
+    loop {
+        tokio::select! {
+            output = &mut future => return Ok(NetworkWait::Completed(output)),
+            _ = reconcile_ticker.tick() => reconcile_lifecycle(executor),
+            result = tokio::signal::ctrl_c() => {
+                result?;
+                return Ok(NetworkWait::Shutdown);
+            }
+        }
+    }
+}
+
+fn reconcile_lifecycle(executor: &mut HostExecutor) {
+    if let Err(error) = executor.reconcile_desired() {
+        eprintln!("host lifecycle reconcile failed: {error}");
+    }
+}
+
+fn emit_shutdown(executor: &mut HostExecutor) {
     executor.shutdown();
     println!(
         "{}",
@@ -135,13 +231,9 @@ pub async fn run_until_shutdown(
             "state": "SHUTDOWN"
         })
     );
-    Ok(())
 }
 
-pub async fn process_pending(
-    github: &GitHubClient,
-    executor: &mut HostExecutor,
-) -> LocalResult<usize> {
+async fn fetch_pending_control(github: &GitHubClient) -> LocalResult<PendingControlBatch> {
     let cursor_store =
         IssueCursorStore::new(PathBuf::from(CONTROL_CURSOR_PATH), CONTROL_ISSUE_NUMBER)?;
     let mut checkpoint = load_checkpoint_for_poll(&cursor_store)?;
@@ -165,6 +257,24 @@ pub async fn process_pending(
                 .await?
         }
     };
+
+    Ok(PendingControlBatch {
+        cursor_store,
+        checkpoint,
+        comments,
+    })
+}
+
+async fn process_control_batch(
+    github: &GitHubClient,
+    executor: &mut HostExecutor,
+    batch: PendingControlBatch,
+) -> LocalResult<usize> {
+    let PendingControlBatch {
+        cursor_store,
+        checkpoint,
+        comments,
+    } = batch;
 
     if comments.is_empty() {
         if let Some(cursor) = checkpoint.cursor.as_ref()
@@ -268,6 +378,14 @@ pub async fn process_pending(
     Ok(processed)
 }
 
+pub async fn process_pending(
+    github: &GitHubClient,
+    executor: &mut HostExecutor,
+) -> LocalResult<usize> {
+    let batch = fetch_pending_control(github).await?;
+    process_control_batch(github, executor, batch).await
+}
+
 fn load_checkpoint_for_poll(store: &IssueCursorStore) -> LocalResult<IssueCheckpoint> {
     match store.load_checkpoint() {
         Ok(checkpoint) => Ok(checkpoint),
@@ -310,6 +428,13 @@ mod tests {
     fn persisted_control_terminal_ids_block_late_duplicate_request_ids() {
         let ids = BTreeSet::from(["ctl_0123456789abcdef".to_owned()]);
         assert!(ids.contains("ctl_0123456789abcdef"));
+    }
+
+    #[test]
+    fn control_cadences_keep_local_reconcile_faster_than_network_polling() {
+        assert_eq!(LOCAL_RECONCILE_SECONDS, 1);
+        assert_eq!(DEFAULT_CONTROL_POLL_SECONDS, 5);
+        assert!(LOCAL_RECONCILE_SECONDS < DEFAULT_CONTROL_POLL_SECONDS);
     }
 
     #[test]
