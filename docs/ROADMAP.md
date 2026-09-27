@@ -36,28 +36,34 @@ Authority: #26
 - explicit `DEGRADED / M2_REST_BOOTSTRAP_ONLY`;
 - encrypted Windows physical acceptance.
 
-### M3 Persistent Public OKX WebSocket — CURRENT
+### M3 Persistent Public OKX WebSocket — PASS
 
 Authority: #30
 
-Target:
+Accepted:
+- `okx-ws` protocol/transport boundary only;
+- one `okx-runtime::PublicWsCoordinator` lifecycle owner;
+- REST bootstrap + WS convergence;
+- live instruments/ticker/mark/index/funding/OI state;
+- Decimal-backed order-book state;
+- strict `seqId/prevSeqId` continuity;
+- evidence-derived NOT_READY/DEGRADED/FRESH/STALE;
+- encrypted physical FRESH SnapshotQuality + MarketSnapshot;
+- agent restart revokes old evidence and rebuilds FRESH deterministically.
 
-1. `okx-ws` protocol/transport boundary only;
-2. typed connect/subscribe/event/error/notice handling;
-3. one `okx-runtime::PublicWsCoordinator` owns bounded reconnect and explicit WS generation;
-4. REST bootstrap + WS convergence;
-5. live instruments/ticker/mark/index/funding/OI state;
-6. order-book snapshot + incremental apply;
-7. strict `seqId/prevSeqId` continuity;
-8. readiness transitions;
-9. `FRESH` only after complete proof;
-10. physical disconnect/reconnect acceptance.
+The disruptive physical forced-network-loss proof is DEFERRED with #16 R3, not PASS.
 
 Checksum validation is explicitly forbidden for current OKX JSON order-book channels because OKX deprecated it in production on 2026-06-23.
 
+### Post-M3 runtime readability cleanup — CURRENT
+
+Authority: #42
+
+Module-split `okx-runtime::public` inside the same crate. No behavior, schema or lifecycle-owner change. This is the gate before M4.
+
 ### M4 Private read-only Account + Order State
 
-Planned after M3.
+Planned after #42.
 
 - balances/equity;
 - positions;
@@ -92,7 +98,7 @@ Not PASS:
 - [ ] R4 Windows reboot + sign-in physical recovery;
 - [ ] final no-duplicate count associated with those disruptive tests.
 
-This debt is intentionally visible but does not block M3 product development.
+This debt is intentionally visible. It does not invalidate the completed non-disruptive M3 acceptance, but remains open before final lifecycle closure.
 
 ## Non-goals for M1–M6
 
