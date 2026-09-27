@@ -266,7 +266,9 @@ pub(super) async fn dispatch(
 
             for instrument in instruments {
                 let current =
-                    match assemble_current_market(request, context, generated_at, instrument).await? {
+                    match assemble_current_market(request, context, generated_at, instrument)
+                        .await?
+                    {
                         CurrentMarketAssembly::Ready(value) => *value,
                         CurrentMarketAssembly::Response(response) => return Ok(*response),
                         CurrentMarketAssembly::Unavailable => {
@@ -282,7 +284,8 @@ pub(super) async fn dispatch(
                     };
 
                 if current.rules.reference_generation != history.snapshot.reference_generation
-                    || current.snapshot.reference_generation != history.snapshot.reference_generation
+                    || current.snapshot.reference_generation
+                        != history.snapshot.reference_generation
                 {
                     return Ok(failure_response(
                         request,
