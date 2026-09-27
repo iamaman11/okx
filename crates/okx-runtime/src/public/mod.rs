@@ -68,8 +68,9 @@ mod tests {
     use okx_ws::{PublicChannel, Subscription};
 
     use super::{
-        PublicRuntimeError, PublicWsCoordinator, reconnect_delay,
+        PublicRuntimeError, PublicWsCoordinator,
         decode::{RawBookData, decode_book},
+        reconnect_delay,
         subscriptions::{baseline_subscriptions, connection_fingerprint, required_subscriptions},
     };
 
@@ -219,4 +220,3 @@ mod tests {
         assert_eq!(book.prev_seq_id, -1);
     }
 }
-
