@@ -66,21 +66,11 @@ impl std::fmt::Display for GitHubResponseError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GitHubBackoff {
     failure_count: u32,
     next_retry_at: Option<Instant>,
     last_class: Option<GitHubFailureClass>,
-}
-
-impl Default for GitHubBackoff {
-    fn default() -> Self {
-        Self {
-            failure_count: 0,
-            next_retry_at: None,
-            last_class: None,
-        }
-    }
 }
 
 impl GitHubBackoff {
