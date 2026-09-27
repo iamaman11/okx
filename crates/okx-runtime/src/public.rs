@@ -56,6 +56,8 @@ pub struct PublicQualitySnapshot {
     pub connection_id_fingerprint: Option<String>,
     pub acknowledged_subscriptions: usize,
     pub sequence_continuity_proven: bool,
+    pub order_book_seq_id: Option<i64>,
+    pub order_book_exchange_timestamp_ms: Option<String>,
     pub oldest_required_receive_ms: Option<u64>,
     pub reason: String,
     pub last_error: Option<String>,
@@ -296,6 +298,10 @@ impl PublicRuntimeState {
             connection_id_fingerprint: self.connection_id.as_deref().map(connection_fingerprint),
             acknowledged_subscriptions: self.acknowledged_subscriptions.len(),
             sequence_continuity_proven: readiness.sequence_continuity_proven,
+            order_book_seq_id: market.order_book_seq_id(),
+            order_book_exchange_timestamp_ms: market
+                .order_book_exchange_timestamp_ms()
+                .map(ToOwned::to_owned),
             oldest_required_receive_ms: readiness.oldest_required_receive_ms,
             reason: readiness.reason,
             last_error: self.last_error.clone(),
