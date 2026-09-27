@@ -50,8 +50,8 @@ Ownership is strict:
 - M1 Reference Data Registry — PASS / closed (#23).
 - M2 Public REST Market State — PASS / closed (#26).
 - M3 Persistent Public OKX WebSocket — PASS / closed (#30).
-- Post-M3 runtime readability cleanup — CURRENT gate (#42).
-- M4 Private read-only Account + Order State — planned after #42.
+- Post-M3 runtime readability cleanup — PASS / closed (#42).
+- M4 Private read-only Account + Order State — CURRENT.
 - M5 Deterministic Cost/Risk/Scenario — planned.
 - M6 MCP adapter — planned.
 
@@ -121,4 +121,4 @@ Canonical GitHub issues:
 - #10 encrypted temporary analytical transport;
 - #16 deferred Windows recovery acceptance debt;
 - #30 M3 persistent public WebSocket — closed/PASS;
-- #42 current post-M3 runtime readability cleanup gate.
+- #42 post-M3 runtime readability cleanup — closed/PASS.
