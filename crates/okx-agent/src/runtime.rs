@@ -38,16 +38,29 @@ pub async fn run_until_shutdown(config: &AgentConfig, identity: &AgentIdentity) 
     Ok(())
 }
 
+pub struct MailboxRuntimeContext<'a> {
+    pub config: &'a AgentConfig,
+    pub identity: &'a AgentIdentity,
+    pub mailbox: &'a GitHubMailboxClient,
+    pub mailbox_issue: u64,
+    pub agent_private_key: &'a [u8; 32],
+    pub reference: &'a ReferenceRegistry,
+    pub market: &'a MarketBootstrapper,
+}
+
 pub async fn run_mailbox_until_shutdown(
-    config: &AgentConfig,
-    identity: &AgentIdentity,
-    mailbox: &GitHubMailboxClient,
-    mailbox_issue: u64,
+    context: MailboxRuntimeContext<'_>,
     poll_seconds: u64,
-    agent_private_key: &[u8; 32],
-    reference: &ReferenceRegistry,
-    market: &MarketBootstrapper,
 ) -> AgentResult<()> {
+    let MailboxRuntimeContext {
+        config,
+        identity,
+        mailbox,
+        mailbox_issue,
+        agent_private_key,
+        reference,
+        market,
+    } = context;
     if !(1..=60).contains(&poll_seconds) {
         return Err(AgentError::InvalidPollInterval);
     }

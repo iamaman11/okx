@@ -17,7 +17,7 @@ use okx_agent::{
     market_bootstrap::MarketBootstrapper,
     once::process_once_now,
     reference_bootstrap::bootstrap_reference,
-    runtime::{run_mailbox_until_shutdown, run_until_shutdown},
+    runtime::{MailboxRuntimeContext, run_mailbox_until_shutdown, run_until_shutdown},
 };
 use okx_api::{OkxEnvironment, OkxPublicClient, Region};
 use okx_protocol::MailboxEnvelope;
@@ -141,14 +141,16 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 );
                 let mut private_key = load_native_private_key(&config.key_id)?;
                 let result = run_mailbox_until_shutdown(
-                    &config,
-                    &identity,
-                    &mailbox,
-                    mailbox_issue,
+                    MailboxRuntimeContext {
+                        config: &config,
+                        identity: &identity,
+                        mailbox: &mailbox,
+                        mailbox_issue,
+                        agent_private_key: &private_key,
+                        reference: &reference,
+                        market: &market,
+                    },
                     poll_seconds,
-                    &private_key,
-                    &reference,
-                    &market,
                 )
                 .await;
                 private_key.zeroize();
