@@ -2,6 +2,7 @@ pub mod config;
 pub mod github_auth;
 pub mod github_mailbox;
 pub mod identity;
+pub mod market_bootstrap;
 pub mod once;
 pub mod reference_bootstrap;
 pub mod runtime;
