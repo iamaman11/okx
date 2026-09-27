@@ -200,7 +200,7 @@ struct AssembledCurrentMarket {
 }
 
 enum CurrentMarketAssembly {
-    Ready(AssembledCurrentMarket),
+    Ready(Box<AssembledCurrentMarket>),
     Response(AgentResponse),
     Unavailable,
 }
@@ -235,12 +235,14 @@ async fn assemble_current_market(
                     generated_at.to_owned(),
                 )
                 .await?;
-            return Ok(CurrentMarketAssembly::Ready(AssembledCurrentMarket {
-                rules,
-                snapshot: live.market,
-                quality: DataQuality::Fresh,
-                warnings: Vec::new(),
-            }));
+            return Ok(CurrentMarketAssembly::Ready(Box::new(
+                AssembledCurrentMarket {
+                    rules,
+                    snapshot: live.market,
+                    quality: DataQuality::Fresh,
+                    warnings: Vec::new(),
+                },
+            )));
         }
 
         let Some(market) = context.market_fallback else {
@@ -258,15 +260,17 @@ async fn assemble_current_market(
         };
         let reference = public_ws.reference_snapshot().await;
         return match market.snapshot(&reference, instrument).await {
-            Ok(snapshot) => Ok(CurrentMarketAssembly::Ready(AssembledCurrentMarket {
-                rules,
-                snapshot,
-                quality: DataQuality::Degraded,
-                warnings: vec![format!(
-                    "persistent WebSocket state is not FRESH ({}); returned bounded public REST fallback",
-                    quality.reason
-                )],
-            })),
+            Ok(snapshot) => Ok(CurrentMarketAssembly::Ready(Box::new(
+                AssembledCurrentMarket {
+                    rules,
+                    snapshot,
+                    quality: DataQuality::Degraded,
+                    warnings: vec![format!(
+                        "persistent WebSocket state is not FRESH ({}); returned bounded public REST fallback",
+                        quality.reason
+                    )],
+                },
+            ))),
             Err(error) => Ok(CurrentMarketAssembly::Response(market_failure(
                 request,
                 generated_at,
@@ -288,12 +292,14 @@ async fn assemble_current_market(
     };
 
     match market.snapshot(reference, instrument).await {
-        Ok(snapshot) => Ok(CurrentMarketAssembly::Ready(AssembledCurrentMarket {
-            rules,
-            snapshot,
-            quality: DataQuality::Degraded,
-            warnings: vec![MARKET_REST_BOOTSTRAP_WARNING.to_owned()],
-        })),
+        Ok(snapshot) => Ok(CurrentMarketAssembly::Ready(Box::new(
+            AssembledCurrentMarket {
+                rules,
+                snapshot,
+                quality: DataQuality::Degraded,
+                warnings: vec![MARKET_REST_BOOTSTRAP_WARNING.to_owned()],
+            },
+        ))),
         Err(error) => Ok(CurrentMarketAssembly::Response(market_failure(
             request,
             generated_at,
