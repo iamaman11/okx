@@ -29,6 +29,12 @@ pub enum AgentError {
     #[error("reference data error: {0}")]
     Reference(#[from] okx_observation::ReferenceError),
 
+    #[error("public observation runtime error: {0}")]
+    PublicRuntime(#[from] okx_runtime::PublicRuntimeError),
+
+    #[error("public observation runtime task failed: {0}")]
+    PublicRuntimeTask(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
