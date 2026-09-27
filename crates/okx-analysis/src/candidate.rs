@@ -104,10 +104,9 @@ pub fn analyze_candidate_order(
         .ok_or(AnalysisError::MissingSettlementCurrency)?;
     let contract_value = positive_decimal(
         "contract_value",
-        instrument
-            .contract_value
-            .as_deref()
-            .ok_or_else(|| AnalysisError::UnsupportedContractMechanics("missing ctVal".to_owned()))?,
+        instrument.contract_value.as_deref().ok_or_else(|| {
+            AnalysisError::UnsupportedContractMechanics("missing ctVal".to_owned())
+        })?,
     )?;
     let tick_size = positive_decimal("tick_size", &instrument.tick_size)?;
     let lot_size = positive_decimal("lot_size", &instrument.lot_size)?;
@@ -156,7 +155,8 @@ fn analyze_values(
 
     let per_contract_entry_notional = mechanics.contract_value * entry_price;
     let per_contract_stop_notional = mechanics.contract_value * stop_price;
-    let per_contract_entry_cost = user_fee_cost(per_contract_entry_notional, mechanics.entry_fee_rate);
+    let per_contract_entry_cost =
+        user_fee_cost(per_contract_entry_notional, mechanics.entry_fee_rate);
     let per_contract_stop_exit_cost =
         user_fee_cost(per_contract_stop_notional, mechanics.exit_fee_rate);
     let per_contract_gross_stop_loss = match input.direction {
@@ -274,10 +274,7 @@ fn analyze_values(
     })
 }
 
-fn fee_rate(
-    fees: &FeeScheduleSnapshot,
-    role: LiquidityRole,
-) -> Result<Decimal, AnalysisError> {
+fn fee_rate(fees: &FeeScheduleSnapshot, role: LiquidityRole) -> Result<Decimal, AnalysisError> {
     decimal(
         "fee_rate",
         match role {
@@ -333,11 +330,7 @@ fn floor_to_step(value: Decimal, step: Decimal) -> Decimal {
     (value / step).floor() * step
 }
 
-fn round_target(
-    direction: PositionDirection,
-    target: Decimal,
-    tick_size: Decimal,
-) -> Decimal {
+fn round_target(direction: PositionDirection, target: Decimal, tick_size: Decimal) -> Decimal {
     match direction {
         PositionDirection::Long => (target / tick_size).ceil() * tick_size,
         PositionDirection::Short => (target / tick_size).floor() * tick_size,
