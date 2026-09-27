@@ -31,8 +31,8 @@ Rust/Tokio observation runtime
         |
         v
 typed Query API
-  encrypted GitHub mailbox #10 now
-  MCP adapter later
+  encrypted GitHub mailbox #10
+  canonical current query transport
 ```
 
 Ownership is strict:
@@ -51,9 +51,11 @@ Ownership is strict:
 - M2 Public REST Market State — PASS / closed (#26).
 - M3 Persistent Public OKX WebSocket — PASS / closed (#30).
 - Post-M3 runtime readability cleanup — PASS / closed (#42).
-- M4 Private read-only Account + Order State — CURRENT.
+- Q0 Query/transport efficiency hardening — CURRENT (#47).
+- M4 Private read-only Account + Order State — NEXT after #47.
 - M5 Deterministic Cost/Risk/Scenario — planned.
-- M6 MCP adapter — planned.
+
+No MCP stage is planned. The current encrypted GitHub mailbox remains the normal query transport.
 
 M2 intentionally reports `DEGRADED`: request-time REST bootstrap is attributable but is not persistent realtime state.
 
