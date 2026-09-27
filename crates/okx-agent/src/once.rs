@@ -3,10 +3,9 @@ use chrono::{SecondsFormat, Utc};
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, INSTRUMENT_RULES_SCHEMA_V1,
-    INSTRUMENT_SEARCH_SCHEMA_V1,
-    InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError,
-    MarketHistoryError, MarketReadiness, MarketSnapshot, ReferenceRegistry,
-    SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
+    INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1,
+    MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError, MarketReadiness, MarketSnapshot,
+    ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
 };
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
@@ -46,12 +45,9 @@ const MARKET_REST_BOOTSTRAP_WARNING: &str = "market data is bounded public REST 
 const REFERENCE_RUNTIME_WARNING: &str = "instrument rules come from the live ReferenceRegistry; market FRESH readiness is reported separately";
 const MARKET_HISTORY_UNCONFIRMED_WARNING: &str =
     "OKX history response contains at least one unconfirmed candlestick";
-const ACCOUNT_REST_BOOTSTRAP_WARNING: &str =
-    "private account state is a bounded authenticated REST bootstrap; private WebSocket convergence is not ready";
-const ACCOUNT_WS_GENERATION_CHANGED_WARNING: &str =
-    "private WebSocket generation changed during REST bootstrap; returning coherent REST snapshot only";
-const ACCOUNT_WS_JOURNAL_GAP_WARNING: &str =
-    "private WebSocket delta journal advanced beyond the REST bootstrap cursor; returning coherent REST snapshot only";
+const ACCOUNT_REST_BOOTSTRAP_WARNING: &str = "private account state is a bounded authenticated REST bootstrap; private WebSocket convergence is not ready";
+const ACCOUNT_WS_GENERATION_CHANGED_WARNING: &str = "private WebSocket generation changed during REST bootstrap; returning coherent REST snapshot only";
+const ACCOUNT_WS_JOURNAL_GAP_WARNING: &str = "private WebSocket delta journal advanced beyond the REST bootstrap cursor; returning coherent REST snapshot only";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
 
 #[derive(serde::Serialize)]
@@ -605,9 +601,7 @@ async fn response_for(
                                         status: AgentResponseStatus::Completed,
                                         generated_at: generated_at.to_owned(),
                                         quality: DataQuality::Fresh,
-                                        result_schema: Some(
-                                            ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned(),
-                                        ),
+                                        result_schema: Some(ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned()),
                                         result: Some(serde_json::to_value(result)?),
                                         failure: None,
                                         warnings: Vec::new(),
