@@ -119,13 +119,7 @@ impl GitHubMailboxClient {
                     true,
                 )?;
             }
-            self.record_poll_telemetry(
-                fetch_latency,
-                0,
-                checkpoint.cursor.as_ref(),
-                None,
-                None,
-            );
+            self.record_poll_telemetry(fetch_latency, 0, checkpoint.cursor.as_ref(), None, None);
             return Ok(0);
         }
 
