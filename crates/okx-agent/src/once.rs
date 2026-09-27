@@ -1044,6 +1044,7 @@ mod tests {
                 public_ws: None,
                 mailbox_telemetry: None,
                 account_fallback: None,
+                private_ws: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1081,6 +1082,7 @@ mod tests {
                 public_ws: None,
                 mailbox_telemetry: None,
                 account_fallback: None,
+                private_ws: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1119,6 +1121,7 @@ mod tests {
                 public_ws: None,
                 mailbox_telemetry: None,
                 account_fallback: None,
+                private_ws: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
