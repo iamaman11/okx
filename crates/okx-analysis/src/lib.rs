@@ -80,7 +80,9 @@ pub enum AnalysisError {
     UnsupportedAccountMode(String),
     #[error("unsupported position mode '{0}'")]
     UnsupportedPositionMode(String),
-    #[error("unsupported non-zero position type '{instrument_type}' for instrument '{instrument_id}'")]
+    #[error(
+        "unsupported non-zero position type '{instrument_type}' for instrument '{instrument_id}'"
+    )]
     UnsupportedPositionType {
         instrument_id: String,
         instrument_type: String,
@@ -90,7 +92,9 @@ pub enum AnalysisError {
         instrument_id: String,
         position_side: String,
     },
-    #[error("position direction is inconsistent for instrument '{instrument_id}': side '{position_side}', position '{position}'")]
+    #[error(
+        "position direction is inconsistent for instrument '{instrument_id}': side '{position_side}', position '{position}'"
+    )]
     InconsistentPositionDirection {
         instrument_id: String,
         position_side: String,
@@ -98,7 +102,9 @@ pub enum AnalysisError {
     },
     #[error("non-zero position '{0}' is missing notionalUsd")]
     MissingPositionNotional(String),
-    #[error("estimated liquidation price is on the non-adverse side of mark price for instrument '{0}'")]
+    #[error(
+        "estimated liquidation price is on the non-adverse side of mark price for instrument '{0}'"
+    )]
     InconsistentLiquidationPrice(String),
 }
 
