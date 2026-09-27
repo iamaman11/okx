@@ -78,11 +78,7 @@ pub struct Credentials {
 }
 
 impl Credentials {
-    pub fn new(
-        api_key: String,
-        secret_key: String,
-        passphrase: String,
-    ) -> Result<Self, OkxError> {
+    pub fn new(api_key: String, secret_key: String, passphrase: String) -> Result<Self, OkxError> {
         validate_secret_component("API key", &api_key)?;
         validate_secret_component("API secret", &secret_key)?;
         validate_secret_component("API passphrase", &passphrase)?;
@@ -148,6 +144,9 @@ mod tests {
             Ok(_) => panic!("empty secret must be rejected"),
             Err(error) => error,
         };
-        assert_eq!(error.to_string(), "configuration error: API secret is invalid");
+        assert_eq!(
+            error.to_string(),
+            "configuration error: API secret is invalid"
+        );
     }
 }
