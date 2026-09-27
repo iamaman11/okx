@@ -1,8 +1,8 @@
-use std::{collections::BTreeSet, path::Path};
+use std::{collections::BTreeSet, path::Path, time::Instant};
 
 use okx_github::{
     GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCommentCursor, IssueCursorStore,
-    OWNER_USER_ID, REPOSITORY_ID,
+    IssuePollTelemetryStore, OWNER_USER_ID, REPOSITORY_ID,
 };
 use okx_protocol::{MailboxDirection, MailboxEnvelope};
 use okx_runtime::PublicWsHandle;
@@ -22,6 +22,7 @@ pub struct GitHubMailboxClient {
     github: GitHubClient,
     issue_number: u64,
     cursor_store: IssueCursorStore,
+    telemetry_store: IssuePollTelemetryStore,
 }
 
 impl GitHubMailboxClient {
@@ -34,14 +35,15 @@ impl GitHubMailboxClient {
             return Err(AgentError::InvalidMailboxIssue);
         }
 
-        let cursor_path = state_root
-            .join("github-mailbox")
-            .join(format!("issue-{issue_number}-cursor.json"));
+        let mailbox_root = state_root.join("github-mailbox");
+        let cursor_path = mailbox_root.join(format!("issue-{issue_number}-cursor.json"));
+        let telemetry_path = mailbox_root.join(format!("issue-{issue_number}-telemetry.json"));
 
         Ok(Self {
             github: GitHubClient::new(token, "iamaman11-okx-agent/0.1")?,
             issue_number,
             cursor_store: IssueCursorStore::new(cursor_path, issue_number)?,
+            telemetry_store: IssuePollTelemetryStore::new(telemetry_path, issue_number)?,
         })
     }
 
@@ -84,6 +86,7 @@ impl GitHubMailboxClient {
         market: &MarketBootstrapper,
     ) -> AgentResult<usize> {
         let mut checkpoint = self.load_checkpoint_for_poll()?;
+        let fetch_started = Instant::now();
         let comments = if checkpoint.ledger_initialized {
             self.github
                 .issue_comments_after(self.issue_number, checkpoint.cursor.as_ref())
@@ -103,6 +106,7 @@ impl GitHubMailboxClient {
                     .await?
             }
         };
+        let fetch_latency = fetch_started.elapsed();
 
         if comments.is_empty() {
             if let Some(cursor) = checkpoint.cursor.as_ref()
@@ -114,6 +118,12 @@ impl GitHubMailboxClient {
                     true,
                 )?;
             }
+            self.record_poll_telemetry(
+                fetch_latency,
+                0,
+                checkpoint.cursor.as_ref(),
+                None,
+            );
             return Ok(0);
         }
 
@@ -121,6 +131,7 @@ impl GitHubMailboxClient {
         terminal_ids.extend(terminal_request_ids(&comments));
         let mut processed = 0usize;
         let mut batch_complete = true;
+        let mut last_terminal_request_id = None;
 
         for comment in &comments {
             if comment.user_id != OWNER_USER_ID {
@@ -148,6 +159,7 @@ impl GitHubMailboxClient {
                     self.github
                         .post_issue_comment(self.issue_number, &serde_json::to_string(&response)?)
                         .await?;
+                    last_terminal_request_id = Some(envelope.request_id.clone());
                     terminal_ids.insert(envelope.request_id);
                     processed += 1;
                 }
@@ -161,12 +173,37 @@ impl GitHubMailboxClient {
             }
         }
 
-        if let Some(cursor) = completed_batch_cursor(&comments, batch_complete) {
+        let completed_cursor = completed_batch_cursor(&comments, batch_complete);
+        if let Some(cursor) = completed_cursor.as_ref() {
             self.cursor_store
-                .save_checkpoint(&cursor, &terminal_ids, true)?;
+                .save_checkpoint(cursor, &terminal_ids, true)?;
         }
+        let effective_cursor = completed_cursor.as_ref().or(checkpoint.cursor.as_ref());
+        self.record_poll_telemetry(
+            fetch_latency,
+            comments.len(),
+            effective_cursor,
+            last_terminal_request_id.as_deref(),
+        );
 
         Ok(processed)
+    }
+
+    fn record_poll_telemetry(
+        &self,
+        fetch_latency: std::time::Duration,
+        comments_scanned: usize,
+        cursor: Option<&IssueCommentCursor>,
+        last_terminal_request_id: Option<&str>,
+    ) {
+        if let Err(error) = self.telemetry_store.record_success(
+            fetch_latency,
+            comments_scanned,
+            cursor,
+            last_terminal_request_id,
+        ) {
+            eprintln!("mailbox telemetry update failed: {error}");
+        }
     }
 
     fn load_checkpoint_for_poll(&self) -> AgentResult<IssueCheckpoint> {
