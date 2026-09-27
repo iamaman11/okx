@@ -117,6 +117,42 @@ impl ReferenceRegistry {
         })
     }
 
+    pub fn apply_public_updates(
+        &mut self,
+        source_received_at: impl Into<String>,
+        updates: Vec<PublicInstrument>,
+    ) -> Result<bool, ReferenceError> {
+        let source_received_at = source_received_at.into();
+        if source_received_at.trim().is_empty() {
+            return Err(ReferenceError::EmptySourceTimestamp);
+        }
+
+        let mut normalized_updates = BTreeMap::new();
+        for update in updates {
+            let spec = InstrumentSpec::try_from(update)?;
+            let instrument_id = spec.instrument_id.clone();
+            if normalized_updates
+                .insert(instrument_id.clone(), spec)
+                .is_some()
+            {
+                return Err(ReferenceError::DuplicateInstrument(instrument_id));
+            }
+        }
+
+        let mut next = self.instruments.clone();
+        for (instrument_id, spec) in normalized_updates {
+            next.insert(instrument_id, spec);
+        }
+
+        let changed = next != self.instruments;
+        if changed {
+            self.generation = generation_for(&next)?;
+            self.instruments = next;
+        }
+        self.source_received_at = source_received_at;
+        Ok(changed)
+    }
+
     pub fn source_received_at(&self) -> &str {
         &self.source_received_at
     }
@@ -317,6 +353,55 @@ mod tests {
             .expect("registry");
 
         assert_eq!(first.generation(), second.generation());
+    }
+
+    #[test]
+    fn ws_style_reference_updates_are_atomic_and_generation_is_content_based() {
+        let mut registry = ReferenceRegistry::from_public(
+            "2026-09-27T00:00:00.000Z",
+            vec![swap("DOGE-USDT-SWAP")],
+        )
+        .expect("registry");
+        let initial_generation = registry.generation().as_str().to_owned();
+
+        let mut changed = swap("DOGE-USDT-SWAP");
+        changed.tick_size = "0.000001".to_owned();
+        assert!(
+            registry
+                .apply_public_updates("2026-09-27T00:01:00.000Z", vec![changed.clone()])
+                .expect("update")
+        );
+        assert_ne!(registry.generation().as_str(), initial_generation);
+        assert_eq!(
+            registry
+                .get("DOGE-USDT-SWAP")
+                .expect("instrument")
+                .tick_size,
+            "0.000001"
+        );
+
+        let changed_generation = registry.generation().as_str().to_owned();
+        assert!(
+            !registry
+                .apply_public_updates("2026-09-27T00:02:00.000Z", vec![changed])
+                .expect("same update")
+        );
+        assert_eq!(registry.generation().as_str(), changed_generation);
+        assert_eq!(registry.source_received_at(), "2026-09-27T00:02:00.000Z");
+
+        let mut invalid = swap("BROKEN-USDT-SWAP");
+        invalid.tick_size.clear();
+        let before = registry.generation().as_str().to_owned();
+        assert!(
+            registry
+                .apply_public_updates(
+                    "2026-09-27T00:03:00.000Z",
+                    vec![swap("BTC-USDT-SWAP"), invalid],
+                )
+                .is_err()
+        );
+        assert_eq!(registry.generation().as_str(), before);
+        assert!(registry.get("BTC-USDT-SWAP").is_none());
     }
 
     #[test]
