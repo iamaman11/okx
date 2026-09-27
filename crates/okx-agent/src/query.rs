@@ -1231,5 +1231,4 @@ mod tests {
             expiry_time: String::new(),
         }
     }
-
 }
