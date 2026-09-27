@@ -26,6 +26,12 @@ pub enum ProtocolError {
     #[error("invalid instrument")]
     InvalidInstrument,
 
+    #[error("invalid asset token")]
+    InvalidAssetToken,
+
+    #[error("invalid instrument search limit")]
+    InvalidInstrumentSearchLimit,
+
     #[error("invalid history bar")]
     InvalidHistoryBar,
 
@@ -141,6 +147,14 @@ pub enum AgentOperation {
     SnapshotQuality {
         instrument: String,
     },
+    FindInstruments {
+        asset: String,
+        quote: Option<String>,
+        limit: Option<u16>,
+    },
+    MarketOverview {
+        instrument: String,
+    },
     AccountSnapshot,
     PortfolioRisk,
     AnalyzeCandidateOrder {
@@ -157,7 +171,22 @@ impl AgentOperation {
         match self {
             Self::MarketSnapshot { instrument }
             | Self::InstrumentRules { instrument }
-            | Self::SnapshotQuality { instrument } => validate_instrument(instrument),
+            | Self::SnapshotQuality { instrument }
+            | Self::MarketOverview { instrument } => validate_instrument(instrument),
+            Self::FindInstruments {
+                asset,
+                quote,
+                limit,
+            } => {
+                validate_asset_token(asset)?;
+                if let Some(quote) = quote {
+                    validate_asset_token(quote)?;
+                }
+                if matches!(limit, Some(0 | 201..=u16::MAX)) {
+                    return Err(ProtocolError::InvalidInstrumentSearchLimit);
+                }
+                Ok(())
+            },
             Self::MarketHistory {
                 instrument,
                 bar,
@@ -389,6 +418,18 @@ pub fn validate_agent_key_id(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
+fn validate_asset_token(value: &str) -> Result<(), ProtocolError> {
+    if (1..=16).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidAssetToken)
+    }
+}
+
 fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     if (3..=64).contains(&value.len())
         && value
@@ -583,6 +624,39 @@ mod tests {
             envelope.validate(MailboxDirection::AgentToClient),
             Err(ProtocolError::DirectionMismatch)
         );
+    }
+
+    #[test]
+    fn discovery_and_overview_operations_are_strict_and_round_trip() {
+        let discovery = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_find_0123456789".to_owned(),
+            operation: AgentOperation::FindInstruments {
+                asset: "DOGE".to_owned(),
+                quote: Some("USDT".to_owned()),
+                limit: Some(100),
+            },
+        };
+        discovery.validate().expect("valid discovery");
+        let encoded = serde_json::to_string(&discovery).expect("serialize");
+        let decoded: AgentRequest = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded, discovery);
+
+        let overview = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_overview_012345".to_owned(),
+            operation: AgentOperation::MarketOverview {
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+            },
+        };
+        overview.validate().expect("valid overview");
+
+        let invalid = AgentOperation::FindInstruments {
+            asset: "doge".to_owned(),
+            quote: Some("USDT".to_owned()),
+            limit: Some(201),
+        };
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
