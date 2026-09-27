@@ -129,7 +129,9 @@ pub enum AnalysisError {
     StopDoesNotLose(String),
     #[error("target scenario does not produce a profit for instrument '{0}'")]
     TargetDoesNotProfit(String),
-    #[error("candidate size for instrument '{instrument_id}' rounded to '{contracts}', below min size '{min_size}'")]
+    #[error(
+        "candidate size for instrument '{instrument_id}' rounded to '{contracts}', below min size '{min_size}'"
+    )]
     CandidateBelowMinimumSize {
         instrument_id: String,
         contracts: String,
