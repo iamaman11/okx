@@ -201,7 +201,7 @@ struct AssembledCurrentMarket {
 
 enum CurrentMarketAssembly {
     Ready(Box<AssembledCurrentMarket>),
-    Response(AgentResponse),
+    Response(Box<AgentResponse>),
     Unavailable,
 }
 
@@ -213,10 +213,8 @@ async fn assemble_current_market(
 ) -> AgentResult<CurrentMarketAssembly> {
     if let Some(public_ws) = context.public_ws {
         let Some(rules) = public_ws.instrument_rules(instrument).await else {
-            return Ok(CurrentMarketAssembly::Response(reference_not_found(
-                request,
-                generated_at,
-                instrument,
+            return Ok(CurrentMarketAssembly::Response(Box::new(
+                reference_not_found(request, generated_at, instrument),
             )));
         };
         public_ws.demand_instrument(instrument.to_owned()).await?;
@@ -246,7 +244,7 @@ async fn assemble_current_market(
         }
 
         let Some(market) = context.market_fallback else {
-            return Ok(CurrentMarketAssembly::Response(failure_response(
+            return Ok(CurrentMarketAssembly::Response(Box::new(failure_response(
                 request,
                 generated_at,
                 AgentResponseStatus::Failed,
@@ -256,7 +254,7 @@ async fn assemble_current_market(
                     quality.reason
                 ),
                 true,
-            )));
+            ))));
         };
         let reference = public_ws.reference_snapshot().await;
         return match market.snapshot(&reference, instrument).await {
@@ -271,11 +269,11 @@ async fn assemble_current_market(
                     )],
                 },
             ))),
-            Err(error) => Ok(CurrentMarketAssembly::Response(market_failure(
+            Err(error) => Ok(CurrentMarketAssembly::Response(Box::new(market_failure(
                 request,
                 generated_at,
                 error,
-            ))),
+            )))),
         };
     }
 
@@ -284,10 +282,8 @@ async fn assemble_current_market(
         return Ok(CurrentMarketAssembly::Unavailable);
     };
     let Some(rules) = reference.instrument_rules(instrument) else {
-        return Ok(CurrentMarketAssembly::Response(reference_not_found(
-            request,
-            generated_at,
-            instrument,
+        return Ok(CurrentMarketAssembly::Response(Box::new(
+            reference_not_found(request, generated_at, instrument),
         )));
     };
 
@@ -300,11 +296,11 @@ async fn assemble_current_market(
                 warnings: vec![MARKET_REST_BOOTSTRAP_WARNING.to_owned()],
             },
         ))),
-        Err(error) => Ok(CurrentMarketAssembly::Response(market_failure(
+        Err(error) => Ok(CurrentMarketAssembly::Response(Box::new(market_failure(
             request,
             generated_at,
             error,
-        ))),
+        )))),
     }
 }
 
