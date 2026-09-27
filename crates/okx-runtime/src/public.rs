@@ -10,8 +10,9 @@ use okx_api::{
     PublicMarkPrice, PublicOpenInterest, PublicTicker,
 };
 use okx_observation::{
-    BookLevelUpdate, FundingRequirement, LiveMarketSnapshot, MarketReadiness, MarketReadinessReport,
-    MarketStreamError, MarketStreamState, OrderBookMessage, ReferenceError, ReferenceRegistry,
+    BookLevelUpdate, FundingRequirement, LiveMarketSnapshot, MarketReadiness,
+    MarketReadinessReport, MarketStreamError, MarketStreamState, OrderBookMessage, ReferenceError,
+    ReferenceRegistry,
 };
 use okx_ws::{
     InboundMessage, PublicChannel, PublicWsConnection, PublicWsError, Subscription, WsArg,
@@ -19,8 +20,8 @@ use okx_ws::{
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, watch, RwLock},
-    time::{interval, sleep_until, Instant},
+    sync::{RwLock, mpsc, watch},
+    time::{Instant, interval, sleep_until},
 };
 
 pub const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
@@ -235,10 +236,9 @@ impl PublicRuntimeState {
         max_age_ms: u64,
         rest_fallback_available: bool,
     ) -> Result<MarketReadinessReport, PublicRuntimeError> {
-        let market = self
-            .markets
-            .get(instrument_id)
-            .ok_or_else(|| PublicRuntimeError::MarketStateNotInitialized(instrument_id.to_owned()))?;
+        let market = self.markets.get(instrument_id).ok_or_else(|| {
+            PublicRuntimeError::MarketStateNotInitialized(instrument_id.to_owned())
+        })?;
         Ok(market.readiness(
             &self.reference,
             now_ms,
@@ -451,10 +451,7 @@ impl PublicWsCoordinator {
                         InboundMessage::Pong => {
                             awaiting_pong_since = None;
                         }
-                        InboundMessage::Subscribed {
-                            arg,
-                            connection_id,
-                        } => {
+                        InboundMessage::Subscribed { arg, connection_id } => {
                             let subscription = subscription_from_arg(&arg);
                             pending.remove(&subscription);
                             failed.remove(&subscription);
@@ -470,11 +467,7 @@ impl PublicWsCoordinator {
                             self.reconcile_subscriptions(connection, &mut pending, &failed)
                                 .await?;
                         }
-                        InboundMessage::Error {
-                            code,
-                            message,
-                            arg,
-                        } => {
+                        InboundMessage::Error { code, message, arg } => {
                             if let Some(arg) = arg {
                                 let subscription = subscription_from_arg(&arg);
                                 pending.remove(&subscription);
@@ -503,10 +496,7 @@ impl PublicWsCoordinator {
                         }
                         InboundMessage::Data { arg, action, data } => {
                             saw_data = true;
-                            match self
-                                .apply_data(self.generation, arg, action, data)
-                                .await
-                            {
+                            match self.apply_data(self.generation, arg, action, data).await {
                                 Ok(true) => {
                                     return Ok(GenerationOutcome::Reconnect {
                                         saw_data,
@@ -540,12 +530,7 @@ impl PublicWsCoordinator {
             let state = self.state.read().await;
             desired_subscriptions(&state.reference, &self.demands)
         };
-        let observed = self
-            .state
-            .read()
-            .await
-            .acknowledged_subscriptions
-            .clone();
+        let observed = self.state.read().await.acknowledged_subscriptions.clone();
 
         let additions: Vec<_> = desired
             .difference(&observed)
@@ -579,11 +564,7 @@ impl PublicWsCoordinator {
                     if !state.markets.contains_key(&instrument_id) {
                         state.markets.insert(
                             instrument_id.clone(),
-                            MarketStreamState::new(
-                                instrument_id,
-                                generation,
-                                reference_generation,
-                            ),
+                            MarketStreamState::new(instrument_id, generation, reference_generation),
                         );
                     }
                 }
@@ -674,15 +655,14 @@ impl PublicWsCoordinator {
                 Ok(false)
             }
             PublicChannel::Books => {
-                let instrument_id = arg.instrument_id.ok_or(
-                    PublicRuntimeError::MissingChannelInstrument {
-                        channel: PublicChannel::Books,
-                    },
-                )?;
-                let market = state
-                    .markets
-                    .get_mut(&instrument_id)
-                    .ok_or_else(|| PublicRuntimeError::MarketStateNotInitialized(instrument_id.clone()))?;
+                let instrument_id =
+                    arg.instrument_id
+                        .ok_or(PublicRuntimeError::MissingChannelInstrument {
+                            channel: PublicChannel::Books,
+                        })?;
+                let market = state.markets.get_mut(&instrument_id).ok_or_else(|| {
+                    PublicRuntimeError::MarketStateNotInitialized(instrument_id.clone())
+                })?;
                 for value in data {
                     let message = decode_book(serde_json::from_value(value)?);
                     match action.as_deref() {
@@ -895,8 +875,7 @@ mod tests {
     #[test]
     fn baseline_and_demand_subscriptions_are_reference_driven() {
         let reference = reference(instrument("DOGE-USDT-SWAP", "SWAP", "normal"));
-        let required =
-            required_subscriptions(&reference, "DOGE-USDT-SWAP").expect("subscriptions");
+        let required = required_subscriptions(&reference, "DOGE-USDT-SWAP").expect("subscriptions");
 
         assert!(required.contains(&Subscription::instrument(
             PublicChannel::FundingRate,
@@ -918,16 +897,19 @@ mod tests {
         let ordinary = reference(instrument("DOGE-USDT-261225", "FUTURES", "normal"));
         let ordinary_required =
             required_subscriptions(&ordinary, "DOGE-USDT-261225").expect("ordinary");
-        assert!(!ordinary_required
-            .iter()
-            .any(|subscription| subscription.channel == PublicChannel::FundingRate));
+        assert!(
+            !ordinary_required
+                .iter()
+                .any(|subscription| subscription.channel == PublicChannel::FundingRate)
+        );
 
         let xperp = reference(instrument("DOGE-USDT-XPERP", "FUTURES", "xperp"));
-        let xperp_required =
-            required_subscriptions(&xperp, "DOGE-USDT-XPERP").expect("xperp");
-        assert!(xperp_required
-            .iter()
-            .any(|subscription| subscription.channel == PublicChannel::FundingRate));
+        let xperp_required = required_subscriptions(&xperp, "DOGE-USDT-XPERP").expect("xperp");
+        assert!(
+            xperp_required
+                .iter()
+                .any(|subscription| subscription.channel == PublicChannel::FundingRate)
+        );
     }
 
     #[test]
