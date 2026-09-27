@@ -1,7 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    str::FromStr,
-};
+use std::{collections::BTreeMap, str::FromStr};
 
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -73,10 +70,7 @@ pub enum OrderBookError {
     SequenceGap { expected: i64, actual: i64 },
 
     #[error("order-book field '{field}' is invalid: '{value}'")]
-    InvalidDecimal {
-        field: &'static str,
-        value: String,
-    },
+    InvalidDecimal { field: &'static str, value: String },
 
     #[error("order-book size must not be negative: '{0}'")]
     NegativeSize(String),
@@ -146,8 +140,17 @@ impl OrderBookState {
             });
         }
 
-        apply_levels(&mut self.asks, message.asks)?;
-        apply_levels(&mut self.bids, message.bids)?;
+        let mut next_asks = self.asks.clone();
+        let mut next_bids = self.bids.clone();
+        if let Err(error) = apply_levels(&mut next_asks, message.asks)
+            .and_then(|()| apply_levels(&mut next_bids, message.bids))
+        {
+            self.invalidate();
+            return Err(error);
+        }
+
+        self.asks = next_asks;
+        self.bids = next_bids;
         self.last_seq_id = Some(message.seq_id);
         self.exchange_timestamp_ms = Some(message.exchange_timestamp_ms);
         Ok(())
@@ -156,6 +159,7 @@ impl OrderBookState {
     pub fn invalidate(&mut self) {
         self.status = OrderBookStatus::Invalid;
         self.last_seq_id = None;
+        self.exchange_timestamp_ms = None;
         self.asks.clear();
         self.bids.clear();
     }
@@ -319,6 +323,32 @@ mod tests {
         assert_eq!(state.status(), OrderBookStatus::Invalid);
         assert!(state.snapshot().asks.is_empty());
         assert!(state.snapshot().bids.is_empty());
+    }
+
+    #[test]
+    fn malformed_update_is_atomic_and_invalidates_book() {
+        let mut state = OrderBookState::waiting(7);
+        state.apply_snapshot(7, snapshot(10)).expect("snapshot");
+
+        let error = state
+            .apply_update(
+                7,
+                OrderBookMessage {
+                    asks: vec![level("0.125", "0"), level("0.126", "12")],
+                    bids: vec![level("not-a-price", "18")],
+                    exchange_timestamp_ms: "1790467200100".to_owned(),
+                    seq_id: 11,
+                    prev_seq_id: 10,
+                },
+            )
+            .expect_err("malformed update");
+
+        assert!(matches!(error, OrderBookError::InvalidDecimal { .. }));
+        let published = state.snapshot();
+        assert_eq!(published.status, OrderBookStatus::Invalid);
+        assert_eq!(published.exchange_timestamp_ms, None);
+        assert!(published.asks.is_empty());
+        assert!(published.bids.is_empty());
     }
 
     #[test]
