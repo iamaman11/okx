@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use okx_observation::{
-    LiveMarketSnapshot, MarketReadiness, MarketReadinessReport, MarketStreamState,
-    ReferenceRegistry,
+    InstrumentRulesSnapshot, InstrumentSearchSnapshot, LiveMarketSnapshot, MarketReadiness,
+    MarketReadinessReport, MarketSnapshot, MarketStreamState, ReferenceRegistry,
 };
 use okx_ws::{Subscription, WsArg};
 use serde::Serialize;
@@ -43,6 +43,14 @@ pub struct PublicQualitySnapshot {
     pub oldest_required_receive_ms: Option<u64>,
     pub reason: String,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublicMarketOverviewView {
+    pub rules: InstrumentRulesSnapshot,
+    pub quality: PublicQualitySnapshot,
+    pub live_market: Option<MarketSnapshot>,
+    pub reference: ReferenceRegistry,
 }
 
 #[derive(Debug)]
@@ -212,6 +220,49 @@ impl PublicRuntimeState {
             oldest_required_receive_ms: readiness.oldest_required_receive_ms,
             reason: readiness.reason,
             last_error: self.last_error.clone(),
+        })
+    }
+
+    pub fn find_instruments(
+        &self,
+        asset: &str,
+        quote: Option<&str>,
+        limit: usize,
+    ) -> InstrumentSearchSnapshot {
+        self.reference.find_instruments(asset, quote, limit)
+    }
+
+    pub fn market_overview_view(
+        &self,
+        instrument_id: &str,
+        now_ms: u64,
+        max_age_ms: u64,
+        source_received_at: impl Into<String>,
+    ) -> Result<PublicMarketOverviewView, PublicRuntimeError> {
+        let rules = self
+            .reference
+            .instrument_rules(instrument_id)
+            .ok_or_else(|| PublicRuntimeError::InstrumentNotFound(instrument_id.to_owned()))?;
+        let quality = self.quality_snapshot(instrument_id, now_ms, max_age_ms, true)?;
+        let live_market = if quality.quality == MarketReadiness::Fresh {
+            Some(
+                self.fresh_snapshot(
+                    instrument_id,
+                    now_ms,
+                    max_age_ms,
+                    source_received_at,
+                )?
+                .market,
+            )
+        } else {
+            None
+        };
+
+        Ok(PublicMarketOverviewView {
+            rules,
+            quality,
+            live_market,
+            reference: self.reference.clone(),
         })
     }
 
