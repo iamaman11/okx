@@ -170,6 +170,12 @@ pub enum AgentOperation {
     MailboxTelemetry,
     AccountSnapshot,
     PortfolioRisk,
+    CurrentCost {
+        instrument: String,
+        contracts: String,
+        side: PositionSide,
+        liquidity_role: LiquidityRole,
+    },
     PositionScenario {
         instrument: String,
         side: PositionSide,
@@ -222,6 +228,14 @@ impl AgentOperation {
                 limit,
             } => validate_history_request(instrument, bar, *limit),
             Self::MailboxTelemetry | Self::AccountSnapshot | Self::PortfolioRisk => Ok(()),
+            Self::CurrentCost {
+                instrument,
+                contracts,
+                ..
+            } => {
+                validate_instrument(instrument)?;
+                validate_decimal_text(contracts, "contracts")
+            }
             Self::PositionScenario {
                 instrument,
                 contracts,
@@ -800,6 +814,32 @@ mod tests {
         assert_eq!(
             envelope.validate(MailboxDirection::AgentToClient),
             Err(ProtocolError::DirectionMismatch)
+        );
+    }
+
+    #[test]
+    fn current_cost_is_typed_and_keeps_decimal_contracts_as_text() {
+        let request = AgentOperation::CurrentCost {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            contracts: "2.5".to_owned(),
+            side: PositionSide::Long,
+            liquidity_role: LiquidityRole::Taker,
+        };
+        assert!(request.validate().is_ok());
+
+        let json = serde_json::to_string(&request).expect("serialize");
+        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, request);
+
+        let invalid = AgentOperation::CurrentCost {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            contracts: "2e3".to_owned(),
+            side: PositionSide::Short,
+            liquidity_role: LiquidityRole::Maker,
+        };
+        assert_eq!(
+            invalid.validate(),
+            Err(ProtocolError::InvalidDecimalInput("contracts"))
         );
     }
 
