@@ -434,7 +434,6 @@ mod tests {
     fn control_cadences_keep_local_reconcile_faster_than_network_polling() {
         assert_eq!(LOCAL_RECONCILE_SECONDS, 1);
         assert_eq!(DEFAULT_CONTROL_POLL_SECONDS, 5);
-        assert!(LOCAL_RECONCILE_SECONDS < DEFAULT_CONTROL_POLL_SECONDS);
     }
 
     #[test]
