@@ -200,16 +200,8 @@ impl MarketSnapshot {
 
         let index_price = IndexPriceState {
             index_id: underlying.clone(),
-            price: required(
-                "index ticker",
-                "idxPx",
-                bootstrap.index_ticker.index_price,
-            )?,
-            exchange_timestamp_ms: required(
-                "index ticker",
-                "ts",
-                bootstrap.index_ticker.ts,
-            )?,
+            price: required("index ticker", "idxPx", bootstrap.index_ticker.index_price)?,
+            exchange_timestamp_ms: required("index ticker", "ts", bootstrap.index_ticker.ts)?,
         };
 
         let funding = match instrument.instrument_type {
@@ -218,11 +210,7 @@ impl MarketSnapshot {
                 require_instrument("funding rate", instrument_id, &funding.instrument_id)?;
                 Some(FundingState {
                     rate: required("funding rate", "fundingRate", funding.funding_rate)?,
-                    funding_time_ms: required(
-                        "funding rate",
-                        "fundingTime",
-                        funding.funding_time,
-                    )?,
+                    funding_time_ms: required("funding rate", "fundingTime", funding.funding_time)?,
                     next_funding_time_ms: required(
                         "funding rate",
                         "nextFundingTime",
@@ -246,11 +234,7 @@ impl MarketSnapshot {
             contracts: required("open interest", "oi", bootstrap.open_interest.oi)?,
             currency: optional(bootstrap.open_interest.oi_currency),
             usd: optional(bootstrap.open_interest.oi_usd),
-            exchange_timestamp_ms: required(
-                "open interest",
-                "ts",
-                bootstrap.open_interest.ts,
-            )?,
+            exchange_timestamp_ms: required("open interest", "ts", bootstrap.open_interest.ts)?,
         };
 
         let mut snapshot = Self {

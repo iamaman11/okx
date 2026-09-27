@@ -173,10 +173,7 @@ impl MarketDataApi {
         )
     }
 
-    pub async fn funding_rate(
-        &self,
-        instrument_id: &str,
-    ) -> Result<PublicFundingRate, OkxError> {
+    pub async fn funding_rate(&self, instrument_id: &str) -> Result<PublicFundingRate, OkxError> {
         one(
             self.client
                 .public_get(
