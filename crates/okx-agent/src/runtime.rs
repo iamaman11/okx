@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use okx_runtime::{PrivateWsCoordinator, PublicWsCoordinator, PublicWsHandle};
+use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator, PublicWsHandle};
 use serde::Serialize;
 use tokio::{
     sync::watch,
@@ -51,6 +51,7 @@ pub struct MailboxRuntimeContext<'a> {
     pub public_ws: &'a PublicWsHandle,
     pub market: &'a MarketBootstrapper,
     pub account: Option<&'a AccountBootstrapper>,
+    pub private_ws: Option<&'a PrivateWsHandle>,
 }
 
 pub async fn run_mailbox_until_shutdown(
@@ -68,6 +69,7 @@ pub async fn run_mailbox_until_shutdown(
         public_ws,
         market,
         account,
+        private_ws,
     } = context;
     if !(1..=60).contains(&poll_seconds) {
         return Err(AgentError::InvalidPollInterval);
@@ -165,6 +167,7 @@ pub async fn run_mailbox_until_shutdown(
                         public_ws,
                         market,
                         account,
+                        private_ws,
                     )
                     .await
                 {

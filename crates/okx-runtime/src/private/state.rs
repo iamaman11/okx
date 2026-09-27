@@ -1,10 +1,13 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
-use okx_ws::{PrivateChannel, PrivateSubscription, PrivateWsArg};
+use okx_observation::AccountWsEvent;
+use okx_ws::{PrivateSubscription, PrivateWsArg};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 pub const PRIVATE_WS_STATUS_SCHEMA_V1: &str = "okx.private-ws-status/v1";
+pub const PRIVATE_EVENT_JOURNAL_CAPACITY: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -31,6 +34,33 @@ pub struct PrivateWsStatus {
     pub last_error: Option<String>,
 }
 
+pub type PrivateWsEvent = AccountWsEvent;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivateConvergenceCursor {
+    pub generation: u64,
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrivateConvergenceWindow {
+    pub generation: u64,
+    pub status: PrivateWsStatus,
+    pub events: Vec<PrivateWsEvent>,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum PrivateConvergenceError {
+    #[error("private websocket is not ready for convergence")]
+    NotReady,
+
+    #[error("private websocket generation changed during REST bootstrap")]
+    GenerationChanged,
+
+    #[error("private websocket event journal no longer contains the convergence cursor")]
+    JournalGap,
+}
+
 #[derive(Debug)]
 pub struct PrivateRuntimeState {
     pub(super) connection_state: PrivateConnectionState,
@@ -43,6 +73,8 @@ pub struct PrivateRuntimeState {
     pub(super) orders_updates_seen: bool,
     pub(super) last_inbound_ms: Option<u64>,
     pub(super) last_error: Option<String>,
+    event_sequence: u64,
+    event_journal: VecDeque<(u64, PrivateWsEvent)>,
 }
 
 impl PrivateRuntimeState {
@@ -58,6 +90,8 @@ impl PrivateRuntimeState {
             orders_updates_seen: false,
             last_inbound_ms: None,
             last_error: None,
+            event_sequence: 0,
+            event_journal: VecDeque::new(),
         }
     }
 
@@ -77,15 +111,54 @@ impl PrivateRuntimeState {
             logged_in: self.logged_in,
             connection_id_fingerprint: self.connection_id.as_deref().map(connection_fingerprint),
             acknowledged_subscriptions: self.acknowledged_subscriptions.len(),
-            subscriptions_complete: baseline_private_subscriptions()
-                .iter()
-                .all(|subscription| self.acknowledged_subscriptions.contains(subscription)),
+            subscriptions_complete: self.subscriptions_complete(),
             account_data_seen: self.account_data_seen,
             positions_data_seen: self.positions_data_seen,
             orders_updates_seen: self.orders_updates_seen,
             last_inbound_ms: self.last_inbound_ms,
             last_error: self.last_error.clone(),
         }
+    }
+
+    pub fn convergence_cursor(&self) -> Result<PrivateConvergenceCursor, PrivateConvergenceError> {
+        if !self.convergence_ready() {
+            return Err(PrivateConvergenceError::NotReady);
+        }
+        Ok(PrivateConvergenceCursor {
+            generation: self.generation,
+            sequence: self.event_sequence,
+        })
+    }
+
+    pub fn convergence_window(
+        &self,
+        cursor: PrivateConvergenceCursor,
+    ) -> Result<PrivateConvergenceWindow, PrivateConvergenceError> {
+        if cursor.generation != self.generation {
+            return Err(PrivateConvergenceError::GenerationChanged);
+        }
+        if !self.convergence_ready() {
+            return Err(PrivateConvergenceError::NotReady);
+        }
+
+        if let Some((oldest_sequence, _)) = self.event_journal.front()
+            && cursor.sequence.saturating_add(1) < *oldest_sequence
+        {
+            return Err(PrivateConvergenceError::JournalGap);
+        }
+
+        let events = self
+            .event_journal
+            .iter()
+            .filter(|(sequence, _)| *sequence > cursor.sequence)
+            .map(|(_, event)| event.clone())
+            .collect();
+
+        Ok(PrivateConvergenceWindow {
+            generation: self.generation,
+            status: self.status(),
+            events,
+        })
     }
 
     pub(super) fn set_connecting(&mut self) {
@@ -106,6 +179,8 @@ impl PrivateRuntimeState {
         self.orders_updates_seen = false;
         self.last_inbound_ms = None;
         self.last_error = None;
+        self.event_sequence = 0;
+        self.event_journal.clear();
     }
 
     pub(super) fn set_disconnected(&mut self, reconnecting: bool, reason: impl Into<String>) {
@@ -139,13 +214,33 @@ impl PrivateRuntimeState {
         }
     }
 
-    pub(super) fn observe_data(&mut self, channel: PrivateChannel, received_at_ms: u64) {
+    pub(super) fn observe_event(&mut self, event: PrivateWsEvent, received_at_ms: u64) {
         self.last_inbound_ms = Some(received_at_ms);
-        match channel {
-            PrivateChannel::Account => self.account_data_seen = true,
-            PrivateChannel::Positions => self.positions_data_seen = true,
-            PrivateChannel::Orders => self.orders_updates_seen = true,
+        match &event {
+            PrivateWsEvent::Account(_) => self.account_data_seen = true,
+            PrivateWsEvent::Positions(_) => self.positions_data_seen = true,
+            PrivateWsEvent::Orders(_) => self.orders_updates_seen = true,
         }
+
+        self.event_sequence = self.event_sequence.saturating_add(1);
+        self.event_journal.push_back((self.event_sequence, event));
+        while self.event_journal.len() > PRIVATE_EVENT_JOURNAL_CAPACITY {
+            self.event_journal.pop_front();
+        }
+    }
+
+    fn subscriptions_complete(&self) -> bool {
+        baseline_private_subscriptions()
+            .iter()
+            .all(|subscription| self.acknowledged_subscriptions.contains(subscription))
+    }
+
+    fn convergence_ready(&self) -> bool {
+        self.connection_state == PrivateConnectionState::Connected
+            && self.logged_in
+            && self.subscriptions_complete()
+            && self.account_data_seen
+            && self.positions_data_seen
     }
 }
 
@@ -183,6 +278,65 @@ mod tests {
 
     #[test]
     fn generation_reset_revokes_all_old_private_evidence() {
+        let mut state = ready_state();
+        let first = state.status();
+        assert!(first.logged_in);
+        assert!(first.subscriptions_complete);
+        assert!(first.account_data_seen);
+        assert!(first.positions_data_seen);
+        assert!(
+            !first
+                .connection_id_fingerprint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("conn-secret")
+        );
+        assert!(state.convergence_cursor().is_ok());
+
+        state.begin_generation(2);
+        let second = state.status();
+        assert_eq!(second.connection_generation, 2);
+        assert!(!second.logged_in);
+        assert_eq!(second.acknowledged_subscriptions, 0);
+        assert!(!second.account_data_seen);
+        assert!(!second.positions_data_seen);
+        assert!(!second.orders_updates_seen);
+        assert_eq!(
+            state.convergence_cursor(),
+            Err(PrivateConvergenceError::NotReady)
+        );
+    }
+
+    #[test]
+    fn convergence_window_is_generation_bound() {
+        let mut state = ready_state();
+        let cursor = state.convergence_cursor().expect("cursor");
+        state.observe_event(PrivateWsEvent::Orders(Vec::new()), 12);
+        let window = state.convergence_window(cursor).expect("window");
+        assert_eq!(window.generation, 1);
+        assert_eq!(window.events.len(), 1);
+
+        state.begin_generation(2);
+        assert_eq!(
+            state.convergence_window(cursor).expect_err("old cursor"),
+            PrivateConvergenceError::GenerationChanged
+        );
+    }
+
+    #[test]
+    fn journal_gap_fails_closed() {
+        let mut state = ready_state();
+        let cursor = state.convergence_cursor().expect("cursor");
+        for index in 0..=PRIVATE_EVENT_JOURNAL_CAPACITY {
+            state.observe_event(PrivateWsEvent::Orders(Vec::new()), 100 + index as u64);
+        }
+        assert_eq!(
+            state.convergence_window(cursor).expect_err("journal gap"),
+            PrivateConvergenceError::JournalGap
+        );
+    }
+
+    fn ready_state() -> PrivateRuntimeState {
         let mut state = PrivateRuntimeState::new();
         state.begin_generation(1);
         state.acknowledge_login(Some("conn-secret".to_owned()));
@@ -196,29 +350,8 @@ mod tests {
             };
             state.acknowledge_subscription(&arg, None);
         }
-        state.observe_data(PrivateChannel::Account, 10);
-        state.observe_data(PrivateChannel::Positions, 11);
-
-        let first = state.status();
-        assert!(first.logged_in);
-        assert!(first.subscriptions_complete);
-        assert!(first.account_data_seen);
-        assert!(first.positions_data_seen);
-        assert!(
-            !first
-                .connection_id_fingerprint
-                .as_deref()
-                .unwrap_or_default()
-                .contains("conn-secret")
-        );
-
-        state.begin_generation(2);
-        let second = state.status();
-        assert_eq!(second.connection_generation, 2);
-        assert!(!second.logged_in);
-        assert_eq!(second.acknowledged_subscriptions, 0);
-        assert!(!second.account_data_seen);
-        assert!(!second.positions_data_seen);
-        assert!(!second.orders_updates_seen);
+        state.observe_event(PrivateWsEvent::Account(Vec::new()), 10);
+        state.observe_event(PrivateWsEvent::Positions(Vec::new()), 11);
+        state
     }
 }

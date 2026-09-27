@@ -2,10 +2,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
-    ACCOUNT_SNAPSHOT_SCHEMA_V1, INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1,
-    InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError,
-    MarketHistoryError, MarketReadiness, MarketSnapshot, ReferenceRegistry,
-    SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
+    ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, INSTRUMENT_RULES_SCHEMA_V1,
+    INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1,
+    MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError, MarketReadiness, MarketSnapshot,
+    ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
 };
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
@@ -13,7 +13,10 @@ use okx_protocol::{
     MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
     crypto::{decrypt, derive_directional_key, encrypt, shared_secret},
 };
-use okx_runtime::{PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PublicQualitySnapshot, PublicWsHandle};
+use okx_runtime::{
+    PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PrivateConvergenceError, PrivateWsHandle,
+    PublicQualitySnapshot, PublicWsHandle,
+};
 
 use crate::{
     AgentError, AgentResult,
@@ -42,7 +45,9 @@ const MARKET_REST_BOOTSTRAP_WARNING: &str = "market data is bounded public REST 
 const REFERENCE_RUNTIME_WARNING: &str = "instrument rules come from the live ReferenceRegistry; market FRESH readiness is reported separately";
 const MARKET_HISTORY_UNCONFIRMED_WARNING: &str =
     "OKX history response contains at least one unconfirmed candlestick";
-const ACCOUNT_REST_BOOTSTRAP_WARNING: &str = "private account state is a bounded authenticated REST bootstrap; private WebSocket convergence is not connected until M4-C";
+const ACCOUNT_REST_BOOTSTRAP_WARNING: &str = "private account state is a bounded authenticated REST bootstrap; private WebSocket convergence is not ready";
+const ACCOUNT_WS_GENERATION_CHANGED_WARNING: &str = "private WebSocket generation changed during REST bootstrap; returning coherent REST snapshot only";
+const ACCOUNT_WS_JOURNAL_GAP_WARNING: &str = "private WebSocket delta journal advanced beyond the REST bootstrap cursor; returning coherent REST snapshot only";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
 
 #[derive(serde::Serialize)]
@@ -60,6 +65,7 @@ pub struct ObservationQueryContext<'a> {
     public_ws: Option<&'a PublicWsHandle>,
     mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
     account_fallback: Option<&'a AccountBootstrapper>,
+    private_ws: Option<&'a PrivateWsHandle>,
 }
 
 impl<'a> ObservationQueryContext<'a> {
@@ -70,6 +76,7 @@ impl<'a> ObservationQueryContext<'a> {
             public_ws: None,
             mailbox_telemetry: None,
             account_fallback: None,
+            private_ws: None,
         }
     }
 
@@ -91,6 +98,7 @@ impl<'a> ObservationQueryContext<'a> {
             public_ws: None,
             mailbox_telemetry: None,
             account_fallback,
+            private_ws: None,
         }
     }
 
@@ -98,7 +106,7 @@ impl<'a> ObservationQueryContext<'a> {
         public_ws: &'a PublicWsHandle,
         market_fallback: &'a MarketBootstrapper,
     ) -> Self {
-        Self::live_with_private(public_ws, market_fallback, None, None)
+        Self::live_with_private(public_ws, market_fallback, None, None, None)
     }
 
     pub const fn live_with_mailbox_telemetry(
@@ -106,7 +114,7 @@ impl<'a> ObservationQueryContext<'a> {
         market_fallback: &'a MarketBootstrapper,
         mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
     ) -> Self {
-        Self::live_with_private(public_ws, market_fallback, mailbox_telemetry, None)
+        Self::live_with_private(public_ws, market_fallback, mailbox_telemetry, None, None)
     }
 
     pub const fn live_with_private(
@@ -114,6 +122,7 @@ impl<'a> ObservationQueryContext<'a> {
         market_fallback: &'a MarketBootstrapper,
         mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
         account_fallback: Option<&'a AccountBootstrapper>,
+        private_ws: Option<&'a PrivateWsHandle>,
     ) -> Self {
         Self {
             standalone_reference: None,
@@ -121,6 +130,7 @@ impl<'a> ObservationQueryContext<'a> {
             public_ws: Some(public_ws),
             mailbox_telemetry,
             account_fallback,
+            private_ws,
         }
     }
 }
@@ -565,20 +575,77 @@ async fn response_for(
                 ));
             };
 
-            match account.snapshot().await {
-                Ok(result) => Ok(AgentResponse {
-                    schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-                    request_id: request.request_id.clone(),
-                    status: AgentResponseStatus::Completed,
-                    generated_at: generated_at.to_owned(),
-                    quality: DataQuality::Degraded,
-                    result_schema: Some(ACCOUNT_SNAPSHOT_SCHEMA_V1.to_owned()),
-                    result: Some(serde_json::to_value(result)?),
-                    failure: None,
-                    warnings: vec![ACCOUNT_REST_BOOTSTRAP_WARNING.to_owned()],
-                }),
-                Err(error) => Ok(account_failure(request, generated_at, error)),
+            let convergence_cursor = match context.private_ws {
+                Some(private_ws) => private_ws.convergence_cursor().await.ok(),
+                None => None,
+            };
+
+            let rest = match account.snapshot().await {
+                Ok(result) => result,
+                Err(error) => return Ok(account_failure(request, generated_at, error)),
+            };
+
+            if let (Some(private_ws), Some(cursor)) = (context.private_ws, convergence_cursor) {
+                match private_ws.convergence_window(cursor).await {
+                    Ok(window) => {
+                        if let Some(last_inbound_ms) = window.status.last_inbound_ms {
+                            match rest.converge_private_ws(
+                                window.generation,
+                                last_inbound_ms,
+                                &window.events,
+                            ) {
+                                Ok(result) => {
+                                    return Ok(AgentResponse {
+                                        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                                        request_id: request.request_id.clone(),
+                                        status: AgentResponseStatus::Completed,
+                                        generated_at: generated_at.to_owned(),
+                                        quality: DataQuality::Fresh,
+                                        result_schema: Some(ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned()),
+                                        result: Some(serde_json::to_value(result)?),
+                                        failure: None,
+                                        warnings: Vec::new(),
+                                    });
+                                }
+                                Err(error) => {
+                                    return Ok(failure_response(
+                                        request,
+                                        generated_at,
+                                        AgentResponseStatus::Failed,
+                                        ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE,
+                                        error.to_string(),
+                                        false,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Err(PrivateConvergenceError::GenerationChanged) => {
+                        return account_rest_response(
+                            request,
+                            generated_at,
+                            rest,
+                            ACCOUNT_WS_GENERATION_CHANGED_WARNING,
+                        );
+                    }
+                    Err(PrivateConvergenceError::JournalGap) => {
+                        return account_rest_response(
+                            request,
+                            generated_at,
+                            rest,
+                            ACCOUNT_WS_JOURNAL_GAP_WARNING,
+                        );
+                    }
+                    Err(PrivateConvergenceError::NotReady) => {}
+                }
             }
+
+            Ok(account_rest_response(
+                request,
+                generated_at,
+                rest,
+                ACCOUNT_REST_BOOTSTRAP_WARNING,
+            )?)
         }
         AgentOperation::MailboxTelemetry => {
             let Some(telemetry) = context.mailbox_telemetry else {
@@ -657,6 +724,25 @@ async fn response_for(
         }
         _ => Ok(unavailable(request, generated_at)),
     }
+}
+
+fn account_rest_response(
+    request: &AgentRequest,
+    generated_at: &str,
+    result: okx_observation::AccountSnapshot,
+    warning: &str,
+) -> AgentResult<AgentResponse> {
+    Ok(AgentResponse {
+        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+        request_id: request.request_id.clone(),
+        status: AgentResponseStatus::Completed,
+        generated_at: generated_at.to_owned(),
+        quality: DataQuality::Degraded,
+        result_schema: Some(ACCOUNT_SNAPSHOT_SCHEMA_V1.to_owned()),
+        result: Some(serde_json::to_value(result)?),
+        failure: None,
+        warnings: vec![warning.to_owned()],
+    })
 }
 
 fn data_quality(quality: MarketReadiness) -> DataQuality {
@@ -952,6 +1038,7 @@ mod tests {
                 public_ws: None,
                 mailbox_telemetry: None,
                 account_fallback: None,
+                private_ws: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -989,6 +1076,7 @@ mod tests {
                 public_ws: None,
                 mailbox_telemetry: None,
                 account_fallback: None,
+                private_ws: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1027,6 +1115,7 @@ mod tests {
                 public_ws: None,
                 mailbox_telemetry: None,
                 account_fallback: None,
+                private_ws: None,
             },
             "2026-09-27T00:00:01.000Z",
         )

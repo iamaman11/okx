@@ -6,7 +6,7 @@ use okx_github::{
     IssuePollTelemetryStatus, IssuePollTelemetryStore, OWNER_USER_ID, REPOSITORY_ID,
 };
 use okx_protocol::{MailboxDirection, MailboxEnvelope};
-use okx_runtime::PublicWsHandle;
+use okx_runtime::{PrivateWsHandle, PublicWsHandle};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -87,6 +87,7 @@ impl GitHubMailboxClient {
         public_ws: &PublicWsHandle,
         market: &MarketBootstrapper,
         account: Option<&AccountBootstrapper>,
+        private_ws: Option<&PrivateWsHandle>,
     ) -> AgentResult<usize> {
         let mut checkpoint = self.load_checkpoint_for_poll()?;
         let fetch_started = Instant::now();
@@ -156,6 +157,7 @@ impl GitHubMailboxClient {
                     market,
                     mailbox_telemetry.as_ref(),
                     account,
+                    private_ws,
                 ),
             )
             .await

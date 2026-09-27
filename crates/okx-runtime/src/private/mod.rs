@@ -10,8 +10,10 @@ pub use coordinator::{
     private_reconnect_delay,
 };
 pub use state::{
-    PRIVATE_WS_STATUS_SCHEMA_V1, PrivateConnectionState, PrivateRuntimeState, PrivateWsStatus,
-    baseline_private_subscriptions, connection_fingerprint as private_connection_fingerprint,
+    PRIVATE_EVENT_JOURNAL_CAPACITY, PRIVATE_WS_STATUS_SCHEMA_V1, PrivateConnectionState,
+    PrivateConvergenceCursor, PrivateConvergenceError, PrivateConvergenceWindow,
+    PrivateRuntimeState, PrivateWsEvent, PrivateWsStatus, baseline_private_subscriptions,
+    connection_fingerprint as private_connection_fingerprint,
 };
 
 #[derive(Debug, Error)]
@@ -21,4 +23,7 @@ pub enum PrivateRuntimeError {
 
     #[error("private websocket authentication material error: {0}")]
     Api(#[from] OkxError),
+
+    #[error("private websocket JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 }
