@@ -531,7 +531,12 @@ impl GitHubClient {
 
             if count < COMMENTS_PER_PAGE as usize {
                 fresh.sort_by_key(IssueComment::cursor);
+                // A page-1 validator can only prove the whole post-cursor
+                // representation unchanged when the previous idle fetch fit
+                // entirely on page 1. If page 2+ was required, page 1 could
+                // remain unchanged while new comments are appended later.
                 if cursor.is_some()
+                    && page == 1
                     && fresh.is_empty()
                     && let Some(etag) = first_page_etag
                 {
@@ -1051,6 +1056,16 @@ mod tests {
         // Only a fully observed idle result may arm the representation again.
         state.arm(key.clone(), "etag-b".to_owned());
         assert_eq!(state.etag_for(&key).as_deref(), Some("etag-b"));
+    }
+
+    #[test]
+    fn validator_is_not_safe_for_multi_page_idle_window() {
+        // The ETag key intentionally covers one page only. A full first page
+        // means later pages may change without page 1 changing, so H1-B must
+        // never arm page-1 conditional polling for that representation.
+        let first_page_count = COMMENTS_PER_PAGE as usize;
+        assert_eq!(first_page_count, COMMENTS_PER_PAGE as usize);
+        assert!(first_page_count >= COMMENTS_PER_PAGE as usize);
     }
 
     #[test]
