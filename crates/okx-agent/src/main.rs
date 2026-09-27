@@ -130,7 +130,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let identity = load_native_identity(&config.key_id)?;
             if let Some(mailbox_issue) = mailbox_issue {
                 let token = load_native_github_token()?;
-                let mailbox = GitHubMailboxClient::new(mailbox_issue, token)?;
+                let mailbox = GitHubMailboxClient::new(mailbox_issue, token, &config.root)?;
                 let public_client = OkxPublicClient::new(environment)?;
                 let reference = bootstrap_reference(public_client.clone()).await?;
                 eprintln!(

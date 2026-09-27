@@ -1,5 +1,11 @@
+use std::{
+    fs::{self, File},
+    io::Write,
+    path::{Path, PathBuf},
+};
+
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -11,6 +17,7 @@ pub const OWNER_USER_ID: u64 = 44_100_369;
 const COMMENTS_PER_PAGE: u32 = 100;
 const MAX_COMMENT_PAGES: u32 = 10;
 pub const MAX_COMMENT_BODY_BYTES: usize = 64 * 1024;
+pub const ISSUE_CURSOR_SCHEMA_V1: &str = "okx.github.issue-cursor/v1";
 
 #[derive(Debug, Error)]
 pub enum GitHubError {
@@ -34,6 +41,15 @@ pub enum GitHubError {
 
     #[error("GitHub workflow artifact does not satisfy the trusted artifact policy")]
     UntrustedArtifact,
+
+    #[error("GitHub issue cursor JSON is invalid: {0}")]
+    CursorJson(serde_json::Error),
+
+    #[error("GitHub issue cursor does not match the pinned repository/issue")]
+    CursorStateMismatch,
+
+    #[error("GitHub issue cursor I/O error: {0}")]
+    CursorIo(#[from] std::io::Error),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,11 +69,100 @@ pub struct WorkflowArtifact {
     pub expired: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct IssueCommentCursor {
+    pub created_at: String,
+    pub id: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueComment {
     pub id: u64,
     pub body: String,
     pub user_id: u64,
+    pub created_at: String,
+}
+
+impl IssueComment {
+    pub fn cursor(&self) -> IssueCommentCursor {
+        IssueCommentCursor {
+            created_at: self.created_at.clone(),
+            id: self.id,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedIssueCursor {
+    schema: String,
+    repository_id: u64,
+    issue_number: u64,
+    cursor: IssueCommentCursor,
+}
+
+#[derive(Debug, Clone)]
+pub struct IssueCursorStore {
+    path: PathBuf,
+    issue_number: u64,
+}
+
+impl IssueCursorStore {
+    pub fn new(path: impl Into<PathBuf>, issue_number: u64) -> Result<Self, GitHubError> {
+        validate_issue_number(issue_number)?;
+        Ok(Self {
+            path: path.into(),
+            issue_number,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn load(&self) -> Result<Option<IssueCommentCursor>, GitHubError> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+
+        let bytes = fs::read(&self.path)?;
+        let persisted: PersistedIssueCursor =
+            serde_json::from_slice(&bytes).map_err(GitHubError::CursorJson)?;
+
+        if persisted.schema != ISSUE_CURSOR_SCHEMA_V1
+            || persisted.repository_id != REPOSITORY_ID
+            || persisted.issue_number != self.issue_number
+        {
+            return Err(GitHubError::CursorStateMismatch);
+        }
+
+        Ok(Some(persisted.cursor))
+    }
+
+    pub fn save(&self, cursor: &IssueCommentCursor) -> Result<(), GitHubError> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let persisted = PersistedIssueCursor {
+            schema: ISSUE_CURSOR_SCHEMA_V1.to_owned(),
+            repository_id: REPOSITORY_ID,
+            issue_number: self.issue_number,
+            cursor: cursor.clone(),
+        };
+        let bytes = serde_json::to_vec(&persisted).map_err(GitHubError::CursorJson)?;
+
+        let tmp = self.path.with_extension("tmp");
+        let mut file = File::create(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+
+        if self.path.exists() {
+            fs::remove_file(&self.path)?;
+        }
+        fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
 }
 
 pub struct GitHubClient {
@@ -98,12 +203,46 @@ impl GitHubClient {
         &self,
         issue_number: u64,
     ) -> Result<Vec<IssueComment>, GitHubError> {
+        self.issue_comments_after(issue_number, None).await
+    }
+
+    pub async fn recent_issue_comments(
+        &self,
+        issue_number: u64,
+    ) -> Result<Vec<IssueComment>, GitHubError> {
         validate_issue_number(issue_number)?;
 
-        let mut all = Vec::new();
+        let url = format!(
+            "{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments?per_page={COMMENTS_PER_PAGE}&page=1&sort=created&direction=desc"
+        );
+        let comments: Vec<RawIssueComment> = self
+            .http
+            .get(url)
+            .bearer_auth(self.token.as_str())
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        Ok(comments
+            .into_iter()
+            .map(RawIssueComment::into_issue_comment)
+            .collect())
+    }
+
+    pub async fn issue_comments_after(
+        &self,
+        issue_number: u64,
+        cursor: Option<&IssueCommentCursor>,
+    ) -> Result<Vec<IssueComment>, GitHubError> {
+        validate_issue_number(issue_number)?;
+
+        let mut fresh = Vec::new();
         for page in 1..=MAX_COMMENT_PAGES {
             let url = format!(
-                "{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments?per_page={COMMENTS_PER_PAGE}&page={page}"
+                "{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments?per_page={COMMENTS_PER_PAGE}&page={page}&sort=created&direction=desc"
             );
             let page_comments: Vec<RawIssueComment> = self
                 .http
@@ -117,14 +256,23 @@ impl GitHubClient {
                 .await?;
 
             let count = page_comments.len();
-            all.extend(page_comments.into_iter().map(|comment| IssueComment {
-                id: comment.id,
-                body: comment.body,
-                user_id: comment.user.id,
-            }));
+            let mut crossed_cursor_time = false;
+            for raw in page_comments {
+                let comment = raw.into_issue_comment();
+                let is_new = cursor.is_none_or(|current| comment.cursor() > *current);
+                let is_older_than_cursor =
+                    cursor.is_some_and(|current| comment.created_at < current.created_at);
+                if is_new {
+                    fresh.push(comment);
+                }
+                if is_older_than_cursor {
+                    crossed_cursor_time = true;
+                }
+            }
 
-            if count < COMMENTS_PER_PAGE as usize {
-                return Ok(all);
+            if crossed_cursor_time || count < COMMENTS_PER_PAGE as usize {
+                fresh.sort_by_key(IssueComment::cursor);
+                return Ok(fresh);
             }
         }
 
@@ -280,6 +428,18 @@ struct RawIssueComment {
     #[serde(default)]
     body: String,
     user: CommentUser,
+    created_at: String,
+}
+
+impl RawIssueComment {
+    fn into_issue_comment(self) -> IssueComment {
+        IssueComment {
+            id: self.id,
+            body: self.body,
+            user_id: self.user.id,
+            created_at: self.created_at,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,5 +464,49 @@ mod tests {
             validate_issue_number(0),
             Err(GitHubError::InvalidIssueNumber)
         ));
+    }
+
+    #[test]
+    fn comment_cursor_orders_by_creation_then_id() {
+        let older = IssueCommentCursor {
+            created_at: "2026-09-27T12:00:00Z".to_owned(),
+            id: 10,
+        };
+        let newer_same_second = IssueCommentCursor {
+            created_at: "2026-09-27T12:00:00Z".to_owned(),
+            id: 11,
+        };
+        let newest = IssueCommentCursor {
+            created_at: "2026-09-27T12:00:01Z".to_owned(),
+            id: 1,
+        };
+
+        assert!(older < newer_same_second);
+        assert!(newer_same_second < newest);
+    }
+
+    #[test]
+    fn cursor_store_round_trips_and_rejects_wrong_issue() {
+        let root =
+            std::env::temp_dir().join(format!("okx-github-cursor-{}-{}", std::process::id(), 47));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp root");
+
+        let path = root.join("cursor.json");
+        let store = IssueCursorStore::new(&path, 10).expect("store");
+        let cursor = IssueCommentCursor {
+            created_at: "2026-09-27T12:00:00Z".to_owned(),
+            id: 123,
+        };
+        store.save(&cursor).expect("save");
+        assert_eq!(store.load().expect("load"), Some(cursor));
+
+        let wrong = IssueCursorStore::new(&path, 12).expect("wrong store");
+        assert!(matches!(
+            wrong.load(),
+            Err(GitHubError::CursorStateMismatch)
+        ));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

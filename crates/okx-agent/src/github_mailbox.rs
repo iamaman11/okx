@@ -1,6 +1,9 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, path::Path};
 
-use okx_github::{GitHubClient, OWNER_USER_ID, REPOSITORY_ID};
+use okx_github::{
+    GitHubClient, GitHubError, IssueComment, IssueCommentCursor, IssueCursorStore, OWNER_USER_ID,
+    REPOSITORY_ID,
+};
 use okx_protocol::{MailboxDirection, MailboxEnvelope};
 use okx_runtime::PublicWsHandle;
 use serde::{Deserialize, Serialize};
@@ -18,17 +21,27 @@ pub const GITHUB_MAILBOX_IDENTITY_SCHEMA_V1: &str = "okx.github-mailbox.identity
 pub struct GitHubMailboxClient {
     github: GitHubClient,
     issue_number: u64,
+    cursor_store: IssueCursorStore,
 }
 
 impl GitHubMailboxClient {
-    pub fn new(issue_number: u64, token: Zeroizing<String>) -> AgentResult<Self> {
+    pub fn new(
+        issue_number: u64,
+        token: Zeroizing<String>,
+        state_root: &Path,
+    ) -> AgentResult<Self> {
         if issue_number == 0 {
             return Err(AgentError::InvalidMailboxIssue);
         }
 
+        let cursor_path = state_root
+            .join("github-mailbox")
+            .join(format!("issue-{issue_number}-cursor.json"));
+
         Ok(Self {
             github: GitHubClient::new(token, "iamaman11-okx-agent/0.1")?,
             issue_number,
+            cursor_store: IssueCursorStore::new(cursor_path, issue_number)?,
         })
     }
 
@@ -47,7 +60,7 @@ impl GitHubMailboxClient {
             public_key: identity.public_key.clone(),
         };
 
-        let comments = self.github.issue_comments(self.issue_number).await?;
+        let comments = self.github.recent_issue_comments(self.issue_number).await?;
         let already_published = comments.iter().any(|comment| {
             comment.user_id == OWNER_USER_ID
                 && serde_json::from_str::<PublishedIdentity>(&comment.body)
@@ -70,23 +83,20 @@ impl GitHubMailboxClient {
         public_ws: &PublicWsHandle,
         market: &MarketBootstrapper,
     ) -> AgentResult<usize> {
-        let mut comments = self.github.issue_comments(self.issue_number).await?;
-        comments.sort_by_key(|comment| comment.id);
-
-        let mut terminal_request_ids = HashSet::new();
-        for comment in &comments {
-            if comment.user_id != OWNER_USER_ID {
-                continue;
-            }
-            if let Ok(envelope) = serde_json::from_str::<MailboxEnvelope>(&comment.body)
-                && envelope.direction == MailboxDirection::AgentToClient
-            {
-                terminal_request_ids.insert(envelope.request_id);
-            }
+        let cursor = self.load_cursor_for_poll()?;
+        let comments = self
+            .github
+            .issue_comments_after(self.issue_number, cursor.as_ref())
+            .await?;
+        if comments.is_empty() {
+            return Ok(0);
         }
 
+        let mut terminal_request_ids = terminal_request_ids(&comments);
         let mut processed = 0usize;
-        for comment in comments {
+        let mut batch_complete = true;
+
+        for comment in &comments {
             if comment.user_id != OWNER_USER_ID {
                 continue;
             }
@@ -116,6 +126,7 @@ impl GitHubMailboxClient {
                     processed += 1;
                 }
                 Err(error) => {
+                    batch_complete = false;
                     eprintln!(
                         "mailbox request {} rejected before terminal response: {}",
                         envelope.request_id, error
@@ -124,8 +135,53 @@ impl GitHubMailboxClient {
             }
         }
 
+        if let Some(cursor) = completed_batch_cursor(&comments, batch_complete) {
+            self.cursor_store.save(&cursor)?;
+        }
+
         Ok(processed)
     }
+
+    fn load_cursor_for_poll(&self) -> AgentResult<Option<IssueCommentCursor>> {
+        match self.cursor_store.load() {
+            Ok(cursor) => Ok(cursor),
+            Err(GitHubError::CursorJson(error)) => {
+                eprintln!(
+                    "mailbox cursor JSON invalid at {}: {}; falling back to bounded bootstrap scan",
+                    self.cursor_store.path().display(),
+                    error
+                );
+                Ok(None)
+            }
+            Err(GitHubError::CursorStateMismatch) => {
+                eprintln!(
+                    "mailbox cursor state mismatch at {}; falling back to bounded bootstrap scan",
+                    self.cursor_store.path().display()
+                );
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+fn terminal_request_ids(comments: &[IssueComment]) -> HashSet<String> {
+    comments
+        .iter()
+        .filter(|comment| comment.user_id == OWNER_USER_ID)
+        .filter_map(|comment| serde_json::from_str::<MailboxEnvelope>(&comment.body).ok())
+        .filter(|envelope| envelope.direction == MailboxDirection::AgentToClient)
+        .map(|envelope| envelope.request_id)
+        .collect()
+}
+
+fn completed_batch_cursor(
+    comments: &[IssueComment],
+    batch_complete: bool,
+) -> Option<IssueCommentCursor> {
+    batch_complete
+        .then(|| comments.last().map(IssueComment::cursor))
+        .flatten()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +198,65 @@ pub struct PublishedIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_response_in_same_replayed_batch_prevents_duplicate_request() {
+        let request_body = serde_json::json!({
+            "schema": "okx.mailbox.envelope/v1",
+            "request_id": "req-1",
+            "direction": "client_to_agent",
+            "agent_key_id": "agent-key-1",
+            "client_ephemeral_public_key": "public",
+            "nonce": "nonce",
+            "ciphertext": "ciphertext"
+        })
+        .to_string();
+        let response_body = serde_json::json!({
+            "schema": "okx.mailbox.envelope/v1",
+            "request_id": "req-1",
+            "direction": "agent_to_client",
+            "agent_key_id": "agent-key-1",
+            "client_ephemeral_public_key": "public",
+            "nonce": "nonce",
+            "ciphertext": "ciphertext"
+        })
+        .to_string();
+        let comments = vec![
+            IssueComment {
+                id: 10,
+                body: request_body,
+                user_id: OWNER_USER_ID,
+                created_at: "2026-09-27T12:00:00Z".to_owned(),
+            },
+            IssueComment {
+                id: 11,
+                body: response_body,
+                user_id: OWNER_USER_ID,
+                created_at: "2026-09-27T12:00:01Z".to_owned(),
+            },
+        ];
+
+        assert!(terminal_request_ids(&comments).contains("req-1"));
+    }
+
+    #[test]
+    fn failed_batch_does_not_advance_cursor() {
+        let comments = vec![IssueComment {
+            id: 10,
+            body: "{}".to_owned(),
+            user_id: OWNER_USER_ID,
+            created_at: "2026-09-27T12:00:00Z".to_owned(),
+        }];
+
+        assert_eq!(completed_batch_cursor(&comments, false), None);
+        assert_eq!(
+            completed_batch_cursor(&comments, true),
+            Some(IssueCommentCursor {
+                created_at: "2026-09-27T12:00:00Z".to_owned(),
+                id: 10,
+            })
+        );
+    }
 
     #[test]
     fn published_identity_contains_public_material_only() {
