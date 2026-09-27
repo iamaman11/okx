@@ -8,8 +8,8 @@ pub mod market_data;
 pub mod public_data;
 
 pub use account::{
-    AccountApi, AccountCapabilities, AccountConfig, FeeRate, Instrument, LeverageInfo, MarginMode,
-    Position,
+    AccountApi, AccountCapabilities, AccountConfig, BalanceDetail, BalanceSnapshot, FeeRate,
+    Instrument, LeverageInfo, MarginMode, PendingOrder, Position,
 };
 pub use client::{OkxPublicClient, OkxRestClient};
 pub use config::{Credentials, OkxEnvironment, Region};
