@@ -1,7 +1,8 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{MarketDataApi, OkxPublicClient};
 use okx_observation::{
-    FundingRequirement, MarketBootstrap, MarketError, MarketSnapshot, ReferenceRegistry,
+    FundingRequirement, MarketBootstrap, MarketError, MarketHistoryError, MarketHistorySnapshot,
+    MarketSnapshot, ReferenceRegistry,
 };
 use thiserror::Error;
 
@@ -31,6 +32,9 @@ pub enum MarketBootstrapError {
 
     #[error("market normalization error: {0}")]
     Normalize(#[from] MarketError),
+
+    #[error("market history normalization error: {0}")]
+    HistoryNormalize(#[from] MarketHistoryError),
 }
 
 impl MarketBootstrapper {
@@ -94,6 +98,32 @@ impl MarketBootstrapper {
                 funding_rate,
                 open_interest,
             },
+        )?)
+    }
+
+    pub async fn history(
+        &self,
+        reference: &ReferenceRegistry,
+        instrument_id: &str,
+        bar: &str,
+        limit: u16,
+    ) -> Result<MarketHistorySnapshot, MarketBootstrapError> {
+        let instrument = reference.get(instrument_id).ok_or_else(|| {
+            MarketBootstrapError::ReferenceInstrumentNotFound(instrument_id.to_owned())
+        })?;
+        if instrument.state != "live" {
+            return Err(MarketHistoryError::InstrumentNotLive(instrument_id.to_owned()).into());
+        }
+
+        let rows = self.api.history_candles(instrument_id, bar, limit).await?;
+        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        Ok(MarketHistorySnapshot::from_public(
+            reference,
+            instrument_id,
+            bar,
+            limit,
+            source_received_at,
+            rows,
         )?)
     }
 }
