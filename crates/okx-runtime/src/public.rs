@@ -989,6 +989,26 @@ mod tests {
         assert!(!first.contains("conn-secret-value"));
     }
 
+    #[tokio::test]
+    async fn demand_registration_is_local_idempotent_and_network_independent() {
+        let reference = reference(instrument("DOGE-USDT-SWAP", "SWAP", "normal"));
+        let (_coordinator, handle) =
+            PublicWsCoordinator::new(OkxEnvironment::new(okx_api::Region::Global, false), reference);
+
+        handle
+            .demand_instrument("DOGE-USDT-SWAP")
+            .await
+            .expect("first demand");
+        handle
+            .demand_instrument("DOGE-USDT-SWAP")
+            .await
+            .expect("repeat demand");
+
+        let state = handle.state.read().await;
+        assert!(state.markets.contains_key("DOGE-USDT-SWAP"));
+        assert_eq!(state.markets.len(), 1);
+    }
+
     #[test]
     fn reconnect_backoff_is_bounded_and_starts_at_one_second() {
         assert_eq!(reconnect_delay(0), Duration::from_secs(1));
