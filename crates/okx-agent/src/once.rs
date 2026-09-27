@@ -1,7 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_protocol::{
-    AGENT_REQUEST_SCHEMA_V1, AgentRequest, MailboxDirection, MailboxEnvelope,
+    AGENT_REQUEST_SCHEMA_V1, AgentRequest, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection,
+    MailboxEnvelope,
     crypto::{decrypt, derive_directional_key, encrypt, shared_secret},
 };
 
