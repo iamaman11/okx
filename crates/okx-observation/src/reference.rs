@@ -449,9 +449,14 @@ mod tests {
 
     #[test]
     fn instrument_search_uses_normalized_asset_and_settlement_fields() {
+        let mut btc = swap("BTC-USDT-SWAP");
+        btc.instrument_family = "BTC-USDT".to_owned();
+        btc.underlying = "BTC-USDT".to_owned();
+        btc.contract_value_currency = "BTC".to_owned();
+
         let registry = ReferenceRegistry::from_public(
             "2026-09-27T00:00:00.000Z",
-            vec![swap("DOGE-USDT-SWAP"), swap("BTC-USDT-SWAP")],
+            vec![swap("DOGE-USDT-SWAP"), btc],
         )
         .expect("registry");
 
