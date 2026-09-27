@@ -178,12 +178,9 @@ mod tests {
 
     #[test]
     fn websocket_login_material_uses_okx_verify_path() {
-        let credentials = Credentials::new(
-            "key".to_owned(),
-            "secret".to_owned(),
-            "pass".to_owned(),
-        )
-        .expect("credentials");
+        let credentials =
+            Credentials::new("key".to_owned(), "secret".to_owned(), "pass".to_owned())
+                .expect("credentials");
         let material = credentials
             .websocket_login_material("1538054050")
             .expect("login material");
