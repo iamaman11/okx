@@ -111,6 +111,8 @@ pub struct FeeGroup {
 pub struct FeeRate {
     #[serde(default)]
     pub level: String,
+    #[serde(rename = "ts", default)]
+    pub timestamp_ms: String,
     #[serde(rename = "instType", default)]
     pub instrument_type: String,
     #[serde(rename = "ruleType", default)]
@@ -346,6 +348,22 @@ impl AccountApi {
 
         self.client
             .private_get("/api/v5/account/trade-fee", &params)
+            .await
+    }
+
+    pub async fn fee_rates_for_family(
+        &self,
+        instrument_type: InstrumentType,
+        instrument_family: &str,
+    ) -> Result<Vec<FeeRate>, OkxError> {
+        self.client
+            .private_get(
+                "/api/v5/account/trade-fee",
+                &[
+                    ("instType", instrument_type.to_string()),
+                    ("instFamily", instrument_family.to_owned()),
+                ],
+            )
             .await
     }
 
