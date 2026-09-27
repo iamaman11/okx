@@ -8,17 +8,20 @@ pub(super) async fn dispatch(
     match &request.operation {
         AgentOperation::MarketSnapshot { instrument } => {
             match assemble_current_market(request, context, generated_at, instrument).await? {
-                CurrentMarketAssembly::Ready(assembled) => Ok(AgentResponse {
-                    schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-                    request_id: request.request_id.clone(),
-                    status: AgentResponseStatus::Completed,
-                    generated_at: generated_at.to_owned(),
-                    quality: assembled.quality,
-                    result_schema: Some(MARKET_SNAPSHOT_SCHEMA_V1.to_owned()),
-                    result: Some(serde_json::to_value(assembled.snapshot)?),
-                    failure: None,
-                    warnings: assembled.warnings,
-                }),
+                CurrentMarketAssembly::Ready(assembled) => {
+                    let assembled = *assembled;
+                    Ok(AgentResponse {
+                        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id.clone(),
+                        status: AgentResponseStatus::Completed,
+                        generated_at: generated_at.to_owned(),
+                        quality: assembled.quality,
+                        result_schema: Some(MARKET_SNAPSHOT_SCHEMA_V1.to_owned()),
+                        result: Some(serde_json::to_value(assembled.snapshot)?),
+                        failure: None,
+                        warnings: assembled.warnings,
+                    })
+                }
                 CurrentMarketAssembly::Response(response) => Ok(response),
                 CurrentMarketAssembly::Unavailable => Ok(unavailable(request, generated_at)),
             }
