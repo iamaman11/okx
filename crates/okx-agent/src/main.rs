@@ -6,7 +6,6 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use okx_api::{OkxEnvironment, Region};
 use okx_agent::{
     AgentResult,
     config::{AgentConfig, default_root},
@@ -19,6 +18,7 @@ use okx_agent::{
     reference_bootstrap::bootstrap_reference,
     runtime::{run_mailbox_until_shutdown, run_until_shutdown},
 };
+use okx_api::{OkxEnvironment, Region};
 use okx_protocol::MailboxEnvelope;
 use zeroize::Zeroize;
 
