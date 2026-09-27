@@ -5,7 +5,10 @@ use okx_api::{
     OkxEnvironment, PublicFundingRate, PublicIndexTicker, PublicInstrument, PublicMarkPrice,
     PublicOpenInterest, PublicTicker,
 };
-use okx_observation::{FundingRequirement, MarketStreamState, ReferenceRegistry};
+use okx_observation::{
+    FundingRequirement, InstrumentRulesSnapshot, LiveMarketSnapshot, MarketStreamState,
+    ReferenceRegistry,
+};
 use okx_ws::{
     InboundMessage, PublicChannel, PublicWsConnection, PublicWsError, Subscription, WsArg,
 };
@@ -16,8 +19,8 @@ use tokio::{
 
 use super::{
     PublicRuntimeError,
-    decode::{RawBookData, decode_book, now_ms},
-    state::PublicRuntimeState,
+    decode::{decode_book, now_ms},
+    state::{PublicQualitySnapshot, PublicRuntimeState},
     subscriptions::{desired_subscriptions, subscription_from_arg},
 };
 
