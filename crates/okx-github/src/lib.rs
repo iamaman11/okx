@@ -249,8 +249,7 @@ impl GitHubClient {
     ) -> Result<Vec<IssueComment>, GitHubError> {
         validate_issue_number(issue_number)?;
 
-        let url =
-            format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments");
+        let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments");
         let comments: Vec<RawIssueComment> = self
             .http
             .get(url)
@@ -583,10 +582,8 @@ mod tests {
 
     #[test]
     fn legacy_cursor_without_ledger_migrates_as_uninitialized() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-github-legacy-cursor-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("okx-github-legacy-cursor-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("temp root");
         let path = root.join("cursor.json");
