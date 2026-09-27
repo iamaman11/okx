@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize, de::{self, Deserializer}};
+use serde::{
+    Deserialize, Serialize,
+    de::{self, Deserializer},
+};
 
 use crate::{client::OkxPublicClient, error::OkxError, instrument::InstrumentType};
 
@@ -140,7 +143,16 @@ impl<'de> Deserialize<'de> for PublicCandle {
     {
         let row = Vec::<String>::deserialize(deserializer)?;
         match row.as_slice() {
-            [timestamp_ms, open, high, low, close, volume, volume_currency, confirm] => Ok(Self {
+            [
+                timestamp_ms,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                volume_currency,
+                confirm,
+            ] => Ok(Self {
                 timestamp_ms: timestamp_ms.clone(),
                 open: open.clone(),
                 high: high.clone(),
@@ -387,10 +399,8 @@ mod tests {
 
     #[test]
     fn history_candle_rejects_unknown_shape() {
-        let error = serde_json::from_str::<PublicCandle>(
-            r#"["1790467200000","0.12","0.13"]"#,
-        )
-        .expect_err("invalid history candle");
+        let error = serde_json::from_str::<PublicCandle>(r#"["1790467200000","0.12","0.13"]"#)
+            .expect_err("invalid history candle");
         assert!(error.to_string().contains("expected 8 or 9"));
     }
 
