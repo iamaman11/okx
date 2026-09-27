@@ -1,6 +1,9 @@
 use chrono::{SecondsFormat, Utc};
-use okx_api::{AccountApi, OkxError, OkxRestClient};
-use okx_observation::{AccountError, AccountSnapshot};
+use okx_api::{AccountApi, FeeRate, OkxError, OkxRestClient};
+use okx_observation::{
+    AccountError, AccountSnapshot, FeeScheduleError, FeeScheduleInput, FeeScheduleSnapshot,
+    InstrumentRulesSnapshot,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -15,6 +18,24 @@ pub enum AccountBootstrapError {
     Normalize(#[from] AccountError),
 }
 
+#[derive(Debug, Error)]
+pub enum FeeScheduleBootstrapError {
+    #[error("OKX observer API key is not strictly read-only")]
+    PermissionRejected,
+
+    #[error("OKX private API error: {0}")]
+    Api(#[from] OkxError),
+
+    #[error("fee reference field '{0}' is unavailable")]
+    ReferenceIncomplete(&'static str),
+
+    #[error("fee response is inconsistent: {0}")]
+    ResponseInconsistent(String),
+
+    #[error("fee normalization error: {0}")]
+    Normalize(#[from] FeeScheduleError),
+}
+
 #[derive(Clone)]
 pub struct AccountBootstrapper {
     api: AccountApi,
@@ -25,6 +46,42 @@ impl AccountBootstrapper {
         Self {
             api: AccountApi::new(client),
         }
+    }
+
+    pub async fn fee_schedule(
+        &self,
+        rules: &InstrumentRulesSnapshot,
+    ) -> Result<FeeScheduleSnapshot, FeeScheduleBootstrapError> {
+        let config = self.api.config().await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| FeeScheduleBootstrapError::PermissionRejected)?;
+
+        let instrument = &rules.instrument;
+        let family = instrument
+            .instrument_family
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(FeeScheduleBootstrapError::ReferenceIncomplete("instFamily"))?;
+        let expected_group = instrument
+            .fee_group_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(FeeScheduleBootstrapError::ReferenceIncomplete("groupId"))?;
+
+        let rows = self
+            .api
+            .fee_rates_for_family(instrument.instrument_type, family)
+            .await?;
+        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        normalize_fee_schedule(
+            &instrument.instrument_id,
+            &rules.reference_generation,
+            &instrument.instrument_type.to_string(),
+            family,
+            expected_group,
+            source_received_at,
+            rows,
+        )
     }
 
     pub async fn snapshot(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
@@ -49,6 +106,57 @@ impl AccountBootstrapper {
     }
 }
 
+fn normalize_fee_schedule(
+    instrument_id: &str,
+    reference_generation: &str,
+    expected_type: &str,
+    family: &str,
+    expected_group: &str,
+    source_received_at: String,
+    rows: Vec<FeeRate>,
+) -> Result<FeeScheduleSnapshot, FeeScheduleBootstrapError> {
+    let mut matching_rows = rows
+        .into_iter()
+        .filter(|row| row.instrument_type == expected_type)
+        .collect::<Vec<_>>();
+    if matching_rows.len() != 1 {
+        return Err(FeeScheduleBootstrapError::ResponseInconsistent(format!(
+            "expected one fee-rate row for {expected_type}/{family}, found {}",
+            matching_rows.len()
+        )));
+    }
+    let row = matching_rows.pop().expect("length checked");
+    if row.timestamp_ms.trim().is_empty() {
+        return Err(FeeScheduleBootstrapError::ResponseInconsistent(
+            "fee-rate row is missing exchange timestamp".to_owned(),
+        ));
+    }
+
+    let mut groups = row
+        .fee_groups
+        .into_iter()
+        .filter(|group| group.group_id == expected_group)
+        .collect::<Vec<_>>();
+    if groups.len() != 1 {
+        return Err(FeeScheduleBootstrapError::ResponseInconsistent(format!(
+            "expected one fee group '{expected_group}', found {}",
+            groups.len()
+        )));
+    }
+    let group = groups.pop().expect("length checked");
+
+    Ok(FeeScheduleSnapshot::from_input(FeeScheduleInput {
+        instrument_id: instrument_id.to_owned(),
+        reference_generation: reference_generation.to_owned(),
+        source_received_at,
+        exchange_timestamp_ms: row.timestamp_ms,
+        level: row.level,
+        maker_rate: group.maker,
+        taker_rate: group.taker,
+        exact_for_instrument: true,
+    })?)
+}
+
 fn strict_read_only_permissions(value: &str) -> Result<Vec<String>, AccountBootstrapError> {
     let permissions = value
         .split(',')
@@ -71,6 +179,127 @@ fn strict_read_only_permissions(value: &str) -> Result<Vec<String>, AccountBoots
 #[cfg(test)]
 mod tests {
     use super::*;
+    use okx_api::account::FeeGroup;
+
+    fn fee_row(groups: Vec<FeeGroup>) -> FeeRate {
+        FeeRate {
+            level: "Lv1".to_owned(),
+            timestamp_ms: "1790539200000".to_owned(),
+            instrument_type: "SWAP".to_owned(),
+            rule_type: "normal".to_owned(),
+            maker: "-0.009".to_owned(),
+            taker: "-0.009".to_owned(),
+            maker_usdt: String::new(),
+            taker_usdt: String::new(),
+            fee_groups: groups,
+        }
+    }
+
+    fn fee_group(id: &str, maker: &str, taker: &str) -> FeeGroup {
+        FeeGroup {
+            group_id: id.to_owned(),
+            maker: maker.to_owned(),
+            taker: taker.to_owned(),
+            elp_maker: String::new(),
+            rpi_maker: String::new(),
+        }
+    }
+
+    #[test]
+    fn exact_fee_schedule_uses_matching_fee_group_not_deprecated_top_level_rate() {
+        let result = normalize_fee_schedule(
+            "DOGE-USDT-SWAP",
+            "sha256:reference",
+            "SWAP",
+            "DOGE-USDT",
+            "4",
+            "2026-09-27T20:00:00.000Z".to_owned(),
+            vec![fee_row(vec![
+                fee_group("4", "-0.0002", "-0.0005"),
+                fee_group("5", "-0.0001", "-0.0004"),
+            ])],
+        )
+        .expect("fee schedule");
+
+        assert_eq!(result.instrument_id, "DOGE-USDT-SWAP");
+        assert_eq!(result.reference_generation, "sha256:reference");
+        assert_eq!(result.exchange_timestamp_ms, "1790539200000");
+        assert_eq!(result.level, "Lv1");
+        assert_eq!(result.maker_rate, "-0.0002");
+        assert_eq!(result.taker_rate, "-0.0005");
+        assert!(result.exact_for_instrument);
+    }
+
+    #[test]
+    fn exact_fee_schedule_fails_when_group_mapping_is_missing_or_ambiguous() {
+        let missing = normalize_fee_schedule(
+            "DOGE-USDT-SWAP",
+            "sha256:reference",
+            "SWAP",
+            "DOGE-USDT",
+            "4",
+            "2026-09-27T20:00:00.000Z".to_owned(),
+            vec![fee_row(vec![fee_group("5", "-0.0001", "-0.0004")])],
+        );
+        assert!(matches!(
+            missing,
+            Err(FeeScheduleBootstrapError::ResponseInconsistent(_))
+        ));
+
+        let duplicate = normalize_fee_schedule(
+            "DOGE-USDT-SWAP",
+            "sha256:reference",
+            "SWAP",
+            "DOGE-USDT",
+            "4",
+            "2026-09-27T20:00:00.000Z".to_owned(),
+            vec![fee_row(vec![
+                fee_group("4", "-0.0002", "-0.0005"),
+                fee_group("4", "-0.0003", "-0.0006"),
+            ])],
+        );
+        assert!(matches!(
+            duplicate,
+            Err(FeeScheduleBootstrapError::ResponseInconsistent(_))
+        ));
+    }
+
+    #[test]
+    fn exact_fee_schedule_requires_one_typed_row_and_exchange_timestamp() {
+        let wrong_type = normalize_fee_schedule(
+            "DOGE-USDT-SWAP",
+            "sha256:reference",
+            "SWAP",
+            "DOGE-USDT",
+            "4",
+            "2026-09-27T20:00:00.000Z".to_owned(),
+            vec![FeeRate {
+                instrument_type: "FUTURES".to_owned(),
+                ..fee_row(vec![fee_group("4", "-0.0002", "-0.0005")])
+            }],
+        );
+        assert!(matches!(
+            wrong_type,
+            Err(FeeScheduleBootstrapError::ResponseInconsistent(_))
+        ));
+
+        let missing_timestamp = normalize_fee_schedule(
+            "DOGE-USDT-SWAP",
+            "sha256:reference",
+            "SWAP",
+            "DOGE-USDT",
+            "4",
+            "2026-09-27T20:00:00.000Z".to_owned(),
+            vec![FeeRate {
+                timestamp_ms: String::new(),
+                ..fee_row(vec![fee_group("4", "-0.0002", "-0.0005")])
+            }],
+        );
+        assert!(matches!(
+            missing_timestamp,
+            Err(FeeScheduleBootstrapError::ResponseInconsistent(_))
+        ));
+    }
 
     #[test]
     fn observer_permission_must_be_exactly_read_only() {

@@ -1,16 +1,23 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
+use okx_analysis::{
+    ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
+    CandidateOrderAssumptions, LiquidityRole as AnalysisLiquidityRole, PositionDirection,
+    analyze_account_risk, analyze_candidate_order,
+};
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
-    ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, INSTRUMENT_RULES_SCHEMA_V1,
-    INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1,
-    MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError, MarketReadiness, MarketSnapshot,
-    ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
+    ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountError, AccountSnapshot,
+    INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
+    MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
+    MarketReadiness, MarketSnapshot, ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1,
+    SnapshotQualityReport,
 };
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
     AgentResponse, AgentResponseStatus, DataQuality, InstrumentTypeFilter,
-    MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
+    LiquidityRole as ProtocolLiquidityRole, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection,
+    MailboxEnvelope, PositionSide,
     crypto::{decrypt, derive_directional_key, encrypt, shared_secret},
 };
 use okx_runtime::{
@@ -20,7 +27,7 @@ use okx_runtime::{
 
 use crate::{
     AgentError, AgentResult,
-    account_bootstrap::{AccountBootstrapError, AccountBootstrapper},
+    account_bootstrap::{AccountBootstrapError, AccountBootstrapper, FeeScheduleBootstrapError},
     market_bootstrap::{MarketBootstrapError, MarketBootstrapper},
 };
 
@@ -37,6 +44,8 @@ pub const ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE: &str =
 pub const ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE: &str = "ACCOUNT_OBSERVER_PERMISSION_REJECTED";
 pub const ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE: &str = "ACCOUNT_PRIVATE_API_UNAVAILABLE";
 pub const ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE: &str = "ACCOUNT_BOOTSTRAP_INCONSISTENT";
+pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT";
+pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
 
 const REFERENCE_BOOTSTRAP_WARNING: &str =
@@ -48,6 +57,7 @@ const MARKET_HISTORY_UNCONFIRMED_WARNING: &str =
 const ACCOUNT_REST_BOOTSTRAP_WARNING: &str = "private account state is a bounded authenticated REST bootstrap; private WebSocket convergence is not ready";
 const ACCOUNT_WS_GENERATION_CHANGED_WARNING: &str = "private WebSocket generation changed during REST bootstrap; returning coherent REST snapshot only";
 const ACCOUNT_WS_JOURNAL_GAP_WARNING: &str = "private WebSocket delta journal advanced beyond the REST bootstrap cursor; returning coherent REST snapshot only";
+const CANDIDATE_EXPLICIT_ASSUMPTIONS_WARNING: &str = "candidate analysis uses explicit hypothetical entry/stop prices and exact account fee evidence; it does not assume a current fill price, funding event, slippage, spread, margin or FX conversion";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
 
 #[derive(serde::Serialize)]
@@ -563,6 +573,75 @@ async fn response_for(
             }
         }
         AgentOperation::AccountSnapshot => {
+            let assembled = match assemble_account_snapshot(context).await {
+                Ok(value) => value,
+                Err(error) => return Ok(account_query_failure(request, generated_at, error)),
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: assembled.quality,
+                result_schema: Some(assembled.result_schema.to_owned()),
+                result: Some(serde_json::to_value(assembled.snapshot)?),
+                failure: None,
+                warnings: assembled.warnings,
+            })
+        }
+        AgentOperation::PortfolioRisk => {
+            let assembled = match assemble_account_snapshot(context).await {
+                Ok(value) => value,
+                Err(error) => return Ok(account_query_failure(request, generated_at, error)),
+            };
+            let result = match analyze_account_risk(&assembled.snapshot) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(analysis_failure(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        error,
+                    ));
+                }
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: assembled.quality,
+                result_schema: Some(ACCOUNT_RISK_ANALYSIS_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(result)?),
+                failure: None,
+                warnings: assembled.warnings,
+            })
+        }
+        AgentOperation::AnalyzeCandidateOrder {
+            instrument,
+            side,
+            entry_price,
+            stop_price,
+            max_settle_notional,
+            max_loss_settle,
+            target_rr,
+            entry_liquidity_role,
+            exit_liquidity_role,
+        } => {
+            let rules = if let Some(public_ws) = context.public_ws {
+                let Some(rules) = public_ws.instrument_rules(instrument).await else {
+                    return Ok(reference_not_found(request, generated_at, instrument));
+                };
+                rules
+            } else if let Some(reference) = context.standalone_reference {
+                let Some(rules) = reference.instrument_rules(instrument) else {
+                    return Ok(reference_not_found(request, generated_at, instrument));
+                };
+                rules
+            } else {
+                return Ok(unavailable(request, generated_at));
+            };
+
             let Some(account) = context.account_fallback else {
                 return Ok(failure_response(
                     request,
@@ -574,82 +653,45 @@ async fn response_for(
                     false,
                 ));
             };
-
-            let convergence_cursor = match context.private_ws {
-                Some(private_ws) => private_ws.convergence_cursor().await.ok(),
-                None => None,
+            let fees = match account.fee_schedule(&rules).await {
+                Ok(value) => value,
+                Err(error) => return Ok(fee_schedule_failure(request, generated_at, error)),
             };
-
-            let rest = match account.snapshot().await {
-                Ok(result) => result,
-                Err(error) => return Ok(account_failure(request, generated_at, error)),
+            let assumptions = CandidateOrderAssumptions {
+                direction: match side {
+                    PositionSide::Long => PositionDirection::Long,
+                    PositionSide::Short => PositionDirection::Short,
+                },
+                entry_price: entry_price.clone(),
+                stop_price: stop_price.clone(),
+                max_settle_notional: max_settle_notional.clone(),
+                max_loss_settle: max_loss_settle.clone(),
+                target_rr: target_rr.clone(),
+                entry_liquidity_role: analysis_liquidity_role(*entry_liquidity_role),
+                exit_liquidity_role: analysis_liquidity_role(*exit_liquidity_role),
             };
-
-            if let (Some(private_ws), Some(cursor)) = (context.private_ws, convergence_cursor) {
-                match private_ws.convergence_window(cursor).await {
-                    Ok(window) => {
-                        if let (Some(connection_fingerprint), Some(last_inbound_ms)) = (
-                            window.status.connection_id_fingerprint.as_deref(),
-                            window.status.last_inbound_ms,
-                        ) {
-                            match rest.converge_private_ws(
-                                window.generation,
-                                connection_fingerprint,
-                                last_inbound_ms,
-                                &window.events,
-                            ) {
-                                Ok(result) => {
-                                    return Ok(AgentResponse {
-                                        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-                                        request_id: request.request_id.clone(),
-                                        status: AgentResponseStatus::Completed,
-                                        generated_at: generated_at.to_owned(),
-                                        quality: DataQuality::Fresh,
-                                        result_schema: Some(ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned()),
-                                        result: Some(serde_json::to_value(result)?),
-                                        failure: None,
-                                        warnings: Vec::new(),
-                                    });
-                                }
-                                Err(error) => {
-                                    return Ok(failure_response(
-                                        request,
-                                        generated_at,
-                                        AgentResponseStatus::Failed,
-                                        ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE,
-                                        error.to_string(),
-                                        false,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    Err(PrivateConvergenceError::GenerationChanged) => {
-                        return account_rest_response(
-                            request,
-                            generated_at,
-                            rest,
-                            ACCOUNT_WS_GENERATION_CHANGED_WARNING,
-                        );
-                    }
-                    Err(PrivateConvergenceError::JournalGap) => {
-                        return account_rest_response(
-                            request,
-                            generated_at,
-                            rest,
-                            ACCOUNT_WS_JOURNAL_GAP_WARNING,
-                        );
-                    }
-                    Err(PrivateConvergenceError::NotReady) => {}
+            let result = match analyze_candidate_order(&rules, &fees, &assumptions) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(analysis_failure(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Rejected,
+                        error,
+                    ));
                 }
-            }
-
-            Ok(account_rest_response(
-                request,
-                generated_at,
-                rest,
-                ACCOUNT_REST_BOOTSTRAP_WARNING,
-            )?)
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: DataQuality::Degraded,
+                result_schema: Some(CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(result)?),
+                failure: None,
+                warnings: vec![CANDIDATE_EXPLICIT_ASSUMPTIONS_WARNING.to_owned()],
+            })
         }
         AgentOperation::MailboxTelemetry => {
             let Some(telemetry) = context.mailbox_telemetry else {
@@ -726,27 +768,184 @@ async fn response_for(
                 )),
             }
         }
-        _ => Ok(unavailable(request, generated_at)),
     }
 }
 
-fn account_rest_response(
+struct AssembledAccountSnapshot {
+    snapshot: AccountSnapshot,
+    quality: DataQuality,
+    result_schema: &'static str,
+    warnings: Vec<String>,
+}
+
+enum AccountQueryError {
+    CredentialUnavailable,
+    Bootstrap(AccountBootstrapError),
+    Convergence(AccountError),
+}
+
+async fn assemble_account_snapshot(
+    context: ObservationQueryContext<'_>,
+) -> Result<AssembledAccountSnapshot, AccountQueryError> {
+    let account = context
+        .account_fallback
+        .ok_or(AccountQueryError::CredentialUnavailable)?;
+    let convergence_cursor = match context.private_ws {
+        Some(private_ws) => private_ws.convergence_cursor().await.ok(),
+        None => None,
+    };
+    let rest = account
+        .snapshot()
+        .await
+        .map_err(AccountQueryError::Bootstrap)?;
+
+    if let (Some(private_ws), Some(cursor)) = (context.private_ws, convergence_cursor) {
+        match private_ws.convergence_window(cursor).await {
+            Ok(window) => {
+                if let (Some(connection_fingerprint), Some(last_inbound_ms)) = (
+                    window.status.connection_id_fingerprint.as_deref(),
+                    window.status.last_inbound_ms,
+                ) {
+                    let snapshot = rest
+                        .converge_private_ws(
+                            window.generation,
+                            connection_fingerprint,
+                            last_inbound_ms,
+                            &window.events,
+                        )
+                        .map_err(AccountQueryError::Convergence)?;
+                    return Ok(AssembledAccountSnapshot {
+                        snapshot,
+                        quality: DataQuality::Fresh,
+                        result_schema: ACCOUNT_SNAPSHOT_SCHEMA_V2,
+                        warnings: Vec::new(),
+                    });
+                }
+            }
+            Err(PrivateConvergenceError::GenerationChanged) => {
+                return Ok(AssembledAccountSnapshot {
+                    snapshot: rest,
+                    quality: DataQuality::Degraded,
+                    result_schema: ACCOUNT_SNAPSHOT_SCHEMA_V1,
+                    warnings: vec![ACCOUNT_WS_GENERATION_CHANGED_WARNING.to_owned()],
+                });
+            }
+            Err(PrivateConvergenceError::JournalGap) => {
+                return Ok(AssembledAccountSnapshot {
+                    snapshot: rest,
+                    quality: DataQuality::Degraded,
+                    result_schema: ACCOUNT_SNAPSHOT_SCHEMA_V1,
+                    warnings: vec![ACCOUNT_WS_JOURNAL_GAP_WARNING.to_owned()],
+                });
+            }
+            Err(PrivateConvergenceError::NotReady) => {}
+        }
+    }
+
+    Ok(AssembledAccountSnapshot {
+        snapshot: rest,
+        quality: DataQuality::Degraded,
+        result_schema: ACCOUNT_SNAPSHOT_SCHEMA_V1,
+        warnings: vec![ACCOUNT_REST_BOOTSTRAP_WARNING.to_owned()],
+    })
+}
+
+fn account_query_failure(
     request: &AgentRequest,
     generated_at: &str,
-    result: okx_observation::AccountSnapshot,
-    warning: &str,
-) -> AgentResult<AgentResponse> {
-    Ok(AgentResponse {
-        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-        request_id: request.request_id.clone(),
-        status: AgentResponseStatus::Completed,
-        generated_at: generated_at.to_owned(),
-        quality: DataQuality::Degraded,
-        result_schema: Some(ACCOUNT_SNAPSHOT_SCHEMA_V1.to_owned()),
-        result: Some(serde_json::to_value(result)?),
-        failure: None,
-        warnings: vec![warning.to_owned()],
-    })
+    error: AccountQueryError,
+) -> AgentResponse {
+    match error {
+        AccountQueryError::CredentialUnavailable => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE,
+            "OKX observer credential is not provisioned in native secret storage".to_owned(),
+            false,
+        ),
+        AccountQueryError::Bootstrap(error) => account_failure(request, generated_at, error),
+        AccountQueryError::Convergence(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE,
+            error.to_string(),
+            false,
+        ),
+    }
+}
+
+fn fee_schedule_failure(
+    request: &AgentRequest,
+    generated_at: &str,
+    error: FeeScheduleBootstrapError,
+) -> AgentResponse {
+    match error {
+        FeeScheduleBootstrapError::PermissionRejected => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE,
+            "OKX observer API key must have read_only permission only".to_owned(),
+            false,
+        ),
+        FeeScheduleBootstrapError::Api(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE,
+            error.to_string(),
+            true,
+        ),
+        FeeScheduleBootstrapError::ReferenceIncomplete(field) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE,
+            format!("instrument reference is missing required fee selector '{field}'"),
+            false,
+        ),
+        FeeScheduleBootstrapError::ResponseInconsistent(message) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE,
+            message,
+            true,
+        ),
+        FeeScheduleBootstrapError::Normalize(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ANALYSIS_INPUT_INCONSISTENT_CODE,
+            error.to_string(),
+            false,
+        ),
+    }
+}
+
+fn analysis_failure(
+    request: &AgentRequest,
+    generated_at: &str,
+    status: AgentResponseStatus,
+    error: AnalysisError,
+) -> AgentResponse {
+    failure_response(
+        request,
+        generated_at,
+        status,
+        ANALYSIS_INPUT_INCONSISTENT_CODE,
+        error.to_string(),
+        false,
+    )
+}
+
+const fn analysis_liquidity_role(role: ProtocolLiquidityRole) -> AnalysisLiquidityRole {
+    match role {
+        ProtocolLiquidityRole::Maker => AnalysisLiquidityRole::Maker,
+        ProtocolLiquidityRole::Taker => AnalysisLiquidityRole::Taker,
+    }
 }
 
 fn data_quality(quality: MarketReadiness) -> DataQuality {

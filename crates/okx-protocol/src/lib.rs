@@ -165,9 +165,13 @@ pub enum AgentOperation {
     AnalyzeCandidateOrder {
         instrument: String,
         side: PositionSide,
-        notional_usd: String,
-        max_risk_usd: String,
+        entry_price: String,
+        stop_price: String,
+        max_settle_notional: String,
+        max_loss_settle: String,
         target_rr: String,
+        entry_liquidity_role: LiquidityRole,
+        exit_liquidity_role: LiquidityRole,
     },
 }
 
@@ -232,14 +236,18 @@ impl AgentOperation {
             Self::MailboxTelemetry | Self::AccountSnapshot | Self::PortfolioRisk => Ok(()),
             Self::AnalyzeCandidateOrder {
                 instrument,
-                notional_usd,
-                max_risk_usd,
+                entry_price,
+                stop_price,
+                max_settle_notional,
+                max_loss_settle,
                 target_rr,
                 ..
             } => {
                 validate_instrument(instrument)?;
-                validate_decimal_text(notional_usd, "notional_usd")?;
-                validate_decimal_text(max_risk_usd, "max_risk_usd")?;
+                validate_decimal_text(entry_price, "entry_price")?;
+                validate_decimal_text(stop_price, "stop_price")?;
+                validate_decimal_text(max_settle_notional, "max_settle_notional")?;
+                validate_decimal_text(max_loss_settle, "max_loss_settle")?;
                 validate_decimal_text(target_rr, "target_rr")
             }
         }
@@ -348,6 +356,13 @@ impl HostControlResult {
 pub enum PositionSide {
     Long,
     Short,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiquidityRole {
+    Maker,
+    Taker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,9 +579,13 @@ mod tests {
             operation: AgentOperation::AnalyzeCandidateOrder {
                 instrument: "DOGE-USDT-SWAP".to_owned(),
                 side: PositionSide::Long,
-                notional_usd: "500".to_owned(),
-                max_risk_usd: "20".to_owned(),
+                entry_price: "0.2".to_owned(),
+                stop_price: "0.18".to_owned(),
+                max_settle_notional: "500".to_owned(),
+                max_loss_settle: "20".to_owned(),
                 target_rr: "3".to_owned(),
+                entry_liquidity_role: LiquidityRole::Taker,
+                exit_liquidity_role: LiquidityRole::Taker,
             },
         };
 
@@ -717,22 +736,30 @@ mod tests {
         let valid = AgentOperation::AnalyzeCandidateOrder {
             instrument: "DOGE-USDT-SWAP".to_owned(),
             side: PositionSide::Short,
-            notional_usd: "500.25".to_owned(),
-            max_risk_usd: "20.00".to_owned(),
+            entry_price: "0.2".to_owned(),
+            stop_price: "0.22".to_owned(),
+            max_settle_notional: "500.25".to_owned(),
+            max_loss_settle: "20.00".to_owned(),
             target_rr: "3.0".to_owned(),
+            entry_liquidity_role: LiquidityRole::Taker,
+            exit_liquidity_role: LiquidityRole::Maker,
         };
         assert!(valid.validate().is_ok());
 
         let invalid = AgentOperation::AnalyzeCandidateOrder {
             instrument: "DOGE-USDT-SWAP".to_owned(),
             side: PositionSide::Short,
-            notional_usd: "5e2".to_owned(),
-            max_risk_usd: "20".to_owned(),
+            entry_price: "2e-1".to_owned(),
+            stop_price: "0.22".to_owned(),
+            max_settle_notional: "500".to_owned(),
+            max_loss_settle: "20".to_owned(),
             target_rr: "3".to_owned(),
+            entry_liquidity_role: LiquidityRole::Taker,
+            exit_liquidity_role: LiquidityRole::Taker,
         };
         assert_eq!(
             invalid.validate(),
-            Err(ProtocolError::InvalidDecimalInput("notional_usd"))
+            Err(ProtocolError::InvalidDecimalInput("entry_price"))
         );
     }
 }
