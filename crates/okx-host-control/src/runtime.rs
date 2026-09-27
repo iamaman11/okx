@@ -2,7 +2,8 @@ use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use okx_github::{
-    GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCursorStore, OWNER_USER_ID,
+    GitHubBackoff, GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCursorStore,
+    OWNER_USER_ID,
 };
 use okx_protocol::{
     HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlOperation, HostControlRequest,
@@ -36,6 +37,7 @@ pub async fn run_until_shutdown(
     }
 
     let mut github_verified = false;
+    let mut github_backoff = GitHubBackoff::default();
     let mut initial_state = "DEGRADED";
 
     if let Err(error) = executor.reconcile_desired() {
@@ -44,11 +46,17 @@ pub async fn run_until_shutdown(
 
     match github.verify_repository_identity().await {
         Ok(()) => {
+            github_backoff.on_success();
             github_verified = true;
             initial_state = "READY";
         }
         Err(error) => {
-            eprintln!("initial GitHub identity verification deferred: {error}");
+            let delay = github_backoff.on_error(&error);
+            eprintln!(
+                "initial GitHub identity verification deferred: {error}; class={:?}; retry_in_ms={}",
+                github_backoff.last_class(),
+                delay.as_millis()
+            );
         }
     }
 
@@ -76,23 +84,43 @@ pub async fn run_until_shutdown(
                     eprintln!("host lifecycle reconcile failed: {error}");
                 }
 
+                if !github_backoff.ready() {
+                    continue;
+                }
+
                 if !github_verified {
                     match github.verify_repository_identity().await {
                         Ok(()) => {
+                            github_backoff.on_success();
                             github_verified = true;
                             eprintln!("GitHub repository identity verified");
                         }
                         Err(error) => {
-                            eprintln!("GitHub identity verification still unavailable: {error}");
+                            let delay = github_backoff.on_error(&error);
+                            eprintln!(
+                                "GitHub identity verification still unavailable: {error}; class={:?}; retry_in_ms={}",
+                                github_backoff.last_class(),
+                                delay.as_millis()
+                            );
                             continue;
                         }
                     }
                 }
 
-                if let Err(error) = process_pending(github, executor).await {
-                    eprintln!("host-control poll failed: {error}");
-                    if matches!(error, HostControlError::Github(_)) {
-                        github_verified = false;
+                match process_pending(github, executor).await {
+                    Ok(_) => github_backoff.on_success(),
+                    Err(error) => {
+                        if let HostControlError::Github(github_error) = &error {
+                            let delay = github_backoff.on_error(github_error);
+                            eprintln!(
+                                "host-control poll failed: {error}; class={:?}; retry_in_ms={}",
+                                github_backoff.last_class(),
+                                delay.as_millis()
+                            );
+                            github_verified = false;
+                        } else {
+                            eprintln!("host-control poll failed: {error}");
+                        }
                     }
                 }
             }
