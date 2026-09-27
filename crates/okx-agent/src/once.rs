@@ -621,20 +621,20 @@ async fn response_for(
                         }
                     }
                     Err(PrivateConvergenceError::GenerationChanged) => {
-                        return Ok(account_rest_response(
+                        return account_rest_response(
                             request,
                             generated_at,
                             rest,
                             ACCOUNT_WS_GENERATION_CHANGED_WARNING,
-                        )?);
+                        );
                     }
                     Err(PrivateConvergenceError::JournalGap) => {
-                        return Ok(account_rest_response(
+                        return account_rest_response(
                             request,
                             generated_at,
                             rest,
                             ACCOUNT_WS_JOURNAL_GAP_WARNING,
-                        )?);
+                        );
                     }
                     Err(PrivateConvergenceError::NotReady) => {}
                 }
