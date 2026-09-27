@@ -7,91 +7,23 @@ pub(super) async fn dispatch(
 ) -> AgentResult<AgentResponse> {
     match &request.operation {
         AgentOperation::MarketSnapshot { instrument } => {
-            if let Some(public_ws) = context.public_ws {
-                if public_ws.instrument_rules(instrument).await.is_none() {
-                    return Ok(reference_not_found(request, generated_at, instrument));
-                }
-                public_ws.demand_instrument(instrument.clone()).await?;
-
-                let now_ms = utc_now_ms();
-                let quality = public_ws
-                    .quality_snapshot(instrument, now_ms, PUBLIC_MARKET_MAX_AGE_MS, true)
-                    .await?;
-
-                if quality.quality == MarketReadiness::Fresh {
-                    let live = public_ws
-                        .fresh_snapshot(
-                            instrument,
-                            now_ms,
-                            PUBLIC_MARKET_MAX_AGE_MS,
-                            generated_at.to_owned(),
-                        )
-                        .await?;
-                    return Ok(AgentResponse {
+            match assemble_current_market(request, context, generated_at, instrument).await? {
+                CurrentMarketAssembly::Ready(assembled) => {
+                    let assembled = *assembled;
+                    Ok(AgentResponse {
                         schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
                         request_id: request.request_id.clone(),
                         status: AgentResponseStatus::Completed,
                         generated_at: generated_at.to_owned(),
-                        quality: DataQuality::Fresh,
+                        quality: assembled.quality,
                         result_schema: Some(MARKET_SNAPSHOT_SCHEMA_V1.to_owned()),
-                        result: Some(serde_json::to_value(live.market)?),
+                        result: Some(serde_json::to_value(assembled.snapshot)?),
                         failure: None,
-                        warnings: Vec::new(),
-                    });
+                        warnings: assembled.warnings,
+                    })
                 }
-
-                let Some(market) = context.market_fallback else {
-                    return Ok(failure_response(
-                        request,
-                        generated_at,
-                        AgentResponseStatus::Failed,
-                        MARKET_PUBLIC_API_UNAVAILABLE_CODE,
-                        format!(
-                            "persistent WebSocket state is not FRESH: {}",
-                            quality.reason
-                        ),
-                        true,
-                    ));
-                };
-                let reference = public_ws.reference_snapshot().await;
-                return match market.snapshot(&reference, instrument).await {
-                    Ok(result) => Ok(AgentResponse {
-                        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-                        request_id: request.request_id.clone(),
-                        status: AgentResponseStatus::Completed,
-                        generated_at: generated_at.to_owned(),
-                        quality: DataQuality::Degraded,
-                        result_schema: Some(MARKET_SNAPSHOT_SCHEMA_V1.to_owned()),
-                        result: Some(serde_json::to_value(result)?),
-                        failure: None,
-                        warnings: vec![format!(
-                            "persistent WebSocket state is not FRESH ({}); returned bounded public REST fallback",
-                            quality.reason
-                        )],
-                    }),
-                    Err(error) => Ok(market_failure(request, generated_at, error)),
-                };
-            }
-
-            let (Some(reference), Some(market)) =
-                (context.standalone_reference, context.market_fallback)
-            else {
-                return Ok(unavailable(request, generated_at));
-            };
-
-            match market.snapshot(reference, instrument).await {
-                Ok(result) => Ok(AgentResponse {
-                    schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-                    request_id: request.request_id.clone(),
-                    status: AgentResponseStatus::Completed,
-                    generated_at: generated_at.to_owned(),
-                    quality: DataQuality::Degraded,
-                    result_schema: Some(MARKET_SNAPSHOT_SCHEMA_V1.to_owned()),
-                    result: Some(serde_json::to_value(result)?),
-                    failure: None,
-                    warnings: vec![MARKET_REST_BOOTSTRAP_WARNING.to_owned()],
-                }),
-                Err(error) => Ok(market_failure(request, generated_at, error)),
+                CurrentMarketAssembly::Response(response) => Ok(*response),
+                CurrentMarketAssembly::Unavailable => Ok(unavailable(request, generated_at)),
             }
         }
         AgentOperation::InstrumentRules { instrument } => {
