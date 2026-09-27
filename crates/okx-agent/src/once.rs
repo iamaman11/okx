@@ -866,6 +866,7 @@ mod tests {
                 standalone_reference: Some(&registry),
                 market_fallback: None,
                 public_ws: None,
+                mailbox_telemetry: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -901,6 +902,7 @@ mod tests {
                 standalone_reference: Some(&registry),
                 market_fallback: None,
                 public_ws: None,
+                mailbox_telemetry: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -937,6 +939,7 @@ mod tests {
                 standalone_reference: Some(&registry),
                 market_fallback: None,
                 public_ws: None,
+                mailbox_telemetry: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
