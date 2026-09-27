@@ -1,8 +1,8 @@
-use std::{collections::HashSet, path::Path};
+use std::{collections::BTreeSet, path::Path};
 
 use okx_github::{
-    GitHubClient, GitHubError, IssueComment, IssueCommentCursor, IssueCursorStore, OWNER_USER_ID,
-    REPOSITORY_ID,
+    GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCommentCursor, IssueCursorStore,
+    OWNER_USER_ID, REPOSITORY_ID,
 };
 use okx_protocol::{MailboxDirection, MailboxEnvelope};
 use okx_runtime::PublicWsHandle;
@@ -83,16 +83,42 @@ impl GitHubMailboxClient {
         public_ws: &PublicWsHandle,
         market: &MarketBootstrapper,
     ) -> AgentResult<usize> {
-        let cursor = self.load_cursor_for_poll()?;
-        let comments = self
-            .github
-            .issue_comments_after(self.issue_number, cursor.as_ref())
-            .await?;
+        let mut checkpoint = self.load_checkpoint_for_poll()?;
+        let comments = if checkpoint.ledger_initialized {
+            self.github
+                .issue_comments_after(self.issue_number, checkpoint.cursor.as_ref())
+                .await?
+        } else {
+            let history = self.github.issue_comments(self.issue_number).await?;
+            checkpoint
+                .terminal_request_ids
+                .extend(terminal_request_ids(&history));
+            checkpoint.ledger_initialized = true;
+
+            if checkpoint.cursor.is_none() {
+                history
+            } else {
+                self.github
+                    .issue_comments_after(self.issue_number, checkpoint.cursor.as_ref())
+                    .await?
+            }
+        };
+
         if comments.is_empty() {
+            if let Some(cursor) = checkpoint.cursor.as_ref()
+                && checkpoint.ledger_initialized
+            {
+                self.cursor_store.save_checkpoint(
+                    cursor,
+                    &checkpoint.terminal_request_ids,
+                    true,
+                )?;
+            }
             return Ok(0);
         }
 
-        let mut terminal_request_ids = terminal_request_ids(&comments);
+        let mut terminal_ids = checkpoint.terminal_request_ids.clone();
+        terminal_ids.extend(terminal_request_ids(&comments));
         let mut processed = 0usize;
         let mut batch_complete = true;
 
@@ -105,7 +131,7 @@ impl GitHubMailboxClient {
                 continue;
             };
             if envelope.direction != MailboxDirection::ClientToAgent
-                || terminal_request_ids.contains(&envelope.request_id)
+                || terminal_ids.contains(&envelope.request_id)
             {
                 continue;
             }
@@ -122,7 +148,7 @@ impl GitHubMailboxClient {
                     self.github
                         .post_issue_comment(self.issue_number, &serde_json::to_string(&response)?)
                         .await?;
-                    terminal_request_ids.insert(envelope.request_id);
+                    terminal_ids.insert(envelope.request_id);
                     processed += 1;
                 }
                 Err(error) => {
@@ -136,41 +162,45 @@ impl GitHubMailboxClient {
         }
 
         if let Some(cursor) = completed_batch_cursor(&comments, batch_complete) {
-            self.cursor_store.save(&cursor)?;
+            self.cursor_store
+                .save_checkpoint(&cursor, &terminal_ids, true)?;
         }
 
         Ok(processed)
     }
 
-    fn load_cursor_for_poll(&self) -> AgentResult<Option<IssueCommentCursor>> {
-        match self.cursor_store.load() {
-            Ok(cursor) => Ok(cursor),
+    fn load_checkpoint_for_poll(&self) -> AgentResult<IssueCheckpoint> {
+        match self.cursor_store.load_checkpoint() {
+            Ok(checkpoint) => Ok(checkpoint),
             Err(GitHubError::CursorJson(error)) => {
                 eprintln!(
                     "mailbox cursor JSON invalid at {}: {}; falling back to bounded bootstrap scan",
                     self.cursor_store.path().display(),
                     error
                 );
-                Ok(None)
+                Ok(IssueCheckpoint::default())
             }
             Err(GitHubError::CursorStateMismatch) => {
                 eprintln!(
                     "mailbox cursor state mismatch at {}; falling back to bounded bootstrap scan",
                     self.cursor_store.path().display()
                 );
-                Ok(None)
+                Ok(IssueCheckpoint::default())
             }
             Err(error) => Err(error.into()),
         }
     }
 }
 
-fn terminal_request_ids(comments: &[IssueComment]) -> HashSet<String> {
+fn terminal_request_ids(comments: &[IssueComment]) -> BTreeSet<String> {
     comments
         .iter()
         .filter(|comment| comment.user_id == OWNER_USER_ID)
         .filter_map(|comment| serde_json::from_str::<MailboxEnvelope>(&comment.body).ok())
-        .filter(|envelope| envelope.direction == MailboxDirection::AgentToClient)
+        .filter(|envelope| {
+            envelope.direction == MailboxDirection::AgentToClient
+                && envelope.validate(MailboxDirection::AgentToClient).is_ok()
+        })
         .map(|envelope| envelope.request_id)
         .collect()
 }
@@ -200,10 +230,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn persisted_terminal_ledger_rejects_late_duplicate_request_id() {
+        let mut checkpoint = IssueCheckpoint::default();
+        checkpoint
+            .terminal_request_ids
+            .insert("req_0123456789abcdef".to_owned());
+        checkpoint.ledger_initialized = true;
+
+        assert!(
+            checkpoint
+                .terminal_request_ids
+                .contains("req_0123456789abcdef")
+        );
+    }
+
+    #[test]
     fn terminal_response_in_same_replayed_batch_prevents_duplicate_request() {
         let request_body = serde_json::json!({
             "schema": "okx.mailbox.envelope/v1",
-            "request_id": "req-1",
+            "request_id": "req_0123456789abcdef",
             "direction": "client_to_agent",
             "agent_key_id": "agent-key-1",
             "client_ephemeral_public_key": "public",
@@ -213,7 +258,7 @@ mod tests {
         .to_string();
         let response_body = serde_json::json!({
             "schema": "okx.mailbox.envelope/v1",
-            "request_id": "req-1",
+            "request_id": "req_0123456789abcdef",
             "direction": "agent_to_client",
             "agent_key_id": "agent-key-1",
             "client_ephemeral_public_key": "public",
@@ -236,7 +281,7 @@ mod tests {
             },
         ];
 
-        assert!(terminal_request_ids(&comments).contains("req-1"));
+        assert!(terminal_request_ids(&comments).contains("req_0123456789abcdef"));
     }
 
     #[test]

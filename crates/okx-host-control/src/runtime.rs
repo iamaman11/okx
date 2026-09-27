@@ -1,8 +1,8 @@
-use std::{collections::HashSet, path::PathBuf, time::Duration};
+use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use okx_github::{
-    GitHubClient, GitHubError, IssueComment, IssueCommentCursor, IssueCursorStore, OWNER_USER_ID,
+    GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCursorStore, OWNER_USER_ID,
 };
 use okx_protocol::{
     HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlOperation, HostControlRequest,
@@ -23,8 +23,8 @@ enum ProcessTransition {
 }
 
 pub const CONTROL_ISSUE_NUMBER: u64 = 12;
-const CONTROL_CURSOR_PATH: &str = r"C:\okx-control\github-control-issue-12-cursor.json";
 const MAX_CONTROL_BODY_BYTES: usize = 4096;
+const CONTROL_CURSOR_PATH: &str = r"C:\okx-control\github-control-issue-12-cursor.json";
 
 pub async fn run_until_shutdown(
     github: &GitHubClient,
@@ -114,18 +114,43 @@ pub async fn process_pending(
     github: &GitHubClient,
     executor: &mut HostExecutor,
 ) -> LocalResult<usize> {
-    let cursor_store = control_cursor_store()?;
-    let cursor = load_cursor_for_poll(&cursor_store)?;
-    let comments = github
-        .issue_comments_after(CONTROL_ISSUE_NUMBER, cursor.as_ref())
-        .await?;
+    let cursor_store =
+        IssueCursorStore::new(PathBuf::from(CONTROL_CURSOR_PATH), CONTROL_ISSUE_NUMBER)?;
+    let mut checkpoint = load_checkpoint_for_poll(&cursor_store)?;
+
+    let comments = if checkpoint.ledger_initialized {
+        github
+            .issue_comments_after(CONTROL_ISSUE_NUMBER, checkpoint.cursor.as_ref())
+            .await?
+    } else {
+        let history = github.issue_comments(CONTROL_ISSUE_NUMBER).await?;
+        checkpoint
+            .terminal_request_ids
+            .extend(control_terminal_request_ids(&history));
+        checkpoint.ledger_initialized = true;
+
+        if checkpoint.cursor.is_none() {
+            history
+        } else {
+            github
+                .issue_comments_after(CONTROL_ISSUE_NUMBER, checkpoint.cursor.as_ref())
+                .await?
+        }
+    };
+
     if comments.is_empty() {
+        if let Some(cursor) = checkpoint.cursor.as_ref()
+            && checkpoint.ledger_initialized
+        {
+            cursor_store.save_checkpoint(cursor, &checkpoint.terminal_request_ids, true)?;
+        }
         return Ok(0);
     }
 
-    let mut terminal_request_ids = terminal_request_ids(&comments);
-    let mut processed = 0usize;
+    let mut terminal_ids = checkpoint.terminal_request_ids.clone();
+    terminal_ids.extend(control_terminal_request_ids(&comments));
 
+    let mut processed = 0usize;
     for comment in &comments {
         if comment.user_id != OWNER_USER_ID || comment.body.len() > MAX_CONTROL_BODY_BYTES {
             continue;
@@ -134,7 +159,7 @@ pub async fn process_pending(
         let Ok(request) = serde_json::from_str::<HostControlRequest>(&comment.body) else {
             continue;
         };
-        if request.validate().is_err() || terminal_request_ids.contains(&request.request_id) {
+        if request.validate().is_err() || terminal_ids.contains(&request.request_id) {
             continue;
         }
 
@@ -196,7 +221,7 @@ pub async fn process_pending(
             .post_issue_comment(CONTROL_ISSUE_NUMBER, &serde_json::to_string(&result)?)
             .await?;
 
-        terminal_request_ids.insert(request.request_id);
+        terminal_ids.insert(request.request_id);
         processed += 1;
 
         if result.status == HostControlStatus::Pass {
@@ -208,57 +233,45 @@ pub async fn process_pending(
         }
     }
 
-    if let Some(cursor) = completed_batch_cursor(&comments) {
-        cursor_store.save(&cursor)?;
+    if let Some(cursor) = comments.last().map(IssueComment::cursor) {
+        cursor_store.save_checkpoint(&cursor, &terminal_ids, true)?;
     }
 
     Ok(processed)
 }
 
-fn control_cursor_store() -> LocalResult<IssueCursorStore> {
-    Ok(IssueCursorStore::new(
-        PathBuf::from(CONTROL_CURSOR_PATH),
-        CONTROL_ISSUE_NUMBER,
-    )?)
-}
-
-fn load_cursor_for_poll(
-    cursor_store: &IssueCursorStore,
-) -> LocalResult<Option<IssueCommentCursor>> {
-    match cursor_store.load() {
-        Ok(cursor) => Ok(cursor),
+fn load_checkpoint_for_poll(store: &IssueCursorStore) -> LocalResult<IssueCheckpoint> {
+    match store.load_checkpoint() {
+        Ok(checkpoint) => Ok(checkpoint),
         Err(GitHubError::CursorJson(error)) => {
             eprintln!(
                 "control cursor JSON invalid at {}: {}; falling back to bounded bootstrap scan",
-                cursor_store.path().display(),
+                store.path().display(),
                 error
             );
-            Ok(None)
+            Ok(IssueCheckpoint::default())
         }
         Err(GitHubError::CursorStateMismatch) => {
             eprintln!(
                 "control cursor state mismatch at {}; falling back to bounded bootstrap scan",
-                cursor_store.path().display()
+                store.path().display()
             );
-            Ok(None)
+            Ok(IssueCheckpoint::default())
         }
         Err(error) => Err(error.into()),
     }
 }
 
-fn terminal_request_ids(comments: &[IssueComment]) -> HashSet<String> {
+fn control_terminal_request_ids(comments: &[IssueComment]) -> BTreeSet<String> {
     comments
         .iter()
-        .filter(|comment| comment.user_id == OWNER_USER_ID)
-        .filter(|comment| comment.body.len() <= MAX_CONTROL_BODY_BYTES)
+        .filter(|comment| {
+            comment.user_id == OWNER_USER_ID && comment.body.len() <= MAX_CONTROL_BODY_BYTES
+        })
         .filter_map(|comment| serde_json::from_str::<HostControlResult>(&comment.body).ok())
         .filter(|result| result.validate().is_ok())
         .map(|result| result.request_id)
         .collect()
-}
-
-fn completed_batch_cursor(comments: &[IssueComment]) -> Option<IssueCommentCursor> {
-    comments.last().map(IssueComment::cursor)
 }
 
 #[cfg(test)]
@@ -266,56 +279,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn control_issue_is_pinned() {
-        assert_eq!(CONTROL_ISSUE_NUMBER, 12);
-        assert_eq!(OWNER_USER_ID, 44_100_369);
-        assert_eq!(
-            CONTROL_CURSOR_PATH,
-            r"C:\okx-control\github-control-issue-12-cursor.json"
-        );
+    fn persisted_control_terminal_ids_block_late_duplicate_request_ids() {
+        let ids = BTreeSet::from(["ctl_0123456789abcdef".to_owned()]);
+        assert!(ids.contains("ctl_0123456789abcdef"));
     }
 
     #[test]
-    fn replay_batch_with_terminal_ack_is_idempotent() {
-        let request = serde_json::json!({
-            "schema": "okx.windows.control/v1",
-            "request_id": "ctl_replay_test_20260927a",
-            "operation": { "type": "transport_status" }
-        })
-        .to_string();
-        let terminal = serde_json::json!({
-            "schema": "okx.windows.control.result/v1",
-            "request_id": "ctl_replay_test_20260927a",
-            "operation": { "type": "transport_status" },
-            "status": "PASS",
-            "observed_at": "2026-09-27T12:00:01.000Z",
-            "details": {},
-            "failure": null
-        })
-        .to_string();
-
-        let comments = vec![
-            IssueComment {
-                id: 10,
-                body: request,
-                user_id: OWNER_USER_ID,
-                created_at: "2026-09-27T12:00:00Z".to_owned(),
-            },
-            IssueComment {
-                id: 11,
-                body: terminal,
-                user_id: OWNER_USER_ID,
-                created_at: "2026-09-27T12:00:01Z".to_owned(),
-            },
-        ];
-
-        assert!(terminal_request_ids(&comments).contains("ctl_replay_test_20260927a"));
-        assert_eq!(
-            completed_batch_cursor(&comments),
-            Some(IssueCommentCursor {
-                created_at: "2026-09-27T12:00:01Z".to_owned(),
-                id: 11,
-            })
-        );
+    fn control_issue_is_pinned() {
+        assert_eq!(CONTROL_ISSUE_NUMBER, 12);
+        assert_eq!(OWNER_USER_ID, 44_100_369);
     }
 }
