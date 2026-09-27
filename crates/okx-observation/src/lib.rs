@@ -13,7 +13,8 @@ pub use order_book::{
     OrderBookState, OrderBookStatus,
 };
 pub use reference::{
-    FundingRequirement, INSTRUMENT_RULES_SCHEMA_V1, InstrumentRulesSnapshot, InstrumentSpec,
+    FundingRequirement, INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1,
+    InstrumentRulesSnapshot, InstrumentSearchSnapshot, InstrumentSpec,
     REFERENCE_REGISTRY_SCHEMA_V1, ReferenceError, ReferenceGeneration, ReferenceRegistry,
 };
 
