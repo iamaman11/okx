@@ -275,8 +275,7 @@ async fn assemble_current_market(
         };
     }
 
-    let (Some(reference), Some(market)) =
-        (context.standalone_reference, context.market_fallback)
+    let (Some(reference), Some(market)) = (context.standalone_reference, context.market_fallback)
     else {
         return Ok(CurrentMarketAssembly::Unavailable);
     };
