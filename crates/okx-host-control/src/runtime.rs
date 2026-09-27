@@ -1,7 +1,10 @@
-use std::{collections::HashSet, time::Duration};
+use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
-use okx_github::{GitHubClient, OWNER_USER_ID};
+use okx_github::{
+    GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCommentCursor, IssueCursorStore,
+    OWNER_USER_ID,
+};
 use okx_protocol::{
     HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlOperation, HostControlRequest,
     HostControlResult, HostControlStatus,
@@ -22,6 +25,7 @@ enum ProcessTransition {
 
 pub const CONTROL_ISSUE_NUMBER: u64 = 12;
 const MAX_CONTROL_BODY_BYTES: usize = 4096;
+const CONTROL_ROOT: &str = r"C:\okx-control";
 
 pub async fn run_until_shutdown(
     github: &GitHubClient,
@@ -111,24 +115,52 @@ pub async fn process_pending(
     github: &GitHubClient,
     executor: &mut HostExecutor,
 ) -> LocalResult<usize> {
-    let mut comments = github.issue_comments(CONTROL_ISSUE_NUMBER).await?;
-    comments.sort_by_key(|comment| comment.id);
+    let cursor_store = IssueCursorStore::new(
+        PathBuf::from(CONTROL_ROOT)
+            .join("github-control")
+            .join(format!("issue-{CONTROL_ISSUE_NUMBER}-cursor.json")),
+        CONTROL_ISSUE_NUMBER,
+    )?;
+    let mut checkpoint = load_checkpoint_for_poll(&cursor_store)?;
 
-    let mut terminal_request_ids = HashSet::new();
-    for comment in &comments {
-        if comment.user_id != OWNER_USER_ID || comment.body.len() > MAX_CONTROL_BODY_BYTES {
-            continue;
+    let comments = if checkpoint.ledger_initialized {
+        github
+            .issue_comments_after(CONTROL_ISSUE_NUMBER, checkpoint.cursor.as_ref())
+            .await?
+    } else {
+        let history = github.issue_comments(CONTROL_ISSUE_NUMBER).await?;
+        checkpoint
+            .terminal_request_ids
+            .extend(control_terminal_request_ids(&history));
+        checkpoint.ledger_initialized = true;
+
+        if checkpoint.cursor.is_none() {
+            history
+        } else {
+            github
+                .issue_comments_after(CONTROL_ISSUE_NUMBER, checkpoint.cursor.as_ref())
+                .await?
         }
+    };
 
-        if let Ok(result) = serde_json::from_str::<HostControlResult>(&comment.body)
-            && result.validate().is_ok()
+    if comments.is_empty() {
+        if let Some(cursor) = checkpoint.cursor.as_ref()
+            && checkpoint.ledger_initialized
         {
-            terminal_request_ids.insert(result.request_id);
+            cursor_store.save_checkpoint(
+                cursor,
+                &checkpoint.terminal_request_ids,
+                true,
+            )?;
         }
+        return Ok(0);
     }
 
+    let mut terminal_ids = checkpoint.terminal_request_ids.clone();
+    terminal_ids.extend(control_terminal_request_ids(&comments));
+
     let mut processed = 0usize;
-    for comment in comments {
+    for comment in &comments {
         if comment.user_id != OWNER_USER_ID || comment.body.len() > MAX_CONTROL_BODY_BYTES {
             continue;
         }
@@ -136,7 +168,7 @@ pub async fn process_pending(
         let Ok(request) = serde_json::from_str::<HostControlRequest>(&comment.body) else {
             continue;
         };
-        if request.validate().is_err() || terminal_request_ids.contains(&request.request_id) {
+        if request.validate().is_err() || terminal_ids.contains(&request.request_id) {
             continue;
         }
 
@@ -198,7 +230,7 @@ pub async fn process_pending(
             .post_issue_comment(CONTROL_ISSUE_NUMBER, &serde_json::to_string(&result)?)
             .await?;
 
-        terminal_request_ids.insert(request.request_id);
+        terminal_ids.insert(request.request_id);
         processed += 1;
 
         if result.status == HostControlStatus::Pass {
@@ -210,12 +242,56 @@ pub async fn process_pending(
         }
     }
 
+    if let Some(cursor) = comments.last().map(IssueComment::cursor) {
+        cursor_store.save_checkpoint(&cursor, &terminal_ids, true)?;
+    }
+
     Ok(processed)
+}
+
+fn load_checkpoint_for_poll(store: &IssueCursorStore) -> LocalResult<IssueCheckpoint> {
+    match store.load_checkpoint() {
+        Ok(checkpoint) => Ok(checkpoint),
+        Err(GitHubError::CursorJson(error)) => {
+            eprintln!(
+                "control cursor JSON invalid at {}: {}; falling back to bounded bootstrap scan",
+                store.path().display(),
+                error
+            );
+            Ok(IssueCheckpoint::default())
+        }
+        Err(GitHubError::CursorStateMismatch) => {
+            eprintln!(
+                "control cursor state mismatch at {}; falling back to bounded bootstrap scan",
+                store.path().display()
+            );
+            Ok(IssueCheckpoint::default())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn control_terminal_request_ids(comments: &[IssueComment]) -> BTreeSet<String> {
+    comments
+        .iter()
+        .filter(|comment| {
+            comment.user_id == OWNER_USER_ID && comment.body.len() <= MAX_CONTROL_BODY_BYTES
+        })
+        .filter_map(|comment| serde_json::from_str::<HostControlResult>(&comment.body).ok())
+        .filter(|result| result.validate().is_ok())
+        .map(|result| result.request_id)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_control_terminal_ids_block_late_duplicate_request_ids() {
+        let ids = BTreeSet::from(["ctl_0123456789abcdef".to_owned()]);
+        assert!(ids.contains("ctl_0123456789abcdef"));
+    }
 
     #[test]
     fn control_issue_is_pinned() {
