@@ -104,6 +104,8 @@ pub struct AccountSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_ws_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_ws_connection_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_ws_last_inbound_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_ws_events_applied: Option<u64>,
@@ -152,6 +154,9 @@ pub enum AccountError {
     #[error("private account timestamp '{field}' is invalid: '{value}'")]
     InvalidTimestamp { field: &'static str, value: String },
 
+    #[error("private websocket connection fingerprint is missing")]
+    MissingPrivateConnectionFingerprint,
+
     #[error("failed to serialize normalized account snapshot: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -194,6 +199,7 @@ impl AccountSnapshot {
             quality_reason: M4_REST_BOOTSTRAP_REASON.to_owned(),
             private_ws_connected: false,
             private_ws_generation: None,
+            private_ws_connection_fingerprint: None,
             private_ws_last_inbound_ms: None,
             private_ws_events_applied: None,
             account_level,
@@ -212,6 +218,7 @@ impl AccountSnapshot {
     pub fn converge_private_ws(
         mut self,
         private_ws_generation: u64,
+        private_ws_connection_fingerprint: impl Into<String>,
         private_ws_last_inbound_ms: u64,
         events: &[AccountWsEvent],
     ) -> Result<Self, AccountError> {
@@ -238,8 +245,14 @@ impl AccountSnapshot {
         self.schema = ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned();
         self.source = ACCOUNT_CONVERGED_SOURCE_V2.to_owned();
         self.quality_reason = M4_REST_WS_CONVERGED_REASON.to_owned();
+        let private_ws_connection_fingerprint = private_ws_connection_fingerprint.into();
+        if private_ws_connection_fingerprint.trim().is_empty() {
+            return Err(AccountError::MissingPrivateConnectionFingerprint);
+        }
+
         self.private_ws_connected = true;
         self.private_ws_generation = Some(private_ws_generation);
+        self.private_ws_connection_fingerprint = Some(private_ws_connection_fingerprint);
         self.private_ws_last_inbound_ms = Some(private_ws_last_inbound_ms);
         self.private_ws_events_applied = Some(events.len() as u64);
         self.positions.sort_by(position_sort);
@@ -577,6 +590,7 @@ fn generation_for(snapshot: &AccountSnapshot) -> Result<String, AccountError> {
         quality_reason: &'a str,
         private_ws_connected: bool,
         private_ws_generation: Option<u64>,
+        private_ws_connection_fingerprint: Option<&'a str>,
         private_ws_last_inbound_ms: Option<u64>,
         account_level: &'a str,
         position_mode: &'a str,
@@ -594,6 +608,7 @@ fn generation_for(snapshot: &AccountSnapshot) -> Result<String, AccountError> {
         quality_reason: &snapshot.quality_reason,
         private_ws_connected: snapshot.private_ws_connected,
         private_ws_generation: snapshot.private_ws_generation,
+        private_ws_connection_fingerprint: snapshot.private_ws_connection_fingerprint.as_deref(),
         private_ws_last_inbound_ms: snapshot.private_ws_last_inbound_ms,
         account_level: &snapshot.account_level,
         position_mode: &snapshot.position_mode,
@@ -722,7 +737,12 @@ mod tests {
         stale.details[0].update_time = "1790519999999".to_owned();
 
         let converged = rest
-            .converge_private_ws(7, 1790520000100, &[AccountWsEvent::Account(vec![stale])])
+            .converge_private_ws(
+                7,
+                "conn-fingerprint-a",
+                1790520000100,
+                &[AccountWsEvent::Account(vec![stale])],
+            )
             .expect("converged");
 
         assert_eq!(converged.schema, ACCOUNT_SNAPSHOT_SCHEMA_V2);
@@ -747,10 +767,48 @@ mod tests {
 
         let canceled = pending_order("123", "canceled", "1790520000100");
         let converged = rest
-            .converge_private_ws(8, 1790520000200, &[AccountWsEvent::Orders(vec![canceled])])
+            .converge_private_ws(
+                8,
+                "conn-fingerprint-b",
+                1790520000200,
+                &[AccountWsEvent::Orders(vec![canceled])],
+            )
             .expect("converged");
 
         assert!(converged.pending_orders.is_empty());
+    }
+
+    #[test]
+    fn private_connection_fingerprint_changes_content_generation() {
+        let first = AccountSnapshot::from_rest_bootstrap(
+            "2026-09-27T15:00:00.000Z",
+            config(),
+            balance(),
+            Vec::new(),
+            Vec::new(),
+            vec!["read_only".to_owned()],
+        )
+        .expect("rest")
+        .converge_private_ws(1, "conn-fingerprint-a", 1790520000100, &[])
+        .expect("first");
+
+        let second = AccountSnapshot::from_rest_bootstrap(
+            "2026-09-27T15:00:00.000Z",
+            config(),
+            balance(),
+            Vec::new(),
+            Vec::new(),
+            vec!["read_only".to_owned()],
+        )
+        .expect("rest")
+        .converge_private_ws(1, "conn-fingerprint-b", 1790520000100, &[])
+        .expect("second");
+
+        assert_ne!(first.account_generation, second.account_generation);
+        assert_ne!(
+            first.private_ws_connection_fingerprint,
+            second.private_ws_connection_fingerprint
+        );
     }
 
     #[test]
@@ -764,7 +822,7 @@ mod tests {
             vec!["read_only".to_owned()],
         )
         .expect("rest")
-        .converge_private_ws(1, 1790520000100, &[])
+        .converge_private_ws(1, "conn-fingerprint-a", 1790520000100, &[])
         .expect("first");
 
         let second = AccountSnapshot::from_rest_bootstrap(
@@ -776,7 +834,7 @@ mod tests {
             vec!["read_only".to_owned()],
         )
         .expect("rest")
-        .converge_private_ws(2, 1790520000100, &[])
+        .converge_private_ws(2, "conn-fingerprint-b", 1790520000100, &[])
         .expect("second");
 
         assert_ne!(first.account_generation, second.account_generation);

@@ -238,6 +238,7 @@ impl PrivateRuntimeState {
     fn convergence_ready(&self) -> bool {
         self.connection_state == PrivateConnectionState::Connected
             && self.logged_in
+            && self.connection_id.is_some()
             && self.subscriptions_complete()
             && self.account_data_seen
             && self.positions_data_seen
@@ -292,6 +293,13 @@ mod tests {
                 .contains("conn-secret")
         );
         assert!(state.convergence_cursor().is_ok());
+
+        state.connection_id = None;
+        assert_eq!(
+            state.convergence_cursor(),
+            Err(PrivateConvergenceError::NotReady)
+        );
+        state.connection_id = Some("conn-secret".to_owned());
 
         state.begin_generation(2);
         let second = state.status();
