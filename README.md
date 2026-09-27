@@ -1,59 +1,94 @@
 # okx
 
-Rust/Tokio trading infrastructure for OKX.
+Rust/Tokio read-only observation and analysis platform for OKX.
 
-The project is being built in small, verifiable layers:
+The project is built in small, physically verifiable layers. The current production direction is a native Windows runtime, not workflow-per-query GitHub execution.
 
-1. read-only account capabilities;
-2. authenticated account state;
-3. public/private WebSocket runtime and reconciliation;
-4. demo order execution;
-5. position supervision and logical positions;
-6. risk/cost engine;
-7. strategy and arbitrage engines;
-8. guarded live trading.
+## Current architecture
 
-## Phase 1: account capabilities
+```text
+GitHub-hosted CI
+  -> tested Windows bundle
+  -> verified deployment
 
-The first CLI is intentionally read-only. It asks OKX what the authenticated account can actually use instead of inferring capabilities from country alone.
-
-It reports:
-
-- account mode and position mode;
-- available SWAP/FUTURES products;
-- sample instruments visible to the account;
-- maximum leverage advertised by the selected instrument;
-- currently configured leverage for the selected margin mode;
-- the instrument fee-group ID and account fee schedule;
-- non-zero balance currency count and open-position count.
-
-OKX fee rates are resolved through the instrument `groupId` / fee-group mapping. Current configured leverage and instrument maximum leverage are kept as two separate concepts.
-
-### Credentials
-
-Never commit credentials. Supply them at runtime:
-
-```bash
-export OKX_API_KEY='...'
-export OKX_API_SECRET='...'
-export OKX_API_PASSPHRASE='...'
+Windows Task Scheduler
+  ONE TimeTrigger
+        |
+        v
+okx-host-control.exe
+  single controller
+  desired state + Job Object
+        |
+        v
+okx-agent.exe
+        |
+        v
+Rust/Tokio observation runtime
+  Reference Data
+  Market State
+  Reconciliation / Readiness
+  later Account + Orders
+        |
+        v
+typed Query API
+  encrypted GitHub mailbox #10 now
+  MCP adapter later
 ```
 
-For an EEA production account:
+Ownership is strict:
 
-```bash
-cargo run -p okx-cli --bin okx-capabilities -- \
-  --region eea \
-  --instrument BTC-USDT-SWAP \
-  --margin cross
+- `okx-api`: typed OKX exchange primitives;
+- `okx-observation`: normalized reference/market/account/order state, reconciliation and readiness;
+- `okx-agent`: composition and access transport;
+- `okx-host-control`: Windows lifecycle/deploy/diagnostics only;
+- GitHub Actions: CI/release/acceptance only, never the production market-data runtime.
+
+## Implementation status
+
+- M1 Reference Data Registry — PASS / closed (#23).
+- M2 Public REST Market State — PASS / closed (#26).
+- M3 Persistent Public OKX WebSocket — current stage (#32).
+- M4 Private read-only Account + Order State — planned.
+- M5 Deterministic Cost/Risk/Scenario — planned.
+- M6 MCP adapter — planned.
+
+M2 intentionally reports `DEGRADED`: request-time REST bootstrap is attributable but is not persistent realtime state.
+
+M3 is the gate that may introduce `FRESH` market readiness after persistent WebSocket subscriptions, generation/reconciliation evidence and order-book sequence continuity are proven.
+
+## Safety boundary
+
+M1–M6 are read-only observation/analysis work:
+
+- no order placement/cancel/amend;
+- no withdrawals/transfers;
+- no executor credential in the observation runtime;
+- no raw API secrets in GitHub/logs/query responses;
+- missing or inconsistent state fails closed.
+
+## Windows lifecycle
+
+Canonical runtime supervision:
+
+```text
+Task Scheduler TimeTrigger
+  -> one okx-host-control
+  -> one Job-Object-owned okx-agent
 ```
 
-Use `--demo` only with an OKX Demo Trading API key.
+No SCM service, PowerShell watchdog, RestartOnFailure, LogonTrigger recovery, or second custom watchdog.
 
-## Security
+Disruptive recovery tests R3 (external network/GitHub loss) and R4 (Windows reboot + sign-in) are intentionally DEFERRED, not PASS; see #16.
 
-- no API keys, secrets, or passphrases in Git;
-- Phase 1 contains no place/amend/cancel/close-order API;
-- no withdrawal or transfer API;
-- secrets and generated signatures are not serialized or logged;
-- live order execution will remain absent until read-only and demo acceptance gates pass.
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Roadmap and acceptance cursor](docs/ROADMAP.md)
+
+Canonical GitHub issues:
+
+- #5 product/domain architecture;
+- #7 native Windows runtime/deployment;
+- #10 encrypted temporary analytical transport;
+- #16 deferred Windows recovery acceptance debt;
+- #32 current M3 WebSocket stage.
