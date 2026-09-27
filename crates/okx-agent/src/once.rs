@@ -1,8 +1,9 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
+use okx_observation::{INSTRUMENT_RULES_SCHEMA_V1, ReferenceRegistry};
 use okx_protocol::{
-    AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentRequest, AgentResponse,
-    AgentResponseStatus, DataQuality, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection,
+    AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
+    AgentResponse, AgentResponseStatus, DataQuality, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection,
     MailboxEnvelope,
     crypto::{decrypt, derive_directional_key, encrypt, shared_secret},
 };
@@ -10,11 +11,15 @@ use okx_protocol::{
 use crate::{AgentError, AgentResult};
 
 pub const P1_NOT_AVAILABLE_CODE: &str = "P1_OPERATION_NOT_AVAILABLE";
+pub const REFERENCE_INSTRUMENT_NOT_FOUND_CODE: &str = "REFERENCE_INSTRUMENT_NOT_FOUND";
+const REFERENCE_BOOTSTRAP_WARNING: &str =
+    "reference data is REST-bootstrap only; live instruments continuity is not connected until M3";
 
 pub fn process_once(
     envelope: &MailboxEnvelope,
     expected_key_id: &str,
     agent_private_key: &[u8; 32],
+    reference: Option<&ReferenceRegistry>,
     response_nonce: [u8; 12],
     generated_at: &str,
 ) -> AgentResult<MailboxEnvelope> {
@@ -47,22 +52,7 @@ pub fn process_once(
     }
     debug_assert_eq!(request.schema, AGENT_REQUEST_SCHEMA_V1);
 
-    let response = AgentResponse {
-        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-        request_id: request.request_id.clone(),
-        status: AgentResponseStatus::Rejected,
-        generated_at: generated_at.to_owned(),
-        quality: DataQuality::NotReady,
-        result_schema: None,
-        result: None,
-        failure: Some(AgentFailure {
-            code: P1_NOT_AVAILABLE_CODE.to_owned(),
-            message: "typed request accepted by the P1 runtime shell; domain operation is not connected yet"
-                .to_owned(),
-            retryable: false,
-        }),
-        warnings: Vec::new(),
-    };
+    let response = response_for(&request, reference, generated_at)?;
     response.validate()?;
     let response_plaintext = serde_json::to_vec(&response)?;
     let response_key = derive_directional_key(
@@ -97,6 +87,7 @@ pub fn process_once_now(
     envelope: &MailboxEnvelope,
     expected_key_id: &str,
     agent_private_key: &[u8; 32],
+    reference: Option<&ReferenceRegistry>,
 ) -> AgentResult<MailboxEnvelope> {
     let mut nonce = [0_u8; 12];
     getrandom::fill(&mut nonce).map_err(|error| AgentError::Random(error.to_string()))?;
@@ -106,9 +97,74 @@ pub fn process_once_now(
         envelope,
         expected_key_id,
         agent_private_key,
+        reference,
         nonce,
         &generated_at,
     )
+}
+
+fn response_for(
+    request: &AgentRequest,
+    reference: Option<&ReferenceRegistry>,
+    generated_at: &str,
+) -> AgentResult<AgentResponse> {
+    match &request.operation {
+        AgentOperation::InstrumentRules { instrument } => {
+            let Some(reference) = reference else {
+                return Ok(unavailable(request, generated_at));
+            };
+
+            if let Some(result) = reference.instrument_rules(instrument) {
+                return Ok(AgentResponse {
+                    schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                    request_id: request.request_id.clone(),
+                    status: AgentResponseStatus::Completed,
+                    generated_at: generated_at.to_owned(),
+                    quality: DataQuality::Degraded,
+                    result_schema: Some(INSTRUMENT_RULES_SCHEMA_V1.to_owned()),
+                    result: Some(serde_json::to_value(result)?),
+                    failure: None,
+                    warnings: vec![REFERENCE_BOOTSTRAP_WARNING.to_owned()],
+                });
+            }
+
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Rejected,
+                generated_at: generated_at.to_owned(),
+                quality: DataQuality::NotReady,
+                result_schema: None,
+                result: None,
+                failure: Some(AgentFailure {
+                    code: REFERENCE_INSTRUMENT_NOT_FOUND_CODE.to_owned(),
+                    message: format!("instrument '{instrument}' is not present in the reference registry"),
+                    retryable: false,
+                }),
+                warnings: Vec::new(),
+            })
+        }
+        _ => Ok(unavailable(request, generated_at)),
+    }
+}
+
+fn unavailable(request: &AgentRequest, generated_at: &str) -> AgentResponse {
+    AgentResponse {
+        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+        request_id: request.request_id.clone(),
+        status: AgentResponseStatus::Rejected,
+        generated_at: generated_at.to_owned(),
+        quality: DataQuality::NotReady,
+        result_schema: None,
+        result: None,
+        failure: Some(AgentFailure {
+            code: P1_NOT_AVAILABLE_CODE.to_owned(),
+            message: "typed request accepted by the P1 runtime shell; domain operation is not connected yet"
+                .to_owned(),
+            retryable: false,
+        }),
+        warnings: Vec::new(),
+    }
 }
 
 fn decode_fixed<const N: usize>(value: &str) -> AgentResult<[u8; N]> {
@@ -121,8 +177,9 @@ fn decode_fixed<const N: usize>(value: &str) -> AgentResult<[u8; N]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use okx_api::PublicInstrument;
+    use okx_observation::ReferenceRegistry;
     use okx_protocol::{
-        AgentOperation,
         crypto::{derive_directional_key, encrypt, public_key_from_private, shared_secret},
     };
 
@@ -180,6 +237,7 @@ mod tests {
             &request_envelope,
             "agent-key-1",
             &agent_private,
+            None,
             response_nonce,
             "2026-09-26T18:00:00.000Z",
         )
@@ -213,5 +271,65 @@ mod tests {
             response.failure.expect("failure").code,
             P1_NOT_AVAILABLE_CODE
         );
+    }
+
+    #[test]
+    fn instrument_rules_uses_reference_registry_and_reports_bootstrap_quality() {
+        let request = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_rules_0123456789".to_owned(),
+            operation: AgentOperation::InstrumentRules {
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+            },
+        };
+        let registry = ReferenceRegistry::from_public(
+            "2026-09-27T00:00:00.000Z",
+            vec![swap()],
+        )
+        .expect("registry");
+
+        let response = response_for(&request, Some(&registry), "2026-09-27T00:00:01.000Z")
+            .expect("response");
+
+        assert_eq!(response.status, AgentResponseStatus::Completed);
+        assert_eq!(response.quality, DataQuality::Degraded);
+        assert_eq!(
+            response.result_schema.as_deref(),
+            Some(INSTRUMENT_RULES_SCHEMA_V1)
+        );
+        assert!(response.failure.is_none());
+        assert_eq!(response.warnings, vec![REFERENCE_BOOTSTRAP_WARNING]);
+        assert_eq!(
+            response.result.expect("result")["instrument"]["instrument_id"],
+            "DOGE-USDT-SWAP"
+        );
+    }
+
+    fn swap() -> PublicInstrument {
+        PublicInstrument {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            instrument_family: "DOGE-USDT".to_owned(),
+            underlying: "DOGE-USDT".to_owned(),
+            state: "live".to_owned(),
+            rule_type: "normal".to_owned(),
+            base_currency: String::new(),
+            quote_currency: String::new(),
+            settle_currency: "USDT".to_owned(),
+            tick_size: "0.00001".to_owned(),
+            lot_size: "0.01".to_owned(),
+            min_size: "0.01".to_owned(),
+            max_limit_size: "1000000".to_owned(),
+            max_market_size: "100000".to_owned(),
+            max_limit_amount: String::new(),
+            max_market_amount: String::new(),
+            contract_type: "linear".to_owned(),
+            contract_value: "1000".to_owned(),
+            contract_value_currency: "DOGE".to_owned(),
+            fee_group_id: "4".to_owned(),
+            lever: "100".to_owned(),
+            list_time: "1700000000000".to_owned(),
+            expiry_time: String::new(),
+        }
     }
 }
