@@ -9,7 +9,7 @@ use okx_host_control::{
     HostControlResult,
     auth::{load_native_github_token, store_native_github_token},
     executor::{HostExecutor, install_current_executable},
-    runtime::{process_pending, run_until_shutdown},
+    runtime::{DEFAULT_CONTROL_POLL_SECONDS, process_pending, run_until_shutdown},
     single_instance::SingleInstanceGuard,
 };
 use zeroize::Zeroize;
@@ -37,7 +37,7 @@ enum Command {
 
     /// Poll GitHub control issue #12 over outbound HTTPS.
     Run {
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = DEFAULT_CONTROL_POLL_SECONDS)]
         poll_seconds: u64,
     },
 }
