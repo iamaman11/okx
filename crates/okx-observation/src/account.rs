@@ -643,6 +643,27 @@ mod tests {
         }
     }
 
+    fn pending_order(order_id: &str, state: &str, update_time: &str) -> PendingOrder {
+        PendingOrder {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            order_id: order_id.to_owned(),
+            client_order_id: String::new(),
+            side: "buy".to_owned(),
+            position_side: "long".to_owned(),
+            trade_mode: "cross".to_owned(),
+            order_type: "limit".to_owned(),
+            px: "0.1".to_owned(),
+            sz: "100".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
+            average_fill_price: String::new(),
+            state: state.to_owned(),
+            reduce_only: "false".to_owned(),
+            creation_time: "1790519999000".to_owned(),
+            update_time: update_time.to_owned(),
+        }
+    }
+
     #[test]
     fn rest_bootstrap_is_deterministic_and_never_emits_raw_uid() {
         let first = AccountSnapshot::from_rest_bootstrap(
@@ -670,6 +691,93 @@ mod tests {
         assert!(!json.contains("raw-user-id-never-output"));
         assert_eq!(first.quality_reason, M4_REST_BOOTSTRAP_REASON);
         assert!(!first.private_ws_connected);
+    }
+
+    #[test]
+    fn converged_snapshot_ignores_older_balance_event() {
+        let rest = AccountSnapshot::from_rest_bootstrap(
+            "2026-09-27T15:00:00.000Z",
+            config(),
+            balance(),
+            Vec::new(),
+            Vec::new(),
+            vec!["read_only".to_owned()],
+        )
+        .expect("rest");
+
+        let mut stale = balance();
+        stale.total_equity = "1".to_owned();
+        stale.update_time = "1790519999999".to_owned();
+        stale.details[0].equity = "1".to_owned();
+        stale.details[0].update_time = "1790519999999".to_owned();
+
+        let converged = rest
+            .converge_private_ws(
+                7,
+                1790520000100,
+                &[AccountWsEvent::Account(vec![stale])],
+            )
+            .expect("converged");
+
+        assert_eq!(converged.schema, ACCOUNT_SNAPSHOT_SCHEMA_V2);
+        assert_eq!(converged.balance.total_equity_usd, "1000.125");
+        assert_eq!(converged.private_ws_generation, Some(7));
+        assert!(converged.private_ws_connected);
+        assert_eq!(converged.quality_reason, M4_REST_WS_CONVERGED_REASON);
+    }
+
+    #[test]
+    fn terminal_order_delta_removes_rest_pending_order() {
+        let live = pending_order("123", "live", "1790520000000");
+        let rest = AccountSnapshot::from_rest_bootstrap(
+            "2026-09-27T15:00:00.000Z",
+            config(),
+            balance(),
+            Vec::new(),
+            vec![live],
+            vec!["read_only".to_owned()],
+        )
+        .expect("rest");
+
+        let canceled = pending_order("123", "canceled", "1790520000100");
+        let converged = rest
+            .converge_private_ws(
+                8,
+                1790520000200,
+                &[AccountWsEvent::Orders(vec![canceled])],
+            )
+            .expect("converged");
+
+        assert!(converged.pending_orders.is_empty());
+    }
+
+    #[test]
+    fn private_generation_changes_content_generation() {
+        let first = AccountSnapshot::from_rest_bootstrap(
+            "2026-09-27T15:00:00.000Z",
+            config(),
+            balance(),
+            Vec::new(),
+            Vec::new(),
+            vec!["read_only".to_owned()],
+        )
+        .expect("rest")
+        .converge_private_ws(1, 1790520000100, &[])
+        .expect("first");
+
+        let second = AccountSnapshot::from_rest_bootstrap(
+            "2026-09-27T15:00:00.000Z",
+            config(),
+            balance(),
+            Vec::new(),
+            Vec::new(),
+            vec!["read_only".to_owned()],
+        )
+        .expect("rest")
+        .converge_private_ws(2, 1790520000100, &[])
+        .expect("second");
+
+        assert_ne!(first.account_generation, second.account_generation);
     }
 
     #[test]
