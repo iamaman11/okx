@@ -76,6 +76,10 @@ One Tokio observation lifecycle owner:
 
 Composition root and access adapter only. It starts/owns the runtime as a component but must not duplicate its lifecycle state machine, domain calculations or Windows supervision.
 
+### Runtime maintainability rule
+
+Large lifecycle modules may be split by responsibility **inside the same crate** when readability degrades. A file/module split must never create another lifecycle owner. Post-M3 cleanup #42 applies this rule to `okx-runtime::public` before M4.
+
 ### okx-host-control
 
 Windows lifecycle/deployment/diagnostics only:
@@ -146,6 +150,8 @@ Required evidence before `FRESH`:
 - no unresolved gap/reconciliation conflict.
 
 A connected socket alone is never readiness.
+
+M3 is physically accepted for the non-disruptive path: FRESH encrypted quality/snapshot, advancing book sequence evidence, and fail-closed restart rebuild. The external network-loss proof remains deferred with #16 R3.
 
 ## Order-book integrity
 

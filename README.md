@@ -49,14 +49,15 @@ Ownership is strict:
 
 - M1 Reference Data Registry — PASS / closed (#23).
 - M2 Public REST Market State — PASS / closed (#26).
-- M3 Persistent Public OKX WebSocket — current stage (#30).
-- M4 Private read-only Account + Order State — planned.
+- M3 Persistent Public OKX WebSocket — PASS / closed (#30).
+- Post-M3 runtime readability cleanup — CURRENT gate (#42).
+- M4 Private read-only Account + Order State — planned after #42.
 - M5 Deterministic Cost/Risk/Scenario — planned.
 - M6 MCP adapter — planned.
 
 M2 intentionally reports `DEGRADED`: request-time REST bootstrap is attributable but is not persistent realtime state.
 
-M3 is the gate that may introduce `FRESH` market readiness after persistent WebSocket subscriptions, generation/reconciliation evidence and order-book sequence continuity are proven.
+M3 proved `FRESH` market readiness from persistent WebSocket subscriptions, generation/reconciliation evidence and order-book `seqId/prevSeqId` continuity. The remaining physical forced network-loss test is explicitly deferred with #16 R3.
 
 ## Safety boundary
 
@@ -93,4 +94,5 @@ Canonical GitHub issues:
 - #7 native Windows runtime/deployment;
 - #10 encrypted temporary analytical transport;
 - #16 deferred Windows recovery acceptance debt;
-- #30 current M3 WebSocket stage.
+- #30 M3 persistent public WebSocket — closed/PASS;
+- #42 current post-M3 runtime readability cleanup gate.
