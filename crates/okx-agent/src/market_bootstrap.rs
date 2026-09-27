@@ -1,6 +1,8 @@
 use chrono::{SecondsFormat, Utc};
-use okx_api::{InstrumentType, MarketDataApi, OkxPublicClient};
-use okx_observation::{MarketBootstrap, MarketError, MarketSnapshot, ReferenceRegistry};
+use okx_api::{MarketDataApi, OkxPublicClient};
+use okx_observation::{
+    FundingRequirement, MarketBootstrap, MarketError, MarketSnapshot, ReferenceRegistry,
+};
 use thiserror::Error;
 
 #[derive(Clone)]
@@ -53,9 +55,9 @@ impl MarketBootstrapper {
             self.api.open_interest(instrument_type, instrument_id),
         )?;
 
-        let funding_rate = match instrument_type {
-            InstrumentType::Swap => Some(self.api.funding_rate(instrument_id).await?),
-            InstrumentType::Futures => None,
+        let funding_rate = match instrument.funding_requirement {
+            FundingRequirement::Required => Some(self.api.funding_rate(instrument_id).await?),
+            FundingRequirement::NotApplicable | FundingRequirement::Unknown => None,
         };
 
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -116,7 +118,11 @@ mod tests {
         let reference = reference();
         let instrument = reference.get("DOGE-USDT-SWAP").expect("instrument");
 
-        assert_eq!(instrument.instrument_type, InstrumentType::Swap);
+        assert_eq!(instrument.instrument_type, okx_api::InstrumentType::Swap);
+        assert_eq!(
+            instrument.funding_requirement,
+            FundingRequirement::Required
+        );
         assert_eq!(instrument.underlying.as_deref(), Some("DOGE-USDT"));
     }
 }

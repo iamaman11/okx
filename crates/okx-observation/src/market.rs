@@ -6,7 +6,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::ReferenceRegistry;
+use crate::{FundingRequirement, ReferenceRegistry};
 
 pub const MARKET_SNAPSHOT_SCHEMA_V1: &str = "okx.market-snapshot/v1";
 pub const SNAPSHOT_QUALITY_SCHEMA_V1: &str = "okx.snapshot-quality/v1";
@@ -159,11 +159,19 @@ pub enum MarketError {
         field: &'static str,
     },
 
-    #[error("SWAP market snapshot requires funding-rate data")]
+    #[error("market snapshot requires funding-rate data for this instrument")]
     FundingRequired,
 
-    #[error("FUTURES market snapshot must not contain perpetual funding-rate data")]
+    #[error("market snapshot contains funding-rate data for a non-funding instrument")]
     UnexpectedFunding,
+
+    #[error(
+        "instrument '{instrument_id}' has unknown funding semantics for ruleType '{rule_type}'"
+    )]
+    UnknownFundingRequirement {
+        instrument_id: String,
+        rule_type: String,
+    },
 
     #[error("failed to serialize normalized market snapshot: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -240,8 +248,8 @@ impl MarketSnapshot {
             exchange_timestamp_ms: required("index ticker", "ts", bootstrap.index_ticker.ts)?,
         };
 
-        let funding = match instrument.instrument_type {
-            InstrumentType::Swap => {
+        let funding = match instrument.funding_requirement {
+            FundingRequirement::Required => {
                 let funding = bootstrap.funding_rate.ok_or(MarketError::FundingRequired)?;
                 require_instrument("funding rate", instrument_id, &funding.instrument_id)?;
                 Some(FundingState {
@@ -258,11 +266,20 @@ impl MarketSnapshot {
                     exchange_timestamp_ms: required("funding rate", "ts", funding.ts)?,
                 })
             }
-            InstrumentType::Futures => {
+            FundingRequirement::NotApplicable => {
                 if bootstrap.funding_rate.is_some() {
                     return Err(MarketError::UnexpectedFunding);
                 }
                 None
+            }
+            FundingRequirement::Unknown => {
+                return Err(MarketError::UnknownFundingRequirement {
+                    instrument_id: instrument_id.to_owned(),
+                    rule_type: instrument
+                        .rule_type
+                        .clone()
+                        .unwrap_or_else(|| "<missing>".to_owned()),
+                });
             }
         };
 

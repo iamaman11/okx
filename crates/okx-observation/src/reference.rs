@@ -18,6 +18,14 @@ impl ReferenceGeneration {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FundingRequirement {
+    Required,
+    NotApplicable,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InstrumentSpec {
     pub instrument_id: String,
@@ -26,6 +34,7 @@ pub struct InstrumentSpec {
     pub underlying: Option<String>,
     pub state: String,
     pub rule_type: Option<String>,
+    pub funding_requirement: FundingRequirement,
     pub base_currency: Option<String>,
     pub quote_currency: Option<String>,
     pub settle_currency: Option<String>,
@@ -154,13 +163,17 @@ impl TryFrom<PublicInstrument> for InstrumentSpec {
             other => return Err(ReferenceError::UnsupportedInstrumentType(other.to_owned())),
         };
 
+        let rule_type = optional(value.rule_type);
+        let funding_requirement = funding_requirement(instrument_type, rule_type.as_deref());
+
         Ok(Self {
             instrument_id: instrument_id.to_owned(),
             instrument_type,
             instrument_family: optional(value.instrument_family),
             underlying: optional(value.underlying),
             state: require(&value.instrument_id, &value.state, "state")?.to_owned(),
-            rule_type: optional(value.rule_type),
+            rule_type,
+            funding_requirement,
             base_currency: optional(value.base_currency),
             quote_currency: optional(value.quote_currency),
             settle_currency: optional(value.settle_currency),
@@ -179,6 +192,20 @@ impl TryFrom<PublicInstrument> for InstrumentSpec {
             list_time_ms: optional(value.list_time),
             expiry_time_ms: optional(value.expiry_time),
         })
+    }
+}
+
+fn funding_requirement(
+    instrument_type: InstrumentType,
+    rule_type: Option<&str>,
+) -> FundingRequirement {
+    match instrument_type {
+        InstrumentType::Swap => FundingRequirement::Required,
+        InstrumentType::Futures => match rule_type {
+            Some("xperp" | "pre_market") => FundingRequirement::Required,
+            Some("normal") => FundingRequirement::NotApplicable,
+            _ => FundingRequirement::Unknown,
+        },
     }
 }
 
@@ -301,6 +328,73 @@ mod tests {
         .expect_err("duplicate must fail");
 
         assert!(matches!(error, ReferenceError::DuplicateInstrument(_)));
+    }
+
+    #[test]
+    fn funding_semantics_are_reference_driven_and_fail_closed_for_unknown_rules() {
+        let mut ordinary_future = swap("BTC-USDT-261225");
+        ordinary_future.instrument_type = "FUTURES".to_owned();
+        ordinary_future.rule_type = "normal".to_owned();
+
+        let mut xperp = swap("BTC-USD_XPERP-310101");
+        xperp.instrument_type = "FUTURES".to_owned();
+        xperp.rule_type = "xperp".to_owned();
+
+        let mut pre_market_xperp = swap("OPENAI-USD-XPERP-PRE");
+        pre_market_xperp.instrument_type = "FUTURES".to_owned();
+        pre_market_xperp.rule_type = "pre_market".to_owned();
+
+        let mut unknown_future = swap("BTC-USDT-UNKNOWN");
+        unknown_future.instrument_type = "FUTURES".to_owned();
+        unknown_future.rule_type = "future_rule".to_owned();
+
+        let registry = ReferenceRegistry::from_public(
+            "2026-09-27T00:00:00.000Z",
+            vec![
+                swap("DOGE-USDT-SWAP"),
+                ordinary_future,
+                xperp,
+                pre_market_xperp,
+                unknown_future,
+            ],
+        )
+        .expect("registry");
+
+        assert_eq!(
+            registry
+                .get("DOGE-USDT-SWAP")
+                .expect("swap")
+                .funding_requirement,
+            FundingRequirement::Required
+        );
+        assert_eq!(
+            registry
+                .get("BTC-USDT-261225")
+                .expect("future")
+                .funding_requirement,
+            FundingRequirement::NotApplicable
+        );
+        assert_eq!(
+            registry
+                .get("BTC-USD_XPERP-310101")
+                .expect("xperp")
+                .funding_requirement,
+            FundingRequirement::Required
+        );
+        assert_eq!(
+            registry
+                .get("OPENAI-USD-XPERP-PRE")
+                .expect("pre-market xperp")
+                .funding_requirement,
+            FundingRequirement::Required
+        );
+        assert_eq!(
+            registry
+                .get("BTC-USDT-UNKNOWN")
+                .expect("unknown future")
+                .funding_requirement,
+            FundingRequirement::Unknown
+        );
     }
 
     #[test]
