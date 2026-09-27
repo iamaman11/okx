@@ -17,7 +17,11 @@ pub struct PrivateWsArg {
     pub ccy: Option<String>,
     #[serde(rename = "instType", default, skip_serializing_if = "Option::is_none")]
     pub instrument_type: Option<String>,
-    #[serde(rename = "instFamily", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "instFamily",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub instrument_family: Option<String>,
     #[serde(rename = "instId", default, skip_serializing_if = "Option::is_none")]
     pub instrument_id: Option<String>,
@@ -274,9 +278,6 @@ mod tests {
 
     #[test]
     fn unknown_private_channel_fails_closed() {
-        assert!(parse_private_text(
-            r#"{"arg":{"channel":"future-private"},"data":[{}]}"#
-        )
-        .is_err());
+        assert!(parse_private_text(r#"{"arg":{"channel":"future-private"},"data":[{}]}"#).is_err());
     }
 }
