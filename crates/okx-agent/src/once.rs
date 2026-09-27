@@ -4,13 +4,13 @@ use okx_observation::{
     INSTRUMENT_RULES_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketReadiness,
     ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
 };
-use okx_runtime::{PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PublicWsHandle};
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
     AgentResponse, AgentResponseStatus, DataQuality, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection,
     MailboxEnvelope,
     crypto::{decrypt, derive_directional_key, encrypt, shared_secret},
 };
+use okx_runtime::{PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PublicWsHandle};
 
 use crate::{
     AgentError, AgentResult,
@@ -27,8 +27,7 @@ pub const MARKET_INSTRUMENT_NOT_LIVE_CODE: &str = "MARKET_INSTRUMENT_NOT_LIVE";
 const REFERENCE_BOOTSTRAP_WARNING: &str =
     "reference data is REST-bootstrap only; live instruments continuity is not connected until M3";
 const MARKET_REST_BOOTSTRAP_WARNING: &str = "market data is bounded public REST bootstrap; persistent WebSocket continuity is not connected until M3";
-const REFERENCE_RUNTIME_WARNING: &str =
-    "instrument rules come from the live ReferenceRegistry; market FRESH readiness is reported separately";
+const REFERENCE_RUNTIME_WARNING: &str = "instrument rules come from the live ReferenceRegistry; market FRESH readiness is reported separately";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
 
 #[derive(Clone, Copy)]
@@ -58,7 +57,10 @@ impl<'a> ObservationQueryContext<'a> {
         }
     }
 
-    pub const fn live(public_ws: &'a PublicWsHandle, market_fallback: &'a MarketBootstrapper) -> Self {
+    pub const fn live(
+        public_ws: &'a PublicWsHandle,
+        market_fallback: &'a MarketBootstrapper,
+    ) -> Self {
         Self {
             standalone_reference: None,
             market_fallback: Some(market_fallback),
@@ -295,12 +297,7 @@ async fn response_for(
                 }
                 public_ws.demand_instrument(instrument.clone()).await?;
                 let result = public_ws
-                    .quality_snapshot(
-                        instrument,
-                        utc_now_ms(),
-                        PUBLIC_MARKET_MAX_AGE_MS,
-                        true,
-                    )
+                    .quality_snapshot(instrument, utc_now_ms(), PUBLIC_MARKET_MAX_AGE_MS, true)
                     .await?;
                 return Ok(AgentResponse {
                     schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
@@ -596,8 +593,8 @@ mod tests {
             },
             "2026-09-27T00:00:01.000Z",
         )
-            .await
-            .expect("response");
+        .await
+        .expect("response");
 
         assert_eq!(response.status, AgentResponseStatus::Completed);
         assert_eq!(response.quality, DataQuality::Degraded);
@@ -629,8 +626,8 @@ mod tests {
             },
             "2026-09-27T00:00:01.000Z",
         )
-            .await
-            .expect("response");
+        .await
+        .expect("response");
 
         assert_eq!(response.status, AgentResponseStatus::Completed);
         assert_eq!(response.quality, DataQuality::Degraded);
