@@ -1,4 +1,10 @@
+mod candidate;
 mod risk;
+
+pub use candidate::{
+    CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderInput,
+    CandidateSizeConstraint, analyze_candidate_order,
+};
 
 pub use risk::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, PositionRiskAnalysis,
@@ -106,6 +112,28 @@ pub enum AnalysisError {
         "estimated liquidation price is on the non-adverse side of mark price for instrument '{0}'"
     )]
     InconsistentLiquidationPrice(String),
+    #[error("linear candidate analysis requires a settlement currency")]
+    MissingSettlementCurrency,
+    #[error("candidate price field '{field}' value '{value}' is not aligned to tick size '{tick_size}'")]
+    PriceNotOnTick {
+        field: &'static str,
+        value: String,
+        tick_size: String,
+    },
+    #[error("stop price must be adverse to the candidate position direction")]
+    StopPriceNotAdverse,
+    #[error("fee rate field '{0}' is outside the supported (-1, 1) range")]
+    InvalidFeeRate(&'static str),
+    #[error("candidate stop loss per contract must be positive after trading-cost assumptions")]
+    NonPositiveStopLossPerContract,
+    #[error("computed candidate size '{computed}' is below minimum order size '{minimum}'")]
+    BelowMinimumOrderSize { computed: String, minimum: String },
+    #[error("computed target price must be positive")]
+    NonPositiveTargetPrice,
+    #[error("computed net target profit must be positive")]
+    NonPositiveTargetProfit,
+    #[error("target tick rounding reduced achieved risk/reward below the requested value")]
+    TargetRoundingReducedRiskReward,
 }
 
 pub fn analyze_cost(
