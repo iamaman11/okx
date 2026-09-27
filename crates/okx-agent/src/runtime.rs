@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use okx_github::GitHubBackoff;
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator, PublicWsHandle};
 use serde::Serialize;
 use tokio::{
@@ -91,6 +92,7 @@ pub async fn run_mailbox_until_shutdown(
     let mut github_verified = false;
     let mut identity_published = false;
     let mut ready_emitted = false;
+    let mut github_backoff = GitHubBackoff::default();
 
     emit(
         RuntimeState::DegradedMailbox,
@@ -124,14 +126,28 @@ pub async fn run_mailbox_until_shutdown(
                 };
             }
             _ = ticker.tick() => {
+                if !github_backoff.ready() {
+                    continue;
+                }
+
                 if !github_verified {
                     match mailbox.verify_repository_identity().await {
                         Ok(()) => {
+                            github_backoff.on_success();
                             github_verified = true;
                             eprintln!("mailbox repository identity verified");
                         }
                         Err(error) => {
-                            eprintln!("mailbox identity verification unavailable: {error}");
+                            if let AgentError::Github(github_error) = &error {
+                                let delay = github_backoff.on_error(github_error);
+                                eprintln!(
+                                    "mailbox identity verification unavailable: {error}; class={:?}; retry_in_ms={}",
+                                    github_backoff.last_class(),
+                                    delay.as_millis()
+                                );
+                            } else {
+                                eprintln!("mailbox identity verification unavailable: {error}");
+                            }
                             continue;
                         }
                     }
@@ -140,10 +156,20 @@ pub async fn run_mailbox_until_shutdown(
                 if !identity_published {
                     match mailbox.ensure_identity_published(identity).await {
                         Ok(()) => {
+                            github_backoff.on_success();
                             identity_published = true;
                         }
                         Err(error) => {
-                            eprintln!("mailbox identity publication unavailable: {error}");
+                            if let AgentError::Github(github_error) = &error {
+                                let delay = github_backoff.on_error(github_error);
+                                eprintln!(
+                                    "mailbox identity publication unavailable: {error}; class={:?}; retry_in_ms={}",
+                                    github_backoff.last_class(),
+                                    delay.as_millis()
+                                );
+                            } else {
+                                eprintln!("mailbox identity publication unavailable: {error}");
+                            }
                             github_verified = false;
                             continue;
                         }
@@ -172,11 +198,23 @@ pub async fn run_mailbox_until_shutdown(
                     .await
                 {
                     Ok(processed) if processed > 0 => {
+                        github_backoff.on_success();
                         eprintln!("mailbox processed {processed} terminal request(s)");
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        github_backoff.on_success();
+                    }
                     Err(error) => {
-                        eprintln!("mailbox poll failed: {error}");
+                        if let AgentError::Github(github_error) = &error {
+                            let delay = github_backoff.on_error(github_error);
+                            eprintln!(
+                                "mailbox poll failed: {error}; class={:?}; retry_in_ms={}",
+                                github_backoff.last_class(),
+                                delay.as_millis()
+                            );
+                        } else {
+                            eprintln!("mailbox poll failed: {error}");
+                        }
                         github_verified = false;
                         identity_published = false;
                         ready_emitted = false;
