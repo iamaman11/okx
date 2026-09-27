@@ -1,9 +1,21 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PublicChannel {
+    Instruments,
+    Tickers,
+    MarkPrice,
+    IndexTickers,
+    FundingRate,
+    OpenInterest,
+    Books,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WsArg {
-    pub channel: String,
+    pub channel: PublicChannel,
     #[serde(rename = "instType", default, skip_serializing_if = "Option::is_none")]
     pub instrument_type: Option<String>,
     #[serde(
@@ -18,7 +30,7 @@ pub struct WsArg {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Subscription {
-    pub channel: String,
+    pub channel: PublicChannel,
     #[serde(rename = "instType", skip_serializing_if = "Option::is_none")]
     pub instrument_type: Option<String>,
     #[serde(rename = "instFamily", skip_serializing_if = "Option::is_none")]
@@ -28,18 +40,18 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    pub fn instrument(channel: impl Into<String>, instrument_id: impl Into<String>) -> Self {
+    pub fn instrument(channel: PublicChannel, instrument_id: impl Into<String>) -> Self {
         Self {
-            channel: channel.into(),
+            channel,
             instrument_type: None,
             instrument_family: None,
             instrument_id: Some(instrument_id.into()),
         }
     }
 
-    pub fn instrument_type(channel: impl Into<String>, instrument_type: impl Into<String>) -> Self {
+    pub fn instrument_type(channel: PublicChannel, instrument_type: impl Into<String>) -> Self {
         Self {
-            channel: channel.into(),
+            channel,
             instrument_type: Some(instrument_type.into()),
             instrument_family: None,
             instrument_id: None,
@@ -51,6 +63,10 @@ impl Subscription {
 pub enum InboundMessage {
     Pong,
     Subscribed {
+        arg: WsArg,
+        connection_id: Option<String>,
+    },
+    Unsubscribed {
         arg: WsArg,
         connection_id: Option<String>,
     },
@@ -73,16 +89,27 @@ pub enum InboundMessage {
 }
 
 #[derive(Debug, Serialize)]
-struct SubscribeRequest<'a> {
+struct SubscriptionRequest<'a> {
     id: &'static str,
     op: &'static str,
     args: &'a [Subscription],
 }
 
 pub fn subscribe_payload(subscriptions: &[Subscription]) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&SubscribeRequest {
+    subscription_payload("subscribe", subscriptions)
+}
+
+pub fn unsubscribe_payload(subscriptions: &[Subscription]) -> Result<String, serde_json::Error> {
+    subscription_payload("unsubscribe", subscriptions)
+}
+
+fn subscription_payload(
+    operation: &'static str,
+    subscriptions: &[Subscription],
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&SubscriptionRequest {
         id: "m3-public",
-        op: "subscribe",
+        op: operation,
         args: subscriptions,
     })
 }
@@ -99,6 +126,13 @@ pub fn parse_text(text: &str) -> Result<InboundMessage, serde_json::Error> {
         Some("subscribe") => {
             let arg = serde_json::from_value(value.get("arg").cloned().unwrap_or(Value::Null))?;
             Ok(InboundMessage::Subscribed {
+                arg,
+                connection_id: string_field(&value, "connId"),
+            })
+        }
+        Some("unsubscribe") => {
+            let arg = serde_json::from_value(value.get("arg").cloned().unwrap_or(Value::Null))?;
+            Ok(InboundMessage::Unsubscribed {
                 arg,
                 connection_id: string_field(&value, "connId"),
             })
@@ -142,23 +176,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn subscribe_payload_is_typed_and_bounded_to_requested_topics() {
-        let payload = subscribe_payload(&[
-            Subscription::instrument("tickers", "DOGE-USDT-SWAP"),
-            Subscription::instrument("books", "DOGE-USDT-SWAP"),
-        ])
-        .expect("payload");
+    fn subscribe_and_unsubscribe_are_typed() {
+        let subscriptions = [
+            Subscription::instrument(PublicChannel::Tickers, "DOGE-USDT-SWAP"),
+            Subscription::instrument(PublicChannel::Books, "DOGE-USDT-SWAP"),
+        ];
 
-        let value: Value = serde_json::from_str(&payload).expect("json");
-        assert_eq!(value["id"], "m3-public");
-        assert_eq!(value["op"], "subscribe");
-        assert_eq!(value["args"].as_array().expect("args").len(), 2);
-        assert_eq!(value["args"][0]["channel"], "tickers");
-        assert_eq!(value["args"][1]["channel"], "books");
+        let subscribe: Value =
+            serde_json::from_str(&subscribe_payload(&subscriptions).expect("subscribe"))
+                .expect("subscribe json");
+        let unsubscribe: Value =
+            serde_json::from_str(&unsubscribe_payload(&subscriptions).expect("unsubscribe"))
+                .expect("unsubscribe json");
+
+        assert_eq!(subscribe["op"], "subscribe");
+        assert_eq!(unsubscribe["op"], "unsubscribe");
+        assert_eq!(subscribe["args"][0]["channel"], "tickers");
+        assert_eq!(subscribe["args"][1]["channel"], "books");
     }
 
     #[test]
-    fn parses_subscription_notice_and_data_without_channel_specific_logic() {
+    fn parses_known_channels_notice_and_data() {
         let subscribed = parse_text(
             r#"{"event":"subscribe","arg":{"channel":"tickers","instId":"DOGE-USDT-SWAP"},"connId":"abc"}"#,
         )
@@ -166,8 +204,11 @@ mod tests {
         assert!(matches!(
             subscribed,
             InboundMessage::Subscribed {
+                arg: WsArg {
+                    channel: PublicChannel::Tickers,
+                    ..
+                },
                 connection_id: Some(ref id),
-                ..
             } if id == "abc"
         ));
 
@@ -189,10 +230,24 @@ mod tests {
         assert!(matches!(
             data,
             InboundMessage::Data {
+                arg: WsArg {
+                    channel: PublicChannel::Books,
+                    ..
+                },
                 action: Some(ref action),
                 ..
             } if action == "snapshot"
         ));
+    }
+
+    #[test]
+    fn unknown_channel_fails_closed() {
+        assert!(
+            parse_text(
+                r#"{"arg":{"channel":"future-unknown","instId":"DOGE-USDT-SWAP"},"data":[{}]}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
