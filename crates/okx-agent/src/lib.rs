@@ -6,6 +6,7 @@ pub mod identity;
 pub mod market_bootstrap;
 pub mod okx_credentials;
 pub mod once;
+mod query;
 pub mod reference_bootstrap;
 pub mod runtime;
 
