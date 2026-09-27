@@ -266,7 +266,9 @@ fn last_terminal_request_id(comments: &[IssueComment]) -> Option<String> {
 
 fn request_latency_ms(created_at: &str) -> Option<u64> {
     let created_at = DateTime::parse_from_rfc3339(created_at).ok()?;
-    let latency = Utc::now().signed_duration_since(created_at).num_milliseconds();
+    let latency = Utc::now()
+        .signed_duration_since(created_at)
+        .num_milliseconds();
     Some(latency.max(0) as u64)
 }
 
