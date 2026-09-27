@@ -53,11 +53,28 @@ Domain state owner:
 - readiness;
 - immutable snapshots.
 
+### okx-ws
+
+WebSocket protocol/transport boundary only:
+
+- TLS/WebSocket connect and frame transport;
+- typed subscribe/unsubscribe and channel envelopes;
+- application `ping` / typed `pong` primitives;
+- no reconnect timer, generation ownership or domain state.
+
+### okx-runtime
+
+One Tokio observation lifecycle owner:
+
+- public WebSocket reconnect/backoff;
+- connection generation;
+- desired-vs-observed subscriptions;
+- application heartbeat timing;
+- REST bootstrap + WS convergence orchestration.
+
 ### okx-agent
 
-Composition root and access adapter only.
-
-It may own the long-lived Tokio observation tasks, but it must not duplicate domain calculations or Windows supervision.
+Composition root and access adapter only. It starts/owns the runtime as a component but must not duplicate its lifecycle state machine, domain calculations or Windows supervision.
 
 ### okx-host-control
 

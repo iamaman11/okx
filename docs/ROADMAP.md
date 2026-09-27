@@ -38,13 +38,13 @@ Authority: #26
 
 ### M3 Persistent Public OKX WebSocket — CURRENT
 
-Authority: #32
+Authority: #30
 
 Target:
 
-1. one public WS lifecycle owner;
+1. `okx-ws` protocol/transport boundary only;
 2. typed connect/subscribe/event/error/notice handling;
-3. bounded reconnect with explicit WS generation;
+3. one `okx-runtime::PublicWsCoordinator` owns bounded reconnect and explicit WS generation;
 4. REST bootstrap + WS convergence;
 5. live instruments/ticker/mark/index/funding/OI state;
 6. order-book snapshot + incremental apply;
