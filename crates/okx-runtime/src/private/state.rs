@@ -120,9 +120,7 @@ impl PrivateRuntimeState {
         }
     }
 
-    pub fn convergence_cursor(
-        &self,
-    ) -> Result<PrivateConvergenceCursor, PrivateConvergenceError> {
+    pub fn convergence_cursor(&self) -> Result<PrivateConvergenceCursor, PrivateConvergenceError> {
         if !self.convergence_ready() {
             return Err(PrivateConvergenceError::NotReady);
         }
