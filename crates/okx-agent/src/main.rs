@@ -15,12 +15,13 @@ use okx_agent::{
         default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
     },
     market_bootstrap::MarketBootstrapper,
-    once::process_once_now,
+    once::{ObservationQueryContext, process_once_now},
     reference_bootstrap::bootstrap_reference,
     runtime::{MailboxRuntimeContext, run_mailbox_until_shutdown, run_until_shutdown},
 };
 use okx_api::{OkxEnvironment, OkxPublicClient, Region};
 use okx_protocol::MailboxEnvelope;
+use okx_runtime::PublicWsCoordinator;
 use zeroize::Zeroize;
 
 #[derive(Debug, Parser)]
@@ -116,8 +117,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 &envelope,
                 &config.key_id,
                 &private_key,
-                Some(&reference),
-                Some(&market),
+                ObservationQueryContext::standalone(&reference, &market),
             )
             .await;
             private_key.zeroize();
@@ -133,12 +133,14 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 let mailbox = GitHubMailboxClient::new(mailbox_issue, token)?;
                 let public_client = OkxPublicClient::new(environment)?;
                 let reference = bootstrap_reference(public_client.clone()).await?;
-                let market = MarketBootstrapper::new(public_client);
                 eprintln!(
                     "reference registry ready generation={} instruments={}",
                     reference.generation().as_str(),
                     reference.len()
                 );
+                let market = MarketBootstrapper::new(public_client);
+                let (public_ws_coordinator, public_ws) =
+                    PublicWsCoordinator::new(environment, reference);
                 let mut private_key = load_native_private_key(&config.key_id)?;
                 let result = run_mailbox_until_shutdown(
                     MailboxRuntimeContext {
@@ -147,9 +149,10 @@ async fn run(cli: Cli) -> AgentResult<()> {
                         mailbox: &mailbox,
                         mailbox_issue,
                         agent_private_key: &private_key,
-                        reference: &reference,
+                        public_ws: &public_ws,
                         market: &market,
                     },
+                    public_ws_coordinator,
                     poll_seconds,
                 )
                 .await;
