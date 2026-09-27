@@ -1,9 +1,15 @@
 mod candidate;
 mod risk;
+mod scenario;
 
 pub use candidate::{
     CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderAssumptions,
     SizingConstraint, analyze_candidate_order,
+};
+pub use scenario::{
+    HISTORY_BEHAVIOR_SCHEMA_V1, POSITION_SCENARIO_SCHEMA_V1, HistoryBehaviorAnalysis,
+    PositionScenarioAnalysis, PositionScenarioAssumptions, ScenarioExitAssumption,
+    ScenarioPriceSource, analyze_history_behavior, analyze_position_scenario,
 };
 pub use risk::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, PositionRiskAnalysis,
@@ -141,6 +147,16 @@ pub enum AnalysisError {
     InvalidTargetPrice(String),
     #[error("fee rate '{0}' makes deterministic candidate math undefined")]
     InvalidFeeRate(&'static str),
+    #[error("scenario entry-move ratio must be greater than -1")]
+    ScenarioMoveAtOrBelowNegativeOne,
+    #[error("history analysis requires at least two confirmed candles, found {confirmed}")]
+    InsufficientConfirmedHistory { confirmed: usize },
+    #[error("history candle timestamp '{0}' is invalid")]
+    InvalidHistoryTimestamp(String),
+    #[error("confirmed history candles are not strictly chronological")]
+    HistoryNotChronological,
+    #[error("history candle '{0}' has inconsistent OHLC values")]
+    InvalidHistoryCandle(String),
 }
 
 pub fn analyze_cost(
