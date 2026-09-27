@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, path::Path, time::Instant};
 
 use okx_github::{
     GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCommentCursor, IssueCursorStore,
-    IssuePollTelemetryStore, OWNER_USER_ID, REPOSITORY_ID,
+    IssuePollTelemetryStatus, IssuePollTelemetryStore, OWNER_USER_ID, REPOSITORY_ID,
 };
 use okx_protocol::{MailboxDirection, MailboxEnvelope};
 use okx_runtime::PublicWsHandle;
@@ -131,7 +131,8 @@ impl GitHubMailboxClient {
         terminal_ids.extend(terminal_request_ids(&comments));
         let mut processed = 0usize;
         let mut batch_complete = true;
-        let mut last_terminal_request_id = None;
+        let mut last_terminal_request_id = last_terminal_request_id(&comments);
+        let mailbox_telemetry = self.telemetry_for_query();
 
         for comment in &comments {
             if comment.user_id != OWNER_USER_ID {
@@ -151,7 +152,11 @@ impl GitHubMailboxClient {
                 &envelope,
                 expected_key_id,
                 agent_private_key,
-                ObservationQueryContext::live(public_ws, market),
+                ObservationQueryContext::live_with_mailbox_telemetry(
+                    public_ws,
+                    market,
+                    mailbox_telemetry.as_ref(),
+                ),
             )
             .await
             {
@@ -187,6 +192,16 @@ impl GitHubMailboxClient {
         );
 
         Ok(processed)
+    }
+
+    fn telemetry_for_query(&self) -> Option<IssuePollTelemetryStatus> {
+        match self.telemetry_store.status() {
+            Ok(status) => status,
+            Err(error) => {
+                eprintln!("mailbox telemetry read failed: {error}");
+                None
+            }
+        }
     }
 
     fn record_poll_telemetry(
@@ -227,6 +242,19 @@ impl GitHubMailboxClient {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+fn last_terminal_request_id(comments: &[IssueComment]) -> Option<String> {
+    comments
+        .iter()
+        .filter(|comment| comment.user_id == OWNER_USER_ID)
+        .filter_map(|comment| serde_json::from_str::<MailboxEnvelope>(&comment.body).ok())
+        .filter(|envelope| {
+            envelope.direction == MailboxDirection::AgentToClient
+                && envelope.validate(MailboxDirection::AgentToClient).is_ok()
+        })
+        .last()
+        .map(|envelope| envelope.request_id)
 }
 
 fn terminal_request_ids(comments: &[IssueComment]) -> BTreeSet<String> {
