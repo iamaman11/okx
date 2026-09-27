@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -248,12 +249,15 @@ impl GitHubClient {
     ) -> Result<Vec<IssueComment>, GitHubError> {
         validate_issue_number(issue_number)?;
 
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments?per_page={COMMENTS_PER_PAGE}&page=1&sort=created&direction=desc"
-        );
+        let url =
+            format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments");
         let comments: Vec<RawIssueComment> = self
             .http
             .get(url)
+            .query(&[
+                ("per_page", COMMENTS_PER_PAGE.to_string()),
+                ("page", "1".to_owned()),
+            ])
             .bearer_auth(self.token.as_str())
             .header("Accept", "application/vnd.github+json")
             .send()
@@ -275,14 +279,24 @@ impl GitHubClient {
     ) -> Result<Vec<IssueComment>, GitHubError> {
         validate_issue_number(issue_number)?;
 
+        let since = cursor.map(cursor_overlap_since).transpose()?;
         let mut fresh = Vec::new();
+
         for page in 1..=MAX_COMMENT_PAGES {
-            let url = format!(
-                "{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments?per_page={COMMENTS_PER_PAGE}&page={page}&sort=created&direction=desc"
-            );
+            let url =
+                format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}/comments");
+            let mut query = vec![
+                ("per_page", COMMENTS_PER_PAGE.to_string()),
+                ("page", page.to_string()),
+            ];
+            if let Some(since) = since.as_ref() {
+                query.push(("since", since.clone()));
+            }
+
             let page_comments: Vec<RawIssueComment> = self
                 .http
                 .get(url)
+                .query(&query)
                 .bearer_auth(self.token.as_str())
                 .header("Accept", "application/vnd.github+json")
                 .send()
@@ -292,21 +306,14 @@ impl GitHubClient {
                 .await?;
 
             let count = page_comments.len();
-            let mut crossed_cursor_time = false;
-            for raw in page_comments {
-                let comment = raw.into_issue_comment();
-                let is_new = cursor.is_none_or(|current| comment.cursor() > *current);
-                let is_older_than_cursor =
-                    cursor.is_some_and(|current| comment.created_at < current.created_at);
-                if is_new {
-                    fresh.push(comment);
-                }
-                if is_older_than_cursor {
-                    crossed_cursor_time = true;
-                }
-            }
+            fresh.extend(
+                page_comments
+                    .into_iter()
+                    .map(RawIssueComment::into_issue_comment)
+                    .filter(|comment| cursor.is_none_or(|current| comment.cursor() > *current)),
+            );
 
-            if crossed_cursor_time || count < COMMENTS_PER_PAGE as usize {
+            if count < COMMENTS_PER_PAGE as usize {
                 fresh.sort_by_key(IssueComment::cursor);
                 return Ok(fresh);
             }
@@ -416,6 +423,13 @@ impl GitHubClient {
     }
 }
 
+fn cursor_overlap_since(cursor: &IssueCommentCursor) -> Result<String, GitHubError> {
+    let timestamp = DateTime::parse_from_rfc3339(&cursor.created_at)
+        .map_err(|_| GitHubError::CursorStateMismatch)?
+        - ChronoDuration::seconds(1);
+    Ok(timestamp.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
 fn validate_issue_number(issue_number: u64) -> Result<(), GitHubError> {
     if issue_number == 0 {
         Err(GitHubError::InvalidIssueNumber)
@@ -500,6 +514,18 @@ mod tests {
             validate_issue_number(0),
             Err(GitHubError::InvalidIssueNumber)
         ));
+    }
+
+    #[test]
+    fn cursor_overlap_rewinds_one_second_for_timestamp_ties() {
+        let cursor = IssueCommentCursor {
+            created_at: "2026-09-27T12:00:00Z".to_owned(),
+            id: 10,
+        };
+        assert_eq!(
+            cursor_overlap_since(&cursor).expect("overlap"),
+            "2026-09-27T11:59:59Z"
+        );
     }
 
     #[test]
