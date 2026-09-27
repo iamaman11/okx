@@ -1,8 +1,14 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
+use okx_analysis::{
+    ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, AnalysisError,
+    CandidateOrderAssumptions, LiquidityRole as AnalysisLiquidityRole, PositionDirection,
+    analyze_account_risk, analyze_candidate_order,
+};
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
-    ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, INSTRUMENT_RULES_SCHEMA_V1,
+    ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot,
+    INSTRUMENT_RULES_SCHEMA_V1,
     INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1,
     MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError, MarketReadiness, MarketSnapshot,
     ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
@@ -10,7 +16,8 @@ use okx_observation::{
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
     AgentResponse, AgentResponseStatus, DataQuality, InstrumentTypeFilter,
-    MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
+    LiquidityRole as ProtocolLiquidityRole, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection,
+    MailboxEnvelope, PositionSide,
     crypto::{decrypt, derive_directional_key, encrypt, shared_secret},
 };
 use okx_runtime::{
@@ -20,7 +27,9 @@ use okx_runtime::{
 
 use crate::{
     AgentError, AgentResult,
-    account_bootstrap::{AccountBootstrapError, AccountBootstrapper},
+    account_bootstrap::{
+        AccountBootstrapError, AccountBootstrapper, FeeScheduleBootstrapError,
+    },
     market_bootstrap::{MarketBootstrapError, MarketBootstrapper},
 };
 
@@ -37,6 +46,8 @@ pub const ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE: &str =
 pub const ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE: &str = "ACCOUNT_OBSERVER_PERMISSION_REJECTED";
 pub const ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE: &str = "ACCOUNT_PRIVATE_API_UNAVAILABLE";
 pub const ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE: &str = "ACCOUNT_BOOTSTRAP_INCONSISTENT";
+pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT";
+pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
 
 const REFERENCE_BOOTSTRAP_WARNING: &str =
@@ -48,6 +59,7 @@ const MARKET_HISTORY_UNCONFIRMED_WARNING: &str =
 const ACCOUNT_REST_BOOTSTRAP_WARNING: &str = "private account state is a bounded authenticated REST bootstrap; private WebSocket convergence is not ready";
 const ACCOUNT_WS_GENERATION_CHANGED_WARNING: &str = "private WebSocket generation changed during REST bootstrap; returning coherent REST snapshot only";
 const ACCOUNT_WS_JOURNAL_GAP_WARNING: &str = "private WebSocket delta journal advanced beyond the REST bootstrap cursor; returning coherent REST snapshot only";
+const CANDIDATE_EXPLICIT_ASSUMPTIONS_WARNING: &str = "candidate analysis uses explicit hypothetical entry/stop prices and exact account fee evidence; it does not assume a current fill price, funding event, slippage, spread, margin or FX conversion";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
 
 #[derive(serde::Serialize)]
