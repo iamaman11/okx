@@ -104,7 +104,8 @@ mod tests {
 
     #[test]
     fn payload_schema_is_strict_and_secrets_do_not_appear_in_errors() {
-        let invalid = r#"{"schema":"wrong","api_key":"key","secret_key":"super-secret","passphrase":"pass"}"#;
+        let invalid =
+            r#"{"schema":"wrong","api_key":"key","secret_key":"super-secret","passphrase":"pass"}"#;
         let error = store_native_okx_credentials(invalid).expect_err("invalid schema");
         let message = error.to_string();
         assert!(!message.contains("super-secret"));
