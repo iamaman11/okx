@@ -2,9 +2,11 @@ use std::{
     fs,
     io::{self, Read},
     path::PathBuf,
+    str::FromStr,
 };
 
 use clap::{Parser, Subcommand};
+use okx_api::{OkxEnvironment, Region};
 use okx_agent::{
     AgentResult,
     config::{AgentConfig, default_root},
@@ -14,6 +16,7 @@ use okx_agent::{
         default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
     },
     once::process_once_now,
+    reference_bootstrap::bootstrap_reference,
     runtime::{run_mailbox_until_shutdown, run_until_shutdown},
 };
 use okx_protocol::MailboxEnvelope;
@@ -28,6 +31,12 @@ struct Cli {
 
     #[arg(long, global = true, default_value = default_key_id())]
     key_id: String,
+
+    #[arg(long, global = true, default_value = "global")]
+    region: String,
+
+    #[arg(long, global = true)]
+    demo: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -68,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(cli: Cli) -> AgentResult<()> {
     let config = AgentConfig::new(cli.root, cli.key_id.clone());
+    let environment = OkxEnvironment::new(Region::from_str(&cli.region)?, cli.demo);
 
     match cli.command {
         Command::InitKey => {
@@ -98,7 +108,9 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let payload = read_input(input)?;
             let envelope: MailboxEnvelope = serde_json::from_str(&payload)?;
             let mut private_key = load_native_private_key(&config.key_id)?;
-            let response = process_once_now(&envelope, &config.key_id, &private_key);
+            let reference = bootstrap_reference(environment).await?;
+            let response =
+                process_once_now(&envelope, &config.key_id, &private_key, Some(&reference));
             private_key.zeroize();
             println!("{}", serde_json::to_string_pretty(&response?)?);
         }
@@ -110,6 +122,12 @@ async fn run(cli: Cli) -> AgentResult<()> {
             if let Some(mailbox_issue) = mailbox_issue {
                 let token = load_native_github_token()?;
                 let mailbox = GitHubMailboxClient::new(mailbox_issue, token)?;
+                let reference = bootstrap_reference(environment).await?;
+                eprintln!(
+                    "reference registry ready generation={} instruments={}",
+                    reference.generation().as_str(),
+                    reference.len()
+                );
                 let mut private_key = load_native_private_key(&config.key_id)?;
                 let result = run_mailbox_until_shutdown(
                     &config,
@@ -118,6 +136,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     mailbox_issue,
                     poll_seconds,
                     &private_key,
+                    &reference,
                 )
                 .await;
                 private_key.zeroize();
