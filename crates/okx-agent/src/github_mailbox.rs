@@ -117,8 +117,8 @@ impl GitHubMailboxClient {
             return Ok(0);
         }
 
-        let mut terminal_request_ids = checkpoint.terminal_request_ids.clone();
-        terminal_request_ids.extend(terminal_request_ids(&comments));
+        let mut terminal_ids = checkpoint.terminal_request_ids.clone();
+        terminal_ids.extend(terminal_request_ids(&comments));
         let mut processed = 0usize;
         let mut batch_complete = true;
 
@@ -131,7 +131,7 @@ impl GitHubMailboxClient {
                 continue;
             };
             if envelope.direction != MailboxDirection::ClientToAgent
-                || terminal_request_ids.contains(&envelope.request_id)
+                || terminal_ids.contains(&envelope.request_id)
             {
                 continue;
             }
@@ -148,7 +148,7 @@ impl GitHubMailboxClient {
                     self.github
                         .post_issue_comment(self.issue_number, &serde_json::to_string(&response)?)
                         .await?;
-                    terminal_request_ids.insert(envelope.request_id);
+                    terminal_ids.insert(envelope.request_id);
                     processed += 1;
                 }
                 Err(error) => {
@@ -163,7 +163,7 @@ impl GitHubMailboxClient {
 
         if let Some(cursor) = completed_batch_cursor(&comments, batch_complete) {
             self.cursor_store
-                .save_checkpoint(&cursor, &terminal_request_ids, true)?;
+                .save_checkpoint(&cursor, &terminal_ids, true)?;
         }
 
         Ok(processed)
