@@ -11,6 +11,7 @@ members = [
     "crates/okx-ws",
     "crates/okx-runtime",
     "crates/okx-analysis",
+    "crates/okx-execution",
 ]
 
 [workspace.package]
