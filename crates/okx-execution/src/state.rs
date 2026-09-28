@@ -205,8 +205,7 @@ const fn execution_state(exchange_state: ExchangeOrderState) -> ExecutionState {
 mod tests {
     use super::*;
     use crate::{
-        ExecutionAction, OrderSide, OrderType, PositionSide, TradeMode,
-        EXECUTION_PLAN_SCHEMA_V1,
+        EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, OrderSide, OrderType, PositionSide, TradeMode,
     };
 
     fn plan() -> ExecutionPlan {
