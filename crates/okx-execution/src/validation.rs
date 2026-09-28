@@ -745,16 +745,11 @@ mod tests {
         let account = account();
         let candidate = open_candidate(&rules, PositionDirection::Long);
         let intent = open_intent(&rules, &account, &candidate, PositionSide::Long);
-        let plan = prepare_execution(&intent, &rules, &account, Some(&candidate))
-            .expect("execution plan");
+        let plan =
+            prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("execution plan");
 
-        revalidate_execution_plan(
-            &plan,
-            &rules,
-            &account,
-            Some(&candidate.fee_generation),
-        )
-        .expect("fresh plan");
+        revalidate_execution_plan(&plan, &rules, &account, Some(&candidate.fee_generation))
+            .expect("fresh plan");
 
         let mut changed_account = account.clone();
         changed_account.account_uid_fingerprint = "different".to_owned();
