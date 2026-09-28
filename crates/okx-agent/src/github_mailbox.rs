@@ -187,11 +187,18 @@ impl GitHubMailboxClient {
                     processed += 1;
                 }
                 Err(error) => {
-                    batch_complete = false;
-                    eprintln!(
-                        "mailbox request {} rejected before terminal response: {}",
-                        envelope.request_id, error
-                    );
+                    if permanent_mailbox_input_error(&error) {
+                        eprintln!(
+                            "mailbox request {} dropped as permanent malformed input: {}",
+                            envelope.request_id, error
+                        );
+                    } else {
+                        batch_complete = false;
+                        eprintln!(
+                            "mailbox request {} rejected before terminal response: {}",
+                            envelope.request_id, error
+                        );
+                    }
                 }
             }
         }
@@ -266,6 +273,18 @@ impl GitHubMailboxClient {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+fn permanent_mailbox_input_error(error: &AgentError) -> bool {
+    matches!(
+        error,
+        AgentError::Protocol(_)
+            | AgentError::Crypto(_)
+            | AgentError::Base64(_)
+            | AgentError::AgentKeyMismatch { .. }
+            | AgentError::InvalidPrivateKeyLength(_)
+            | AgentError::RequestIdMismatch
+    )
 }
 
 fn last_terminal_request_id(comments: &[IssueComment]) -> Option<String> {
