@@ -6,6 +6,7 @@ pub mod error;
 pub mod instrument;
 pub mod market_data;
 pub mod public_data;
+pub mod trade;
 
 pub use account::{
     AccountApi, AccountCapabilities, AccountConfig, BalanceDetail, BalanceSnapshot, FeeRate,
@@ -20,3 +21,9 @@ pub use market_data::{
     PublicOpenInterest, PublicTicker,
 };
 pub use public_data::{PublicDataApi, PublicInstrument};
+
+pub use trade::{
+    AmendOrderRequest, ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode,
+    CancelOrderRequest, OrderOperationAck, PlaceOrderRequest, TradeApi, TradeOrderDetails,
+    TradeResponse,
+};

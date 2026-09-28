@@ -1,6 +1,6 @@
 use reqwest::Client;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     auth::{sign, timestamp_now},
@@ -9,11 +9,15 @@ use crate::{
 };
 
 #[derive(Debug, Deserialize)]
-struct ApiEnvelope<T> {
-    code: String,
+pub(crate) struct ApiEnvelope<T> {
+    pub(crate) code: String,
     #[serde(default)]
-    msg: String,
-    data: Vec<T>,
+    pub(crate) msg: String,
+    pub(crate) data: Vec<T>,
+    #[serde(rename = "inTime", default)]
+    pub(crate) in_time: String,
+    #[serde(rename = "outTime", default)]
+    pub(crate) out_time: String,
 }
 
 #[derive(Clone)]
@@ -128,14 +132,55 @@ impl OkxRestClient {
 
         decode(request.send().await?).await
     }
+
+    pub(crate) async fn private_post<T, B>(
+        &self,
+        path: &str,
+        body: &B,
+        exp_time_ms: Option<u64>,
+    ) -> Result<ApiEnvelope<T>, OkxError>
+    where
+        T: DeserializeOwned,
+        B: Serialize + ?Sized,
+    {
+        let encoded = serde_json::to_string(body)?;
+        let timestamp = timestamp_now();
+        let signature = sign(
+            &timestamp,
+            "POST",
+            path,
+            &encoded,
+            self.credentials.secret_key(),
+        )?;
+        let url = format!("{}{}", self.environment.rest_base_url(), path);
+
+        let mut request = self
+            .http
+            .post(url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("OK-ACCESS-KEY", self.credentials.api_key())
+            .header("OK-ACCESS-SIGN", signature)
+            .header("OK-ACCESS-TIMESTAMP", timestamp)
+            .header("OK-ACCESS-PASSPHRASE", self.credentials.passphrase())
+            .body(encoded);
+
+        if let Some(exp_time_ms) = exp_time_ms {
+            request = request.header("expTime", exp_time_ms.to_string());
+        }
+        if self.environment.demo {
+            request = request.header("x-simulated-trading", "1");
+        }
+
+        decode_envelope(request.send().await?).await
+    }
 }
 
 async fn decode<T>(response: reqwest::Response) -> Result<Vec<T>, OkxError>
 where
     T: DeserializeOwned,
 {
-    let response = response.error_for_status()?;
-    let envelope: ApiEnvelope<T> = response.json().await?;
+    let envelope = decode_envelope(response).await?;
 
     if envelope.code != "0" {
         return Err(OkxError::Api {
@@ -145,4 +190,12 @@ where
     }
 
     Ok(envelope.data)
+}
+
+async fn decode_envelope<T>(response: reqwest::Response) -> Result<ApiEnvelope<T>, OkxError>
+where
+    T: DeserializeOwned,
+{
+    let response = response.error_for_status()?;
+    Ok(response.json().await?)
 }
