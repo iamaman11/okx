@@ -504,7 +504,7 @@ impl AccountApi {
             is_subaccount: !config.uid.is_empty()
                 && !config.main_uid.is_empty()
                 && config.uid != config.main_uid,
-            account_uid_fingerprint: uid_fingerprint(&config.uid),
+            account_uid_fingerprint: account_uid_fingerprint(&config.uid),
             account_type: account_type_name(&config.account_type).to_owned(),
             account_stp_mode: config.account_stp_mode,
             auto_loan: config.auto_loan,
@@ -562,7 +562,7 @@ fn account_mode_name(account_level: &str) -> &'static str {
     }
 }
 
-fn uid_fingerprint(uid: &str) -> String {
+pub fn account_uid_fingerprint(uid: &str) -> String {
     let digest = Sha256::digest(uid.as_bytes());
     format!("{digest:x}")
 }
