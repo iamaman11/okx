@@ -2,8 +2,6 @@ use okx_api::{AccountConfig, OkxEnvironment, account_uid_fingerprint};
 use okx_observation::{ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot};
 use serde::Serialize;
 
-use crate::AgentResult;
-
 pub const EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1: &str = "okx.executor-credential-preflight/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
