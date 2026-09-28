@@ -1,6 +1,4 @@
-use okx_api::{
-    AccountApi, AccountConfig, Credentials, OkxEnvironment, OkxRestClient, account_uid_fingerprint,
-};
+use okx_api::{AccountConfig, OkxEnvironment, account_uid_fingerprint};
 use okx_observation::{ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot};
 use serde::Serialize;
 
@@ -24,25 +22,6 @@ pub struct ExecutorCredentialPreflight {
     pub long_short_mode: bool,
     pub subaccount: bool,
     pub production_environment: bool,
-}
-
-pub async fn probe_executor_credentials(
-    environment: OkxEnvironment,
-    observer_credentials: Credentials,
-    executor_credentials: Credentials,
-) -> AgentResult<ExecutorCredentialPreflight> {
-    let observer = AccountApi::new(OkxRestClient::new(environment, observer_credentials)?)
-        .config()
-        .await?;
-    let executor = AccountApi::new(OkxRestClient::new(environment, executor_credentials)?)
-        .config()
-        .await?;
-
-    Ok(evaluate_executor_preflight(
-        environment,
-        &observer,
-        &executor,
-    ))
 }
 
 pub fn evaluate_executor_preflight_against_snapshot(
