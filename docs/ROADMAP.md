@@ -6,16 +6,19 @@
 - [x] hosted Linux/Windows CI;
 - [x] verified Windows bundle deployment;
 - [x] one TimeTrigger controller supervisor;
-- [x] one Rust agent supervisor with Job Object ownership;
+- [x] one Rust host-control supervisor with Job Object ownership;
 - [x] controller crash -> automatic scheduler recovery;
 - [x] agent recovery;
-- [x] encrypted analytical transport after recovery.
+- [x] Windows reboot/sign-in recovery;
+- [x] real external network/GitHub-loss -> asynchronous CONTROL/DATA recovery;
+- [x] exact installed-agent provenance;
+- [x] H1 conditional GitHub polling / failure classification / response budgets / compact evidence.
 
-## Product stages
+## Read-only product — CLOSED/PASS
 
 ### M1 Reference Data Registry — PASS
 
-Authority: #23
+Authority: #23.
 
 - public instruments bootstrap;
 - normalized InstrumentSpec;
@@ -25,95 +28,90 @@ Authority: #23
 
 ### M2 Public REST Market State — PASS
 
-Authority: #26
+Authority: #26.
 
 - ticker/bid/ask;
 - mark/index;
 - funding;
 - open interest;
 - deterministic market generation;
-- request-time fresh REST bootstrap;
-- explicit `DEGRADED / M2_REST_BOOTSTRAP_ONLY`;
-- encrypted Windows physical acceptance.
+- explicit quality.
 
 ### M3 Persistent Public OKX WebSocket — PASS
 
-Authority: #30
+Authority: #30.
 
-Accepted:
-- `okx-ws` protocol/transport boundary only;
-- one `okx-runtime::PublicWsCoordinator` lifecycle owner;
-- REST bootstrap + WS convergence;
-- live instruments/ticker/mark/index/funding/OI state;
-- Decimal-backed order-book state;
-- strict `seqId/prevSeqId` continuity;
-- evidence-derived NOT_READY/DEGRADED/FRESH/STALE;
-- encrypted physical FRESH SnapshotQuality + MarketSnapshot;
-- agent restart revokes old evidence and rebuilds FRESH deterministically.
+- one public WS lifecycle owner;
+- REST bootstrap/recovery + WS live ownership;
+- demand-driven subscriptions;
+- seqId/prevSeqId order-book continuity;
+- generation-bound readiness;
+- restart and real network-loss recovery accepted.
 
-The disruptive physical forced-network-loss proof is DEFERRED with #16 R3, not PASS.
+Checksum is not an integrity authority for the current OKX order-book channels.
 
-Checksum validation is explicitly forbidden for current OKX JSON order-book channels because OKX deprecated it in production on 2026-06-23.
+### Q0 / M4 / M5 / M6 — PASS
 
-### Post-M3 runtime readability cleanup — PASS
+- Q0 query/transport efficiency — #47 CLOSED/PASS;
+- M4 private read-only account/order state — #59 CLOSED/PASS;
+- M5 deterministic Decimal cost/risk/scenario analysis — #65 CLOSED/PASS;
+- M6 HistoryBehavior / PositionScenario / CurrentCost / bounded MarketResearch — #72 CLOSED/PASS;
+- H1 GitHub transport, response-shaping and context-efficiency — #83 CLOSED/PASS;
+- A2 unattended Windows lifecycle / reboot / external-network recovery — #16 CLOSED/PASS.
 
-Authority: #42
+The current read-only platform is production-accepted in the present Windows + GitHub environment.
 
-Module-split `okx-runtime::public` inside the same crate. No behavior, schema or lifecycle-owner change. Accepted via PR #45; #42 CLOSED/PASS.
+## Current large slice — Phase 2 production execution boundary
 
-### Q0 Current-environment query/transport efficiency — CURRENT
+Authority: #3.
 
-Authority: #47
+Goal: build a production-grade mutation boundary while keeping live trading disabled.
 
-Before M4, harden the existing encrypted GitHub mailbox instead of introducing another transport:
+The existing observation/analysis stack remains unchanged and read-only. Phase 2 introduces exactly one mutation owner and must not turn the query layer, GitHub transport, observation state or analysis crates into trading engines.
 
-- incremental/high-water mailbox cursor instead of full-history polling;
-- bounded mailbox transport metrics;
-- typed instrument discovery;
-- composite MarketOverview query;
-- retention/rotation/compaction policy with replay safety;
-- physical DATA #10 acceptance after migration.
+Required foundation:
 
-### M4 Private read-only Account + Order State — NEXT
+- separate executor credential custody: Read + Trade, never Withdraw;
+- executor credential is not the observer credential and is not used on GitHub-hosted runners;
+- executor identity must be proven to target the same intended sub-account without exposing raw UID;
+- one OrderExecutor owns place/amend/cancel/close mutation sequencing;
+- typed immutable execution intents only;
+- deterministic globally unique clOrdId policy;
+- persisted mutation ledger across restart;
+- instrument/reference generation validation;
+- tick/lot/min/max and account-position-mode validation;
+- explicit tdMode, side, posSide, order type and reduce-only semantics;
+- server-time / expiry policy before writes;
+- ACK is not fill confirmation;
+- lost/ambiguous submission becomes UNKNOWN_SUBMISSION;
+- UNKNOWN_SUBMISSION must reconcile by clOrdId before any retry;
+- private orders WS remains observation evidence, not mutation authority;
+- batch partial success must be represented per item;
+- all public/hosted acceptance before explicit enablement is non-mutating;
+- ALLOW_LIVE_TRADING=false remains the hard production default.
 
-- balances/equity;
-- positions;
-- account configuration;
-- pending orders/fills;
-- REST bootstrap + private WS convergence;
-- observer credential only.
+Phase 2 is one large logical slice with internal hosted and physical gates, not a new chain of alphabetic micro-stages.
 
-### M5 Deterministic Analysis
+## Deferred, non-blocking maintenance
 
-Planned after M4.
+### Controller self-update — #54
 
-- Decimal/fixed-point fees/cost;
-- risk/exposure;
-- sizing;
-- stop/TP;
-- hypothetical scenarios.
+Deferred unless controller upgrades become frequent enough to justify the extra lifecycle complexity. Normal operation is already remotely controlled.
 
-### Access transport decision
+### DATA mailbox compaction — #58
 
-No MCP stage is planned. The encrypted GitHub mailbox is the normal access path in the current Windows/GitHub environment. Future transport work must improve this path incrementally rather than introduce a second access stack.
+Deferred until the existing capacity trigger or real recovery evidence requires it. No speculative compactor or second transport owner.
 
-## Explicit deferred lifecycle debt
+## Access transport
 
-Authority: #16
+No MCP migration is planned. The encrypted GitHub mailbox remains the current typed access path. Future execution intents, if exposed through it, must remain encrypted, strictly typed and fail-closed.
 
-Not PASS:
+## Security non-goals
 
-- [ ] R3 external network/GitHub-loss physical recovery;
-- [x] R4 Windows reboot + sign-in physical recovery — PASS;
-- [ ] final no-duplicate count associated with those disruptive tests.
-
-This debt is intentionally visible. It does not invalidate the completed non-disruptive M3 acceptance, but remains open before final lifecycle closure.
-
-## Non-goals for M1–M6
-
-- no live order mutation;
-- no autonomous strategy execution;
-- no withdrawals/transfers;
-- no executor credential in observation;
+- no withdrawal/transfer API;
+- no arbitrary shell/HTTP proxy;
+- no generic batch/DSL/expression engine;
+- no autonomous strategy engine in the execution-boundary slice;
+- no live order mutation until Phase 2 acceptance explicitly authorizes it;
 - no second lifecycle supervisor;
 - no local Windows production build in the normal deployment path.
