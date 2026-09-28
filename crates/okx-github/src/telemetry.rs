@@ -12,6 +12,15 @@ use crate::{GitHubError, IssueCommentCursor, REPOSITORY_ID};
 
 pub const ISSUE_POLL_TELEMETRY_SCHEMA_V1: &str = "okx.github.issue-poll-telemetry/v1";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueResponseSizeTelemetry {
+    pub plaintext_bytes: u64,
+    pub plaintext_budget_bytes: u64,
+    pub predicted_comment_bytes: u64,
+    pub budget_exceeded: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedIssuePollTelemetry {
@@ -25,6 +34,8 @@ struct PersistedIssuePollTelemetry {
     last_fetch_latency_ms: u64,
     #[serde(default)]
     last_request_latency_ms: Option<u64>,
+    #[serde(default)]
+    last_response_size: Option<IssueResponseSizeTelemetry>,
     cursor: Option<IssueCommentCursor>,
     last_terminal_request_id: Option<String>,
 }
@@ -41,6 +52,7 @@ pub struct IssuePollTelemetryStatus {
     pub poll_age_ms: u64,
     pub last_fetch_latency_ms: u64,
     pub last_request_latency_ms: Option<u64>,
+    pub last_response_size: Option<IssueResponseSizeTelemetry>,
     pub cursor: Option<IssueCommentCursor>,
     pub last_terminal_request_id: Option<String>,
 }
@@ -73,6 +85,7 @@ impl IssuePollTelemetryStore {
         cursor: Option<&IssueCommentCursor>,
         last_terminal_request_id: Option<&str>,
         last_request_latency_ms: Option<u64>,
+        last_response_size: Option<IssueResponseSizeTelemetry>,
     ) -> Result<(), GitHubError> {
         let previous = self.load_persisted()?;
         let polls_completed = previous
@@ -93,6 +106,11 @@ impl IssuePollTelemetryStore {
                 .as_ref()
                 .and_then(|value| value.last_request_latency_ms)
         });
+        let last_response_size = last_response_size.or_else(|| {
+            previous
+                .as_ref()
+                .and_then(|value| value.last_response_size)
+        });
 
         let telemetry = PersistedIssuePollTelemetry {
             schema: ISSUE_POLL_TELEMETRY_SCHEMA_V1.to_owned(),
@@ -104,6 +122,7 @@ impl IssuePollTelemetryStore {
             last_poll_completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             last_fetch_latency_ms: fetch_latency.as_millis().min(u64::MAX as u128) as u64,
             last_request_latency_ms,
+            last_response_size,
             cursor: cursor.cloned(),
             last_terminal_request_id,
         };
@@ -133,6 +152,7 @@ impl IssuePollTelemetryStore {
             poll_age_ms: age,
             last_fetch_latency_ms: value.last_fetch_latency_ms,
             last_request_latency_ms: value.last_request_latency_ms,
+            last_response_size: value.last_response_size,
             cursor: value.cursor,
             last_terminal_request_id: value.last_terminal_request_id,
         }))
@@ -210,10 +230,23 @@ mod tests {
                 Some(&cursor),
                 Some("req_0123456789abcdef"),
                 Some(1234),
+                Some(IssueResponseSizeTelemetry {
+                    plaintext_bytes: 10_535,
+                    plaintext_budget_bytes: 12_288,
+                    predicted_comment_bytes: 14_312,
+                    budget_exceeded: false,
+                }),
             )
             .expect("first");
         store
-            .record_success(Duration::from_millis(11), 0, Some(&cursor), None, None)
+            .record_success(
+                Duration::from_millis(11),
+                0,
+                Some(&cursor),
+                None,
+                None,
+                None,
+            )
             .expect("second");
 
         let status = store.status().expect("status").expect("present");
@@ -222,6 +255,15 @@ mod tests {
         assert_eq!(status.last_comments_scanned, 0);
         assert_eq!(status.last_fetch_latency_ms, 11);
         assert_eq!(status.last_request_latency_ms, Some(1234));
+        assert_eq!(
+            status.last_response_size,
+            Some(IssueResponseSizeTelemetry {
+                plaintext_bytes: 10_535,
+                plaintext_budget_bytes: 12_288,
+                predicted_comment_bytes: 14_312,
+                budget_exceeded: false,
+            })
+        );
         assert_eq!(status.cursor, Some(cursor));
         assert_eq!(
             status.last_terminal_request_id.as_deref(),
@@ -237,7 +279,7 @@ mod tests {
         let _ = fs::remove_file(&path);
         let store = IssuePollTelemetryStore::new(&path, 10).expect("store");
         store
-            .record_success(Duration::from_millis(1), 0, None, None, None)
+            .record_success(Duration::from_millis(1), 0, None, None, None, None)
             .expect("record");
 
         let other = IssuePollTelemetryStore::new(&path, 12).expect("other");
