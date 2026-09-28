@@ -2,6 +2,7 @@ pub mod telemetry;
 
 pub use telemetry::{
     ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus, IssuePollTelemetryStore,
+    IssueResponseSizeTelemetry,
 };
 
 use std::{

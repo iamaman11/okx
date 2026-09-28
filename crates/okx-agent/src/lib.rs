@@ -85,6 +85,9 @@ pub enum AgentError {
 
     #[error("poll interval must be between 1 and 60 seconds")]
     InvalidPollInterval,
+
+    #[error("response budget invariant failed")]
+    ResponseBudgetInvariant,
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;
