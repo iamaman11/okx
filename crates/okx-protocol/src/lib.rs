@@ -140,6 +140,22 @@ pub enum InstrumentTypeFilter {
     Futures,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionTradeMode {
+    Cross,
+    Isolated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionOrderType {
+    Limit,
+    PostOnly,
+    Fok,
+    Ioc,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentOperation {
@@ -174,6 +190,33 @@ pub enum AgentOperation {
     },
     SnapshotQuality {
         instrument: String,
+    },
+    ExecutorPreflight,
+    PrepareOpenExecution {
+        intent_id: String,
+        instrument: String,
+        trade_mode: ExecutionTradeMode,
+        position_side: PositionSide,
+        order_type: ExecutionOrderType,
+        entry_price: String,
+        stop_price: String,
+        max_settle_notional: String,
+        max_loss_settle: String,
+        target_rr: String,
+        entry_liquidity_role: LiquidityRole,
+        exit_liquidity_role: LiquidityRole,
+    },
+    PrepareCloseExecution {
+        intent_id: String,
+        instrument: String,
+        trade_mode: ExecutionTradeMode,
+        position_side: PositionSide,
+        order_type: ExecutionOrderType,
+        size: String,
+        price: String,
+    },
+    SubmitPreparedExecution {
+        intent_id: String,
     },
     MailboxTelemetry,
     AccountSnapshot,
@@ -240,7 +283,41 @@ impl AgentOperation {
                 bar,
                 limit,
             } => validate_history_request(instrument, bar, *limit),
-            Self::MailboxTelemetry | Self::AccountSnapshot | Self::PortfolioRisk => Ok(()),
+            Self::ExecutorPreflight
+            | Self::MailboxTelemetry
+            | Self::AccountSnapshot
+            | Self::PortfolioRisk => Ok(()),
+            Self::PrepareOpenExecution {
+                intent_id,
+                instrument,
+                entry_price,
+                stop_price,
+                max_settle_notional,
+                max_loss_settle,
+                target_rr,
+                ..
+            } => {
+                validate_request_id(intent_id)?;
+                validate_instrument(instrument)?;
+                validate_decimal_text(entry_price, "entry_price")?;
+                validate_decimal_text(stop_price, "stop_price")?;
+                validate_decimal_text(max_settle_notional, "max_settle_notional")?;
+                validate_decimal_text(max_loss_settle, "max_loss_settle")?;
+                validate_decimal_text(target_rr, "target_rr")
+            }
+            Self::PrepareCloseExecution {
+                intent_id,
+                instrument,
+                size,
+                price,
+                ..
+            } => {
+                validate_request_id(intent_id)?;
+                validate_instrument(instrument)?;
+                validate_decimal_text(size, "size")?;
+                validate_decimal_text(price, "price")
+            }
+            Self::SubmitPreparedExecution { intent_id } => validate_request_id(intent_id),
             Self::CurrentCost {
                 instrument,
                 contracts,
@@ -603,6 +680,68 @@ mod tests {
 
     fn request_id() -> String {
         "req_0123456789abcdef".to_owned()
+    }
+
+    #[test]
+    fn execution_operations_are_strict_and_bounded() {
+        let open = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: request_id(),
+            operation: AgentOperation::PrepareOpenExecution {
+                intent_id: "intent_open_0123456789".to_owned(),
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                trade_mode: ExecutionTradeMode::Cross,
+                position_side: PositionSide::Long,
+                order_type: ExecutionOrderType::Limit,
+                entry_price: "0.1".to_owned(),
+                stop_price: "0.09".to_owned(),
+                max_settle_notional: "100".to_owned(),
+                max_loss_settle: "5".to_owned(),
+                target_rr: "2".to_owned(),
+                entry_liquidity_role: LiquidityRole::Taker,
+                exit_liquidity_role: LiquidityRole::Taker,
+            },
+        };
+        open.validate().expect("valid open execution request");
+
+        let close = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_close_0123456789".to_owned(),
+            operation: AgentOperation::PrepareCloseExecution {
+                intent_id: "intent_close_0123456789".to_owned(),
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                trade_mode: ExecutionTradeMode::Cross,
+                position_side: PositionSide::Long,
+                order_type: ExecutionOrderType::Limit,
+                size: "1".to_owned(),
+                price: "0.1".to_owned(),
+            },
+        };
+        close.validate().expect("valid close execution request");
+
+        let submit = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_submit_0123456789".to_owned(),
+            operation: AgentOperation::SubmitPreparedExecution {
+                intent_id: "intent_open_0123456789".to_owned(),
+            },
+        };
+        submit.validate().expect("valid submit request");
+
+        let invalid = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_invalid_exec_012345".to_owned(),
+            operation: AgentOperation::PrepareCloseExecution {
+                intent_id: "short".to_owned(),
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                trade_mode: ExecutionTradeMode::Cross,
+                position_side: PositionSide::Long,
+                order_type: ExecutionOrderType::Limit,
+                size: "1".to_owned(),
+                price: "0.1".to_owned(),
+            },
+        };
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

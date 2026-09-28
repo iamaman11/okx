@@ -27,11 +27,13 @@ use okx_runtime::{
 use crate::{
     AgentResult,
     account_bootstrap::{AccountBootstrapError, AccountBootstrapper, FeeScheduleBootstrapError},
+    execution_runtime::ExecutionRuntime,
     market_bootstrap::{MarketBootstrapError, MarketBootstrapper},
 };
 
 mod account;
 mod analysis;
+mod execution;
 mod market;
 
 pub const P1_NOT_AVAILABLE_CODE: &str = "P1_OPERATION_NOT_AVAILABLE";
@@ -83,6 +85,7 @@ pub struct ObservationQueryContext<'a> {
     mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
     account_fallback: Option<&'a AccountBootstrapper>,
     private_ws: Option<&'a PrivateWsHandle>,
+    execution: Option<&'a ExecutionRuntime>,
 }
 
 impl<'a> ObservationQueryContext<'a> {
@@ -94,6 +97,7 @@ impl<'a> ObservationQueryContext<'a> {
             mailbox_telemetry: None,
             account_fallback: None,
             private_ws: None,
+            execution: None,
         }
     }
 
@@ -116,6 +120,7 @@ impl<'a> ObservationQueryContext<'a> {
             mailbox_telemetry: None,
             account_fallback,
             private_ws: None,
+            execution: None,
         }
     }
 
@@ -141,6 +146,24 @@ impl<'a> ObservationQueryContext<'a> {
         account_fallback: Option<&'a AccountBootstrapper>,
         private_ws: Option<&'a PrivateWsHandle>,
     ) -> Self {
+        Self::live_with_execution(
+            public_ws,
+            market_fallback,
+            mailbox_telemetry,
+            account_fallback,
+            private_ws,
+            None,
+        )
+    }
+
+    pub const fn live_with_execution(
+        public_ws: &'a PublicWsHandle,
+        market_fallback: &'a MarketBootstrapper,
+        mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
+        account_fallback: Option<&'a AccountBootstrapper>,
+        private_ws: Option<&'a PrivateWsHandle>,
+        execution: Option<&'a ExecutionRuntime>,
+    ) -> Self {
         Self {
             standalone_reference: None,
             market_fallback: Some(market_fallback),
@@ -148,6 +171,7 @@ impl<'a> ObservationQueryContext<'a> {
             mailbox_telemetry,
             account_fallback,
             private_ws,
+            execution,
         }
     }
 }
@@ -170,6 +194,12 @@ pub(crate) async fn dispatch(
         }
         AgentOperation::AccountSnapshot | AgentOperation::PortfolioRisk => {
             account::dispatch(request, context, generated_at).await
+        }
+        AgentOperation::ExecutorPreflight
+        | AgentOperation::PrepareOpenExecution { .. }
+        | AgentOperation::PrepareCloseExecution { .. }
+        | AgentOperation::SubmitPreparedExecution { .. } => {
+            execution::dispatch(request, context, generated_at).await
         }
         AgentOperation::CurrentCost { .. }
         | AgentOperation::PositionScenario { .. }
@@ -724,6 +754,7 @@ mod tests {
                 mailbox_telemetry: None,
                 account_fallback: None,
                 private_ws: None,
+                execution: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -762,6 +793,7 @@ mod tests {
                 mailbox_telemetry: None,
                 account_fallback: None,
                 private_ws: None,
+                execution: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -801,6 +833,7 @@ mod tests {
                 mailbox_telemetry: None,
                 account_fallback: None,
                 private_ws: None,
+                execution: None,
             },
             "2026-09-27T00:00:01.000Z",
         )

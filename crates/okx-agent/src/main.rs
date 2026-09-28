@@ -5,18 +5,24 @@ use std::{
     str::FromStr,
 };
 
+use chrono::Utc;
+
 use clap::{Parser, Subcommand};
 use okx_agent::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
     config::{AgentConfig, default_root},
+    execution_runtime::ExecutionRuntime,
     github_auth::{load_native_github_token, store_native_github_token},
     github_mailbox::GitHubMailboxClient,
     identity::{
         default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
     },
     market_bootstrap::MarketBootstrapper,
-    okx_credentials::{load_native_okx_credentials, store_native_okx_credentials},
+    okx_credentials::{
+        load_native_executor_okx_credentials, load_native_okx_credentials,
+        store_native_executor_okx_credentials, store_native_okx_credentials,
+    },
     once::{ObservationQueryContext, process_once_now},
     reference_bootstrap::bootstrap_reference,
     runtime::{MailboxRuntimeContext, run_mailbox_until_shutdown, run_until_shutdown},
@@ -61,6 +67,9 @@ enum Command {
 
     /// Store the read-only OKX observer credential payload from stdin.
     SetOkxCredentials,
+
+    /// Store the separate Read + Trade OKX executor credential payload from stdin.
+    SetExecutorOkxCredentials,
 
     /// Process one encrypted mailbox envelope from a file or stdin.
     Once {
@@ -126,6 +135,19 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 })
             );
         }
+        Command::SetExecutorOkxCredentials => {
+            let mut payload = read_stdin()?;
+            let result = store_native_executor_okx_credentials(&payload);
+            payload.zeroize();
+            result?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.agent.executor-okx-credentials/v1",
+                    "stored": true
+                })
+            );
+        }
         Command::Once { input } => {
             let payload = read_input(input)?;
             let envelope: MailboxEnvelope = serde_json::from_str(&payload)?;
@@ -168,6 +190,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     optional_private_components(environment);
                 let (public_ws_coordinator, public_ws) =
                     PublicWsCoordinator::new(environment, reference);
+                let execution = optional_execution_runtime(&config, environment);
                 let mut private_key = load_native_private_key(&config.key_id)?;
                 let result = run_mailbox_until_shutdown(
                     MailboxRuntimeContext {
@@ -180,6 +203,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                         market: &market,
                         account: account.as_ref(),
                         private_ws: private_ws.as_ref(),
+                        execution: execution.as_ref(),
                     },
                     public_ws_coordinator,
                     private_ws_coordinator,
@@ -195,6 +219,34 @@ async fn run(cli: Cli) -> AgentResult<()> {
     }
 
     Ok(())
+}
+
+fn optional_execution_runtime(
+    config: &AgentConfig,
+    environment: OkxEnvironment,
+) -> Option<ExecutionRuntime> {
+    let credentials = match load_native_executor_okx_credentials() {
+        Ok(value) => value,
+        Err(AgentError::ExecutorOkxCredentialsNotFound) => {
+            eprintln!(
+                "OKX executor credential not provisioned; execution operations are NOT_READY"
+            );
+            return None;
+        }
+        Err(error) => {
+            eprintln!("OKX executor credential unavailable: {error}");
+            return None;
+        }
+    };
+
+    let observed_at_ms = Utc::now().timestamp_millis().max(1) as u64;
+    match ExecutionRuntime::new(&config.root, environment, credentials, observed_at_ms) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            eprintln!("execution runtime unavailable: {error}");
+            None
+        }
+    }
 }
 
 fn optional_private_components(

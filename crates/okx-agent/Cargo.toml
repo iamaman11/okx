@@ -17,6 +17,7 @@ getrandom = "0.4"
 okx-analysis = { path = "../okx-analysis" }
 okx-api = { path = "../okx-api" }
 okx-github = { path = "../okx-github" }
+okx-execution = { path = "../okx-execution" }
 okx-observation = { path = "../okx-observation" }
 okx-protocol = { path = "../okx-protocol" }
 okx-runtime = { path = "../okx-runtime" }

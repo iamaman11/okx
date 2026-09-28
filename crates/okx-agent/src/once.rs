@@ -156,6 +156,8 @@ async fn process_once_with_size_telemetry(
 fn response_budget(operation: &AgentOperation) -> ResponseBudget {
     let plaintext_bytes = match operation {
         AgentOperation::InstrumentRules { .. }
+        | AgentOperation::ExecutorPreflight
+        | AgentOperation::SubmitPreparedExecution { .. }
         | AgentOperation::HistoryBehavior { .. }
         | AgentOperation::SnapshotQuality { .. }
         | AgentOperation::MailboxTelemetry
@@ -164,6 +166,8 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         AgentOperation::MarketResearch { .. } => MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES,
         AgentOperation::MarketSnapshot { .. }
         | AgentOperation::MarketOverview { .. }
+        | AgentOperation::PrepareOpenExecution { .. }
+        | AgentOperation::PrepareCloseExecution { .. }
         | AgentOperation::PortfolioRisk
         | AgentOperation::AnalyzeCandidateOrder { .. } => STANDARD_RESPONSE_PLAINTEXT_BYTES,
         AgentOperation::MarketHistory { .. }

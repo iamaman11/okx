@@ -19,4 +19,4 @@ pub use state::{
     ALLOW_LIVE_TRADING_DEFAULT, ExchangeOrderState, ExecutionRecord, ExecutionState,
     ExecutionTransitionError, require_live_trading_enabled,
 };
-pub use validation::{ExecutionValidationError, prepare_execution};
+pub use validation::{ExecutionValidationError, prepare_execution, revalidate_execution_plan};

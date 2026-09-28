@@ -14,12 +14,23 @@ use zeroize::Zeroizing;
 use crate::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
+    execution_runtime::ExecutionRuntime,
     identity::AgentIdentity,
     market_bootstrap::MarketBootstrapper,
     once::{ObservationQueryContext, process_once_now_with_size_telemetry},
 };
 
 pub const GITHUB_MAILBOX_IDENTITY_SCHEMA_V1: &str = "okx.github-mailbox.identity/v1";
+
+pub struct MailboxQueryRuntimeContext<'a> {
+    pub expected_key_id: &'a str,
+    pub agent_private_key: &'a [u8; 32],
+    pub public_ws: &'a PublicWsHandle,
+    pub market: &'a MarketBootstrapper,
+    pub account: Option<&'a AccountBootstrapper>,
+    pub private_ws: Option<&'a PrivateWsHandle>,
+    pub execution: Option<&'a ExecutionRuntime>,
+}
 
 pub struct GitHubMailboxClient {
     github: GitHubClient,
@@ -83,13 +94,17 @@ impl GitHubMailboxClient {
 
     pub async fn process_pending(
         &self,
-        expected_key_id: &str,
-        agent_private_key: &[u8; 32],
-        public_ws: &PublicWsHandle,
-        market: &MarketBootstrapper,
-        account: Option<&AccountBootstrapper>,
-        private_ws: Option<&PrivateWsHandle>,
+        context: MailboxQueryRuntimeContext<'_>,
     ) -> AgentResult<usize> {
+        let MailboxQueryRuntimeContext {
+            expected_key_id,
+            agent_private_key,
+            public_ws,
+            market,
+            account,
+            private_ws,
+            execution,
+        } = context;
         let mut checkpoint = self.load_checkpoint_for_poll()?;
         let fetch_started = Instant::now();
         let comments = if checkpoint.ledger_initialized {
@@ -161,12 +176,13 @@ impl GitHubMailboxClient {
                 &envelope,
                 expected_key_id,
                 agent_private_key,
-                ObservationQueryContext::live_with_private(
+                ObservationQueryContext::live_with_execution(
                     public_ws,
                     market,
                     mailbox_telemetry.as_ref(),
                     account,
                     private_ws,
+                    execution,
                 ),
             )
             .await
