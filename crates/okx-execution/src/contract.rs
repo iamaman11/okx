@@ -118,8 +118,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        EXECUTION_PLAN_SCHEMA_V1, ExecutionRecord, ExecutionTransitionError,
-        derive_client_order_id,
+        EXECUTION_PLAN_SCHEMA_V1, ExecutionRecord, ExecutionTransitionError, derive_client_order_id,
     };
 
     fn plan(intent_id: &str) -> ExecutionPlan {
