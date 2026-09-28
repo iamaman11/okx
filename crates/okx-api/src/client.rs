@@ -44,16 +44,7 @@ impl OkxPublicClient {
     where
         T: DeserializeOwned,
     {
-        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        for (key, value) in params {
-            serializer.append_pair(key, value);
-        }
-        let query = serializer.finish();
-        let request_path = if query.is_empty() {
-            path.to_owned()
-        } else {
-            format!("{path}?{query}")
-        };
+        let request_path = request_path_with_query(path, params);
         let url = format!("{}{}", self.environment.rest_base_url(), request_path);
 
         let mut request = self.http.get(url).header("Accept", "application/json");
@@ -96,17 +87,7 @@ impl OkxRestClient {
     where
         T: DeserializeOwned,
     {
-        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        for (key, value) in params {
-            serializer.append_pair(key, value);
-        }
-        let query = serializer.finish();
-
-        let request_path = if query.is_empty() {
-            path.to_owned()
-        } else {
-            format!("{path}?{query}")
-        };
+        let request_path = request_path_with_query(path, params);
 
         let timestamp = timestamp_now();
         let signature = sign(
@@ -173,6 +154,19 @@ impl OkxRestClient {
         }
 
         decode_envelope(request.send().await?).await
+    }
+}
+
+fn request_path_with_query(path: &str, params: &[(&str, String)]) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in params {
+        serializer.append_pair(key, value);
+    }
+    let query = serializer.finish();
+    if query.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{query}")
     }
 }
 
