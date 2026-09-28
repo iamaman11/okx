@@ -13,7 +13,7 @@ use crate::{
     account_bootstrap::AccountBootstrapper,
     config::{AGENT_RUNTIME_SCHEMA_V1, AgentConfig},
     execution_runtime::ExecutionRuntime,
-    github_mailbox::GitHubMailboxClient,
+    github_mailbox::{GitHubMailboxClient, MailboxQueryRuntimeContext},
     identity::AgentIdentity,
     market_bootstrap::MarketBootstrapper,
 };
@@ -190,15 +190,15 @@ pub async fn run_mailbox_until_shutdown(
                 }
 
                 match mailbox
-                    .process_pending(
-                        &config.key_id,
+                    .process_pending(MailboxQueryRuntimeContext {
+                        expected_key_id: &config.key_id,
                         agent_private_key,
                         public_ws,
                         market,
                         account,
                         private_ws,
                         execution,
-                    )
+                    })
                     .await
                 {
                     Ok(processed) if processed > 0 => {
