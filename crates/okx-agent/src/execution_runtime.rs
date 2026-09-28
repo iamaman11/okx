@@ -84,10 +84,7 @@ impl ExecutionRuntime {
         self.executor.lock().await.ledger().get(intent_id).cloned()
     }
 
-    pub async fn status(
-        &self,
-        intent_id: &str,
-    ) -> AgentResult<Option<ExecutionStatusSnapshot>> {
+    pub async fn status(&self, intent_id: &str) -> AgentResult<Option<ExecutionStatusSnapshot>> {
         let executor = self.executor.lock().await;
         executor
             .ledger()
