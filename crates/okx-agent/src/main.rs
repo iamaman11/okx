@@ -228,7 +228,9 @@ fn optional_execution_runtime(
     let credentials = match load_native_executor_okx_credentials() {
         Ok(value) => value,
         Err(AgentError::ExecutorOkxCredentialsNotFound) => {
-            eprintln!("OKX executor credential not provisioned; execution operations are NOT_READY");
+            eprintln!(
+                "OKX executor credential not provisioned; execution operations are NOT_READY"
+            );
             return None;
         }
         Err(error) => {
