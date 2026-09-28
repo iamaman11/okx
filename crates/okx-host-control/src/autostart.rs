@@ -116,7 +116,7 @@ pub fn status_value() -> HostControlResult<Value> {
 
 fn exported_policy_valid(xml: &str) -> bool {
     xml.contains(CONTROLLER_PATH)
-        && xml.contains("<Arguments>run --poll-seconds 2</Arguments>")
+        && xml.contains("<Arguments>run</Arguments>")
         && xml.contains("<WorkingDirectory>C:\\okx-control</WorkingDirectory>")
         && xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>")
         && xml.matches("<TimeTrigger>").count() == 1
@@ -224,7 +224,7 @@ mod tests {
         assert!(xml.starts_with(r#"<?xml version="1.0" ?>"#));
         assert!(!xml.contains("encoding="));
         assert!(xml.contains(CONTROLLER_PATH));
-        assert!(xml.contains("run --poll-seconds 2"));
+        assert!(xml.contains("<Arguments>run</Arguments>"));
         assert!(xml.contains("<WorkingDirectory>C:\\okx-control</WorkingDirectory>"));
         assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
         assert_eq!(xml.matches("<TimeTrigger>").count(), 1);
