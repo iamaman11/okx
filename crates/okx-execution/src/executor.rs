@@ -637,7 +637,9 @@ mod tests {
         let (root, mut ledger) = ledger("unavailable");
         let plan = plan();
         ledger.prepare(plan.clone(), 101).expect("prepare");
-        ledger.begin_submission(&plan.intent_id, 102).expect("submitting");
+        ledger
+            .begin_submission(&plan.intent_id, 102)
+            .expect("submitting");
         ledger
             .mark_unknown_submission(&plan.intent_id, 103)
             .expect("unknown");
