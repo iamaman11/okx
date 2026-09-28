@@ -15,8 +15,12 @@ use okx_agent::{
     identity::{
         default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
     },
+    execution_preflight::probe_executor_credentials,
     market_bootstrap::MarketBootstrapper,
-    okx_credentials::{load_native_okx_credentials, store_native_okx_credentials},
+    okx_credentials::{
+        load_native_executor_okx_credentials, load_native_okx_credentials,
+        store_native_executor_okx_credentials, store_native_okx_credentials,
+    },
     once::{ObservationQueryContext, process_once_now},
     reference_bootstrap::bootstrap_reference,
     runtime::{MailboxRuntimeContext, run_mailbox_until_shutdown, run_until_shutdown},
@@ -61,6 +65,12 @@ enum Command {
 
     /// Store the read-only OKX observer credential payload from stdin.
     SetOkxCredentials,
+
+    /// Store the separate Read + Trade OKX executor credential payload from stdin.
+    SetExecutorOkxCredentials,
+
+    /// Probe executor permission/IP/account identity without mutating OKX state.
+    ExecutorPreflight,
 
     /// Process one encrypted mailbox envelope from a file or stdin.
     Once {
@@ -125,6 +135,25 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     "stored": true
                 })
             );
+        }
+        Command::SetExecutorOkxCredentials => {
+            let mut payload = read_stdin()?;
+            let result = store_native_executor_okx_credentials(&payload);
+            payload.zeroize();
+            result?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.agent.executor-okx-credentials/v1",
+                    "stored": true
+                })
+            );
+        }
+        Command::ExecutorPreflight => {
+            let observer = load_native_okx_credentials()?;
+            let executor = load_native_executor_okx_credentials()?;
+            let evidence = probe_executor_credentials(environment, observer, executor).await?;
+            println!("{}", serde_json::to_string_pretty(&evidence)?);
         }
         Command::Once { input } => {
             let payload = read_input(input)?;
