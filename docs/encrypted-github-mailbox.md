@@ -1,13 +1,13 @@
 # Encrypted GitHub mailbox protocol
 
-This document defines the transport boundary for issue #7.
+This document defines the encrypted DATA transport boundary for issue #10.
 
 GitHub is a public mailbox, not a trusted plaintext data channel. All request and
 response payloads are encrypted end-to-end.
 
 ## Roles
 
-- **Agent**: native Windows `okx-agent.exe`, initially under `C:\okx`.
+- **Agent**: native Windows `okx-agent.exe`, installed under `C:\okx-runtime`.
 - **Client**: ChatGPT computation environment for one interactive request.
 - **Mailbox**: public `iamaman11/okx` GitHub issues/comments.
 
@@ -74,6 +74,19 @@ Only the envelope is written to GitHub:
 The response comment uses the same envelope schema with
 `direction=agent_to_client` and the same request ID/client ephemeral public key.
 
+## Client publication preflight
+
+Normal clients must not hand-edit Base64, ciphertext, nonce or ephemeral public-key fields.
+
+Before publishing a client-to-agent envelope, the exact final envelope must pass
+`okx_protocol::crypto::preflight_client_request_envelope`. The helper validates
+the typed request, request-id equality, transport encoding and dimensions,
+client key consistency, authenticated decryption of the exact ciphertext, and
+equality of the decrypted request with the original typed request.
+
+A preflight failure means nothing is posted.
+
+
 ## Plaintext request
 
 After successful decryption, the agent accepts only the strongly typed
@@ -102,6 +115,10 @@ arguments, account state, positions, balances, risk results or OKX credentials.
 
 The client ephemeral private key is request-scoped and must never be written to
 GitHub, repository files, issue text, logs or plugin memory.
+
+Permanent malformed or unauthenticated DATA input is not a valid terminal
+request and must not hold the mailbox cursor indefinitely. Internal/runtime
+failures remain retryable.
 
 ## Cross-language acceptance
 
