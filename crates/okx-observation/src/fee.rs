@@ -71,7 +71,6 @@ impl FeeScheduleSnapshot {
         let encoded = serde_json::to_vec(&(
             &value.instrument_id,
             &value.reference_generation,
-            &value.exchange_timestamp_ms,
             &value.level,
             &value.maker_rate,
             &value.taker_rate,
@@ -79,5 +78,61 @@ impl FeeScheduleSnapshot {
         ))?;
         value.fee_generation = format!("sha256:{:x}", Sha256::digest(encoded));
         Ok(value)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(exchange_timestamp_ms: &str, maker_rate: &str, taker_rate: &str) -> FeeScheduleInput {
+        FeeScheduleInput {
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            reference_generation: "sha256:reference".to_owned(),
+            source_received_at: "2026-09-29T00:00:00Z".to_owned(),
+            exchange_timestamp_ms: exchange_timestamp_ms.to_owned(),
+            level: "Lv1".to_owned(),
+            maker_rate: maker_rate.to_owned(),
+            taker_rate: taker_rate.to_owned(),
+            exact_for_instrument: true,
+        }
+    }
+
+    #[test]
+    fn exchange_timestamp_does_not_change_fee_generation() {
+        let first = FeeScheduleSnapshot::from_input(input(
+            "1790630000000",
+            "-0.0002",
+            "-0.0005",
+        ))
+        .expect("first");
+        let second = FeeScheduleSnapshot::from_input(input(
+            "1790639999999",
+            "-0.0002",
+            "-0.0005",
+        ))
+        .expect("second");
+
+        assert_eq!(first.fee_generation, second.fee_generation);
+        assert_ne!(first.exchange_timestamp_ms, second.exchange_timestamp_ms);
+    }
+
+    #[test]
+    fn actual_fee_change_changes_fee_generation() {
+        let first = FeeScheduleSnapshot::from_input(input(
+            "1790630000000",
+            "-0.0002",
+            "-0.0005",
+        ))
+        .expect("first");
+        let second = FeeScheduleSnapshot::from_input(input(
+            "1790630000001",
+            "-0.0001",
+            "-0.0005",
+        ))
+        .expect("second");
+
+        assert_ne!(first.fee_generation, second.fee_generation);
     }
 }
