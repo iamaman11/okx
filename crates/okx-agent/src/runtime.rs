@@ -12,6 +12,7 @@ use crate::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
     config::{AGENT_RUNTIME_SCHEMA_V1, AgentConfig},
+    execution_runtime::ExecutionRuntime,
     github_mailbox::GitHubMailboxClient,
     identity::AgentIdentity,
     market_bootstrap::MarketBootstrapper,
@@ -53,6 +54,7 @@ pub struct MailboxRuntimeContext<'a> {
     pub market: &'a MarketBootstrapper,
     pub account: Option<&'a AccountBootstrapper>,
     pub private_ws: Option<&'a PrivateWsHandle>,
+    pub execution: Option<&'a ExecutionRuntime>,
 }
 
 pub async fn run_mailbox_until_shutdown(
@@ -71,6 +73,7 @@ pub async fn run_mailbox_until_shutdown(
         market,
         account,
         private_ws,
+        execution,
     } = context;
     if !(1..=60).contains(&poll_seconds) {
         return Err(AgentError::InvalidPollInterval);
@@ -194,6 +197,7 @@ pub async fn run_mailbox_until_shutdown(
                         market,
                         account,
                         private_ws,
+                        execution,
                     )
                     .await
                 {
