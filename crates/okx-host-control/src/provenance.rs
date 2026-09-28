@@ -53,9 +53,9 @@ impl InstalledAgentProvenance {
             && self.repository_id == REPOSITORY_ID
             && self.run_id != 0
             && self.artifact_id != 0
-            && is_lower_hex_sha256(&self.source_head_sha)
-            && is_lower_hex_sha256(&self.source_tree)
-            && is_lower_hex_sha256(&self.agent_sha256)
+            && is_lower_hex(&self.source_head_sha, 40)
+            && is_lower_hex(&self.source_tree, 40)
+            && is_lower_hex(&self.agent_sha256, 64)
             && !self.rust_version.trim().is_empty()
     }
 }
@@ -217,8 +217,8 @@ fn hex_digest(bytes: &[u8]) -> String {
         .concat()
 }
 
-fn is_lower_hex_sha256(value: &str) -> bool {
-    value.len() == 64
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -282,8 +282,8 @@ mod tests {
         InstalledAgentProvenance::verified(
             42,
             84,
-            "a".repeat(64),
-            "b".repeat(64),
+            "a".repeat(40),
+            "b".repeat(40),
             "rustc 1.95.0".to_owned(),
             hash,
         )
