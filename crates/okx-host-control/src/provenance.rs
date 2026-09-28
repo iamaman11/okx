@@ -11,8 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{HostControlError, HostControlResult};
 
-pub const INSTALLED_AGENT_PROVENANCE_SCHEMA_V1: &str =
-    "okx.host-control.installed-agent/v1";
+pub const INSTALLED_AGENT_PROVENANCE_SCHEMA_V1: &str = "okx.host-control.installed-agent/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,9 +80,12 @@ impl InstalledAgentProvenanceStore {
             ));
         }
 
-        let parent = self.path.parent().ok_or(HostControlError::ArtifactVerification(
-            "installed agent provenance path has no parent",
-        ))?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or(HostControlError::ArtifactVerification(
+                "installed agent provenance path has no parent",
+            ))?;
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(provenance)?;
@@ -98,9 +100,7 @@ impl InstalledAgentProvenanceStore {
 
     pub fn status_value(&self, binary_path: &Path) -> Value {
         let binary_present = binary_path.is_file();
-        let binary_sha256 = binary_present
-            .then(|| sha256_file(binary_path))
-            .transpose();
+        let binary_sha256 = binary_present.then(|| sha256_file(binary_path)).transpose();
 
         let record = match self.load() {
             Ok(value) => value,
