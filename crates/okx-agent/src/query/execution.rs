@@ -3,8 +3,9 @@ use okx_analysis::{
     analyze_candidate_order,
 };
 use okx_execution::{
-    ExecutionAction, ExecutionIntent, ExecutionTransitionError, OrderExecutorError, OrderType,
-    PositionSide as ExecutionPositionSide, TradeMode, prepare_execution, revalidate_execution_plan,
+    ExecutionAction, ExecutionIntent, ExecutionLedgerError, ExecutionTransitionError,
+    OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide, TradeMode,
+    prepare_execution, revalidate_execution_plan,
 };
 use okx_protocol::{
     ExecutionOrderType, ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
@@ -19,6 +20,9 @@ pub const EXECUTION_RUNTIME_UNAVAILABLE_CODE: &str = "EXECUTION_RUNTIME_UNAVAILA
 pub const EXECUTION_ACCOUNT_NOT_FRESH_CODE: &str = "EXECUTION_ACCOUNT_NOT_FRESH";
 pub const EXECUTION_INPUT_INCONSISTENT_CODE: &str = "EXECUTION_INPUT_INCONSISTENT";
 pub const EXECUTION_RECORD_NOT_FOUND_CODE: &str = "EXECUTION_RECORD_NOT_FOUND";
+pub const EXECUTION_INTENT_CONFLICT_CODE: &str = "EXECUTION_INTENT_CONFLICT";
+pub const EXECUTION_IDEMPOTENCY_COLLISION_CODE: &str = "EXECUTION_IDEMPOTENCY_COLLISION";
+pub const EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE: &str = "EXECUTION_LEDGER_CAPACITY_EXHAUSTED";
 pub const LIVE_TRADING_DISABLED_CODE: &str = "LIVE_TRADING_DISABLED";
 pub const EXECUTION_GATE_INVARIANT_CODE: &str = "EXECUTION_GATE_INVARIANT_VIOLATION";
 
@@ -111,7 +115,10 @@ pub(super) async fn dispatch(
                 Ok(value) => value,
                 Err(error) => return Ok(validation_failure(request, generated_at, error)),
             };
-            let prepared = execution.prepare(plan, utc_now_ms()).await?;
+            let prepared = match execution.prepare(plan, utc_now_ms()).await {
+                Ok(value) => value,
+                Err(error) => return prepare_error_response(request, generated_at, error),
+            };
             Ok(completed(
                 request,
                 generated_at,
@@ -158,7 +165,10 @@ pub(super) async fn dispatch(
                 Ok(value) => value,
                 Err(error) => return Ok(validation_failure(request, generated_at, error)),
             };
-            let prepared = execution.prepare(plan, utc_now_ms()).await?;
+            let prepared = match execution.prepare(plan, utc_now_ms()).await {
+                Ok(value) => value,
+                Err(error) => return prepare_error_response(request, generated_at, error),
+            };
             Ok(completed(
                 request,
                 generated_at,
@@ -393,6 +403,43 @@ fn validation_failure(
     )
 }
 
+fn prepare_error_response(
+    request: &AgentRequest,
+    generated_at: &str,
+    error: crate::AgentError,
+) -> AgentResult<AgentResponse> {
+    let (status, code, message) = match error {
+        crate::AgentError::ExecutionLedger(error) => {
+            let (status, code) = match &error {
+                ExecutionLedgerError::IntentConflict => (
+                    AgentResponseStatus::Rejected,
+                    EXECUTION_INTENT_CONFLICT_CODE,
+                ),
+                ExecutionLedgerError::ClientOrderIdCollision => (
+                    AgentResponseStatus::Rejected,
+                    EXECUTION_IDEMPOTENCY_COLLISION_CODE,
+                ),
+                ExecutionLedgerError::CapacityExceeded(_) => (
+                    AgentResponseStatus::Failed,
+                    EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE,
+                ),
+                _ => return Err(crate::AgentError::ExecutionLedger(error)),
+            };
+            (status, code, error.to_string())
+        }
+        error => return Err(error),
+    };
+
+    Ok(failure_response(
+        request,
+        generated_at,
+        status,
+        code,
+        message,
+        false,
+    ))
+}
+
 const fn execution_trade_mode(value: ExecutionTradeMode) -> TradeMode {
     match value {
         ExecutionTradeMode::Cross => TradeMode::Cross,
@@ -420,5 +467,96 @@ const fn analysis_liquidity_role(value: ProtocolLiquidityRole) -> AnalysisLiquid
     match value {
         ProtocolLiquidityRole::Maker => AnalysisLiquidityRole::Maker,
         ProtocolLiquidityRole::Taker => AnalysisLiquidityRole::Taker,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use okx_execution::{ExecutionLedgerError, ExecutionState};
+    use okx_protocol::AGENT_REQUEST_SCHEMA_V1;
+
+    const GENERATED_AT: &str = "2026-09-29T00:00:00.000Z";
+
+    fn request() -> AgentRequest {
+        AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_prepare_ledger_error_01".to_owned(),
+            operation: AgentOperation::MarketOverview {
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+            },
+        }
+    }
+
+    fn assert_terminal_failure(
+        error: ExecutionLedgerError,
+        status: AgentResponseStatus,
+        code: &str,
+    ) {
+        let response = prepare_error_response(
+            &request(),
+            GENERATED_AT,
+            crate::AgentError::ExecutionLedger(error),
+        )
+        .expect("deterministic prepare error is terminal");
+
+        assert_eq!(response.status, status);
+        let failure = response.failure.expect("failure details");
+        assert_eq!(failure.code, code);
+        assert!(!failure.retryable);
+    }
+
+    #[test]
+    fn intent_conflict_is_terminal_rejection() {
+        assert_terminal_failure(
+            ExecutionLedgerError::IntentConflict,
+            AgentResponseStatus::Rejected,
+            EXECUTION_INTENT_CONFLICT_CODE,
+        );
+    }
+
+    #[test]
+    fn client_order_id_collision_is_terminal_rejection() {
+        assert_terminal_failure(
+            ExecutionLedgerError::ClientOrderIdCollision,
+            AgentResponseStatus::Rejected,
+            EXECUTION_IDEMPOTENCY_COLLISION_CODE,
+        );
+    }
+
+    #[test]
+    fn ledger_capacity_exhaustion_is_terminal_failure() {
+        assert_terminal_failure(
+            ExecutionLedgerError::CapacityExceeded(10_000),
+            AgentResponseStatus::Failed,
+            EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE,
+        );
+    }
+
+    #[test]
+    fn infrastructure_and_invariant_errors_remain_internal() {
+        let json_error = serde_json::from_str::<serde_json::Value>("{")
+            .expect_err("malformed JSON produces a parse error");
+        let errors = [
+            ExecutionLedgerError::Io(std::io::Error::other("disk unavailable")),
+            ExecutionLedgerError::Json(json_error),
+            ExecutionLedgerError::Corrupt("invalid timestamps"),
+            ExecutionLedgerError::InvalidTimestamp,
+            ExecutionLedgerError::Transition(ExecutionTransitionError::InvalidTransition {
+                from: ExecutionState::Prepared,
+                to: ExecutionState::Acknowledged,
+            }),
+        ];
+
+        for error in errors {
+            assert!(matches!(
+                prepare_error_response(
+                    &request(),
+                    GENERATED_AT,
+                    crate::AgentError::ExecutionLedger(error),
+                ),
+                Err(crate::AgentError::ExecutionLedger(_))
+            ));
+        }
     }
 }
