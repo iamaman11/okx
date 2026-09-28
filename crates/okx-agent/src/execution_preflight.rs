@@ -5,8 +5,7 @@ use serde::Serialize;
 
 use crate::AgentResult;
 
-pub const EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1: &str =
-    "okx.executor-credential-preflight/v1";
+pub const EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1: &str = "okx.executor-credential-preflight/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutorCredentialPreflight {
@@ -37,7 +36,11 @@ pub async fn probe_executor_credentials(
         .config()
         .await?;
 
-    Ok(evaluate_executor_preflight(environment, &observer, &executor))
+    Ok(evaluate_executor_preflight(
+        environment,
+        &observer,
+        &executor,
+    ))
 }
 
 pub fn evaluate_executor_preflight(
@@ -48,19 +51,23 @@ pub fn evaluate_executor_preflight(
     let observer_permissions = permissions(&observer.perm);
     let executor_permissions = permissions(&executor.perm);
 
-    let observer_read_only = observer_permissions.iter().any(|value| value == "read_only")
+    let observer_read_only = observer_permissions
+        .iter()
+        .any(|value| value == "read_only")
         && !observer_permissions.iter().any(|value| value == "trade")
         && !observer_permissions.iter().any(|value| value == "withdraw");
-    let executor_read_permission = executor_permissions.iter().any(|value| value == "read_only");
+    let executor_read_permission = executor_permissions
+        .iter()
+        .any(|value| value == "read_only");
     let executor_trade_permission = executor_permissions.iter().any(|value| value == "trade");
-    let executor_withdraw_permission =
-        executor_permissions.iter().any(|value| value == "withdraw");
+    let executor_withdraw_permission = executor_permissions.iter().any(|value| value == "withdraw");
     let executor_ip_bound = !executor.ip.trim().is_empty();
 
     let observer_fingerprint = account_uid_fingerprint(&observer.uid);
     let executor_fingerprint = account_uid_fingerprint(&executor.uid);
-    let account_identity_match =
-        !observer.uid.is_empty() && !executor.uid.is_empty() && observer_fingerprint == executor_fingerprint;
+    let account_identity_match = !observer.uid.is_empty()
+        && !executor.uid.is_empty()
+        && observer_fingerprint == executor_fingerprint;
 
     let futures_mode = executor.account_level == "2";
     let long_short_mode = executor.position_mode == "long_short_mode";
