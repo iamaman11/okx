@@ -120,6 +120,7 @@ impl<'a> ObservationQueryContext<'a> {
             mailbox_telemetry: None,
             account_fallback,
             private_ws: None,
+            execution: None,
         }
     }
 
