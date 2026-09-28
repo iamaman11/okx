@@ -10,12 +10,12 @@ use okx_agent::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
     config::{AgentConfig, default_root},
+    execution_preflight::probe_executor_credentials,
     github_auth::{load_native_github_token, store_native_github_token},
     github_mailbox::GitHubMailboxClient,
     identity::{
         default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
     },
-    execution_preflight::probe_executor_credentials,
     market_bootstrap::MarketBootstrapper,
     okx_credentials::{
         load_native_executor_okx_credentials, load_native_okx_credentials,
