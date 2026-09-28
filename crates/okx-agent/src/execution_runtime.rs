@@ -3,14 +3,15 @@ use std::path::Path;
 use okx_api::{AccountApi, Credentials, OkxEnvironment, OkxRestClient, TradeApi};
 use okx_execution::{
     DurableExecutionLedger, ExecutionLedgerEntry, ExecutionLedgerStore, ExecutionPlan,
-    OrderExecutor, OrderExecutorError, PrepareDisposition, SubmitDisposition,
+    ExecutionStatusSnapshot, OrderExecutor, OrderExecutorError, PrepareOutcome, SubmitDisposition,
+    execution_status,
 };
 use okx_observation::AccountSnapshot;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::{
-    AgentResult,
+    AgentError, AgentResult,
     execution_preflight::{
         ExecutorCredentialPreflight, evaluate_executor_preflight_against_snapshot,
     },
@@ -75,22 +76,22 @@ impl ExecutionRuntime {
         &self,
         plan: ExecutionPlan,
         observed_at_ms: u64,
-    ) -> AgentResult<PreparedExecutionResult> {
-        let mut executor = self.executor.lock().await;
-        let disposition = executor.prepare(plan, observed_at_ms)?;
-        let (disposition, entry) = match disposition {
-            PrepareDisposition::Created(entry) => (PreparedDisposition::Created, entry),
-            PrepareDisposition::Existing(entry) => (PreparedDisposition::Existing, entry),
-        };
-        Ok(PreparedExecutionResult {
-            schema: EXECUTION_PREPARED_SCHEMA_V1,
-            disposition,
-            entry,
-        })
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
+        self.executor.lock().await.prepare(plan, observed_at_ms)
     }
 
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {
         self.executor.lock().await.ledger().get(intent_id).cloned()
+    }
+
+    pub async fn status(&self, intent_id: &str) -> AgentResult<Option<ExecutionStatusSnapshot>> {
+        let executor = self.executor.lock().await;
+        executor
+            .ledger()
+            .get(intent_id)
+            .map(execution_status)
+            .transpose()
+            .map_err(AgentError::from)
     }
 
     pub async fn live_trading_enabled(&self) -> bool {

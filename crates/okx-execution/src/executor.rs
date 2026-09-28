@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::{
     DurableExecutionLedger, ExchangeOrderState, ExecutionLedgerEntry, ExecutionLedgerError,
     ExecutionPlan, ExecutionState, ExecutionTransitionError, OrderSide, OrderType, PositionSide,
-    PrepareDisposition, TradeMode, require_live_trading_enabled,
+    PrepareOutcome, TradeMode, classify_prepare_result, require_live_trading_enabled,
 };
 
 #[async_trait]
@@ -115,8 +115,10 @@ where
         &mut self,
         plan: ExecutionPlan,
         observed_at_ms: u64,
-    ) -> Result<PrepareDisposition, OrderExecutorError> {
-        Ok(self.ledger.prepare(plan, observed_at_ms)?)
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
+        Ok(classify_prepare_result(
+            self.ledger.prepare(plan, observed_at_ms),
+        )?)
     }
 
     pub async fn submit_prepared(
