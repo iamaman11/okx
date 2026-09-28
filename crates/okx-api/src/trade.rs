@@ -105,7 +105,7 @@ impl OrderOperationAck {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TradeResponse<T> {
     pub code: String,
     pub message: String,
@@ -352,10 +352,10 @@ mod tests {
 
     #[test]
     fn exchange_item_error_is_preserved_even_when_top_level_succeeds() {
-        let response: TradeResponse<OrderOperationAck> = serde_json::from_str(
+        let envelope: ApiEnvelope<OrderOperationAck> = serde_json::from_str(
             r#"{
                 "code":"0",
-                "message":"",
+                "msg":"",
                 "data":[{
                     "ordId":"",
                     "clOrdId":"okx01234567890123456789012345678",
@@ -363,11 +363,12 @@ mod tests {
                     "sCode":"51008",
                     "sMsg":"insufficient balance"
                 }],
-                "in_time_us":"1790000000000000",
-                "out_time_us":"1790000000001000"
+                "inTime":"1790000000000000",
+                "outTime":"1790000000001000"
             }"#,
         )
-        .expect("response");
+        .expect("OKX envelope");
+        let response: TradeResponse<OrderOperationAck> = envelope.into();
 
         assert!(response.top_level_success());
         assert_eq!(response.data.len(), 1);
