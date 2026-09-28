@@ -64,6 +64,56 @@ impl OkxPublicClient {
 
         decode(request.send().await?).await
     }
+
+    pub(crate) async fn private_post_json<TRequest, TResponse>(
+        &self,
+        path: &str,
+        body: &TRequest,
+        exp_time_ms: Option<&str>,
+    ) -> Result<ApiEnvelope<TResponse>, OkxError>
+    where
+        TRequest: Serialize + ?Sized,
+        TResponse: DeserializeOwned,
+    {
+        let body = serde_json::to_string(body)?;
+        let timestamp = timestamp_now();
+        let signature = sign(
+            &timestamp,
+            "POST",
+            path,
+            &body,
+            self.credentials.secret_key(),
+        )?;
+        let url = format!("{}{}", self.environment.rest_base_url(), path);
+
+        let mut request = self
+            .http
+            .post(url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("OK-ACCESS-KEY", self.credentials.api_key())
+            .header("OK-ACCESS-SIGN", signature)
+            .header("OK-ACCESS-TIMESTAMP", timestamp)
+            .header("OK-ACCESS-PASSPHRASE", self.credentials.passphrase())
+            .body(body);
+
+        if let Some(exp_time_ms) = exp_time_ms {
+            if exp_time_ms.is_empty()
+                || !exp_time_ms.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(OkxError::Config(
+                    "expTime must be a Unix timestamp in milliseconds".to_owned(),
+                ));
+            }
+            request = request.header("expTime", exp_time_ms);
+        }
+
+        if self.environment.demo {
+            request = request.header("x-simulated-trading", "1");
+        }
+
+        decode_envelope(request.send().await?).await
+    }
 }
 
 #[derive(Clone)]
