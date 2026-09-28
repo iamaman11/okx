@@ -591,7 +591,6 @@ fn generation_for(snapshot: &AccountSnapshot) -> Result<String, AccountError> {
         private_ws_connected: bool,
         private_ws_generation: Option<u64>,
         private_ws_connection_fingerprint: Option<&'a str>,
-        private_ws_last_inbound_ms: Option<u64>,
         account_level: &'a str,
         position_mode: &'a str,
         account_type: &'a str,
@@ -609,7 +608,6 @@ fn generation_for(snapshot: &AccountSnapshot) -> Result<String, AccountError> {
         private_ws_connected: snapshot.private_ws_connected,
         private_ws_generation: snapshot.private_ws_generation,
         private_ws_connection_fingerprint: snapshot.private_ws_connection_fingerprint.as_deref(),
-        private_ws_last_inbound_ms: snapshot.private_ws_last_inbound_ms,
         account_level: &snapshot.account_level,
         position_mode: &snapshot.position_mode,
         account_type: &snapshot.account_type,
@@ -776,6 +774,36 @@ mod tests {
             .expect("converged");
 
         assert!(converged.pending_orders.is_empty());
+    }
+
+    #[test]
+    fn private_last_inbound_time_does_not_change_content_generation() {
+        let first = AccountSnapshot::from_rest_bootstrap(
+            "2026-09-27T15:00:00.000Z",
+            config(),
+            balance(),
+            Vec::new(),
+            Vec::new(),
+            vec!["read_only".to_owned()],
+        )
+        .expect("rest")
+        .converge_private_ws(1, "conn-fingerprint-a", 1790520000100, &[])
+        .expect("first");
+
+        let second = AccountSnapshot::from_rest_bootstrap(
+            "2026-09-27T15:00:01.000Z",
+            config(),
+            balance(),
+            Vec::new(),
+            Vec::new(),
+            vec!["read_only".to_owned()],
+        )
+        .expect("rest")
+        .converge_private_ws(1, "conn-fingerprint-a", 1790520009999, &[])
+        .expect("second");
+
+        assert_eq!(first.account_generation, second.account_generation);
+        assert_ne!(first.private_ws_last_inbound_ms, second.private_ws_last_inbound_ms);
     }
 
     #[test]
