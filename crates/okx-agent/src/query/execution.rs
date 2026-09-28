@@ -3,9 +3,8 @@ use okx_analysis::{
     analyze_candidate_order,
 };
 use okx_execution::{
-    ExecutionAction, ExecutionIntent, ExecutionTransitionError,
-    OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide,
-    TradeMode, prepare_execution, revalidate_execution_plan,
+    ExecutionAction, ExecutionIntent, ExecutionTransitionError, OrderExecutorError, OrderType,
+    PositionSide as ExecutionPositionSide, TradeMode, prepare_execution, revalidate_execution_plan,
 };
 use okx_protocol::{
     ExecutionOrderType, ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
@@ -29,7 +28,9 @@ pub(super) async fn dispatch(
     generated_at: &str,
 ) -> AgentResult<AgentResponse> {
     match &request.operation {
-        AgentOperation::ExecutorPreflight => executor_preflight(request, context, generated_at).await,
+        AgentOperation::ExecutorPreflight => {
+            executor_preflight(request, context, generated_at).await
+        }
         AgentOperation::PrepareOpenExecution {
             intent_id,
             instrument,
@@ -243,12 +244,9 @@ async fn submit_prepared(
         None
     };
 
-    if let Err(error) = revalidate_execution_plan(
-        &plan,
-        &rules,
-        &account,
-        current_fee_generation.as_deref(),
-    ) {
+    if let Err(error) =
+        revalidate_execution_plan(&plan, &rules, &account, current_fee_generation.as_deref())
+    {
         return Ok(validation_failure(request, generated_at, error));
     }
 
