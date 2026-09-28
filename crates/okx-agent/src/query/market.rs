@@ -6,7 +6,14 @@ struct MarketResearchResult {
     assembled_at: String,
     bar: String,
     history_limit: u16,
+    reference: MarketResearchReferenceProvenance,
     instruments: Vec<MarketResearchInstrumentResult>,
+}
+
+#[derive(serde::Serialize, PartialEq, Eq)]
+struct MarketResearchReferenceProvenance {
+    generation: String,
+    received_at: String,
 }
 
 #[derive(serde::Serialize)]
@@ -56,8 +63,6 @@ struct MarketResearchBehavior {
 
 #[derive(serde::Serialize)]
 struct MarketResearchProvenance {
-    reference_generation: String,
-    reference_received_at: String,
     market_generation: String,
     market_received_at: String,
     ticker_exchange_timestamp_ms: String,
@@ -71,7 +76,6 @@ struct MarketResearchProvenance {
 struct MarketResearchQuality {
     market: DataQuality,
     history: DataQuality,
-    overall: DataQuality,
 }
 
 #[derive(serde::Serialize)]
@@ -353,6 +357,7 @@ pub(super) async fn dispatch(
             let history_limit = limit.unwrap_or(100);
             let mut results = Vec::with_capacity(instruments.len());
             let mut response_quality = DataQuality::Fresh;
+            let mut shared_reference = None;
 
             for instrument in instruments {
                 let current =
@@ -387,6 +392,27 @@ pub(super) async fn dispatch(
                         ),
                         true,
                     ));
+                }
+
+                let reference = MarketResearchReferenceProvenance {
+                    generation: current.rules.reference_generation.clone(),
+                    received_at: current.rules.source_received_at.clone(),
+                };
+                match &shared_reference {
+                    Some(existing) if existing != &reference => {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            MARKET_RESEARCH_INCONSISTENT_CODE,
+                            format!(
+                                "reference provenance changed between instruments while assembling market research for '{instrument}'"
+                            ),
+                            true,
+                        ));
+                    }
+                    None => shared_reference = Some(reference),
+                    _ => {}
                 }
 
                 let history_behavior = match analyze_history_behavior(&history.snapshot) {
@@ -453,8 +479,6 @@ pub(super) async fn dispatch(
                             .clone(),
                     },
                     provenance: MarketResearchProvenance {
-                        reference_generation: current.rules.reference_generation.clone(),
-                        reference_received_at: current.rules.source_received_at.clone(),
                         market_generation: current.snapshot.market_generation.clone(),
                         market_received_at: current.snapshot.source_received_at.clone(),
                         ticker_exchange_timestamp_ms: current
@@ -474,7 +498,6 @@ pub(super) async fn dispatch(
                     quality: MarketResearchQuality {
                         market: current.quality,
                         history: history.quality,
-                        overall: quality,
                     },
                     diagnostics,
                 });
@@ -485,6 +508,8 @@ pub(super) async fn dispatch(
                 assembled_at: generated_at.to_owned(),
                 bar: bar.clone(),
                 history_limit,
+                reference: shared_reference
+                    .expect("MarketResearch validation requires at least two instruments"),
                 instruments: results,
             };
             Ok(AgentResponse {
@@ -658,10 +683,6 @@ mod tests {
                 confirmed_high_low_range_ratio: "0.2345".to_owned(),
             },
             provenance: MarketResearchProvenance {
-                reference_generation:
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        .to_owned(),
-                reference_received_at: "2026-09-28T00:00:00.000Z".to_owned(),
                 market_generation:
                     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         .to_owned(),
@@ -677,7 +698,6 @@ mod tests {
             quality: MarketResearchQuality {
                 market: DataQuality::Fresh,
                 history: DataQuality::Fresh,
-                overall: DataQuality::Fresh,
             },
             diagnostics: Vec::new(),
         }
@@ -689,9 +709,26 @@ mod tests {
             assembled_at: "2026-09-28T00:00:02.000Z".to_owned(),
             bar: "1H".to_owned(),
             history_limit: 100,
+            reference: MarketResearchReferenceProvenance {
+                generation:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                received_at: "2026-09-28T00:00:00.000Z".to_owned(),
+            },
             instruments: (0..instrument_count).map(fixture).collect(),
         };
-        serde_json::to_vec(&result).expect("serialize").len()
+        let response = AgentResponse {
+            schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+            request_id: "req_h1d_market_research_size_fixture".to_owned(),
+            status: AgentResponseStatus::Completed,
+            generated_at: "2026-09-28T00:00:02.000Z".to_owned(),
+            quality: DataQuality::Fresh,
+            result_schema: Some(MARKET_RESEARCH_SCHEMA_V2.to_owned()),
+            result: Some(serde_json::to_value(result).expect("serialize result")),
+            failure: None,
+            warnings: Vec::new(),
+        };
+        serde_json::to_vec(&response).expect("serialize").len()
     }
 
     #[test]
