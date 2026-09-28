@@ -102,7 +102,6 @@ fn evaluate_common(
         && observer_private_ws_converged
         && executor_permissions_exact
         && !executor_withdraw_permission
-        && executor_ip_bound
         && account_identity_match
         && futures_mode
         && long_short_mode
@@ -164,9 +163,9 @@ mod tests {
     }
 
     #[test]
-    fn accepted_requires_separate_read_only_observer_and_ip_bound_trade_executor() {
+    fn accepted_does_not_require_ip_binding() {
         let observer = config("sub-uid", "main-uid", "read_only", "");
-        let executor = config("sub-uid", "main-uid", "read_only,trade", "203.0.113.10");
+        let executor = config("sub-uid", "main-uid", "read_only,trade", "");
 
         let evidence = evaluate_executor_preflight(environment(), &observer, &executor);
 
@@ -176,7 +175,7 @@ mod tests {
         assert!(evidence.executor_read_permission);
         assert!(evidence.executor_trade_permission);
         assert!(!evidence.executor_withdraw_permission);
-        assert!(evidence.executor_ip_bound);
+        assert!(!evidence.executor_ip_bound);
         assert!(evidence.account_identity_match);
         assert!(evidence.futures_mode);
         assert!(evidence.long_short_mode);
@@ -250,12 +249,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_ip_or_trade_permission_fails_closed() {
+    fn missing_trade_permission_fails_closed_but_missing_ip_does_not() {
         let observer = config("sub-uid", "main-uid", "read_only", "");
         let no_ip = config("sub-uid", "main-uid", "read_only,trade", "");
-        let no_trade = config("sub-uid", "main-uid", "read_only", "203.0.113.10");
+        let no_trade = config("sub-uid", "main-uid", "read_only", "");
 
-        assert!(!evaluate_executor_preflight(environment(), &observer, &no_ip).accepted);
+        let no_ip_evidence = evaluate_executor_preflight(environment(), &observer, &no_ip);
+        assert!(no_ip_evidence.accepted);
+        assert!(!no_ip_evidence.executor_ip_bound);
+
         assert!(!evaluate_executor_preflight(environment(), &observer, &no_trade).accepted);
     }
 
