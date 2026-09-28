@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,17 @@ pub(crate) struct ApiEnvelope<T> {
     pub(crate) out_time: String,
 }
 
+const OKX_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const OKX_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn build_http_client() -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .user_agent("iamaman11-okx/0.1")
+        .connect_timeout(OKX_CONNECT_TIMEOUT)
+        .timeout(OKX_REQUEST_TIMEOUT)
+        .build()
+}
+
 #[derive(Clone)]
 pub struct OkxPublicClient {
     http: Client,
@@ -28,7 +41,7 @@ pub struct OkxPublicClient {
 
 impl OkxPublicClient {
     pub fn new(environment: OkxEnvironment) -> Result<Self, OkxError> {
-        let http = Client::builder().user_agent("iamaman11-okx/0.1").build()?;
+        let http = build_http_client()?;
         Ok(Self { http, environment })
     }
 
@@ -66,7 +79,7 @@ pub struct OkxRestClient {
 
 impl OkxRestClient {
     pub fn new(environment: OkxEnvironment, credentials: Credentials) -> Result<Self, OkxError> {
-        let http = Client::builder().user_agent("iamaman11-okx/0.1").build()?;
+        let http = build_http_client()?;
 
         Ok(Self {
             http,
