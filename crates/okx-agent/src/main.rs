@@ -12,7 +12,6 @@ use okx_agent::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
     config::{AgentConfig, default_root},
-    execution_preflight::probe_executor_credentials,
     execution_runtime::ExecutionRuntime,
     github_auth::{load_native_github_token, store_native_github_token},
     github_mailbox::GitHubMailboxClient,
@@ -71,9 +70,6 @@ enum Command {
 
     /// Store the separate Read + Trade OKX executor credential payload from stdin.
     SetExecutorOkxCredentials,
-
-    /// Probe executor permission/IP/account identity without mutating OKX state.
-    ExecutorPreflight,
 
     /// Process one encrypted mailbox envelope from a file or stdin.
     Once {
@@ -151,12 +147,6 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     "stored": true
                 })
             );
-        }
-        Command::ExecutorPreflight => {
-            let observer = load_native_okx_credentials()?;
-            let executor = load_native_executor_okx_credentials()?;
-            let evidence = probe_executor_credentials(environment, observer, executor).await?;
-            println!("{}", serde_json::to_string_pretty(&evidence)?);
         }
         Command::Once { input } => {
             let payload = read_input(input)?;
