@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{client::ApiEnvelope, error::OkxError, OkxRestClient};
+use crate::{OkxRestClient, client::ApiEnvelope, error::OkxError};
 
 const PLACE_ORDER_PATH: &str = "/api/v5/trade/order";
 const CANCEL_ORDER_PATH: &str = "/api/v5/trade/cancel-order";
