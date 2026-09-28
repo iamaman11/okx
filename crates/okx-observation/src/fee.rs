@@ -81,7 +81,6 @@ impl FeeScheduleSnapshot {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,18 +100,10 @@ mod tests {
 
     #[test]
     fn exchange_timestamp_does_not_change_fee_generation() {
-        let first = FeeScheduleSnapshot::from_input(input(
-            "1790630000000",
-            "-0.0002",
-            "-0.0005",
-        ))
-        .expect("first");
-        let second = FeeScheduleSnapshot::from_input(input(
-            "1790639999999",
-            "-0.0002",
-            "-0.0005",
-        ))
-        .expect("second");
+        let first = FeeScheduleSnapshot::from_input(input("1790630000000", "-0.0002", "-0.0005"))
+            .expect("first");
+        let second = FeeScheduleSnapshot::from_input(input("1790639999999", "-0.0002", "-0.0005"))
+            .expect("second");
 
         assert_eq!(first.fee_generation, second.fee_generation);
         assert_ne!(first.exchange_timestamp_ms, second.exchange_timestamp_ms);
@@ -120,18 +111,10 @@ mod tests {
 
     #[test]
     fn actual_fee_change_changes_fee_generation() {
-        let first = FeeScheduleSnapshot::from_input(input(
-            "1790630000000",
-            "-0.0002",
-            "-0.0005",
-        ))
-        .expect("first");
-        let second = FeeScheduleSnapshot::from_input(input(
-            "1790630000001",
-            "-0.0001",
-            "-0.0005",
-        ))
-        .expect("second");
+        let first = FeeScheduleSnapshot::from_input(input("1790630000000", "-0.0002", "-0.0005"))
+            .expect("first");
+        let second = FeeScheduleSnapshot::from_input(input("1790630000001", "-0.0001", "-0.0005"))
+            .expect("second");
 
         assert_ne!(first.fee_generation, second.fee_generation);
     }
