@@ -164,12 +164,7 @@ fn bounded_response_plaintext(
         return Ok(plaintext);
     }
 
-    let failure = response_too_large_response(
-        &response.request_id,
-        generated_at,
-        size,
-        budget,
-    );
+    let failure = response_too_large_response(&response.request_id, generated_at, size, budget);
     failure.validate()?;
     let failure_plaintext = serde_json::to_vec(&failure)?;
     let failure_size = response_size(
