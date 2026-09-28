@@ -59,17 +59,11 @@ pub(super) async fn dispatch(
                 FreshAccount::Ready(value) => value,
                 FreshAccount::Response(response) => return Ok(*response),
             };
-            let preflight = match executor_preflight_check(
-                request,
-                generated_at,
-                execution,
-                &account,
-            )
-            .await?
-            {
-                ExecutorPreflightCheck::Ready(value) => value,
-                ExecutorPreflightCheck::Response(response) => return Ok(*response),
-            };
+            let preflight =
+                match executor_preflight_check(request, generated_at, execution, &account).await? {
+                    ExecutorPreflightCheck::Ready(value) => value,
+                    ExecutorPreflightCheck::Response(response) => return Ok(*response),
+                };
             if !preflight.accepted {
                 return Ok(preflight_rejected(request, generated_at));
             }
@@ -147,17 +141,11 @@ pub(super) async fn dispatch(
                 FreshAccount::Ready(value) => value,
                 FreshAccount::Response(response) => return Ok(*response),
             };
-            let preflight = match executor_preflight_check(
-                request,
-                generated_at,
-                execution,
-                &account,
-            )
-            .await?
-            {
-                ExecutorPreflightCheck::Ready(value) => value,
-                ExecutorPreflightCheck::Response(response) => return Ok(*response),
-            };
+            let preflight =
+                match executor_preflight_check(request, generated_at, execution, &account).await? {
+                    ExecutorPreflightCheck::Ready(value) => value,
+                    ExecutorPreflightCheck::Response(response) => return Ok(*response),
+                };
             if !preflight.accepted {
                 return Ok(preflight_rejected(request, generated_at));
             }
