@@ -1,6 +1,7 @@
 pub mod account_bootstrap;
 pub mod config;
 pub mod execution_preflight;
+pub mod execution_runtime;
 pub mod github_auth;
 pub mod github_mailbox;
 pub mod identity;
@@ -95,6 +96,12 @@ pub enum AgentError {
 
     #[error("response budget invariant failed")]
     ResponseBudgetInvariant,
+
+    #[error("execution ledger error: {0}")]
+    ExecutionLedger(#[from] okx_execution::ExecutionLedgerError),
+
+    #[error("order executor error: {0}")]
+    OrderExecutor(#[from] okx_execution::OrderExecutorError),
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;
