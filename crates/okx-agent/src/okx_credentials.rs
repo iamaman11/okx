@@ -95,9 +95,7 @@ fn store_native_credentials(profile: CredentialProfile, payload: &str) -> AgentR
     {
         let entry = keyring::Entry::new(profile.service(), profile.account())
             .map_err(secret_store_error)?;
-        let encoded = Zeroizing::new(
-            serde_json::to_vec(&stored).map_err(|_| profile.invalid())?,
-        );
+        let encoded = Zeroizing::new(serde_json::to_vec(&stored).map_err(|_| profile.invalid())?);
         entry.set_secret(&encoded).map_err(secret_store_error)?;
         Ok(())
     }
@@ -138,10 +136,7 @@ fn load_native_credentials(profile: CredentialProfile) -> AgentResult<Credential
     }
 }
 
-fn validate_payload(
-    profile: CredentialProfile,
-    stored: &StoredOkxCredentials,
-) -> AgentResult<()> {
+fn validate_payload(profile: CredentialProfile, stored: &StoredOkxCredentials) -> AgentResult<()> {
     if stored.schema != profile.schema() {
         return Err(profile.invalid());
     }
@@ -169,8 +164,10 @@ mod tests {
         let observer = r#"{"schema":"okx.observer-credentials/v1","api_key":"key","secret_key":"secret","passphrase":"pass"}"#;
         let executor = r#"{"schema":"okx.executor-credentials/v1","api_key":"key","secret_key":"secret","passphrase":"pass"}"#;
 
-        let observer_stored: StoredOkxCredentials = serde_json::from_str(observer).expect("observer");
-        let executor_stored: StoredOkxCredentials = serde_json::from_str(executor).expect("executor");
+        let observer_stored: StoredOkxCredentials =
+            serde_json::from_str(observer).expect("observer");
+        let executor_stored: StoredOkxCredentials =
+            serde_json::from_str(executor).expect("executor");
 
         assert!(validate_payload(CredentialProfile::Observer, &observer_stored).is_ok());
         assert!(validate_payload(CredentialProfile::Executor, &executor_stored).is_ok());
@@ -192,8 +189,8 @@ mod tests {
             secret_key: "super-secret".to_owned(),
             passphrase: "super-pass".to_owned(),
         };
-        let error = validate_payload(CredentialProfile::Executor, &stored)
-            .expect_err("invalid schema");
+        let error =
+            validate_payload(CredentialProfile::Executor, &stored).expect_err("invalid schema");
         let message = error.to_string();
         assert!(!message.contains("super-secret"));
         assert!(!message.contains("super-pass"));
