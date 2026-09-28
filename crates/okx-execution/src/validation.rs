@@ -31,6 +31,18 @@ pub enum ExecutionValidationError {
     #[error("execution account UID fingerprint is missing")]
     MissingAccountIdentity,
 
+    #[error("execution account identity changed")]
+    AccountIdentityMismatch,
+
+    #[error("execution plan side does not match action/position side")]
+    PlanSideMismatch,
+
+    #[error("opening execution fee schedule changed")]
+    FeeGenerationMismatch,
+
+    #[error("opening execution requires current exact fee evidence")]
+    CurrentFeeEvidenceUnavailable,
+
     #[error("unsupported account level '{0}', expected Futures mode level 2")]
     UnsupportedAccountLevel(String),
 
@@ -99,74 +111,15 @@ pub fn prepare_execution(
         return Err(ExecutionValidationError::InvalidIntentId);
     }
 
-    if intent.instrument_id != rules.instrument.instrument_id {
-        return Err(ExecutionValidationError::InstrumentMismatch);
-    }
-    if intent.expected_reference_generation != rules.reference_generation {
-        return Err(ExecutionValidationError::ReferenceGenerationMismatch);
-    }
-    if intent.expected_account_generation != account.account_generation {
-        return Err(ExecutionValidationError::AccountGenerationMismatch);
-    }
-    if account.schema != ACCOUNT_SNAPSHOT_SCHEMA_V2 || !account.private_ws_connected {
-        return Err(ExecutionValidationError::AccountNotConverged);
-    }
-    if account.account_uid_fingerprint.trim().is_empty() {
-        return Err(ExecutionValidationError::MissingAccountIdentity);
-    }
-    if account.account_level != "2" {
-        return Err(ExecutionValidationError::UnsupportedAccountLevel(
-            account.account_level.clone(),
-        ));
-    }
-    if account.position_mode != "long_short_mode" {
-        return Err(ExecutionValidationError::UnsupportedPositionMode(
-            account.position_mode.clone(),
-        ));
-    }
-    if rules.instrument.state != "live" {
-        return Err(ExecutionValidationError::InstrumentNotLive(
-            rules.instrument.instrument_id.clone(),
-        ));
-    }
-
-    let size = positive_decimal("size", &intent.size)?;
-    let lot_size = positive_decimal("lot_size", &rules.instrument.lot_size)?;
-    let min_size = positive_decimal("min_size", &rules.instrument.min_size)?;
-    if size < min_size {
-        return Err(ExecutionValidationError::BelowMinimumSize {
-            size: normalized(size),
-            min_size: normalized(min_size),
-        });
-    }
-    if size % lot_size != Decimal::ZERO {
-        return Err(ExecutionValidationError::SizeNotLotAligned {
-            size: normalized(size),
-            lot_size: normalized(lot_size),
-        });
-    }
-
-    let max_size_text = rules
-        .instrument
-        .max_limit_size
-        .as_deref()
-        .ok_or(ExecutionValidationError::MissingMaximumSize)?;
-    let max_size = positive_decimal("max_limit_size", max_size_text)?;
-    if size > max_size {
-        return Err(ExecutionValidationError::ExceedsMaximumSize {
-            size: normalized(size),
-            max_size: normalized(max_size),
-        });
-    }
-
-    let price = positive_decimal("price", &intent.price)?;
-    let tick_size = positive_decimal("tick_size", &rules.instrument.tick_size)?;
-    if price % tick_size != Decimal::ZERO {
-        return Err(ExecutionValidationError::PriceNotTickAligned {
-            price: normalized(price),
-            tick_size: normalized(tick_size),
-        });
-    }
+    validate_current_authorities(
+        &intent.instrument_id,
+        &intent.expected_reference_generation,
+        &intent.expected_account_generation,
+        None,
+        rules,
+        account,
+    )?;
+    let (size, price) = validate_order_mechanics(&intent.size, &intent.price, rules)?;
 
     let side = order_side(intent.action, intent.position_side);
     let open_risk = match intent.action {
@@ -203,6 +156,155 @@ pub fn prepare_execution(
         price: normalized(price),
         open_risk,
     })
+}
+
+pub fn revalidate_execution_plan(
+    plan: &ExecutionPlan,
+    rules: &InstrumentRulesSnapshot,
+    account: &AccountSnapshot,
+    current_fee_generation: Option<&str>,
+) -> Result<(), ExecutionValidationError> {
+    validate_current_authorities(
+        &plan.instrument_id,
+        &plan.reference_generation,
+        &plan.account_generation,
+        Some(&plan.account_uid_fingerprint),
+        rules,
+        account,
+    )?;
+
+    if plan.side != order_side(plan.action, plan.position_side) {
+        return Err(ExecutionValidationError::PlanSideMismatch);
+    }
+
+    let (size, _) = validate_order_mechanics(&plan.size, &plan.price, rules)?;
+
+    match plan.action {
+        ExecutionAction::Open => {
+            let evidence = plan
+                .open_risk
+                .as_ref()
+                .ok_or(ExecutionValidationError::MissingOpenRiskEvidence)?;
+            let current_fee_generation = current_fee_generation
+                .filter(|value| !value.trim().is_empty())
+                .ok_or(ExecutionValidationError::CurrentFeeEvidenceUnavailable)?;
+            if evidence.fee_generation != current_fee_generation {
+                return Err(ExecutionValidationError::FeeGenerationMismatch);
+            }
+        }
+        ExecutionAction::Close => {
+            if plan.open_risk.is_some() {
+                return Err(ExecutionValidationError::UnexpectedOpenRiskEvidence);
+            }
+            let intent = ExecutionIntent {
+                intent_id: plan.intent_id.clone(),
+                expected_reference_generation: plan.reference_generation.clone(),
+                expected_account_generation: plan.account_generation.clone(),
+                instrument_id: plan.instrument_id.clone(),
+                trade_mode: plan.trade_mode,
+                position_side: plan.position_side,
+                action: plan.action,
+                order_type: plan.order_type,
+                size: plan.size.clone(),
+                price: plan.price.clone(),
+            };
+            validate_close_capacity(&intent, account, size, plan.side)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_current_authorities(
+    instrument_id: &str,
+    expected_reference_generation: &str,
+    expected_account_generation: &str,
+    expected_account_uid_fingerprint: Option<&str>,
+    rules: &InstrumentRulesSnapshot,
+    account: &AccountSnapshot,
+) -> Result<(), ExecutionValidationError> {
+    if instrument_id != rules.instrument.instrument_id {
+        return Err(ExecutionValidationError::InstrumentMismatch);
+    }
+    if expected_reference_generation != rules.reference_generation {
+        return Err(ExecutionValidationError::ReferenceGenerationMismatch);
+    }
+    if expected_account_generation != account.account_generation {
+        return Err(ExecutionValidationError::AccountGenerationMismatch);
+    }
+    if account.schema != ACCOUNT_SNAPSHOT_SCHEMA_V2 || !account.private_ws_connected {
+        return Err(ExecutionValidationError::AccountNotConverged);
+    }
+    if account.account_uid_fingerprint.trim().is_empty() {
+        return Err(ExecutionValidationError::MissingAccountIdentity);
+    }
+    if let Some(expected) = expected_account_uid_fingerprint
+        && expected != account.account_uid_fingerprint
+    {
+        return Err(ExecutionValidationError::AccountIdentityMismatch);
+    }
+    if account.account_level != "2" {
+        return Err(ExecutionValidationError::UnsupportedAccountLevel(
+            account.account_level.clone(),
+        ));
+    }
+    if account.position_mode != "long_short_mode" {
+        return Err(ExecutionValidationError::UnsupportedPositionMode(
+            account.position_mode.clone(),
+        ));
+    }
+    if rules.instrument.state != "live" {
+        return Err(ExecutionValidationError::InstrumentNotLive(
+            rules.instrument.instrument_id.clone(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_order_mechanics(
+    size_text: &str,
+    price_text: &str,
+    rules: &InstrumentRulesSnapshot,
+) -> Result<(Decimal, Decimal), ExecutionValidationError> {
+    let size = positive_decimal("size", size_text)?;
+    let lot_size = positive_decimal("lot_size", &rules.instrument.lot_size)?;
+    let min_size = positive_decimal("min_size", &rules.instrument.min_size)?;
+    if size < min_size {
+        return Err(ExecutionValidationError::BelowMinimumSize {
+            size: normalized(size),
+            min_size: normalized(min_size),
+        });
+    }
+    if size % lot_size != Decimal::ZERO {
+        return Err(ExecutionValidationError::SizeNotLotAligned {
+            size: normalized(size),
+            lot_size: normalized(lot_size),
+        });
+    }
+
+    let max_size_text = rules
+        .instrument
+        .max_limit_size
+        .as_deref()
+        .ok_or(ExecutionValidationError::MissingMaximumSize)?;
+    let max_size = positive_decimal("max_limit_size", max_size_text)?;
+    if size > max_size {
+        return Err(ExecutionValidationError::ExceedsMaximumSize {
+            size: normalized(size),
+            max_size: normalized(max_size),
+        });
+    }
+
+    let price = positive_decimal("price", price_text)?;
+    let tick_size = positive_decimal("tick_size", &rules.instrument.tick_size)?;
+    if price % tick_size != Decimal::ZERO {
+        return Err(ExecutionValidationError::PriceNotTickAligned {
+            price: normalized(price),
+            tick_size: normalized(tick_size),
+        });
+    }
+
+    Ok((size, price))
 }
 
 fn validate_candidate(
@@ -634,6 +736,41 @@ mod tests {
                 requested: "3.51".to_owned(),
                 available: "3.5".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn prepared_plan_revalidation_rejects_generation_identity_and_fee_changes() {
+        let rules = rules();
+        let account = account();
+        let candidate = open_candidate(&rules, PositionDirection::Long);
+        let intent = open_intent(&rules, &account, &candidate, PositionSide::Long);
+        let plan = prepare_execution(&intent, &rules, &account, Some(&candidate))
+            .expect("execution plan");
+
+        revalidate_execution_plan(
+            &plan,
+            &rules,
+            &account,
+            Some(&candidate.fee_generation),
+        )
+        .expect("fresh plan");
+
+        let mut changed_account = account.clone();
+        changed_account.account_uid_fingerprint = "different".to_owned();
+        assert_eq!(
+            revalidate_execution_plan(
+                &plan,
+                &rules,
+                &changed_account,
+                Some(&candidate.fee_generation),
+            ),
+            Err(ExecutionValidationError::AccountIdentityMismatch)
+        );
+
+        assert_eq!(
+            revalidate_execution_plan(&plan, &rules, &account, Some("changed-fee-generation")),
+            Err(ExecutionValidationError::FeeGenerationMismatch)
         );
     }
 
