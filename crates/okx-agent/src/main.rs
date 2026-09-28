@@ -26,6 +26,8 @@ use okx_protocol::MailboxEnvelope;
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator};
 use zeroize::Zeroize;
 
+const DEFAULT_DATA_POLL_SECONDS: u64 = 2;
+
 #[derive(Debug, Parser)]
 #[command(name = "okx-agent")]
 #[command(about = "Native long-lived OKX observation agent runtime")]
@@ -71,7 +73,7 @@ enum Command {
         #[arg(long)]
         mailbox_issue: Option<u64>,
 
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = DEFAULT_DATA_POLL_SECONDS)]
         poll_seconds: u64,
     },
 }
