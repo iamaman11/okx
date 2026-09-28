@@ -5,12 +5,15 @@ use std::{
     str::FromStr,
 };
 
+use chrono::Utc;
+
 use clap::{Parser, Subcommand};
 use okx_agent::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
     config::{AgentConfig, default_root},
     execution_preflight::probe_executor_credentials,
+    execution_runtime::ExecutionRuntime,
     github_auth::{load_native_github_token, store_native_github_token},
     github_mailbox::GitHubMailboxClient,
     identity::{
@@ -197,6 +200,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     optional_private_components(environment);
                 let (public_ws_coordinator, public_ws) =
                     PublicWsCoordinator::new(environment, reference);
+                let execution = optional_execution_runtime(&config, environment);
                 let mut private_key = load_native_private_key(&config.key_id)?;
                 let result = run_mailbox_until_shutdown(
                     MailboxRuntimeContext {
@@ -209,6 +213,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                         market: &market,
                         account: account.as_ref(),
                         private_ws: private_ws.as_ref(),
+                        execution: execution.as_ref(),
                     },
                     public_ws_coordinator,
                     private_ws_coordinator,
@@ -224,6 +229,32 @@ async fn run(cli: Cli) -> AgentResult<()> {
     }
 
     Ok(())
+}
+
+fn optional_execution_runtime(
+    config: &AgentConfig,
+    environment: OkxEnvironment,
+) -> Option<ExecutionRuntime> {
+    let credentials = match load_native_executor_okx_credentials() {
+        Ok(value) => value,
+        Err(AgentError::ExecutorOkxCredentialsNotFound) => {
+            eprintln!("OKX executor credential not provisioned; execution operations are NOT_READY");
+            return None;
+        }
+        Err(error) => {
+            eprintln!("OKX executor credential unavailable: {error}");
+            return None;
+        }
+    };
+
+    let observed_at_ms = Utc::now().timestamp_millis().max(1) as u64;
+    match ExecutionRuntime::new(&config.root, environment, credentials, observed_at_ms) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            eprintln!("execution runtime unavailable: {error}");
+            None
+        }
+    }
 }
 
 fn optional_private_components(
