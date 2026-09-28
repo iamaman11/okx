@@ -62,7 +62,6 @@ struct MarketResearchBehavior {
 struct MarketResearchProvenance {
     market_generation: String,
     market_received_at: String,
-    ticker_exchange_timestamp_ms: String,
     history_generation: String,
     history_oldest_confirmed_open_time_ms: String,
     history_newest_confirmed_open_time_ms: String,
@@ -472,11 +471,6 @@ pub(super) async fn dispatch(
                     provenance: MarketResearchProvenance {
                         market_generation: current.snapshot.market_generation.clone(),
                         market_received_at: current.snapshot.source_received_at.clone(),
-                        ticker_exchange_timestamp_ms: current
-                            .snapshot
-                            .ticker
-                            .exchange_timestamp_ms
-                            .clone(),
                         history_generation: history_behavior.history_generation.clone(),
                         history_oldest_confirmed_open_time_ms: history_behavior
                             .oldest_confirmed_open_time_ms
@@ -675,7 +669,6 @@ mod tests {
                     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         .to_owned(),
                 market_received_at: "2026-09-28T00:00:01.000Z".to_owned(),
-                ticker_exchange_timestamp_ms: "1790553601000".to_owned(),
                 history_generation:
                     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                         .to_owned(),
@@ -738,6 +731,10 @@ mod tests {
         assert!(
             eight <= 12 * 1024,
             "eight-instrument projection is {eight} bytes"
+        );
+        assert!(
+            eight <= 12 * 1024 - 512,
+            "eight-instrument conservative fixture leaves less than 512 bytes of headroom: {eight} bytes"
         );
     }
 
