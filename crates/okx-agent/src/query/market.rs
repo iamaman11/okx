@@ -13,7 +13,6 @@ struct MarketResearchResult {
 #[derive(serde::Serialize, PartialEq, Eq)]
 struct MarketResearchReferenceProvenance {
     generation: String,
-    received_at: String,
 }
 
 #[derive(serde::Serialize)]
@@ -30,7 +29,6 @@ struct MarketResearchInstrumentResult {
 #[derive(serde::Serialize)]
 struct MarketResearchMechanics {
     instrument_type: okx_api::InstrumentType,
-    contract_type: Option<String>,
     contract_value: Option<String>,
     contract_value_currency: Option<String>,
     settle_currency: Option<String>,
@@ -53,18 +51,15 @@ struct MarketResearchMarket {
 #[derive(serde::Serialize)]
 struct MarketResearchBehavior {
     confirmed_count: usize,
-    excluded_unconfirmed_count: usize,
     total_close_return_ratio: String,
     mean_absolute_close_return_ratio: String,
     max_absolute_close_return_ratio: String,
     max_close_drawdown_ratio: String,
-    confirmed_high_low_range_ratio: String,
 }
 
 #[derive(serde::Serialize)]
 struct MarketResearchProvenance {
     market_generation: String,
-    market_received_at: String,
     ticker_exchange_timestamp_ms: String,
     history_generation: String,
     history_oldest_confirmed_open_time_ms: String,
@@ -396,7 +391,6 @@ pub(super) async fn dispatch(
 
                 let reference = MarketResearchReferenceProvenance {
                     generation: current.rules.reference_generation.clone(),
-                    received_at: current.rules.source_received_at.clone(),
                 };
                 match &shared_reference {
                     Some(existing) if existing != &reference => {
@@ -436,7 +430,6 @@ pub(super) async fn dispatch(
                     instrument_id: instrument.clone(),
                     mechanics: MarketResearchMechanics {
                         instrument_type: current.rules.instrument.instrument_type,
-                        contract_type: current.rules.instrument.contract_type.clone(),
                         contract_value: current.rules.instrument.contract_value.clone(),
                         contract_value_currency: current
                             .rules
@@ -465,7 +458,6 @@ pub(super) async fn dispatch(
                     },
                     behavior: MarketResearchBehavior {
                         confirmed_count: history_behavior.confirmed_candle_count,
-                        excluded_unconfirmed_count: history_behavior.excluded_unconfirmed_count,
                         total_close_return_ratio: history_behavior.total_close_return_ratio.clone(),
                         mean_absolute_close_return_ratio: history_behavior
                             .mean_absolute_close_return_ratio
@@ -474,13 +466,9 @@ pub(super) async fn dispatch(
                             .max_absolute_close_return_ratio
                             .clone(),
                         max_close_drawdown_ratio: history_behavior.max_close_drawdown_ratio.clone(),
-                        confirmed_high_low_range_ratio: history_behavior
-                            .confirmed_high_low_range_ratio
-                            .clone(),
                     },
                     provenance: MarketResearchProvenance {
                         market_generation: current.snapshot.market_generation.clone(),
-                        market_received_at: current.snapshot.source_received_at.clone(),
                         ticker_exchange_timestamp_ms: current
                             .snapshot
                             .ticker
@@ -651,42 +639,38 @@ mod tests {
     use super::*;
 
     fn fixture(index: usize) -> MarketResearchInstrumentResult {
-        let instrument_id = format!("ASSET{index}-USDT-SWAP");
+        let instrument_id = format!("ASSET{index:02}-USDT-SWAP");
         MarketResearchInstrumentResult {
             instrument_id,
             mechanics: MarketResearchMechanics {
                 instrument_type: okx_api::InstrumentType::Swap,
-                contract_type: Some("linear".to_owned()),
-                contract_value: Some("100".to_owned()),
+                contract_value: Some("0.00000001".to_owned()),
                 contract_value_currency: Some("ASSET".to_owned()),
                 settle_currency: Some("USDT".to_owned()),
                 expiry_time_ms: None,
                 funding_semantics: "required",
             },
             market: MarketResearchMarket {
-                bid: "0.123456".to_owned(),
-                ask: "0.123457".to_owned(),
-                last: "0.123456".to_owned(),
-                mark: "0.123455".to_owned(),
-                index: "0.123450".to_owned(),
-                funding_rate: Some("0.0001".to_owned()),
-                open_interest_contracts: "1234567".to_owned(),
-                open_interest_usd: Some("15234567.89".to_owned()),
+                bid: "12345.12345678901234".to_owned(),
+                ask: "12345.12345678901235".to_owned(),
+                last: "12345.12345678901234".to_owned(),
+                mark: "12345.12345678901233".to_owned(),
+                index: "12345.12345678901230".to_owned(),
+                funding_rate: Some("0.000123456789012345".to_owned()),
+                open_interest_contracts: "1234567890123456789".to_owned(),
+                open_interest_usd: Some("1234567890123456789012345".to_owned()),
             },
             behavior: MarketResearchBehavior {
                 confirmed_count: 100,
-                excluded_unconfirmed_count: 0,
-                total_close_return_ratio: "0.1234".to_owned(),
-                mean_absolute_close_return_ratio: "0.0123".to_owned(),
-                max_absolute_close_return_ratio: "0.0456".to_owned(),
-                max_close_drawdown_ratio: "0.0789".to_owned(),
-                confirmed_high_low_range_ratio: "0.2345".to_owned(),
+                total_close_return_ratio: "0.123456789012345678901234567890".to_owned(),
+                mean_absolute_close_return_ratio: "0.012345678901234567890123456789".to_owned(),
+                max_absolute_close_return_ratio: "0.045678901234567890123456789012".to_owned(),
+                max_close_drawdown_ratio: "0.078901234567890123456789012345".to_owned(),
             },
             provenance: MarketResearchProvenance {
                 market_generation:
                     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         .to_owned(),
-                market_received_at: "2026-09-28T00:00:01.000Z".to_owned(),
                 ticker_exchange_timestamp_ms: "1790553601000".to_owned(),
                 history_generation:
                     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -699,7 +683,16 @@ mod tests {
                 market: DataQuality::Fresh,
                 history: DataQuality::Fresh,
             },
-            diagnostics: Vec::new(),
+            diagnostics: vec![
+                MarketResearchDiagnostic {
+                    code: "REST_FALLBACK",
+                    component: "market",
+                },
+                MarketResearchDiagnostic {
+                    code: "UNCONFIRMED_LAST_CANDLE",
+                    component: "history",
+                },
+            ],
         }
     }
 
@@ -713,13 +706,12 @@ mod tests {
                 generation:
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_owned(),
-                received_at: "2026-09-28T00:00:00.000Z".to_owned(),
             },
             instruments: (0..instrument_count).map(fixture).collect(),
         };
         let response = AgentResponse {
             schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-            request_id: "req_h1d_market_research_size_fixture".to_owned(),
+            request_id: "req_h1d_market_research_size_fixture_20260928a".to_owned(),
             status: AgentResponseStatus::Completed,
             generated_at: "2026-09-28T00:00:02.000Z".to_owned(),
             quality: DataQuality::Fresh,
