@@ -7,8 +7,7 @@ use thiserror::Error;
 
 use crate::{
     EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionPlan, OpenRiskEvidence,
-    OrderSide, PositionSide, derive_client_order_id,
-    model::order_side,
+    OrderSide, PositionSide, derive_client_order_id, model::order_side,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -341,10 +340,7 @@ fn decimal(field: &'static str, value: &str) -> Result<Decimal, ExecutionValidat
     })
 }
 
-fn positive_decimal(
-    field: &'static str,
-    value: &str,
-) -> Result<Decimal, ExecutionValidationError> {
+fn positive_decimal(field: &'static str, value: &str) -> Result<Decimal, ExecutionValidationError> {
     let value = decimal(field, value)?;
     if value <= Decimal::ZERO {
         Err(ExecutionValidationError::NonPositive(field))
