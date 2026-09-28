@@ -732,6 +732,15 @@ mod tests {
         };
         submit.validate().expect("valid submit request");
 
+        let status = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_status_0123456789".to_owned(),
+            operation: AgentOperation::ExecutionStatus {
+                intent_id: "intent_open_0123456789".to_owned(),
+            },
+        };
+        status.validate().expect("valid execution status request");
+
         let invalid = AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_invalid_exec_012345".to_owned(),
