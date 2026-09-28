@@ -803,7 +803,10 @@ mod tests {
         .expect("second");
 
         assert_eq!(first.account_generation, second.account_generation);
-        assert_ne!(first.private_ws_last_inbound_ms, second.private_ws_last_inbound_ms);
+        assert_ne!(
+            first.private_ws_last_inbound_ms,
+            second.private_ws_last_inbound_ms
+        );
     }
 
     #[test]
