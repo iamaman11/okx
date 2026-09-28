@@ -4,6 +4,7 @@ pub mod github_auth;
 pub mod github_mailbox;
 pub mod identity;
 pub mod market_bootstrap;
+pub mod execution_preflight;
 pub mod okx_credentials;
 pub mod once;
 mod query;
@@ -79,6 +80,12 @@ pub enum AgentError {
 
     #[error("stored OKX observer credential payload is invalid")]
     InvalidOkxCredentials,
+
+    #[error("OKX executor credential was not found in native secret storage")]
+    ExecutorOkxCredentialsNotFound,
+
+    #[error("stored OKX executor credential payload is invalid")]
+    InvalidExecutorOkxCredentials,
 
     #[error("mailbox issue number must be non-zero")]
     InvalidMailboxIssue,
