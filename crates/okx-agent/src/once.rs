@@ -168,7 +168,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         | AgentOperation::AnalyzeCandidateOrder { .. } => STANDARD_RESPONSE_PLAINTEXT_BYTES,
         AgentOperation::MarketHistory { .. }
         | AgentOperation::FindInstruments { .. }
-        | AgentOperation::AccountSnapshot => LARGE_RESPONSE_PLAINTEXT_BYTES
+        | AgentOperation::AccountSnapshot => LARGE_RESPONSE_PLAINTEXT_BYTES,
     };
     debug_assert!(plaintext_bytes <= GLOBAL_RESPONSE_PLAINTEXT_BYTES);
     ResponseBudget { plaintext_bytes }
@@ -190,9 +190,7 @@ fn bounded_response_plaintext(
         response_nonce,
         plaintext.len(),
     )?;
-    let effective_budget = budget
-        .plaintext_bytes
-        .min(GLOBAL_RESPONSE_PLAINTEXT_BYTES);
+    let effective_budget = budget.plaintext_bytes.min(GLOBAL_RESPONSE_PLAINTEXT_BYTES);
     let within_budget = response_size_within_budget(size, budget);
     let telemetry = ResponseSizeTelemetry {
         plaintext_bytes: u64::try_from(size.plaintext_bytes)
@@ -641,13 +639,8 @@ mod tests {
         let request = sizing_envelope(request_id);
         let response_nonce = [11_u8; 12];
         let plaintext = vec![b'x'; 10_535];
-        let predicted = response_size(
-            &request,
-            "agent-key-1",
-            response_nonce,
-            plaintext.len(),
-        )
-        .expect("predicted size");
+        let predicted = response_size(&request, "agent-key-1", response_nonce, plaintext.len())
+            .expect("predicted size");
 
         let mut response = MailboxEnvelope {
             schema: MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
@@ -710,12 +703,7 @@ mod tests {
         assert!(!failure.retryable);
         assert!(bounded.bytes.len() < COMPACT_RESPONSE_PLAINTEXT_BYTES);
 
-        let size = response_size(
-            &envelope,
-            "agent-key-1",
-            [10_u8; 12],
-            bounded.bytes.len(),
-        )
+        let size = response_size(&envelope, "agent-key-1", [10_u8; 12], bounded.bytes.len())
             .expect("failure size");
         assert!(size.predicted_comment_bytes < MAX_COMMENT_BODY_BYTES);
     }
