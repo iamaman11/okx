@@ -32,6 +32,7 @@ struct MarketResearchMechanics {
     contract_value: Option<String>,
     contract_value_currency: Option<String>,
     settle_currency: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     expiry_time_ms: Option<String>,
     funding_semantics: &'static str,
 }
@@ -60,6 +61,7 @@ struct MarketResearchBehavior {
 #[derive(serde::Serialize)]
 struct MarketResearchProvenance {
     market_generation: String,
+    market_received_at: String,
     ticker_exchange_timestamp_ms: String,
     history_generation: String,
     history_oldest_confirmed_open_time_ms: String,
@@ -469,6 +471,7 @@ pub(super) async fn dispatch(
                     },
                     provenance: MarketResearchProvenance {
                         market_generation: current.snapshot.market_generation.clone(),
+                        market_received_at: current.snapshot.source_received_at.clone(),
                         ticker_exchange_timestamp_ms: current
                             .snapshot
                             .ticker
@@ -671,6 +674,7 @@ mod tests {
                 market_generation:
                     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         .to_owned(),
+                market_received_at: "2026-09-28T00:00:01.000Z".to_owned(),
                 ticker_exchange_timestamp_ms: "1790553601000".to_owned(),
                 history_generation:
                     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -680,8 +684,8 @@ mod tests {
                 market_source: "websocket",
             },
             quality: MarketResearchQuality {
-                market: DataQuality::Fresh,
-                history: DataQuality::Fresh,
+                market: DataQuality::Degraded,
+                history: DataQuality::Degraded,
             },
             diagnostics: vec![
                 MarketResearchDiagnostic {
@@ -714,7 +718,7 @@ mod tests {
             request_id: "req_h1d_market_research_size_fixture_20260928a".to_owned(),
             status: AgentResponseStatus::Completed,
             generated_at: "2026-09-28T00:00:02.000Z".to_owned(),
-            quality: DataQuality::Fresh,
+            quality: DataQuality::Degraded,
             result_schema: Some(MARKET_RESEARCH_SCHEMA_V2.to_owned()),
             result: Some(serde_json::to_value(result).expect("serialize result")),
             failure: None,
