@@ -60,9 +60,21 @@ jobs:
 
           successful_pr_ci="$(gh api             --method GET             -H "Accept: application/vnd.github+json"             "/repos/$GITHUB_REPOSITORY/actions/runs"             -f head_sha="$head_sha"             -f event="pull_request"             -f status="completed"             -f per_page=100             --jq '[.workflow_runs[] | select(.name == "CI" and .conclusion == "success")] | length')"
 
-          if [[ "$successful_pr_ci" -gt 0 ]]; then
+          merge_tree="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" \
+            --jq '.tree.sha')"
+          head_tree="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/$GITHUB_REPOSITORY/git/commits/$head_sha" \
+            --jq '.tree.sha')"
+
+          if [[ "$successful_pr_ci" -gt 0 && "$merge_tree" == "$head_tree" ]]; then
             echo "build_required=false" >> "$GITHUB_OUTPUT"
-            echo "reason=merged PR head already passed CI" >> "$GITHUB_OUTPUT"
+            echo "reason=merged tree exactly matches successful PR head tree" >> "$GITHUB_OUTPUT"
+          elif [[ "$successful_pr_ci" -gt 0 ]]; then
+            echo "build_required=true" >> "$GITHUB_OUTPUT"
+            echo "reason=merge tree differs from successful PR head tree" >> "$GITHUB_OUTPUT"
           else
             echo "build_required=true" >> "$GITHUB_OUTPUT"
             echo "reason=no successful PR CI found for merged head" >> "$GITHUB_OUTPUT"
