@@ -107,6 +107,10 @@ where
         &self.ledger
     }
 
+    pub const fn live_trading_enabled(&self) -> bool {
+        self.live_trading_enabled
+    }
+
     pub fn prepare(
         &mut self,
         plan: ExecutionPlan,
