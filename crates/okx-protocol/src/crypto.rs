@@ -33,7 +33,6 @@ pub enum CryptoError {
     Decrypt,
 }
 
-
 #[derive(Debug, Error)]
 pub enum ClientEnvelopePreflightError {
     #[error("protocol error: {0}")]
@@ -333,13 +332,8 @@ mod tests {
         envelope.ciphertext =
             STANDARD.encode(encrypt(&key, &nonce, aad.as_bytes(), &plaintext).expect("encrypt"));
 
-        preflight_client_request_envelope(
-            &envelope,
-            &request,
-            client_private,
-            agent_public,
-        )
-        .expect("preflight");
+        preflight_client_request_envelope(&envelope, &request, client_private, agent_public)
+            .expect("preflight");
     }
 
     #[test]
@@ -363,12 +357,7 @@ mod tests {
         };
 
         assert!(matches!(
-            preflight_client_request_envelope(
-                &envelope,
-                &request,
-                client_private,
-                [9_u8; 32],
-            ),
+            preflight_client_request_envelope(&envelope, &request, client_private, [9_u8; 32],),
             Err(ClientEnvelopePreflightError::Base64(_))
         ));
     }
@@ -394,12 +383,7 @@ mod tests {
         };
 
         assert!(matches!(
-            preflight_client_request_envelope(
-                &envelope,
-                &request,
-                client_private,
-                [9_u8; 32],
-            ),
+            preflight_client_request_envelope(&envelope, &request, client_private, [9_u8; 32],),
             Err(ClientEnvelopePreflightError::RequestIdMismatch)
         ));
     }
