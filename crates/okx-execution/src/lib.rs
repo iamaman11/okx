@@ -1,9 +1,14 @@
+mod contract;
 mod executor;
 mod ledger;
 mod model;
 mod state;
 mod validation;
 
+pub use contract::{
+    EXECUTION_STATUS_SCHEMA_V1, ExecutionStatusSnapshot, PrepareFailure, PrepareOutcome,
+    PrepareRejection, classify_prepare_result, execution_status,
+};
 pub use executor::{
     ExecutionGateway, OrderExecutor, OrderExecutorError, ReconcileDisposition, SubmitDisposition,
 };
