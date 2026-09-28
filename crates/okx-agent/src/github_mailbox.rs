@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 use crate::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
+    execution_runtime::ExecutionRuntime,
     identity::AgentIdentity,
     market_bootstrap::MarketBootstrapper,
     once::{ObservationQueryContext, process_once_now_with_size_telemetry},
@@ -89,6 +90,7 @@ impl GitHubMailboxClient {
         market: &MarketBootstrapper,
         account: Option<&AccountBootstrapper>,
         private_ws: Option<&PrivateWsHandle>,
+        execution: Option<&ExecutionRuntime>,
     ) -> AgentResult<usize> {
         let mut checkpoint = self.load_checkpoint_for_poll()?;
         let fetch_started = Instant::now();
@@ -161,12 +163,13 @@ impl GitHubMailboxClient {
                 &envelope,
                 expected_key_id,
                 agent_private_key,
-                ObservationQueryContext::live_with_private(
+                ObservationQueryContext::live_with_execution(
                     public_ws,
                     market,
                     mailbox_telemetry.as_ref(),
                     account,
                     private_ws,
+                    execution,
                 ),
             )
             .await
