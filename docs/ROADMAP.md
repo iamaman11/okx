@@ -80,12 +80,14 @@ Accepted Phase-2 foundation and pre-enable runtime:
 - #104 semantic account generation for pre-send revalidation — PASS;
 - #105 semantic fee-condition generation for pre-send revalidation — PASS;
 - #106 deterministic prepare conflicts terminalized instead of holding the DATA cursor — PASS;
+- #107 OKX public/private REST connect/request deadlines bounded so one external call cannot hold the DATA cursor forever — PASS;
 - executor credential is independently verified by OKX as Read+Trade, no Withdraw, matching intended subaccount/mode;
 - production OrderExecutor remains hard-disabled before SUBMITTING and before exchange mutation.
 
 Current consolidation gate:
 
 - centralize prepare-domain classification in okx-execution so deterministic outcomes cannot leak into generic AgentError;
+- terminalize executor-preflight OKX/API unavailability as retryable DATA failure instead of internal cursor blockage;
 - expose encrypted read-only ExecutionStatus by intent_id so ledger diagnosis is remotely observable;
 - prove replay/restart/idempotency matrix, including PREPARED persistence and SUBMITTING -> UNKNOWN_SUBMISSION recovery;
 - deploy one exact artifact and close physical pre-enable acceptance.
