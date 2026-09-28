@@ -15,6 +15,7 @@ use crate::{
     autostart,
     desired::{AgentDesired, DesiredStateStore},
     job::AgentJob,
+    provenance::InstalledAgentProvenanceStore,
 };
 
 const CANONICAL_ROOT: &str = r"C:\okx";
@@ -168,17 +169,23 @@ impl HostExecutor {
         }
 
         let running = self.agent_is_running()?;
+        let agent_binary = self.agent_binary();
+        let installed_agent =
+            InstalledAgentProvenanceStore::canonical().status_value(&agent_binary);
 
         Ok(json!({
-            "repo_root": CANONICAL_ROOT,
-            "repo_present": repo_present,
-            "repository": "iamaman11/okx",
-            "head": head,
-            "branch": branch,
-            "clean": clean,
-            "origin": origin,
-            "cargo_available": command_available("cargo"),
-            "agent_binary_present": self.agent_binary().is_file(),
+            "workspace": {
+                "repo_root": CANONICAL_ROOT,
+                "repo_present": repo_present,
+                "repository": "iamaman11/okx",
+                "head": head,
+                "branch": branch,
+                "clean": clean,
+                "origin": origin,
+                "cargo_available": command_available("cargo")
+            },
+            "installed_agent": installed_agent,
+            "agent_binary_present": agent_binary.is_file(),
             "agent_owned_running": running,
             "agent_desired": self.desired_agent,
             "desired_state_path": self.desired_store.path(),

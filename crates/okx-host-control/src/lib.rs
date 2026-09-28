@@ -4,6 +4,7 @@ pub mod autostart;
 pub mod desired;
 pub mod executor;
 pub mod job;
+pub mod provenance;
 pub mod runtime;
 pub mod single_instance;
 
