@@ -111,7 +111,7 @@ impl InstalledAgentProvenanceStore {
                     "binary_path": binary_path,
                     "binary_present": binary_present,
                     "binary_sha256": binary_sha256.ok().flatten(),
-                    "provenance_path": self.path,
+                    "provenance_path": &self.path,
                     "provenance": Value::Null,
                     "diagnostic": error.to_string()
                 });
@@ -127,7 +127,7 @@ impl InstalledAgentProvenanceStore {
                     "binary_path": binary_path,
                     "binary_present": binary_present,
                     "binary_sha256": Value::Null,
-                    "provenance_path": self.path,
+                    "provenance_path": &self.path,
                     "provenance": record,
                     "diagnostic": error.to_string()
                 });
@@ -141,7 +141,7 @@ impl InstalledAgentProvenanceStore {
                 "binary_path": binary_path,
                 "binary_present": binary_present,
                 "binary_sha256": current_sha,
-                "provenance_path": self.path,
+                "provenance_path": &self.path,
                 "provenance": Value::Null
             });
         };
@@ -153,7 +153,7 @@ impl InstalledAgentProvenanceStore {
                 "binary_path": binary_path,
                 "binary_present": false,
                 "binary_sha256": Value::Null,
-                "provenance_path": self.path,
+                "provenance_path": &self.path,
                 "provenance": provenance
             });
         }
@@ -175,7 +175,7 @@ impl InstalledAgentProvenanceStore {
             "binary_path": binary_path,
             "binary_present": true,
             "binary_sha256": current_sha,
-            "provenance_path": self.path,
+            "provenance_path": &self.path,
             "provenance": provenance
         })
     }
@@ -206,7 +206,7 @@ fn sha256_file(path: &Path) -> HostControlResult<String> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(hex_digest(digest.finalize().as_slice()))
+    Ok(hex_digest(&digest.finalize()))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
