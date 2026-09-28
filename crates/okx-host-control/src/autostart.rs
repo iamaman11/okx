@@ -190,7 +190,7 @@ fn task_xml(account: &str, start_boundary: &str) -> String {
   <Actions Context="Author">
     <Exec>
       <Command>{controller}</Command>
-      <Arguments>run --poll-seconds 2</Arguments>
+      <Arguments>run</Arguments>
       <WorkingDirectory>C:\okx-control</WorkingDirectory>
     </Exec>
   </Actions>
