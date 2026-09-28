@@ -181,3 +181,45 @@ No new code may introduce checksum-based integrity authority.
 - no arbitrary shell/HTTP proxy operation;
 - no raw credentials or private plaintext in public GitHub;
 - analysis consumes immutable snapshots, never mutable collectors directly.
+
+## Application query boundary
+
+The product has two query levels over the same authorities.
+
+**Level 1 — forensic/detail** exposes bounded factual snapshots for drill-down and diagnostics:
+`InstrumentRules`, `FindInstruments`, `MarketSnapshot`, `MarketOverview`, `MarketHistory`,
+`HistoryBehavior`, `SnapshotQuality`, `AccountSnapshot`, and transport telemetry.
+
+**Level 2 — application/research** answers a demonstrated research question by composing immutable
+inputs locally and returning compact attributable evidence:
+`MarketResearch`, `PortfolioRisk`, `CurrentCost`, `PositionScenario`, and
+`AnalyzeCandidateOrder`.
+
+The admission rule is:
+
+> If ChatGPT would otherwise fetch a large raw dataset and repeat deterministic domain arithmetic,
+> aggregation, filtering, consistency checks, or bounded scenario expansion, that work belongs in
+> a typed Level 2 operation next to the immutable inputs.
+
+Level 2 does **not** introduce a new engine. Existing ownership remains unchanged:
+observation owns factual state, `okx-analysis` owns deterministic Decimal math, and query adapters
+only acquire bounded dependencies, enforce consistency, call pure analysis, and project results.
+
+Every Level 2 operation must have:
+
+- explicit bounded request shape and work limits;
+- operation-scoped immutable dependency acquisition, with each exact dependency captured once and
+  reused within that request;
+- explicit quality and generation-consistency rules that never upgrade source quality;
+- compact result provenance sufficient to avoid implying atomic simultaneity;
+- an operation-specific response budget before the GitHub envelope boundary;
+- no arbitrary batch, expression language, field-selection DSL, local LLM, SQL layer, or new
+  long-lived state owner.
+
+Current MarketResearch work budget is `2..=8` unique instruments with history `limit <= 100`.
+Each instrument is assembled from one current-market acquisition plus one bounded history
+acquisition, then existing pure `analyze_history_behavior` performs deterministic reduction.
+The v2 projection retains per-instrument market/history timestamps and generations while omitting
+full nested forensic snapshots. Level 1 operations remain available when raw/detail evidence is
+explicitly required.
+
