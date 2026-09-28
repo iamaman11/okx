@@ -218,6 +218,9 @@ pub enum AgentOperation {
     SubmitPreparedExecution {
         intent_id: String,
     },
+    ExecutionStatus {
+        intent_id: String,
+    },
     MailboxTelemetry,
     AccountSnapshot,
     PortfolioRisk,
@@ -317,7 +320,8 @@ impl AgentOperation {
                 validate_decimal_text(size, "size")?;
                 validate_decimal_text(price, "price")
             }
-            Self::SubmitPreparedExecution { intent_id } => validate_request_id(intent_id),
+            Self::SubmitPreparedExecution { intent_id }
+            | Self::ExecutionStatus { intent_id } => validate_request_id(intent_id),
             Self::CurrentCost {
                 instrument,
                 contracts,
