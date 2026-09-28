@@ -1,8 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use okx_protocol::{
-    AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentRequest, AgentResponse,
-    AgentResponseStatus, DataQuality, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection,
+    AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
+    AgentResponse, AgentResponseStatus, DataQuality, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection,
     MailboxEnvelope,
     crypto::{decrypt, derive_directional_key, encrypt, shared_secret},
 };
@@ -10,6 +10,27 @@ use okx_protocol::{
 use crate::{AgentError, AgentResult, query::dispatch};
 
 pub const INVALID_REQUEST_CODE: &str = "INVALID_REQUEST";
+pub const RESPONSE_TOO_LARGE_CODE: &str = "RESPONSE_TOO_LARGE";
+
+const GLOBAL_RESPONSE_PLAINTEXT_BYTES: usize = 40 * 1024;
+const MAX_RESPONSE_COMMENT_BODY_BYTES: usize = 60 * 1024;
+const COMPACT_RESPONSE_PLAINTEXT_BYTES: usize = 8 * 1024;
+const MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES: usize = 12 * 1024;
+const STANDARD_RESPONSE_PLAINTEXT_BYTES: usize = 16 * 1024;
+const MARKET_HISTORY_RESPONSE_PLAINTEXT_BYTES: usize = 32 * 1024;
+const LARGE_RAW_RESPONSE_PLAINTEXT_BYTES: usize = GLOBAL_RESPONSE_PLAINTEXT_BYTES;
+const AEAD_TAG_BYTES: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResponseBudget {
+    plaintext_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResponseSize {
+    plaintext_bytes: usize,
+    predicted_comment_bytes: usize,
+}
 
 pub use crate::query::{
     ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE, ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE,
@@ -51,15 +72,27 @@ pub async fn process_once(
     let aad = envelope.aad()?;
     let plaintext = decrypt(&request_key, &request_nonce, aad.as_bytes(), &ciphertext)?;
 
-    let response = match serde_json::from_slice::<AgentRequest>(&plaintext) {
+    let (response, budget) = match serde_json::from_slice::<AgentRequest>(&plaintext) {
         Ok(request) if request.validate().is_ok() && request.request_id == envelope.request_id => {
             debug_assert_eq!(request.schema, AGENT_REQUEST_SCHEMA_V1);
-            dispatch(&request, context, generated_at).await?
+            let budget = response_budget(&request.operation);
+            (dispatch(&request, context, generated_at).await?, budget)
         }
-        Ok(_) | Err(_) => invalid_request_response(&envelope.request_id, generated_at),
+        Ok(_) | Err(_) => (
+            invalid_request_response(&envelope.request_id, generated_at),
+            ResponseBudget {
+                plaintext_bytes: COMPACT_RESPONSE_PLAINTEXT_BYTES,
+            },
+        ),
     };
-    response.validate()?;
-    let response_plaintext = serde_json::to_vec(&response)?;
+    let response_plaintext = bounded_response_plaintext(
+        response,
+        budget,
+        envelope,
+        expected_key_id,
+        response_nonce,
+        generated_at,
+    )?;
     let response_key = derive_directional_key(
         &shared,
         &envelope.request_id,
@@ -86,6 +119,140 @@ pub async fn process_once(
     response_envelope.ciphertext = STANDARD.encode(response_ciphertext);
 
     Ok(response_envelope)
+}
+
+fn response_budget(operation: &AgentOperation) -> ResponseBudget {
+    let plaintext_bytes = match operation {
+        AgentOperation::InstrumentRules { .. }
+        | AgentOperation::HistoryBehavior { .. }
+        | AgentOperation::SnapshotQuality { .. }
+        | AgentOperation::MailboxTelemetry
+        | AgentOperation::CurrentCost { .. }
+        | AgentOperation::PositionScenario { .. } => COMPACT_RESPONSE_PLAINTEXT_BYTES,
+        AgentOperation::MarketResearch { .. } => MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES,
+        AgentOperation::MarketSnapshot { .. }
+        | AgentOperation::MarketOverview { .. }
+        | AgentOperation::PortfolioRisk
+        | AgentOperation::AnalyzeCandidateOrder { .. } => STANDARD_RESPONSE_PLAINTEXT_BYTES,
+        AgentOperation::MarketHistory { .. } => MARKET_HISTORY_RESPONSE_PLAINTEXT_BYTES,
+        AgentOperation::FindInstruments { .. } | AgentOperation::AccountSnapshot => {
+            LARGE_RAW_RESPONSE_PLAINTEXT_BYTES
+        }
+    };
+    debug_assert!(plaintext_bytes <= GLOBAL_RESPONSE_PLAINTEXT_BYTES);
+    ResponseBudget { plaintext_bytes }
+}
+
+fn bounded_response_plaintext(
+    response: AgentResponse,
+    budget: ResponseBudget,
+    request_envelope: &MailboxEnvelope,
+    expected_key_id: &str,
+    response_nonce: [u8; 12],
+    generated_at: &str,
+) -> AgentResult<Vec<u8>> {
+    response.validate()?;
+    let plaintext = serde_json::to_vec(&response)?;
+    let size = response_size(
+        request_envelope,
+        expected_key_id,
+        response_nonce,
+        plaintext.len(),
+    )?;
+
+    if response_size_within_budget(size, budget) {
+        return Ok(plaintext);
+    }
+
+    let failure = response_too_large_response(
+        &response.request_id,
+        generated_at,
+        size,
+        budget,
+    );
+    failure.validate()?;
+    let failure_plaintext = serde_json::to_vec(&failure)?;
+    let failure_size = response_size(
+        request_envelope,
+        expected_key_id,
+        response_nonce,
+        failure_plaintext.len(),
+    )?;
+    let failure_budget = ResponseBudget {
+        plaintext_bytes: COMPACT_RESPONSE_PLAINTEXT_BYTES,
+    };
+    if !response_size_within_budget(failure_size, failure_budget) {
+        return Err(AgentError::ResponseBudgetInvariant);
+    }
+
+    Ok(failure_plaintext)
+}
+
+fn response_size(
+    request_envelope: &MailboxEnvelope,
+    expected_key_id: &str,
+    response_nonce: [u8; 12],
+    plaintext_bytes: usize,
+) -> AgentResult<ResponseSize> {
+    let ciphertext_bytes = plaintext_bytes
+        .checked_add(AEAD_TAG_BYTES)
+        .ok_or(AgentError::ResponseBudgetInvariant)?;
+    let ciphertext_base64_bytes = ciphertext_bytes
+        .checked_add(2)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_mul(4))
+        .ok_or(AgentError::ResponseBudgetInvariant)?;
+
+    let projected_envelope = MailboxEnvelope {
+        schema: MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
+        request_id: request_envelope.request_id.clone(),
+        direction: MailboxDirection::AgentToClient,
+        agent_key_id: expected_key_id.to_owned(),
+        client_ephemeral_public_key: request_envelope.client_ephemeral_public_key.clone(),
+        nonce: STANDARD.encode(response_nonce),
+        ciphertext: "A".repeat(ciphertext_base64_bytes),
+    };
+    let predicted_comment_bytes = serde_json::to_vec(&projected_envelope)?.len();
+
+    Ok(ResponseSize {
+        plaintext_bytes,
+        predicted_comment_bytes,
+    })
+}
+
+fn response_size_within_budget(size: ResponseSize, budget: ResponseBudget) -> bool {
+    size.plaintext_bytes <= budget.plaintext_bytes
+        && size.plaintext_bytes <= GLOBAL_RESPONSE_PLAINTEXT_BYTES
+        && size.predicted_comment_bytes <= MAX_RESPONSE_COMMENT_BODY_BYTES
+}
+
+fn response_too_large_response(
+    request_id: &str,
+    generated_at: &str,
+    size: ResponseSize,
+    budget: ResponseBudget,
+) -> AgentResponse {
+    AgentResponse {
+        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+        request_id: request_id.to_owned(),
+        status: AgentResponseStatus::Failed,
+        generated_at: generated_at.to_owned(),
+        quality: DataQuality::NotReady,
+        result_schema: None,
+        result: None,
+        failure: Some(AgentFailure {
+            code: RESPONSE_TOO_LARGE_CODE.to_owned(),
+            message: format!(
+                "serialized response exceeds bounded transport budget: plaintext={}B limit={}B predicted_comment={}B comment_limit={}B",
+                size.plaintext_bytes,
+                budget.plaintext_bytes.min(GLOBAL_RESPONSE_PLAINTEXT_BYTES),
+                size.predicted_comment_bytes,
+                MAX_RESPONSE_COMMENT_BODY_BYTES
+            ),
+            retryable: false,
+        }),
+        warnings: Vec::new(),
+    }
 }
 
 fn invalid_request_response(request_id: &str, generated_at: &str) -> AgentResponse {
@@ -313,6 +480,142 @@ mod tests {
         .expect_err("tampered ciphertext must fail before response");
 
         assert!(matches!(error, AgentError::Crypto(_)));
+    }
+
+    fn sizing_envelope(request_id: &str) -> MailboxEnvelope {
+        MailboxEnvelope {
+            schema: MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
+            request_id: request_id.to_owned(),
+            direction: MailboxDirection::ClientToAgent,
+            agent_key_id: "agent-key-1".to_owned(),
+            client_ephemeral_public_key: STANDARD.encode([7_u8; 32]),
+            nonce: STANDARD.encode([8_u8; 12]),
+            ciphertext: String::new(),
+        }
+    }
+
+    #[test]
+    fn response_budget_registry_is_explicit_and_bounded() {
+        let compact = AgentOperation::MailboxTelemetry;
+        let research = AgentOperation::MarketResearch {
+            instruments: vec!["DOGE-USDT-SWAP".to_owned(), "BTC-USDT-SWAP".to_owned()],
+            bar: "1H".to_owned(),
+            limit: Some(12),
+        };
+        let standard = AgentOperation::MarketOverview {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+        };
+        let history = AgentOperation::MarketHistory {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            bar: "1H".to_owned(),
+            limit: Some(100),
+        };
+        let large_raw = AgentOperation::AccountSnapshot;
+
+        assert_eq!(
+            response_budget(&compact).plaintext_bytes,
+            COMPACT_RESPONSE_PLAINTEXT_BYTES
+        );
+        assert_eq!(
+            response_budget(&research).plaintext_bytes,
+            MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES
+        );
+        assert_eq!(
+            response_budget(&standard).plaintext_bytes,
+            STANDARD_RESPONSE_PLAINTEXT_BYTES
+        );
+        assert_eq!(
+            response_budget(&history).plaintext_bytes,
+            MARKET_HISTORY_RESPONSE_PLAINTEXT_BYTES
+        );
+        assert_eq!(
+            response_budget(&large_raw).plaintext_bytes,
+            GLOBAL_RESPONSE_PLAINTEXT_BYTES
+        );
+    }
+
+    #[test]
+    fn every_plaintext_budget_has_an_exact_boundary() {
+        for limit in [
+            COMPACT_RESPONSE_PLAINTEXT_BYTES,
+            MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES,
+            STANDARD_RESPONSE_PLAINTEXT_BYTES,
+            MARKET_HISTORY_RESPONSE_PLAINTEXT_BYTES,
+            LARGE_RAW_RESPONSE_PLAINTEXT_BYTES,
+        ] {
+            let budget = ResponseBudget {
+                plaintext_bytes: limit,
+            };
+            assert!(response_size_within_budget(
+                ResponseSize {
+                    plaintext_bytes: limit,
+                    predicted_comment_bytes: MAX_RESPONSE_COMMENT_BODY_BYTES,
+                },
+                budget
+            ));
+            assert!(!response_size_within_budget(
+                ResponseSize {
+                    plaintext_bytes: limit + 1,
+                    predicted_comment_bytes: MAX_RESPONSE_COMMENT_BODY_BYTES,
+                },
+                budget
+            ));
+        }
+    }
+
+    #[test]
+    fn global_plaintext_ceiling_predicts_a_publishable_envelope() {
+        let envelope = sizing_envelope(&"r".repeat(128));
+        let size = response_size(
+            &envelope,
+            &"k".repeat(64),
+            [9_u8; 12],
+            GLOBAL_RESPONSE_PLAINTEXT_BYTES,
+        )
+        .expect("size");
+        assert!(size.predicted_comment_bytes < MAX_RESPONSE_COMMENT_BODY_BYTES);
+    }
+
+    #[test]
+    fn oversized_response_becomes_small_terminal_failure_before_encryption() {
+        let request_id = "req_response_budget_0123456789";
+        let envelope = sizing_envelope(request_id);
+        let response = AgentResponse {
+            schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+            request_id: request_id.to_owned(),
+            status: AgentResponseStatus::Completed,
+            generated_at: "2026-09-28T00:00:00.000Z".to_owned(),
+            quality: DataQuality::Fresh,
+            result_schema: Some("okx.test.large/v1".to_owned()),
+            result: Some(serde_json::json!({
+                "payload": "x".repeat(MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES)
+            })),
+            failure: None,
+            warnings: Vec::new(),
+        };
+        let bounded = bounded_response_plaintext(
+            response,
+            ResponseBudget {
+                plaintext_bytes: MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES,
+            },
+            &envelope,
+            "agent-key-1",
+            [10_u8; 12],
+            "2026-09-28T00:00:00.000Z",
+        )
+        .expect("bounded failure");
+
+        let terminal: AgentResponse = serde_json::from_slice(&bounded).expect("terminal json");
+        assert_eq!(terminal.status, AgentResponseStatus::Failed);
+        assert_eq!(terminal.quality, DataQuality::NotReady);
+        let failure = terminal.failure.expect("failure");
+        assert_eq!(failure.code, RESPONSE_TOO_LARGE_CODE);
+        assert!(!failure.retryable);
+        assert!(bounded.len() < COMPACT_RESPONSE_PLAINTEXT_BYTES);
+
+        let size = response_size(&envelope, "agent-key-1", [10_u8; 12], bounded.len())
+            .expect("failure size");
+        assert!(size.predicted_comment_bytes < MAX_RESPONSE_COMMENT_BODY_BYTES);
     }
 
     #[tokio::test]
