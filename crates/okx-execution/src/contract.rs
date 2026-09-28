@@ -114,6 +114,8 @@ fn plan_fingerprint(plan: &ExecutionPlan) -> Result<String, serde_json::Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::{
         EXECUTION_PLAN_SCHEMA_V1, ExecutionRecord, ExecutionTransitionError,
@@ -198,6 +200,50 @@ mod tests {
         for error in errors {
             assert!(classify_prepare_result(Err(error)).is_err());
         }
+    }
+
+    #[test]
+    fn replay_restart_and_idempotency_matrix_is_fail_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-execution-contract-matrix-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = crate::ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = crate::DurableExecutionLedger::open(store.clone(), 100).expect("open");
+
+        let original = plan("intent_matrix_0123456789");
+        assert!(matches!(
+            classify_prepare_result(ledger.prepare(original.clone(), 101)).expect("created"),
+            PrepareOutcome::Created(_)
+        ));
+        assert!(matches!(
+            classify_prepare_result(ledger.prepare(original.clone(), 102)).expect("existing"),
+            PrepareOutcome::Existing(_)
+        ));
+
+        let mut conflict = original.clone();
+        conflict.price = "0.09318".to_owned();
+        assert_eq!(
+            classify_prepare_result(ledger.prepare(conflict, 103)).expect("conflict"),
+            PrepareOutcome::Rejected(PrepareRejection::IntentConflict)
+        );
+
+        ledger
+            .begin_submission(&original.intent_id, 104)
+            .expect("persist submitting");
+        drop(ledger);
+
+        let reopened = crate::DurableExecutionLedger::open(store.clone(), 200).expect("reopen");
+        let recovered = reopened.get(&original.intent_id).expect("recovered");
+        assert_eq!(recovered.record.state, ExecutionState::UnknownSubmission);
+        assert!(!recovered.record.can_submit());
+
+        let status = execution_status(recovered).expect("status");
+        assert_eq!(status.state, ExecutionState::UnknownSubmission);
+        assert_eq!(status.intent_id, original.intent_id);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
