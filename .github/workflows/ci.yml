@@ -117,10 +117,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy native Windows crates
-        run: cargo clippy -p okx-agent -p okx-host-control --all-targets -- -D warnings
+        run: cargo clippy -p okx-agent -p okx-host-control -p okx-execution --all-targets -- -D warnings
 
       - name: Test native Windows crates
-        run: cargo test -p okx-agent -p okx-host-control
+        run: cargo test -p okx-agent -p okx-host-control -p okx-execution
 
       - name: Build deployable Windows binaries
         if: github.event_name == 'pull_request'

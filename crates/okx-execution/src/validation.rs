@@ -7,7 +7,8 @@ use thiserror::Error;
 
 use crate::{
     EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionPlan, OpenRiskEvidence,
-    OrderSide, PositionSide, derive_client_order_id, model::order_side,
+    OrderSide, PositionSide, derive_client_order_id,
+    model::{order_side, valid_intent_id},
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -94,7 +95,9 @@ pub fn prepare_execution(
     account: &AccountSnapshot,
     candidate: Option<&CandidateOrderAnalysis>,
 ) -> Result<ExecutionPlan, ExecutionValidationError> {
-    validate_intent_id(&intent.intent_id)?;
+    if !valid_intent_id(&intent.intent_id) {
+        return Err(ExecutionValidationError::InvalidIntentId);
+    }
 
     if intent.instrument_id != rules.instrument.instrument_id {
         return Err(ExecutionValidationError::InstrumentMismatch);
@@ -313,18 +316,6 @@ fn validate_close_capacity(
         });
     }
     Ok(())
-}
-
-fn validate_intent_id(value: &str) -> Result<(), ExecutionValidationError> {
-    if (16..=128).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        Ok(())
-    } else {
-        Err(ExecutionValidationError::InvalidIntentId)
-    }
 }
 
 fn decimal(field: &'static str, value: &str) -> Result<Decimal, ExecutionValidationError> {

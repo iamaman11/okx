@@ -129,6 +129,13 @@ pub struct ExecutionPlan {
     pub open_risk: Option<OpenRiskEvidence>,
 }
 
+pub(crate) fn valid_intent_id(value: &str) -> bool {
+    (16..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 pub fn derive_client_order_id(intent_id: &str) -> String {
     let digest = Sha256::digest(format!("okx-execution-v1:{intent_id}").as_bytes());
     let hex = format!("{digest:x}");
