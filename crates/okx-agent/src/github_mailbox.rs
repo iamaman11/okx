@@ -187,11 +187,18 @@ impl GitHubMailboxClient {
                     processed += 1;
                 }
                 Err(error) => {
-                    batch_complete = false;
-                    eprintln!(
-                        "mailbox request {} rejected before terminal response: {}",
-                        envelope.request_id, error
-                    );
+                    if permanent_mailbox_input_error(&error) {
+                        eprintln!(
+                            "mailbox request {} dropped as permanent malformed input: {}",
+                            envelope.request_id, error
+                        );
+                    } else {
+                        batch_complete = false;
+                        eprintln!(
+                            "mailbox request {} rejected before terminal response: {}",
+                            envelope.request_id, error
+                        );
+                    }
                 }
             }
         }
@@ -268,6 +275,18 @@ impl GitHubMailboxClient {
     }
 }
 
+fn permanent_mailbox_input_error(error: &AgentError) -> bool {
+    matches!(
+        error,
+        AgentError::Protocol(_)
+            | AgentError::Crypto(_)
+            | AgentError::Base64(_)
+            | AgentError::AgentKeyMismatch { .. }
+            | AgentError::InvalidPrivateKeyLength(_)
+            | AgentError::RequestIdMismatch
+    )
+}
+
 fn last_terminal_request_id(comments: &[IssueComment]) -> Option<String> {
     comments.iter().rev().find_map(|comment| {
         if comment.user_id != OWNER_USER_ID {
@@ -323,6 +342,8 @@ pub struct PublishedIdentity {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+
     use super::*;
 
     #[test]
@@ -397,6 +418,32 @@ mod tests {
                 id: 10,
             })
         );
+    }
+
+    #[test]
+    fn permanent_input_errors_are_skipped_without_retrying_batch() {
+        let decode_error = base64::engine::general_purpose::STANDARD
+            .decode("=")
+            .expect_err("invalid base64");
+        assert!(permanent_mailbox_input_error(&AgentError::Base64(
+            decode_error
+        )));
+        assert!(permanent_mailbox_input_error(&AgentError::Protocol(
+            okx_protocol::ProtocolError::InvalidRequestId,
+        )));
+        assert!(permanent_mailbox_input_error(&AgentError::Crypto(
+            okx_protocol::crypto::CryptoError::Decrypt,
+        )));
+    }
+
+    #[test]
+    fn internal_runtime_errors_still_require_batch_retry() {
+        assert!(!permanent_mailbox_input_error(
+            &AgentError::ResponseBudgetInvariant
+        ));
+        assert!(!permanent_mailbox_input_error(&AgentError::Random(
+            "transient".to_owned(),
+        )));
     }
 
     #[test]
