@@ -1,8 +1,11 @@
+use std::str::FromStr;
+
 use async_trait::async_trait;
 use okx_api::{
     ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, OkxError, OrderOperationAck,
     PlaceOrderRequest, TradeApi, TradeOrderDetails, TradeResponse,
 };
+use rust_decimal::Decimal;
 use thiserror::Error;
 
 use crate::{
@@ -199,12 +202,7 @@ where
             Err(_) => return Ok(ReconcileDisposition::Unavailable(entry)),
         };
 
-        if order.instrument_id != plan.instrument_id
-            || order.client_order_id != plan.client_order_id
-            || order.order_id.trim().is_empty()
-        {
-            return Err(OrderExecutorError::ReconciliationIdentityMismatch);
-        }
+        validate_order_identity(plan, &order)?;
 
         let state = map_exchange_state(&order.state)?;
         let entry =
@@ -291,6 +289,73 @@ fn place_request(plan: &ExecutionPlan) -> PlaceOrderRequest {
         },
         size: plan.size.clone(),
         price: plan.price.clone(),
+    }
+}
+
+fn validate_order_identity(
+    plan: &ExecutionPlan,
+    order: &TradeOrderDetails,
+) -> Result<(), OrderExecutorError> {
+    if order.order_id.trim().is_empty()
+        || order.instrument_id != plan.instrument_id
+        || order.client_order_id != plan.client_order_id
+        || order.side != order_side_text(plan.side)
+        || order.position_side != position_side_text(plan.position_side)
+        || order.trade_mode != trade_mode_text(plan.trade_mode)
+        || order.order_type != order_type_text(plan.order_type)
+    {
+        return Err(OrderExecutorError::ReconciliationIdentityMismatch);
+    }
+
+    let order_price = Decimal::from_str(&order.price)
+        .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
+    let plan_price = Decimal::from_str(&plan.price)
+        .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
+    let order_size = Decimal::from_str(&order.size)
+        .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
+    let plan_size = Decimal::from_str(&plan.size)
+        .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
+    let filled = Decimal::from_str(&order.accumulated_fill_size)
+        .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
+
+    if order_price != plan_price
+        || order_size != plan_size
+        || filled < Decimal::ZERO
+        || filled > order_size
+    {
+        return Err(OrderExecutorError::ReconciliationIdentityMismatch);
+    }
+
+    Ok(())
+}
+
+const fn order_side_text(value: OrderSide) -> &'static str {
+    match value {
+        OrderSide::Buy => "buy",
+        OrderSide::Sell => "sell",
+    }
+}
+
+const fn position_side_text(value: PositionSide) -> &'static str {
+    match value {
+        PositionSide::Long => "long",
+        PositionSide::Short => "short",
+    }
+}
+
+const fn trade_mode_text(value: TradeMode) -> &'static str {
+    match value {
+        TradeMode::Cross => "cross",
+        TradeMode::Isolated => "isolated",
+    }
+}
+
+const fn order_type_text(value: OrderType) -> &'static str {
+    match value {
+        OrderType::Limit => "limit",
+        OrderType::PostOnly => "post_only",
+        OrderType::Fok => "fok",
+        OrderType::Ioc => "ioc",
     }
 }
 
@@ -628,6 +693,71 @@ mod tests {
             ExecutionState::Live
         );
         assert_eq!(executor.gateway().lookup_calls(), 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_rejects_same_client_id_with_mismatched_order_shape() {
+        let (root, mut ledger) = ledger("identity-mismatch");
+        let plan = plan();
+        ledger.prepare(plan.clone(), 101).expect("prepare");
+        ledger
+            .begin_submission(&plan.intent_id, 102)
+            .expect("submitting");
+        ledger
+            .mark_unknown_submission(&plan.intent_id, 103)
+            .expect("unknown");
+
+        let mut mismatched = order_details(&plan, "live");
+        mismatched.side = "sell".to_owned();
+        let gateway = MockGateway::new(vec![], vec![Ok(mismatched)]);
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let error = executor
+            .reconcile(&plan.intent_id, 104)
+            .await
+            .expect_err("identity mismatch");
+        assert!(matches!(
+            error,
+            OrderExecutorError::ReconciliationIdentityMismatch
+        ));
+        assert_eq!(
+            executor
+                .ledger()
+                .get(&plan.intent_id)
+                .expect("entry")
+                .record
+                .state,
+            ExecutionState::UnknownSubmission
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_compares_price_and_size_numerically() {
+        let (root, mut ledger) = ledger("numeric-identity");
+        let plan = plan();
+        ledger.prepare(plan.clone(), 101).expect("prepare");
+        ledger
+            .begin_submission(&plan.intent_id, 102)
+            .expect("submitting");
+        ledger
+            .mark_unknown_submission(&plan.intent_id, 103)
+            .expect("unknown");
+
+        let mut details = order_details(&plan, "live");
+        details.price = "0.1000".to_owned();
+        details.size = "1.000".to_owned();
+        let gateway = MockGateway::new(vec![], vec![Ok(details)]);
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let outcome = executor
+            .reconcile(&plan.intent_id, 104)
+            .await
+            .expect("numeric equivalence");
+        assert!(matches!(outcome, ReconcileDisposition::Found(_)));
 
         let _ = fs::remove_dir_all(root);
     }
