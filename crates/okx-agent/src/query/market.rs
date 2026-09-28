@@ -440,18 +440,14 @@ pub(super) async fn dispatch(
                     behavior: MarketResearchBehavior {
                         confirmed_count: history_behavior.confirmed_candle_count,
                         excluded_unconfirmed_count: history_behavior.excluded_unconfirmed_count,
-                        total_close_return_ratio: history_behavior
-                            .total_close_return_ratio
-                            .clone(),
+                        total_close_return_ratio: history_behavior.total_close_return_ratio.clone(),
                         mean_absolute_close_return_ratio: history_behavior
                             .mean_absolute_close_return_ratio
                             .clone(),
                         max_absolute_close_return_ratio: history_behavior
                             .max_absolute_close_return_ratio
                             .clone(),
-                        max_close_drawdown_ratio: history_behavior
-                            .max_close_drawdown_ratio
-                            .clone(),
+                        max_close_drawdown_ratio: history_behavior.max_close_drawdown_ratio.clone(),
                         confirmed_high_low_range_ratio: history_behavior
                             .confirmed_high_low_range_ratio
                             .clone(),
@@ -662,12 +658,18 @@ mod tests {
                 confirmed_high_low_range_ratio: "0.2345".to_owned(),
             },
             provenance: MarketResearchProvenance {
-                reference_generation: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                reference_generation:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
                 reference_received_at: "2026-09-28T00:00:00.000Z".to_owned(),
-                market_generation: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                market_generation:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_owned(),
                 market_received_at: "2026-09-28T00:00:01.000Z".to_owned(),
                 ticker_exchange_timestamp_ms: "1790553601000".to_owned(),
-                history_generation: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+                history_generation:
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_owned(),
                 history_oldest_confirmed_open_time_ms: "1790467200000".to_owned(),
                 history_newest_confirmed_open_time_ms: "1790553600000".to_owned(),
                 market_source: "websocket",
@@ -696,8 +698,14 @@ mod tests {
     fn compact_projection_stays_within_h1_targets() {
         let three = projected_size(3);
         let eight = projected_size(8);
-        assert!(three <= 6 * 1024, "three-instrument projection is {three} bytes");
-        assert!(eight <= 12 * 1024, "eight-instrument projection is {eight} bytes");
+        assert!(
+            three <= 6 * 1024,
+            "three-instrument projection is {three} bytes"
+        );
+        assert!(
+            eight <= 12 * 1024,
+            "eight-instrument projection is {eight} bytes"
+        );
     }
 
     #[test]
@@ -710,4 +718,3 @@ mod tests {
         assert_eq!(value[1]["component"], "history");
     }
 }
-
