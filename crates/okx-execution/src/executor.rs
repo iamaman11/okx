@@ -149,9 +149,9 @@ impl OrderExecutor {
             return Ok(PlaceResponseDisposition::UnknownSubmission(entry));
         }
 
-        let entry =
-            self.ledger
-                .acknowledge(intent_id, ack.order_id.clone(), observed_at_ms)?;
+        let entry = self
+            .ledger
+            .acknowledge(intent_id, ack.order_id.clone(), observed_at_ms)?;
         Ok(PlaceResponseDisposition::Acknowledged(entry))
     }
 
@@ -308,17 +308,14 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use crate::{
-        EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionLedgerStore, ExecutionRecord,
-        ExecutionState, OrderSide, PositionSide,
+        EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionLedgerStore, ExecutionState,
+        OrderSide, PositionSide,
     };
 
     use super::*;
 
     fn temp_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "okx-order-executor-{name}-{}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("okx-order-executor-{name}-{}", std::process::id()))
     }
 
     fn plan() -> ExecutionPlan {
@@ -415,10 +412,7 @@ mod tests {
             .expect("begin");
 
         assert_eq!(request.instrument_id, "DOGE-USDT-SWAP");
-        assert_eq!(
-            request.client_order_id,
-            "okx01234567890123456789012345678"
-        );
+        assert_eq!(request.client_order_id, "okx01234567890123456789012345678");
         assert_eq!(request.side, ApiOrderSide::Buy);
         assert_eq!(request.position_side, ApiPositionSide::Long);
         assert_eq!(
@@ -440,11 +434,7 @@ mod tests {
             .begin_place("intent_0123456789abcdef", 102)
             .expect("begin");
         let disposition = executor
-            .observe_place_response(
-                "intent_0123456789abcdef",
-                &accepted_response(),
-                103,
-            )
+            .observe_place_response("intent_0123456789abcdef", &accepted_response(), 103)
             .expect("ack");
 
         assert!(matches!(
@@ -500,11 +490,7 @@ mod tests {
             .expect("unknown");
 
         let reconciled = executor
-            .reconcile_order_details(
-                "intent_0123456789abcdef",
-                &live_details(),
-                104,
-            )
+            .reconcile_order_details("intent_0123456789abcdef", &live_details(), 104)
             .expect("reconcile");
 
         assert_eq!(reconciled.record.state, ExecutionState::Live);
@@ -525,11 +511,7 @@ mod tests {
         let mut details = live_details();
         details.side = "sell".to_owned();
         assert!(matches!(
-            executor.reconcile_order_details(
-                "intent_0123456789abcdef",
-                &details,
-                104,
-            ),
+            executor.reconcile_order_details("intent_0123456789abcdef", &details, 104),
             Err(OrderExecutorError::ReconciliationIdentity("side"))
         ));
         assert_eq!(
