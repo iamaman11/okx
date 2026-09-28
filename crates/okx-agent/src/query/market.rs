@@ -3,6 +3,7 @@ use super::*;
 #[derive(serde::Serialize)]
 struct MarketResearchResult {
     schema: String,
+    assembled_at: String,
     bar: String,
     history_limit: u16,
     instruments: Vec<MarketResearchInstrumentResult>,
@@ -11,15 +12,105 @@ struct MarketResearchResult {
 #[derive(serde::Serialize)]
 struct MarketResearchInstrumentResult {
     instrument_id: String,
-    instrument_rules: InstrumentRulesSnapshot,
-    market: MarketSnapshot,
+    mechanics: MarketResearchMechanics,
+    market: MarketResearchMarket,
+    behavior: MarketResearchBehavior,
+    provenance: MarketResearchProvenance,
+    quality: MarketResearchQuality,
+    diagnostics: Vec<MarketResearchDiagnostic>,
+}
+
+#[derive(serde::Serialize)]
+struct MarketResearchMechanics {
+    instrument_type: okx_api::InstrumentType,
+    contract_type: Option<String>,
+    contract_value: Option<String>,
+    contract_value_currency: Option<String>,
+    settle_currency: Option<String>,
+    expiry_time_ms: Option<String>,
+    funding_semantics: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct MarketResearchMarket {
+    bid: String,
+    ask: String,
+    last: String,
+    mark: String,
+    index: String,
+    funding_rate: Option<String>,
+    open_interest_contracts: String,
+    open_interest_usd: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct MarketResearchBehavior {
+    confirmed_count: usize,
+    excluded_unconfirmed_count: usize,
+    total_close_return_ratio: String,
+    mean_absolute_close_return_ratio: String,
+    max_absolute_close_return_ratio: String,
+    max_close_drawdown_ratio: String,
+    confirmed_high_low_range_ratio: String,
+}
+
+#[derive(serde::Serialize)]
+struct MarketResearchProvenance {
+    reference_generation: String,
+    reference_received_at: String,
+    market_generation: String,
+    market_received_at: String,
+    ticker_exchange_timestamp_ms: String,
+    history_generation: String,
+    history_oldest_confirmed_open_time_ms: String,
+    history_newest_confirmed_open_time_ms: String,
     market_source: &'static str,
-    market_quality: DataQuality,
-    market_warnings: Vec<String>,
-    history_behavior: HistoryBehaviorAnalysis,
-    history_quality: DataQuality,
-    history_warnings: Vec<String>,
-    quality: DataQuality,
+}
+
+#[derive(serde::Serialize)]
+struct MarketResearchQuality {
+    market: DataQuality,
+    history: DataQuality,
+    overall: DataQuality,
+}
+
+#[derive(serde::Serialize)]
+struct MarketResearchDiagnostic {
+    code: &'static str,
+    component: &'static str,
+}
+
+fn funding_semantics(requirement: okx_observation::FundingRequirement) -> &'static str {
+    match requirement {
+        okx_observation::FundingRequirement::Required => "required",
+        okx_observation::FundingRequirement::NotApplicable => "not_applicable",
+        okx_observation::FundingRequirement::Unknown => "unknown",
+    }
+}
+
+fn research_diagnostics(
+    market_source: &'static str,
+    history_warnings: &[String],
+) -> Vec<MarketResearchDiagnostic> {
+    let mut diagnostics = Vec::with_capacity(2);
+    match market_source {
+        "rest_fallback" => diagnostics.push(MarketResearchDiagnostic {
+            code: "REST_FALLBACK",
+            component: "market",
+        }),
+        "rest_bootstrap" => diagnostics.push(MarketResearchDiagnostic {
+            code: "REST_BOOTSTRAP",
+            component: "market",
+        }),
+        _ => {}
+    }
+    if !history_warnings.is_empty() {
+        diagnostics.push(MarketResearchDiagnostic {
+            code: "UNCONFIRMED_LAST_CANDLE",
+            component: "history",
+        });
+    }
+    diagnostics
 }
 
 const fn research_quality(market: DataQuality, history: DataQuality) -> DataQuality {
@@ -262,7 +353,6 @@ pub(super) async fn dispatch(
             let history_limit = limit.unwrap_or(100);
             let mut results = Vec::with_capacity(instruments.len());
             let mut response_quality = DataQuality::Fresh;
-            let mut response_warnings = Vec::new();
 
             for instrument in instruments {
                 let current =
@@ -315,35 +405,84 @@ pub(super) async fn dispatch(
                 if !matches!(quality, DataQuality::Fresh) {
                     response_quality = DataQuality::Degraded;
                 }
-                response_warnings.extend(
-                    current
-                        .warnings
-                        .iter()
-                        .map(|warning| format!("{instrument}: market: {warning}")),
-                );
-                response_warnings.extend(
-                    history
-                        .warnings
-                        .iter()
-                        .map(|warning| format!("{instrument}: history: {warning}")),
-                );
-
+                let diagnostics = research_diagnostics(current.source, &history.warnings);
                 results.push(MarketResearchInstrumentResult {
                     instrument_id: instrument.clone(),
-                    instrument_rules: current.rules,
-                    market: current.snapshot,
-                    market_source: current.source,
-                    market_quality: current.quality,
-                    market_warnings: current.warnings,
-                    history_behavior,
-                    history_quality: history.quality,
-                    history_warnings: history.warnings,
-                    quality,
+                    mechanics: MarketResearchMechanics {
+                        instrument_type: current.rules.instrument.instrument_type,
+                        contract_type: current.rules.instrument.contract_type.clone(),
+                        contract_value: current.rules.instrument.contract_value.clone(),
+                        contract_value_currency: current
+                            .rules
+                            .instrument
+                            .contract_value_currency
+                            .clone(),
+                        settle_currency: current.rules.instrument.settle_currency.clone(),
+                        expiry_time_ms: current.rules.instrument.expiry_time_ms.clone(),
+                        funding_semantics: funding_semantics(
+                            current.rules.instrument.funding_requirement,
+                        ),
+                    },
+                    market: MarketResearchMarket {
+                        bid: current.snapshot.ticker.best_bid.clone(),
+                        ask: current.snapshot.ticker.best_ask.clone(),
+                        last: current.snapshot.ticker.last.clone(),
+                        mark: current.snapshot.mark_price.price.clone(),
+                        index: current.snapshot.index_price.price.clone(),
+                        funding_rate: current
+                            .snapshot
+                            .funding
+                            .as_ref()
+                            .map(|funding| funding.rate.clone()),
+                        open_interest_contracts: current.snapshot.open_interest.contracts.clone(),
+                        open_interest_usd: current.snapshot.open_interest.usd.clone(),
+                    },
+                    behavior: MarketResearchBehavior {
+                        confirmed_count: history_behavior.confirmed_candle_count,
+                        excluded_unconfirmed_count: history_behavior.excluded_unconfirmed_count,
+                        total_close_return_ratio: history_behavior.total_close_return_ratio.clone(),
+                        mean_absolute_close_return_ratio: history_behavior
+                            .mean_absolute_close_return_ratio
+                            .clone(),
+                        max_absolute_close_return_ratio: history_behavior
+                            .max_absolute_close_return_ratio
+                            .clone(),
+                        max_close_drawdown_ratio: history_behavior.max_close_drawdown_ratio.clone(),
+                        confirmed_high_low_range_ratio: history_behavior
+                            .confirmed_high_low_range_ratio
+                            .clone(),
+                    },
+                    provenance: MarketResearchProvenance {
+                        reference_generation: current.rules.reference_generation.clone(),
+                        reference_received_at: current.rules.source_received_at.clone(),
+                        market_generation: current.snapshot.market_generation.clone(),
+                        market_received_at: current.snapshot.source_received_at.clone(),
+                        ticker_exchange_timestamp_ms: current
+                            .snapshot
+                            .ticker
+                            .exchange_timestamp_ms
+                            .clone(),
+                        history_generation: history_behavior.history_generation.clone(),
+                        history_oldest_confirmed_open_time_ms: history_behavior
+                            .oldest_confirmed_open_time_ms
+                            .clone(),
+                        history_newest_confirmed_open_time_ms: history_behavior
+                            .newest_confirmed_open_time_ms
+                            .clone(),
+                        market_source: current.source,
+                    },
+                    quality: MarketResearchQuality {
+                        market: current.quality,
+                        history: history.quality,
+                        overall: quality,
+                    },
+                    diagnostics,
                 });
             }
 
             let result = MarketResearchResult {
-                schema: MARKET_RESEARCH_SCHEMA_V1.to_owned(),
+                schema: MARKET_RESEARCH_SCHEMA_V2.to_owned(),
+                assembled_at: generated_at.to_owned(),
                 bar: bar.clone(),
                 history_limit,
                 instruments: results,
@@ -354,10 +493,10 @@ pub(super) async fn dispatch(
                 status: AgentResponseStatus::Completed,
                 generated_at: generated_at.to_owned(),
                 quality: response_quality,
-                result_schema: Some(MARKET_RESEARCH_SCHEMA_V1.to_owned()),
+                result_schema: Some(MARKET_RESEARCH_SCHEMA_V2.to_owned()),
                 result: Some(serde_json::to_value(result)?),
                 failure: None,
-                warnings: response_warnings,
+                warnings: Vec::new(),
             })
         }
         AgentOperation::MarketHistory {
@@ -479,5 +618,103 @@ pub(super) async fn dispatch(
             }
         }
         _ => unreachable!("query domain dispatcher received unsupported operation"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(index: usize) -> MarketResearchInstrumentResult {
+        let instrument_id = format!("ASSET{index}-USDT-SWAP");
+        MarketResearchInstrumentResult {
+            instrument_id,
+            mechanics: MarketResearchMechanics {
+                instrument_type: okx_api::InstrumentType::Swap,
+                contract_type: Some("linear".to_owned()),
+                contract_value: Some("100".to_owned()),
+                contract_value_currency: Some("ASSET".to_owned()),
+                settle_currency: Some("USDT".to_owned()),
+                expiry_time_ms: None,
+                funding_semantics: "required",
+            },
+            market: MarketResearchMarket {
+                bid: "0.123456".to_owned(),
+                ask: "0.123457".to_owned(),
+                last: "0.123456".to_owned(),
+                mark: "0.123455".to_owned(),
+                index: "0.123450".to_owned(),
+                funding_rate: Some("0.0001".to_owned()),
+                open_interest_contracts: "1234567".to_owned(),
+                open_interest_usd: Some("15234567.89".to_owned()),
+            },
+            behavior: MarketResearchBehavior {
+                confirmed_count: 100,
+                excluded_unconfirmed_count: 0,
+                total_close_return_ratio: "0.1234".to_owned(),
+                mean_absolute_close_return_ratio: "0.0123".to_owned(),
+                max_absolute_close_return_ratio: "0.0456".to_owned(),
+                max_close_drawdown_ratio: "0.0789".to_owned(),
+                confirmed_high_low_range_ratio: "0.2345".to_owned(),
+            },
+            provenance: MarketResearchProvenance {
+                reference_generation:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                reference_received_at: "2026-09-28T00:00:00.000Z".to_owned(),
+                market_generation:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_owned(),
+                market_received_at: "2026-09-28T00:00:01.000Z".to_owned(),
+                ticker_exchange_timestamp_ms: "1790553601000".to_owned(),
+                history_generation:
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_owned(),
+                history_oldest_confirmed_open_time_ms: "1790467200000".to_owned(),
+                history_newest_confirmed_open_time_ms: "1790553600000".to_owned(),
+                market_source: "websocket",
+            },
+            quality: MarketResearchQuality {
+                market: DataQuality::Fresh,
+                history: DataQuality::Fresh,
+                overall: DataQuality::Fresh,
+            },
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn projected_size(instrument_count: usize) -> usize {
+        let result = MarketResearchResult {
+            schema: MARKET_RESEARCH_SCHEMA_V2.to_owned(),
+            assembled_at: "2026-09-28T00:00:02.000Z".to_owned(),
+            bar: "1H".to_owned(),
+            history_limit: 100,
+            instruments: (0..instrument_count).map(fixture).collect(),
+        };
+        serde_json::to_vec(&result).expect("serialize").len()
+    }
+
+    #[test]
+    fn compact_projection_stays_within_h1_targets() {
+        let three = projected_size(3);
+        let eight = projected_size(8);
+        assert!(
+            three <= 6 * 1024,
+            "three-instrument projection is {three} bytes"
+        );
+        assert!(
+            eight <= 12 * 1024,
+            "eight-instrument projection is {eight} bytes"
+        );
+    }
+
+    #[test]
+    fn diagnostics_are_structured_and_bounded() {
+        let diagnostics = research_diagnostics("rest_fallback", &[String::from("detail")]);
+        let value = serde_json::to_value(diagnostics).expect("serialize");
+        assert_eq!(value[0]["code"], "REST_FALLBACK");
+        assert_eq!(value[0]["component"], "market");
+        assert_eq!(value[1]["code"], "UNCONFIRMED_LAST_CANDLE");
+        assert_eq!(value[1]["component"], "history");
     }
 }
