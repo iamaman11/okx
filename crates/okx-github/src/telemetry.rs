@@ -106,11 +106,8 @@ impl IssuePollTelemetryStore {
                 .as_ref()
                 .and_then(|value| value.last_request_latency_ms)
         });
-        let last_response_size = last_response_size.or_else(|| {
-            previous
-                .as_ref()
-                .and_then(|value| value.last_response_size)
-        });
+        let last_response_size = last_response_size
+            .or_else(|| previous.as_ref().and_then(|value| value.last_response_size));
 
         let telemetry = PersistedIssuePollTelemetry {
             schema: ISSUE_POLL_TELEMETRY_SCHEMA_V1.to_owned(),
