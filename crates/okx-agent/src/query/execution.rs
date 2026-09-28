@@ -50,7 +50,7 @@ pub(super) async fn dispatch(
             };
             let account = match fresh_account(request, context, generated_at).await? {
                 FreshAccount::Ready(value) => value,
-                FreshAccount::Response(response) => return Ok(response),
+                FreshAccount::Response(response) => return Ok(*response),
             };
             let preflight = execution.preflight(&account).await?;
             if !preflight.accepted {
@@ -133,7 +133,7 @@ pub(super) async fn dispatch(
             };
             let account = match fresh_account(request, context, generated_at).await? {
                 FreshAccount::Ready(value) => value,
-                FreshAccount::Response(response) => return Ok(response),
+                FreshAccount::Response(response) => return Ok(*response),
             };
             let preflight = execution.preflight(&account).await?;
             if !preflight.accepted {
@@ -183,7 +183,7 @@ async fn executor_preflight(
     };
     let account = match fresh_account(request, context, generated_at).await? {
         FreshAccount::Ready(value) => value,
-        FreshAccount::Response(response) => return Ok(response),
+        FreshAccount::Response(response) => return Ok(*response),
     };
     let evidence = execution.preflight(&account).await?;
     Ok(completed(
@@ -216,7 +216,7 @@ async fn submit_prepared(
 
     let account = match fresh_account(request, context, generated_at).await? {
         FreshAccount::Ready(value) => value,
-        FreshAccount::Response(response) => return Ok(response),
+        FreshAccount::Response(response) => return Ok(*response),
     };
     let preflight = execution.preflight(&account).await?;
     if !preflight.accepted {
@@ -288,7 +288,7 @@ async fn submit_prepared(
 
 enum FreshAccount {
     Ready(Box<AccountSnapshot>),
-    Response(AgentResponse),
+    Response(Box<AgentResponse>),
 }
 
 async fn fresh_account(
@@ -299,18 +299,18 @@ async fn fresh_account(
     let assembled = match assemble_account_snapshot(context).await {
         Ok(value) => value,
         Err(error) => {
-            return Ok(FreshAccount::Response(account_query_failure(
+            return Ok(FreshAccount::Response(Box::new(account_query_failure(
                 request,
                 generated_at,
                 error,
-            )));
+            ))));
         }
     };
     if assembled.quality != DataQuality::Fresh {
-        return Ok(FreshAccount::Response(account_not_fresh(
+        return Ok(FreshAccount::Response(Box::new(account_not_fresh(
             request,
             generated_at,
-        )));
+        ))));
     }
     Ok(FreshAccount::Ready(Box::new(assembled.snapshot)))
 }
