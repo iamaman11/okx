@@ -114,7 +114,7 @@ pub fn prepare_execution(
     validate_current_authorities(
         &intent.instrument_id,
         &intent.expected_reference_generation,
-        &intent.expected_account_generation,
+        Some(&intent.expected_account_generation),
         None,
         rules,
         account,
@@ -167,7 +167,7 @@ pub fn revalidate_execution_plan(
     validate_current_authorities(
         &plan.instrument_id,
         &plan.reference_generation,
-        &plan.account_generation,
+        None,
         Some(&plan.account_uid_fingerprint),
         rules,
         account,
@@ -218,7 +218,7 @@ pub fn revalidate_execution_plan(
 fn validate_current_authorities(
     instrument_id: &str,
     expected_reference_generation: &str,
-    expected_account_generation: &str,
+    expected_account_generation: Option<&str>,
     expected_account_uid_fingerprint: Option<&str>,
     rules: &InstrumentRulesSnapshot,
     account: &AccountSnapshot,
@@ -229,7 +229,9 @@ fn validate_current_authorities(
     if expected_reference_generation != rules.reference_generation {
         return Err(ExecutionValidationError::ReferenceGenerationMismatch);
     }
-    if expected_account_generation != account.account_generation {
+    if let Some(expected_account_generation) = expected_account_generation
+        && expected_account_generation != account.account_generation
+    {
         return Err(ExecutionValidationError::AccountGenerationMismatch);
     }
     if account.schema != ACCOUNT_SNAPSHOT_SCHEMA_V2 || !account.private_ws_connected {
@@ -740,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_plan_revalidation_rejects_generation_identity_and_fee_changes() {
+    fn prepared_plan_revalidation_uses_semantic_authorities_not_generation_equality() {
         let rules = rules();
         let account = account();
         let candidate = open_candidate(&rules, PositionDirection::Long);
@@ -750,6 +752,16 @@ mod tests {
 
         revalidate_execution_plan(&plan, &rules, &account, Some(&candidate.fee_generation))
             .expect("fresh plan");
+
+        let mut generation_only_change = account.clone();
+        generation_only_change.account_generation = "sha256:new-observation".to_owned();
+        revalidate_execution_plan(
+            &plan,
+            &rules,
+            &generation_only_change,
+            Some(&candidate.fee_generation),
+        )
+        .expect("generation provenance change alone is not a semantic rejection");
 
         let mut changed_account = account.clone();
         changed_account.account_uid_fingerprint = "different".to_owned();
