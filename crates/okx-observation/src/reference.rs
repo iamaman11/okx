@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use okx_api::{InstrumentType, PublicInstrument};
 use serde::Serialize;
@@ -111,12 +111,23 @@ impl ReferenceRegistry {
         }
 
         let mut normalized = BTreeMap::new();
+        let mut seen = BTreeSet::new();
         for instrument in instruments {
-            let spec = InstrumentSpec::try_from(instrument)?;
-            let instrument_id = spec.instrument_id.clone();
-            if normalized.insert(instrument_id.clone(), spec).is_some() {
+            let instrument_id = require(
+                &instrument.instrument_id,
+                &instrument.instrument_id,
+                "instId",
+            )?
+            .to_owned();
+            if !seen.insert(instrument_id.clone()) {
                 return Err(ReferenceError::DuplicateInstrument(instrument_id));
             }
+            if is_preopen(&instrument) {
+                continue;
+            }
+
+            let spec = InstrumentSpec::try_from(instrument)?;
+            normalized.insert(instrument_id, spec);
         }
 
         let generation = generation_for(&normalized)?;
@@ -139,18 +150,27 @@ impl ReferenceRegistry {
         }
 
         let mut normalized_updates = BTreeMap::new();
+        let mut preopen_ids = BTreeSet::new();
+        let mut seen = BTreeSet::new();
         for update in updates {
-            let spec = InstrumentSpec::try_from(update)?;
-            let instrument_id = spec.instrument_id.clone();
-            if normalized_updates
-                .insert(instrument_id.clone(), spec)
-                .is_some()
-            {
+            let instrument_id =
+                require(&update.instrument_id, &update.instrument_id, "instId")?.to_owned();
+            if !seen.insert(instrument_id.clone()) {
                 return Err(ReferenceError::DuplicateInstrument(instrument_id));
             }
+            if is_preopen(&update) {
+                preopen_ids.insert(instrument_id);
+                continue;
+            }
+
+            let spec = InstrumentSpec::try_from(update)?;
+            normalized_updates.insert(instrument_id, spec);
         }
 
         let mut next = self.instruments.clone();
+        for instrument_id in preopen_ids {
+            next.remove(&instrument_id);
+        }
         for (instrument_id, spec) in normalized_updates {
             next.insert(instrument_id, spec);
         }
@@ -273,6 +293,10 @@ impl TryFrom<PublicInstrument> for InstrumentSpec {
             expiry_time_ms: optional(value.expiry_time),
         })
     }
+}
+
+fn is_preopen(instrument: &PublicInstrument) -> bool {
+    instrument.state.trim() == "preopen"
 }
 
 fn funding_requirement(
@@ -446,6 +470,81 @@ mod tests {
         );
         assert_eq!(registry.generation().as_str(), before);
         assert!(registry.get("BTC-USDT-SWAP").is_none());
+    }
+
+    #[test]
+    fn preopen_instrument_with_incomplete_mechanics_is_excluded_from_snapshot() {
+        let mut preopen = swap("XDP-USDT-SWAP");
+        preopen.state = "preopen".to_owned();
+        preopen.tick_size.clear();
+        preopen.lot_size.clear();
+        preopen.min_size.clear();
+
+        let registry = ReferenceRegistry::from_public(
+            "2026-09-28T13:30:00.000Z",
+            vec![swap("DOGE-USDT-SWAP"), preopen],
+        )
+        .expect("preopen must not block trade-ready reference bootstrap");
+
+        assert_eq!(registry.len(), 1);
+        assert!(registry.get("DOGE-USDT-SWAP").is_some());
+        assert!(registry.get("XDP-USDT-SWAP").is_none());
+    }
+
+    #[test]
+    fn preopen_update_removes_trade_ready_instrument_and_live_update_readds_it() {
+        let mut xdp = swap("XDP-USDT-SWAP");
+        xdp.instrument_family = "XDP-USDT".to_owned();
+        xdp.underlying = "XDP-USDT".to_owned();
+        xdp.contract_value_currency = "XDP".to_owned();
+
+        let mut registry = ReferenceRegistry::from_public(
+            "2026-09-28T13:00:00.000Z",
+            vec![swap("DOGE-USDT-SWAP"), xdp.clone()],
+        )
+        .expect("registry");
+        assert!(registry.get("XDP-USDT-SWAP").is_some());
+
+        let mut preopen = xdp.clone();
+        preopen.state = "preopen".to_owned();
+        preopen.tick_size.clear();
+        preopen.lot_size.clear();
+        preopen.min_size.clear();
+
+        assert!(
+            registry
+                .apply_public_updates("2026-09-28T13:30:00.000Z", vec![preopen])
+                .expect("preopen update")
+        );
+        assert!(registry.get("XDP-USDT-SWAP").is_none());
+
+        xdp.state = "live".to_owned();
+        assert!(
+            registry
+                .apply_public_updates("2026-09-28T14:00:00.000Z", vec![xdp])
+                .expect("live update")
+        );
+        assert!(registry.get("XDP-USDT-SWAP").is_some());
+    }
+
+    #[test]
+    fn live_instrument_with_incomplete_mechanics_still_fails_closed() {
+        let mut live = swap("XDP-USDT-SWAP");
+        live.tick_size.clear();
+
+        let error = ReferenceRegistry::from_public(
+            "2026-09-28T14:00:00.000Z",
+            vec![swap("DOGE-USDT-SWAP"), live],
+        )
+        .expect_err("live incomplete mechanics must fail closed");
+
+        assert!(matches!(
+            error,
+            ReferenceError::MissingRequiredField {
+                instrument_id,
+                field: "tickSz"
+            } if instrument_id == "XDP-USDT-SWAP"
+        ));
     }
 
     #[test]
