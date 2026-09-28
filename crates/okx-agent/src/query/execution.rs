@@ -3,9 +3,9 @@ use okx_analysis::{
     analyze_candidate_order,
 };
 use okx_execution::{
-    ExecutionAction, ExecutionIntent, ExecutionLedgerError, ExecutionTransitionError,
-    OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide, TradeMode,
-    prepare_execution, revalidate_execution_plan,
+    EXECUTION_STATUS_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionTransitionError,
+    OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide, PrepareFailure,
+    PrepareOutcome, PrepareRejection, TradeMode, prepare_execution, revalidate_execution_plan,
 };
 use okx_protocol::{
     ExecutionOrderType, ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
@@ -13,7 +13,9 @@ use okx_protocol::{
 };
 
 use super::*;
-use crate::execution_runtime::EXECUTION_PREPARED_SCHEMA_V1;
+use crate::execution_runtime::{
+    EXECUTION_PREPARED_SCHEMA_V1, PreparedDisposition, PreparedExecutionResult,
+};
 
 pub const EXECUTION_PREFLIGHT_REJECTED_CODE: &str = "EXECUTION_PREFLIGHT_REJECTED";
 pub const EXECUTION_RUNTIME_UNAVAILABLE_CODE: &str = "EXECUTION_RUNTIME_UNAVAILABLE";
@@ -115,16 +117,8 @@ pub(super) async fn dispatch(
                 Ok(value) => value,
                 Err(error) => return Ok(validation_failure(request, generated_at, error)),
             };
-            let prepared = match execution.prepare(plan, utc_now_ms()).await {
-                Ok(value) => value,
-                Err(error) => return prepare_error_response(request, generated_at, error),
-            };
-            Ok(completed(
-                request,
-                generated_at,
-                EXECUTION_PREPARED_SCHEMA_V1,
-                serde_json::to_value(prepared)?,
-            ))
+            let outcome = execution.prepare(plan, utc_now_ms()).await?;
+            prepare_outcome_response(request, generated_at, outcome)
         }
         AgentOperation::PrepareCloseExecution {
             intent_id,
@@ -165,19 +159,14 @@ pub(super) async fn dispatch(
                 Ok(value) => value,
                 Err(error) => return Ok(validation_failure(request, generated_at, error)),
             };
-            let prepared = match execution.prepare(plan, utc_now_ms()).await {
-                Ok(value) => value,
-                Err(error) => return prepare_error_response(request, generated_at, error),
-            };
-            Ok(completed(
-                request,
-                generated_at,
-                EXECUTION_PREPARED_SCHEMA_V1,
-                serde_json::to_value(prepared)?,
-            ))
+            let outcome = execution.prepare(plan, utc_now_ms()).await?;
+            prepare_outcome_response(request, generated_at, outcome)
         }
         AgentOperation::SubmitPreparedExecution { intent_id } => {
             submit_prepared(request, context, generated_at, intent_id).await
+        }
+        AgentOperation::ExecutionStatus { intent_id } => {
+            execution_status_response(request, context, generated_at, intent_id).await
         }
         _ => unreachable!("execution dispatcher received unsupported operation"),
     }
@@ -403,40 +392,86 @@ fn validation_failure(
     )
 }
 
-fn prepare_error_response(
+fn prepare_outcome_response(
     request: &AgentRequest,
     generated_at: &str,
-    error: crate::AgentError,
+    outcome: PrepareOutcome,
 ) -> AgentResult<AgentResponse> {
-    let (status, code, message) = match error {
-        crate::AgentError::ExecutionLedger(error) => {
-            let (status, code) = match &error {
-                ExecutionLedgerError::IntentConflict => (
-                    AgentResponseStatus::Rejected,
-                    EXECUTION_INTENT_CONFLICT_CODE,
-                ),
-                ExecutionLedgerError::ClientOrderIdCollision => (
-                    AgentResponseStatus::Rejected,
-                    EXECUTION_IDEMPOTENCY_COLLISION_CODE,
-                ),
-                ExecutionLedgerError::CapacityExceeded(_) => (
-                    AgentResponseStatus::Failed,
-                    EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE,
-                ),
-                _ => return Err(crate::AgentError::ExecutionLedger(error)),
-            };
-            (status, code, error.to_string())
+    match outcome {
+        PrepareOutcome::Created(entry) => Ok(completed(
+            request,
+            generated_at,
+            EXECUTION_PREPARED_SCHEMA_V1,
+            serde_json::to_value(PreparedExecutionResult {
+                schema: EXECUTION_PREPARED_SCHEMA_V1,
+                disposition: PreparedDisposition::Created,
+                entry,
+            })?,
+        )),
+        PrepareOutcome::Existing(entry) => Ok(completed(
+            request,
+            generated_at,
+            EXECUTION_PREPARED_SCHEMA_V1,
+            serde_json::to_value(PreparedExecutionResult {
+                schema: EXECUTION_PREPARED_SCHEMA_V1,
+                disposition: PreparedDisposition::Existing,
+                entry,
+            })?,
+        )),
+        PrepareOutcome::Rejected(PrepareRejection::IntentConflict) => Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_INTENT_CONFLICT_CODE,
+            "intent_id already exists with a different immutable execution plan".to_owned(),
+            false,
+        )),
+        PrepareOutcome::Rejected(PrepareRejection::ClientOrderIdCollision) => {
+            Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_IDEMPOTENCY_COLLISION_CODE,
+                "derived client_order_id collides with an existing execution record".to_owned(),
+                false,
+            ))
         }
-        error => return Err(error),
+        PrepareOutcome::Failed(PrepareFailure::CapacityExceeded { limit }) => Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE,
+            format!("execution ledger capacity of {limit} records is exhausted"),
+            false,
+        )),
+    }
+}
+
+async fn execution_status_response(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    intent_id: &str,
+) -> AgentResult<AgentResponse> {
+    let Some(execution) = context.execution else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    let Some(status) = execution.status(intent_id).await? else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RECORD_NOT_FOUND_CODE,
+            "execution record was not found".to_owned(),
+            false,
+        ));
     };
 
-    Ok(failure_response(
+    Ok(completed(
         request,
         generated_at,
-        status,
-        code,
-        message,
-        false,
+        EXECUTION_STATUS_SCHEMA_V1,
+        serde_json::to_value(status)?,
     ))
 }
 
@@ -473,7 +508,10 @@ const fn analysis_liquidity_role(value: ProtocolLiquidityRole) -> AnalysisLiquid
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_execution::{ExecutionLedgerError, ExecutionState};
+    use okx_execution::{
+        EXECUTION_PLAN_SCHEMA_V1, ExecutionRecord, ExecutionLedgerEntry, OrderSide,
+        derive_client_order_id,
+    };
     use okx_protocol::AGENT_REQUEST_SCHEMA_V1;
 
     const GENERATED_AT: &str = "2026-09-29T00:00:00.000Z";
@@ -481,82 +519,82 @@ mod tests {
     fn request() -> AgentRequest {
         AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "req_prepare_ledger_error_01".to_owned(),
-            operation: AgentOperation::MarketOverview {
-                instrument: "DOGE-USDT-SWAP".to_owned(),
+            request_id: "req_prepare_outcome_012345".to_owned(),
+            operation: AgentOperation::ExecutionStatus {
+                intent_id: "intent_prepare_outcome_01".to_owned(),
             },
         }
     }
 
-    fn assert_terminal_failure(
-        error: ExecutionLedgerError,
-        status: AgentResponseStatus,
-        code: &str,
-    ) {
-        let response = prepare_error_response(
-            &request(),
-            GENERATED_AT,
-            crate::AgentError::ExecutionLedger(error),
-        )
-        .expect("deterministic prepare error is terminal");
-
-        assert_eq!(response.status, status);
-        let failure = response.failure.expect("failure details");
-        assert_eq!(failure.code, code);
-        assert!(!failure.retryable);
-    }
-
-    #[test]
-    fn intent_conflict_is_terminal_rejection() {
-        assert_terminal_failure(
-            ExecutionLedgerError::IntentConflict,
-            AgentResponseStatus::Rejected,
-            EXECUTION_INTENT_CONFLICT_CODE,
-        );
-    }
-
-    #[test]
-    fn client_order_id_collision_is_terminal_rejection() {
-        assert_terminal_failure(
-            ExecutionLedgerError::ClientOrderIdCollision,
-            AgentResponseStatus::Rejected,
-            EXECUTION_IDEMPOTENCY_COLLISION_CODE,
-        );
-    }
-
-    #[test]
-    fn ledger_capacity_exhaustion_is_terminal_failure() {
-        assert_terminal_failure(
-            ExecutionLedgerError::CapacityExceeded(10_000),
-            AgentResponseStatus::Failed,
-            EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE,
-        );
-    }
-
-    #[test]
-    fn infrastructure_and_invariant_errors_remain_internal() {
-        let json_error = serde_json::from_str::<serde_json::Value>("{")
-            .expect_err("malformed JSON produces a parse error");
-        let errors = [
-            ExecutionLedgerError::Io(std::io::Error::other("disk unavailable")),
-            ExecutionLedgerError::Json(json_error),
-            ExecutionLedgerError::Corrupt("invalid timestamps"),
-            ExecutionLedgerError::InvalidTimestamp,
-            ExecutionLedgerError::Transition(ExecutionTransitionError::InvalidTransition {
-                from: ExecutionState::Prepared,
-                to: ExecutionState::Acknowledged,
+    fn entry() -> ExecutionLedgerEntry {
+        let intent_id = "intent_prepare_outcome_01";
+        ExecutionLedgerEntry {
+            record: ExecutionRecord::new(okx_execution::ExecutionPlan {
+                schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+                intent_id: intent_id.to_owned(),
+                client_order_id: derive_client_order_id(intent_id),
+                reference_generation: "sha256:reference".to_owned(),
+                account_generation: "sha256:account".to_owned(),
+                account_uid_fingerprint: "uid-fingerprint".to_owned(),
+                instrument_id: "DOGE-USDT-SWAP".to_owned(),
+                trade_mode: TradeMode::Cross,
+                side: OrderSide::Buy,
+                position_side: ExecutionPositionSide::Long,
+                action: ExecutionAction::Open,
+                order_type: OrderType::Limit,
+                size: "0.05".to_owned(),
+                price: "0.09317".to_owned(),
+                open_risk: None,
             }),
+            created_at_ms: 100,
+            updated_at_ms: 100,
+        }
+    }
+
+    #[test]
+    fn every_prepare_domain_outcome_maps_to_terminal_response() {
+        let cases = [
+            (
+                PrepareOutcome::Rejected(PrepareRejection::IntentConflict),
+                AgentResponseStatus::Rejected,
+                EXECUTION_INTENT_CONFLICT_CODE,
+            ),
+            (
+                PrepareOutcome::Rejected(PrepareRejection::ClientOrderIdCollision),
+                AgentResponseStatus::Rejected,
+                EXECUTION_IDEMPOTENCY_COLLISION_CODE,
+            ),
+            (
+                PrepareOutcome::Failed(PrepareFailure::CapacityExceeded { limit: 10_000 }),
+                AgentResponseStatus::Failed,
+                EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE,
+            ),
         ];
 
-        for error in errors {
-            assert!(matches!(
-                prepare_error_response(
-                    &request(),
-                    GENERATED_AT,
-                    crate::AgentError::ExecutionLedger(error),
-                ),
-                Err(crate::AgentError::ExecutionLedger(_))
-            ));
+        for (outcome, expected_status, expected_code) in cases {
+            let response =
+                prepare_outcome_response(&request(), GENERATED_AT, outcome).expect("terminal");
+            assert_eq!(response.status, expected_status);
+            let failure = response.failure.expect("failure");
+            assert_eq!(failure.code, expected_code);
+            assert!(!failure.retryable);
+        }
+    }
+
+    #[test]
+    fn created_and_existing_prepare_outcomes_remain_completed() {
+        for outcome in [
+            PrepareOutcome::Created(entry()),
+            PrepareOutcome::Existing(entry()),
+        ] {
+            let response =
+                prepare_outcome_response(&request(), GENERATED_AT, outcome).expect("completed");
+            assert_eq!(response.status, AgentResponseStatus::Completed);
+            assert_eq!(
+                response.result_schema.as_deref(),
+                Some(EXECUTION_PREPARED_SCHEMA_V1)
+            );
+            assert!(response.failure.is_none());
         }
     }
 }
