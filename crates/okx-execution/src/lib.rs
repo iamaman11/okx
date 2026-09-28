@@ -1,8 +1,10 @@
+mod executor;
 mod ledger;
 mod model;
 mod state;
 mod validation;
 
+pub use executor::{OrderExecutor, OrderExecutorError, PlaceResponseDisposition};
 pub use ledger::{
     DurableExecutionLedger, EXECUTION_LEDGER_SCHEMA_V1, ExecutionLedgerEntry, ExecutionLedgerError,
     ExecutionLedgerStore, MAX_EXECUTION_LEDGER_RECORDS, PrepareDisposition,
