@@ -1,10 +1,10 @@
 pub mod account_bootstrap;
 pub mod config;
+pub mod execution_preflight;
 pub mod github_auth;
 pub mod github_mailbox;
 pub mod identity;
 pub mod market_bootstrap;
-pub mod execution_preflight;
 pub mod okx_credentials;
 pub mod once;
 mod query;
