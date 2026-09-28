@@ -118,14 +118,14 @@ where
         exp_time_ms: u64,
         observed_at_ms: u64,
     ) -> Result<SubmitDisposition, OrderExecutorError> {
+        // The production constructor is intentionally fail-closed. The hard
+        // gate is the first operation: disabled execution must not validate,
+        // persist SUBMITTING, or call the exchange gateway.
+        require_live_trading_enabled(self.live_trading_enabled)?;
+
         if exp_time_ms == 0 {
             return Err(OrderExecutorError::InvalidExpiry);
         }
-
-        // The production constructor is intentionally fail-closed. The gate is
-        // evaluated before SUBMITTING is persisted, so a disabled runtime does
-        // not create false ambiguous-submission evidence.
-        require_live_trading_enabled(self.live_trading_enabled)?;
 
         let entry = self
             .ledger
@@ -461,7 +461,7 @@ mod tests {
         let mut executor = OrderExecutor::new(ledger, gateway);
 
         let error = executor
-            .submit_prepared(&plan.intent_id, 200, 102)
+            .submit_prepared(&plan.intent_id, 0, 102)
             .await
             .expect_err("disabled");
 
