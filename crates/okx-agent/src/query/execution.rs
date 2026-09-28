@@ -13,7 +13,7 @@ use okx_protocol::{
 };
 
 use super::*;
-use crate::execution_runtime::{EXECUTION_PREPARED_SCHEMA_V1, ExecutionRuntime};
+use crate::execution_runtime::EXECUTION_PREPARED_SCHEMA_V1;
 
 pub const EXECUTION_PREFLIGHT_REJECTED_CODE: &str = "EXECUTION_PREFLIGHT_REJECTED";
 pub const EXECUTION_RUNTIME_UNAVAILABLE_CODE: &str = "EXECUTION_RUNTIME_UNAVAILABLE";
