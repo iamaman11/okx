@@ -426,16 +426,14 @@ fn prepare_outcome_response(
             "intent_id already exists with a different immutable execution plan".to_owned(),
             false,
         )),
-        PrepareOutcome::Rejected(PrepareRejection::ClientOrderIdCollision) => {
-            Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Rejected,
-                EXECUTION_IDEMPOTENCY_COLLISION_CODE,
-                "derived client_order_id collides with an existing execution record".to_owned(),
-                false,
-            ))
-        }
+        PrepareOutcome::Rejected(PrepareRejection::ClientOrderIdCollision) => Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_IDEMPOTENCY_COLLISION_CODE,
+            "derived client_order_id collides with an existing execution record".to_owned(),
+            false,
+        )),
         PrepareOutcome::Failed(PrepareFailure::CapacityExceeded { limit }) => Ok(failure_response(
             request,
             generated_at,
@@ -509,7 +507,7 @@ const fn analysis_liquidity_role(value: ProtocolLiquidityRole) -> AnalysisLiquid
 mod tests {
     use super::*;
     use okx_execution::{
-        EXECUTION_PLAN_SCHEMA_V1, ExecutionRecord, ExecutionLedgerEntry, OrderSide,
+        EXECUTION_PLAN_SCHEMA_V1, ExecutionLedgerEntry, ExecutionRecord, OrderSide,
         derive_client_order_id,
     };
     use okx_protocol::AGENT_REQUEST_SCHEMA_V1;
