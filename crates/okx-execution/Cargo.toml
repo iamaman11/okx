@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait = "0.1"
 okx-api = { path = "../okx-api" }
 okx-analysis = { path = "../okx-analysis" }
 okx-observation = { path = "../okx-observation" }
@@ -17,3 +18,6 @@ thiserror = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
