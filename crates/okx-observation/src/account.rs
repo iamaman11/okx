@@ -601,6 +601,24 @@ fn generation_for(snapshot: &AccountSnapshot) -> Result<String, AccountError> {
         pending_orders: &'a [PendingOrderState],
     }
 
+    let mut balance = snapshot.balance.clone();
+    balance.update_time_ms = None;
+    for detail in &mut balance.details {
+        detail.update_time_ms = None;
+    }
+
+    let mut positions = snapshot.positions.clone();
+    for position in &mut positions {
+        position.creation_time_ms = None;
+        position.update_time_ms = None;
+    }
+
+    let mut pending_orders = snapshot.pending_orders.clone();
+    for order in &mut pending_orders {
+        order.creation_time_ms.clear();
+        order.update_time_ms.clear();
+    }
+
     let encoded = serde_json::to_vec(&GenerationInput {
         schema: &snapshot.schema,
         source: &snapshot.source,
@@ -613,9 +631,9 @@ fn generation_for(snapshot: &AccountSnapshot) -> Result<String, AccountError> {
         account_type: &snapshot.account_type,
         account_uid_fingerprint: &snapshot.account_uid_fingerprint,
         api_key_permissions: &snapshot.api_key_permissions,
-        balance: &snapshot.balance,
-        positions: &snapshot.positions,
-        pending_orders: &snapshot.pending_orders,
+        balance: &balance,
+        positions: &positions,
+        pending_orders: &pending_orders,
     })?;
     Ok(format!("sha256:{:x}", Sha256::digest(encoded)))
 }
@@ -714,6 +732,43 @@ mod tests {
         assert!(!json.contains("raw-user-id-never-output"));
         assert_eq!(first.quality_reason, M4_REST_BOOTSTRAP_REASON);
         assert!(!first.private_ws_connected);
+    }
+
+    #[test]
+    fn rest_update_timestamps_do_not_change_content_generation() {
+        let first_balance = balance();
+        let mut second_balance = balance();
+        second_balance.update_time = "1790520009999".to_owned();
+        second_balance.details[0].update_time = "1790520009999".to_owned();
+
+        let first = AccountSnapshot::from_rest_bootstrap(
+            "2026-09-27T15:00:00.000Z",
+            config(),
+            first_balance,
+            Vec::new(),
+            vec![pending_order("123", "live", "1790520000000")],
+            vec!["read_only".to_owned()],
+        )
+        .expect("first");
+
+        let mut second_order = pending_order("123", "live", "1790520009999");
+        second_order.creation_time = "1790519999999".to_owned();
+        let second = AccountSnapshot::from_rest_bootstrap(
+            "2026-09-27T15:00:01.000Z",
+            config(),
+            second_balance,
+            Vec::new(),
+            vec![second_order],
+            vec!["read_only".to_owned()],
+        )
+        .expect("second");
+
+        assert_eq!(first.account_generation, second.account_generation);
+        assert_ne!(first.balance.update_time_ms, second.balance.update_time_ms);
+        assert_ne!(
+            first.pending_orders[0].update_time_ms,
+            second.pending_orders[0].update_time_ms
+        );
     }
 
     #[test]
