@@ -287,7 +287,7 @@ async fn submit_prepared(
 }
 
 enum FreshAccount {
-    Ready(AccountSnapshot),
+    Ready(Box<AccountSnapshot>),
     Response(AgentResponse),
 }
 
@@ -312,7 +312,7 @@ async fn fresh_account(
             generated_at,
         )));
     }
-    Ok(FreshAccount::Ready(assembled.snapshot))
+    Ok(FreshAccount::Ready(Box::new(assembled.snapshot)))
 }
 
 async fn current_rules(
