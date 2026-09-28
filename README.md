@@ -114,6 +114,8 @@ Keeping the first three directories separate is intentional: a mutable Git check
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Encrypted GitHub mailbox](docs/encrypted-github-mailbox.md)
+- [ChatGPT operator contract](docs/chatgpt-operator-contract.md)
 - [Roadmap and acceptance cursor](docs/ROADMAP.md)
 
 Canonical GitHub issues:
