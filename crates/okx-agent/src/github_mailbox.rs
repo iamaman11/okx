@@ -342,6 +342,8 @@ pub struct PublishedIdentity {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+
     use super::*;
 
     #[test]
@@ -416,6 +418,32 @@ mod tests {
                 id: 10,
             })
         );
+    }
+
+    #[test]
+    fn permanent_input_errors_are_skipped_without_retrying_batch() {
+        let decode_error = base64::engine::general_purpose::STANDARD
+            .decode("=")
+            .expect_err("invalid base64");
+        assert!(permanent_mailbox_input_error(&AgentError::Base64(
+            decode_error
+        )));
+        assert!(permanent_mailbox_input_error(&AgentError::Protocol(
+            okx_protocol::ProtocolError::InvalidRequestId,
+        )));
+        assert!(permanent_mailbox_input_error(&AgentError::Crypto(
+            okx_protocol::crypto::CryptoError::Decrypt,
+        )));
+    }
+
+    #[test]
+    fn internal_runtime_errors_still_require_batch_retry() {
+        assert!(!permanent_mailbox_input_error(
+            &AgentError::ResponseBudgetInvariant
+        ));
+        assert!(!permanent_mailbox_input_error(&AgentError::Random(
+            "transient".to_owned(),
+        )));
     }
 
     #[test]
