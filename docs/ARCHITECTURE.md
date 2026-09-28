@@ -54,7 +54,7 @@ Domain state owner:
 
 - Reference Registry;
 - Market State;
-- later Account and Order State;
+- Account and Order State;
 - generation IDs;
 - reconciliation;
 - readiness;
@@ -79,9 +79,22 @@ One Tokio observation lifecycle owner:
 - application heartbeat timing;
 - REST bootstrap + WS convergence orchestration.
 
+### okx-execution
+
+Single mutation owner only:
+
+- immutable validated ExecutionPlan;
+- deterministic client order id;
+- durable bounded execution ledger;
+- PREPARED/SUBMITTING/ACKNOWLEDGED/UNKNOWN_SUBMISSION/exchange-state reconciliation;
+- typed gateway to okx-api trade primitives;
+- no observation ownership;
+- no analytical calculations;
+- production construction remains live-trading disabled until explicit pre-enable acceptance.
+
 ### okx-agent
 
-Composition root and access adapter only. It starts/owns the runtime as a component but must not duplicate its lifecycle state machine, domain calculations or Windows supervision.
+Composition root and access adapter only. It starts/owns the runtime as a component but must not duplicate its lifecycle state machine, domain calculations, execution state or Windows supervision.
 
 ### Runtime maintainability rule
 
@@ -170,7 +183,7 @@ Required evidence before `FRESH`:
 
 A connected socket alone is never readiness.
 
-M3 is physically accepted for the non-disruptive path: FRESH encrypted quality/snapshot, advancing book sequence evidence, and fail-closed restart rebuild. The external network-loss proof remains deferred with #16 R3.
+M3/A2 are physically accepted, including real external network/GitHub loss and asynchronous CONTROL/DATA recovery without duplicate runtime owners.
 
 ## Order-book integrity
 
@@ -285,4 +298,12 @@ Rules:
 - reference generation, tick/lot/min and account-mode assumptions are revalidated at the mutation boundary;
 - live writes remain disabled until explicit Phase-2 production acceptance changes the gate.
 
-The first Phase-2 implementation must therefore be safe to deploy with no live mutation capability exercised.
+Accepted Phase-2 cursor:
+- #96 pure execution model — PASS;
+- #97 durable mutation ledger — PASS;
+- #98 typed OKX mutation primitives — PASS;
+- #99 one production-disabled OrderExecutor + UNKNOWN_SUBMISSION reconciliation — PASS.
+
+Current work is credential/preflight, then disabled runtime integration. A prepared ExecutionPlan is not a timeless permit: immediately before any future send, the execution boundary must reacquire current authoritative reference/account state and require exact generation, identity, account-mode and trade-readiness continuity.
+
+The first deployed Phase-2 runtime must be physically accepted with live mutation still impossible.
