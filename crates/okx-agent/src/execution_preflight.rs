@@ -78,7 +78,9 @@ fn evaluate_common(
     executor_permissions: &[String],
     executor: &AccountConfig,
 ) -> ExecutorCredentialPreflight {
-    let executor_read_permission = executor_permissions.iter().any(|value| value == "read_only");
+    let executor_read_permission = executor_permissions
+        .iter()
+        .any(|value| value == "read_only");
     let executor_trade_permission = executor_permissions.iter().any(|value| value == "trade");
     let executor_withdraw_permission = executor_permissions.iter().any(|value| value == "withdraw");
     let executor_permissions_exact =
