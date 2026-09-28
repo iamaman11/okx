@@ -87,6 +87,9 @@ Single mutation owner only:
 - deterministic client order id;
 - durable bounded execution ledger;
 - PREPARED/SUBMITTING/ACKNOWLEDGED/UNKNOWN_SUBMISSION/exchange-state reconciliation;
+- closed typed prepare outcomes: Created / Existing / Rejected / Failed;
+- deterministic domain failures are classified inside okx-execution, never as generic transport/runtime errors;
+- compact read-only ExecutionStatus projection for remote ledger observability;
 - typed gateway to okx-api trade primitives;
 - no observation ownership;
 - no analytical calculations;
@@ -307,3 +310,35 @@ Accepted Phase-2 cursor:
 Current work is credential/preflight, then disabled runtime integration. A prepared ExecutionPlan is not a timeless permit: immediately before any future send, the execution boundary must reacquire current authoritative reference/account state and require exact generation, identity, account-mode and trade-readiness continuity.
 
 The first deployed Phase-2 runtime must be physically accepted with live mutation still impossible.
+
+## Phase 2 execution terminal contract
+
+The execution boundary distinguishes domain outcomes from infrastructure failures.
+
+```text
+ExecutionPlan
+    |
+    v
+ONE OrderExecutor
+    |
+    v
+durable ledger
+    |
+    +--> Created / Existing / Rejected / Failed   -> terminal DATA response
+    |
+    +--> I/O / JSON / corruption / invariant      -> internal fail-closed retry path
+```
+
+Rules:
+
+- identical intent + identical immutable plan returns Existing, not an error;
+- identical intent + different plan is terminal Rejected;
+- client-order-id collision is terminal Rejected;
+- bounded ledger capacity exhaustion is terminal Failed;
+- disk I/O, corrupt ledger, JSON corruption, invalid monotonic time and impossible transitions remain internal failures;
+- classification is exhaustive in okx-execution; adding a new ledger error requires an explicit compiler-visible classification decision;
+- mailbox replay of a deterministic domain outcome must reach a terminal response and advance the cursor;
+- ExecutionStatus by intent_id is the canonical encrypted read-only diagnostic for durable execution state;
+- status exposes no credentials and no raw exchange order id; it returns a plan fingerprint, state, public plan mechanics, order-id presence and durable timestamps.
+
+Normal execution diagnosis therefore stays inside DATA/CONTROL. A local agent is reserved for secret provisioning or genuinely physical/local evidence, not ordinary ledger inspection.
