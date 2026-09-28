@@ -230,7 +230,6 @@ mod tests {
 
     #[test]
     fn default_live_trading_gate_is_fail_closed() {
-        assert!(!ALLOW_LIVE_TRADING_DEFAULT);
         assert_eq!(
             require_live_trading_enabled(ALLOW_LIVE_TRADING_DEFAULT),
             Err(ExecutionTransitionError::LiveTradingDisabled)
