@@ -3,7 +3,8 @@ use std::{collections::BTreeSet, path::Path, time::Instant};
 use chrono::{DateTime, Utc};
 use okx_github::{
     GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCommentCursor, IssueCursorStore,
-    IssuePollTelemetryStatus, IssuePollTelemetryStore, OWNER_USER_ID, REPOSITORY_ID,
+    IssuePollTelemetryStatus, IssuePollTelemetryStore, IssueResponseSizeTelemetry, OWNER_USER_ID,
+    REPOSITORY_ID,
 };
 use okx_protocol::{MailboxDirection, MailboxEnvelope};
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
@@ -15,7 +16,7 @@ use crate::{
     account_bootstrap::AccountBootstrapper,
     identity::AgentIdentity,
     market_bootstrap::MarketBootstrapper,
-    once::{ObservationQueryContext, process_once_now},
+    once::{ObservationQueryContext, process_once_now_with_size_telemetry},
 };
 
 pub const GITHUB_MAILBOX_IDENTITY_SCHEMA_V1: &str = "okx.github-mailbox.identity/v1";
@@ -122,7 +123,14 @@ impl GitHubMailboxClient {
                     true,
                 )?;
             }
-            self.record_poll_telemetry(fetch_latency, 0, checkpoint.cursor.as_ref(), None, None);
+            self.record_poll_telemetry(
+                fetch_latency,
+                0,
+                checkpoint.cursor.as_ref(),
+                None,
+                None,
+                None,
+            );
             return Ok(0);
         }
 
@@ -132,6 +140,7 @@ impl GitHubMailboxClient {
         let mut batch_complete = true;
         let mut last_terminal_request_id = last_terminal_request_id(&comments);
         let mut last_request_latency_ms = None;
+        let mut last_response_size = None;
         let mailbox_telemetry = self.telemetry_for_query();
 
         for comment in &comments {
@@ -148,7 +157,7 @@ impl GitHubMailboxClient {
                 continue;
             }
 
-            match process_once_now(
+            match process_once_now_with_size_telemetry(
                 &envelope,
                 expected_key_id,
                 agent_private_key,
@@ -162,12 +171,18 @@ impl GitHubMailboxClient {
             )
             .await
             {
-                Ok(response) => {
+                Ok((response, response_size)) => {
                     self.github
                         .post_issue_comment(self.issue_number, &serde_json::to_string(&response)?)
                         .await?;
                     last_terminal_request_id = Some(envelope.request_id.clone());
                     last_request_latency_ms = request_latency_ms(&comment.created_at);
+                    last_response_size = Some(IssueResponseSizeTelemetry {
+                        plaintext_bytes: response_size.plaintext_bytes,
+                        plaintext_budget_bytes: response_size.plaintext_budget_bytes,
+                        predicted_comment_bytes: response_size.predicted_comment_bytes,
+                        budget_exceeded: response_size.budget_exceeded,
+                    });
                     terminal_ids.insert(envelope.request_id);
                     processed += 1;
                 }
@@ -193,6 +208,7 @@ impl GitHubMailboxClient {
             effective_cursor,
             last_terminal_request_id.as_deref(),
             last_request_latency_ms,
+            last_response_size,
         );
 
         Ok(processed)
@@ -215,6 +231,7 @@ impl GitHubMailboxClient {
         cursor: Option<&IssueCommentCursor>,
         last_terminal_request_id: Option<&str>,
         last_request_latency_ms: Option<u64>,
+        last_response_size: Option<IssueResponseSizeTelemetry>,
     ) {
         if let Err(error) = self.telemetry_store.record_success(
             fetch_latency,
@@ -222,6 +239,7 @@ impl GitHubMailboxClient {
             cursor,
             last_terminal_request_id,
             last_request_latency_ms,
+            last_response_size,
         ) {
             eprintln!("mailbox telemetry update failed: {error}");
         }
