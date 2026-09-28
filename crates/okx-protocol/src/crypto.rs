@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chacha20poly1305::{
     ChaCha20Poly1305,
     aead::{Aead, KeyInit, Payload, array::Array},
@@ -8,7 +9,8 @@ use thiserror::Error;
 use x25519_dalek::{X25519_BASEPOINT_BYTES, x25519};
 
 use crate::{
-    MAILBOX_REPOSITORY, MailboxDirection, ProtocolError, validate_agent_key_id, validate_request_id,
+    AgentRequest, MAILBOX_REPOSITORY, MailboxDirection, MailboxEnvelope, ProtocolError,
+    validate_agent_key_id, validate_request_id,
 };
 
 pub const HKDF_SALT_V1: &[u8] = b"okx-mailbox-v1/hkdf-sha256";
@@ -29,6 +31,106 @@ pub enum CryptoError {
 
     #[error("AEAD authentication/decryption failed")]
     Decrypt,
+}
+
+
+#[derive(Debug, Error)]
+pub enum ClientEnvelopePreflightError {
+    #[error("protocol error: {0}")]
+    Protocol(ProtocolError),
+
+    #[error("crypto error: {0}")]
+    Crypto(CryptoError),
+
+    #[error("base64 decode error: {0}")]
+    Base64(base64::DecodeError),
+
+    #[error("JSON decode error: {0}")]
+    Json(serde_json::Error),
+
+    #[error("client ephemeral public key must decode to exactly 32 bytes")]
+    InvalidClientPublicKeyLength,
+
+    #[error("nonce must decode to exactly 12 bytes")]
+    InvalidNonceLength,
+
+    #[error("client ephemeral public key does not match the supplied private key")]
+    ClientPublicKeyMismatch,
+
+    #[error("outer and inner request_id do not match")]
+    RequestIdMismatch,
+
+    #[error("decrypted request does not match the expected typed request")]
+    RequestMismatch,
+}
+
+pub fn preflight_client_request_envelope(
+    envelope: &MailboxEnvelope,
+    request: &AgentRequest,
+    client_private_key: [u8; 32],
+    agent_public_key: [u8; 32],
+) -> Result<(), ClientEnvelopePreflightError> {
+    envelope
+        .validate(MailboxDirection::ClientToAgent)
+        .map_err(ClientEnvelopePreflightError::Protocol)?;
+    request
+        .validate()
+        .map_err(ClientEnvelopePreflightError::Protocol)?;
+
+    if envelope.request_id != request.request_id {
+        return Err(ClientEnvelopePreflightError::RequestIdMismatch);
+    }
+
+    let decoded_client_public = STANDARD
+        .decode(&envelope.client_ephemeral_public_key)
+        .map_err(ClientEnvelopePreflightError::Base64)?;
+    let decoded_client_public: [u8; 32] = decoded_client_public
+        .try_into()
+        .map_err(|_| ClientEnvelopePreflightError::InvalidClientPublicKeyLength)?;
+
+    if decoded_client_public != public_key_from_private(client_private_key) {
+        return Err(ClientEnvelopePreflightError::ClientPublicKeyMismatch);
+    }
+
+    let decoded_nonce = STANDARD
+        .decode(&envelope.nonce)
+        .map_err(ClientEnvelopePreflightError::Base64)?;
+    let decoded_nonce: [u8; 12] = decoded_nonce
+        .try_into()
+        .map_err(|_| ClientEnvelopePreflightError::InvalidNonceLength)?;
+
+    let ciphertext = STANDARD
+        .decode(&envelope.ciphertext)
+        .map_err(ClientEnvelopePreflightError::Base64)?;
+
+    let shared = shared_secret(client_private_key, agent_public_key)
+        .map_err(ClientEnvelopePreflightError::Crypto)?;
+    let key = derive_directional_key(
+        &shared,
+        &envelope.request_id,
+        &envelope.agent_key_id,
+        MailboxDirection::ClientToAgent,
+    )
+    .map_err(ClientEnvelopePreflightError::Crypto)?;
+    let aad = envelope
+        .aad()
+        .map_err(ClientEnvelopePreflightError::Protocol)?;
+    let plaintext = decrypt(&key, &decoded_nonce, aad.as_bytes(), &ciphertext)
+        .map_err(ClientEnvelopePreflightError::Crypto)?;
+    let decoded_request: AgentRequest =
+        serde_json::from_slice(&plaintext).map_err(ClientEnvelopePreflightError::Json)?;
+    decoded_request
+        .validate()
+        .map_err(ClientEnvelopePreflightError::Protocol)?;
+
+    if decoded_request.request_id != envelope.request_id {
+        return Err(ClientEnvelopePreflightError::RequestIdMismatch);
+    }
+    if &decoded_request != request {
+        return Err(ClientEnvelopePreflightError::RequestMismatch);
+    }
+
+    Ok(())
 }
 
 pub fn public_key_from_private(private_key: [u8; 32]) -> [u8; 32] {
@@ -192,6 +294,114 @@ mod tests {
         let decrypted =
             decrypt(&client_to_agent, &nonce, aad.as_bytes(), &ciphertext).expect("decrypt");
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn client_envelope_preflight_accepts_exact_typed_request() {
+        let agent_private = decode_32("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=");
+        let agent_public = public_key_from_private(agent_private);
+        let client_private = decode_32("ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=");
+        let client_public = public_key_from_private(client_private);
+        let nonce = *b"0123456789ab";
+        let request = crate::AgentRequest {
+            schema: crate::AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: REQUEST_ID.to_owned(),
+            operation: crate::AgentOperation::MarketSnapshot {
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+            },
+        };
+
+        let shared = shared_secret(client_private, agent_public).expect("shared");
+        let key = derive_directional_key(
+            &shared,
+            REQUEST_ID,
+            AGENT_KEY_ID,
+            MailboxDirection::ClientToAgent,
+        )
+        .expect("key");
+        let mut envelope = crate::MailboxEnvelope {
+            schema: crate::MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
+            request_id: REQUEST_ID.to_owned(),
+            direction: MailboxDirection::ClientToAgent,
+            agent_key_id: AGENT_KEY_ID.to_owned(),
+            client_ephemeral_public_key: STANDARD.encode(client_public),
+            nonce: STANDARD.encode(nonce),
+            ciphertext: String::new(),
+        };
+        let aad = envelope.aad().expect("aad");
+        let plaintext = serde_json::to_vec(&request).expect("request json");
+        envelope.ciphertext =
+            STANDARD.encode(encrypt(&key, &nonce, aad.as_bytes(), &plaintext).expect("encrypt"));
+
+        preflight_client_request_envelope(
+            &envelope,
+            &request,
+            client_private,
+            agent_public,
+        )
+        .expect("preflight");
+    }
+
+    #[test]
+    fn client_envelope_preflight_rejects_malformed_transport_encoding() {
+        let client_private = [7_u8; 32];
+        let request = crate::AgentRequest {
+            schema: crate::AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: REQUEST_ID.to_owned(),
+            operation: crate::AgentOperation::MarketSnapshot {
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+            },
+        };
+        let envelope = crate::MailboxEnvelope {
+            schema: crate::MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
+            request_id: REQUEST_ID.to_owned(),
+            direction: MailboxDirection::ClientToAgent,
+            agent_key_id: AGENT_KEY_ID.to_owned(),
+            client_ephemeral_public_key: STANDARD.encode(public_key_from_private(client_private)),
+            nonce: STANDARD.encode([0_u8; 12]),
+            ciphertext: "=".to_owned(),
+        };
+
+        assert!(matches!(
+            preflight_client_request_envelope(
+                &envelope,
+                &request,
+                client_private,
+                [9_u8; 32],
+            ),
+            Err(ClientEnvelopePreflightError::Base64(_))
+        ));
+    }
+
+    #[test]
+    fn client_envelope_preflight_rejects_request_id_mismatch_before_post() {
+        let client_private = [11_u8; 32];
+        let request = crate::AgentRequest {
+            schema: crate::AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_aaaaaaaaaaaaaaaa".to_owned(),
+            operation: crate::AgentOperation::MarketSnapshot {
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+            },
+        };
+        let envelope = crate::MailboxEnvelope {
+            schema: crate::MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
+            request_id: REQUEST_ID.to_owned(),
+            direction: MailboxDirection::ClientToAgent,
+            agent_key_id: AGENT_KEY_ID.to_owned(),
+            client_ephemeral_public_key: STANDARD.encode(public_key_from_private(client_private)),
+            nonce: STANDARD.encode([0_u8; 12]),
+            ciphertext: STANDARD.encode([0_u8; 16]),
+        };
+
+        assert!(matches!(
+            preflight_client_request_envelope(
+                &envelope,
+                &request,
+                client_private,
+                [9_u8; 32],
+            ),
+            Err(ClientEnvelopePreflightError::RequestIdMismatch)
+        ));
     }
 
     #[test]
