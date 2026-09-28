@@ -48,8 +48,8 @@ pub(super) async fn dispatch(
                 return Ok(execution_unavailable(request, generated_at));
             };
             let account = match fresh_account(request, context, generated_at).await? {
-                Some(value) => value,
-                None => return Ok(account_not_fresh(request, generated_at)),
+                FreshAccount::Ready(value) => value,
+                FreshAccount::Response(response) => return Ok(response),
             };
             let preflight = execution.preflight(&account).await?;
             if !preflight.accepted {
@@ -131,8 +131,8 @@ pub(super) async fn dispatch(
                 return Ok(execution_unavailable(request, generated_at));
             };
             let account = match fresh_account(request, context, generated_at).await? {
-                Some(value) => value,
-                None => return Ok(account_not_fresh(request, generated_at)),
+                FreshAccount::Ready(value) => value,
+                FreshAccount::Response(response) => return Ok(response),
             };
             let preflight = execution.preflight(&account).await?;
             if !preflight.accepted {
@@ -181,8 +181,8 @@ async fn executor_preflight(
         return Ok(execution_unavailable(request, generated_at));
     };
     let account = match fresh_account(request, context, generated_at).await? {
-        Some(value) => value,
-        None => return Ok(account_not_fresh(request, generated_at)),
+        FreshAccount::Ready(value) => value,
+        FreshAccount::Response(response) => return Ok(response),
     };
     let evidence = execution.preflight(&account).await?;
     Ok(completed(
@@ -214,8 +214,8 @@ async fn submit_prepared(
     };
 
     let account = match fresh_account(request, context, generated_at).await? {
-        Some(value) => value,
-        None => return Ok(account_not_fresh(request, generated_at)),
+        FreshAccount::Ready(value) => value,
+        FreshAccount::Response(response) => return Ok(response),
     };
     let preflight = execution.preflight(&account).await?;
     if !preflight.accepted {
@@ -288,30 +288,33 @@ async fn submit_prepared(
     }
 }
 
+enum FreshAccount {
+    Ready(AccountSnapshot),
+    Response(AgentResponse),
+}
+
 async fn fresh_account(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
     generated_at: &str,
-) -> AgentResult<Option<AccountSnapshot>> {
+) -> AgentResult<FreshAccount> {
     let assembled = match assemble_account_snapshot(context).await {
         Ok(value) => value,
-        Err(error) => return Ok(Some(account_failure_snapshot(request, generated_at, error)?)),
+        Err(error) => {
+            return Ok(FreshAccount::Response(account_query_failure(
+                request,
+                generated_at,
+                error,
+            )));
+        }
     };
     if assembled.quality != DataQuality::Fresh {
-        return Ok(None);
+        return Ok(FreshAccount::Response(account_not_fresh(
+            request,
+            generated_at,
+        )));
     }
-    Ok(Some(assembled.snapshot))
-}
-
-fn account_failure_snapshot(
-    request: &AgentRequest,
-    generated_at: &str,
-    error: AccountQueryError,
-) -> AgentResult<AccountSnapshot> {
-    let response = account_query_failure(request, generated_at, error);
-    Err(crate::AgentError::PublicRuntimeTask(
-        serde_json::to_string(&response).unwrap_or_else(|_| "account query unavailable".to_owned()),
-    ))
+    Ok(FreshAccount::Ready(assembled.snapshot))
 }
 
 async fn current_rules(
