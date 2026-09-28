@@ -149,9 +149,9 @@ where
             }
             Ok(response) => match classify_place_response(&entry.record.plan, response) {
                 PlaceResponse::Acknowledged(order_id) => {
-                    let entry =
-                        self.ledger
-                            .acknowledge(intent_id, order_id, observed_at_ms)?;
+                    let entry = self
+                        .ledger
+                        .acknowledge(intent_id, order_id, observed_at_ms)?;
                     Ok(SubmitDisposition::Acknowledged(entry))
                 }
                 PlaceResponse::Rejected(code) => {
@@ -192,10 +192,7 @@ where
         let plan = &entry.record.plan;
         let order = match self
             .gateway
-            .order_by_client_id(
-                plan.instrument_id.clone(),
-                plan.client_order_id.clone(),
-            )
+            .order_by_client_id(plan.instrument_id.clone(), plan.client_order_id.clone())
             .await
         {
             Ok(order) => order,
@@ -387,20 +384,15 @@ mod tests {
     }
 
     fn temp_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "okx-order-executor-{name}-{}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("okx-order-executor-{name}-{}", std::process::id()))
     }
 
     fn ledger(name: &str) -> (PathBuf, DurableExecutionLedger) {
         let root = temp_root(name);
         let _ = fs::remove_dir_all(&root);
-        let ledger = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join("ledger.json")),
-            100,
-        )
-        .expect("ledger");
+        let ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 100)
+                .expect("ledger");
         (root, ledger)
     }
 
@@ -611,7 +603,9 @@ mod tests {
         let (root, mut ledger) = ledger("reconcile");
         let plan = plan();
         ledger.prepare(plan.clone(), 101).expect("prepare");
-        ledger.begin_submission(&plan.intent_id, 102).expect("submitting");
+        ledger
+            .begin_submission(&plan.intent_id, 102)
+            .expect("submitting");
         ledger
             .mark_unknown_submission(&plan.intent_id, 103)
             .expect("unknown");
