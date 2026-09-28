@@ -10,8 +10,7 @@ use thiserror::Error;
 
 use crate::{
     EXECUTION_PLAN_SCHEMA_V1, ExchangeOrderState, ExecutionPlan, ExecutionRecord, ExecutionState,
-    ExecutionTransitionError, derive_client_order_id,
-    model::valid_intent_id,
+    ExecutionTransitionError, derive_client_order_id, model::valid_intent_id,
 };
 
 pub const EXECUTION_LEDGER_SCHEMA_V1: &str = "okx.execution-ledger/v1";
@@ -113,7 +112,9 @@ impl ExecutionLedgerStore {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
         if file.records.len() > self.max_records {
-            return Err(ExecutionLedgerError::Corrupt("record count exceeds capacity"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "record count exceeds capacity",
+            ));
         }
 
         let mut by_intent = BTreeMap::new();
@@ -144,7 +145,9 @@ impl ExecutionLedgerStore {
         for (intent_id, entry) in entries {
             validate_entry(entry)?;
             if intent_id != &entry.record.plan.intent_id {
-                return Err(ExecutionLedgerError::Corrupt("map key does not match intent_id"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "map key does not match intent_id",
+                ));
             }
             if !client_order_ids.insert(entry.record.plan.client_order_id.clone()) {
                 return Err(ExecutionLedgerError::ClientOrderIdCollision);
@@ -265,7 +268,9 @@ impl DurableExecutionLedger {
         intent_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
-        self.mutate(intent_id, observed_at_ms, |record| record.begin_submission())
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.begin_submission()
+        })
     }
 
     pub fn acknowledge(
@@ -458,7 +463,9 @@ fn validate_plan_identity(plan: &ExecutionPlan) -> Result<(), ExecutionLedgerErr
         || plan.account_uid_fingerprint.trim().is_empty()
         || plan.instrument_id.trim().is_empty()
     {
-        return Err(ExecutionLedgerError::Corrupt("invalid execution plan identity"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "invalid execution plan identity",
+        ));
     }
     Ok(())
 }
@@ -527,8 +534,7 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), ExecutionLedg
 mod tests {
     use super::*;
     use crate::{
-        ExecutionAction, OrderSide, OrderType, PositionSide, TradeMode,
-        EXECUTION_PLAN_SCHEMA_V1,
+        EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, OrderSide, OrderType, PositionSide, TradeMode,
     };
 
     fn temp_root(name: &str) -> PathBuf {
@@ -632,9 +638,7 @@ mod tests {
         }
 
         let reopened = DurableExecutionLedger::open(store.clone(), 200).expect("recovery open");
-        let recovered = reopened
-            .get("intent_0123456789abcdef")
-            .expect("recovered");
+        let recovered = reopened.get("intent_0123456789abcdef").expect("recovered");
         assert_eq!(recovered.record.state, ExecutionState::UnknownSubmission);
         assert_eq!(recovered.updated_at_ms, 200);
         assert!(!recovered.record.can_submit());
@@ -726,11 +730,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("root");
         let path = root.join("ledger.json");
-        fs::write(
-            &path,
-            r#"{"schema":"wrong","records":[]}"#,
-        )
-        .expect("write corrupt");
+        fs::write(&path, r#"{"schema":"wrong","records":[]}"#).expect("write corrupt");
 
         assert!(matches!(
             DurableExecutionLedger::open(ExecutionLedgerStore::at(&path), 100),
