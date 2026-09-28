@@ -69,28 +69,24 @@ Goal: build a production-grade mutation boundary while keeping live trading disa
 
 The existing observation/analysis stack remains unchanged and read-only. Phase 2 introduces exactly one mutation owner and must not turn the query layer, GitHub transport, observation state or analysis crates into trading engines.
 
-Required foundation:
+Accepted foundation through #99:
 
-- separate executor credential custody: Read + Trade, never Withdraw;
-- executor credential is not the observer credential and is not used on GitHub-hosted runners;
-- executor identity must be proven to target the same intended sub-account without exposing raw UID;
-- one OrderExecutor owns place/amend/cancel/close mutation sequencing;
-- typed immutable execution intents only;
-- deterministic globally unique clOrdId policy;
-- persisted mutation ledger across restart;
-- instrument/reference generation validation;
-- tick/lot/min/max and account-position-mode validation;
-- explicit tdMode, side, posSide, order type and reduce-only semantics;
-- server-time / expiry policy before writes;
-- ACK is not fill confirmation;
-- lost/ambiguous submission becomes UNKNOWN_SUBMISSION;
-- UNKNOWN_SUBMISSION must reconcile by clOrdId before any retry;
-- private orders WS remains observation evidence, not mutation authority;
-- batch partial success must be represented per item;
-- all public/hosted acceptance before explicit enablement is non-mutating;
-- ALLOW_LIVE_TRADING=false remains the hard production default.
+- #96 pure typed ExecutionIntent -> ExecutionPlan — PASS;
+- #97 durable bounded mutation ledger across restart — PASS;
+- #98 typed OKX place/amend/cancel + exact clOrdId lookup — PASS;
+- #99 one production-disabled OrderExecutor + UNKNOWN_SUBMISSION recovery — PASS;
+- deterministic clOrdId, generation binding, tick/lot/min/max and long/short validation are implemented;
+- SUBMITTING is durable before send; uncertain result never blindly retries;
+- reconciliation adopts exchange state only after strict full-plan identity checks.
 
-Phase 2 is one large logical slice with internal hosted and physical gates, not a new chain of alphabetic micro-stages.
+Remaining before any live order:
+
+1. separate executor credential custody + non-mutating preflight;
+2. disabled production runtime integration with fresh pre-send snapshot revalidation;
+3. exact artifact deploy + physical proof that disabled submit stops before SUBMITTING/network send;
+4. only after all three PASS may an explicit live-write acceptance be authorized.
+
+Phase 2 remains one large logical slice with internal hosted and physical gates, not a new chain of alphabetic micro-stages.
 
 ## Deferred, non-blocking maintenance
 
