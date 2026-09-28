@@ -9,7 +9,11 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
-use crate::{HostControlError, HostControlResult, executor::HostExecutor};
+use crate::{
+    HostControlError, HostControlResult,
+    executor::HostExecutor,
+    provenance::{InstalledAgentProvenance, InstalledAgentProvenanceStore},
+};
 
 const BUNDLE_SCHEMA_V1: &str = "okx.windows.bundle/v1";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
@@ -96,16 +100,27 @@ pub async fn deploy_agent(
         return Err(HostControlError::ArtifactHashMismatch);
     }
 
+    let provenance = InstalledAgentProvenance::verified(
+        run_id,
+        artifact_id,
+        manifest.source_head_sha.clone(),
+        manifest.source_tree.clone(),
+        manifest.rust_version.clone(),
+        actual_agent_hash.clone(),
+    );
+
     executor.install_verified_agent(&agent_bytes)?;
+    InstalledAgentProvenanceStore::canonical().save(&provenance)?;
 
     Ok(json!({
-        "run_id": run_id,
-        "artifact_id": artifact_id,
-        "source_head_sha": manifest.source_head_sha,
-        "source_tree": manifest.source_tree,
-        "rust_version": manifest.rust_version,
-        "agent_sha256": actual_agent_hash,
-        "installed": true
+        "run_id": provenance.run_id,
+        "artifact_id": provenance.artifact_id,
+        "source_head_sha": provenance.source_head_sha,
+        "source_tree": provenance.source_tree,
+        "rust_version": provenance.rust_version,
+        "agent_sha256": provenance.agent_sha256,
+        "installed": true,
+        "provenance_persisted": true
     }))
 }
 
