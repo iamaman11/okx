@@ -198,7 +198,8 @@ pub(crate) async fn dispatch(
         AgentOperation::ExecutorPreflight
         | AgentOperation::PrepareOpenExecution { .. }
         | AgentOperation::PrepareCloseExecution { .. }
-        | AgentOperation::SubmitPreparedExecution { .. } => {
+        | AgentOperation::SubmitPreparedExecution { .. }
+        | AgentOperation::ExecutionStatus { .. } => {
             execution::dispatch(request, context, generated_at).await
         }
         AgentOperation::CurrentCost { .. }
