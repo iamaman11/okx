@@ -1,6 +1,7 @@
 use okx_api::{
     AccountApi, AccountConfig, Credentials, OkxEnvironment, OkxRestClient, account_uid_fingerprint,
 };
+use okx_observation::{ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot};
 use serde::Serialize;
 
 use crate::AgentResult;
@@ -12,6 +13,7 @@ pub struct ExecutorCredentialPreflight {
     pub schema: &'static str,
     pub accepted: bool,
     pub observer_read_only: bool,
+    pub observer_private_ws_converged: bool,
     pub executor_read_permission: bool,
     pub executor_trade_permission: bool,
     pub executor_withdraw_permission: bool,
@@ -43,42 +45,83 @@ pub async fn probe_executor_credentials(
     ))
 }
 
+pub fn evaluate_executor_preflight_against_snapshot(
+    environment: OkxEnvironment,
+    observer: &AccountSnapshot,
+    executor: &AccountConfig,
+) -> ExecutorCredentialPreflight {
+    let observer_read_only = observer.api_key_permissions == ["read_only"];
+    let observer_private_ws_converged =
+        observer.schema == ACCOUNT_SNAPSHOT_SCHEMA_V2 && observer.private_ws_connected;
+    let executor_permissions = permissions(&executor.perm);
+    evaluate_common(
+        environment,
+        observer_read_only,
+        observer_private_ws_converged,
+        &observer.account_uid_fingerprint,
+        &observer.account_level,
+        &observer.position_mode,
+        &executor_permissions,
+        executor,
+    )
+}
+
 pub fn evaluate_executor_preflight(
     environment: OkxEnvironment,
     observer: &AccountConfig,
     executor: &AccountConfig,
 ) -> ExecutorCredentialPreflight {
     let observer_permissions = permissions(&observer.perm);
+    let observer_read_only = observer_permissions == ["read_only"];
+    let observer_fingerprint = account_uid_fingerprint(&observer.uid);
     let executor_permissions = permissions(&executor.perm);
 
-    let observer_read_only = observer_permissions
-        .iter()
-        .any(|value| value == "read_only")
-        && !observer_permissions.iter().any(|value| value == "trade")
-        && !observer_permissions.iter().any(|value| value == "withdraw");
-    let executor_read_permission = executor_permissions
-        .iter()
-        .any(|value| value == "read_only");
+    evaluate_common(
+        environment,
+        observer_read_only,
+        true,
+        &observer_fingerprint,
+        &observer.account_level,
+        &observer.position_mode,
+        &executor_permissions,
+        executor,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_common(
+    environment: OkxEnvironment,
+    observer_read_only: bool,
+    observer_private_ws_converged: bool,
+    observer_fingerprint: &str,
+    observer_account_level: &str,
+    observer_position_mode: &str,
+    executor_permissions: &[String],
+    executor: &AccountConfig,
+) -> ExecutorCredentialPreflight {
+    let executor_read_permission = executor_permissions.iter().any(|value| value == "read_only");
     let executor_trade_permission = executor_permissions.iter().any(|value| value == "trade");
     let executor_withdraw_permission = executor_permissions.iter().any(|value| value == "withdraw");
+    let executor_permissions_exact =
+        executor_permissions.len() == 2 && executor_read_permission && executor_trade_permission;
     let executor_ip_bound = !executor.ip.trim().is_empty();
 
-    let observer_fingerprint = account_uid_fingerprint(&observer.uid);
     let executor_fingerprint = account_uid_fingerprint(&executor.uid);
-    let account_identity_match = !observer.uid.is_empty()
+    let account_identity_match = !observer_fingerprint.is_empty()
         && !executor.uid.is_empty()
         && observer_fingerprint == executor_fingerprint;
 
-    let futures_mode = executor.account_level == "2";
-    let long_short_mode = executor.position_mode == "long_short_mode";
+    let futures_mode = observer_account_level == "2" && executor.account_level == "2";
+    let long_short_mode =
+        observer_position_mode == "long_short_mode" && executor.position_mode == "long_short_mode";
     let subaccount = !executor.uid.is_empty()
         && !executor.main_uid.is_empty()
         && executor.uid != executor.main_uid;
     let production_environment = !environment.demo;
 
     let accepted = observer_read_only
-        && executor_read_permission
-        && executor_trade_permission
+        && observer_private_ws_converged
+        && executor_permissions_exact
         && !executor_withdraw_permission
         && executor_ip_bound
         && account_identity_match
@@ -91,6 +134,7 @@ pub fn evaluate_executor_preflight(
         schema: EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1,
         accepted,
         observer_read_only,
+        observer_private_ws_converged,
         executor_read_permission,
         executor_trade_permission,
         executor_withdraw_permission,
@@ -149,6 +193,7 @@ mod tests {
 
         assert!(evidence.accepted);
         assert!(evidence.observer_read_only);
+        assert!(evidence.observer_private_ws_converged);
         assert!(evidence.executor_read_permission);
         assert!(evidence.executor_trade_permission);
         assert!(!evidence.executor_withdraw_permission);
@@ -158,6 +203,56 @@ mod tests {
         assert!(evidence.long_short_mode);
         assert!(evidence.subaccount);
         assert!(evidence.production_environment);
+    }
+
+    #[test]
+    fn snapshot_preflight_requires_private_ws_convergence_and_exact_observer_identity() {
+        use okx_observation::{
+            ACCOUNT_CONVERGED_SOURCE_V2, AccountBalanceState, M4_REST_WS_CONVERGED_REASON,
+        };
+
+        let mut observer = AccountSnapshot {
+            schema: ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned(),
+            source: ACCOUNT_CONVERGED_SOURCE_V2.to_owned(),
+            source_received_at: "2026-09-28T19:00:00Z".to_owned(),
+            account_generation: "sha256:account".to_owned(),
+            quality_reason: M4_REST_WS_CONVERGED_REASON.to_owned(),
+            private_ws_connected: true,
+            private_ws_generation: Some(1),
+            private_ws_connection_fingerprint: Some("fingerprint".to_owned()),
+            private_ws_last_inbound_ms: Some(1),
+            private_ws_events_applied: Some(1),
+            account_level: "2".to_owned(),
+            position_mode: "long_short_mode".to_owned(),
+            account_type: "1".to_owned(),
+            account_uid_fingerprint: account_uid_fingerprint("sub-uid"),
+            api_key_permissions: vec!["read_only".to_owned()],
+            balance: AccountBalanceState {
+                total_equity_usd: "1".to_owned(),
+                adjusted_equity_usd: None,
+                isolated_equity_usd: None,
+                initial_margin_requirement_usd: None,
+                maintenance_margin_requirement_usd: None,
+                margin_ratio: None,
+                notional_usd: None,
+                update_time_ms: None,
+                details: Vec::new(),
+            },
+            positions: Vec::new(),
+            pending_orders: Vec::new(),
+        };
+        let executor = config("sub-uid", "main-uid", "read_only,trade", "203.0.113.10");
+
+        assert!(
+            evaluate_executor_preflight_against_snapshot(environment(), &observer, &executor)
+                .accepted
+        );
+
+        observer.private_ws_connected = false;
+        let evidence =
+            evaluate_executor_preflight_against_snapshot(environment(), &observer, &executor);
+        assert!(!evidence.accepted);
+        assert!(!evidence.observer_private_ws_converged);
     }
 
     #[test]
