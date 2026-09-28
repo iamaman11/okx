@@ -1,6 +1,6 @@
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     auth::{sign, timestamp_now},
