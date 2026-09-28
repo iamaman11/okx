@@ -113,8 +113,12 @@ impl ReferenceRegistry {
         let mut normalized = BTreeMap::new();
         let mut seen = BTreeSet::new();
         for instrument in instruments {
-            let instrument_id =
-                require(&instrument.instrument_id, &instrument.instrument_id, "instId")?.to_owned();
+            let instrument_id = require(
+                &instrument.instrument_id,
+                &instrument.instrument_id,
+                "instId",
+            )?
+            .to_owned();
             if !seen.insert(instrument_id.clone()) {
                 return Err(ReferenceError::DuplicateInstrument(instrument_id));
             }
