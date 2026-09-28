@@ -10,7 +10,7 @@ pub mod trade;
 
 pub use account::{
     AccountApi, AccountCapabilities, AccountConfig, BalanceDetail, BalanceSnapshot, FeeRate,
-    Instrument, LeverageInfo, MarginMode, PendingOrder, Position,
+    Instrument, LeverageInfo, MarginMode, PendingOrder, Position, account_uid_fingerprint,
 };
 pub use client::{OkxPublicClient, OkxRestClient};
 pub use config::{Credentials, OkxEnvironment, Region, WsLoginMaterial};
