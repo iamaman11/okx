@@ -754,6 +754,7 @@ mod tests {
                 mailbox_telemetry: None,
                 account_fallback: None,
                 private_ws: None,
+                execution: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -792,6 +793,7 @@ mod tests {
                 mailbox_telemetry: None,
                 account_fallback: None,
                 private_ws: None,
+                execution: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -831,6 +833,7 @@ mod tests {
                 mailbox_telemetry: None,
                 account_fallback: None,
                 private_ws: None,
+                execution: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
