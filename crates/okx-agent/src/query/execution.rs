@@ -16,6 +16,7 @@ use super::*;
 use crate::execution_runtime::EXECUTION_PREPARED_SCHEMA_V1;
 
 pub const EXECUTION_PREFLIGHT_REJECTED_CODE: &str = "EXECUTION_PREFLIGHT_REJECTED";
+pub const EXECUTION_PREFLIGHT_UNAVAILABLE_CODE: &str = "EXECUTION_PREFLIGHT_UNAVAILABLE";
 pub const EXECUTION_RUNTIME_UNAVAILABLE_CODE: &str = "EXECUTION_RUNTIME_UNAVAILABLE";
 pub const EXECUTION_ACCOUNT_NOT_FRESH_CODE: &str = "EXECUTION_ACCOUNT_NOT_FRESH";
 pub const EXECUTION_INPUT_INCONSISTENT_CODE: &str = "EXECUTION_INPUT_INCONSISTENT";
@@ -56,7 +57,17 @@ pub(super) async fn dispatch(
                 FreshAccount::Ready(value) => value,
                 FreshAccount::Response(response) => return Ok(*response),
             };
-            let preflight = execution.preflight(&account).await?;
+            let preflight = match executor_preflight_check(
+                request,
+                generated_at,
+                execution,
+                &account,
+            )
+            .await?
+            {
+                ExecutorPreflightCheck::Ready(value) => value,
+                ExecutorPreflightCheck::Response(response) => return Ok(*response),
+            };
             if !preflight.accepted {
                 return Ok(preflight_rejected(request, generated_at));
             }
@@ -142,7 +153,17 @@ pub(super) async fn dispatch(
                 FreshAccount::Ready(value) => value,
                 FreshAccount::Response(response) => return Ok(*response),
             };
-            let preflight = execution.preflight(&account).await?;
+            let preflight = match executor_preflight_check(
+                request,
+                generated_at,
+                execution,
+                &account,
+            )
+            .await?
+            {
+                ExecutorPreflightCheck::Ready(value) => value,
+                ExecutorPreflightCheck::Response(response) => return Ok(*response),
+            };
             if !preflight.accepted {
                 return Ok(preflight_rejected(request, generated_at));
             }
@@ -183,6 +204,33 @@ pub(super) async fn dispatch(
     }
 }
 
+enum ExecutorPreflightCheck {
+    Ready(crate::execution_preflight::ExecutorCredentialPreflight),
+    Response(Box<AgentResponse>),
+}
+
+async fn executor_preflight_check(
+    request: &AgentRequest,
+    generated_at: &str,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+    account: &AccountSnapshot,
+) -> AgentResult<ExecutorPreflightCheck> {
+    match execution.preflight(account).await {
+        Ok(value) => Ok(ExecutorPreflightCheck::Ready(value)),
+        Err(crate::AgentError::Okx(error)) => Ok(ExecutorPreflightCheck::Response(Box::new(
+            failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_PREFLIGHT_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ),
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
 async fn executor_preflight(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
@@ -195,7 +243,10 @@ async fn executor_preflight(
         FreshAccount::Ready(value) => value,
         FreshAccount::Response(response) => return Ok(*response),
     };
-    let evidence = execution.preflight(&account).await?;
+    let evidence = match executor_preflight_check(request, generated_at, execution, &account).await? {
+        ExecutorPreflightCheck::Ready(value) => value,
+        ExecutorPreflightCheck::Response(response) => return Ok(*response),
+    };
     Ok(completed(
         request,
         generated_at,
@@ -228,7 +279,10 @@ async fn submit_prepared(
         FreshAccount::Ready(value) => value,
         FreshAccount::Response(response) => return Ok(*response),
     };
-    let preflight = execution.preflight(&account).await?;
+    let preflight = match executor_preflight_check(request, generated_at, execution, &account).await? {
+        ExecutorPreflightCheck::Ready(value) => value,
+        ExecutorPreflightCheck::Response(response) => return Ok(*response),
+    };
     if !preflight.accepted {
         return Ok(preflight_rejected(request, generated_at));
     }
