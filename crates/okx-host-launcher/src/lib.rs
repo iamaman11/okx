@@ -244,7 +244,10 @@ pub fn install_root(
     match load_active()? {
         Some(existing) if existing.active.controller_sha256 == active.controller_sha256 => {}
         Some(_) => return Err(LauncherError::RootConflict),
-        None => save_json(Path::new(ACTIVE_PATH), &ActiveController::new(active.clone(), None))?,
+        None => save_json(
+            Path::new(ACTIVE_PATH),
+            &ActiveController::new(active.clone(), None),
+        )?,
     }
 
     Ok(json!({
@@ -282,7 +285,10 @@ pub fn stage_update(candidate: ControllerVersion, bytes: &[u8]) -> LauncherResul
     }
 
     stage_version(&candidate, bytes)?;
-    save_json(Path::new(STAGED_PATH), &StagedController::new(candidate.clone()))?;
+    save_json(
+        Path::new(STAGED_PATH),
+        &StagedController::new(candidate.clone()),
+    )?;
     Ok(json!({
         "staged": true,
         "disposition": "CREATED",
@@ -376,16 +382,36 @@ pub fn abort_update() -> LauncherResult<Value> {
 
 pub fn status_value() -> Value {
     let active = load_active()
-        .map(|value| value.map_or_else(|| json!({"state":"NONE"}), |v| json!({"state":"READY","value":v})))
+        .map(|value| {
+            value.map_or_else(
+                || json!({"state":"NONE"}),
+                |v| json!({"state":"READY","value":v}),
+            )
+        })
         .unwrap_or_else(|error| json!({"state":"INVALID","error":error.to_string()}));
     let staged = load_staged()
-        .map(|value| value.map_or_else(|| json!({"state":"NONE"}), |v| json!({"state":"STAGED","value":v})))
+        .map(|value| {
+            value.map_or_else(
+                || json!({"state":"NONE"}),
+                |v| json!({"state":"STAGED","value":v}),
+            )
+        })
         .unwrap_or_else(|error| json!({"state":"INVALID","error":error.to_string()}));
     let pending = load_pending()
-        .map(|value| value.map_or_else(|| json!({"state":"NONE"}), |v| json!({"state":"PENDING","value":v})))
+        .map(|value| {
+            value.map_or_else(
+                || json!({"state":"NONE"}),
+                |v| json!({"state":"PENDING","value":v}),
+            )
+        })
         .unwrap_or_else(|error| json!({"state":"INVALID","error":error.to_string()}));
     let last_result = load_optional::<ActivationResult>(Path::new(LAST_RESULT_PATH))
-        .map(|value| value.map_or_else(|| json!({"state":"NONE"}), |v| json!({"state":"RECORDED","value":v})))
+        .map(|value| {
+            value.map_or_else(
+                || json!({"state":"NONE"}),
+                |v| json!({"state":"RECORDED","value":v}),
+            )
+        })
         .unwrap_or_else(|error| json!({"state":"INVALID","error":error.to_string()}));
 
     json!({
@@ -695,7 +721,10 @@ fn atomic_replace(source: &Path, destination: &Path) -> LauncherResult<()> {
     Ok(())
 }
 
-fn spawn_controller(version: &ControllerVersion, activation_request_id: Option<&str>) -> LauncherResult<Child> {
+fn spawn_controller(
+    version: &ControllerVersion,
+    activation_request_id: Option<&str>,
+) -> LauncherResult<Child> {
     verify_version(version)?;
     let stdout = OpenOptions::new()
         .create(true)
@@ -709,9 +738,7 @@ fn spawn_controller(version: &ControllerVersion, activation_request_id: Option<&
     let mut command = Command::new(version.binary_path()?);
     command.arg("run");
     if let Some(request_id) = activation_request_id {
-        command
-            .arg("--activation-request-id")
-            .arg(request_id);
+        command.arg("--activation-request-id").arg(request_id);
     }
     command
         .current_dir(CONTROL_ROOT)
