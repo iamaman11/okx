@@ -19,7 +19,10 @@ pub fn install() -> HostControlResult<Value> {
 pub fn install_controller_update_activation() -> HostControlResult<Value> {
     ensure_policy_valid()?;
     change_action(UPDATE_CONTROLLER_PATH, "activate-controller-update")?;
-    ensure_activation_policy_valid()?;
+    if let Err(error) = ensure_activation_policy_valid() {
+        let _ = change_action(CONTROLLER_PATH, "run");
+        return Err(error);
+    }
     Ok(json!({
         "changed": true,
         "task_name": TASK_NAME,
