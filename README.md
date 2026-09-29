@@ -121,7 +121,7 @@ Live-write enablement is a separate future authorization after #113 closes.
 - durable production recovery bundles are promoted to versioned GitHub Releases after exact-tree + manifest + binary-hash verification;
 - normal local Windows build/install is not a production deployment authority.
 
-Repository-level `main` protection/ruleset enforcement is tracked by #113 and must be enabled before the final production baseline is closed.
+`main` branch protection is enabled with required `classify`, `linux-core`, and `windows-native` checks; tested-tree/merged-tree equality remains the artifact reuse invariant.
 
 ## Windows filesystem boundaries
 
