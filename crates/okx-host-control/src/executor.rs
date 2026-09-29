@@ -95,6 +95,9 @@ impl HostExecutor {
                 Err(HostControlError::InvalidExecutionPath)
             }
             HostControlOperation::AcceptanceKillAgent => self.acceptance_kill_agent(),
+            HostControlOperation::AcceptanceFailNextControllerActivation => {
+                Ok(okx_host_launcher::arm_fail_next_activation()?)
+            }
             HostControlOperation::TransportStatus => self.transport_status(),
         }
     }
@@ -435,6 +438,7 @@ impl HostExecutor {
                 "controller_self_overwrite": false,
                 "scheduler_mutation_during_update": false,
                 "abort_controller_update": true,
+                "acceptance_fail_next_controller_activation": true,
                 "launcher": okx_host_launcher::status_value()
             }
         }))
