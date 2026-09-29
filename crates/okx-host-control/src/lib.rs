@@ -5,6 +5,7 @@ pub mod controller_update;
 pub mod desired;
 pub mod executor;
 pub mod job;
+pub mod legacy_bootstrap;
 pub mod provenance;
 pub mod runtime;
 pub mod single_instance;
@@ -21,6 +22,9 @@ pub enum HostControlError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("launcher error: {0}")]
+    Launcher(#[from] okx_host_launcher::LauncherError),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -115,16 +119,20 @@ pub enum HostControlError {
     #[error("controller update activator process could not be launched")]
     ControllerUpdateActivatorLaunch,
 
+    #[error("legacy controller bootstrap is disabled after launcher-root installation")]
+    LegacyBootstrapDisabled,
+
     #[error("CONTROL result budget invariant failed")]
     ControlResponseBudgetInvariant,
 }
 
 impl HostControlError {
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
             Self::Protocol(_) => "PROTOCOL_ERROR",
             Self::Github(_) => "GITHUB_ERROR",
             Self::Json(_) => "JSON_ERROR",
+            Self::Launcher(error) => controller_update::launcher_error_code(error),
             Self::Io(_) => "IO_ERROR",
             Self::SecretStore(_) => "SECRET_STORE_ERROR",
             Self::GithubTokenNotFound => "GITHUB_TOKEN_NOT_FOUND",
@@ -156,6 +164,7 @@ impl HostControlError {
             Self::ControllerUpdateConflict => "CONTROLLER_UPDATE_CONFLICT",
             Self::ControllerUpdateTerminalAckMissing => "CONTROLLER_UPDATE_TERMINAL_ACK_MISSING",
             Self::ControllerUpdateActivatorLaunch => "CONTROLLER_UPDATE_ACTIVATOR_LAUNCH_FAILED",
+            Self::LegacyBootstrapDisabled => "LEGACY_BOOTSTRAP_DISABLED",
             Self::ControlResponseBudgetInvariant => "CONTROL_RESPONSE_BUDGET_INVARIANT",
         }
     }
