@@ -73,6 +73,7 @@ impl HostExecutor {
             HostControlOperation::Sync => self.sync(),
             HostControlOperation::BuildAgent => Err(HostControlError::InvalidExecutionPath),
             HostControlOperation::DeployAgent { .. }
+            | HostControlOperation::InstallLauncherRoot { .. }
             | HostControlOperation::StageControllerUpdate { .. }
             | HostControlOperation::HandoffControllerUpdate => {
                 Err(HostControlError::InvalidExecutionPath)
@@ -427,10 +428,14 @@ impl HostExecutor {
                 "verified_self_update": true,
                 "bounded_control_results": true,
                 "bounded_workspace_status": true,
-                "self_update_acceptance_marker": "transient-activator-v5",
+                "self_update_acceptance_marker": "immutable-launcher-v1",
                 "scheduler_action_handoff": false,
-                "transient_activator_handoff": true,
-                "abort_controller_update": true
+                "transient_activator_handoff": false,
+                "immutable_launcher_root": true,
+                "controller_self_overwrite": false,
+                "scheduler_mutation_during_update": false,
+                "abort_controller_update": true,
+                "launcher": okx_host_launcher::status_value()
             }
         }))
     }
