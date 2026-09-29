@@ -13,9 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{
-    HostControlError, HostControlResult, autostart, single_instance::SingleInstanceGuard,
-};
+use crate::{HostControlError, HostControlResult, autostart, single_instance::SingleInstanceGuard};
 
 pub const CONTROLLER_PATH: &str = r"C:\okx-control\okx-host-control.exe";
 pub const UPDATE_ROOT: &str = r"C:\okx-control\update";
