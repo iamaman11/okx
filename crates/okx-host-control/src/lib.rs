@@ -111,6 +111,9 @@ pub enum HostControlError {
 
     #[error("controller update handoff has no durable CONTROL terminal PASS")]
     ControllerUpdateTerminalAckMissing,
+
+    #[error("CONTROL result budget invariant failed")]
+    ControlResponseBudgetInvariant,
 }
 
 impl HostControlError {
@@ -149,6 +152,7 @@ impl HostControlError {
             Self::ControllerUpdateHashMismatch => "CONTROLLER_UPDATE_HASH_MISMATCH",
             Self::ControllerUpdateConflict => "CONTROLLER_UPDATE_CONFLICT",
             Self::ControllerUpdateTerminalAckMissing => "CONTROLLER_UPDATE_TERMINAL_ACK_MISSING",
+            Self::ControlResponseBudgetInvariant => "CONTROL_RESPONSE_BUDGET_INVARIANT",
         }
     }
 }
