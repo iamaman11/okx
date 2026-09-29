@@ -309,13 +309,13 @@ fn wait_for_exact_process_exit(identity: ProcessIdentity) -> HostControlResult<(
     use windows_sys::Win32::{
         Foundation::{CloseHandle, WAIT_OBJECT_0},
         System::Threading::{
-            INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE,
-            WaitForSingleObject,
+            INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
         },
     };
+    const PROCESS_SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
     let handle = unsafe {
         OpenProcess(
-            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE_ACCESS | PROCESS_QUERY_LIMITED_INFORMATION,
             0,
             identity.pid,
         )
