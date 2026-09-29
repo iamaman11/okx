@@ -35,10 +35,14 @@ Windows Task Scheduler
   ONE TimeTrigger / PT1M / StartWhenAvailable / IgnoreNew
         |
         v
-ONE okx-host-control.exe
+ONE immutable okx-host-launcher.exe
+  content-addressed controller selection
+  transactional activation + rollback
+        |
+        v
+ONE versioned okx-host-control.exe
   desired state + mutex + Job Object
   fixed typed CONTROL operations only
-  verified self-update through the SAME Scheduler task
         |
         v
 ONE okx-agent.exe
@@ -66,6 +70,7 @@ ONE okx-agent.exe
 - `okx-agent`: composition/query/access adapter only;
 - `okx-github`: GitHub transport primitives;
 - `okx-protocol`: versioned DATA/CONTROL contracts;
+- `okx-host-launcher`: immutable one-shot controller root-of-trust; hash verification, activation and rollback only;
 - `okx-host-control`: Windows lifecycle/deploy/diagnostics only.
 
 No observation, analysis, transport or host-control component may directly become a trading engine.
@@ -88,7 +93,7 @@ ChatGPT -> fixed allowlisted control request -> GitHub #12 -> okx-host-control
 
 CONTROL has no arbitrary shell/PowerShell/HTTP/path execution surface. Legacy remote `BuildAgent` is protocol-compatible only and fails closed; normal production deployment is verified hosted-CI artifact deployment.
 
-Both transports have physically passed restart and real external GitHub/network-loss recovery. Controller replacement is being closed as a typed verified operation: successful PR-CI bundle -> staged fixed path -> durable CONTROL ACK -> handoff through the same Scheduler task -> hash-verified canonical replacement -> task restoration.
+Both transports have physically passed restart and real external GitHub/network-loss recovery. Controller replacement is being closed under #126: successful PR-CI bundle -> immutable content-addressed version -> durable CONTROL ACK -> unchanged Scheduler invokes launcher -> exact old-PID exit -> readiness proof -> commit or automatic rollback.
 
 ## Account and execution boundary
 
@@ -122,7 +127,7 @@ Repository-level `main` protection/ruleset enforcement is tracked by #113 and mu
 
 ```text
 C:\okx          mutable canonical Git workspace
-C:\okx-control  installed host-control + controller lifecycle state
+C:\okx-control  immutable launcher + versioned controllers + activation state
 C:\okx-runtime  installed agent + runtime state/logs/staging
 C:\okx-upgrade  temporary bootstrap/upgrade staging only
 ```
@@ -145,5 +150,6 @@ Canonical issues:
 - #12 CONTROL transport;
 - #3 execution boundary;
 - #47 capability matrix;
-- #54 controller self-update — ACTIVE until the first updater-capable controller is bootstrapped and a subsequent fully remote self-update is physically accepted;
+- #126 immutable controller launcher/root-of-trust — ACTIVE until one-time root migration plus remote commit/rollback/reboot physical acceptance;
+- #54 controller self-update — absorbed by #126 for final lifecycle closure;
 - #58 mailbox compaction — trigger-based deferred maintenance.
