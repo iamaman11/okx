@@ -182,7 +182,14 @@ pub fn prepare_handoff(request_id: &str) -> HostControlResult<Value> {
     pending.handoff_request_id = Some(request_id.to_owned());
     save_json(Path::new(PENDING_PATH), &pending)?;
 
-    let task = autostart::install_controller_update_activation()?;
+    let task = match autostart::install_controller_update_activation() {
+        Ok(task) => task,
+        Err(error) => {
+            pending.handoff_request_id = None;
+            save_json(Path::new(PENDING_PATH), &pending)?;
+            return Err(error);
+        }
+    };
     Ok(json!({
         "handoff_prepared": true,
         "activation": public_pending(&pending),
@@ -202,7 +209,7 @@ pub async fn activate(github: &GitHubClient) -> HostControlResult<Value> {
     if !durable_handoff_ack(github, &request_id).await? {
         pending.handoff_request_id = None;
         save_json(Path::new(PENDING_PATH), &pending)?;
-        autostart::install()?;
+        autostart::restore_controller_action()?;
         return Err(HostControlError::ControllerUpdateTerminalAckMissing);
     }
 
@@ -220,7 +227,7 @@ pub async fn activate(github: &GitHubClient) -> HostControlResult<Value> {
 
     save_json(Path::new(INSTALLED_PROVENANCE_PATH), &pending.installed())?;
 
-    let scheduler = autostart::install()?;
+    let scheduler = autostart::restore_controller_action()?;
     fs::remove_file(PENDING_PATH)?;
 
     Ok(json!({
@@ -229,6 +236,35 @@ pub async fn activate(github: &GitHubClient) -> HostControlResult<Value> {
         "source_head_sha": pending.source_head_sha,
         "source_tree": pending.source_tree,
         "scheduler": scheduler
+    }))
+}
+
+pub fn abort() -> HostControlResult<Value> {
+    autostart::ensure_policy_valid()?;
+
+    let Some(pending) = load_pending()? else {
+        return Ok(json!({
+            "aborted": false,
+            "disposition": "NO_PENDING_UPDATE"
+        }));
+    };
+
+    if Path::new(PENDING_PATH).exists() {
+        fs::remove_file(PENDING_PATH)?;
+    }
+    if Path::new(STAGED_CONTROLLER_PATH).exists() {
+        fs::remove_file(STAGED_CONTROLLER_PATH)?;
+    }
+
+    Ok(json!({
+        "aborted": true,
+        "disposition": "PENDING_UPDATE_CLEARED",
+        "run_id": pending.run_id,
+        "artifact_id": pending.artifact_id,
+        "source_head_sha": pending.source_head_sha,
+        "source_tree": pending.source_tree,
+        "controller_sha256": pending.controller_sha256,
+        "handoff_request_id": pending.handoff_request_id
     }))
 }
 
