@@ -12,7 +12,9 @@ use okx_protocol::{
 use tokio::time::{Interval, MissedTickBehavior, interval};
 
 use crate::{
-    HostControlError, HostControlResult as LocalResult, artifact::deploy_agent, autostart,
+    HostControlError, HostControlResult as LocalResult,
+    artifact::{deploy_agent, stage_controller_update},
+    autostart, controller_update,
     executor::HostExecutor,
 };
 
@@ -317,6 +319,25 @@ async fn process_control_batch(
                 )
                 .await,
                 ProcessTransition::None,
+            ),
+            HostControlOperation::StageControllerUpdate {
+                run_id,
+                artifact_id,
+                expected_source_tree,
+            } => (
+                stage_controller_update(
+                    github,
+                    executor,
+                    *run_id,
+                    *artifact_id,
+                    expected_source_tree,
+                )
+                .await,
+                ProcessTransition::None,
+            ),
+            HostControlOperation::HandoffControllerUpdate => (
+                controller_update::prepare_handoff(),
+                ProcessTransition::Handoff,
             ),
             HostControlOperation::HandoffToAutostart => {
                 (autostart::run_now(), ProcessTransition::Handoff)
