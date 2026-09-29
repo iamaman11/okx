@@ -126,13 +126,10 @@ pub async fn recover_terminal_ack(github: &GitHubClient) -> HostControlResult<bo
     }
 
     let comments = github.issue_comments(12).await?;
-    if comments.iter().any(|comment| {
-        durable_ack_body(
-            comment.user_id,
-            &comment.body,
-            &migration.request_id,
-        )
-    }) {
+    if comments
+        .iter()
+        .any(|comment| durable_ack_body(comment.user_id, &comment.body, &migration.request_id))
+    {
         mark_terminal_ack(&migration.request_id)?;
         return Ok(true);
     }
@@ -182,8 +179,7 @@ pub fn activate(request_id: &str) -> HostControlResult<Value> {
     wait_for_exact_process_exit(migration.parent)?;
 
     let launcher = Path::new(okx_host_launcher::LAUNCHER_PATH);
-    if !launcher.is_file()
-        || okx_host_launcher::sha256_file(launcher)? != migration.launcher_sha256
+    if !launcher.is_file() || okx_host_launcher::sha256_file(launcher)? != migration.launcher_sha256
     {
         return Err(HostControlError::ControllerUpdateHashMismatch);
     }
@@ -295,26 +291,13 @@ fn current_process_identity() -> HostControlResult<ProcessIdentity> {
 }
 
 #[cfg(windows)]
-fn process_creation_time(
-    handle: windows_sys::Win32::Foundation::HANDLE,
-) -> HostControlResult<u64> {
-    use windows_sys::Win32::{
-        Foundation::FILETIME,
-        System::Threading::GetProcessTimes,
-    };
+fn process_creation_time(handle: windows_sys::Win32::Foundation::HANDLE) -> HostControlResult<u64> {
+    use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
     let mut creation = FILETIME::default();
     let mut exit = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
-    let ok = unsafe {
-        GetProcessTimes(
-            handle,
-            &mut creation,
-            &mut exit,
-            &mut kernel,
-            &mut user,
-        )
-    };
+    let ok = unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
     if ok == 0 {
         return Err(std::io::Error::last_os_error().into());
     }
