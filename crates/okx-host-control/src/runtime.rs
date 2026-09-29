@@ -29,6 +29,8 @@ pub const CONTROL_ISSUE_NUMBER: u64 = 12;
 pub const DEFAULT_CONTROL_POLL_SECONDS: u64 = 5;
 const LOCAL_RECONCILE_SECONDS: u64 = 1;
 const MAX_CONTROL_BODY_BYTES: usize = 4096;
+const MAX_CONTROL_RESULT_BYTES: usize = 16 * 1024;
+const CONTROL_RESPONSE_TOO_LARGE_CODE: &str = "CONTROL_RESPONSE_TOO_LARGE";
 const CONTROL_CURSOR_PATH: &str = r"C:\okx-control\github-control-issue-12-cursor.json";
 
 #[derive(Debug)]
@@ -365,7 +367,7 @@ async fn process_control_batch(
             ),
         };
 
-        let result = HostControlResult {
+        let result = bounded_control_result(HostControlResult {
             schema: HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
             request_id: request.request_id.clone(),
             operation,
@@ -373,11 +375,11 @@ async fn process_control_batch(
             observed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             details,
             failure,
-        };
-        result.validate()?;
+        })?;
+        let result_body = serde_json::to_string(&result)?;
 
         github
-            .post_issue_comment(CONTROL_ISSUE_NUMBER, &serde_json::to_string(&result)?)
+            .post_issue_comment(CONTROL_ISSUE_NUMBER, &result_body)
             .await?;
 
         terminal_ids.insert(request.request_id);
@@ -397,6 +399,36 @@ async fn process_control_batch(
     }
 
     Ok(processed)
+}
+
+fn bounded_control_result(result: HostControlResult) -> LocalResult<HostControlResult> {
+    result.validate()?;
+    let serialized = serde_json::to_vec(&result)?;
+    if serialized.len() <= MAX_CONTROL_RESULT_BYTES {
+        return Ok(result);
+    }
+
+    let bounded = HostControlResult {
+        schema: result.schema,
+        request_id: result.request_id,
+        operation: result.operation,
+        status: HostControlStatus::Fail,
+        observed_at: result.observed_at,
+        details: None,
+        failure: Some(HostControlFailure {
+            code: CONTROL_RESPONSE_TOO_LARGE_CODE.to_owned(),
+            message: format!(
+                "CONTROL result exceeded bounded response budget: serialized={}B limit={}B",
+                serialized.len(),
+                MAX_CONTROL_RESULT_BYTES
+            ),
+        }),
+    };
+    bounded.validate()?;
+    if serde_json::to_vec(&bounded)?.len() > MAX_CONTROL_RESULT_BYTES {
+        return Err(HostControlError::ControlResponseBudgetInvariant);
+    }
+    Ok(bounded)
 }
 
 pub async fn process_pending(
@@ -461,5 +493,46 @@ mod tests {
     fn control_issue_is_pinned() {
         assert_eq!(CONTROL_ISSUE_NUMBER, 12);
         assert_eq!(OWNER_USER_ID, 44_100_369);
+    }
+
+    #[test]
+    fn oversized_control_result_terminalizes_as_compact_failure() {
+        let result = HostControlResult {
+            schema: HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
+            request_id: "ctl_budget_0123456789".to_owned(),
+            operation: HostControlOperation::Status,
+            status: HostControlStatus::Pass,
+            observed_at: "2026-09-29T13:00:00.000Z".to_owned(),
+            details: Some(serde_json::json!({"blob": "x".repeat(MAX_CONTROL_RESULT_BYTES)})),
+            failure: None,
+        };
+
+        let bounded = bounded_control_result(result).expect("bounded result");
+        assert_eq!(bounded.status, HostControlStatus::Fail);
+        assert_eq!(
+            bounded
+                .failure
+                .as_ref()
+                .map(|failure| failure.code.as_str()),
+            Some(CONTROL_RESPONSE_TOO_LARGE_CODE)
+        );
+        assert!(serde_json::to_vec(&bounded).expect("serialize").len() <= MAX_CONTROL_RESULT_BYTES);
+    }
+
+    #[test]
+    fn compact_control_result_is_preserved() {
+        let result = HostControlResult {
+            schema: HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
+            request_id: "ctl_budget_small_012345".to_owned(),
+            operation: HostControlOperation::Status,
+            status: HostControlStatus::Pass,
+            observed_at: "2026-09-29T13:00:00.000Z".to_owned(),
+            details: Some(serde_json::json!({"ready": true})),
+            failure: None,
+        };
+
+        let bounded = bounded_control_result(result).expect("bounded result");
+        assert_eq!(bounded.status, HostControlStatus::Pass);
+        assert!(bounded.failure.is_none());
     }
 }
