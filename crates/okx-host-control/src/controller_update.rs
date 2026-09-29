@@ -147,7 +147,10 @@ mod tests {
             ["sch", "tasks"].concat(),
             ["Command", "::new"].concat(),
         ] {
-            assert!(!source.contains(&forbidden), "forbidden normal-update token: {forbidden}");
+            assert!(
+                !source.contains(&forbidden),
+                "forbidden normal-update token: {forbidden}"
+            );
         }
     }
 }
