@@ -21,6 +21,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessTransition {
     None,
+    RootMigration,
     Handoff,
     Crash,
 }
@@ -355,7 +356,7 @@ async fn process_control_batch(
                     expected_source_tree,
                 )
                 .await,
-                ProcessTransition::None,
+                ProcessTransition::RootMigration,
             ),
             HostControlOperation::StageControllerUpdate {
                 run_id,
@@ -423,6 +424,7 @@ async fn process_control_batch(
         if result.status == HostControlStatus::Pass {
             match transition {
                 ProcessTransition::None => {}
+                ProcessTransition::RootMigration => std::process::exit(0),
                 ProcessTransition::Handoff => {
                     if result.operation == HostControlOperation::HandoffControllerUpdate {
                         controller_update::mark_terminal_ack(&result.request_id)?;
