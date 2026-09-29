@@ -336,7 +336,7 @@ async fn process_control_batch(
                 ProcessTransition::None,
             ),
             HostControlOperation::HandoffControllerUpdate => (
-                controller_update::prepare_handoff(),
+                controller_update::prepare_handoff(&request.request_id),
                 ProcessTransition::Handoff,
             ),
             HostControlOperation::HandoffToAutostart => {
