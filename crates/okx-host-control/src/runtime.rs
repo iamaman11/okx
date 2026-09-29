@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, future::Future, path::PathBuf, time::Duration};
 use chrono::{SecondsFormat, Utc};
 use okx_github::{
     GitHubBackoff, GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCursorStore,
-    OWNER_USER_ID,
+    MAX_COMMENT_BODY_BYTES, OWNER_USER_ID,
 };
 use okx_protocol::{
     HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlOperation, HostControlRequest,
@@ -465,7 +465,7 @@ fn control_terminal_request_ids(comments: &[IssueComment]) -> BTreeSet<String> {
     comments
         .iter()
         .filter(|comment| {
-            comment.user_id == OWNER_USER_ID && comment.body.len() <= MAX_CONTROL_BODY_BYTES
+            comment.user_id == OWNER_USER_ID && comment.body.len() <= MAX_COMMENT_BODY_BYTES
         })
         .filter_map(|comment| serde_json::from_str::<HostControlResult>(&comment.body).ok())
         .filter(|result| result.validate().is_ok())
@@ -517,6 +517,30 @@ mod tests {
             Some(CONTROL_RESPONSE_TOO_LARGE_CODE)
         );
         assert!(serde_json::to_vec(&bounded).expect("serialize").len() <= MAX_CONTROL_RESULT_BYTES);
+    }
+
+    #[test]
+    fn recovery_ledger_accepts_valid_terminal_larger_than_request_limit() {
+        let result = HostControlResult {
+            schema: HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
+            request_id: "ctl_large_terminal_012345".to_owned(),
+            operation: HostControlOperation::Status,
+            status: HostControlStatus::Pass,
+            observed_at: "2026-09-29T13:00:00.000Z".to_owned(),
+            details: Some(serde_json::json!({"diagnostic": "x".repeat(MAX_CONTROL_BODY_BYTES)})),
+            failure: None,
+        };
+        let body = serde_json::to_string(&result).expect("serialize");
+        assert!(body.len() > MAX_CONTROL_BODY_BYTES);
+        assert!(body.len() <= MAX_COMMENT_BODY_BYTES);
+
+        let comments = [IssueComment {
+            id: 1,
+            body,
+            user_id: OWNER_USER_ID,
+            created_at: "2026-09-29T13:00:00.000Z".to_owned(),
+        }];
+        assert!(control_terminal_request_ids(&comments).contains("ctl_large_terminal_012345"));
     }
 
     #[test]
