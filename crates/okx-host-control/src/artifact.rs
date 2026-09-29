@@ -13,9 +13,9 @@ use zip::{ZipArchive, result::ZipError};
 use crate::{
     HostControlError, HostControlResult,
     controller_update::{self, ControllerUpdateCandidate},
-    root_migration,
     executor::HostExecutor,
     provenance::{InstalledAgentProvenance, InstalledAgentProvenanceStore},
+    root_migration,
 };
 
 const BUNDLE_SCHEMA_V1: &str = "okx.windows.bundle/v1";
@@ -140,11 +140,8 @@ pub async fn install_launcher_root(
         active,
         &bundle.controller_bytes,
     )?;
-    let migration = root_migration::prepare(
-        request_id,
-        &actual_controller_hash,
-        &actual_launcher_hash,
-    )?;
+    let migration =
+        root_migration::prepare(request_id, &actual_controller_hash, &actual_launcher_hash)?;
 
     Ok(json!({
         "root": root,
