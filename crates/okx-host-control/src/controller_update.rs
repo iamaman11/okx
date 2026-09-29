@@ -141,9 +141,13 @@ mod tests {
     #[test]
     fn normal_update_module_has_no_self_overwrite_path() {
         let source = include_str!("controller_update.rs");
-        assert!(!source.contains("okx-host-control.exe.new"));
-        assert!(!source.contains("fs::rename(canonical"));
-        assert!(!source.contains("schtasks"));
-        assert!(!source.contains("Command::new"));
+        for forbidden in [
+            ["okx-host-control.exe", ".new"].concat(),
+            ["fs::rename(", "canonical"].concat(),
+            ["sch", "tasks"].concat(),
+            ["Command", "::new"].concat(),
+        ] {
+            assert!(!source.contains(&forbidden), "forbidden normal-update token: {forbidden}");
+        }
     }
 }
