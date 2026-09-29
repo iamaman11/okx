@@ -510,7 +510,10 @@ mod tests {
         let bounded = bounded_control_result(result).expect("bounded result");
         assert_eq!(bounded.status, HostControlStatus::Fail);
         assert_eq!(
-            bounded.failure.as_ref().map(|failure| failure.code.as_str()),
+            bounded
+                .failure
+                .as_ref()
+                .map(|failure| failure.code.as_str()),
             Some(CONTROL_RESPONSE_TOO_LARGE_CODE)
         );
         assert!(serde_json::to_vec(&bounded).expect("serialize").len() <= MAX_CONTROL_RESULT_BYTES);
