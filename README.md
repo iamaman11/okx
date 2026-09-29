@@ -35,7 +35,8 @@ Windows Task Scheduler
   ONE TimeTrigger / PT1M / StartWhenAvailable / IgnoreNew
         |
         v
-ONE immutable okx-host-launcher.exe
+ONE fixed Scheduler entrypoint: C:\okx-control\okx-host-control.exe
+  immutable launcher binary after one-time root migration
   content-addressed controller selection
   transactional activation + rollback
         |
@@ -93,7 +94,7 @@ ChatGPT -> fixed allowlisted control request -> GitHub #12 -> okx-host-control
 
 CONTROL has no arbitrary shell/PowerShell/HTTP/path execution surface. Legacy remote `BuildAgent` is protocol-compatible only and fails closed; normal production deployment is verified hosted-CI artifact deployment.
 
-Both transports have physically passed restart and real external GitHub/network-loss recovery. Controller replacement is being closed under #126: successful PR-CI bundle -> immutable content-addressed version -> durable CONTROL ACK -> unchanged Scheduler invokes launcher -> exact old-PID exit -> readiness proof -> commit or automatic rollback.
+Both transports have physically passed restart and real external GitHub/network-loss recovery. Controller replacement is being closed under #126: successful PR-CI bundle -> immutable content-addressed version -> durable CONTROL ACK -> unchanged Scheduler invokes the fixed launcher entrypoint -> exact old-process identity exit -> readiness proof -> commit or automatic rollback. The Scheduler definition is unchanged even by the one-time root migration.
 
 ## Account and execution boundary
 
