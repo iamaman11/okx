@@ -179,8 +179,9 @@ Immutable Windows controller installation root-of-trust only:
 - content-addressed controller versions;
 - durable active/staged/pending/ready/result records under `C:\okx-control`;
 - exact SHA-256 verification;
-- exact old-PID wait + readiness event;
-- deterministic commit/rollback across crash/reboot;
+- exact Windows process identity (PID + process creation time) for old-controller wait and readiness proof;
+- readiness event plus durable ready record;
+- deterministic commit/rollback across crash/reboot, including PID reuse;
 - no GitHub, OKX, mailbox, trading, workspace or agent business semantics;
 - no daemon/watchdog/polling loop.
 
@@ -199,6 +200,8 @@ Windows lifecycle/deployment/diagnostics only:
 - durable activation preparation for the immutable launcher.
 
 No market/account/risk/order business logic belongs here. Normal controller updates never overwrite the running controller and never mutate the Scheduler definition. A migration-only legacy activator exists solely to cross the pre-launcher bootstrap boundary and is fail-closed once launcher-root exists.
+
+Physical rollback acceptance uses one bounded typed hook, `AcceptanceFailNextControllerActivation`: it can only arm the already-staged next controller candidate to exit before its READY proof. The marker is content-bound to that candidate, one-shot, lives under the launcher activation root, and is cleared by abort/commit/rollback. It is not a generic crash, shell, path or command surface.
 
 Remote legacy `BuildAgent` is not a production execution path and fails closed. Normal production deployment accepts only a verified hosted-CI artifact whose provenance matches current accepted source tree and binary hashes.
 
@@ -272,7 +275,7 @@ ONE okx-host-control
 ONE okx-agent
 ```
 
-Task Scheduler supervises the launcher only. The launcher selects/starts exactly one immutable controller version; host-control supervises the agent only.
+Task Scheduler supervises the launcher only. The launcher selects/starts exactly one immutable controller version; host-control supervises the agent only. During the one-time root migration, the accepted controller installs launcher-root and the permanent Scheduler action, publishes its terminal result, then exits the legacy running task instance; the next existing PT1M trigger enters through launcher. Normal subsequent updates use the unchanged task on demand.
 
 No SCM service, RestartOnFailure authority, LogonTrigger recovery, PowerShell watchdog or second custom supervisor is allowed.
 
