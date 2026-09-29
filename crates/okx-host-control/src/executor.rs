@@ -68,7 +68,7 @@ impl HostExecutor {
         match operation {
             HostControlOperation::Status => self.status(),
             HostControlOperation::Sync => self.sync(),
-            HostControlOperation::BuildAgent => self.build_agent(),
+            HostControlOperation::BuildAgent => Err(HostControlError::InvalidExecutionPath),
             HostControlOperation::DeployAgent { .. } => Err(HostControlError::InvalidExecutionPath),
             HostControlOperation::TestWorkspace => self.test_workspace(),
             HostControlOperation::InitAgentIdentity => self.init_agent_identity(),
@@ -228,31 +228,6 @@ impl HostExecutor {
         Ok(json!({
             "head": self.git(&["rev-parse", "HEAD"])?,
             "workspace_tests": "PASS"
-        }))
-    }
-
-    fn build_agent(&mut self) -> HostControlResult<Value> {
-        self.require_agent_stopped()?;
-        self.assert_synced_main()?;
-        self.run_logged(
-            "cargo",
-            &["build", "--release", "-p", "okx-agent"],
-            "host-control-cargo-build.log",
-            "cargo build",
-        )?;
-
-        let local_binary = self.local_build_agent_binary();
-        if !local_binary.is_file() {
-            return Err(HostControlError::AgentBinaryMissing);
-        }
-
-        let bytes = fs::read(local_binary)?;
-        self.install_verified_agent(&bytes)?;
-
-        Ok(json!({
-            "head": self.git(&["rev-parse", "HEAD"])?,
-            "agent_binary_present": true,
-            "deployment": "LOCAL_BOOTSTRAP_ONLY"
         }))
     }
 
@@ -638,13 +613,6 @@ impl HostExecutor {
         }
     }
 
-    fn local_build_agent_binary(&self) -> PathBuf {
-        self.repo_root
-            .join("target")
-            .join("release")
-            .join("okx-agent.exe")
-    }
-
     fn agent_binary(&self) -> PathBuf {
         PathBuf::from(RUNTIME_ROOT).join("okx-agent.exe")
     }
@@ -697,6 +665,15 @@ mod tests {
     fn remote_allowlist_is_narrow() {
         assert!(ALLOWED_REMOTES.contains(&"https://github.com/iamaman11/okx.git"));
         assert!(!ALLOWED_REMOTES.contains(&"https://github.com/other/okx.git"));
+    }
+
+    #[test]
+    fn remote_local_build_is_not_a_valid_execution_path() {
+        let mut executor = HostExecutor::canonical().expect("executor");
+        let error = executor
+            .execute(HostControlOperation::BuildAgent)
+            .expect_err("remote local build must fail closed");
+        assert!(matches!(error, HostControlError::InvalidExecutionPath));
     }
 
     #[test]
