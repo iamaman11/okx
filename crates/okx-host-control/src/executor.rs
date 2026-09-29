@@ -425,7 +425,8 @@ impl HostExecutor {
                 "schema": HOST_CONTROL_CAPABILITIES_SCHEMA_V1,
                 "verified_self_update": true,
                 "bounded_control_results": true,
-                "bounded_workspace_status": true
+                "bounded_workspace_status": true,
+                "self_update_acceptance_marker": "physical-proof-v2"
             }
         }))
     }
