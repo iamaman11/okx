@@ -33,8 +33,13 @@ enum Command {
     /// Store the GitHub control token from stdin in Windows Credential Manager.
     SetGithubToken,
 
-    /// One-shot Scheduler activator for a previously verified controller update.
-    ActivateControllerUpdate,
+    /// One-shot staged activator for a previously verified controller update.
+    ActivateControllerUpdate {
+        #[arg(long)]
+        parent_pid: u32,
+        #[arg(long)]
+        handoff_request_id: String,
+    },
 
     /// Process pending typed requests once and exit.
     Once,
@@ -74,11 +79,15 @@ async fn run(cli: Cli) -> HostControlResult<()> {
                 })
             );
         }
-        Command::ActivateControllerUpdate => {
+        Command::ActivateControllerUpdate {
+            parent_pid,
+            handoff_request_id,
+        } => {
             let token = load_native_github_token()?;
             let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
             github.verify_repository_identity().await?;
-            let result = controller_update::activate(&github).await?;
+            let result =
+                controller_update::activate(&github, parent_pid, &handoff_request_id).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Once => {
