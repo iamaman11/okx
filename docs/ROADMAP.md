@@ -106,7 +106,7 @@ Current accepted durable release lineage began with:
 - [x] Phase 2 pre-enable status synchronized;
 - [x] live-write status explicitly separated from production baseline.
 
-### Checkpoint 5 — final exact production-baseline acceptance — NEXT after Checkpoint 2 enforcement
+### Checkpoint 5 — final exact production-baseline acceptance — runtime/execution PASS; controller lifecycle + repository enforcement remain
 
 One bounded acceptance on the exact final artifact must prove:
 
@@ -135,11 +135,26 @@ Exit state:
 
 ## Deferred, non-blocking maintenance
 
-### #54 controller self-update
+### #54 controller self-update — ACTIVE / required
 
-Rare replacement of the running `okx-host-control.exe` remains a bounded trust-root transition. Keep deferred unless zero-local-touch controller replacement becomes a hard product requirement.
+Full-cycle operation now explicitly includes Windows controller diagnosis and verified replacement.
 
-Do not add a second service/watchdog/scheduler owner.
+Required acceptance:
+
+- [ ] merge the updater-capable controller with Linux + Windows CI PASS;
+- [ ] one final bounded bootstrap installs that first updater-capable controller from the exact verified CI artifact;
+- [ ] typed `workspace_status` diagnoses Windows source divergence without arbitrary shell;
+- [ ] build a subsequent different controller artifact;
+- [ ] remotely `stage_controller_update`;
+- [ ] remotely verify staged hash/provenance;
+- [ ] remotely `handoff_controller_update`;
+- [ ] durable CONTROL terminal PASS must exist before activation;
+- [ ] the same canonical Scheduler task performs the one-shot activator handoff;
+- [ ] canonical controller replacement/hash/provenance PASS;
+- [ ] canonical Scheduler action restored;
+- [ ] fresh CONTROL + DATA + agent ownership/recovery PASS after replacement.
+
+No second service/watchdog/scheduler task is allowed.
 
 ### #58 DATA mailbox compaction
 
