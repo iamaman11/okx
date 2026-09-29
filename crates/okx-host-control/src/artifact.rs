@@ -11,8 +11,9 @@ use sha2::{Digest, Sha256};
 use zip::{ZipArchive, result::ZipError};
 
 use crate::{
-    HostControlError, HostControlResult, autostart,
+    HostControlError, HostControlResult,
     controller_update::{self, ControllerUpdateCandidate},
+    root_migration,
     executor::HostExecutor,
     provenance::{InstalledAgentProvenance, InstalledAgentProvenanceStore},
 };
@@ -90,6 +91,7 @@ pub async fn deploy_agent(
 pub async fn install_launcher_root(
     github: &GitHubClient,
     executor: &HostExecutor,
+    request_id: &str,
     run_id: u64,
     artifact_id: u64,
     expected_source_tree: &str,
@@ -138,12 +140,17 @@ pub async fn install_launcher_root(
         active,
         &bundle.controller_bytes,
     )?;
-    let scheduler = autostart::install()?;
+    let migration = root_migration::prepare(
+        request_id,
+        &actual_controller_hash,
+        &actual_launcher_hash,
+    )?;
 
     Ok(json!({
         "root": root,
-        "scheduler": scheduler,
-        "migration": "ONE_TIME_IMMUTABLE_LAUNCHER_ROOT"
+        "root_migration": migration,
+        "scheduler_changed": false,
+        "migration": "ONE_TIME_IMMUTABLE_LAUNCHER_ROOT_POST_EXIT"
     }))
 }
 
