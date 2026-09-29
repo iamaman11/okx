@@ -129,6 +129,7 @@ async fn run(cli: Cli) -> HostControlResult<()> {
             let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
             let mut executor = HostExecutor::canonical()?;
             if let Some(request_id) = activation_request_id.as_deref() {
+                okx_host_control::autostart::ensure_policy_valid()?;
                 if okx_host_launcher::consume_fail_next_activation(request_id)? {
                     return Err(
                         okx_host_control::HostControlError::AcceptanceActivationFailureInjected,
