@@ -148,7 +148,7 @@ pub fn stage(candidate: ControllerUpdateCandidate, bytes: &[u8]) -> HostControlR
     fs::write(&temp, bytes)?;
     replace_file(&temp, &staged)?;
 
-    if sha256_file(&staged)? != candidate.controller_sha256 {
+    if sha256_file(&staged)? != pending.controller_sha256 {
         return Err(HostControlError::ControllerUpdateHashMismatch);
     }
 
