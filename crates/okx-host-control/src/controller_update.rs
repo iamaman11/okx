@@ -378,14 +378,20 @@ async fn durable_handoff_ack(github: &GitHubClient, request_id: &str) -> HostCon
     let comments = github.issue_comments(12).await?;
     Ok(comments
         .iter()
-        .filter(|comment| comment.user_id == OWNER_USER_ID)
-        .filter_map(|comment| serde_json::from_str::<ProtocolControlResult>(&comment.body).ok())
-        .any(|result| {
-            result.request_id == request_id
-                && result.status == HostControlStatus::Pass
-                && result.operation == HostControlOperation::HandoffControllerUpdate
-                && result.validate().is_ok()
-        }))
+        .any(|comment| durable_ack_body(comment.user_id, &comment.body, request_id)))
+}
+
+fn durable_ack_body(user_id: u64, body: &str, request_id: &str) -> bool {
+    if user_id != OWNER_USER_ID {
+        return false;
+    }
+    let Ok(result) = serde_json::from_str::<ProtocolControlResult>(body) else {
+        return false;
+    };
+    result.request_id == request_id
+        && result.status == HostControlStatus::Pass
+        && result.operation == HostControlOperation::HandoffControllerUpdate
+        && result.validate().is_ok()
 }
 
 fn same_candidate(left: &PendingControllerUpdate, right: &PendingControllerUpdate) -> bool {
@@ -496,6 +502,33 @@ mod tests {
     fn updater_paths_are_fixed_outside_mutable_repo() {
         assert!(Path::new(STAGED_CONTROLLER_PATH).starts_with(r"C:\okx-control"));
         assert!(!Path::new(STAGED_CONTROLLER_PATH).starts_with(r"C:\okx\"));
+    }
+
+    #[test]
+    fn durable_ack_requires_owner_pass_and_exact_handoff_operation() {
+        let request_id = "ctl_controller_update_0123456789";
+        let pass = ProtocolControlResult {
+            schema: okx_protocol::HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
+            request_id: request_id.to_owned(),
+            operation: HostControlOperation::HandoffControllerUpdate,
+            status: HostControlStatus::Pass,
+            observed_at: "2026-09-29T12:00:00.000Z".to_owned(),
+            details: Some(json!({"handoff_prepared": true})),
+            failure: None,
+        };
+        let pass_json = serde_json::to_string(&pass).expect("serialize");
+        assert!(durable_ack_body(OWNER_USER_ID, &pass_json, request_id));
+        assert!(!durable_ack_body(OWNER_USER_ID + 1, &pass_json, request_id));
+
+        let mut wrong_operation = pass.clone();
+        wrong_operation.operation = HostControlOperation::Status;
+        let wrong_json = serde_json::to_string(&wrong_operation).expect("serialize");
+        assert!(!durable_ack_body(OWNER_USER_ID, &wrong_json, request_id));
+
+        let mut failed = pass;
+        failed.status = HostControlStatus::Fail;
+        let failed_json = serde_json::to_string(&failed).expect("serialize");
+        assert!(!durable_ack_body(OWNER_USER_ID, &failed_json, request_id));
     }
 
     #[test]
