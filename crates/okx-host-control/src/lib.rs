@@ -105,6 +105,12 @@ pub enum HostControlError {
 
     #[error("staged or installed controller SHA-256 mismatch")]
     ControllerUpdateHashMismatch,
+
+    #[error("another controller update is already staged")]
+    ControllerUpdateConflict,
+
+    #[error("controller update handoff has no durable CONTROL terminal PASS")]
+    ControllerUpdateTerminalAckMissing,
 }
 
 impl HostControlError {
@@ -141,6 +147,8 @@ impl HostControlError {
             Self::ControllerUpdateNotStaged => "CONTROLLER_UPDATE_NOT_STAGED",
             Self::ControllerUpdateStateInvalid => "CONTROLLER_UPDATE_STATE_INVALID",
             Self::ControllerUpdateHashMismatch => "CONTROLLER_UPDATE_HASH_MISMATCH",
+            Self::ControllerUpdateConflict => "CONTROLLER_UPDATE_CONFLICT",
+            Self::ControllerUpdateTerminalAckMissing => "CONTROLLER_UPDATE_TERMINAL_ACK_MISSING",
         }
     }
 }
