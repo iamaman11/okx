@@ -21,6 +21,7 @@ use crate::{
 const CANONICAL_ROOT: &str = r"C:\okx";
 const RUNTIME_ROOT: &str = r"C:\okx-runtime";
 const AGENT_MAILBOX_ISSUE: &str = "10";
+const HOST_CONTROL_CAPABILITIES_SCHEMA_V1: &str = "okx.host-control.capabilities/v1";
 const HEALTHY_AGENT_SECS: u64 = 30;
 const RESTART_BACKOFF_SECS: [u64; 5] = [1, 5, 15, 30, 60];
 const WORKSPACE_STATUS_MAX_CHANGES: usize = 16;
@@ -419,7 +420,13 @@ impl HostExecutor {
             "host": self.status()?,
             "identity": self.read_agent_identity()?,
             "autostart": autostart::status_value()?,
-            "controller_update": controller_update::status_value()
+            "controller_update": controller_update::status_value(),
+            "controller_capabilities": {
+                "schema": HOST_CONTROL_CAPABILITIES_SCHEMA_V1,
+                "verified_self_update": true,
+                "bounded_control_results": true,
+                "bounded_workspace_status": true
+            }
         }))
     }
 
