@@ -122,11 +122,10 @@ fn load_pending() -> HostControlResult<LegacyPending> {
         || !lower_hex(&value.controller_sha256, 64)
         || value.rust_version.trim().is_empty()
         || value.staged_path != STAGED_CONTROLLER_PATH
-        || value
+        || !value
             .handoff_request_id
             .as_deref()
             .is_none_or(valid_request_id)
-            == false
     {
         return Err(HostControlError::ControllerUpdateStateInvalid);
     }
@@ -298,8 +297,6 @@ fn valid_request_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn legacy_bridge_is_permanently_guarded_by_launcher_root() {
         let source = include_str!("legacy_bootstrap.rs");
