@@ -295,7 +295,7 @@ pub fn install_root(
         "launcher_path": LAUNCHER_PATH,
         "launcher_sha256": launcher_sha256,
         "active_controller_sha256": active.controller_sha256,
-        "scheduler_action_required": "okx-host-launcher.exe run"
+        "scheduler_action_required": "okx-host-control.exe run (immutable launcher entrypoint after root migration)"
     }))
 }
 
