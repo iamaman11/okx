@@ -91,14 +91,8 @@ pub async fn stage_controller_update(
     artifact_id: u64,
     expected_source_tree: &str,
 ) -> HostControlResult<Value> {
-    let bundle = verified_bundle(
-        github,
-        executor,
-        run_id,
-        artifact_id,
-        expected_source_tree,
-    )
-    .await?;
+    let bundle =
+        verified_bundle(github, executor, run_id, artifact_id, expected_source_tree).await?;
 
     let declared_controller_hash = declared_hash(&bundle.manifest, "okx-host-control.exe")?;
     let actual_controller_hash = sha256_hex(&bundle.controller_bytes);
