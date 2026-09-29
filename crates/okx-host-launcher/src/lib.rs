@@ -13,6 +13,7 @@ use thiserror::Error;
 pub const REPOSITORY_ID: u64 = 1_388_071_566;
 pub const CONTROL_ROOT: &str = r"C:\okx-control";
 pub const LAUNCHER_PATH: &str = r"C:\okx-control\okx-host-launcher.exe";
+pub const ENTRYPOINT_PATH: &str = r"C:\okx-control\okx-host-control.exe";
 pub const VERSIONS_ROOT: &str = r"C:\okx-control\versions";
 pub const ACTIVE_PATH: &str = r"C:\okx-control\active-controller.json";
 pub const STAGED_PATH: &str = r"C:\okx-control\staged-controller.json";
@@ -298,6 +299,62 @@ pub fn install_root(
     }))
 }
 
+pub fn active_controller_binary_path() -> LauncherResult<PathBuf> {
+    let active = load_active()?.ok_or(LauncherError::RootNotInstalled)?;
+    verify_version(&active.active)?;
+    active.active.binary_path()
+}
+
+pub fn install_launcher_entrypoint(
+    expected_launcher_sha256: &str,
+    expected_controller_sha256: &str,
+) -> LauncherResult<Value> {
+    if !lower_hex(expected_launcher_sha256, 64)
+        || !lower_hex(expected_controller_sha256, 64)
+    {
+        return Err(LauncherError::InvalidState);
+    }
+    let launcher = Path::new(LAUNCHER_PATH);
+    let entrypoint = Path::new(ENTRYPOINT_PATH);
+    if !launcher.is_file() || sha256_file(launcher)? != expected_launcher_sha256 {
+        return Err(LauncherError::HashMismatch);
+    }
+    if !entrypoint.is_file() {
+        return Err(LauncherError::RootConflict);
+    }
+
+    let current = sha256_file(entrypoint)?;
+    if current == expected_launcher_sha256 {
+        return Ok(json!({
+            "installed": true,
+            "disposition": "EXISTING",
+            "entrypoint_path": ENTRYPOINT_PATH,
+            "entrypoint_sha256": current
+        }));
+    }
+    if current != expected_controller_sha256 {
+        return Err(LauncherError::RootConflict);
+    }
+
+    let temp = PathBuf::from(format!("{ENTRYPOINT_PATH}.launcher-new"));
+    fs::copy(launcher, &temp)?;
+    if sha256_file(&temp)? != expected_launcher_sha256 {
+        let _ = fs::remove_file(&temp);
+        return Err(LauncherError::HashMismatch);
+    }
+    atomic_replace(&temp, entrypoint)?;
+    if sha256_file(entrypoint)? != expected_launcher_sha256 {
+        return Err(LauncherError::HashMismatch);
+    }
+
+    Ok(json!({
+        "installed": true,
+        "disposition": "REPLACED_CONTROLLER_ENTRYPOINT",
+        "entrypoint_path": ENTRYPOINT_PATH,
+        "entrypoint_sha256": expected_launcher_sha256
+    }))
+}
+
 pub fn stage_update(candidate: ControllerVersion, bytes: &[u8]) -> LauncherResult<Value> {
     candidate.validate()?;
     let active = load_active()?.ok_or(LauncherError::RootNotInstalled)?;
@@ -494,6 +551,10 @@ pub fn status_value() -> Value {
     json!({
         "schema": "okx.host-launcher.status/v1",
         "launcher_present": Path::new(LAUNCHER_PATH).is_file(),
+        "entrypoint_path": ENTRYPOINT_PATH,
+        "entrypoint_is_launcher": Path::new(ENTRYPOINT_PATH).is_file()
+            && sha256_file(Path::new(ENTRYPOINT_PATH)).ok()
+                == sha256_file(Path::new(LAUNCHER_PATH)).ok(),
         "active": active,
         "staged": staged,
         "pending": pending,
@@ -1298,6 +1359,7 @@ mod tests {
         for path in [
             CONTROL_ROOT,
             LAUNCHER_PATH,
+            ENTRYPOINT_PATH,
             VERSIONS_ROOT,
             ACTIVE_PATH,
             STAGED_PATH,
