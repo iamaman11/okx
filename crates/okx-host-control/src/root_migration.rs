@@ -338,7 +338,11 @@ fn wait_for_exact_process_exit(identity: ProcessIdentity) -> HostControlResult<(
         )
     };
     if handle.is_null() {
-        return Ok(());
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(87) {
+            return Ok(());
+        }
+        return Err(error.into());
     }
     let creation = process_creation_time(handle)?;
     if creation != identity.creation_time_100ns {
