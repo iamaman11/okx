@@ -309,9 +309,7 @@ pub fn install_launcher_entrypoint(
     expected_launcher_sha256: &str,
     expected_controller_sha256: &str,
 ) -> LauncherResult<Value> {
-    if !lower_hex(expected_launcher_sha256, 64)
-        || !lower_hex(expected_controller_sha256, 64)
-    {
+    if !lower_hex(expected_launcher_sha256, 64) || !lower_hex(expected_controller_sha256, 64) {
         return Err(LauncherError::InvalidState);
     }
     let launcher = Path::new(LAUNCHER_PATH);
