@@ -3,9 +3,9 @@ use okx_host_launcher::{ControllerVersion, LauncherError};
 use okx_protocol::{
     HostControlOperation, HostControlResult as ProtocolControlResult, HostControlStatus,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use crate::{HostControlError, HostControlResult};
+use crate::HostControlResult;
 
 #[derive(Debug, Clone)]
 pub struct ControllerUpdateCandidate {
@@ -120,7 +120,7 @@ mod tests {
             operation: HostControlOperation::HandoffControllerUpdate,
             status: HostControlStatus::Pass,
             observed_at: "2026-09-29T12:00:00.000Z".to_owned(),
-            details: Some(json!({"handoff_prepared": true})),
+            details: Some(serde_json::json!({"handoff_prepared": true})),
             failure: None,
         };
         let pass_json = serde_json::to_string(&pass).expect("serialize");
