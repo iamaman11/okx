@@ -7,6 +7,7 @@ pub mod executor;
 pub mod job;
 pub mod legacy_bootstrap;
 pub mod provenance;
+pub mod root_migration;
 pub mod runtime;
 pub mod single_instance;
 
