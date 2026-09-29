@@ -427,7 +427,7 @@ impl HostExecutor {
                 "verified_self_update": true,
                 "bounded_control_results": true,
                 "bounded_workspace_status": true,
-                "self_update_acceptance_marker": "scheduler-change-v3",
+                "self_update_acceptance_marker": "scheduler-change-v4",
                 "scheduler_action_handoff": true,
                 "abort_controller_update": true
             }
