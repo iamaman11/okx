@@ -494,4 +494,42 @@ mod tests {
         assert_eq!(CONTROL_ISSUE_NUMBER, 12);
         assert_eq!(OWNER_USER_ID, 44_100_369);
     }
+
+    #[test]
+    fn oversized_control_result_terminalizes_as_compact_failure() {
+        let result = HostControlResult {
+            schema: HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
+            request_id: "ctl_budget_0123456789".to_owned(),
+            operation: HostControlOperation::Status,
+            status: HostControlStatus::Pass,
+            observed_at: "2026-09-29T13:00:00.000Z".to_owned(),
+            details: Some(serde_json::json!({"blob": "x".repeat(MAX_CONTROL_RESULT_BYTES)})),
+            failure: None,
+        };
+
+        let bounded = bounded_control_result(result).expect("bounded result");
+        assert_eq!(bounded.status, HostControlStatus::Fail);
+        assert_eq!(
+            bounded.failure.as_ref().map(|failure| failure.code.as_str()),
+            Some(CONTROL_RESPONSE_TOO_LARGE_CODE)
+        );
+        assert!(serde_json::to_vec(&bounded).expect("serialize").len() <= MAX_CONTROL_RESULT_BYTES);
+    }
+
+    #[test]
+    fn compact_control_result_is_preserved() {
+        let result = HostControlResult {
+            schema: HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
+            request_id: "ctl_budget_small_012345".to_owned(),
+            operation: HostControlOperation::Status,
+            status: HostControlStatus::Pass,
+            observed_at: "2026-09-29T13:00:00.000Z".to_owned(),
+            details: Some(serde_json::json!({"ready": true})),
+            failure: None,
+        };
+
+        let bounded = bounded_control_result(result).expect("bounded result");
+        assert_eq!(bounded.status, HostControlStatus::Pass);
+        assert!(bounded.failure.is_none());
+    }
 }
