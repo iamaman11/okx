@@ -123,16 +123,16 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Clippy native Windows crates
-        run: cargo clippy --locked -p okx-agent -p okx-host-control -p okx-execution --all-targets -- -D warnings
+        run: cargo clippy --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --all-targets -- -D warnings
 
       - name: Test native Windows crates
-        run: cargo test --locked -p okx-agent -p okx-host-control -p okx-execution
+        run: cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution
 
       - name: Build deployable Windows binaries
         if: github.event_name == 'pull_request'
         shell: pwsh
         run: |
-          cargo build --locked --release -p okx-agent -p okx-host-control
+          cargo build --locked --release -p okx-agent -p okx-host-control -p okx-host-launcher
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
@@ -140,12 +140,14 @@ jobs:
 
           Copy-Item "target\release\okx-agent.exe" (Join-Path $dist "okx-agent.exe")
           Copy-Item "target\release\okx-host-control.exe" (Join-Path $dist "okx-host-control.exe")
+          Copy-Item "target\release\okx-host-launcher.exe" (Join-Path $dist "okx-host-launcher.exe")
           Copy-Item "Cargo.lock" (Join-Path $dist "Cargo.lock")
 
           $sourceHead = (git rev-parse HEAD).Trim()
           $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
           $agentHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-agent.exe")).Hash.ToLowerInvariant()
           $controllerHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-host-control.exe")).Hash.ToLowerInvariant()
+          $launcherHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-host-launcher.exe")).Hash.ToLowerInvariant()
           $rustVersion = (rustc --version).Trim()
 
           $manifest = [ordered]@{
@@ -157,6 +159,7 @@ jobs:
             files = [ordered]@{
               "okx-agent.exe" = [ordered]@{ sha256 = $agentHash }
               "okx-host-control.exe" = [ordered]@{ sha256 = $controllerHash }
+              "okx-host-launcher.exe" = [ordered]@{ sha256 = $launcherHash }
             }
           }
 
