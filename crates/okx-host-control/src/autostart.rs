@@ -315,6 +315,7 @@ mod tests {
     #[test]
     fn scheduler_change_is_not_part_of_update_contract() {
         let source = include_str!("autostart.rs");
-        assert!(!source.contains(r#""/Change""#));
+        let forbidden = [r#""/"#, r#"Change""#].concat();
+        assert!(!source.contains(&forbidden));
     }
 }
