@@ -38,6 +38,7 @@ Windows Task Scheduler
 ONE okx-host-control.exe
   desired state + mutex + Job Object
   fixed typed CONTROL operations only
+  verified self-update through the SAME Scheduler task
         |
         v
 ONE okx-agent.exe
@@ -87,7 +88,7 @@ ChatGPT -> fixed allowlisted control request -> GitHub #12 -> okx-host-control
 
 CONTROL has no arbitrary shell/PowerShell/HTTP/path execution surface. Legacy remote `BuildAgent` is protocol-compatible only and fails closed; normal production deployment is verified hosted-CI artifact deployment.
 
-Both transports have physically passed restart and real external GitHub/network-loss recovery.
+Both transports have physically passed restart and real external GitHub/network-loss recovery. Controller replacement is being closed as a typed verified operation: successful PR-CI bundle -> staged fixed path -> durable CONTROL ACK -> handoff through the same Scheduler task -> hash-verified canonical replacement -> task restoration.
 
 ## Account and execution boundary
 
@@ -144,5 +145,5 @@ Canonical issues:
 - #12 CONTROL transport;
 - #3 execution boundary;
 - #47 capability matrix;
-- #54 controller self-update — deferred/non-blocking;
+- #54 controller self-update — ACTIVE until the first updater-capable controller is bootstrapped and a subsequent fully remote self-update is physically accepted;
 - #58 mailbox compaction — trigger-based deferred maintenance.

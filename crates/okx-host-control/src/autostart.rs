@@ -8,10 +8,37 @@ use crate::{HostControlError, HostControlResult};
 const TASK_NAME: &str = r"\iamaman11-okx-host-control";
 const CONTROLLER_PATH: &str = r"C:\okx-control\okx-host-control.exe";
 const TASK_XML_PATH: &str = r"C:\okx-control\okx-host-control-task.xml";
+const UPDATE_CONTROLLER_PATH: &str = r"C:\okx-control\update\okx-host-control.exe.staged";
+const UPDATE_WORKING_DIRECTORY: &str = r"C:\okx-control\update";
 
 pub fn install() -> HostControlResult<Value> {
+    install_action(CONTROLLER_PATH, "run", r"C:\okx-control")?;
+    status_value()
+}
+
+pub fn install_controller_update_activation() -> HostControlResult<Value> {
+    install_action(
+        UPDATE_CONTROLLER_PATH,
+        "activate-controller-update",
+        UPDATE_WORKING_DIRECTORY,
+    )?;
+    Ok(json!({
+        "installed": true,
+        "task_name": TASK_NAME,
+        "controller_path": UPDATE_CONTROLLER_PATH,
+        "arguments": "activate-controller-update",
+        "working_directory": UPDATE_WORKING_DIRECTORY
+    }))
+}
+
+fn install_action(
+    command: &str,
+    arguments: &str,
+    working_directory: &str,
+) -> HostControlResult<()> {
     #[cfg(not(windows))]
     {
+        let _ = (command, arguments, working_directory);
         return Err(HostControlError::UnsupportedPlatform);
     }
 
@@ -21,7 +48,13 @@ pub fn install() -> HostControlResult<Value> {
         let start_boundary = (Local::now() + ChronoDuration::seconds(10))
             .format("%Y-%m-%dT%H:%M:%S")
             .to_string();
-        let xml = task_xml(&account, &start_boundary);
+        let xml = task_xml(
+            &account,
+            &start_boundary,
+            command,
+            arguments,
+            working_directory,
+        );
         let xml_path = PathBuf::from(TASK_XML_PATH);
 
         if let Some(parent) = xml_path.parent() {
@@ -36,8 +69,7 @@ pub fn install() -> HostControlResult<Value> {
         if !status.success() {
             return Err(HostControlError::CommandFailed("schtasks create"));
         }
-
-        status_value()
+        Ok(())
     }
 }
 
@@ -148,9 +180,18 @@ fn current_account() -> HostControlResult<String> {
     Ok(account)
 }
 
-fn task_xml(account: &str, start_boundary: &str) -> String {
+fn task_xml(
+    account: &str,
+    start_boundary: &str,
+    command: &str,
+    arguments: &str,
+    working_directory: &str,
+) -> String {
     let account = xml_escape(account);
     let start_boundary = xml_escape(start_boundary);
+    let command = xml_escape(command);
+    let arguments = xml_escape(arguments);
+    let working_directory = xml_escape(working_directory);
     format!(
         r#"<?xml version="1.0" ?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -189,16 +230,18 @@ fn task_xml(account: &str, start_boundary: &str) -> String {
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>{controller}</Command>
-      <Arguments>run</Arguments>
-      <WorkingDirectory>C:\okx-control</WorkingDirectory>
+      <Command>{command}</Command>
+      <Arguments>{arguments}</Arguments>
+      <WorkingDirectory>{working_directory}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
 "#,
         account = account,
         start_boundary = start_boundary,
-        controller = xml_escape(CONTROLLER_PATH),
+        command = command,
+        arguments = arguments,
+        working_directory = working_directory,
     )
 }
 
@@ -219,7 +262,13 @@ mod tests {
 
     #[test]
     fn task_xml_has_one_time_trigger_supervisor() {
-        let xml = task_xml(r"HOST\User", TEST_START);
+        let xml = task_xml(
+            r"HOST\User",
+            TEST_START,
+            CONTROLLER_PATH,
+            "run",
+            r"C:\okx-control",
+        );
 
         assert!(xml.starts_with(r#"<?xml version="1.0" ?>"#));
         assert!(!xml.contains("encoding="));
@@ -242,25 +291,50 @@ mod tests {
 
     #[test]
     fn exported_policy_accepts_exact_time_trigger_contract() {
-        assert!(exported_policy_valid(&task_xml(r"HOST\User", TEST_START)));
+        assert!(exported_policy_valid(&task_xml(
+            r"HOST\User",
+            TEST_START,
+            CONTROLLER_PATH,
+            "run",
+            r"C:\okx-control",
+        )));
     }
 
     #[test]
     fn exported_policy_rejects_bounded_or_wrong_repetition() {
-        let bounded = task_xml(r"HOST\User", TEST_START).replace(
+        let bounded = task_xml(
+            r"HOST\User",
+            TEST_START,
+            CONTROLLER_PATH,
+            "run",
+            r"C:\okx-control",
+        )
+        .replace(
             "<Interval>PT1M</Interval>",
             "<Interval>PT1M</Interval><Duration>PT1H</Duration>",
         );
         assert!(!exported_policy_valid(&bounded));
 
-        let wrong_interval = task_xml(r"HOST\User", TEST_START)
-            .replace("<Interval>PT1M</Interval>", "<Interval>PT5M</Interval>");
+        let wrong_interval = task_xml(
+            r"HOST\User",
+            TEST_START,
+            CONTROLLER_PATH,
+            "run",
+            r"C:\okx-control",
+        )
+        .replace("<Interval>PT1M</Interval>", "<Interval>PT5M</Interval>");
         assert!(!exported_policy_valid(&wrong_interval));
     }
 
     #[test]
     fn exported_policy_rejects_duplicate_recovery_authority() {
-        let duplicate = task_xml(r"HOST\User", TEST_START).replace(
+        let duplicate = task_xml(
+            r"HOST\User",
+            TEST_START,
+            CONTROLLER_PATH,
+            "run",
+            r"C:\okx-control",
+        ).replace(
             "<Priority>7</Priority>",
             "<Priority>7</Priority><RestartOnFailure><Interval>PT1M</Interval><Count>32</Count></RestartOnFailure>",
         );
@@ -269,9 +343,15 @@ mod tests {
 
     #[test]
     fn exported_policy_rejects_non_time_trigger() {
-        let logon = task_xml(r"HOST\User", TEST_START)
-            .replace("<TimeTrigger>", "<LogonTrigger>")
-            .replace("</TimeTrigger>", "</LogonTrigger>");
+        let logon = task_xml(
+            r"HOST\User",
+            TEST_START,
+            CONTROLLER_PATH,
+            "run",
+            r"C:\okx-control",
+        )
+        .replace("<TimeTrigger>", "<LogonTrigger>")
+        .replace("</TimeTrigger>", "</LogonTrigger>");
         assert!(!exported_policy_valid(&logon));
     }
 

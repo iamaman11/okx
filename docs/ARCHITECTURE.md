@@ -37,6 +37,7 @@ Task Scheduler
 ONE okx-host-control
   mutex + desired state + Job Object
   fixed typed CONTROL operations
+  verified self-update via the SAME Scheduler task
         |
         v
 ONE okx-agent
@@ -175,9 +176,12 @@ Windows lifecycle/deployment/diagnostics only:
 - bounded restart;
 - verified artifact deployment;
 - Scheduler/autostart diagnostics;
-- typed allowlisted CONTROL operations.
+- typed allowlisted CONTROL operations;
+- bounded Windows workspace diagnostics;
+- verified controller staging/replacement from accepted CI bundles;
+- one-shot controller handoff through the same canonical Scheduler task.
 
-No market/account/risk/order business logic belongs here.
+No market/account/risk/order business logic belongs here. Controller self-update does not create a second supervisor: the existing Scheduler task temporarily executes a fixed staged activator and is restored to the canonical controller after verified replacement.
 
 Remote legacy `BuildAgent` is not a production execution path and fails closed. Normal production deployment accepts only a verified hosted-CI artifact whose provenance matches current accepted source tree and binary hashes.
 
@@ -425,9 +429,13 @@ Remaining before final production-baseline closure:
 - GitHub `main` branch/ruleset enforcement;
 - one final exact-artifact physical acceptance after all closure changes.
 
+Remaining operational closure:
+
+- #54 controller self-update: ACTIVE until one bootstrap plus one subsequent fully remote controller replacement are physically accepted;
+- GitHub `main` branch/ruleset enforcement.
+
 Deferred, non-blocking:
 
-- #54 controller self-update;
 - #58 mailbox compaction at its existing capacity trigger.
 
 ## Non-goals

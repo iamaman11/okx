@@ -11,6 +11,7 @@ use zip::ZipArchive;
 
 use crate::{
     HostControlError, HostControlResult,
+    controller_update::{self, ControllerUpdateCandidate},
     executor::HostExecutor,
     provenance::{InstalledAgentProvenance, InstalledAgentProvenanceStore},
 };
@@ -18,6 +19,7 @@ use crate::{
 const BUNDLE_SCHEMA_V1: &str = "okx.windows.bundle/v1";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_AGENT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_CONTROLLER_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +38,12 @@ struct BundleFile {
     sha256: String,
 }
 
+struct VerifiedBundle {
+    manifest: BundleManifest,
+    agent_bytes: Vec<u8>,
+    controller_bytes: Vec<u8>,
+}
+
 pub async fn deploy_agent(
     github: &GitHubClient,
     executor: &mut HostExecutor,
@@ -43,6 +51,75 @@ pub async fn deploy_agent(
     artifact_id: u64,
     expected_source_tree: &str,
 ) -> HostControlResult<Value> {
+    let bundle =
+        verified_bundle(github, executor, run_id, artifact_id, expected_source_tree).await?;
+
+    let declared_agent_hash = declared_hash(&bundle.manifest, "okx-agent.exe")?;
+    let actual_agent_hash = sha256_hex(&bundle.agent_bytes);
+    if actual_agent_hash != declared_agent_hash {
+        return Err(HostControlError::ArtifactHashMismatch);
+    }
+
+    let provenance = InstalledAgentProvenance::verified(
+        run_id,
+        artifact_id,
+        bundle.manifest.source_head_sha.clone(),
+        bundle.manifest.source_tree.clone(),
+        bundle.manifest.rust_version.clone(),
+        actual_agent_hash.clone(),
+    );
+
+    executor.install_verified_agent(&bundle.agent_bytes)?;
+    InstalledAgentProvenanceStore::canonical().save(&provenance)?;
+
+    Ok(json!({
+        "run_id": provenance.run_id,
+        "artifact_id": provenance.artifact_id,
+        "source_head_sha": provenance.source_head_sha,
+        "source_tree": provenance.source_tree,
+        "rust_version": provenance.rust_version,
+        "agent_sha256": provenance.agent_sha256,
+        "installed": true,
+        "provenance_persisted": true
+    }))
+}
+
+pub async fn stage_controller_update(
+    github: &GitHubClient,
+    executor: &HostExecutor,
+    run_id: u64,
+    artifact_id: u64,
+    expected_source_tree: &str,
+) -> HostControlResult<Value> {
+    let bundle =
+        verified_bundle(github, executor, run_id, artifact_id, expected_source_tree).await?;
+
+    let declared_controller_hash = declared_hash(&bundle.manifest, "okx-host-control.exe")?;
+    let actual_controller_hash = sha256_hex(&bundle.controller_bytes);
+    if actual_controller_hash != declared_controller_hash {
+        return Err(HostControlError::ArtifactHashMismatch);
+    }
+
+    controller_update::stage(
+        ControllerUpdateCandidate {
+            run_id,
+            artifact_id,
+            source_head_sha: bundle.manifest.source_head_sha,
+            source_tree: bundle.manifest.source_tree,
+            rust_version: bundle.manifest.rust_version,
+            controller_sha256: actual_controller_hash,
+        },
+        &bundle.controller_bytes,
+    )
+}
+
+async fn verified_bundle(
+    github: &GitHubClient,
+    executor: &HostExecutor,
+    run_id: u64,
+    artifact_id: u64,
+    expected_source_tree: &str,
+) -> HostControlResult<VerifiedBundle> {
     let run = github.workflow_run(run_id).await?;
     if run.name != "CI"
         || run.event != "pull_request"
@@ -69,12 +146,12 @@ pub async fn deploy_agent(
     }
 
     let zip_bytes = github.download_artifact_zip(artifact_id).await?;
-    let (manifest, agent_bytes) = parse_bundle(&zip_bytes)?;
+    let bundle = parse_bundle(&zip_bytes)?;
 
-    if manifest.schema != BUNDLE_SCHEMA_V1
-        || manifest.repository_id != REPOSITORY_ID
-        || manifest.source_head_sha != run.head_sha
-        || manifest.source_tree != expected_source_tree
+    if bundle.manifest.schema != BUNDLE_SCHEMA_V1
+        || bundle.manifest.repository_id != REPOSITORY_ID
+        || bundle.manifest.source_head_sha != run.head_sha
+        || bundle.manifest.source_tree != expected_source_tree
     {
         return Err(HostControlError::ArtifactVerification(
             "bundle manifest identity mismatch",
@@ -82,49 +159,27 @@ pub async fn deploy_agent(
     }
 
     let origin_main_tree = executor.fetch_origin_main_tree()?;
-    if origin_main_tree != manifest.source_tree {
+    if origin_main_tree != bundle.manifest.source_tree {
         return Err(HostControlError::ArtifactSourceTreeMismatch);
     }
 
-    let declared_agent_hash = manifest
-        .files
-        .get("okx-agent.exe")
-        .ok_or(HostControlError::ArtifactVerification(
-            "manifest does not contain okx-agent.exe",
-        ))?
-        .sha256
-        .as_str();
-
-    let actual_agent_hash = sha256_hex(&agent_bytes);
-    if actual_agent_hash != declared_agent_hash {
-        return Err(HostControlError::ArtifactHashMismatch);
-    }
-
-    let provenance = InstalledAgentProvenance::verified(
-        run_id,
-        artifact_id,
-        manifest.source_head_sha.clone(),
-        manifest.source_tree.clone(),
-        manifest.rust_version.clone(),
-        actual_agent_hash.clone(),
-    );
-
-    executor.install_verified_agent(&agent_bytes)?;
-    InstalledAgentProvenanceStore::canonical().save(&provenance)?;
-
-    Ok(json!({
-        "run_id": provenance.run_id,
-        "artifact_id": provenance.artifact_id,
-        "source_head_sha": provenance.source_head_sha,
-        "source_tree": provenance.source_tree,
-        "rust_version": provenance.rust_version,
-        "agent_sha256": provenance.agent_sha256,
-        "installed": true,
-        "provenance_persisted": true
-    }))
+    Ok(bundle)
 }
 
-fn parse_bundle(zip_bytes: &[u8]) -> HostControlResult<(BundleManifest, Vec<u8>)> {
+fn declared_hash<'a>(
+    manifest: &'a BundleManifest,
+    file: &'static str,
+) -> HostControlResult<&'a str> {
+    manifest
+        .files
+        .get(file)
+        .map(|value| value.sha256.as_str())
+        .ok_or(HostControlError::ArtifactVerification(
+            "bundle manifest is missing a required binary",
+        ))
+}
+
+fn parse_bundle(zip_bytes: &[u8]) -> HostControlResult<VerifiedBundle> {
     let reader = Cursor::new(zip_bytes);
     let mut archive = ZipArchive::new(reader)?;
 
@@ -132,7 +187,13 @@ fn parse_bundle(zip_bytes: &[u8]) -> HostControlResult<(BundleManifest, Vec<u8>)
     let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)?;
 
     let agent_bytes = read_entry(&mut archive, "okx-agent.exe", MAX_AGENT_BYTES)?;
-    Ok((manifest, agent_bytes))
+    let controller_bytes = read_entry(&mut archive, "okx-host-control.exe", MAX_CONTROLLER_BYTES)?;
+
+    Ok(VerifiedBundle {
+        manifest,
+        agent_bytes,
+        controller_bytes,
+    })
 }
 
 fn read_entry(
@@ -154,11 +215,7 @@ fn read_entry(
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .concat()
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]

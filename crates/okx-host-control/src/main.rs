@@ -8,6 +8,7 @@ use okx_github::GitHubClient;
 use okx_host_control::{
     HostControlResult,
     auth::{load_native_github_token, store_native_github_token},
+    controller_update,
     executor::{HostExecutor, install_current_executable},
     runtime::{DEFAULT_CONTROL_POLL_SECONDS, process_pending, run_until_shutdown},
     single_instance::SingleInstanceGuard,
@@ -31,6 +32,9 @@ enum Command {
 
     /// Store the GitHub control token from stdin in Windows Credential Manager.
     SetGithubToken,
+
+    /// One-shot Scheduler activator for a previously verified controller update.
+    ActivateControllerUpdate,
 
     /// Process pending typed requests once and exit.
     Once,
@@ -69,6 +73,13 @@ async fn run(cli: Cli) -> HostControlResult<()> {
                     "stored": true
                 })
             );
+        }
+        Command::ActivateControllerUpdate => {
+            let token = load_native_github_token()?;
+            let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
+            github.verify_repository_identity().await?;
+            let result = controller_update::activate(&github).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Once => {
             let token = load_native_github_token()?;

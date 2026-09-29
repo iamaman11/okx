@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod auth;
 pub mod autostart;
+pub mod controller_update;
 pub mod desired;
 pub mod executor;
 pub mod job;
@@ -95,6 +96,21 @@ pub enum HostControlError {
 
     #[error("Windows autostart task is missing or does not match the fixed policy")]
     AutostartPolicyInvalid,
+
+    #[error("verified controller update is not staged")]
+    ControllerUpdateNotStaged,
+
+    #[error("controller update state is invalid")]
+    ControllerUpdateStateInvalid,
+
+    #[error("staged or installed controller SHA-256 mismatch")]
+    ControllerUpdateHashMismatch,
+
+    #[error("another controller update is already staged")]
+    ControllerUpdateConflict,
+
+    #[error("controller update handoff has no durable CONTROL terminal PASS")]
+    ControllerUpdateTerminalAckMissing,
 }
 
 impl HostControlError {
@@ -128,6 +144,11 @@ impl HostControlError {
             Self::ControllerAlreadyRunning => "CONTROLLER_ALREADY_RUNNING",
             Self::WindowsIdentityUnavailable => "WINDOWS_IDENTITY_UNAVAILABLE",
             Self::AutostartPolicyInvalid => "AUTOSTART_POLICY_INVALID",
+            Self::ControllerUpdateNotStaged => "CONTROLLER_UPDATE_NOT_STAGED",
+            Self::ControllerUpdateStateInvalid => "CONTROLLER_UPDATE_STATE_INVALID",
+            Self::ControllerUpdateHashMismatch => "CONTROLLER_UPDATE_HASH_MISMATCH",
+            Self::ControllerUpdateConflict => "CONTROLLER_UPDATE_CONFLICT",
+            Self::ControllerUpdateTerminalAckMissing => "CONTROLLER_UPDATE_TERMINAL_ACK_MISSING",
         }
     }
 }

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::{
     HostControlError, HostControlResult,
     auth::load_native_github_token,
-    autostart,
+    autostart, controller_update,
     desired::{AgentDesired, DesiredStateStore},
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
@@ -69,7 +69,13 @@ impl HostExecutor {
             HostControlOperation::Status => self.status(),
             HostControlOperation::Sync => self.sync(),
             HostControlOperation::BuildAgent => Err(HostControlError::InvalidExecutionPath),
-            HostControlOperation::DeployAgent { .. } => Err(HostControlError::InvalidExecutionPath),
+            HostControlOperation::DeployAgent { .. }
+            | HostControlOperation::StageControllerUpdate { .. }
+            | HostControlOperation::HandoffControllerUpdate => {
+                Err(HostControlError::InvalidExecutionPath)
+            }
+            HostControlOperation::ControllerUpdateStatus => Ok(controller_update::status_value()),
+            HostControlOperation::WorkspaceStatus => self.workspace_status(),
             HostControlOperation::TestWorkspace => self.test_workspace(),
             HostControlOperation::InitAgentIdentity => self.init_agent_identity(),
             HostControlOperation::AgentIdentity => self.agent_identity(),
@@ -194,6 +200,41 @@ impl HostExecutor {
             "restart_attempt": self.restart_attempt,
             "retry_in_ms": self.retry_in_ms(),
             "last_reconcile": self.last_reconcile.clone()
+        }))
+    }
+
+    fn workspace_status(&self) -> HostControlResult<Value> {
+        self.assert_repo(false, false)?;
+        self.git(&["fetch", "--prune", "origin", "main"])?;
+
+        let head = self.git(&["rev-parse", "HEAD"])?;
+        let branch = self.git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let origin_main = self.git(&["rev-parse", "origin/main"])?;
+        let divergence =
+            self.git(&["rev-list", "--left-right", "--count", "HEAD...origin/main"])?;
+        let status = self.git(&["status", "--porcelain=v1"])?;
+        let mut changes = status
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .take(64)
+            .map(|line| line.to_owned())
+            .collect::<Vec<_>>();
+        let truncated = status
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+            > changes.len();
+        changes.shrink_to_fit();
+
+        Ok(json!({
+            "repo_root": CANONICAL_ROOT,
+            "branch": branch,
+            "head": head,
+            "origin_main": origin_main,
+            "divergence_left_right": divergence,
+            "clean": changes.is_empty(),
+            "changes": changes,
+            "changes_truncated": truncated
         }))
     }
 
@@ -370,7 +411,8 @@ impl HostExecutor {
         Ok(json!({
             "host": self.status()?,
             "identity": self.read_agent_identity()?,
-            "autostart": autostart::status_value()?
+            "autostart": autostart::status_value()?,
+            "controller_update": controller_update::status_value()
         }))
     }
 
