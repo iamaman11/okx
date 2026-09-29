@@ -122,7 +122,10 @@ fn load_pending() -> HostControlResult<LegacyPending> {
         || !lower_hex(&value.controller_sha256, 64)
         || value.rust_version.trim().is_empty()
         || value.staged_path != STAGED_CONTROLLER_PATH
-        || value.handoff_request_id.as_deref().is_none_or(valid_request_id)
+        || value
+            .handoff_request_id
+            .as_deref()
+            .is_none_or(valid_request_id)
             == false
     {
         return Err(HostControlError::ControllerUpdateStateInvalid);
