@@ -106,10 +106,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy portable crates
-        run: cargo clippy --workspace --exclude okx-agent --exclude okx-host-control --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --exclude okx-agent --exclude okx-host-control --all-targets -- -D warnings
 
       - name: Test portable crates
-        run: cargo test --workspace --exclude okx-agent --exclude okx-host-control
+        run: cargo test --locked --workspace --exclude okx-agent --exclude okx-host-control
 
   windows-agent:
     name: windows-native
@@ -129,16 +129,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy native Windows crates
-        run: cargo clippy -p okx-agent -p okx-host-control -p okx-execution --all-targets -- -D warnings
+        run: cargo clippy --locked -p okx-agent -p okx-host-control -p okx-execution --all-targets -- -D warnings
 
       - name: Test native Windows crates
-        run: cargo test -p okx-agent -p okx-host-control -p okx-execution
+        run: cargo test --locked -p okx-agent -p okx-host-control -p okx-execution
 
       - name: Build deployable Windows binaries
         if: github.event_name == 'pull_request'
         shell: pwsh
         run: |
-          cargo build --release -p okx-agent -p okx-host-control
+          cargo build --locked --release -p okx-agent -p okx-host-control
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
