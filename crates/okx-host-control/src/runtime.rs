@@ -16,6 +16,7 @@ use crate::{
     artifact::{deploy_agent, install_launcher_root, stage_controller_update},
     autostart, controller_update,
     executor::HostExecutor,
+    root_migration,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,8 +96,13 @@ pub async fn run_until_shutdown(
         }
     }
 
-    if github_verified && maybe_resume_controller_handoff(github, executor).await? {
-        return Ok(());
+    if github_verified {
+        if maybe_resume_root_migration(github, executor).await? {
+            return Ok(());
+        }
+        if maybe_resume_controller_handoff(github, executor).await? {
+            return Ok(());
+        }
     }
 
     println!(
@@ -154,6 +160,9 @@ pub async fn run_until_shutdown(
                     }
                 }
 
+                if maybe_resume_root_migration(github, executor).await? {
+                    return Ok(());
+                }
                 if maybe_resume_controller_handoff(github, executor).await? {
                     return Ok(());
                 }
@@ -205,6 +214,20 @@ pub async fn run_until_shutdown(
 
     emit_shutdown(executor);
     Ok(())
+}
+
+async fn maybe_resume_root_migration(
+    github: &GitHubClient,
+    executor: &mut HostExecutor,
+) -> LocalResult<bool> {
+    if root_migration::recover_terminal_ack(github).await? {
+        if let Err(error) = root_migration::spawn_migrator() {
+            eprintln!("launcher-root migration resume deferred: {error}");
+        }
+        emit_shutdown(executor);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 async fn maybe_resume_controller_handoff(
@@ -351,6 +374,7 @@ async fn process_control_batch(
                 install_launcher_root(
                     github,
                     executor,
+                    &request.request_id,
                     *run_id,
                     *artifact_id,
                     expected_source_tree,
@@ -424,7 +448,14 @@ async fn process_control_batch(
         if result.status == HostControlStatus::Pass {
             match transition {
                 ProcessTransition::None => {}
-                ProcessTransition::RootMigration => std::process::exit(0),
+                ProcessTransition::RootMigration => {
+                    if let Err(error) = root_migration::mark_terminal_ack(&result.request_id)
+                        .and_then(|_| root_migration::spawn_migrator())
+                    {
+                        eprintln!("launcher-root migration handoff deferred: {error}");
+                    }
+                    std::process::exit(0);
+                },
                 ProcessTransition::Handoff => {
                     if result.operation == HostControlOperation::HandoffControllerUpdate {
                         controller_update::mark_terminal_ack(&result.request_id)?;
