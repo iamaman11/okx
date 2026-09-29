@@ -13,14 +13,16 @@ use tokio::time::{Interval, MissedTickBehavior, interval};
 
 use crate::{
     HostControlError, HostControlResult as LocalResult,
-    artifact::{deploy_agent, stage_controller_update},
+    artifact::{deploy_agent, install_launcher_root, stage_controller_update},
     autostart, controller_update,
     executor::HostExecutor,
+    root_migration,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessTransition {
     None,
+    RootMigration,
     Handoff,
     Crash,
 }
@@ -94,6 +96,15 @@ pub async fn run_until_shutdown(
         }
     }
 
+    if github_verified {
+        if maybe_resume_root_migration(github, executor).await? {
+            return Ok(());
+        }
+        if maybe_resume_controller_handoff(github, executor).await? {
+            return Ok(());
+        }
+    }
+
     println!(
         "{}",
         serde_json::json!({
@@ -149,6 +160,13 @@ pub async fn run_until_shutdown(
                     }
                 }
 
+                if maybe_resume_root_migration(github, executor).await? {
+                    return Ok(());
+                }
+                if maybe_resume_controller_handoff(github, executor).await? {
+                    return Ok(());
+                }
+
                 let batch = match await_network_with_reconcile(
                     fetch_pending_control(github),
                     executor,
@@ -196,6 +214,32 @@ pub async fn run_until_shutdown(
 
     emit_shutdown(executor);
     Ok(())
+}
+
+async fn maybe_resume_root_migration(
+    github: &GitHubClient,
+    executor: &mut HostExecutor,
+) -> LocalResult<bool> {
+    if root_migration::recover_terminal_ack(github).await? {
+        if let Err(error) = root_migration::spawn_migrator() {
+            eprintln!("launcher-root migration resume deferred: {error}");
+        }
+        emit_shutdown(executor);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+async fn maybe_resume_controller_handoff(
+    github: &GitHubClient,
+    executor: &mut HostExecutor,
+) -> LocalResult<bool> {
+    if controller_update::recover_terminal_ack(github).await? {
+        autostart::run_now()?;
+        emit_shutdown(executor);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 async fn await_network_with_reconcile<F>(
@@ -322,6 +366,22 @@ async fn process_control_batch(
                 .await,
                 ProcessTransition::None,
             ),
+            HostControlOperation::InstallLauncherRoot {
+                run_id,
+                artifact_id,
+                expected_source_tree,
+            } => (
+                install_launcher_root(
+                    github,
+                    executor,
+                    &request.request_id,
+                    *run_id,
+                    *artifact_id,
+                    expected_source_tree,
+                )
+                .await,
+                ProcessTransition::RootMigration,
+            ),
             HostControlOperation::StageControllerUpdate {
                 run_id,
                 artifact_id,
@@ -388,7 +448,21 @@ async fn process_control_batch(
         if result.status == HostControlStatus::Pass {
             match transition {
                 ProcessTransition::None => {}
-                ProcessTransition::Handoff => std::process::exit(0),
+                ProcessTransition::RootMigration => {
+                    if let Err(error) = root_migration::mark_terminal_ack(&result.request_id)
+                        .and_then(|_| root_migration::spawn_migrator())
+                    {
+                        eprintln!("launcher-root migration handoff deferred: {error}");
+                    }
+                    std::process::exit(0);
+                }
+                ProcessTransition::Handoff => {
+                    if result.operation == HostControlOperation::HandoffControllerUpdate {
+                        controller_update::mark_terminal_ack(&result.request_id)?;
+                    }
+                    autostart::run_now()?;
+                    std::process::exit(0);
+                }
                 ProcessTransition::Crash => std::process::exit(70),
             }
         }

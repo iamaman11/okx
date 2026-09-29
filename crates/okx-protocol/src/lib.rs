@@ -399,6 +399,11 @@ pub enum HostControlOperation {
         artifact_id: u64,
         expected_source_tree: String,
     },
+    InstallLauncherRoot {
+        run_id: u64,
+        artifact_id: u64,
+        expected_source_tree: String,
+    },
     StageControllerUpdate {
         run_id: u64,
         artifact_id: u64,
@@ -420,6 +425,7 @@ pub enum HostControlOperation {
     HandoffToAutostart,
     AcceptanceKillAgent,
     AcceptanceCrashController,
+    AcceptanceFailNextControllerActivation,
     TransportStatus,
 }
 
@@ -427,6 +433,11 @@ impl HostControlOperation {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
             Self::DeployAgent {
+                run_id,
+                artifact_id,
+                expected_source_tree,
+            }
+            | Self::InstallLauncherRoot {
                 run_id,
                 artifact_id,
                 expected_source_tree,

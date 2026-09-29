@@ -1485,6 +1485,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "okx-host-launcher"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "okx-host-control"
 version = "0.1.0"
 dependencies = [
@@ -1492,6 +1503,7 @@ dependencies = [
  "clap",
  "keyring",
  "okx-github",
+ "okx-host-launcher",
  "okx-protocol",
  "serde",
  "serde_json",

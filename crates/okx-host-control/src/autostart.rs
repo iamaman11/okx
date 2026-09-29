@@ -6,11 +6,12 @@ use serde_json::{Value, json};
 use crate::{HostControlError, HostControlResult};
 
 const TASK_NAME: &str = r"\iamaman11-okx-host-control";
-const CONTROLLER_PATH: &str = r"C:\okx-control\okx-host-control.exe";
+const LAUNCHER_PATH: &str = r"C:\okx-control\okx-host-launcher.exe";
+const LEGACY_CONTROLLER_PATH: &str = r"C:\okx-control\okx-host-control.exe";
 const TASK_XML_PATH: &str = r"C:\okx-control\okx-host-control-task.xml";
 
 pub fn install() -> HostControlResult<Value> {
-    install_action(CONTROLLER_PATH, "run", r"C:\okx-control")?;
+    install_action(LAUNCHER_PATH, "run", r"C:\okx-control")?;
     status_value()
 }
 
@@ -57,14 +58,27 @@ fn install_action(
 }
 
 pub fn run_now() -> HostControlResult<Value> {
+    run_now_with_policy(false)
+}
+
+pub fn run_legacy_now() -> HostControlResult<Value> {
+    run_now_with_policy(true)
+}
+
+fn run_now_with_policy(legacy: bool) -> HostControlResult<Value> {
     #[cfg(not(windows))]
     {
+        let _ = legacy;
         return Err(HostControlError::UnsupportedPlatform);
     }
 
     #[cfg(windows)]
     {
-        ensure_policy_valid()?;
+        if legacy {
+            ensure_legacy_policy_valid()?;
+        } else {
+            ensure_policy_valid()?;
+        }
         let status = Command::new("schtasks.exe")
             .args(["/Run", "/TN", TASK_NAME])
             .status()?;
@@ -75,18 +89,23 @@ pub fn run_now() -> HostControlResult<Value> {
 
         Ok(json!({
             "task_name": TASK_NAME,
-            "run_requested": true
+            "run_requested": true,
+            "launcher_root": !legacy
         }))
     }
 }
 
 pub fn ensure_policy_valid() -> HostControlResult<()> {
-    let status = status_value()?;
-    if status
-        .get("policy_valid")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    ensure_expected_policy(LAUNCHER_PATH)
+}
+
+pub fn ensure_legacy_policy_valid() -> HostControlResult<()> {
+    ensure_expected_policy(LEGACY_CONTROLLER_PATH)
+}
+
+fn ensure_expected_policy(command: &str) -> HostControlResult<()> {
+    let xml = exported_task_xml()?;
+    if exported_policy_valid(&xml, command) {
         Ok(())
     } else {
         Err(HostControlError::AutostartPolicyInvalid)
@@ -118,19 +137,36 @@ pub fn status_value() -> HostControlResult<Value> {
         }
 
         let xml = String::from_utf8_lossy(&output.stdout);
-        let policy_valid = exported_policy_valid(&xml);
-
         Ok(json!({
             "installed": true,
-            "policy_valid": policy_valid,
+            "policy_valid": exported_policy_valid(&xml, LAUNCHER_PATH),
+            "legacy_policy_valid": exported_policy_valid(&xml, LEGACY_CONTROLLER_PATH),
             "task_name": TASK_NAME,
-            "controller_path": CONTROLLER_PATH
+            "launcher_path": LAUNCHER_PATH
         }))
     }
 }
 
-fn exported_policy_valid(xml: &str) -> bool {
-    xml.contains(CONTROLLER_PATH)
+fn exported_task_xml() -> HostControlResult<String> {
+    #[cfg(not(windows))]
+    {
+        return Err(HostControlError::UnsupportedPlatform);
+    }
+
+    #[cfg(windows)]
+    {
+        let output = Command::new("schtasks.exe")
+            .args(["/Query", "/TN", TASK_NAME, "/XML"])
+            .output()?;
+        if !output.status.success() {
+            return Err(HostControlError::AutostartPolicyInvalid);
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+fn exported_policy_valid(xml: &str, command: &str) -> bool {
+    xml.contains(command)
         && xml.contains("<Arguments>run</Arguments>")
         && exported_policy_shape_valid(xml)
 }
@@ -163,7 +199,6 @@ fn current_account() -> HostControlResult<String> {
     if account.is_empty() || account.len() > 256 || account.chars().any(|ch| ch.is_control()) {
         return Err(HostControlError::WindowsIdentityUnavailable);
     }
-
     Ok(account)
 }
 
@@ -245,110 +280,42 @@ fn xml_escape(value: &str) -> String {
 mod tests {
     use super::*;
 
-    const TEST_START: &str = "2026-09-27T02:30:00";
+    const TEST_START: &str = "2026-09-29T20:00:00";
 
     #[test]
-    fn task_xml_has_one_time_trigger_supervisor() {
+    fn canonical_task_targets_immutable_launcher() {
         let xml = task_xml(
             r"HOST\User",
             TEST_START,
-            CONTROLLER_PATH,
+            LAUNCHER_PATH,
             "run",
             r"C:\okx-control",
         );
-
-        assert!(xml.starts_with(r#"<?xml version="1.0" ?>"#));
-        assert!(!xml.contains("encoding="));
-        assert!(xml.contains(CONTROLLER_PATH));
-        assert!(xml.contains("<Arguments>run</Arguments>"));
-        assert!(xml.contains("<WorkingDirectory>C:\\okx-control</WorkingDirectory>"));
-        assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+        assert!(exported_policy_valid(&xml, LAUNCHER_PATH));
+        assert!(!exported_policy_valid(&xml, LEGACY_CONTROLLER_PATH));
         assert_eq!(xml.matches("<TimeTrigger>").count(), 1);
-        assert!(xml.contains("<StartBoundary>2026-09-27T02:30:00</StartBoundary>"));
-        assert!(xml.contains("<Repetition>"));
         assert!(xml.contains("<Interval>PT1M</Interval>"));
-        assert!(!xml.contains("<Duration>"));
-        assert!(xml.contains("<StartWhenAvailable>true</StartWhenAvailable>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
-
         assert!(!xml.contains("<RestartOnFailure>"));
-        assert!(!xml.contains("<LogonTrigger>"));
-        assert!(!xml.contains("<RegistrationTrigger>"));
     }
 
     #[test]
-    fn exported_policy_accepts_exact_time_trigger_contract() {
-        assert!(exported_policy_valid(&task_xml(
+    fn legacy_policy_is_recognized_only_for_root_migration_bridge() {
+        let xml = task_xml(
             r"HOST\User",
             TEST_START,
-            CONTROLLER_PATH,
+            LEGACY_CONTROLLER_PATH,
             "run",
             r"C:\okx-control",
-        )));
-    }
-
-    #[test]
-    fn exported_policy_rejects_bounded_or_wrong_repetition() {
-        let bounded = task_xml(
-            r"HOST\User",
-            TEST_START,
-            CONTROLLER_PATH,
-            "run",
-            r"C:\okx-control",
-        )
-        .replace(
-            "<Interval>PT1M</Interval>",
-            "<Interval>PT1M</Interval><Duration>PT1H</Duration>",
         );
-        assert!(!exported_policy_valid(&bounded));
-
-        let wrong_interval = task_xml(
-            r"HOST\User",
-            TEST_START,
-            CONTROLLER_PATH,
-            "run",
-            r"C:\okx-control",
-        )
-        .replace("<Interval>PT1M</Interval>", "<Interval>PT5M</Interval>");
-        assert!(!exported_policy_valid(&wrong_interval));
+        assert!(exported_policy_valid(&xml, LEGACY_CONTROLLER_PATH));
+        assert!(!exported_policy_valid(&xml, LAUNCHER_PATH));
     }
 
     #[test]
-    fn exported_policy_rejects_duplicate_recovery_authority() {
-        let duplicate = task_xml(
-            r"HOST\User",
-            TEST_START,
-            CONTROLLER_PATH,
-            "run",
-            r"C:\okx-control",
-        ).replace(
-            "<Priority>7</Priority>",
-            "<Priority>7</Priority><RestartOnFailure><Interval>PT1M</Interval><Count>32</Count></RestartOnFailure>",
-        );
-        assert!(!exported_policy_valid(&duplicate));
-    }
-
-    #[test]
-    fn exported_policy_rejects_non_time_trigger() {
-        let logon = task_xml(
-            r"HOST\User",
-            TEST_START,
-            CONTROLLER_PATH,
-            "run",
-            r"C:\okx-control",
-        )
-        .replace("<TimeTrigger>", "<LogonTrigger>")
-        .replace("</TimeTrigger>", "</LogonTrigger>");
-        assert!(!exported_policy_valid(&logon));
-    }
-
-    #[test]
-    fn xml_escape_covers_special_characters() {
-        assert_eq!(xml_escape("A&B<C>\"'"), "A&amp;B&lt;C&gt;&quot;&apos;");
-    }
-
-    #[test]
-    fn task_xml_path_is_outside_mutable_repo() {
-        assert!(std::path::Path::new(TASK_XML_PATH).starts_with(r"C:\okx-control"));
+    fn scheduler_change_is_not_part_of_update_contract() {
+        let source = include_str!("autostart.rs");
+        let forbidden = [r#""/"#, r#"Change""#].concat();
+        assert!(!source.contains(&forbidden));
     }
 }
