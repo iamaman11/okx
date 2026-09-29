@@ -741,4 +741,18 @@ mod tests {
     fn restart_backoff_is_bounded() {
         assert_eq!(RESTART_BACKOFF_SECS, [1, 5, 15, 30, 60]);
     }
+
+    #[test]
+    fn workspace_diagnostic_text_is_byte_bounded_and_utf8_safe() {
+        let value = "é".repeat(400);
+        let bounded = bounded_utf8(&value, WORKSPACE_STATUS_MAX_CHANGE_BYTES);
+        assert!(bounded.len() <= WORKSPACE_STATUS_MAX_CHANGE_BYTES);
+        assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn workspace_diagnostic_count_is_intentionally_small() {
+        assert_eq!(WORKSPACE_STATUS_MAX_CHANGES, 16);
+        assert_eq!(WORKSPACE_STATUS_MAX_CHANGE_BYTES, 512);
+    }
 }
