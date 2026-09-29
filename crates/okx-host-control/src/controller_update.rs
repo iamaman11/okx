@@ -13,11 +13,9 @@ use crate::{HostControlError, HostControlResult, autostart};
 
 pub const CONTROLLER_PATH: &str = r"C:\okx-control\okx-host-control.exe";
 pub const UPDATE_ROOT: &str = r"C:\okx-control\update";
-pub const STAGED_CONTROLLER_PATH: &str =
-    r"C:\okx-control\update\okx-host-control.exe.staged";
+pub const STAGED_CONTROLLER_PATH: &str = r"C:\okx-control\update\okx-host-control.exe.staged";
 const PENDING_PATH: &str = r"C:\okx-control\update\pending-controller-update.json";
-const INSTALLED_PROVENANCE_PATH: &str =
-    r"C:\okx-control\installed-controller.json";
+const INSTALLED_PROVENANCE_PATH: &str = r"C:\okx-control\installed-controller.json";
 const PENDING_SCHEMA_V1: &str = "okx.host-control.controller-update/v1";
 const INSTALLED_SCHEMA_V1: &str = "okx.host-control.installed-controller/v1";
 
@@ -168,10 +166,7 @@ pub fn activate() -> HostControlResult<Value> {
         install_controller(staged, canonical, &pending.controller_sha256)?;
     }
 
-    save_json(
-        Path::new(INSTALLED_PROVENANCE_PATH),
-        &pending.installed(),
-    )?;
+    save_json(Path::new(INSTALLED_PROVENANCE_PATH), &pending.installed())?;
 
     let scheduler = autostart::install()?;
     fs::remove_file(PENDING_PATH)?;
@@ -284,8 +279,7 @@ fn installed_status() -> Value {
     }
 
     let result: HostControlResult<InstalledControllerProvenance> = (|| {
-        let value: InstalledControllerProvenance =
-            serde_json::from_slice(&fs::read(path)?)?;
+        let value: InstalledControllerProvenance = serde_json::from_slice(&fs::read(path)?)?;
         if !value.valid() {
             return Err(HostControlError::ControllerUpdateStateInvalid);
         }
