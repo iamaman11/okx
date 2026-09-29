@@ -709,6 +709,26 @@ mod tests {
     }
 
     #[test]
+    fn legacy_pending_without_activator_pid_remains_readable() {
+        let payload = serde_json::json!({
+            "schema": PENDING_SCHEMA_V1,
+            "repository_id": REPOSITORY_ID,
+            "run_id": 1,
+            "artifact_id": 2,
+            "source_head_sha": "a".repeat(40),
+            "source_tree": "b".repeat(40),
+            "rust_version": "rustc 1.95.0",
+            "controller_sha256": "c".repeat(64),
+            "staged_path": STAGED_CONTROLLER_PATH,
+            "handoff_request_id": null
+        });
+        let pending: PendingControllerUpdate =
+            serde_json::from_value(payload).expect("legacy pending");
+        assert_eq!(pending.activator_pid, None);
+        assert!(pending.valid());
+    }
+
+    #[test]
     fn candidate_produces_valid_pending_state() {
         let pending = PendingControllerUpdate::from_candidate(ControllerUpdateCandidate {
             run_id: 1,
