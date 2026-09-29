@@ -39,10 +39,7 @@ pub fn stage(candidate: ControllerUpdateCandidate, bytes: &[u8]) -> HostControlR
 }
 
 pub fn prepare_handoff(request_id: &str) -> HostControlResult<Value> {
-    Ok(okx_host_launcher::prepare_activation(
-        request_id,
-        std::process::id(),
-    )?)
+    Ok(okx_host_launcher::prepare_activation(request_id)?)
 }
 
 pub fn mark_terminal_ack(request_id: &str) -> HostControlResult<Value> {
