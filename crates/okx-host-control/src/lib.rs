@@ -168,9 +168,7 @@ impl HostControlError {
             Self::ControllerUpdateTerminalAckMissing => "CONTROLLER_UPDATE_TERMINAL_ACK_MISSING",
             Self::ControllerUpdateActivatorLaunch => "CONTROLLER_UPDATE_ACTIVATOR_LAUNCH_FAILED",
             Self::LegacyBootstrapDisabled => "LEGACY_BOOTSTRAP_DISABLED",
-            Self::AcceptanceActivationFailureInjected => {
-                "ACCEPTANCE_ACTIVATION_FAILURE_INJECTED"
-            }
+            Self::AcceptanceActivationFailureInjected => "ACCEPTANCE_ACTIVATION_FAILURE_INJECTED",
             Self::ControlResponseBudgetInvariant => "CONTROL_RESPONSE_BUDGET_INVARIANT",
         }
     }
