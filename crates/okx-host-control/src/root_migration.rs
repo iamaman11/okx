@@ -443,8 +443,10 @@ mod tests {
     #[test]
     fn migration_never_mutates_scheduler_definition() {
         let source = include_str!("root_migration.rs");
-        assert!(!source.contains(r#""/Create""#));
-        assert!(!source.contains(r#""/Change""#));
+        let create = [r#""/"#, r#"Create""#].concat();
+        let change = [r#""/"#, r#"Change""#].concat();
+        assert!(!source.contains(&create));
+        assert!(!source.contains(&change));
         assert!(source.contains("install_launcher_entrypoint"));
     }
 
