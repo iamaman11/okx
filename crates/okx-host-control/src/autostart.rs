@@ -8,8 +8,7 @@ use crate::{HostControlError, HostControlResult};
 const TASK_NAME: &str = r"\iamaman11-okx-host-control";
 const CONTROLLER_PATH: &str = r"C:\okx-control\okx-host-control.exe";
 const TASK_XML_PATH: &str = r"C:\okx-control\okx-host-control-task.xml";
-const UPDATE_CONTROLLER_PATH: &str =
-    r"C:\okx-control\update\okx-host-control.exe.staged";
+const UPDATE_CONTROLLER_PATH: &str = r"C:\okx-control\update\okx-host-control.exe.staged";
 const UPDATE_WORKING_DIRECTORY: &str = r"C:\okx-control\update";
 
 pub fn install() -> HostControlResult<Value> {
@@ -309,7 +308,8 @@ mod tests {
             CONTROLLER_PATH,
             "run",
             r"C:\okx-control",
-        ).replace(
+        )
+        .replace(
             "<Interval>PT1M</Interval>",
             "<Interval>PT1M</Interval><Duration>PT1H</Duration>",
         );
@@ -322,7 +322,7 @@ mod tests {
             "run",
             r"C:\okx-control",
         )
-            .replace("<Interval>PT1M</Interval>", "<Interval>PT5M</Interval>");
+        .replace("<Interval>PT1M</Interval>", "<Interval>PT5M</Interval>");
         assert!(!exported_policy_valid(&wrong_interval));
     }
 
@@ -350,8 +350,8 @@ mod tests {
             "run",
             r"C:\okx-control",
         )
-            .replace("<TimeTrigger>", "<LogonTrigger>")
-            .replace("</TimeTrigger>", "</LogonTrigger>");
+        .replace("<TimeTrigger>", "<LogonTrigger>")
+        .replace("</TimeTrigger>", "</LogonTrigger>");
         assert!(!exported_policy_valid(&logon));
     }
 
