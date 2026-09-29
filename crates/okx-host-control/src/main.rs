@@ -1,6 +1,6 @@
 use std::{
     io::{self, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use clap::{Parser, Subcommand};
@@ -8,8 +8,8 @@ use okx_github::GitHubClient;
 use okx_host_control::{
     HostControlResult,
     auth::{load_native_github_token, store_native_github_token},
-    controller_update,
     executor::{HostExecutor, install_current_executable},
+    legacy_bootstrap,
     runtime::{DEFAULT_CONTROL_POLL_SECONDS, process_pending, run_until_shutdown},
     single_instance::SingleInstanceGuard,
 };
@@ -48,6 +48,8 @@ enum Command {
     Run {
         #[arg(long, default_value_t = DEFAULT_CONTROL_POLL_SECONDS)]
         poll_seconds: u64,
+        #[arg(long)]
+        activation_request_id: Option<String>,
     },
 }
 
@@ -60,6 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run(cli: Cli) -> HostControlResult<()> {
     match cli.command {
         Command::Install => {
+            if Path::new(okx_host_launcher::ACTIVE_PATH).exists() {
+                return Err(okx_host_control::HostControlError::LegacyBootstrapDisabled);
+            }
             let result = install_current_executable(&PathBuf::from(INSTALL_PATH))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -87,7 +92,7 @@ async fn run(cli: Cli) -> HostControlResult<()> {
             let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
             github.verify_repository_identity().await?;
             let result =
-                controller_update::activate(&github, parent_pid, &handoff_request_id).await?;
+                legacy_bootstrap::activate(&github, parent_pid, &handoff_request_id).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Once => {
@@ -105,11 +110,17 @@ async fn run(cli: Cli) -> HostControlResult<()> {
                 })
             );
         }
-        Command::Run { poll_seconds } => {
+        Command::Run {
+            poll_seconds,
+            activation_request_id,
+        } => {
             let _single_instance = SingleInstanceGuard::acquire()?;
             let token = load_native_github_token()?;
             let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
             let mut executor = HostExecutor::canonical()?;
+            if let Some(request_id) = activation_request_id.as_deref() {
+                okx_host_launcher::signal_controller_ready(request_id)?;
+            }
             run_until_shutdown(&github, &mut executor, poll_seconds).await?;
         }
     }
