@@ -51,14 +51,8 @@ pub async fn deploy_agent(
     artifact_id: u64,
     expected_source_tree: &str,
 ) -> HostControlResult<Value> {
-    let bundle = verified_bundle(
-        github,
-        executor,
-        run_id,
-        artifact_id,
-        expected_source_tree,
-    )
-    .await?;
+    let bundle =
+        verified_bundle(github, executor, run_id, artifact_id, expected_source_tree).await?;
 
     let declared_agent_hash = declared_hash(&bundle.manifest, "okx-agent.exe")?;
     let actual_agent_hash = sha256_hex(&bundle.agent_bytes);
@@ -106,8 +100,7 @@ pub async fn stage_controller_update(
     )
     .await?;
 
-    let declared_controller_hash =
-        declared_hash(&bundle.manifest, "okx-host-control.exe")?;
+    let declared_controller_hash = declared_hash(&bundle.manifest, "okx-host-control.exe")?;
     let actual_controller_hash = sha256_hex(&bundle.controller_bytes);
     if actual_controller_hash != declared_controller_hash {
         return Err(HostControlError::ArtifactHashMismatch);
@@ -200,8 +193,7 @@ fn parse_bundle(zip_bytes: &[u8]) -> HostControlResult<VerifiedBundle> {
     let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)?;
 
     let agent_bytes = read_entry(&mut archive, "okx-agent.exe", MAX_AGENT_BYTES)?;
-    let controller_bytes =
-        read_entry(&mut archive, "okx-host-control.exe", MAX_CONTROLLER_BYTES)?;
+    let controller_bytes = read_entry(&mut archive, "okx-host-control.exe", MAX_CONTROLLER_BYTES)?;
 
     Ok(VerifiedBundle {
         manifest,
