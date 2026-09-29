@@ -151,7 +151,8 @@ pub fn spawn_migrator() -> HostControlResult<Value> {
         .create(true)
         .append(true)
         .open(root.join("root-migration.stderr.log"))?;
-    let child = Command::new(std::env::current_exe()?)
+    let migrator = okx_host_launcher::active_controller_binary_path()?;
+    let child = Command::new(migrator)
         .arg("migrate-launcher-root")
         .arg("--request-id")
         .arg(&migration.request_id)
@@ -446,6 +447,14 @@ impl RootMigrationGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_never_mutates_scheduler_definition() {
+        let source = include_str!("root_migration.rs");
+        assert!(!source.contains(r#""/Create""#));
+        assert!(!source.contains(r#""/Change""#));
+        assert!(source.contains("install_launcher_entrypoint"));
+    }
 
     #[test]
     fn migration_state_is_fixed_outside_workspace() {
