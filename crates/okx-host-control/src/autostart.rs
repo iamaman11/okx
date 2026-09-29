@@ -9,7 +9,7 @@ const TASK_NAME: &str = r"\iamaman11-okx-host-control";
 const CONTROLLER_PATH: &str = r"C:\okx-control\okx-host-control.exe";
 const TASK_XML_PATH: &str = r"C:\okx-control\okx-host-control-task.xml";
 const UPDATE_CONTROLLER_PATH: &str = r"C:\okx-control\update\okx-host-control.exe.staged";
-const UPDATE_WORKING_DIRECTORY: &str = r"C:\okx-control\update";
+const CANONICAL_WORKING_DIRECTORY: &str = r"C:\okx-control";
 
 pub fn install() -> HostControlResult<Value> {
     install_action(CONTROLLER_PATH, "run", r"C:\okx-control")?;
@@ -17,18 +17,42 @@ pub fn install() -> HostControlResult<Value> {
 }
 
 pub fn install_controller_update_activation() -> HostControlResult<Value> {
-    install_action(
-        UPDATE_CONTROLLER_PATH,
-        "activate-controller-update",
-        UPDATE_WORKING_DIRECTORY,
-    )?;
+    ensure_policy_valid()?;
+    change_action(UPDATE_CONTROLLER_PATH, "activate-controller-update")?;
+    ensure_activation_policy_valid()?;
     Ok(json!({
-        "installed": true,
+        "changed": true,
         "task_name": TASK_NAME,
         "controller_path": UPDATE_CONTROLLER_PATH,
         "arguments": "activate-controller-update",
-        "working_directory": UPDATE_WORKING_DIRECTORY
+        "working_directory": CANONICAL_WORKING_DIRECTORY
     }))
+}
+
+pub fn restore_controller_action() -> HostControlResult<Value> {
+    change_action(CONTROLLER_PATH, "run")?;
+    status_value()
+}
+
+fn change_action(command: &str, arguments: &str) -> HostControlResult<()> {
+    #[cfg(not(windows))]
+    {
+        let _ = (command, arguments);
+        return Err(HostControlError::UnsupportedPlatform);
+    }
+
+    #[cfg(windows)]
+    {
+        let task_run = format!("{command} {arguments}");
+        let status = Command::new("schtasks.exe")
+            .args(["/Change", "/TN", TASK_NAME, "/TR", &task_run])
+            .status()?;
+
+        if !status.success() {
+            return Err(HostControlError::CommandFailed("schtasks change"));
+        }
+        Ok(())
+    }
 }
 
 fn install_action(
@@ -110,6 +134,27 @@ pub fn ensure_policy_valid() -> HostControlResult<()> {
     }
 }
 
+pub fn ensure_activation_policy_valid() -> HostControlResult<()> {
+    #[cfg(not(windows))]
+    {
+        return Err(HostControlError::UnsupportedPlatform);
+    }
+
+    #[cfg(windows)]
+    {
+        let output = Command::new("schtasks.exe")
+            .args(["/Query", "/TN", TASK_NAME, "/XML"])
+            .output()?;
+        if output.status.success()
+            && exported_activation_policy_valid(&String::from_utf8_lossy(&output.stdout))
+        {
+            Ok(())
+        } else {
+            Err(HostControlError::AutostartPolicyInvalid)
+        }
+    }
+}
+
 pub fn status_value() -> HostControlResult<Value> {
     #[cfg(not(windows))]
     {
@@ -147,9 +192,19 @@ pub fn status_value() -> HostControlResult<Value> {
 }
 
 fn exported_policy_valid(xml: &str) -> bool {
-    xml.contains(CONTROLLER_PATH)
+    exported_policy_shape_valid(xml)
+        && xml.contains(CONTROLLER_PATH)
         && xml.contains("<Arguments>run</Arguments>")
-        && xml.contains("<WorkingDirectory>C:\\okx-control</WorkingDirectory>")
+}
+
+fn exported_activation_policy_valid(xml: &str) -> bool {
+    exported_policy_shape_valid(xml)
+        && xml.contains(UPDATE_CONTROLLER_PATH)
+        && xml.contains("<Arguments>activate-controller-update</Arguments>")
+}
+
+fn exported_policy_shape_valid(xml: &str) -> bool {
+    xml.contains("<WorkingDirectory>C:\\okx-control</WorkingDirectory>")
         && xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>")
         && xml.matches("<TimeTrigger>").count() == 1
         && xml.contains("<StartBoundary>")
