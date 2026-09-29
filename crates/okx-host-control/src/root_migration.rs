@@ -2,7 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
 };
 
 use okx_github::{GitHubClient, OWNER_USER_ID, REPOSITORY_ID};
