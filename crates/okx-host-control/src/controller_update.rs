@@ -294,6 +294,10 @@ pub fn abort() -> HostControlResult<Value> {
         }));
     };
 
+    if pending.activator_pid.is_some_and(process_is_running) {
+        return Err(HostControlError::ControllerUpdateConflict);
+    }
+
     if Path::new(PENDING_PATH).exists() {
         fs::remove_file(PENDING_PATH)?;
     }
@@ -309,7 +313,8 @@ pub fn abort() -> HostControlResult<Value> {
         "source_head_sha": pending.source_head_sha,
         "source_tree": pending.source_tree,
         "controller_sha256": pending.controller_sha256,
-        "handoff_request_id": pending.handoff_request_id
+        "handoff_request_id": pending.handoff_request_id,
+        "activator_pid": pending.activator_pid
     }))
 }
 
