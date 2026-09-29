@@ -374,10 +374,7 @@ fn public_pending(value: &PendingControllerUpdate) -> Value {
     })
 }
 
-async fn durable_handoff_ack(
-    github: &GitHubClient,
-    request_id: &str,
-) -> HostControlResult<bool> {
+async fn durable_handoff_ack(github: &GitHubClient, request_id: &str) -> HostControlResult<bool> {
     let comments = github.recent_issue_comments(12).await?;
     Ok(comments
         .iter()
