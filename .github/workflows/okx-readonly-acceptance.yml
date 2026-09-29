@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo run --quiet -p okx-cli -- --region global --instrument BTC-USDT-SWAP --margin cross > /tmp/c.json
+          cargo run --locked --quiet -p okx-cli -- --region global --instrument BTC-USDT-SWAP --margin cross > /tmp/c.json
           jq -e '
             .authenticated == true and
             .region == "global" and
@@ -68,7 +68,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo run --quiet -p okx-cli -- --region global --instrument BTC-USDT-SWAP --margin cross > /tmp/c.json
+          cargo run --locked --quiet -p okx-cli -- --region global --instrument BTC-USDT-SWAP --margin cross > /tmp/c.json
           jq -e '
             .authenticated == true and
             .region == "global" and
