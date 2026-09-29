@@ -2,343 +2,441 @@
 
 ## Principles
 
-The platform must remain simple, layered, modular and fail-closed.
+The platform is intentionally simple, layered, modular and fail-closed.
 
-One owner exists for every lifecycle/state boundary. A recovery mechanism may retry its own responsibility, but no second watchdog or duplicated state machine may compete for ownership.
+Core rules:
 
-## Planes
+- one owner for every lifecycle/state boundary;
+- no duplicate state machines or watchdogs;
+- observation owns factual state;
+- analysis owns deterministic calculations;
+- execution owns all mutations;
+- transport only transports;
+- Windows control only controls lifecycle/deployment;
+- GitHub-hosted CI is the normal build authority;
+- installed binaries are verified artifacts, not mutable-workspace builds;
+- uncertain mutation outcome is reconciled, never blindly replayed.
+
+## Canonical topology
 
 ```text
-DATA PLANE
-OKX Public WS/REST + Private WS/REST
-  -> typed exchange adapters
-  -> normalized observation state
-  -> reconciliation/readiness
-  -> immutable snapshots
+                        SUPPLY CHAIN
+GitHub PR
+  -> pinned Actions + Rust 1.95.0 + committed Cargo.lock
+  -> Linux / Windows CI
+  -> exact Windows bundle
+  -> manifest(source head/tree + binary SHA-256)
+  -> verified deploy
+  -> durable versioned recovery Release
 
-ANALYSIS PLANE
-immutable snapshot
-  -> cost
-  -> risk
-  -> scenario
-
-EXECUTION PLANE — Phase 2
-typed immutable execution intent
-  -> one OrderExecutor
-  -> validation + idempotency ledger
-  -> OKX trade mutation boundary
-  -> reconcile ACK/order state through authoritative exchange evidence
-
-ACCESS PLANE
-ChatGPT / CLI / UI
-  -> typed Query API
-  -> encrypted GitHub mailbox
-  -> canonical current access path
+                       WINDOWS LIFECYCLE
+Task Scheduler
+  ONE TimeTrigger / PT1M / StartWhenAvailable / IgnoreNew
+        |
+        v
+ONE okx-host-control
+  mutex + desired state + Job Object
+  fixed typed CONTROL operations
+        |
+        v
+ONE okx-agent
+        |
+        +----------------------+--------------------+
+        |                      |                    |
+        v                      v                    v
+ Observation             Pure Analysis       ONE OrderExecutor
+ Reference/Market        Decimal math         durable ledger
+ Account/Orders          scenario/risk        mutation authority
+ reconciliation          no state owner       hard-disabled prod
+ readiness
+        |
+        v
+ immutable snapshots
+        |
+        +----------------------+
+                               v
+                     typed encrypted DATA
 ```
 
 ## Crate boundaries
 
-### okx-api
+### `okx-api`
 
 Exchange boundary only:
 
-- REST request/response DTOs;
-- public and private typed primitives;
-- authentication/signing where required;
+- typed REST/auth request/response primitives;
+- public/private exchange DTOs;
+- signing/authentication primitives;
+- typed trade primitives;
 - no normalized domain ownership;
-- no business/risk logic.
+- no mutation state machine;
+- no business/risk policy.
 
-### okx-observation
+### `okx-ws`
 
-Domain state owner:
+WebSocket protocol/transport only:
+
+- TLS/WebSocket connection/framing;
+- typed subscribe/unsubscribe/channel envelopes;
+- application ping/pong primitives;
+- no reconnect policy;
+- no generation ownership;
+- no normalized domain state.
+
+### `okx-runtime`
+
+Tokio observation lifecycle authority:
+
+- public/private WebSocket coordination;
+- reconnect/backoff;
+- connection generation;
+- desired-vs-observed subscriptions;
+- heartbeat timing;
+- REST bootstrap + WS convergence orchestration.
+
+Module/file splits are allowed for readability but must never create another lifecycle owner.
+
+### `okx-observation`
+
+Factual domain-state authority:
 
 - Reference Registry;
 - Market State;
 - Account and Order State;
-- generation IDs;
-- reconciliation;
-- readiness;
-- immutable snapshots.
+- deterministic generations;
+- reconciliation/readiness;
+- immutable snapshots;
+- explicit FRESH/STALE/DEGRADED/NOT_READY quality.
 
-### okx-ws
+Observation never mutates exchange trading state.
 
-WebSocket protocol/transport boundary only:
+### `okx-analysis`
 
-- TLS/WebSocket connect and frame transport;
-- typed subscribe/unsubscribe and channel envelopes;
-- application `ping` / typed `pong` primitives;
-- no reconnect timer, generation ownership or domain state.
+Pure deterministic analysis:
 
-### okx-runtime
+- cost;
+- fee-aware scenarios;
+- portfolio/candidate risk;
+- history behavior;
+- current cost;
+- position scenarios.
 
-One Tokio observation lifecycle owner:
+Inputs are immutable accepted snapshots. No collector, transport, lifecycle or mutation ownership lives here.
 
-- public WebSocket reconnect/backoff;
-- connection generation;
-- desired-vs-observed subscriptions;
-- application heartbeat timing;
-- REST bootstrap + WS convergence orchestration.
+### `okx-execution`
 
-### okx-execution
-
-Single mutation owner only:
+Sole mutation authority:
 
 - immutable validated ExecutionPlan;
-- deterministic client order id;
+- deterministic client order identity;
 - durable bounded execution ledger;
-- PREPARED/SUBMITTING/ACKNOWLEDGED/UNKNOWN_SUBMISSION/exchange-state reconciliation;
-- closed typed prepare outcomes: Created / Existing / Rejected / Failed;
-- deterministic domain failures are classified inside okx-execution, never as generic transport/runtime errors;
-- compact read-only ExecutionStatus projection for remote ledger observability;
-- typed gateway to okx-api trade primitives;
+- PREPARED / SUBMITTING / ACKNOWLEDGED / UNKNOWN_SUBMISSION and terminal/exchange reconciliation;
+- exhaustive deterministic prepare classification;
+- exact reconciliation by immutable plan identity;
+- typed gateway to `okx-api` mutation primitives;
+- compact read-only ExecutionStatus;
 - no observation ownership;
-- no analytical calculations;
-- production construction remains live-trading disabled until explicit pre-enable acceptance.
+- no analytical ownership.
 
-### okx-agent
+Production construction is hard-disabled before SUBMITTING persistence and before exchange send. There is no accepted production live-write enable mechanism.
 
-Composition root and access adapter only. It starts/owns the runtime as a component but must not duplicate its lifecycle state machine, domain calculations, execution state or Windows supervision.
+### `okx-agent`
 
-### Runtime maintainability rule
+Composition root and typed access adapter:
 
-Large lifecycle modules may be split by responsibility **inside the same crate** when readability degrades. A file/module split must never create another lifecycle owner. Post-M3 cleanup #42 applies this rule to `okx-runtime::public` before M4.
+- wires observation/runtime/analysis/execution components;
+- processes authenticated encrypted DATA requests;
+- assembles bounded query dependencies;
+- projects compact typed results.
 
-### okx-host-control
+It does not duplicate observation/runtime/execution state machines.
+
+### `okx-protocol`
+
+Versioned DATA/CONTROL contracts only.
+
+### `okx-github`
+
+GitHub transport primitives only:
+
+- pinned repository/user identity;
+- bounded issue retrieval;
+- persisted cursors/terminal replay metadata;
+- failure classification/backoff.
+
+GitHub is transport/evidence, not market/account state authority.
+
+### `okx-host-control`
 
 Windows lifecycle/deployment/diagnostics only:
 
 - desired RUNNING/STOPPED;
-- one child process;
-- Job Object ownership;
+- exactly one Job-Object-owned child agent;
+- bounded restart;
 - verified artifact deployment;
-- bounded child restart.
+- Scheduler/autostart diagnostics;
+- typed allowlisted CONTROL operations.
 
-No OKX market/account/risk logic belongs here.
+No market/account/risk/order business logic belongs here.
+
+Remote legacy `BuildAgent` is not a production execution path and fails closed. Normal production deployment accepts only a verified hosted-CI artifact whose provenance matches current accepted source tree and binary hashes.
+
+## DATA and CONTROL planes
+
+### DATA #10
+
+Encrypted application/query path:
+
+```text
+client
+ -> X25519/HKDF/ChaCha20-Poly1305 envelope
+ -> GitHub issue #10
+ -> okx-agent
+ -> authenticated typed operation
+ -> local immutable state / pure analysis / execution-status boundary
+ -> encrypted terminal response
+```
+
+Properties already physically accepted:
+
+- request correlation;
+- authenticated terminal result;
+- replay suppression;
+- incremental cursor;
+- bounded state-loss bootstrap;
+- network/GitHub-loss recovery;
+- restart recovery;
+- compact Level 1 and Level 2 operations.
+
+GitHub issue history is transport evidence, not market history/state.
+
+### CONTROL #12
+
+Typed Windows operations only:
+
+```text
+client
+ -> okx.windows.control/v1
+ -> GitHub issue #12
+ -> okx-host-control
+ -> fixed allowlisted lifecycle/deploy/diagnostic operation
+ -> okx.windows.control.result/v1
+```
+
+No arbitrary shell, PowerShell, path, script or HTTP proxy exists.
 
 ## Windows supervision
 
 ```text
 Task Scheduler
-  ONE TimeTrigger / PT1M indefinite
+  ONE TimeTrigger
+  PT1M indefinite
   StartWhenAvailable=true
   IgnoreNew
         |
         v
 ONE okx-host-control
   mutex
-  desired.json
+  desired state
   Job Object / KILL_ON_JOB_CLOSE
-  bounded child restart
+  bounded child restart 1/5/15/30/60
         |
         v
 ONE okx-agent
 ```
 
-Task Scheduler supervises the controller only. The Rust controller supervises the agent only.
+Task Scheduler supervises the controller only. Host-control supervises the agent only.
 
-## Windows filesystem boundaries
+No SCM service, RestartOnFailure authority, LogonTrigger recovery, PowerShell watchdog or second custom supervisor is allowed.
+
+Real reboot/sign-in and real external GitHub/network-loss recovery are physically accepted.
+
+## Filesystem trust boundaries
 
 ```text
-C:\okx          mutable canonical Git workspace
-C:\okx-control  installed controller + desired lifecycle state
-C:\okx-runtime  installed agent + runtime logs/staging
+C:\okx
+  mutable canonical Git workspace
+
+C:\okx-control
+  installed okx-host-control.exe
+  controller lifecycle state
+
+C:\okx-runtime
+  installed okx-agent.exe
+  runtime state/logs/staging
+
+C:\okx-upgrade
+  temporary bootstrap/upgrade staging only
 ```
 
-These are deliberately separate trust/lifecycle boundaries. Installed binaries must not execute from the mutable repository checkout.
+Installed production binaries do not execute from the mutable checkout.
 
-`C:\okx-upgrade` is not a canonical boundary. It is temporary staging left from an earlier one-time manual controller upgrade and is not referenced by normal Scheduler/controller/agent operation.
+## Supply-chain authority
 
-## Market-data evolution
+The production build/deploy path is:
 
-### M1 — Reference Data
+```text
+committed source + Cargo.lock
+ -> pinned GitHub Actions
+ -> Rust 1.95.0
+ -> cargo --locked
+ -> PR CI
+ -> exact tested source tree
+ -> merge
+ -> merged tree must equal tested PR head tree for CI reuse
+ -> bundle manifest + binary SHA-256
+ -> verified deploy
+```
 
-Public REST instruments bootstrap -> normalized deterministic Reference Registry.
+Durable recovery promotion additionally verifies the exact tested/merged tree, embedded manifest and binary hashes before publishing a versioned GitHub Release plus `SHA256SUMS.txt`.
 
-Accepted and closed.
+A short-lived Actions artifact is therefore no longer the only disaster-recovery source.
 
-### M2 — REST Market State
+Repository-level branch/ruleset enforcement on `main` is an external GitHub Administration control tracked by #113 and must be enabled before the production baseline is finally closed.
 
-Fresh finite public REST calls produce a coherent immutable market snapshot:
+## Account boundary
 
-- ticker/bid/ask;
-- mark price;
-- index price;
-- funding;
-- open interest.
+Production trading authority is isolated in the standard OKX sub-account `Succession`.
 
-M2 remains `DEGRADED` by design.
+```text
+OKX main account
+  treasury / administrative authority
+  no runtime trading API
+        |
+        v
+Succession standard sub-account
+  Futures mode
+  long/short position mode
+        |
+        +-- observer key: Read only
+        |
+        +-- executor key: Read + Trade, never Withdraw
+```
 
-Accepted and closed.
+Verified account invariants:
 
-### M3 — Persistent Public WebSocket
+- Global production endpoint family;
+- standard sub-account identity;
+- Futures account mode;
+- `long_short_mode`;
+- observer has read-only and neither trade nor withdraw;
+- executor has read + trade and never withdraw;
+- observer/executor fingerprints target the same intended account;
+- executor IP binding may be present or absent and is diagnostic only;
+- raw API key, secret, passphrase and raw UID are never returned through DATA/CONTROL/logs.
 
-WebSocket becomes the live market-state owner. REST remains bootstrap/verification/recovery.
+GitHub Environment variables are not a live-trading enable authority. Runtime correctness depends on the production executor boundary, whose accepted constructor remains disabled.
 
-Required evidence before `FRESH`:
+## Observation and query model
 
-- live connection generation;
-- required subscriptions acknowledged;
-- current Reference generation;
-- required source updates;
-- order-book initial snapshot;
-- `seqId/prevSeqId` continuity;
-- no unresolved gap/reconciliation conflict.
+Level 1 forensic/detail operations expose bounded factual evidence such as:
 
-A connected socket alone is never readiness.
+- InstrumentRules;
+- FindInstruments;
+- MarketSnapshot / MarketOverview / MarketHistory;
+- SnapshotQuality;
+- AccountSnapshot;
+- transport telemetry;
+- ExecutionStatus.
 
-M3/A2 are physically accepted, including real external network/GitHub loss and asynchronous CONTROL/DATA recovery without duplicate runtime owners.
+Level 2 bounded application/research operations compose immutable dependencies locally:
 
-## Order-book integrity
+- MarketResearch;
+- PortfolioRisk;
+- CurrentCost;
+- PositionScenario;
+- AnalyzeCandidateOrder.
 
-As of OKX production changes effective 2026-06-23, the `checksum` field for `books`, `books-l2-tbt` and `books50-l2-tbt` is deprecated and fixed to `0`.
+Admission rule:
 
-The runtime must use only documented `seqId/prevSeqId` rules for continuity.
+> deterministic arithmetic, aggregation, filtering, consistency checks and bounded scenario expansion belong locally beside immutable inputs rather than in ChatGPT over large raw responses.
 
-No new code may introduce checksum-based integrity authority.
+Level 2 creates no new engine or state owner.
 
-## Security
+## Market/order-state integrity
 
-- observation runtime is read-only;
-- private state later uses observer credentials only;
-- execution credentials remain outside observation;
-- no arbitrary shell/HTTP proxy operation;
-- no raw credentials or private plaintext in public GitHub;
-- analysis consumes immutable snapshots, never mutable collectors directly.
+Persistent WebSocket state is the live owner after REST bootstrap/recovery.
 
-## Application query boundary
+A connected socket alone is not readiness. FRESH requires accepted connection/subscription generations and coherent source updates.
 
-The product has two query levels over the same authorities.
+For OKX order-book channels, `seqId/prevSeqId` continuity is authoritative. Deprecated checksum fields must not be treated as integrity authority.
 
-**Level 1 — forensic/detail** exposes bounded factual snapshots for drill-down and diagnostics:
-`InstrumentRules`, `FindInstruments`, `MarketSnapshot`, `MarketOverview`, `MarketHistory`,
-`HistoryBehavior`, `SnapshotQuality`, `AccountSnapshot`, and transport telemetry.
-
-**Level 2 — application/research** answers a demonstrated research question by composing immutable
-inputs locally and returning compact attributable evidence:
-`MarketResearch`, `PortfolioRisk`, `CurrentCost`, `PositionScenario`, and
-`AnalyzeCandidateOrder`.
-
-The admission rule is:
-
-> If ChatGPT would otherwise fetch a large raw dataset and repeat deterministic domain arithmetic,
-> aggregation, filtering, consistency checks, or bounded scenario expansion, that work belongs in
-> a typed Level 2 operation next to the immutable inputs.
-
-Level 2 does **not** introduce a new engine. Existing ownership remains unchanged:
-observation owns factual state, `okx-analysis` owns deterministic Decimal math, and query adapters
-only acquire bounded dependencies, enforce consistency, call pure analysis, and project results.
-
-Every Level 2 operation must have:
-
-- explicit bounded request shape and work limits;
-- operation-scoped immutable dependency acquisition, with each exact dependency captured once and
-  reused within that request;
-- explicit quality and generation-consistency rules that never upgrade source quality;
-- compact result provenance sufficient to avoid implying atomic simultaneity;
-- an operation-specific response budget before the GitHub envelope boundary;
-- no arbitrary batch, expression language, field-selection DSL, local LLM, SQL layer, or new
-  long-lived state owner.
-
-Current MarketResearch work budget is `2..=8` unique instruments with history `limit <= 100`.
-Each instrument is assembled from one current-market acquisition plus one bounded history
-acquisition, then existing pure `analyze_history_behavior` performs deterministic reduction.
-The v2 projection retains per-instrument market/history timestamps and generations while omitting
-full nested forensic snapshots. Level 1 operations remain available when raw/detail evidence is
-explicitly required.
-
-
-## Accepted platform cursor — 2026-09-28
-
-The read-only platform is fully accepted through M6, H1 and A2:
-
-- M1 reference data — PASS;
-- M2 public REST market state — PASS;
-- M3 persistent public WS — PASS;
-- M4 private account/orders — PASS;
-- M5 deterministic analysis — PASS;
-- M6 bounded application/research queries — PASS;
-- H1 transport/context hardening — PASS;
-- A2 reboot + real external network-loss recovery — PASS.
-
-The next large product boundary is Phase 2 (#3). It must preserve every existing observation/analysis ownership rule.
-
-## Phase 2 execution ownership
-
-Execution is intentionally separate from observation and analysis.
+## Execution safety
 
 ```text
 immutable accepted inputs
-  Reference / Market / Account / Analysis
-                |
-                v
-        typed ExecutionIntent
-                |
-                v
-          ONE OrderExecutor
-      validation + durable ledger
-                |
-                v
-       OKX trade mutation API
-                |
-                v
-private orders/account observation
-      -> reconciliation evidence
-```
-
-Rules:
-
-- okx-api may contain typed OKX trade request/response primitives, but no mutation state machine;
-- a dedicated execution component owns mutation sequencing, idempotency, UNKNOWN_SUBMISSION and reconciliation;
-- observation never sends orders;
-- analysis never sends orders;
-- access/query adapters never directly call OKX mutation endpoints;
-- executor credentials are distinct from observer credentials and never exposed to GitHub-hosted CI;
-- clOrdId is generated by the execution owner and treated as a durable idempotency key even though OKX only enforces uniqueness among pending orders;
-- an HTTP/WS ACK proves acceptance of a request, not a fill;
-- network loss after submission must not cause blind resubmission;
-- an ambiguous outcome is persisted as UNKNOWN_SUBMISSION and reconciled by exact clOrdId / exchange order evidence before further mutation;
-- long/short account mode requires explicit valid side + posSide combinations;
-- reference generation, tick/lot/min and account-mode assumptions are revalidated at the mutation boundary;
-- live writes remain disabled until explicit Phase-2 production acceptance changes the gate.
-
-Accepted Phase-2 cursor:
-- #96 pure execution model — PASS;
-- #97 durable mutation ledger — PASS;
-- #98 typed OKX mutation primitives — PASS;
-- #99 one production-disabled OrderExecutor + UNKNOWN_SUBMISSION reconciliation — PASS.
-
-Current work is credential/preflight, then disabled runtime integration. A prepared ExecutionPlan is not a timeless permit: immediately before any future send, the execution boundary must reacquire current authoritative reference/account state and require exact generation, identity, account-mode and trade-readiness continuity.
-
-The first deployed Phase-2 runtime must be physically accepted with live mutation still impossible.
-
-## Phase 2 execution terminal contract
-
-The execution boundary distinguishes domain outcomes from infrastructure failures.
-
-```text
-ExecutionPlan
-    |
-    v
+      |
+      v
+ExecutionIntent
+      |
+      v
+validated ExecutionPlan
+      |
+      v
 ONE OrderExecutor
-    |
-    v
-durable ledger
-    |
-    +--> Created / Existing / Rejected / Failed   -> terminal DATA response
-    |
-    +--> I/O / JSON / corruption / invariant      -> internal fail-closed retry path
+      |
+      +--> durable PREPARED
+      |
+      +--> future live path only:
+             reacquire current authoritative state
+             exact continuity/risk checks
+             persist SUBMITTING
+             send once
+             ACK or UNKNOWN_SUBMISSION
+             reconcile exact exchange evidence
 ```
 
 Rules:
 
-- identical intent + identical immutable plan returns Existing, not an error;
-- identical intent + different plan is terminal Rejected;
-- client-order-id collision is terminal Rejected;
-- bounded ledger capacity exhaustion is terminal Failed;
-- disk I/O, corrupt ledger, JSON corruption, invalid monotonic time and impossible transitions remain internal failures;
-- classification is exhaustive in okx-execution; adding a new ledger error requires an explicit compiler-visible classification decision;
-- mailbox replay of a deterministic domain outcome must reach a terminal response and advance the cursor;
-- ExecutionStatus by intent_id is the canonical encrypted read-only diagnostic for durable execution state;
-- status exposes no credentials and no raw exchange order id; it returns a plan fingerprint, state, public plan mechanics, order-id presence and durable timestamps.
+- identical intent + identical plan is idempotent;
+- intent/plan conflict is terminal REJECTED;
+- client-order-id collision is terminal REJECTED;
+- capacity exhaustion is terminal FAILED;
+- corruption/I/O/invariant failures fail closed;
+- network uncertainty after a send never causes blind retry;
+- UNKNOWN_SUBMISSION is reconciled by exact client-order/exchange evidence;
+- observation and analysis never send orders.
 
-Normal execution diagnosis therefore stays inside DATA/CONTROL. A local agent is reserved for secret provisioning or genuinely physical/local evidence, not ordinary ledger inspection.
+Phase 2 pre-enable is physically accepted:
+
+- executor credential preflight PASS;
+- disabled submit returns `LIVE_TRADING_DISABLED`;
+- gate occurs before SUBMITTING and before exchange send;
+- ledger survives restart unchanged;
+- live orders sent in acceptance = 0.
+
+Any future live-write work is a separate explicitly authorized post-#113 acceptance slice.
+
+## Current acceptance state
+
+Accepted:
+
+- M1–M6;
+- H1;
+- A2;
+- Phase 2 pre-enable execution safety;
+- reproducible locked dependency graph;
+- immutable Action references;
+- removal of remote local-build deploy bypass;
+- durable recovery release.
+
+Remaining before final production-baseline closure:
+
+- GitHub `main` branch/ruleset enforcement;
+- one final exact-artifact physical acceptance after all closure changes.
+
+Deferred, non-blocking:
+
+- #54 controller self-update;
+- #58 mailbox compaction at its existing capacity trigger.
+
+## Non-goals
+
+- no withdrawal/transfer API;
+- no arbitrary shell/HTTP proxy;
+- no generic batch/DSL/expression language;
+- no local LLM/SQL state layer;
+- no autonomous strategy engine in production-baseline closure;
+- no second access transport;
+- no second lifecycle supervisor;
+- no live order mutation until separately authorized and accepted.
