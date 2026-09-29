@@ -273,6 +273,9 @@ pub async fn activate(
 
     save_json(Path::new(INSTALLED_PROVENANCE_PATH), &pending.installed())?;
     fs::remove_file(PENDING_PATH)?;
+    drop(_single_instance);
+
+    let scheduler = autostart::run_now()?;
 
     Ok(json!({
         "activated": true,
@@ -280,7 +283,8 @@ pub async fn activate(
         "source_head_sha": pending.source_head_sha,
         "source_tree": pending.source_tree,
         "parent_pid": parent_pid,
-        "handoff_request_id": handoff_request_id
+        "handoff_request_id": handoff_request_id,
+        "scheduler": scheduler
     }))
 }
 
