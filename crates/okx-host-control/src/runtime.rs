@@ -455,7 +455,7 @@ async fn process_control_batch(
                         eprintln!("launcher-root migration handoff deferred: {error}");
                     }
                     std::process::exit(0);
-                },
+                }
                 ProcessTransition::Handoff => {
                     if result.operation == HostControlOperation::HandoffControllerUpdate {
                         controller_update::mark_terminal_ack(&result.request_id)?;
