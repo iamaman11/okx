@@ -143,7 +143,7 @@ Required acceptance:
 - [ ] build and merge the independent `okx-host-launcher` root-of-trust;
 - [ ] bundle/manifest/recovery artifacts carry launcher SHA-256;
 - [ ] perform the one-time root migration from an exact accepted artifact;
-- [ ] canonical Scheduler action becomes permanently `okx-host-launcher.exe run`;
+- [ ] canonical Scheduler action string remains permanently `C:\okx-control\okx-host-control.exe run`, whose content becomes the immutable launcher during the one-time root migration;
 - [ ] normal controller update never changes Scheduler and never overwrites a running executable;
 - [ ] remotely stage a distinct controller version;
 - [ ] durable CONTROL terminal PASS precedes old controller exit;

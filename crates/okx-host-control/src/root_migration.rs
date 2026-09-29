@@ -151,7 +151,8 @@ pub fn spawn_migrator() -> HostControlResult<Value> {
         .create(true)
         .append(true)
         .open(root.join("root-migration.stderr.log"))?;
-    let child = Command::new(std::env::current_exe()?)
+    let migrator = okx_host_launcher::active_controller_binary_path()?;
+    let child = Command::new(migrator)
         .arg("migrate-launcher-root")
         .arg("--request-id")
         .arg(&migration.request_id)
@@ -178,22 +179,12 @@ pub fn activate(request_id: &str) -> HostControlResult<Value> {
 
     wait_for_exact_process_exit(migration.parent)?;
 
-    let launcher = Path::new(okx_host_launcher::LAUNCHER_PATH);
-    if !launcher.is_file() || okx_host_launcher::sha256_file(launcher)? != migration.launcher_sha256
-    {
-        return Err(HostControlError::ControllerUpdateHashMismatch);
-    }
-
-    let status = autostart::status_value()?;
-    let canonical = status
-        .get("policy_valid")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !canonical {
-        autostart::ensure_legacy_policy_valid()?;
-        autostart::install()?;
-        autostart::ensure_policy_valid()?;
-    }
+    autostart::ensure_policy_valid()?;
+    let entrypoint = okx_host_launcher::install_launcher_entrypoint(
+        &migration.launcher_sha256,
+        &migration.controller_sha256,
+    )?;
+    autostart::ensure_policy_valid()?;
 
     if Path::new(ROOT_MIGRATION_PATH).exists() {
         fs::remove_file(ROOT_MIGRATION_PATH)?;
@@ -205,6 +196,8 @@ pub fn activate(request_id: &str) -> HostControlResult<Value> {
         "request_id": request_id,
         "launcher_sha256": migration.launcher_sha256,
         "controller_sha256": migration.controller_sha256,
+        "scheduler_definition_changed": false,
+        "entrypoint": entrypoint,
         "scheduler": scheduler
     }))
 }
@@ -446,6 +439,16 @@ impl RootMigrationGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_never_mutates_scheduler_definition() {
+        let source = include_str!("root_migration.rs");
+        let create = [r#""/"#, r#"Create""#].concat();
+        let change = [r#""/"#, r#"Change""#].concat();
+        assert!(!source.contains(&create));
+        assert!(!source.contains(&change));
+        assert!(source.contains("install_launcher_entrypoint"));
+    }
 
     #[test]
     fn migration_state_is_fixed_outside_workspace() {

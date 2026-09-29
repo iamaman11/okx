@@ -431,7 +431,7 @@ impl HostExecutor {
                 "verified_self_update": true,
                 "bounded_control_results": true,
                 "bounded_workspace_status": true,
-                "self_update_acceptance_marker": "immutable-launcher-v1",
+                "self_update_acceptance_marker": "immutable-launcher-v2",
                 "scheduler_action_handoff": false,
                 "transient_activator_handoff": false,
                 "immutable_launcher_root": true,
