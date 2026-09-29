@@ -23,6 +23,8 @@ const RUNTIME_ROOT: &str = r"C:\okx-runtime";
 const AGENT_MAILBOX_ISSUE: &str = "10";
 const HEALTHY_AGENT_SECS: u64 = 30;
 const RESTART_BACKOFF_SECS: [u64; 5] = [1, 5, 15, 30, 60];
+const WORKSPACE_STATUS_MAX_CHANGES: usize = 16;
+const WORKSPACE_STATUS_MAX_CHANGE_BYTES: usize = 512;
 const ALLOWED_REMOTES: &[&str] = &[
     "https://github.com/iamaman11/okx",
     "https://github.com/iamaman11/okx.git",
@@ -213,18 +215,21 @@ impl HostExecutor {
         let divergence =
             self.git(&["rev-list", "--left-right", "--count", "HEAD...origin/main"])?;
         let status = self.git(&["status", "--porcelain=v1"])?;
-        let mut changes = status
+        let change_lines = status
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .take(64)
-            .map(|line| line.to_owned())
             .collect::<Vec<_>>();
-        let truncated = status
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count()
-            > changes.len();
-        changes.shrink_to_fit();
+        let changes_total = change_lines.len();
+        let changes = change_lines
+            .iter()
+            .take(WORKSPACE_STATUS_MAX_CHANGES)
+            .map(|line| bounded_utf8(line, WORKSPACE_STATUS_MAX_CHANGE_BYTES))
+            .collect::<Vec<_>>();
+        let truncated = changes_total > changes.len()
+            || change_lines
+                .iter()
+                .take(WORKSPACE_STATUS_MAX_CHANGES)
+                .any(|line| line.len() > WORKSPACE_STATUS_MAX_CHANGE_BYTES);
 
         Ok(json!({
             "repo_root": CANONICAL_ROOT,
@@ -232,7 +237,9 @@ impl HostExecutor {
             "head": head,
             "origin_main": origin_main,
             "divergence_left_right": divergence,
-            "clean": changes.is_empty(),
+            "clean": changes_total == 0,
+            "changes_total": changes_total,
+            "changes_returned": changes.len(),
             "changes": changes,
             "changes_truncated": truncated
         }))
@@ -662,6 +669,18 @@ impl HostExecutor {
     fn runtime_dir(&self) -> PathBuf {
         PathBuf::from(RUNTIME_ROOT)
     }
+}
+
+fn bounded_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
 
 fn command_available(command: &str) -> bool {
