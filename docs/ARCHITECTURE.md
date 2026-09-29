@@ -34,7 +34,8 @@ Task Scheduler
   ONE TimeTrigger / PT1M / StartWhenAvailable / IgnoreNew
         |
         v
-ONE immutable okx-host-launcher
+ONE fixed Scheduler entrypoint: C:\okx-control\okx-host-control.exe
+  contains immutable launcher after one-time root migration
   fixed paths + hash verification + activation transaction
   process/event-handle recovery + commit/rollback
         |
