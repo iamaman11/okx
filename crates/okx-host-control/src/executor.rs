@@ -77,6 +77,7 @@ impl HostExecutor {
             | HostControlOperation::HandoffControllerUpdate => {
                 Err(HostControlError::InvalidExecutionPath)
             }
+            HostControlOperation::AbortControllerUpdate => controller_update::abort(),
             HostControlOperation::ControllerUpdateStatus => Ok(controller_update::status_value()),
             HostControlOperation::WorkspaceStatus => self.workspace_status(),
             HostControlOperation::TestWorkspace => self.test_workspace(),
@@ -426,7 +427,9 @@ impl HostExecutor {
                 "verified_self_update": true,
                 "bounded_control_results": true,
                 "bounded_workspace_status": true,
-                "self_update_acceptance_marker": "physical-proof-v2"
+                "self_update_acceptance_marker": "scheduler-change-v3",
+                "scheduler_action_handoff": true,
+                "abort_controller_update": true
             }
         }))
     }

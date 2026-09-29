@@ -405,6 +405,7 @@ pub enum HostControlOperation {
         expected_source_tree: String,
     },
     HandoffControllerUpdate,
+    AbortControllerUpdate,
     ControllerUpdateStatus,
     WorkspaceStatus,
     TestWorkspace,
