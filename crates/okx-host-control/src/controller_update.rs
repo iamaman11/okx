@@ -207,9 +207,9 @@ pub async fn activate(github: &GitHubClient) -> HostControlResult<Value> {
         .to_owned();
 
     if !durable_handoff_ack(github, &request_id).await? {
+        autostart::restore_controller_action()?;
         pending.handoff_request_id = None;
         save_json(Path::new(PENDING_PATH), &pending)?;
-        autostart::restore_controller_action()?;
         return Err(HostControlError::ControllerUpdateTerminalAckMissing);
     }
 
