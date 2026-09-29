@@ -9,7 +9,7 @@ use okx_host_control::{
     HostControlResult,
     auth::{load_native_github_token, store_native_github_token},
     executor::{HostExecutor, install_current_executable},
-    legacy_bootstrap,
+    legacy_bootstrap, root_migration,
     runtime::{DEFAULT_CONTROL_POLL_SECONDS, process_pending, run_until_shutdown},
     single_instance::SingleInstanceGuard,
 };
@@ -39,6 +39,12 @@ enum Command {
         parent_pid: u32,
         #[arg(long)]
         handoff_request_id: String,
+    },
+
+    /// One-shot post-parent launcher-root migration. Migration-only.
+    MigrateLauncherRoot {
+        #[arg(long)]
+        request_id: String,
     },
 
     /// Process pending typed requests once and exit.
@@ -93,6 +99,10 @@ async fn run(cli: Cli) -> HostControlResult<()> {
             github.verify_repository_identity().await?;
             let result =
                 legacy_bootstrap::activate(&github, parent_pid, &handoff_request_id).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Command::MigrateLauncherRoot { request_id } => {
+            let result = root_migration::activate(&request_id)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Once => {
