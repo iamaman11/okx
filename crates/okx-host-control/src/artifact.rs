@@ -4,13 +4,14 @@ use std::{
 };
 
 use okx_github::{GitHubClient, REPOSITORY_ID};
+use okx_host_launcher::ControllerVersion;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use zip::ZipArchive;
+use zip::{ZipArchive, result::ZipError};
 
 use crate::{
-    HostControlError, HostControlResult,
+    HostControlError, HostControlResult, autostart,
     controller_update::{self, ControllerUpdateCandidate},
     executor::HostExecutor,
     provenance::{InstalledAgentProvenance, InstalledAgentProvenanceStore},
@@ -20,6 +21,7 @@ const BUNDLE_SCHEMA_V1: &str = "okx.windows.bundle/v1";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_AGENT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CONTROLLER_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_LAUNCHER_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +44,7 @@ struct VerifiedBundle {
     manifest: BundleManifest,
     agent_bytes: Vec<u8>,
     controller_bytes: Vec<u8>,
+    launcher_bytes: Option<Vec<u8>>,
 }
 
 pub async fn deploy_agent(
@@ -81,6 +84,62 @@ pub async fn deploy_agent(
         "agent_sha256": provenance.agent_sha256,
         "installed": true,
         "provenance_persisted": true
+    }))
+}
+
+pub async fn install_launcher_root(
+    github: &GitHubClient,
+    executor: &HostExecutor,
+    run_id: u64,
+    artifact_id: u64,
+    expected_source_tree: &str,
+) -> HostControlResult<Value> {
+    let bundle =
+        verified_bundle(github, executor, run_id, artifact_id, expected_source_tree).await?;
+
+    let launcher_bytes = bundle.launcher_bytes.as_deref().ok_or(
+        HostControlError::ArtifactVerification("bundle is missing okx-host-launcher.exe"),
+    )?;
+    let declared_launcher_hash = declared_hash(&bundle.manifest, "okx-host-launcher.exe")?;
+    let actual_launcher_hash = sha256_hex(launcher_bytes);
+    if actual_launcher_hash != declared_launcher_hash {
+        return Err(HostControlError::ArtifactHashMismatch);
+    }
+
+    let declared_controller_hash = declared_hash(&bundle.manifest, "okx-host-control.exe")?;
+    let actual_controller_hash = sha256_hex(&bundle.controller_bytes);
+    if actual_controller_hash != declared_controller_hash {
+        return Err(HostControlError::ArtifactHashMismatch);
+    }
+
+    let current_exe = std::env::current_exe()?;
+    if okx_host_launcher::sha256_file(&current_exe)? != actual_controller_hash {
+        return Err(HostControlError::ArtifactVerification(
+            "launcher-root migration requires the running controller to match the accepted bundle",
+        ));
+    }
+
+    let active = ControllerVersion {
+        repository_id: REPOSITORY_ID,
+        run_id,
+        artifact_id,
+        source_head_sha: bundle.manifest.source_head_sha.clone(),
+        source_tree: bundle.manifest.source_tree.clone(),
+        rust_version: bundle.manifest.rust_version.clone(),
+        controller_sha256: actual_controller_hash,
+    };
+    let root = okx_host_launcher::install_root(
+        launcher_bytes,
+        &actual_launcher_hash,
+        active,
+        &bundle.controller_bytes,
+    )?;
+    let scheduler = autostart::install()?;
+
+    Ok(json!({
+        "root": root,
+        "scheduler": scheduler,
+        "migration": "ONE_TIME_IMMUTABLE_LAUNCHER_ROOT"
     }))
 }
 
@@ -185,14 +244,16 @@ fn parse_bundle(zip_bytes: &[u8]) -> HostControlResult<VerifiedBundle> {
 
     let manifest_bytes = read_entry(&mut archive, "manifest.json", MAX_MANIFEST_BYTES)?;
     let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)?;
-
     let agent_bytes = read_entry(&mut archive, "okx-agent.exe", MAX_AGENT_BYTES)?;
     let controller_bytes = read_entry(&mut archive, "okx-host-control.exe", MAX_CONTROLLER_BYTES)?;
+    let launcher_bytes =
+        read_optional_entry(&mut archive, "okx-host-launcher.exe", MAX_LAUNCHER_BYTES)?;
 
     Ok(VerifiedBundle {
         manifest,
         agent_bytes,
         controller_bytes,
+        launcher_bytes,
     })
 }
 
@@ -207,10 +268,29 @@ fn read_entry(
             "bundle entry exceeds size limit",
         ));
     }
-
     let mut bytes = Vec::with_capacity(entry.size() as usize);
     entry.read_to_end(&mut bytes)?;
     Ok(bytes)
+}
+
+fn read_optional_entry(
+    archive: &mut ZipArchive<Cursor<&[u8]>>,
+    name: &str,
+    max_bytes: u64,
+) -> HostControlResult<Option<Vec<u8>>> {
+    let mut entry = match archive.by_name(name) {
+        Ok(entry) => entry,
+        Err(ZipError::FileNotFound) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if entry.size() > max_bytes {
+        return Err(HostControlError::ArtifactVerification(
+            "bundle entry exceeds size limit",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
