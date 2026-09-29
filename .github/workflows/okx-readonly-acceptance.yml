@@ -17,8 +17,8 @@ jobs:
       OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
       OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
       - name: Verify observer account contract
         id: probe
         shell: bash
@@ -61,8 +61,8 @@ jobs:
       OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
       OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
       - name: Verify executor account contract without trading
         id: probe
         shell: bash
