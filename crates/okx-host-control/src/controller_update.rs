@@ -495,13 +495,14 @@ fn spawn_activator(request_id: &str) -> HostControlResult<Child> {
 fn process_is_running(pid: u32) -> bool {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, WAIT_TIMEOUT},
-        System::Threading::{OpenProcess, SYNCHRONIZE, WaitForSingleObject},
+        System::Threading::{OpenProcess, WaitForSingleObject},
     };
+    const PROCESS_SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
 
     if pid == 0 {
         return false;
     }
-    let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE_ACCESS, 0, pid) };
     if handle.is_null() {
         return false;
     }
@@ -521,10 +522,11 @@ fn process_is_running(_pid: u32) -> bool {
 fn wait_for_process_exit(pid: u32) -> HostControlResult<()> {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, WAIT_OBJECT_0},
-        System::Threading::{INFINITE, OpenProcess, SYNCHRONIZE, WaitForSingleObject},
+        System::Threading::{INFINITE, OpenProcess, WaitForSingleObject},
     };
+    const PROCESS_SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
 
-    let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE_ACCESS, 0, pid) };
     if handle.is_null() {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() == Some(87) {
