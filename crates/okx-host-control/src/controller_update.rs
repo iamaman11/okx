@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use okx_github::REPOSITORY_ID;
+use okx_github::{GitHubClient, OWNER_USER_ID, REPOSITORY_ID};
+use okx_protocol::{
+    HostControlOperation, HostControlResult as ProtocolControlResult, HostControlStatus,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -41,6 +44,7 @@ struct PendingControllerUpdate {
     rust_version: String,
     controller_sha256: String,
     staged_path: String,
+    handoff_request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +72,7 @@ impl PendingControllerUpdate {
             rust_version: candidate.rust_version,
             controller_sha256: candidate.controller_sha256,
             staged_path: STAGED_CONTROLLER_PATH.to_owned(),
+            handoff_request_id: None,
         }
     }
 
@@ -81,6 +86,10 @@ impl PendingControllerUpdate {
             && lower_hex(&self.controller_sha256, 64)
             && !self.rust_version.trim().is_empty()
             && self.staged_path == STAGED_CONTROLLER_PATH
+            && self
+                .handoff_request_id
+                .as_deref()
+                .is_none_or(valid_control_request_id)
     }
 
     fn installed(&self) -> InstalledControllerProvenance {
@@ -115,6 +124,24 @@ pub fn stage(candidate: ControllerUpdateCandidate, bytes: &[u8]) -> HostControlR
         return Err(HostControlError::ArtifactHashMismatch);
     }
 
+    let pending = PendingControllerUpdate::from_candidate(candidate);
+    if let Some(existing) = load_pending()? {
+        verify_staged(&existing)?;
+        if same_candidate(&existing, &pending) {
+            return Ok(json!({
+                "staged": true,
+                "disposition": "EXISTING",
+                "run_id": existing.run_id,
+                "artifact_id": existing.artifact_id,
+                "source_head_sha": existing.source_head_sha,
+                "source_tree": existing.source_tree,
+                "controller_sha256": existing.controller_sha256,
+                "handoff_request_id": existing.handoff_request_id
+            }));
+        }
+        return Err(HostControlError::ControllerUpdateConflict);
+    }
+
     fs::create_dir_all(UPDATE_ROOT)?;
     let staged = PathBuf::from(STAGED_CONTROLLER_PATH);
     let temp = PathBuf::from(format!("{STAGED_CONTROLLER_PATH}.tmp"));
@@ -125,11 +152,11 @@ pub fn stage(candidate: ControllerUpdateCandidate, bytes: &[u8]) -> HostControlR
         return Err(HostControlError::ControllerUpdateHashMismatch);
     }
 
-    let pending = PendingControllerUpdate::from_candidate(candidate);
     save_json(Path::new(PENDING_PATH), &pending)?;
 
     Ok(json!({
         "staged": true,
+        "disposition": "CREATED",
         "run_id": pending.run_id,
         "artifact_id": pending.artifact_id,
         "source_head_sha": pending.source_head_sha,
@@ -138,11 +165,24 @@ pub fn stage(candidate: ControllerUpdateCandidate, bytes: &[u8]) -> HostControlR
     }))
 }
 
-pub fn prepare_handoff() -> HostControlResult<Value> {
-    let pending = load_pending()?.ok_or(HostControlError::ControllerUpdateNotStaged)?;
-    verify_staged(&pending)?;
-    let task = autostart::install_controller_update_activation()?;
+pub fn prepare_handoff(request_id: &str) -> HostControlResult<Value> {
+    if !valid_control_request_id(request_id) {
+        return Err(HostControlError::ControllerUpdateStateInvalid);
+    }
 
+    let mut pending = load_pending()?.ok_or(HostControlError::ControllerUpdateNotStaged)?;
+    verify_staged(&pending)?;
+    if pending
+        .handoff_request_id
+        .as_deref()
+        .is_some_and(|stored| stored != request_id)
+    {
+        return Err(HostControlError::ControllerUpdateConflict);
+    }
+    pending.handoff_request_id = Some(request_id.to_owned());
+    save_json(Path::new(PENDING_PATH), &pending)?;
+
+    let task = autostart::install_controller_update_activation()?;
     Ok(json!({
         "handoff_prepared": true,
         "activation": public_pending(&pending),
@@ -150,9 +190,18 @@ pub fn prepare_handoff() -> HostControlResult<Value> {
     }))
 }
 
-pub fn activate() -> HostControlResult<Value> {
+pub async fn activate(github: &GitHubClient) -> HostControlResult<Value> {
     let pending = load_pending()?.ok_or(HostControlError::ControllerUpdateNotStaged)?;
     verify_staged(&pending)?;
+    let request_id = pending
+        .handoff_request_id
+        .as_deref()
+        .ok_or(HostControlError::ControllerUpdateStateInvalid)?;
+
+    if !durable_handoff_ack(github, request_id).await? {
+        autostart::install()?;
+        return Err(HostControlError::ControllerUpdateTerminalAckMissing);
+    }
 
     let staged = Path::new(STAGED_CONTROLLER_PATH);
     let canonical = Path::new(CONTROLLER_PATH);
@@ -320,8 +369,44 @@ fn public_pending(value: &PendingControllerUpdate) -> Value {
         "source_head_sha": value.source_head_sha,
         "source_tree": value.source_tree,
         "rust_version": value.rust_version,
-        "controller_sha256": value.controller_sha256
+        "controller_sha256": value.controller_sha256,
+        "handoff_request_id": value.handoff_request_id
     })
+}
+
+async fn durable_handoff_ack(
+    github: &GitHubClient,
+    request_id: &str,
+) -> HostControlResult<bool> {
+    let comments = github.recent_issue_comments(12).await?;
+    Ok(comments
+        .iter()
+        .filter(|comment| comment.user_id == OWNER_USER_ID)
+        .filter_map(|comment| serde_json::from_str::<ProtocolControlResult>(&comment.body).ok())
+        .any(|result| {
+            result.request_id == request_id
+                && result.status == HostControlStatus::Pass
+                && result.operation == HostControlOperation::HandoffControllerUpdate
+                && result.validate().is_ok()
+        }))
+}
+
+fn same_candidate(left: &PendingControllerUpdate, right: &PendingControllerUpdate) -> bool {
+    left.repository_id == right.repository_id
+        && left.run_id == right.run_id
+        && left.artifact_id == right.artifact_id
+        && left.source_head_sha == right.source_head_sha
+        && left.source_tree == right.source_tree
+        && left.rust_version == right.rust_version
+        && left.controller_sha256 == right.controller_sha256
+}
+
+fn valid_control_request_id(value: &str) -> bool {
+    value.starts_with("ctl_")
+        && (16..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 fn save_json<T: Serialize>(path: &Path, value: &T) -> HostControlResult<()> {
@@ -334,7 +419,7 @@ fn save_json<T: Serialize>(path: &Path, value: &T) -> HostControlResult<()> {
     file.write_all(&serde_json::to_vec_pretty(value)?)?;
     file.sync_all()?;
     drop(file);
-    replace_file(&temp, path)
+    atomic_replace(&temp, path)
 }
 
 fn replace_file(source: &Path, destination: &Path) -> HostControlResult<()> {
@@ -343,6 +428,38 @@ fn replace_file(source: &Path, destination: &Path) -> HostControlResult<()> {
     }
     fs::rename(source, destination)?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn atomic_replace(source: &Path, destination: &Path) -> HostControlResult<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let source_w = wide(source);
+    let destination_w = wide(destination);
+    let ok = unsafe {
+        MoveFileExW(
+            source_w.as_ptr(),
+            destination_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error().into())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(source: &Path, destination: &Path) -> HostControlResult<()> {
+    replace_file(source, destination)
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
