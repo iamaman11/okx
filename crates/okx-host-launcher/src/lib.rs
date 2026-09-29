@@ -19,12 +19,14 @@ pub const STAGED_PATH: &str = r"C:\okx-control\staged-controller.json";
 pub const PENDING_PATH: &str = r"C:\okx-control\activation\pending.json";
 pub const READY_PATH: &str = r"C:\okx-control\activation\ready.json";
 pub const LAST_RESULT_PATH: &str = r"C:\okx-control\activation\last-result.json";
+pub const FAIL_NEXT_PATH: &str = r"C:\okx-control\activation\fail-next.json";
 
 const ACTIVE_SCHEMA_V1: &str = "okx.host-launcher.active/v1";
 const STAGED_SCHEMA_V1: &str = "okx.host-launcher.staged/v1";
 const ACTIVATION_SCHEMA_V1: &str = "okx.host-launcher.activation/v1";
 const READY_SCHEMA_V1: &str = "okx.host-launcher.ready/v1";
 const RESULT_SCHEMA_V1: &str = "okx.host-launcher.activation-result/v1";
+const FAIL_NEXT_SCHEMA_V1: &str = "okx.host-launcher.fail-next/v1";
 #[cfg(windows)]
 const CONTROLLER_MUTEX: &str = r"Local\iamaman11-okx-host-control";
 #[cfg(windows)]
@@ -154,13 +156,29 @@ impl StagedController {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub creation_time_100ns: u64,
+}
+
+impl ProcessIdentity {
+    fn validate(&self) -> LauncherResult<()> {
+        if self.pid == 0 || self.creation_time_100ns == 0 {
+            return Err(LauncherError::InvalidState);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActivationRecord {
     pub schema: String,
     pub repository_id: u64,
     pub request_id: String,
-    pub old_controller_pid: u32,
+    pub old_controller: ProcessIdentity,
     pub previous: ControllerVersion,
     pub candidate: ControllerVersion,
     pub terminal_ack: bool,
@@ -171,10 +189,10 @@ impl ActivationRecord {
         if self.schema != ACTIVATION_SCHEMA_V1
             || self.repository_id != REPOSITORY_ID
             || !valid_request_id(&self.request_id)
-            || self.old_controller_pid == 0
         {
             return Err(LauncherError::InvalidState);
         }
+        self.old_controller.validate()?;
         self.previous.validate()?;
         self.candidate.validate()?;
         if self.previous.controller_sha256 == self.candidate.controller_sha256 {
@@ -191,7 +209,7 @@ struct ReadyRecord {
     repository_id: u64,
     request_id: String,
     controller_sha256: String,
-    controller_pid: u32,
+    controller: ProcessIdentity,
 }
 
 impl ReadyRecord {
@@ -200,9 +218,29 @@ impl ReadyRecord {
             || self.repository_id != REPOSITORY_ID
             || self.request_id != pending.request_id
             || self.controller_sha256 != pending.candidate.controller_sha256
-            || self.controller_pid == 0
+
         {
             return Err(LauncherError::InvalidReadiness);
+        }
+        self.controller.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FailNextActivation {
+    schema: String,
+    repository_id: u64,
+    candidate_sha256: String,
+}
+
+impl FailNextActivation {
+    fn validate(&self) -> LauncherResult<()> {
+        if self.schema != FAIL_NEXT_SCHEMA_V1
+            || self.repository_id != REPOSITORY_ID
+            || !lower_hex(&self.candidate_sha256, 64)
+        {
+            return Err(LauncherError::InvalidState);
         }
         Ok(())
     }
@@ -298,13 +336,14 @@ pub fn stage_update(candidate: ControllerVersion, bytes: &[u8]) -> LauncherResul
     }))
 }
 
-pub fn prepare_activation(request_id: &str, old_controller_pid: u32) -> LauncherResult<Value> {
-    if !valid_request_id(request_id) || old_controller_pid == 0 {
+pub fn prepare_activation(request_id: &str) -> LauncherResult<Value> {
+    if !valid_request_id(request_id) {
         return Err(LauncherError::InvalidState);
     }
+    let old_controller = current_process_identity()?;
 
     if let Some(existing) = load_pending()? {
-        if existing.request_id == request_id && existing.old_controller_pid == old_controller_pid {
+        if existing.request_id == request_id && existing.old_controller == old_controller {
             return Ok(json!({
                 "handoff_prepared": true,
                 "disposition": "EXISTING",
@@ -326,7 +365,7 @@ pub fn prepare_activation(request_id: &str, old_controller_pid: u32) -> Launcher
         schema: ACTIVATION_SCHEMA_V1.to_owned(),
         repository_id: REPOSITORY_ID,
         request_id: request_id.to_owned(),
-        old_controller_pid,
+        old_controller,
         previous: active.active,
         candidate: staged.candidate,
         terminal_ack: false,
@@ -363,6 +402,40 @@ pub fn pending_activation() -> LauncherResult<Option<ActivationRecord>> {
     load_pending()
 }
 
+pub fn arm_fail_next_activation() -> LauncherResult<Value> {
+    if load_pending()?.is_some() {
+        return Err(LauncherError::ActivationConflict);
+    }
+    let staged = load_staged()?.ok_or(LauncherError::NotStaged)?;
+    let marker = FailNextActivation {
+        schema: FAIL_NEXT_SCHEMA_V1.to_owned(),
+        repository_id: REPOSITORY_ID,
+        candidate_sha256: staged.candidate.controller_sha256,
+    };
+    save_json(Path::new(FAIL_NEXT_PATH), &marker)?;
+    Ok(json!({
+        "armed": true,
+        "candidate_sha256": marker.candidate_sha256
+    }))
+}
+
+pub fn consume_fail_next_activation(request_id: &str) -> LauncherResult<bool> {
+    let Some(marker) = load_optional::<FailNextActivation>(Path::new(FAIL_NEXT_PATH))? else {
+        return Ok(false);
+    };
+    marker.validate()?;
+    let pending = load_pending()?.ok_or(LauncherError::InvalidState)?;
+    if !pending.terminal_ack
+        || pending.request_id != request_id
+        || marker.candidate_sha256 != pending.candidate.controller_sha256
+        || sha256_file(&std::env::current_exe()?)? != pending.candidate.controller_sha256
+    {
+        return Err(LauncherError::InvalidState);
+    }
+    fs::remove_file(FAIL_NEXT_PATH)?;
+    Ok(true)
+}
+
 pub fn abort_update() -> LauncherResult<Value> {
     if let Some(pending) = load_pending()? {
         if pending.terminal_ack {
@@ -375,6 +448,9 @@ pub fn abort_update() -> LauncherResult<Value> {
     }
     if Path::new(READY_PATH).exists() {
         fs::remove_file(READY_PATH)?;
+    }
+    if Path::new(FAIL_NEXT_PATH).exists() {
+        fs::remove_file(FAIL_NEXT_PATH)?;
     }
     Ok(json!({
         "aborted": true,
@@ -422,7 +498,8 @@ pub fn status_value() -> Value {
         "active": active,
         "staged": staged,
         "pending": pending,
-        "last_result": last_result
+        "last_result": last_result,
+        "fail_next_activation_armed": Path::new(FAIL_NEXT_PATH).is_file()
     })
 }
 
@@ -442,123 +519,198 @@ pub fn signal_controller_ready(request_id: &str) -> LauncherResult<Value> {
         repository_id: REPOSITORY_ID,
         request_id: request_id.to_owned(),
         controller_sha256: pending.candidate.controller_sha256.clone(),
-        controller_pid: std::process::id(),
+        controller: current_process_identity()?,
     };
     save_json(Path::new(READY_PATH), &ready)?;
     signal_ready_event(request_id)?;
 
     Ok(json!({
         "request_id": request_id,
-        "controller_pid": ready.controller_pid,
+        "controller_pid": ready.controller.pid,
+        "controller_creation_time_100ns": ready.controller.creation_time_100ns,
         "controller_sha256": ready.controller_sha256,
         "ready": true
     }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryDecision {
+    ControllerAlreadyRunning,
+    StartActive,
+    WaitingForTerminalAck,
+    RestartPreviousWaitingForAck,
+    CommitDurableReady,
+    AwaitProvisionalReady,
+    RollbackProvisional,
+    ActivateCandidate,
+}
+
+fn classify_recovery(
+    active: &ActiveController,
+    pending: Option<&ActivationRecord>,
+    controller_running: bool,
+    ready_exact_running: bool,
+) -> LauncherResult<RecoveryDecision> {
+    let Some(pending) = pending else {
+        return Ok(if controller_running {
+            RecoveryDecision::ControllerAlreadyRunning
+        } else {
+            RecoveryDecision::StartActive
+        });
+    };
+
+    pending.validate()?;
+    if !pending.terminal_ack {
+        return Ok(if controller_running {
+            RecoveryDecision::WaitingForTerminalAck
+        } else {
+            RecoveryDecision::RestartPreviousWaitingForAck
+        });
+    }
+
+    if active.active.controller_sha256 == pending.candidate.controller_sha256 {
+        if ready_exact_running {
+            return Ok(RecoveryDecision::CommitDurableReady);
+        }
+        return Ok(if controller_running {
+            RecoveryDecision::AwaitProvisionalReady
+        } else {
+            RecoveryDecision::RollbackProvisional
+        });
+    }
+
+    if active.active.controller_sha256 == pending.previous.controller_sha256 {
+        return Ok(RecoveryDecision::ActivateCandidate);
+    }
+
+    Err(LauncherError::InvalidState)
 }
 
 pub fn run() -> LauncherResult<Value> {
     let _guard = LauncherGuard::acquire()?;
     let active = load_active()?.ok_or(LauncherError::RootNotInstalled)?;
     verify_version(&active.active)?;
-
-    let Some(pending) = load_pending()? else {
-        if controller_running()? {
-            return Ok(json!({
-                "schema": "okx.host-launcher.run/v1",
-                "disposition": "CONTROLLER_ALREADY_RUNNING",
-                "active_controller_sha256": active.active.controller_sha256
-            }));
+    let pending = load_pending()?;
+    let controller_is_running = controller_running()?;
+    let ready_exact_running = match (pending.as_ref(), load_ready()?) {
+        (Some(pending), Some(ready)) if ready.validate_for(pending).is_ok() => {
+            process_identity_matches(ready.controller)?
         }
-        let child = spawn_controller(&active.active, None)?;
-        return Ok(json!({
-            "schema": "okx.host-launcher.run/v1",
-            "disposition": "ACTIVE_CONTROLLER_STARTED",
-            "controller_pid": child.id(),
-            "active_controller_sha256": active.active.controller_sha256
-        }));
+        _ => false,
     };
 
-    pending.validate()?;
-    if !pending.terminal_ack {
-        if controller_running()? {
-            return Ok(json!({
+    match classify_recovery(
+        &active,
+        pending.as_ref(),
+        controller_is_running,
+        ready_exact_running,
+    )? {
+        RecoveryDecision::ControllerAlreadyRunning => Ok(json!({
+            "schema": "okx.host-launcher.run/v1",
+            "disposition": "CONTROLLER_ALREADY_RUNNING",
+            "active_controller_sha256": active.active.controller_sha256
+        })),
+        RecoveryDecision::StartActive => {
+            let child = spawn_controller(&active.active, None)?;
+            Ok(json!({
+                "schema": "okx.host-launcher.run/v1",
+                "disposition": "ACTIVE_CONTROLLER_STARTED",
+                "controller_pid": child.id(),
+                "active_controller_sha256": active.active.controller_sha256
+            }))
+        }
+        RecoveryDecision::WaitingForTerminalAck => {
+            let pending = pending.as_ref().ok_or(LauncherError::InvalidState)?;
+            Ok(json!({
                 "schema": "okx.host-launcher.run/v1",
                 "disposition": "WAITING_FOR_TERMINAL_ACK",
                 "request_id": pending.request_id
-            }));
+            }))
         }
-        verify_version(&pending.previous)?;
-        let child = spawn_controller(&pending.previous, None)?;
-        return Ok(json!({
-            "schema": "okx.host-launcher.run/v1",
-            "disposition": "PREVIOUS_CONTROLLER_RESTARTED_WAITING_FOR_ACK",
-            "controller_pid": child.id(),
-            "request_id": pending.request_id
-        }));
-    }
-
-    if let Some(ready) = load_ready()?
-        && ready.validate_for(&pending).is_ok()
-        && process_is_running(ready.controller_pid)?
-        && active.active.controller_sha256 == pending.candidate.controller_sha256
-    {
-        commit_activation(&pending)?;
-        return Ok(json!({
-            "schema": "okx.host-launcher.run/v1",
-            "disposition": "ACTIVATION_COMMITTED_FROM_DURABLE_READY",
-            "request_id": pending.request_id,
-            "controller_pid": ready.controller_pid,
-            "controller_sha256": pending.candidate.controller_sha256
-        }));
-    }
-
-    if active.active.controller_sha256 == pending.candidate.controller_sha256 {
-        if controller_running()? {
-            return Ok(json!({
-                "schema": "okx.host-launcher.run/v1",
-                "disposition": "PROVISIONAL_CONTROLLER_RUNNING_AWAITING_READY",
-                "request_id": pending.request_id
-            }));
-        }
-        return rollback_activation(&pending, "PROVISIONAL_CONTROLLER_NOT_READY");
-    }
-
-    if active.active.controller_sha256 != pending.previous.controller_sha256 {
-        return Err(LauncherError::InvalidState);
-    }
-
-    wait_for_process_exit(pending.old_controller_pid)?;
-    if controller_running()? {
-        return Err(LauncherError::ActivationConflict);
-    }
-
-    verify_version(&pending.candidate)?;
-    save_json(
-        Path::new(ACTIVE_PATH),
-        &ActiveController::new(pending.candidate.clone(), Some(pending.previous.clone())),
-    )?;
-    if Path::new(READY_PATH).exists() {
-        fs::remove_file(READY_PATH)?;
-    }
-
-    let ready_event = ReadyEvent::create(&pending.request_id)?;
-    let mut child = spawn_controller(&pending.candidate, Some(&pending.request_id))?;
-    match ready_event.wait_with_child(&mut child)? {
-        ReadyWait::Ready => {
-            let ready = load_ready()?.ok_or(LauncherError::InvalidReadiness)?;
-            ready.validate_for(&pending)?;
-            if ready.controller_pid != child.id() || !process_is_running(ready.controller_pid)? {
-                return rollback_activation(&pending, "READY_PROCESS_NOT_RUNNING");
-            }
-            commit_activation(&pending)?;
+        RecoveryDecision::RestartPreviousWaitingForAck => {
+            let pending = pending.as_ref().ok_or(LauncherError::InvalidState)?;
+            verify_version(&pending.previous)?;
+            let child = spawn_controller(&pending.previous, None)?;
             Ok(json!({
                 "schema": "okx.host-launcher.run/v1",
-                "disposition": "ACTIVATION_COMMITTED",
+                "disposition": "PREVIOUS_CONTROLLER_RESTARTED_WAITING_FOR_ACK",
+                "controller_pid": child.id(),
+                "request_id": pending.request_id
+            }))
+        }
+        RecoveryDecision::CommitDurableReady => {
+            let pending = pending.as_ref().ok_or(LauncherError::InvalidState)?;
+            let ready = load_ready()?.ok_or(LauncherError::InvalidReadiness)?;
+            ready.validate_for(pending)?;
+            if !process_identity_matches(ready.controller)? {
+                return Err(LauncherError::InvalidReadiness);
+            }
+            commit_activation(pending)?;
+            Ok(json!({
+                "schema": "okx.host-launcher.run/v1",
+                "disposition": "ACTIVATION_COMMITTED_FROM_DURABLE_READY",
                 "request_id": pending.request_id,
-                "controller_pid": ready.controller_pid,
+                "controller_pid": ready.controller.pid,
                 "controller_sha256": pending.candidate.controller_sha256
             }))
         }
-        ReadyWait::ChildExited => rollback_activation(&pending, "CANDIDATE_EXITED_BEFORE_READY"),
+        RecoveryDecision::AwaitProvisionalReady => {
+            let pending = pending.as_ref().ok_or(LauncherError::InvalidState)?;
+            Ok(json!({
+                "schema": "okx.host-launcher.run/v1",
+                "disposition": "PROVISIONAL_CONTROLLER_RUNNING_AWAITING_READY",
+                "request_id": pending.request_id
+            }))
+        }
+        RecoveryDecision::RollbackProvisional => {
+            let pending = pending.as_ref().ok_or(LauncherError::InvalidState)?;
+            rollback_activation(pending, "PROVISIONAL_CONTROLLER_NOT_READY")
+        }
+        RecoveryDecision::ActivateCandidate => {
+            let pending = pending.as_ref().ok_or(LauncherError::InvalidState)?;
+            wait_for_process_exit(pending.old_controller)?;
+            if controller_running()? {
+                return Err(LauncherError::ActivationConflict);
+            }
+
+            verify_version(&pending.candidate)?;
+            save_json(
+                Path::new(ACTIVE_PATH),
+                &ActiveController::new(
+                    pending.candidate.clone(),
+                    Some(pending.previous.clone()),
+                ),
+            )?;
+            if Path::new(READY_PATH).exists() {
+                fs::remove_file(READY_PATH)?;
+            }
+
+            let ready_event = ReadyEvent::create(&pending.request_id)?;
+            let mut child =
+                spawn_controller(&pending.candidate, Some(&pending.request_id))?;
+            match ready_event.wait_with_child(&mut child)? {
+                ReadyWait::Ready => {
+                    let ready = load_ready()?.ok_or(LauncherError::InvalidReadiness)?;
+                    ready.validate_for(pending)?;
+                    if ready.controller.pid != child.id()
+                        || !process_identity_matches(ready.controller)?
+                    {
+                        return rollback_activation(pending, "READY_PROCESS_NOT_RUNNING");
+                    }
+                    commit_activation(pending)?;
+                    Ok(json!({
+                        "schema": "okx.host-launcher.run/v1",
+                        "disposition": "ACTIVATION_COMMITTED",
+                        "request_id": pending.request_id,
+                        "controller_pid": ready.controller.pid,
+                        "controller_sha256": pending.candidate.controller_sha256
+                    }))
+                }
+                ReadyWait::ChildExited => {
+                    rollback_activation(pending, "CANDIDATE_EXITED_BEFORE_READY")
+                }
+            }
+        }
     }
 }
 
@@ -602,7 +754,7 @@ fn save_result(pending: &ActivationRecord, outcome: &str, reason: &str) -> Launc
 }
 
 fn clear_activation_files() -> LauncherResult<()> {
-    for path in [PENDING_PATH, STAGED_PATH, READY_PATH] {
+    for path in [PENDING_PATH, STAGED_PATH, READY_PATH, FAIL_NEXT_PATH] {
         if Path::new(path).exists() {
             fs::remove_file(path)?;
         }
@@ -819,35 +971,103 @@ fn named_mutex_exists(name: &str) -> LauncherResult<bool> {
 }
 
 #[cfg(windows)]
-fn process_is_running(pid: u32) -> LauncherResult<bool> {
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, WAIT_TIMEOUT},
-        System::Threading::{OpenProcess, WaitForSingleObject},
-    };
-    const PROCESS_SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
-    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE_ACCESS, 0, pid) };
-    if handle.is_null() {
-        return Ok(false);
-    }
-    let result = unsafe { WaitForSingleObject(handle, 0) };
-    unsafe { CloseHandle(handle) };
-    Ok(result == WAIT_TIMEOUT)
+fn current_process_identity() -> LauncherResult<ProcessIdentity> {
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let handle = unsafe { GetCurrentProcess() };
+    Ok(ProcessIdentity {
+        pid: std::process::id(),
+        creation_time_100ns: process_creation_time_100ns(handle)?,
+    })
 }
 
 #[cfg(not(windows))]
-fn process_is_running(_pid: u32) -> LauncherResult<bool> {
+fn current_process_identity() -> LauncherResult<ProcessIdentity> {
+    Ok(ProcessIdentity {
+        pid: std::process::id(),
+        creation_time_100ns: 1,
+    })
+}
+
+#[cfg(windows)]
+fn open_process_identity(
+    pid: u32,
+) -> LauncherResult<Option<windows_sys::Win32::Foundation::HANDLE>> {
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+    if pid == 0 {
+        return Ok(None);
+    }
+    let handle =
+        unsafe { OpenProcess(SYNCHRONIZE_ACCESS | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(handle))
+}
+
+#[cfg(windows)]
+fn process_creation_time_100ns(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+) -> LauncherResult<u64> {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::GetProcessTimes,
+    };
+    let mut creation = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exit = creation;
+    let mut kernel = creation;
+    let mut user = creation;
+    let ok = unsafe {
+        GetProcessTimes(
+            handle,
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+}
+
+#[cfg(windows)]
+fn process_identity_matches(identity: ProcessIdentity) -> LauncherResult<bool> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_TIMEOUT},
+        System::Threading::WaitForSingleObject,
+    };
+    identity.validate()?;
+    let Some(handle) = open_process_identity(identity.pid)? else {
+        return Ok(false);
+    };
+    let creation = process_creation_time_100ns(handle);
+    let wait = unsafe { WaitForSingleObject(handle, 0) };
+    unsafe { CloseHandle(handle) };
+    Ok(creation? == identity.creation_time_100ns && wait == WAIT_TIMEOUT)
+}
+
+#[cfg(not(windows))]
+fn process_identity_matches(_identity: ProcessIdentity) -> LauncherResult<bool> {
     Ok(false)
 }
 
 #[cfg(windows)]
-fn wait_for_process_exit(pid: u32) -> LauncherResult<()> {
+fn wait_for_process_exit(identity: ProcessIdentity) -> LauncherResult<()> {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, WAIT_OBJECT_0},
-        System::Threading::{INFINITE, OpenProcess, WaitForSingleObject},
+        System::Threading::{INFINITE, WaitForSingleObject},
     };
-    const PROCESS_SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
-    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE_ACCESS, 0, pid) };
-    if handle.is_null() {
+    identity.validate()?;
+    let Some(handle) = open_process_identity(identity.pid)? else {
+        return Ok(());
+    };
+    if process_creation_time_100ns(handle)? != identity.creation_time_100ns {
+        unsafe { CloseHandle(handle) };
         return Ok(());
     }
     let result = unsafe { WaitForSingleObject(handle, INFINITE) };
@@ -860,9 +1080,10 @@ fn wait_for_process_exit(pid: u32) -> LauncherResult<()> {
 }
 
 #[cfg(not(windows))]
-fn wait_for_process_exit(_pid: u32) -> LauncherResult<()> {
+fn wait_for_process_exit(_identity: ProcessIdentity) -> LauncherResult<()> {
     Err(LauncherError::UnsupportedPlatform)
 }
+
 
 struct LauncherGuard {
     #[cfg(windows)]
@@ -1058,7 +1279,10 @@ mod tests {
             schema: ACTIVATION_SCHEMA_V1.to_owned(),
             repository_id: REPOSITORY_ID,
             request_id: "ctl_launcher_test_012345".to_owned(),
-            old_controller_pid: 42,
+            old_controller: ProcessIdentity {
+                pid: 42,
+                creation_time_100ns: 100,
+            },
             previous: version('c'),
             candidate: version('d'),
             terminal_ack: false,
@@ -1088,8 +1312,105 @@ mod tests {
             PENDING_PATH,
             READY_PATH,
             LAST_RESULT_PATH,
+            FAIL_NEXT_PATH,
         ] {
             assert!(!Path::new(path).starts_with(r"C:\okx\"));
         }
     }
+
+    #[test]
+    fn recovery_matrix_never_activates_before_terminal_ack() {
+        let previous = version('c');
+        let candidate = version('d');
+        let active = ActiveController::new(previous.clone(), None);
+        let pending = ActivationRecord {
+            schema: ACTIVATION_SCHEMA_V1.to_owned(),
+            repository_id: REPOSITORY_ID,
+            request_id: "ctl_recovery_matrix_012345".to_owned(),
+            old_controller: ProcessIdentity {
+                pid: 42,
+                creation_time_100ns: 100,
+            },
+            previous,
+            candidate,
+            terminal_ack: false,
+        };
+
+        assert_eq!(
+            classify_recovery(&active, Some(&pending), true, false).expect("decision"),
+            RecoveryDecision::WaitingForTerminalAck
+        );
+        assert_eq!(
+            classify_recovery(&active, Some(&pending), false, false).expect("decision"),
+            RecoveryDecision::RestartPreviousWaitingForAck
+        );
+    }
+
+    #[test]
+    fn recovery_matrix_commits_only_exact_ready_candidate() {
+        let previous = version('c');
+        let candidate = version('d');
+        let active = ActiveController::new(candidate.clone(), Some(previous.clone()));
+        let pending = ActivationRecord {
+            schema: ACTIVATION_SCHEMA_V1.to_owned(),
+            repository_id: REPOSITORY_ID,
+            request_id: "ctl_recovery_ready_012345".to_owned(),
+            old_controller: ProcessIdentity {
+                pid: 42,
+                creation_time_100ns: 100,
+            },
+            previous,
+            candidate,
+            terminal_ack: true,
+        };
+
+        assert_eq!(
+            classify_recovery(&active, Some(&pending), true, true).expect("decision"),
+            RecoveryDecision::CommitDurableReady
+        );
+        assert_eq!(
+            classify_recovery(&active, Some(&pending), true, false).expect("decision"),
+            RecoveryDecision::AwaitProvisionalReady
+        );
+        assert_eq!(
+            classify_recovery(&active, Some(&pending), false, false).expect("decision"),
+            RecoveryDecision::RollbackProvisional
+        );
+    }
+
+    #[test]
+    fn recovery_matrix_activates_only_from_confirmed_previous() {
+        let previous = version('c');
+        let candidate = version('d');
+        let active = ActiveController::new(previous.clone(), None);
+        let pending = ActivationRecord {
+            schema: ACTIVATION_SCHEMA_V1.to_owned(),
+            repository_id: REPOSITORY_ID,
+            request_id: "ctl_recovery_activate_012345".to_owned(),
+            old_controller: ProcessIdentity {
+                pid: 42,
+                creation_time_100ns: 100,
+            },
+            previous,
+            candidate,
+            terminal_ack: true,
+        };
+        assert_eq!(
+            classify_recovery(&active, Some(&pending), true, false).expect("decision"),
+            RecoveryDecision::ActivateCandidate
+        );
+    }
+
+    #[test]
+    fn launcher_dependency_boundary_has_no_product_or_transport_crates() {
+        let cargo = include_str!("../Cargo.toml");
+        for forbidden in ["okx-github", "okx-api", "okx-agent", "tokio", "reqwest"] {
+            assert!(!cargo.contains(forbidden), "forbidden launcher dependency: {forbidden}");
+        }
+        let source = include_str!("lib.rs");
+        for forbidden in [["sch", "tasks"].concat(), ["Power", "Shell"].concat()] {
+            assert!(!source.contains(&forbidden), "forbidden launcher surface: {forbidden}");
+        }
+    }
+
 }
