@@ -132,7 +132,7 @@ pub async fn install_launcher_root(
         source_head_sha: bundle.manifest.source_head_sha.clone(),
         source_tree: bundle.manifest.source_tree.clone(),
         rust_version: bundle.manifest.rust_version.clone(),
-        controller_sha256: actual_controller_hash,
+        controller_sha256: actual_controller_hash.clone(),
     };
     let root = okx_host_launcher::install_root(
         launcher_bytes,
