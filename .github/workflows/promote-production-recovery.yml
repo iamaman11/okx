@@ -1,0 +1,136 @@
+name: Promote production recovery bundle
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/production-recovery-request.json"
+      - ".github/workflows/promote-production-recovery.yml"
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Resolve exact accepted PR artifact
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq -e '.schema == "okx.production-recovery.request/v1" and .promote == true' \
+            .github/production-recovery-request.json >/dev/null
+
+          prs_json="$(gh api -H "Accept: application/vnd.github+json" "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls")"
+          head_sha="$(jq -r '[.[] | select(.merged_at != null and .base.ref == "main")] | first | .head.sha // empty' <<<"$prs_json")"
+          test -n "$head_sha"
+
+          merge_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq '.tree.sha')"
+          head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head_sha" --jq '.tree.sha')"
+          test "$merge_tree" = "$head_tree"
+
+          runs_json="$(gh api --method GET -H "Accept: application/vnd.github+json" \
+            "/repos/$GITHUB_REPOSITORY/actions/runs" \
+            -f head_sha="$head_sha" -f event="pull_request" -f status="completed" -f per_page=100)"
+          run_id="$(jq -r '[.workflow_runs[] | select(.name == "CI" and .conclusion == "success")] | first | .id // empty' <<<"$runs_json")"
+          test -n "$run_id"
+
+          artifacts_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100")"
+          artifact_name="okx-windows-bundle-$head_sha"
+          artifact_id="$(jq -r --arg name "$artifact_name" '[.artifacts[] | select(.name == $name and .expired == false)] | first | .id // empty' <<<"$artifacts_json")"
+          artifact_digest="$(jq -r --arg name "$artifact_name" '[.artifacts[] | select(.name == $name and .expired == false)] | first | .digest // empty' <<<"$artifacts_json")"
+          test -n "$artifact_id"
+          test -n "$artifact_digest"
+
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "source_tree=$head_tree" >> "$GITHUB_OUTPUT"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "artifact_digest=$artifact_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify bundle
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bundle="$RUNNER_TEMP/okx-windows-recovery-${GITHUB_SHA}.zip"
+          extract="$RUNNER_TEMP/recovery-bundle"
+          mkdir -p "$extract"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/${{ steps.resolve.outputs.artifact_id }}/zip" > "$bundle"
+          unzip -q "$bundle" -d "$extract"
+
+          manifest="$extract/manifest.json"
+          test -f "$manifest"
+          jq -e --arg head "${{ steps.resolve.outputs.head_sha }}" \
+            --arg tree "${{ steps.resolve.outputs.source_tree }}" \
+            '.schema == "okx.windows.bundle/v1" and .repository_id == 1388071566 and .source_head_sha == $head and .source_tree == $tree' \
+            "$manifest" >/dev/null
+
+          for file in okx-agent.exe okx-host-control.exe; do
+            test -f "$extract/$file"
+            expected="$(jq -r --arg file "$file" '.files[$file].sha256' "$manifest")"
+            actual="$(sha256sum "$extract/$file" | awk '{print $1}')"
+            test -n "$expected"
+            test "$actual" = "$expected"
+          done
+
+          test -f "$extract/Cargo.lock"
+          bundle_sha256="$(sha256sum "$bundle" | awk '{print $1}')"
+          checksums="$RUNNER_TEMP/SHA256SUMS.txt"
+          {
+            printf '%s  %s\n' "$bundle_sha256" "$(basename "$bundle")"
+            (cd "$extract" && sha256sum okx-agent.exe okx-host-control.exe Cargo.lock manifest.json)
+          } > "$checksums"
+
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+          echo "checksums=$checksums" >> "$GITHUB_OUTPUT"
+          echo "bundle_sha256=$bundle_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Publish versioned recovery release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA:0:12}"
+          tag="production-recovery-$short_sha"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists; refusing replacement" >&2
+            exit 1
+          fi
+
+          notes="$RUNNER_TEMP/recovery-notes.md"
+          cat > "$notes" <<EOF
+          Production recovery bundle for exact merged tree.
+
+          - repository: $GITHUB_REPOSITORY
+          - accepted merge SHA: $GITHUB_SHA
+          - tested PR head: ${{ steps.resolve.outputs.head_sha }}
+          - source tree: ${{ steps.resolve.outputs.source_tree }}
+          - CI run: ${{ steps.resolve.outputs.run_id }}
+          - Actions artifact: ${{ steps.resolve.outputs.artifact_id }}
+          - Actions artifact digest: ${{ steps.resolve.outputs.artifact_digest }}
+          - promoted ZIP SHA-256: ${{ steps.verify.outputs.bundle_sha256 }}
+
+          The embedded manifest and SHA256SUMS.txt must be verified before recovery install.
+          EOF
+
+          gh release create "$tag" \
+            "${{ steps.verify.outputs.bundle }}" \
+            "${{ steps.verify.outputs.checksums }}" \
+            --target "$GITHUB_SHA" \
+            --title "OKX production recovery $short_sha" \
+            --notes-file "$notes"
+
+          gh release view "$tag" --json tagName,targetCommitish,url,assets
