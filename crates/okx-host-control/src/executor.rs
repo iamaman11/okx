@@ -427,8 +427,9 @@ impl HostExecutor {
                 "verified_self_update": true,
                 "bounded_control_results": true,
                 "bounded_workspace_status": true,
-                "self_update_acceptance_marker": "scheduler-change-v4",
-                "scheduler_action_handoff": true,
+                "self_update_acceptance_marker": "transient-activator-v5",
+                "scheduler_action_handoff": false,
+                "transient_activator_handoff": true,
                 "abort_controller_update": true
             }
         }))

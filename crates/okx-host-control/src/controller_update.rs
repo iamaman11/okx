@@ -1,7 +1,8 @@
 use std::{
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
 };
 
 use okx_github::{GitHubClient, OWNER_USER_ID, REPOSITORY_ID};
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{HostControlError, HostControlResult, autostart};
+use crate::{HostControlError, HostControlResult, autostart, single_instance::SingleInstanceGuard};
 
 pub const CONTROLLER_PATH: &str = r"C:\okx-control\okx-host-control.exe";
 pub const UPDATE_ROOT: &str = r"C:\okx-control\update";
@@ -45,6 +46,8 @@ struct PendingControllerUpdate {
     controller_sha256: String,
     staged_path: String,
     handoff_request_id: Option<String>,
+    #[serde(default)]
+    activator_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +76,7 @@ impl PendingControllerUpdate {
             controller_sha256: candidate.controller_sha256,
             staged_path: STAGED_CONTROLLER_PATH.to_owned(),
             handoff_request_id: None,
+            activator_pid: None,
         }
     }
 
@@ -90,6 +94,7 @@ impl PendingControllerUpdate {
                 .handoff_request_id
                 .as_deref()
                 .is_none_or(valid_control_request_id)
+            && self.activator_pid.is_none_or(|pid| pid != 0)
     }
 
     fn installed(&self) -> InstalledControllerProvenance {
@@ -136,7 +141,8 @@ pub fn stage(candidate: ControllerUpdateCandidate, bytes: &[u8]) -> HostControlR
                 "source_head_sha": existing.source_head_sha,
                 "source_tree": existing.source_tree,
                 "controller_sha256": existing.controller_sha256,
-                "handoff_request_id": existing.handoff_request_id
+                "handoff_request_id": existing.handoff_request_id,
+                "activator_pid": existing.activator_pid
             }));
         }
         return Err(HostControlError::ControllerUpdateConflict);
@@ -170,8 +176,10 @@ pub fn prepare_handoff(request_id: &str) -> HostControlResult<Value> {
         return Err(HostControlError::ControllerUpdateStateInvalid);
     }
 
+    autostart::ensure_policy_valid()?;
     let mut pending = load_pending()?.ok_or(HostControlError::ControllerUpdateNotStaged)?;
     verify_staged(&pending)?;
+
     if pending
         .handoff_request_id
         .as_deref()
@@ -179,39 +187,75 @@ pub fn prepare_handoff(request_id: &str) -> HostControlResult<Value> {
     {
         return Err(HostControlError::ControllerUpdateConflict);
     }
+
+    if pending.handoff_request_id.as_deref() == Some(request_id)
+        && pending.activator_pid.is_some_and(process_is_running)
+    {
+        return Ok(json!({
+            "handoff_prepared": true,
+            "disposition": "EXISTING_ACTIVATOR",
+            "activation": public_pending(&pending)
+        }));
+    }
+
     pending.handoff_request_id = Some(request_id.to_owned());
+    pending.activator_pid = None;
     save_json(Path::new(PENDING_PATH), &pending)?;
 
-    let task = match autostart::install_controller_update_activation() {
-        Ok(task) => task,
+    let mut child = match spawn_activator(request_id) {
+        Ok(child) => child,
         Err(error) => {
             pending.handoff_request_id = None;
+            pending.activator_pid = None;
             save_json(Path::new(PENDING_PATH), &pending)?;
             return Err(error);
         }
     };
+    let activator_pid = child.id();
+    pending.activator_pid = Some(activator_pid);
+    if let Err(error) = save_json(Path::new(PENDING_PATH), &pending) {
+        let _ = child.kill();
+        pending.handoff_request_id = None;
+        pending.activator_pid = None;
+        let _ = save_json(Path::new(PENDING_PATH), &pending);
+        return Err(error);
+    }
+
     Ok(json!({
         "handoff_prepared": true,
-        "activation": public_pending(&pending),
-        "scheduler": task
+        "disposition": "ACTIVATOR_STARTED",
+        "activation": public_pending(&pending)
     }))
 }
 
-pub async fn activate(github: &GitHubClient) -> HostControlResult<Value> {
+pub async fn activate(
+    github: &GitHubClient,
+    parent_pid: u32,
+    handoff_request_id: &str,
+) -> HostControlResult<Value> {
+    if parent_pid == 0 || !valid_control_request_id(handoff_request_id) {
+        return Err(HostControlError::ControllerUpdateStateInvalid);
+    }
+
+    wait_for_process_exit(parent_pid)?;
+
     let mut pending = load_pending()?.ok_or(HostControlError::ControllerUpdateNotStaged)?;
     verify_staged(&pending)?;
-    let request_id = pending
-        .handoff_request_id
-        .as_deref()
-        .ok_or(HostControlError::ControllerUpdateStateInvalid)?
-        .to_owned();
+    if pending.handoff_request_id.as_deref() != Some(handoff_request_id)
+        || pending.activator_pid != Some(std::process::id())
+    {
+        return Err(HostControlError::ControllerUpdateStateInvalid);
+    }
 
-    if !durable_handoff_ack(github, &request_id).await? {
-        autostart::restore_controller_action()?;
+    if !durable_handoff_ack(github, handoff_request_id).await? {
         pending.handoff_request_id = None;
+        pending.activator_pid = None;
         save_json(Path::new(PENDING_PATH), &pending)?;
         return Err(HostControlError::ControllerUpdateTerminalAckMissing);
     }
+
+    let _single_instance = SingleInstanceGuard::acquire()?;
+    autostart::ensure_policy_valid()?;
 
     let staged = Path::new(STAGED_CONTROLLER_PATH);
     let canonical = Path::new(CONTROLLER_PATH);
@@ -226,15 +270,18 @@ pub async fn activate(github: &GitHubClient) -> HostControlResult<Value> {
     }
 
     save_json(Path::new(INSTALLED_PROVENANCE_PATH), &pending.installed())?;
-
-    let scheduler = autostart::restore_controller_action()?;
     fs::remove_file(PENDING_PATH)?;
+    drop(_single_instance);
+
+    let scheduler = autostart::run_now()?;
 
     Ok(json!({
         "activated": true,
         "controller_sha256": pending.controller_sha256,
         "source_head_sha": pending.source_head_sha,
         "source_tree": pending.source_tree,
+        "parent_pid": parent_pid,
+        "handoff_request_id": handoff_request_id,
         "scheduler": scheduler
     }))
 }
@@ -248,6 +295,10 @@ pub fn abort() -> HostControlResult<Value> {
             "disposition": "NO_PENDING_UPDATE"
         }));
     };
+
+    if pending.activator_pid.is_some_and(process_is_running) {
+        return Err(HostControlError::ControllerUpdateConflict);
+    }
 
     if Path::new(PENDING_PATH).exists() {
         fs::remove_file(PENDING_PATH)?;
@@ -264,7 +315,8 @@ pub fn abort() -> HostControlResult<Value> {
         "source_head_sha": pending.source_head_sha,
         "source_tree": pending.source_tree,
         "controller_sha256": pending.controller_sha256,
-        "handoff_request_id": pending.handoff_request_id
+        "handoff_request_id": pending.handoff_request_id,
+        "activator_pid": pending.activator_pid
     }))
 }
 
@@ -409,8 +461,94 @@ fn public_pending(value: &PendingControllerUpdate) -> Value {
         "source_tree": value.source_tree,
         "rust_version": value.rust_version,
         "controller_sha256": value.controller_sha256,
-        "handoff_request_id": value.handoff_request_id
+        "handoff_request_id": value.handoff_request_id,
+        "activator_pid": value.activator_pid
     })
+}
+
+fn spawn_activator(request_id: &str) -> HostControlResult<Child> {
+    fs::create_dir_all(UPDATE_ROOT)?;
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(Path::new(UPDATE_ROOT).join("controller-activator.stdout.log"))?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(Path::new(UPDATE_ROOT).join("controller-activator.stderr.log"))?;
+
+    Command::new(STAGED_CONTROLLER_PATH)
+        .arg("activate-controller-update")
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
+        .arg("--handoff-request-id")
+        .arg(request_id)
+        .current_dir(UPDATE_ROOT)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|_| HostControlError::ControllerUpdateActivatorLaunch)
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_TIMEOUT},
+        System::Threading::{OpenProcess, WaitForSingleObject},
+    };
+    const PROCESS_SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+    if pid == 0 {
+        return false;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE_ACCESS, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let result = unsafe { WaitForSingleObject(handle, 0) };
+    unsafe {
+        CloseHandle(handle);
+    }
+    result == WAIT_TIMEOUT
+}
+
+#[cfg(not(windows))]
+fn process_is_running(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn wait_for_process_exit(pid: u32) -> HostControlResult<()> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_OBJECT_0},
+        System::Threading::{INFINITE, OpenProcess, WaitForSingleObject},
+    };
+    const PROCESS_SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE_ACCESS, 0, pid) };
+    if handle.is_null() {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(87) {
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+
+    let result = unsafe { WaitForSingleObject(handle, INFINITE) };
+    unsafe {
+        CloseHandle(handle);
+    }
+    if result == WAIT_OBJECT_0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(not(windows))]
+fn wait_for_process_exit(_pid: u32) -> HostControlResult<()> {
+    Err(HostControlError::UnsupportedPlatform)
 }
 
 async fn durable_handoff_ack(github: &GitHubClient, request_id: &str) -> HostControlResult<bool> {
@@ -568,6 +706,26 @@ mod tests {
         failed.status = HostControlStatus::Fail;
         let failed_json = serde_json::to_string(&failed).expect("serialize");
         assert!(!durable_ack_body(OWNER_USER_ID, &failed_json, request_id));
+    }
+
+    #[test]
+    fn legacy_pending_without_activator_pid_remains_readable() {
+        let payload = serde_json::json!({
+            "schema": PENDING_SCHEMA_V1,
+            "repository_id": REPOSITORY_ID,
+            "run_id": 1,
+            "artifact_id": 2,
+            "source_head_sha": "a".repeat(40),
+            "source_tree": "b".repeat(40),
+            "rust_version": "rustc 1.95.0",
+            "controller_sha256": "c".repeat(64),
+            "staged_path": STAGED_CONTROLLER_PATH,
+            "handoff_request_id": null
+        });
+        let pending: PendingControllerUpdate =
+            serde_json::from_value(payload).expect("legacy pending");
+        assert_eq!(pending.activator_pid, None);
+        assert!(pending.valid());
     }
 
     #[test]
