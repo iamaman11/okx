@@ -425,6 +425,7 @@ pub enum HostControlOperation {
     HandoffToAutostart,
     AcceptanceKillAgent,
     AcceptanceCrashController,
+    AcceptanceFailNextControllerActivation,
     TransportStatus,
 }
 
