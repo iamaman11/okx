@@ -218,7 +218,6 @@ impl ReadyRecord {
             || self.repository_id != REPOSITORY_ID
             || self.request_id != pending.request_id
             || self.controller_sha256 != pending.candidate.controller_sha256
-
         {
             return Err(LauncherError::InvalidReadiness);
         }
@@ -676,18 +675,14 @@ pub fn run() -> LauncherResult<Value> {
             verify_version(&pending.candidate)?;
             save_json(
                 Path::new(ACTIVE_PATH),
-                &ActiveController::new(
-                    pending.candidate.clone(),
-                    Some(pending.previous.clone()),
-                ),
+                &ActiveController::new(pending.candidate.clone(), Some(pending.previous.clone())),
             )?;
             if Path::new(READY_PATH).exists() {
                 fs::remove_file(READY_PATH)?;
             }
 
             let ready_event = ReadyEvent::create(&pending.request_id)?;
-            let mut child =
-                spawn_controller(&pending.candidate, Some(&pending.request_id))?;
+            let mut child = spawn_controller(&pending.candidate, Some(&pending.request_id))?;
             match ready_event.wait_with_child(&mut child)? {
                 ReadyWait::Ready => {
                     let ready = load_ready()?.ok_or(LauncherError::InvalidReadiness)?;
@@ -997,10 +992,19 @@ fn open_process_identity(
     if pid == 0 {
         return Ok(None);
     }
-    let handle =
-        unsafe { OpenProcess(SYNCHRONIZE_ACCESS | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    let handle = unsafe {
+        OpenProcess(
+            SYNCHRONIZE_ACCESS | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
     if handle.is_null() {
-        return Ok(None);
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(87) {
+            return Ok(None);
+        }
+        return Err(error.into());
     }
     Ok(Some(handle))
 }
@@ -1009,10 +1013,7 @@ fn open_process_identity(
 fn process_creation_time_100ns(
     handle: windows_sys::Win32::Foundation::HANDLE,
 ) -> LauncherResult<u64> {
-    use windows_sys::Win32::{
-        Foundation::FILETIME,
-        System::Threading::GetProcessTimes,
-    };
+    use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
     let mut creation = FILETIME {
         dwLowDateTime: 0,
         dwHighDateTime: 0,
@@ -1020,15 +1021,7 @@ fn process_creation_time_100ns(
     let mut exit = creation;
     let mut kernel = creation;
     let mut user = creation;
-    let ok = unsafe {
-        GetProcessTimes(
-            handle,
-            &mut creation,
-            &mut exit,
-            &mut kernel,
-            &mut user,
-        )
-    };
+    let ok = unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
     if ok == 0 {
         return Err(std::io::Error::last_os_error().into());
     }
@@ -1083,7 +1076,6 @@ fn wait_for_process_exit(identity: ProcessIdentity) -> LauncherResult<()> {
 fn wait_for_process_exit(_identity: ProcessIdentity) -> LauncherResult<()> {
     Err(LauncherError::UnsupportedPlatform)
 }
-
 
 struct LauncherGuard {
     #[cfg(windows)]
@@ -1405,12 +1397,17 @@ mod tests {
     fn launcher_dependency_boundary_has_no_product_or_transport_crates() {
         let cargo = include_str!("../Cargo.toml");
         for forbidden in ["okx-github", "okx-api", "okx-agent", "tokio", "reqwest"] {
-            assert!(!cargo.contains(forbidden), "forbidden launcher dependency: {forbidden}");
+            assert!(
+                !cargo.contains(forbidden),
+                "forbidden launcher dependency: {forbidden}"
+            );
         }
         let source = include_str!("lib.rs");
         for forbidden in [["sch", "tasks"].concat(), ["Power", "Shell"].concat()] {
-            assert!(!source.contains(&forbidden), "forbidden launcher surface: {forbidden}");
+            assert!(
+                !source.contains(&forbidden),
+                "forbidden launcher surface: {forbidden}"
+            );
         }
     }
-
 }
