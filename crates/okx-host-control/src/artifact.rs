@@ -97,9 +97,13 @@ pub async fn install_launcher_root(
     let bundle =
         verified_bundle(github, executor, run_id, artifact_id, expected_source_tree).await?;
 
-    let launcher_bytes = bundle.launcher_bytes.as_deref().ok_or(
-        HostControlError::ArtifactVerification("bundle is missing okx-host-launcher.exe"),
-    )?;
+    let launcher_bytes =
+        bundle
+            .launcher_bytes
+            .as_deref()
+            .ok_or(HostControlError::ArtifactVerification(
+                "bundle is missing okx-host-launcher.exe",
+            ))?;
     let declared_launcher_hash = declared_hash(&bundle.manifest, "okx-host-launcher.exe")?;
     let actual_launcher_hash = sha256_hex(launcher_bytes);
     if actual_launcher_hash != declared_launcher_hash {
