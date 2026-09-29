@@ -65,7 +65,7 @@ Executor IP allowlisting is optional diagnostic evidence, not an acceptance gate
 - [x] Linux + Windows CI PASS from the locked graph;
 - [x] exact tested-tree == merged-tree acceptance recorded.
 
-### Checkpoint 2 — CI/supply-chain immutability — PARTIAL, one external enforcement gap remains
+### Checkpoint 2 — CI/supply-chain immutability — PASS
 
 Completed:
 
@@ -76,12 +76,11 @@ Completed:
 - [x] legacy CONTROL `BuildAgent` fails closed;
 - [x] verified hosted-CI artifact remains the normal agent deployment authority.
 
-Remaining:
+Completed repository enforcement:
 
-- [ ] enable GitHub repository ruleset / branch protection on `main`;
-- [ ] require the canonical PR + CI path before merge/direct update.
-
-GitHub currently reports `main protected=false`. This is repository Administration policy, not an application-runtime change.
+- [x] `main` branch protection enabled;
+- [x] required checks: `classify`, `linux-core`, `windows-native`;
+- [x] enforcement applies to the protected production branch.
 
 ### Checkpoint 3 — durable recovery artifact — PASS
 
@@ -135,26 +134,31 @@ Exit state:
 
 ## Deferred, non-blocking maintenance
 
-### #54 controller self-update — ACTIVE / required
+### #126 immutable controller launcher/root-of-trust — ACTIVE / required
 
-Full-cycle operation now explicitly includes Windows controller diagnosis and verified replacement.
+#126 supersedes the self-replacing controller design tracked by #54.
 
 Required acceptance:
 
-- [ ] merge the updater-capable controller with Linux + Windows CI PASS;
-- [ ] one final bounded bootstrap installs that first updater-capable controller from the exact verified CI artifact;
-- [ ] typed `workspace_status` diagnoses Windows source divergence without arbitrary shell;
-- [ ] build a subsequent different controller artifact;
-- [ ] remotely `stage_controller_update`;
-- [ ] remotely verify staged hash/provenance;
-- [ ] remotely `handoff_controller_update`;
-- [ ] durable CONTROL terminal PASS must exist before activation;
-- [ ] the same canonical Scheduler task performs the one-shot activator handoff;
-- [ ] canonical controller replacement/hash/provenance PASS;
-- [ ] canonical Scheduler action restored;
-- [ ] fresh CONTROL + DATA + agent ownership/recovery PASS after replacement.
+- [ ] build and merge the independent `okx-host-launcher` root-of-trust;
+- [ ] bundle/manifest/recovery artifacts carry launcher SHA-256;
+- [ ] perform the one-time root migration from an exact accepted artifact;
+- [ ] canonical Scheduler action becomes permanently `okx-host-launcher.exe run`;
+- [ ] normal controller update never changes Scheduler and never overwrites a running executable;
+- [ ] remotely stage a distinct controller version;
+- [ ] durable CONTROL terminal PASS precedes old controller exit;
+- [ ] launcher waits the exact old PID and candidate readiness event;
+- [ ] successful candidate commits atomically;
+- [ ] failed candidate automatically rolls back to the previous confirmed version;
+- [ ] crash/reboot boundary converges without local operator intervention;
+- [ ] fresh CONTROL + DATA + Job-owned agent recovery PASS;
+- [ ] live trading remains disabled and exchange mutations remain zero.
 
-No second service/watchdog/scheduler task is allowed.
+The migration-only legacy activator is allowed solely before launcher-root exists and must fail closed afterward.
+
+### #54 controller self-update — ABSORBED BY #126
+
+No separate closure path remains. #54 closes only when #126 physical acceptance closes the controller lifecycle permanently.
 
 ### #58 DATA mailbox compaction
 
