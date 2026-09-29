@@ -1,5 +1,5 @@
 {
   "schema": "okx.production-recovery.request/v1",
   "promote": true,
-  "purpose": "Checkpoint 4 canonical production-baseline candidate: promote this exact tested merged tree for final physical acceptance."
+  "purpose": "Updater-capable Windows control baseline: promote this exact tested merged tree before controller bootstrap and remote self-update acceptance."
 }
