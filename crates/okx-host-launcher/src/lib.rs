@@ -25,7 +25,9 @@ const STAGED_SCHEMA_V1: &str = "okx.host-launcher.staged/v1";
 const ACTIVATION_SCHEMA_V1: &str = "okx.host-launcher.activation/v1";
 const READY_SCHEMA_V1: &str = "okx.host-launcher.ready/v1";
 const RESULT_SCHEMA_V1: &str = "okx.host-launcher.activation-result/v1";
+#[cfg(windows)]
 const CONTROLLER_MUTEX: &str = r"Local\iamaman11-okx-host-control";
+#[cfg(windows)]
 const LAUNCHER_MUTEX: &str = r"Local\iamaman11-okx-host-launcher";
 
 #[derive(Debug, Error)]
@@ -494,20 +496,19 @@ pub fn run() -> LauncherResult<Value> {
         }));
     }
 
-    if let Some(ready) = load_ready()? {
-        if ready.validate_for(&pending).is_ok()
-            && process_is_running(ready.controller_pid)?
-            && active.active.controller_sha256 == pending.candidate.controller_sha256
-        {
-            commit_activation(&pending)?;
-            return Ok(json!({
-                "schema": "okx.host-launcher.run/v1",
-                "disposition": "ACTIVATION_COMMITTED_FROM_DURABLE_READY",
-                "request_id": pending.request_id,
-                "controller_pid": ready.controller_pid,
-                "controller_sha256": pending.candidate.controller_sha256
-            }));
-        }
+    if let Some(ready) = load_ready()?
+        && ready.validate_for(&pending).is_ok()
+        && process_is_running(ready.controller_pid)?
+        && active.active.controller_sha256 == pending.candidate.controller_sha256
+    {
+        commit_activation(&pending)?;
+        return Ok(json!({
+            "schema": "okx.host-launcher.run/v1",
+            "disposition": "ACTIVATION_COMMITTED_FROM_DURABLE_READY",
+            "request_id": pending.request_id,
+            "controller_pid": ready.controller_pid,
+            "controller_sha256": pending.candidate.controller_sha256
+        }));
     }
 
     if active.active.controller_sha256 == pending.candidate.controller_sha256 {
@@ -907,6 +908,7 @@ impl Drop for LauncherGuard {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 enum ReadyWait {
     Ready,
     ChildExited,
@@ -980,6 +982,7 @@ impl Drop for ReadyEvent {
     }
 }
 
+#[cfg(windows)]
 fn ready_event_name(request_id: &str) -> String {
     format!(r"Local\iamaman11-okx-controller-ready-{request_id}")
 }
