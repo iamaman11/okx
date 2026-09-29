@@ -359,6 +359,19 @@ mod tests {
     }
 
     #[test]
+    fn exported_activation_policy_preserves_supervisor_shape() {
+        let xml = task_xml(
+            r"HOST\User",
+            TEST_START,
+            UPDATE_CONTROLLER_PATH,
+            "activate-controller-update",
+            CANONICAL_WORKING_DIRECTORY,
+        );
+        assert!(exported_activation_policy_valid(&xml));
+        assert!(!exported_policy_valid(&xml));
+    }
+
+    #[test]
     fn exported_policy_rejects_bounded_or_wrong_repetition() {
         let bounded = task_xml(
             r"HOST\User",
