@@ -32,7 +32,10 @@ impl ControllerUpdateCandidate {
 }
 
 pub fn stage(candidate: ControllerUpdateCandidate, bytes: &[u8]) -> HostControlResult<Value> {
-    Ok(okx_host_launcher::stage_update(candidate.into_version(), bytes)?)
+    Ok(okx_host_launcher::stage_update(
+        candidate.into_version(),
+        bytes,
+    )?)
 }
 
 pub fn prepare_handoff(request_id: &str) -> HostControlResult<Value> {
