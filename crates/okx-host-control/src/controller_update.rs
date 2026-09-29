@@ -191,14 +191,17 @@ pub fn prepare_handoff(request_id: &str) -> HostControlResult<Value> {
 }
 
 pub async fn activate(github: &GitHubClient) -> HostControlResult<Value> {
-    let pending = load_pending()?.ok_or(HostControlError::ControllerUpdateNotStaged)?;
+    let mut pending = load_pending()?.ok_or(HostControlError::ControllerUpdateNotStaged)?;
     verify_staged(&pending)?;
     let request_id = pending
         .handoff_request_id
         .as_deref()
-        .ok_or(HostControlError::ControllerUpdateStateInvalid)?;
+        .ok_or(HostControlError::ControllerUpdateStateInvalid)?
+        .to_owned();
 
-    if !durable_handoff_ack(github, request_id).await? {
+    if !durable_handoff_ack(github, &request_id).await? {
+        pending.handoff_request_id = None;
+        save_json(Path::new(PENDING_PATH), &pending)?;
         autostart::install()?;
         return Err(HostControlError::ControllerUpdateTerminalAckMissing);
     }
