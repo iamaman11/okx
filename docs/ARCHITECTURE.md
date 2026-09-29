@@ -34,10 +34,14 @@ Task Scheduler
   ONE TimeTrigger / PT1M / StartWhenAvailable / IgnoreNew
         |
         v
-ONE okx-host-control
+ONE immutable okx-host-launcher
+  fixed paths + hash verification + activation transaction
+  process/event-handle recovery + commit/rollback
+        |
+        v
+ONE versioned okx-host-control
   mutex + desired state + Job Object
   fixed typed CONTROL operations
-  verified self-update via the SAME Scheduler task
         |
         v
 ONE okx-agent
@@ -167,6 +171,19 @@ GitHub transport primitives only:
 
 GitHub is transport/evidence, not market/account state authority.
 
+### `okx-host-launcher`
+
+Immutable Windows controller installation root-of-trust only:
+
+- one-shot process started by the one Scheduler task;
+- content-addressed controller versions;
+- durable active/staged/pending/ready/result records under `C:\okx-control`;
+- exact SHA-256 verification;
+- exact old-PID wait + readiness event;
+- deterministic commit/rollback across crash/reboot;
+- no GitHub, OKX, mailbox, trading, workspace or agent business semantics;
+- no daemon/watchdog/polling loop.
+
 ### `okx-host-control`
 
 Windows lifecycle/deployment/diagnostics only:
@@ -178,10 +195,10 @@ Windows lifecycle/deployment/diagnostics only:
 - Scheduler/autostart diagnostics;
 - typed allowlisted CONTROL operations;
 - bounded Windows workspace diagnostics;
-- verified controller staging/replacement from accepted CI bundles;
-- one-shot controller handoff through the same canonical Scheduler task.
+- verified controller staging from accepted CI bundles;
+- durable activation preparation for the immutable launcher.
 
-No market/account/risk/order business logic belongs here. Controller self-update does not create a second supervisor: the existing Scheduler task temporarily executes a fixed staged activator and is restored to the canonical controller after verified replacement.
+No market/account/risk/order business logic belongs here. Normal controller updates never overwrite the running controller and never mutate the Scheduler definition. A migration-only legacy activator exists solely to cross the pre-launcher bootstrap boundary and is fail-closed once launcher-root exists.
 
 Remote legacy `BuildAgent` is not a production execution path and fails closed. Normal production deployment accepts only a verified hosted-CI artifact whose provenance matches current accepted source tree and binary hashes.
 
@@ -239,6 +256,12 @@ Task Scheduler
   IgnoreNew
         |
         v
+ONE okx-host-launcher
+  one-shot / no polling
+  immutable active pointer
+  transactional activation + rollback
+        |
+        v
 ONE okx-host-control
   mutex
   desired state
@@ -249,7 +272,7 @@ ONE okx-host-control
 ONE okx-agent
 ```
 
-Task Scheduler supervises the controller only. Host-control supervises the agent only.
+Task Scheduler supervises the launcher only. The launcher selects/starts exactly one immutable controller version; host-control supervises the agent only.
 
 No SCM service, RestartOnFailure authority, LogonTrigger recovery, PowerShell watchdog or second custom supervisor is allowed.
 
@@ -262,8 +285,9 @@ C:\okx
   mutable canonical Git workspace
 
 C:\okx-control
-  installed okx-host-control.exe
-  controller lifecycle state
+  immutable okx-host-launcher.exe
+  content-addressed controller versions
+  active/staged/activation lifecycle state
 
 C:\okx-runtime
   installed okx-agent.exe
@@ -431,8 +455,8 @@ Remaining before final production-baseline closure:
 
 Remaining operational closure:
 
-- #54 controller self-update: ACTIVE until one bootstrap plus one subsequent fully remote controller replacement are physically accepted;
-- GitHub `main` branch/ruleset enforcement.
+- #126 immutable launcher/root-of-trust: ACTIVE until root migration plus remote commit/rollback/reboot acceptance;
+- #54 is absorbed into #126 for the final controller-lifecycle closure.
 
 Deferred, non-blocking:
 
