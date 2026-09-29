@@ -11,6 +11,32 @@ The goal is to keep queries attributable, replay-safe, context-efficient and fai
 - The repository is public, so account/risk DATA must never be published as plaintext.
 - The DATA cryptographic contract remains X25519 -> HKDF-SHA256 -> ChaCha20-Poly1305.
 
+## Context-budget invariants
+
+Transport correctness is not enough: normal operation must also protect the ChatGPT context window from avoidable bulk evidence.
+
+Runtime bounds:
+
+- DATA plaintext responses are operation-budgeted at 8/12/16/32 KiB with a 40 KiB global ceiling;
+- predicted encrypted GitHub comments must remain within the GitHub comment-body ceiling or terminalize as `RESPONSE_TOO_LARGE`;
+- CONTROL request bodies are limited to 4 KiB;
+- CONTROL terminal results are limited to 16 KiB and oversized diagnostics terminalize as `CONTROL_RESPONSE_TOO_LARGE`;
+- `workspace_status` returns at most 16 changed-path entries and at most 512 bytes per entry;
+- DATA and CONTROL runtime polling use persisted cursors, post-cursor retrieval, ETag/304 support and a bounded 10-page / 1000-comment recovery ceiling.
+
+ChatGPT-side rules:
+
+1. Do not fetch the complete comment history of #10 or #12 during normal operation.
+2. Read issue metadata for counts/capacity, then retrieve only the exact request tail/result needed.
+3. If a connector call returns many records, reduce/filter inside the tool orchestration before emitting anything into conversational context.
+4. Never copy ciphertext, complete successful workflow logs, complete PR diffs or complete mailbox history into normal context.
+5. Prefer structured workflow/job/artifact metadata; fetch only the failing log section when diagnosing CI.
+6. Prefer Level 2 application operations for ordinary analysis. Level 1 bulk/detail operations are forensic tools and should be used only when the extra detail is necessary.
+7. Decrypt a DATA terminal once, validate it, reduce it immediately to compact evidence, and discard the large plaintext from the working conversational summary.
+8. Reuse the compact evidence record rather than repeatedly reopening the same mailbox terminal.
+
+A ChatGPT stream/tool timeout must therefore be diagnosed separately from application transport health. DATA/CONTROL evidence is considered implicated only when their own typed telemetry/status shows a transport failure.
+
 ## DATA publication preflight
 
 Normal operation must never hand-edit Base64, ciphertext, nonce or ephemeral public-key fields.
