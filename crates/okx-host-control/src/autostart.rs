@@ -6,12 +6,11 @@ use serde_json::{Value, json};
 use crate::{HostControlError, HostControlResult};
 
 const TASK_NAME: &str = r"\iamaman11-okx-host-control";
-const LAUNCHER_PATH: &str = r"C:\okx-control\okx-host-launcher.exe";
-const LEGACY_CONTROLLER_PATH: &str = r"C:\okx-control\okx-host-control.exe";
+const ENTRYPOINT_PATH: &str = okx_host_launcher::ENTRYPOINT_PATH;
 const TASK_XML_PATH: &str = r"C:\okx-control\okx-host-control-task.xml";
 
 pub fn install() -> HostControlResult<Value> {
-    install_action(LAUNCHER_PATH, "run", r"C:\okx-control")?;
+    install_action(ENTRYPOINT_PATH, "run", r"C:\okx-control")?;
     status_value()
 }
 
@@ -58,27 +57,14 @@ fn install_action(
 }
 
 pub fn run_now() -> HostControlResult<Value> {
-    run_now_with_policy(false)
-}
-
-pub fn run_legacy_now() -> HostControlResult<Value> {
-    run_now_with_policy(true)
-}
-
-fn run_now_with_policy(legacy: bool) -> HostControlResult<Value> {
     #[cfg(not(windows))]
     {
-        let _ = legacy;
         return Err(HostControlError::UnsupportedPlatform);
     }
 
     #[cfg(windows)]
     {
-        if legacy {
-            ensure_legacy_policy_valid()?;
-        } else {
-            ensure_policy_valid()?;
-        }
+        ensure_policy_valid()?;
         let status = Command::new("schtasks.exe")
             .args(["/Run", "/TN", TASK_NAME])
             .status()?;
@@ -90,17 +76,21 @@ fn run_now_with_policy(legacy: bool) -> HostControlResult<Value> {
         Ok(json!({
             "task_name": TASK_NAME,
             "run_requested": true,
-            "launcher_root": !legacy
+            "entrypoint_path": ENTRYPOINT_PATH
         }))
     }
 }
 
+pub fn run_legacy_now() -> HostControlResult<Value> {
+    run_now()
+}
+
 pub fn ensure_policy_valid() -> HostControlResult<()> {
-    ensure_expected_policy(LAUNCHER_PATH)
+    ensure_expected_policy(ENTRYPOINT_PATH)
 }
 
 pub fn ensure_legacy_policy_valid() -> HostControlResult<()> {
-    ensure_expected_policy(LEGACY_CONTROLLER_PATH)
+    ensure_policy_valid()
 }
 
 fn ensure_expected_policy(command: &str) -> HostControlResult<()> {
@@ -139,10 +129,9 @@ pub fn status_value() -> HostControlResult<Value> {
         let xml = String::from_utf8_lossy(&output.stdout);
         Ok(json!({
             "installed": true,
-            "policy_valid": exported_policy_valid(&xml, LAUNCHER_PATH),
-            "legacy_policy_valid": exported_policy_valid(&xml, LEGACY_CONTROLLER_PATH),
+            "policy_valid": exported_policy_valid(&xml, ENTRYPOINT_PATH),
             "task_name": TASK_NAME,
-            "launcher_path": LAUNCHER_PATH
+            "entrypoint_path": ENTRYPOINT_PATH
         }))
     }
 }
@@ -283,33 +272,19 @@ mod tests {
     const TEST_START: &str = "2026-09-29T20:00:00";
 
     #[test]
-    fn canonical_task_targets_immutable_launcher() {
+    fn canonical_task_keeps_one_fixed_entrypoint_forever() {
         let xml = task_xml(
             r"HOST\User",
             TEST_START,
-            LAUNCHER_PATH,
+            ENTRYPOINT_PATH,
             "run",
             r"C:\okx-control",
         );
-        assert!(exported_policy_valid(&xml, LAUNCHER_PATH));
-        assert!(!exported_policy_valid(&xml, LEGACY_CONTROLLER_PATH));
+        assert!(exported_policy_valid(&xml, ENTRYPOINT_PATH));
         assert_eq!(xml.matches("<TimeTrigger>").count(), 1);
         assert!(xml.contains("<Interval>PT1M</Interval>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(!xml.contains("<RestartOnFailure>"));
-    }
-
-    #[test]
-    fn legacy_policy_is_recognized_only_for_root_migration_bridge() {
-        let xml = task_xml(
-            r"HOST\User",
-            TEST_START,
-            LEGACY_CONTROLLER_PATH,
-            "run",
-            r"C:\okx-control",
-        );
-        assert!(exported_policy_valid(&xml, LEGACY_CONTROLLER_PATH));
-        assert!(!exported_policy_valid(&xml, LAUNCHER_PATH));
     }
 
     #[test]
