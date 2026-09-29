@@ -275,7 +275,7 @@ ONE okx-host-control
 ONE okx-agent
 ```
 
-Task Scheduler supervises the launcher only. The launcher selects/starts exactly one immutable controller version; host-control supervises the agent only. During the one-time root migration, the accepted controller installs launcher-root and the permanent Scheduler action, publishes its terminal result, then exits the legacy running task instance; the next existing PT1M trigger enters through launcher. Normal subsequent updates use the unchanged task on demand.
+Task Scheduler supervises the launcher only. The launcher selects/starts exactly one immutable controller version; host-control supervises the agent only. During the one-time root migration, the accepted controller only materializes the verified launcher root and a durable migration record, then publishes terminal CONTROL PASS. A bounded migration-only child waits for the exact parent process identity to exit, performs the single legacy-to-launcher Scheduler action replacement, verifies the resulting launcher policy, and invokes the existing task. If that child fails, the unchanged legacy task starts the same accepted controller, which recovers the migration from durable GitHub terminal evidence and retries. Normal subsequent controller updates never mutate Scheduler.
 
 No SCM service, RestartOnFailure authority, LogonTrigger recovery, PowerShell watchdog or second custom supervisor is allowed.
 
@@ -323,7 +323,7 @@ Durable recovery promotion additionally verifies the exact tested/merged tree, e
 
 A short-lived Actions artifact is therefore no longer the only disaster-recovery source.
 
-Repository-level branch/ruleset enforcement on `main` is an external GitHub Administration control tracked by #113 and must be enabled before the production baseline is finally closed.
+`main` is protected with the canonical required CI checks. Artifact acceptance still requires the exact tested PR head tree to equal the merged `main` tree.
 
 ## Account boundary
 
@@ -453,8 +453,7 @@ Accepted:
 
 Remaining before final production-baseline closure:
 
-- GitHub `main` branch/ruleset enforcement;
-- one final exact-artifact physical acceptance after all closure changes.
+- one final exact-artifact physical acceptance after the launcher-root lifecycle changes.
 
 Remaining operational closure:
 
