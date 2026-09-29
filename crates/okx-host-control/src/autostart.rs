@@ -15,7 +15,11 @@ pub fn install() -> HostControlResult<Value> {
     status_value()
 }
 
-fn install_action(command: &str, arguments: &str, working_directory: &str) -> HostControlResult<()> {
+fn install_action(
+    command: &str,
+    arguments: &str,
+    working_directory: &str,
+) -> HostControlResult<()> {
     #[cfg(not(windows))]
     {
         let _ = (command, arguments, working_directory);
