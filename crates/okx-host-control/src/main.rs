@@ -75,7 +75,10 @@ async fn run(cli: Cli) -> HostControlResult<()> {
             );
         }
         Command::ActivateControllerUpdate => {
-            let result = controller_update::activate()?;
+            let token = load_native_github_token()?;
+            let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
+            github.verify_repository_identity().await?;
+            let result = controller_update::activate(&github).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Once => {
