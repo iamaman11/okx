@@ -74,9 +74,7 @@ impl HostExecutor {
             | HostControlOperation::HandoffControllerUpdate => {
                 Err(HostControlError::InvalidExecutionPath)
             }
-            HostControlOperation::ControllerUpdateStatus => {
-                Ok(controller_update::status_value())
-            }
+            HostControlOperation::ControllerUpdateStatus => Ok(controller_update::status_value()),
             HostControlOperation::WorkspaceStatus => self.workspace_status(),
             HostControlOperation::TestWorkspace => self.test_workspace(),
             HostControlOperation::InitAgentIdentity => self.init_agent_identity(),
@@ -212,12 +210,8 @@ impl HostExecutor {
         let head = self.git(&["rev-parse", "HEAD"])?;
         let branch = self.git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
         let origin_main = self.git(&["rev-parse", "origin/main"])?;
-        let divergence = self.git(&[
-            "rev-list",
-            "--left-right",
-            "--count",
-            "HEAD...origin/main",
-        ])?;
+        let divergence =
+            self.git(&["rev-list", "--left-right", "--count", "HEAD...origin/main"])?;
         let status = self.git(&["status", "--porcelain=v1"])?;
         let mut changes = status
             .lines()
@@ -225,7 +219,10 @@ impl HostExecutor {
             .take(64)
             .map(|line| line.to_owned())
             .collect::<Vec<_>>();
-        let truncated = status.lines().filter(|line| !line.trim().is_empty()).count()
+        let truncated = status
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
             > changes.len();
         changes.shrink_to_fit();
 
