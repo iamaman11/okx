@@ -413,6 +413,7 @@ pub enum HostControlOperation {
     AbortControllerUpdate,
     ControllerUpdateStatus,
     WorkspaceStatus,
+    ReconcileWorkspace,
     TestWorkspace,
     InitAgentIdentity,
     AgentIdentity,
