@@ -1446,6 +1446,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "okx-bridge-mcp"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "getrandom 0.3.4",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "okx-github",
+ "okx-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "okx-cli"
 version = "0.1.0"
 dependencies = [
