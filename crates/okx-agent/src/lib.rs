@@ -1,4 +1,6 @@
 pub mod account_bootstrap;
+pub mod cloudflare_auth;
+pub mod cloudflare_transport;
 pub mod config;
 pub mod execution_preflight;
 pub mod execution_runtime;
@@ -75,6 +77,21 @@ pub enum AgentError {
 
     #[error("GitHub mailbox token is invalid")]
     InvalidGithubToken,
+
+    #[error("Cloudflare runtime token was not found in native secret storage")]
+    CloudflareTokenNotFound,
+
+    #[error("Cloudflare runtime token is invalid")]
+    InvalidCloudflareToken,
+
+    #[error("Cloudflare WebSocket URL is invalid")]
+    InvalidCloudflareWsUrl,
+
+    #[error("Cloudflare runtime id is invalid")]
+    InvalidCloudflareRuntimeId,
+
+    #[error("Cloudflare direct transport error: {0}")]
+    CloudflareTransport(String),
 
     #[error("OKX observer credential was not found in native secret storage")]
     OkxCredentialsNotFound,
