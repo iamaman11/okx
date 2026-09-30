@@ -8,6 +8,8 @@ use std::{
 
 use okx_protocol::HostControlOperation;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 use crate::{
     HostControlError, HostControlResult,
@@ -23,6 +25,8 @@ use crate::{
 const CANONICAL_ROOT: &str = r"C:\okx";
 const RUNTIME_ROOT: &str = r"C:\okx-runtime";
 const AGENT_MAILBOX_ISSUE: &str = "10";
+const AGENT_CLOUDFLARE_WS_URL: &str = "wss://okx-cloudflare-mcp.pvisakp.workers.dev/runtime";
+const AGENT_CLOUDFLARE_RUNTIME_ID: &str = "windows-primary";
 const HOST_CONTROL_CAPABILITIES_SCHEMA_V1: &str = "okx.host-control.capabilities/v1";
 const HEALTHY_AGENT_SECS: u64 = 30;
 const RESTART_BACKOFF_SECS: [u64; 5] = [1, 5, 15, 30, 60];
@@ -88,6 +92,9 @@ impl HostExecutor {
             HostControlOperation::InitAgentIdentity => self.init_agent_identity(),
             HostControlOperation::AgentIdentity => self.agent_identity(),
             HostControlOperation::BootstrapAgentGithubToken => self.bootstrap_agent_github_token(),
+            HostControlOperation::ProvisionCloudflareRuntimeToken => {
+                self.provision_cloudflare_runtime_token()
+            }
             HostControlOperation::StartAgent => self.start_agent(),
             HostControlOperation::StopAgent => self.stop_agent(),
             HostControlOperation::RestartAgent => self.restart_agent(),
@@ -344,6 +351,63 @@ impl HostExecutor {
         }))
     }
 
+    fn provision_cloudflare_runtime_token(&mut self) -> HostControlResult<Value> {
+        self.require_agent_binary()?;
+
+        let mut random = [0u8; 32];
+        getrandom::fill(&mut random).map_err(|error| HostControlError::Random(error.to_string()))?;
+
+        let mut token = String::with_capacity(64);
+        for byte in random {
+            use std::fmt::Write as _;
+            write!(&mut token, "{byte:02x}")
+                .map_err(|error| HostControlError::Random(error.to_string()))?;
+        }
+
+        let token_sha256 = format!("{:x}", Sha256::digest(token.as_bytes()));
+        let mut child = match hidden_command(self.agent_binary())
+            .arg("set-cloudflare-token")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                token.zeroize();
+                return Err(error.into());
+            }
+        };
+
+        let write_result = (|| -> std::io::Result<()> {
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "okx-agent set-cloudflare-token stdin unavailable",
+                )
+            })?;
+            stdin.write_all(token.as_bytes())?;
+            stdin.write_all(b"\n")?;
+            Ok(())
+        })();
+        token.zeroize();
+        write_result?;
+
+        let status = child.wait()?;
+        if !status.success() {
+            return Err(HostControlError::CommandFailed(
+                "okx-agent set-cloudflare-token",
+            ));
+        }
+
+        Ok(json!({
+            "stored": true,
+            "destination": "Windows Credential Manager",
+            "runtime_id": AGENT_CLOUDFLARE_RUNTIME_ID,
+            "runtime_token_sha256": token_sha256
+        }))
+    }
+
     fn start_agent(&mut self) -> HostControlResult<Value> {
         self.require_agent_binary()?;
         if self.agent_is_running()? {
@@ -445,7 +509,13 @@ impl HostExecutor {
                 "background_process_windows": "CREATE_NO_WINDOW",
                 "launcher_console_subsystem": false,
                 "remote_launcher_root_upgrade": true,
-                "launcher": okx_host_launcher::status_value()
+                "launcher": okx_host_launcher::status_value(),
+                "cloudflare_direct_transport": {
+                    "configured": true,
+                    "runtime_id": AGENT_CLOUDFLARE_RUNTIME_ID,
+                    "ws_url": AGENT_CLOUDFLARE_WS_URL,
+                    "github_fallback_preserved": true
+                }
             }
         }))
     }
@@ -531,6 +601,10 @@ impl HostExecutor {
                 AGENT_MAILBOX_ISSUE,
                 "--poll-seconds",
                 "2",
+                "--cloudflare-ws-url",
+                AGENT_CLOUDFLARE_WS_URL,
+                "--cloudflare-runtime-id",
+                AGENT_CLOUDFLARE_RUNTIME_ID,
             ])
             .current_dir(&self.repo_root)
             .stdout(Stdio::from(stdout))
