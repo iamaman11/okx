@@ -115,7 +115,10 @@ impl AccountBootstrapper {
         let permissions = strict_read_only_permissions(&config.perm)
             .map_err(|_| TradingCapabilitiesBootstrapError::PermissionRejected)?;
 
-        let account_instruments = self.api.instruments(rules.instrument.instrument_type).await?;
+        let account_instruments = self
+            .api
+            .instruments(rules.instrument.instrument_type)
+            .await?;
         let selected = account_instruments
             .into_iter()
             .find(|instrument| instrument.instrument_id == rules.instrument.instrument_id);
