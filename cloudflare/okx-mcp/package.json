@@ -1,0 +1,17 @@
+{
+  "name": "okx-cloudflare-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "deploy": "wrangler deploy --config wrangler.deploy.jsonc"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.1"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "wrangler": "4.144.0"
+  }
+}
