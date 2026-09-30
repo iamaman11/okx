@@ -4,27 +4,17 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use okx_github::{
-    GitHubClient, IssueCommentCursor, OWNER_USER_ID, REPOSITORY_ID,
-};
+use okx_github::{GitHubClient, IssueCommentCursor, OWNER_USER_ID, REPOSITORY_ID};
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponse,
-    HOST_CONTROL_REQUEST_SCHEMA_V1, HostControlOperation, HostControlRequest,
-    HostControlResult, InstrumentTypeFilter, MAILBOX_ENVELOPE_SCHEMA_V1,
-    MailboxDirection, MailboxEnvelope,
+    HOST_CONTROL_REQUEST_SCHEMA_V1, HostControlOperation, HostControlRequest, HostControlResult,
+    InstrumentTypeFilter, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
     crypto::{
-        decrypt, derive_directional_key, encrypt, public_key_from_private,
-        shared_secret,
+        decrypt, derive_directional_key, encrypt, public_key_from_private, shared_secret,
     },
 };
-use rmcp::{
-    ErrorData as McpError,
-    handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock},
-    schemars,
-    tool, tool_router,
-};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -33,11 +23,14 @@ const CONTROL_ISSUE: u64 = 12;
 const IDENTITY_SCHEMA_V1: &str = "okx.github-mailbox.identity/v1";
 const GITHUB_TOKEN_ENV: &str = "OKX_BRIDGE_GITHUB_TOKEN";
 const WAIT_BUDGET: Duration = Duration::from_secs(20);
-const WAIT_INTERVAL: Duration = Duration::from_millis(500);
+const WAIT_INTERVAL: Duration = Duration::from_secs(1);
+
+pub const SERVER_NAME: &str = "okx-bridge";
+pub const SERVER_VERSION: &str = "0.2.0";
 
 #[derive(Debug, Error)]
 pub enum BridgeError {
-    #[error("missing OKX bridge GitHub credential")]
+    #[error("missing or invalid OKX bridge GitHub credential")]
     MissingGithubCredential,
     #[error("GitHub transport failed: {0}")]
     Github(#[from] okx_github::GitHubError),
@@ -59,6 +52,10 @@ pub enum BridgeError {
     Random(String),
     #[error("unexpected terminal response")]
     UnexpectedResponse,
+    #[error("unknown tool '{0}'")]
+    UnknownTool(String),
+    #[error("invalid tool arguments: {0}")]
+    InvalidToolArguments(String),
 }
 
 #[derive(Clone)]
@@ -66,22 +63,20 @@ pub struct Bridge {
     github_token: Zeroizing<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
-pub struct FindInstrumentsParams {
-    /// Base asset code, for example ADA.
-    pub asset: String,
-    /// Optional settlement currency, for example USDT or USD.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindInstrumentsParams {
+    asset: String,
     #[serde(default)]
-    pub settle_currency: Option<String>,
-    /// Optional derivative type: SWAP or FUTURES.
+    settle_currency: Option<String>,
     #[serde(default)]
-    pub instrument_type: Option<String>,
+    instrument_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
-pub struct MarketOverviewParams {
-    /// Exact OKX derivative instrument id, for example ADA-USDT-SWAP.
-    pub instrument: String,
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MarketOverviewParams {
+    instrument: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -95,16 +90,9 @@ struct PublishedIdentity {
     public_key: String,
 }
 
-#[derive(Debug, Serialize)]
-struct ToolEnvelope<T: Serialize> {
-    transport: &'static str,
-    result: T,
-}
-
 impl Bridge {
     pub fn from_env() -> Result<Self, BridgeError> {
-        let token = env::var(GITHUB_TOKEN_ENV)
-            .map_err(|_| BridgeError::MissingGithubCredential)?;
+        let token = env::var(GITHUB_TOKEN_ENV).map_err(|_| BridgeError::MissingGithubCredential)?;
         if token.is_empty()
             || token.len() > 1024
             || token
@@ -113,7 +101,6 @@ impl Bridge {
         {
             return Err(BridgeError::MissingGithubCredential);
         }
-
         Ok(Self {
             github_token: Zeroizing::new(token),
         })
@@ -122,8 +109,63 @@ impl Bridge {
     fn github(&self) -> Result<GitHubClient, BridgeError> {
         Ok(GitHubClient::new(
             Zeroizing::new(self.github_token.as_str().to_owned()),
-            "iamaman11-okx-bridge/0.1",
+            "iamaman11-okx-bridge/0.2",
         )?)
+    }
+
+    pub async fn execute_tool(&self, name: &str, arguments: Value) -> Result<Value, BridgeError> {
+        match name {
+            "find_instruments" => {
+                let params: FindInstrumentsParams = serde_json::from_value(arguments)
+                    .map_err(|error| BridgeError::InvalidToolArguments(error.to_string()))?;
+                let instrument_type = match params.instrument_type.as_deref() {
+                    None => None,
+                    Some("SWAP") => Some(InstrumentTypeFilter::Swap),
+                    Some("FUTURES") => Some(InstrumentTypeFilter::Futures),
+                    Some(value) => {
+                        return Err(BridgeError::InvalidToolArguments(format!(
+                            "instrument_type must be SWAP or FUTURES, got {value}"
+                        )));
+                    }
+                };
+                let response = self
+                    .data_request(AgentOperation::FindInstruments {
+                        asset: params.asset,
+                        settle_currency: params.settle_currency,
+                        instrument_type,
+                    })
+                    .await?;
+                Ok(compact_agent_response(response))
+            }
+            "market_overview" => {
+                let params: MarketOverviewParams = serde_json::from_value(arguments)
+                    .map_err(|error| BridgeError::InvalidToolArguments(error.to_string()))?;
+                let response = self
+                    .data_request(AgentOperation::MarketOverview {
+                        instrument: params.instrument,
+                    })
+                    .await?;
+                Ok(compact_agent_response(response))
+            }
+            "control_status" => {
+                if arguments
+                    .as_object()
+                    .is_some_and(|object| !object.is_empty())
+                {
+                    return Err(BridgeError::InvalidToolArguments(
+                        "control_status accepts no arguments".to_owned(),
+                    ));
+                }
+                let result = self.control_status_request().await?;
+                Ok(json!({
+                    "status": result.status,
+                    "observed_at": result.observed_at,
+                    "details": result.details,
+                    "failure": result.failure
+                }))
+            }
+            other => Err(BridgeError::UnknownTool(other.to_owned())),
+        }
     }
 
     async fn verify(&self, github: &GitHubClient) -> Result<(), BridgeError> {
@@ -175,7 +217,6 @@ impl Bridge {
         getrandom::fill(&mut client_private)
             .map_err(|error| BridgeError::Random(error.to_string()))?;
         let client_public = public_key_from_private(client_private);
-
         let shared = shared_secret(client_private, agent_public_key)?;
         let key = derive_directional_key(
             &shared,
@@ -184,8 +225,7 @@ impl Bridge {
             MailboxDirection::ClientToAgent,
         )?;
         let mut nonce = [0_u8; 12];
-        getrandom::fill(&mut nonce)
-            .map_err(|error| BridgeError::Random(error.to_string()))?;
+        getrandom::fill(&mut nonce).map_err(|error| BridgeError::Random(error.to_string()))?;
 
         let mut envelope = MailboxEnvelope {
             schema: MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
@@ -229,7 +269,7 @@ impl Bridge {
         let request = HostControlRequest {
             schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
             request_id: request_id("ctl_bridge")?,
-            operation: HostControlOperation::Status,
+            operation: HostControlOperation::TransportStatus,
         };
         request.validate()?;
         github
@@ -238,68 +278,79 @@ impl Bridge {
 
         wait_for_control_result(&github, cursor, &request.request_id).await
     }
-
-    async fn tool_data(&self, operation: AgentOperation) -> Result<CallToolResult, McpError> {
-        match self.data_request(operation).await {
-            Ok(response) => tool_success(&response),
-            Err(error) => Ok(CallToolResult::error(vec![ContentBlock::text(
-                error.to_string(),
-            )])),
-        }
-    }
-
-    async fn tool_control_status(&self) -> Result<CallToolResult, McpError> {
-        match self.control_status_request().await {
-            Ok(result) => tool_success(&result),
-            Err(error) => Ok(CallToolResult::error(vec![ContentBlock::text(
-                error.to_string(),
-            )])),
-        }
-    }
 }
 
-#[tool_router(server_handler)]
-impl Bridge {
-    #[tool(description = "Find current OKX ADA/crypto derivative instruments through the encrypted Windows DATA channel. Returns bounded decrypted typed JSON only.")]
-    pub async fn find_instruments(
-        &self,
-        Parameters(params): Parameters<FindInstrumentsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let instrument_type = match params.instrument_type.as_deref() {
-            None => None,
-            Some("SWAP") => Some(InstrumentTypeFilter::Swap),
-            Some("FUTURES") => Some(InstrumentTypeFilter::Futures),
-            Some(_) => {
-                return Err(McpError::invalid_params(
-                    "instrument_type must be SWAP or FUTURES",
-                    None,
-                ));
+pub fn mcp_initialize_result() -> Value {
+    json!({
+        "protocolVersion": "2025-06-18",
+        "capabilities": {
+            "tools": {
+                "listChanged": false
             }
-        };
+        },
+        "serverInfo": {
+            "name": SERVER_NAME,
+            "version": SERVER_VERSION
+        }
+    })
+}
 
-        self.tool_data(AgentOperation::FindInstruments {
-            asset: params.asset,
-            settle_currency: params.settle_currency,
-            instrument_type,
-        })
-        .await
-    }
+pub fn mcp_tools() -> Value {
+    json!([
+        {
+            "name": "find_instruments",
+            "title": "Find OKX instruments",
+            "description": "Find current OKX derivative instruments through the encrypted Windows DATA channel. Returns decrypted bounded data only; transport ciphertext and keys are hidden.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "asset": {"type": "string", "description": "Uppercase asset code, e.g. ADA"},
+                    "settle_currency": {"type": ["string", "null"], "description": "Optional settlement currency, e.g. USDT or USD"},
+                    "instrument_type": {"type": ["string", "null"], "enum": ["SWAP", "FUTURES", null]}
+                },
+                "required": ["asset"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": "market_overview",
+            "title": "Read OKX market overview",
+            "description": "Read current rules, prices and market state for one exact OKX derivative instrument through the encrypted Windows DATA channel.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "instrument": {"type": "string", "description": "Exact OKX instrument id, e.g. ADA-USDT-SWAP"}
+                },
+                "required": ["instrument"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": "control_status",
+            "title": "Read OKX Windows runtime status",
+            "description": "Read the current controller, launcher and agent transport status. Performs no product or trading mutation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true}
+        }
+    ])
+}
 
-    #[tool(description = "Read the current OKX market overview, rules and price state for one exact derivative instrument through the encrypted Windows DATA channel.")]
-    pub async fn market_overview(
-        &self,
-        Parameters(params): Parameters<MarketOverviewParams>,
-    ) -> Result<CallToolResult, McpError> {
-        self.tool_data(AgentOperation::MarketOverview {
-            instrument: params.instrument,
-        })
-        .await
-    }
-
-    #[tool(description = "Read the current Windows OKX controller/agent status through the CONTROL channel. No product mutation is performed.")]
-    pub async fn control_status(&self) -> Result<CallToolResult, McpError> {
-        self.tool_control_status().await
-    }
+fn compact_agent_response(response: AgentResponse) -> Value {
+    json!({
+        "status": response.status,
+        "generated_at": response.generated_at,
+        "quality": response.quality,
+        "result_schema": response.result_schema,
+        "result": response.result,
+        "failure": response.failure,
+        "warnings": response.warnings
+    })
 }
 
 async fn tail_cursor(
@@ -351,12 +402,7 @@ async fn wait_for_mailbox_response(
                 agent_key_id,
                 MailboxDirection::AgentToClient,
             )?;
-            let plaintext = decrypt(
-                &key,
-                &nonce,
-                envelope.aad()?.as_bytes(),
-                &ciphertext,
-            )?;
+            let plaintext = decrypt(&key, &nonce, envelope.aad()?.as_bytes(), &ciphertext)?;
             let response: AgentResponse = serde_json::from_slice(&plaintext)?;
             response.validate()?;
             if response.request_id != request_id {
@@ -413,15 +459,6 @@ fn request_id(prefix: &str) -> Result<String, BridgeError> {
     Ok(format!("{prefix}_{suffix}"))
 }
 
-fn tool_success<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
-    let body = serde_json::to_string(&ToolEnvelope {
-        transport: "hidden",
-        result: value,
-    })
-    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-    Ok(CallToolResult::success(vec![ContentBlock::text(body)]))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,17 +474,28 @@ mod tests {
     }
 
     #[test]
-    fn tool_surface_does_not_expose_transport_fields() {
-        let source = include_str!("lib.rs");
+    fn tool_surface_is_read_only_and_bounded() {
+        let tools = mcp_tools();
+        let tools = tools.as_array().expect("tools");
+        assert_eq!(tools.len(), 3);
+        assert!(tools.iter().all(|tool| {
+            tool.pointer("/annotations/readOnlyHint")
+                .and_then(Value::as_bool)
+                == Some(true)
+        }));
+    }
+
+    #[test]
+    fn tool_surface_does_not_publish_transport_secrets() {
+        let serialized = serde_json::to_string(&mcp_tools()).expect("serialize");
         for forbidden in [
-            "client_private_key:",
-            "github_token:",
-            "ciphertext: String",
+            "ciphertext",
+            "nonce",
+            "private_key",
+            "github_token",
+            "client_ephemeral_public_key",
         ] {
-            assert!(
-                !source.contains(&format!("pub {forbidden}")),
-                "public tool surface leaked {forbidden}"
-            );
+            assert!(!serialized.contains(forbidden));
         }
     }
 
