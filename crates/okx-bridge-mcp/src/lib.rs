@@ -300,7 +300,7 @@ pub fn mcp_tools() -> Value {
         {
             "name": "find_instruments",
             "title": "Find OKX instruments",
-            "description": "Find current OKX derivative instruments through the encrypted Windows DATA channel. Returns decrypted bounded data only; transport ciphertext and keys are hidden.",
+            "description": "Find current OKX derivative instruments through the encrypted Windows DATA channel. Returns bounded typed data only; transport internals stay hidden.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
