@@ -2,7 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     time::{Duration, Instant},
 };
 
@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::{
     HostControlError, HostControlResult,
     auth::load_native_github_token,
+    background_process::hidden_command,
     autostart, controller_update,
     desired::{AgentDesired, DesiredStateStore},
     job::AgentJob,
@@ -314,7 +315,7 @@ impl HostExecutor {
         self.require_agent_binary()?;
         let token = load_native_github_token()?;
 
-        let mut child = Command::new(self.agent_binary())
+        let mut child = hidden_command(self.agent_binary())
             .arg("set-github-token")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -431,7 +432,7 @@ impl HostExecutor {
                 "verified_self_update": true,
                 "bounded_control_results": true,
                 "bounded_workspace_status": true,
-                "self_update_acceptance_marker": "immutable-launcher-v3-rollback",
+                "self_update_acceptance_marker": "immutable-launcher-v4-no-window",
                 "scheduler_action_handoff": false,
                 "transient_activator_handoff": false,
                 "immutable_launcher_root": true,
@@ -439,6 +440,9 @@ impl HostExecutor {
                 "scheduler_mutation_during_update": false,
                 "abort_controller_update": true,
                 "acceptance_fail_next_controller_activation": true,
+                "background_process_windows": "CREATE_NO_WINDOW",
+                "launcher_console_subsystem": false,
+                "remote_launcher_root_upgrade": true,
                 "launcher": okx_host_launcher::status_value()
             }
         }))
@@ -451,7 +455,7 @@ impl HostExecutor {
     }
 
     fn agent_output(&self, args: &[&str]) -> HostControlResult<std::process::Output> {
-        let output = Command::new(self.agent_binary())
+        let output = hidden_command(self.agent_binary())
             .args(args)
             .current_dir(&self.repo_root)
             .output()?;
@@ -518,7 +522,7 @@ impl HostExecutor {
             .append(true)
             .open(self.runtime_dir().join("okx-agent.stderr.log"))?;
 
-        let mut child = Command::new(self.agent_binary())
+        let mut child = hidden_command(self.agent_binary())
             .args([
                 "run",
                 "--mailbox-issue",
@@ -645,7 +649,7 @@ impl HostExecutor {
     }
 
     fn git(&self, args: &[&str]) -> HostControlResult<String> {
-        let output = Command::new("git")
+        let output = hidden_command("git")
             .arg("-C")
             .arg(&self.repo_root)
             .args(args)
@@ -669,7 +673,7 @@ impl HostExecutor {
         let stdout = File::create(self.runtime_dir().join(log_name))?;
         let stderr = stdout.try_clone()?;
 
-        let status = Command::new(program)
+        let status = hidden_command(program)
             .args(args)
             .current_dir(&self.repo_root)
             .stdout(Stdio::from(stdout))
@@ -705,7 +709,7 @@ fn bounded_utf8(value: &str, max_bytes: usize) -> String {
 }
 
 fn command_available(command: &str) -> bool {
-    Command::new(command)
+    hidden_command(command)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
