@@ -18,6 +18,7 @@ interface Env {
   OAUTH_KV: any;
   RUNTIME: any;
   MCP_OWNER_SECRET: string;
+  RUNTIME_TOKEN_SHA256: string;
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
@@ -85,10 +86,6 @@ function validInstrument(value: unknown): value is string {
     value.length <= 64 &&
     /^[A-Z0-9_-]+$/.test(value)
   );
-}
-
-function validSha256(value: unknown): value is string {
-  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -266,16 +263,6 @@ const mcpApi = {
             inputSchema: { type: "object", properties: {}, additionalProperties: false },
           },
           {
-            name: "configure_runtime_token_hash",
-            description: "Set the SHA-256 fingerprint of the Windows runtime bearer token. Transport configuration only.",
-            inputSchema: {
-              type: "object",
-              properties: { sha256: { type: "string", pattern: "^[0-9a-f]{64}$" } },
-              required: ["sha256"],
-              additionalProperties: false,
-            },
-          },
-          {
             name: "find_instruments",
             description: "Find OKX instruments through the Windows product runtime.",
             inputSchema: {
@@ -311,17 +298,6 @@ const mcpApi = {
     try {
       if (name === "runtime_status") {
         return jsonRpc(id, toolResult(await runtimeFetch(env, "/status?probe=1")));
-      }
-      if (name === "configure_runtime_token_hash") {
-        if (!validSha256(args.sha256)) {
-          return jsonRpcError(id, -32602, "invalid sha256");
-        }
-        const result = await runtimeFetch(env, "/configure", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ runtime_token_sha256: args.sha256 }),
-        });
-        return jsonRpc(id, toolResult(result));
       }
       if (name === "find_instruments") {
         if (!validCode(args.asset)) return jsonRpcError(id, -32602, "invalid asset");
@@ -537,11 +513,13 @@ function escapeHtml(value: string): string {
 
 export class RuntimeSession {
   private state: any;
+  private env: Env;
   private pending = new Map<string, Pending>();
   private inflight = 0;
 
-  constructor(state: any, _env: Env) {
+  constructor(state: any, env: Env) {
     this.state = state;
+    this.env = env;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -549,18 +527,6 @@ export class RuntimeSession {
 
     if (url.pathname === "/runtime") {
       return this.acceptRuntime(request);
-    }
-    if (url.pathname === "/configure" && request.method === "POST") {
-      const body = await request.json() as any;
-      if (!validSha256(body.runtime_token_sha256)) {
-        return Response.json(transportFailure("INVALID_RUNTIME_TOKEN_HASH", false), { status: 400 });
-      }
-      await this.state.storage.put("runtime_token_sha256", body.runtime_token_sha256);
-      return Response.json({
-        schema: "okx.direct-transport.configuration/v1",
-        status: "PASS",
-        runtime_token_sha256: body.runtime_token_sha256,
-      });
     }
     if (url.pathname === "/status") {
       return Response.json(await this.status(url.searchParams.get("probe") === "1"));
@@ -576,9 +542,9 @@ export class RuntimeSession {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return new Response("websocket required", { status: 426 });
     }
-    const configuredHash = await this.state.storage.get("runtime_token_sha256") as string | undefined;
-    if (!configuredHash) {
-      return new Response("runtime credential not configured", { status: 503 });
+    const configuredHash = this.env.RUNTIME_TOKEN_SHA256;
+    if (!/^[0-9a-f]{64}$/.test(configuredHash)) {
+      return new Response("runtime credential fingerprint invalid", { status: 503 });
     }
     const authorization = request.headers.get("authorization") ?? "";
     if (!authorization.startsWith("Bearer ")) {
