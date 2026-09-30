@@ -160,6 +160,13 @@ pub enum ExecutionTradeMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum TradingMarginMode {
+    Cross,
+    Isolated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExecutionOrderType {
     Limit,
     PostOnly,
@@ -235,6 +242,10 @@ pub enum AgentOperation {
     MailboxTelemetry,
     AccountSnapshot,
     PortfolioRisk,
+    TradingCapabilities {
+        instrument: String,
+        margin_mode: TradingMarginMode,
+    },
     CurrentCost {
         instrument: String,
         contracts: String,
@@ -301,6 +312,7 @@ impl AgentOperation {
             | Self::MailboxTelemetry
             | Self::AccountSnapshot
             | Self::PortfolioRisk => Ok(()),
+            Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
             Self::PrepareOpenExecution {
                 intent_id,
                 instrument,
@@ -912,6 +924,36 @@ mod tests {
 
     fn request_id() -> String {
         "req_0123456789abcdef".to_owned()
+    }
+
+    #[test]
+    fn trading_capabilities_request_is_strict_and_round_trips() {
+        let request = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_caps_0123456789".to_owned(),
+            operation: AgentOperation::TradingCapabilities {
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                margin_mode: TradingMarginMode::Isolated,
+            },
+        };
+
+        request
+            .validate()
+            .expect("valid trading capabilities request");
+        let json = serde_json::to_string(&request).expect("serialize");
+        let decoded: AgentRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, request);
+        decoded.validate().expect("valid decoded request");
+
+        let invalid = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_caps_invalid_012345".to_owned(),
+            operation: AgentOperation::TradingCapabilities {
+                instrument: "doge/usdt".to_owned(),
+                margin_mode: TradingMarginMode::Cross,
+            },
+        };
+        assert_eq!(invalid.validate(), Err(ProtocolError::InvalidInstrument));
     }
 
     #[test]
