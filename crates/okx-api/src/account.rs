@@ -552,7 +552,7 @@ fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn account_mode_name(account_level: &str) -> &'static str {
+pub fn account_mode_name(account_level: &str) -> &'static str {
     match account_level {
         "1" => "spot",
         "2" => "futures",
@@ -567,7 +567,7 @@ pub fn account_uid_fingerprint(uid: &str) -> String {
     format!("{digest:x}")
 }
 
-fn account_type_name(account_type: &str) -> &'static str {
+pub fn account_type_name(account_type: &str) -> &'static str {
     match account_type {
         "0" => "main",
         "1" => "standard_subaccount",
