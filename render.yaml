@@ -4,6 +4,7 @@ services:
     runtime: docker
     plan: free
     dockerfilePath: ./crates/okx-bridge-mcp/Dockerfile
+    dockerContext: .
     healthCheckPath: /health
     envVars:
       - key: OKX_BRIDGE_GITHUB_TOKEN
