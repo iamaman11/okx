@@ -12,8 +12,9 @@ use serde_json::{Value, json};
 use crate::{
     HostControlError, HostControlResult,
     auth::load_native_github_token,
+    autostart,
     background_process::hidden_command,
-    autostart, controller_update,
+    controller_update,
     desired::{AgentDesired, DesiredStateStore},
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
