@@ -240,7 +240,10 @@ mod tests {
             (!value.is_empty()).then(|| value.to_owned())
         }
 
-        assert_eq!(parse("Bearer github_pat_example").as_deref(), Some("github_pat_example"));
+        assert_eq!(
+            parse("Bearer github_pat_example").as_deref(),
+            Some("github_pat_example")
+        );
         assert_eq!(parse("bearer nope"), None);
         assert_eq!(parse("Bearer "), None);
     }
