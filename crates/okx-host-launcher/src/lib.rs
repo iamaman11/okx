@@ -386,8 +386,7 @@ pub fn upgrade_launcher_root(
 
     let recoverable = (source_hash == expected_current_sha256
         && entrypoint_hash == expected_current_sha256)
-        || (source_hash == candidate_sha256
-            && entrypoint_hash == expected_current_sha256);
+        || (source_hash == candidate_sha256 && entrypoint_hash == expected_current_sha256);
     if !recoverable {
         return Err(LauncherError::RootConflict);
     }
