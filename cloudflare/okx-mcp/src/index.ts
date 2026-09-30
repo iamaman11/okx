@@ -29,6 +29,7 @@ interface SocketAttachment {
 }
 
 interface Pending {
+  generation: number;
   resolve: (value: any) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -474,27 +475,33 @@ export class RuntimeSession {
     if (frame.type === "pong" && typeof frame.nonce === "string") {
       attachment.lastPongAtMs = Date.now();
       ws.serializeAttachment(attachment);
-      this.resolvePending(`pong:${frame.nonce}`, frame);
+      this.resolvePending(`pong:${frame.nonce}`, attachment.generation, frame);
       return;
     }
     if (frame.type === "delivery_ack" && typeof frame.request_id === "string") {
-      this.resolvePending(`ack:${frame.request_id}`, frame);
+      this.resolvePending(`ack:${frame.request_id}`, attachment.generation, frame);
       return;
     }
     if (frame.type === "response" && frame.response?.request_id) {
-      this.resolvePending(`response:${frame.response.request_id}`, frame.response);
+      this.resolvePending(`response:${frame.response.request_id}`, attachment.generation, frame.response);
       return;
     }
 
     ws.close(1008, "unexpected frame");
   }
 
-  async webSocketClose(_ws: any): Promise<void> {
-    this.rejectAll("RUNTIME_OFFLINE");
+  async webSocketClose(ws: any): Promise<void> {
+    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    if (attachment?.generation) {
+      this.rejectGeneration(attachment.generation, "RUNTIME_OFFLINE");
+    }
   }
 
-  async webSocketError(_ws: any): Promise<void> {
-    this.rejectAll("RUNTIME_OFFLINE");
+  async webSocketError(ws: any): Promise<void> {
+    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    if (attachment?.generation) {
+      this.rejectGeneration(attachment.generation, "RUNTIME_OFFLINE");
+    }
   }
 
   private activeSocket(): { ws: any; attachment: SocketAttachment } | null {
@@ -512,7 +519,11 @@ export class RuntimeSession {
 
   private async proveFresh(active: { ws: any; attachment: SocketAttachment }): Promise<void> {
     const nonce = `ping_${crypto.randomUUID()}`;
-    const wait = this.waitFor(`pong:${nonce}`, PONG_DEADLINE_MS);
+    const wait = this.waitFor(
+      `pong:${nonce}`,
+      active.attachment.generation,
+      PONG_DEADLINE_MS,
+    );
     active.ws.send(JSON.stringify({
       type: "ping",
       schema: FRAME_SCHEMA,
@@ -535,8 +546,16 @@ export class RuntimeSession {
     try {
       await this.proveFresh(active);
 
-      const ack = this.waitFor(`ack:${request.request_id}`, ACK_DEADLINE_MS);
-      const response = this.waitFor(`response:${request.request_id}`, RESPONSE_DEADLINE_MS);
+      const ack = this.waitFor(
+        `ack:${request.request_id}`,
+        active.attachment.generation,
+        ACK_DEADLINE_MS,
+      );
+      const response = this.waitFor(
+        `response:${request.request_id}`,
+        active.attachment.generation,
+        RESPONSE_DEADLINE_MS,
+      );
       active.ws.send(JSON.stringify({
         type: "request",
         schema: FRAME_SCHEMA,
@@ -590,20 +609,23 @@ export class RuntimeSession {
     };
   }
 
-  private waitFor(key: string, timeoutMs: number): Promise<any> {
+  private waitFor(key: string, generation: number, timeoutMs: number): Promise<any> {
     this.clearPending(key);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(key);
+        const current = this.pending.get(key);
+        if (current?.generation === generation) {
+          this.pending.delete(key);
+        }
         reject(new Error(key.startsWith("pong:") ? "SESSION_STALE" : key.startsWith("ack:") ? "DELIVERY_FAILED" : "RESPONSE_TIMEOUT"));
       }, timeoutMs);
-      this.pending.set(key, { resolve, reject, timer });
+      this.pending.set(key, { generation, resolve, reject, timer });
     });
   }
 
-  private resolvePending(key: string, value: any): void {
+  private resolvePending(key: string, generation: number, value: any): void {
     const pending = this.pending.get(key);
-    if (!pending) return;
+    if (!pending || pending.generation !== generation) return;
     clearTimeout(pending.timer);
     this.pending.delete(key);
     pending.resolve(value);
@@ -616,8 +638,9 @@ export class RuntimeSession {
     this.pending.delete(key);
   }
 
-  private rejectAll(reason: string): void {
+  private rejectGeneration(generation: number, reason: string): void {
     for (const [key, pending] of this.pending) {
+      if (pending.generation !== generation) continue;
       clearTimeout(pending.timer);
       pending.reject(new Error(reason));
       this.pending.delete(key);
