@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
-    "deploy": "wrangler deploy --config wrangler.deploy.jsonc"
+    "deploy": "wrangler deploy --config wrangler.jsonc"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.2.1"

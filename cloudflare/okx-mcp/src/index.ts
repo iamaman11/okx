@@ -8,13 +8,13 @@ const PONG_DEADLINE_MS = 2_000;
 const ACK_DEADLINE_MS = 2_000;
 const RESPONSE_DEADLINE_MS = 20_000;
 const RUNTIME_NAME = "windows-primary";
+const PUBLIC_ORIGIN = "https://okx-cloudflare-mcp.okx-794.workers.dev";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
 interface Env {
   OAUTH_KV: any;
   RUNTIME: any;
-  PUBLIC_ORIGIN: string;
   MCP_OWNER_SECRET: string;
   OAUTH_PROVIDER: OAuthHelpers;
 }
@@ -657,8 +657,8 @@ export default new OAuthProvider<Env>({
   clientRegistrationEndpoint: "/register",
   scopesSupported: ["mcp:use"],
   resourceMetadata: {
-    resource: "https://okx-cloudflare-mcp.pvisakp.workers.dev/mcp",
-    authorization_servers: ["https://okx-cloudflare-mcp.pvisakp.workers.dev"],
+    resource: `${PUBLIC_ORIGIN}/mcp`,
+    authorization_servers: [PUBLIC_ORIGIN],
   },
   requiredScopes: ["mcp:use"],
 });

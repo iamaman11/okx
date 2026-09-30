@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "okx-cloudflare-mcp",
+  "account_id": "794b1805f8db2889aaae730b313ce7dc",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-30",
   "compatibility_flags": ["global_fetch_strictly_public"],
@@ -8,7 +9,7 @@
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "__OAUTH_KV_ID__"
+      "id": "ac85e0ae8eb046c7a4c2726aa720c15f"
     }
   ],
   "durable_objects": {
@@ -24,8 +25,5 @@
       "tag": "v1",
       "new_sqlite_classes": ["RuntimeSession"]
     }
-  ],
-  "vars": {
-    "PUBLIC_ORIGIN": "https://okx-cloudflare-mcp.pvisakp.workers.dev"
-  }
+  ]
 }
