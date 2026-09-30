@@ -2,9 +2,9 @@ services:
   - type: web
     name: okx-bridge-mcp
     runtime: docker
-    plan: starter
+    plan: free
     dockerfilePath: ./crates/okx-bridge-mcp/Dockerfile
-    healthCheckPath: /mcp
+    healthCheckPath: /health
     envVars:
       - key: OKX_BRIDGE_GITHUB_TOKEN
         sync: false
