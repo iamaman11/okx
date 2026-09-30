@@ -170,7 +170,8 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         | AgentOperation::PrepareOpenExecution { .. }
         | AgentOperation::PrepareCloseExecution { .. }
         | AgentOperation::PortfolioRisk
-        | AgentOperation::AnalyzeCandidateOrder { .. } => STANDARD_RESPONSE_PLAINTEXT_BYTES,
+        | AgentOperation::AnalyzeCandidateOrder { .. }
+        | AgentOperation::TradingCapabilities { .. } => STANDARD_RESPONSE_PLAINTEXT_BYTES,
         AgentOperation::MarketHistory { .. }
         | AgentOperation::FindInstruments { .. }
         | AgentOperation::AccountSnapshot => LARGE_RESPONSE_PLAINTEXT_BYTES,
