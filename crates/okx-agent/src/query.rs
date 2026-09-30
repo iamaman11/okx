@@ -8,7 +8,8 @@ use okx_analysis::{
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
-    ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountError, AccountSnapshot,
+    ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, TRADING_CAPABILITIES_SCHEMA_V1,
+    AccountError, AccountSnapshot,
     INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
     MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
     MarketHistorySnapshot, MarketReadiness, MarketSnapshot, ReferenceRegistry,
@@ -26,7 +27,10 @@ use okx_runtime::{
 
 use crate::{
     AgentResult,
-    account_bootstrap::{AccountBootstrapError, AccountBootstrapper, FeeScheduleBootstrapError},
+    account_bootstrap::{
+        AccountBootstrapError, AccountBootstrapper, FeeScheduleBootstrapError,
+        TradingCapabilitiesBootstrapError,
+    },
     execution_runtime::ExecutionRuntime,
     market_bootstrap::{MarketBootstrapError, MarketBootstrapper},
 };
@@ -50,6 +54,8 @@ pub const ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE: &str =
 pub const ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE: &str = "ACCOUNT_OBSERVER_PERMISSION_REJECTED";
 pub const ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE: &str = "ACCOUNT_PRIVATE_API_UNAVAILABLE";
 pub const ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE: &str = "ACCOUNT_BOOTSTRAP_INCONSISTENT";
+pub const ACCOUNT_TRADING_CAPABILITIES_INCONSISTENT_CODE: &str =
+    "ACCOUNT_TRADING_CAPABILITIES_INCONSISTENT";
 pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT";
 pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
@@ -192,7 +198,9 @@ pub(crate) async fn dispatch(
         | AgentOperation::SnapshotQuality { .. } => {
             market::dispatch(request, context, generated_at).await
         }
-        AgentOperation::AccountSnapshot | AgentOperation::PortfolioRisk => {
+        AgentOperation::AccountSnapshot
+        | AgentOperation::PortfolioRisk
+        | AgentOperation::TradingCapabilities { .. } => {
             account::dispatch(request, context, generated_at).await
         }
         AgentOperation::ExecutorPreflight
@@ -384,6 +392,19 @@ async fn assemble_market_history(
     }))
 }
 
+async fn resolve_instrument_rules(
+    context: ObservationQueryContext<'_>,
+    instrument: &str,
+) -> Option<InstrumentRulesSnapshot> {
+    if let Some(public_ws) = context.public_ws {
+        public_ws.instrument_rules(instrument).await
+    } else {
+        context
+            .standalone_reference
+            .and_then(|reference| reference.instrument_rules(instrument))
+    }
+}
+
 struct AssembledAccountSnapshot {
     snapshot: AccountSnapshot,
     quality: DataQuality,
@@ -483,6 +504,42 @@ fn account_query_failure(
             generated_at,
             AgentResponseStatus::Failed,
             ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE,
+            error.to_string(),
+            false,
+        ),
+    }
+}
+
+fn trading_capabilities_failure(
+    request: &AgentRequest,
+    generated_at: &str,
+    error: TradingCapabilitiesBootstrapError,
+) -> AgentResponse {
+    match error {
+        TradingCapabilitiesBootstrapError::PermissionRejected => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE,
+            "OKX observer API key must have read_only permission only".to_owned(),
+            false,
+        ),
+        TradingCapabilitiesBootstrapError::Api(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE,
+            error.to_string(),
+            true,
+        ),
+        TradingCapabilitiesBootstrapError::Fee(error) => {
+            fee_schedule_failure(request, generated_at, error)
+        }
+        TradingCapabilitiesBootstrapError::Normalize(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ACCOUNT_TRADING_CAPABILITIES_INCONSISTENT_CODE,
             error.to_string(),
             false,
         ),
