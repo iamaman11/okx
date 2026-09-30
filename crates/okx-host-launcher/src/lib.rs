@@ -384,9 +384,9 @@ pub fn upgrade_launcher_root(
         }));
     }
 
-    let recoverable = (source_hash == expected_current_sha256
-        && entrypoint_hash == expected_current_sha256)
-        || (source_hash == candidate_sha256 && entrypoint_hash == expected_current_sha256);
+    let recoverable =
+        (source_hash == candidate_sha256 || source_hash == expected_current_sha256)
+            && entrypoint_hash == expected_current_sha256;
     if !recoverable {
         return Err(LauncherError::RootConflict);
     }
@@ -1021,14 +1021,18 @@ fn spawn_controller(
 }
 
 fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
-    let mut command = Command::new(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = Command::new(program);
         command.creation_flags(CREATE_NO_WINDOW);
+        command
     }
-    command
+    #[cfg(not(windows))]
+    {
+        Command::new(program)
+    }
 }
 
 fn valid_request_id(value: &str) -> bool {
