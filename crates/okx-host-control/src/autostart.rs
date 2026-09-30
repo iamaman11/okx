@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use chrono::{Duration as ChronoDuration, Local};
 use serde_json::{Value, json};
 
-use crate::{background_process::hidden_command, HostControlError, HostControlResult};
+use crate::{HostControlError, HostControlResult, background_process::hidden_command};
 
 const TASK_NAME: &str = r"\iamaman11-okx-host-control";
 const ENTRYPOINT_PATH: &str = okx_host_launcher::ENTRYPOINT_PATH;
