@@ -16,6 +16,7 @@ use crate::{
     desired::{AgentDesired, DesiredStateStore},
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
+    workspace,
 };
 
 const CANONICAL_ROOT: &str = r"C:\okx";
@@ -81,6 +82,7 @@ impl HostExecutor {
             HostControlOperation::AbortControllerUpdate => controller_update::abort(),
             HostControlOperation::ControllerUpdateStatus => Ok(controller_update::status_value()),
             HostControlOperation::WorkspaceStatus => self.workspace_status(),
+            HostControlOperation::ReconcileWorkspace => self.reconcile_workspace(),
             HostControlOperation::TestWorkspace => self.test_workspace(),
             HostControlOperation::InitAgentIdentity => self.init_agent_identity(),
             HostControlOperation::AgentIdentity => self.agent_identity(),
@@ -249,6 +251,24 @@ impl HostExecutor {
             "changes": changes,
             "changes_truncated": truncated
         }))
+    }
+
+    fn reconcile_workspace(&mut self) -> HostControlResult<Value> {
+        let was_running = self.agent_is_running()?;
+        if was_running {
+            self.terminate_agent_owned()?;
+        }
+
+        let result = workspace::reconcile(&self.repo_root);
+
+        if was_running && self.desired_agent == AgentDesired::Running {
+            if let Err(error) = self.start_agent_process() {
+                self.schedule_restart();
+                return Err(error);
+            }
+        }
+
+        result
     }
 
     fn sync(&mut self) -> HostControlResult<Value> {
@@ -431,6 +451,7 @@ impl HostExecutor {
                 "verified_self_update": true,
                 "bounded_control_results": true,
                 "bounded_workspace_status": true,
+                "safe_workspace_reconcile": true,
                 "self_update_acceptance_marker": "immutable-launcher-v3-rollback",
                 "scheduler_action_handoff": false,
                 "transient_activator_handoff": false,
