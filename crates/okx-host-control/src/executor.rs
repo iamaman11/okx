@@ -25,7 +25,7 @@ use crate::{
 const CANONICAL_ROOT: &str = r"C:\okx";
 const RUNTIME_ROOT: &str = r"C:\okx-runtime";
 const AGENT_MAILBOX_ISSUE: &str = "10";
-const AGENT_CLOUDFLARE_WS_URL: &str = "wss://okx-cloudflare-mcp.pvisakp.workers.dev/runtime";
+const AGENT_CLOUDFLARE_WS_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime";
 const AGENT_CLOUDFLARE_RUNTIME_ID: &str = "windows-primary";
 const HOST_CONTROL_CAPABILITIES_SCHEMA_V1: &str = "okx.host-control.capabilities/v1";
 const HEALTHY_AGENT_SECS: u64 = 30;
@@ -837,6 +837,15 @@ mod tests {
             .execute(HostControlOperation::BuildAgent)
             .expect_err("remote local build must fail closed");
         assert!(matches!(error, HostControlError::InvalidExecutionPath));
+    }
+
+    #[test]
+    fn cloudflare_transport_endpoint_is_production_okx_account_only() {
+        assert_eq!(
+            AGENT_CLOUDFLARE_WS_URL,
+            "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime"
+        );
+        assert!(!AGENT_CLOUDFLARE_WS_URL.contains("pvisakp"));
     }
 
     #[test]
