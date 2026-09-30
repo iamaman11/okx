@@ -49,11 +49,7 @@ pub(super) async fn dispatch(
             let snapshot = match account.trading_capabilities(&rules, margin_mode).await {
                 Ok(value) => value,
                 Err(error) => {
-                    return Ok(trading_capabilities_failure(
-                        request,
-                        generated_at,
-                        error,
-                    ));
+                    return Ok(trading_capabilities_failure(request, generated_at, error));
                 }
             };
             let warnings = snapshot.warnings.clone();
