@@ -1,4 +1,5 @@
 pub mod account;
+pub mod capabilities;
 pub mod fee;
 pub mod history;
 pub mod market;
@@ -11,6 +12,11 @@ pub use account::{
     ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountBalanceDetail, AccountBalanceState, AccountError,
     AccountPositionState, AccountSnapshot, AccountWsEvent, M4_REST_BOOTSTRAP_REASON,
     M4_REST_WS_CONVERGED_REASON, PendingOrderState,
+};
+pub use capabilities::{
+    TRADING_CAPABILITIES_SCHEMA_V1, ConfiguredLeverage, TradingAccountCapabilities,
+    TradingCapabilitiesError, TradingCapabilitiesInput, TradingCapabilitiesSnapshot,
+    TradingInstrumentCapabilities,
 };
 pub use fee::{FEE_SCHEDULE_SCHEMA_V1, FeeScheduleError, FeeScheduleInput, FeeScheduleSnapshot};
 pub use history::{
