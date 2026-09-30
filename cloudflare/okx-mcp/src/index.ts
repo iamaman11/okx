@@ -495,7 +495,11 @@ ${invalid ? '<p id="auth-status">Invalid owner secret.</p>' : '<p id="auth-statu
       });
       const result = await response.json();
       if (response.ok && result?.status === "PASS" && typeof result.continue_url === "string") {
-        window.location.assign(result.continue_url);
+        const link = document.createElement("a");
+        link.href = result.continue_url;
+        link.textContent = "Authorize and continue";
+        status.replaceChildren(link);
+        link.click();
         return;
       }
       status.textContent = result?.reason === "INVALID_OWNER_SECRET"
