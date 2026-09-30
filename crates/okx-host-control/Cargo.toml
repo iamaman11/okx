@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
+getrandom = "0.4"
 okx-github = { path = "../okx-github" }
 okx-host-launcher = { path = "../okx-host-launcher" }
 okx-protocol = { path = "../okx-protocol" }
