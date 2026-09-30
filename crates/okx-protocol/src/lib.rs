@@ -381,7 +381,6 @@ impl AgentOperation {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DirectTransportFrame {
@@ -717,7 +716,6 @@ pub struct AgentFailure {
     pub message: String,
     pub retryable: bool,
 }
-
 
 fn validate_direct_schema(value: &str) -> Result<(), ProtocolError> {
     if value == DIRECT_TRANSPORT_FRAME_SCHEMA_V1 {
@@ -1405,7 +1403,6 @@ mod tests {
         );
     }
 }
-
 
 #[cfg(test)]
 mod direct_transport_tests {
