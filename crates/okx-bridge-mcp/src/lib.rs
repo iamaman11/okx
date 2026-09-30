@@ -9,9 +9,7 @@ use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponse,
     HOST_CONTROL_REQUEST_SCHEMA_V1, HostControlOperation, HostControlRequest, HostControlResult,
     InstrumentTypeFilter, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
-    crypto::{
-        decrypt, derive_directional_key, encrypt, public_key_from_private, shared_secret,
-    },
+    crypto::{decrypt, derive_directional_key, encrypt, public_key_from_private, shared_secret},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -374,7 +372,9 @@ async fn wait_for_mailbox_response(
 ) -> Result<AgentResponse, BridgeError> {
     let deadline = Instant::now() + WAIT_BUDGET;
     loop {
-        let comments = github.issue_comments_after(DATA_ISSUE, cursor.as_ref()).await?;
+        let comments = github
+            .issue_comments_after(DATA_ISSUE, cursor.as_ref())
+            .await?;
         for comment in &comments {
             if comment.user_id != OWNER_USER_ID {
                 continue;
@@ -428,7 +428,9 @@ async fn wait_for_control_result(
 ) -> Result<HostControlResult, BridgeError> {
     let deadline = Instant::now() + WAIT_BUDGET;
     loop {
-        let comments = github.issue_comments_after(CONTROL_ISSUE, cursor.as_ref()).await?;
+        let comments = github
+            .issue_comments_after(CONTROL_ISSUE, cursor.as_ref())
+            .await?;
         for comment in &comments {
             if comment.user_id != OWNER_USER_ID {
                 continue;
