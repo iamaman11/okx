@@ -1,7 +1,4 @@
-use std::{
-    env,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use okx_github::{GitHubClient, IssueCommentCursor, OWNER_USER_ID, REPOSITORY_ID};
@@ -19,7 +16,6 @@ use zeroize::{Zeroize, Zeroizing};
 const DATA_ISSUE: u64 = 10;
 const CONTROL_ISSUE: u64 = 12;
 const IDENTITY_SCHEMA_V1: &str = "okx.github-mailbox.identity/v1";
-const GITHUB_TOKEN_ENV: &str = "OKX_BRIDGE_GITHUB_TOKEN";
 const WAIT_BUDGET: Duration = Duration::from_secs(20);
 const WAIT_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -56,7 +52,6 @@ pub enum BridgeError {
     InvalidToolArguments(String),
 }
 
-#[derive(Clone)]
 pub struct Bridge {
     github_token: Zeroizing<String>,
 }
@@ -89,8 +84,7 @@ struct PublishedIdentity {
 }
 
 impl Bridge {
-    pub fn from_env() -> Result<Self, BridgeError> {
-        let token = env::var(GITHUB_TOKEN_ENV).map_err(|_| BridgeError::MissingGithubCredential)?;
+    pub fn from_bearer(token: String) -> Result<Self, BridgeError> {
         if token.is_empty()
             || token.len() > 1024
             || token
@@ -473,6 +467,14 @@ mod tests {
         assert!(control.starts_with("ctl_bridge_"));
         assert!((16..=128).contains(&data.len()));
         assert!((16..=128).contains(&control.len()));
+    }
+
+    #[test]
+    fn bearer_credential_is_never_serialized() {
+        let bridge = Bridge::from_bearer("github_pat_example".to_owned()).expect("bridge");
+        assert_eq!(bridge.github_token.as_str(), "github_pat_example");
+        let debug = format!("{:?}", BridgeError::MissingGithubCredential);
+        assert!(!debug.contains("github_pat_example"));
     }
 
     #[test]
