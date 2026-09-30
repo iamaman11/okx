@@ -1547,7 +1547,8 @@ mod tests {
         let source = include_str!("lib.rs");
         assert!(source.contains("expected_current_sha256"));
         assert!(source.contains("scheduler_definition_changed"));
-        assert!(!source.contains("schtasks"));
+        let scheduler_cli = ["sch", "tasks"].concat();
+        assert!(!source.contains(&scheduler_cli));
     }
 
     #[test]
