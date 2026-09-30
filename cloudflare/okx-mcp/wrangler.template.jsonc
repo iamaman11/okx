@@ -1,0 +1,31 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "okx-cloudflare-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-30",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": true,
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "__OAUTH_KV_ID__"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RUNTIME",
+        "class_name": "RuntimeSession"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RuntimeSession"]
+    }
+  ],
+  "vars": {
+    "PUBLIC_ORIGIN": "https://okx-cloudflare-mcp.pvisakp.workers.dev"
+  }
+}
