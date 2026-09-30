@@ -254,6 +254,7 @@ impl HostExecutor {
     }
 
     fn reconcile_workspace(&mut self) -> HostControlResult<Value> {
+        self.assert_repo(false, true)?;
         let was_running = self.agent_is_running()?;
         if was_running {
             self.terminate_agent_owned()?;
