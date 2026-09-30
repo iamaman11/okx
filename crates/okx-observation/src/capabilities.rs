@@ -1,6 +1,6 @@
 use okx_api::{
-    account::{account_mode_name, account_type_name},
     AccountConfig, LeverageInfo,
+    account::{account_mode_name, account_type_name},
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -89,9 +89,7 @@ pub enum TradingCapabilitiesError {
 }
 
 impl TradingCapabilitiesSnapshot {
-    pub fn from_input(
-        input: TradingCapabilitiesInput,
-    ) -> Result<Self, TradingCapabilitiesError> {
+    pub fn from_input(input: TradingCapabilitiesInput) -> Result<Self, TradingCapabilitiesError> {
         if input.source_received_at.trim().is_empty() {
             return Err(TradingCapabilitiesError::EmptySourceTimestamp);
         }
@@ -136,8 +134,8 @@ impl TradingCapabilitiesSnapshot {
             }
         }
 
-        let is_subaccount = !input.config.main_uid.trim().is_empty()
-            && uid != input.config.main_uid;
+        let is_subaccount =
+            !input.config.main_uid.trim().is_empty() && uid != input.config.main_uid;
 
         Ok(Self {
             schema: TRADING_CAPABILITIES_SCHEMA_V1.to_owned(),
@@ -156,9 +154,7 @@ impl TradingCapabilitiesSnapshot {
             },
             instrument: TradingInstrumentCapabilities {
                 available_to_account: input.available_to_account,
-                account_max_leverage: input
-                    .account_max_leverage
-                    .and_then(non_empty_owned),
+                account_max_leverage: input.account_max_leverage.and_then(non_empty_owned),
                 rules: input.rules.instrument,
             },
             requested_margin_mode,
@@ -191,10 +187,7 @@ fn normalize_leverage(
     })
 }
 
-fn require_config(
-    field: &'static str,
-    value: String,
-) -> Result<String, TradingCapabilitiesError> {
+fn require_config(field: &'static str, value: String) -> Result<String, TradingCapabilitiesError> {
     if value.trim().is_empty() {
         Err(TradingCapabilitiesError::MissingAccountConfig(field))
     } else {
@@ -220,8 +213,8 @@ fn non_empty_owned(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{FeeScheduleInput, FeeScheduleSnapshot, FundingRequirement};
     use okx_api::InstrumentType;
-    use crate::{FundingRequirement, FeeScheduleInput, FeeScheduleSnapshot};
 
     fn rules() -> InstrumentRulesSnapshot {
         InstrumentRulesSnapshot {
@@ -323,7 +316,10 @@ mod tests {
         assert_eq!(snapshot.account.api_key_permissions, vec!["read_only"]);
         assert!(snapshot.account.api_key_ip_bound);
         assert!(snapshot.instrument.available_to_account);
-        assert_eq!(snapshot.instrument.account_max_leverage.as_deref(), Some("50"));
+        assert_eq!(
+            snapshot.instrument.account_max_leverage.as_deref(),
+            Some("50")
+        );
         assert_eq!(snapshot.configured_leverage.len(), 2);
         assert_eq!(
             snapshot.configured_leverage[0].position_side.as_deref(),
