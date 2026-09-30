@@ -12,7 +12,7 @@ use okx_protocol::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{autostart, background_process::hidden_command, HostControlError, HostControlResult};
+use crate::{HostControlError, HostControlResult, autostart, background_process::hidden_command};
 
 const ROOT_MIGRATION_PATH: &str = r"C:\okx-control\root-migration.json";
 const ROOT_MIGRATION_SCHEMA_V1: &str = "okx.host-control.root-migration/v1";
