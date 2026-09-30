@@ -366,6 +366,9 @@ pub fn upgrade_launcher_root(
         return Err(LauncherError::HashMismatch);
     }
 
+    if load_pending()?.is_some() {
+        return Err(LauncherError::ActivationConflict);
+    }
     let _guard = LauncherGuard::acquire()?;
     let source = Path::new(LAUNCHER_PATH);
     let entrypoint = Path::new(ENTRYPOINT_PATH);
@@ -1546,6 +1549,14 @@ mod tests {
         assert!(source.contains("expected_current_sha256"));
         assert!(source.contains("scheduler_definition_changed"));
         assert!(!source.contains("schtasks"));
+    }
+
+    #[test]
+    fn windows_background_launcher_has_no_console() {
+        let main_source = include_str!("main.rs");
+        assert!(main_source.contains(r#"windows_subsystem = "windows""#));
+        let source = include_str!("lib.rs");
+        assert!(source.contains("CREATE_NO_WINDOW"));
     }
 
     #[test]
