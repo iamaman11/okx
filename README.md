@@ -154,3 +154,13 @@ Canonical issues:
 - #126 immutable controller launcher/root-of-trust — ACTIVE until one-time root migration plus remote commit/rollback/reboot physical acceptance;
 - #54 controller self-update — absorbed by #126 for final lifecycle closure;
 - #58 mailbox compaction — trigger-based deferred maintenance.
+
+
+### Windows desktop behavior
+
+The production Windows control plane is intentionally background-only. The fixed Task Scheduler
+entrypoint is a Windows GUI-subsystem launcher and all controller-owned child processes use
+`CREATE_NO_WINDOW`. Normal polling, controller recovery, agent lifecycle, diagnostics, and
+verified launcher-root upgrades must not create console or PowerShell windows on the interactive
+desktop. Launcher-root upgrades are verified against an exact successful PR-CI artifact and the
+expected current launcher SHA-256; they never mutate the Scheduler definition.

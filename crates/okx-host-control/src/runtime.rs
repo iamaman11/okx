@@ -13,7 +13,9 @@ use tokio::time::{Interval, MissedTickBehavior, interval};
 
 use crate::{
     HostControlError, HostControlResult as LocalResult,
-    artifact::{deploy_agent, install_launcher_root, stage_controller_update},
+    artifact::{
+        deploy_agent, install_launcher_root, stage_controller_update, upgrade_launcher_root,
+    },
     autostart, controller_update,
     executor::HostExecutor,
     root_migration,
@@ -381,6 +383,23 @@ async fn process_control_batch(
                 )
                 .await,
                 ProcessTransition::RootMigration,
+            ),
+            HostControlOperation::UpgradeLauncherRoot {
+                run_id,
+                artifact_id,
+                expected_source_tree,
+                expected_current_launcher_sha256,
+            } => (
+                upgrade_launcher_root(
+                    github,
+                    executor,
+                    *run_id,
+                    *artifact_id,
+                    expected_source_tree,
+                    expected_current_launcher_sha256,
+                )
+                .await,
+                ProcessTransition::None,
             ),
             HostControlOperation::StageControllerUpdate {
                 run_id,

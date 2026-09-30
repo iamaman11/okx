@@ -52,6 +52,9 @@ pub enum ProtocolError {
 
     #[error("invalid Git source tree id")]
     InvalidSourceTree,
+
+    #[error("invalid SHA-256")]
+    InvalidSha256,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,6 +407,12 @@ pub enum HostControlOperation {
         artifact_id: u64,
         expected_source_tree: String,
     },
+    UpgradeLauncherRoot {
+        run_id: u64,
+        artifact_id: u64,
+        expected_source_tree: String,
+        expected_current_launcher_sha256: String,
+    },
     StageControllerUpdate {
         run_id: u64,
         artifact_id: u64,
@@ -451,6 +460,18 @@ impl HostControlOperation {
                     return Err(ProtocolError::InvalidRequestId);
                 }
                 validate_source_tree(expected_source_tree)
+            }
+            Self::UpgradeLauncherRoot {
+                run_id,
+                artifact_id,
+                expected_source_tree,
+                expected_current_launcher_sha256,
+            } => {
+                if *run_id == 0 || *artifact_id == 0 {
+                    return Err(ProtocolError::InvalidRequestId);
+                }
+                validate_source_tree(expected_source_tree)?;
+                validate_sha256(expected_current_launcher_sha256)
             }
             _ => Ok(()),
         }
@@ -564,6 +585,18 @@ fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
         Ok(())
     } else {
         Err(ProtocolError::InvalidRequestId)
+    }
+}
+
+fn validate_sha256(value: &str) -> Result<(), ProtocolError> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidSha256)
     }
 }
 
@@ -950,6 +983,25 @@ mod tests {
         assert!(request.validate().is_ok());
         let json = serde_json::to_string(&request).expect("serialize");
         assert_eq!(json, r#"{"type":"mailbox_telemetry"}"#);
+    }
+
+    #[test]
+    fn launcher_root_upgrade_requires_exact_sha256() {
+        let valid = HostControlOperation::UpgradeLauncherRoot {
+            run_id: 1,
+            artifact_id: 2,
+            expected_source_tree: "a".repeat(40),
+            expected_current_launcher_sha256: "b".repeat(64),
+        };
+        assert!(valid.validate().is_ok());
+
+        let invalid = HostControlOperation::UpgradeLauncherRoot {
+            run_id: 1,
+            artifact_id: 2,
+            expected_source_tree: "a".repeat(40),
+            expected_current_launcher_sha256: "not-a-sha".to_owned(),
+        };
+        assert_eq!(invalid.validate(), Err(ProtocolError::InvalidSha256));
     }
 
     #[test]

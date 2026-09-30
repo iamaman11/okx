@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod auth;
 pub mod autostart;
+pub mod background_process;
 pub mod controller_update;
 pub mod desired;
 pub mod executor;

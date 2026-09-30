@@ -2,7 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 use okx_github::{GitHubClient, OWNER_USER_ID, REPOSITORY_ID};
@@ -12,7 +12,7 @@ use okx_protocol::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{HostControlError, HostControlResult, autostart};
+use crate::{HostControlError, HostControlResult, autostart, background_process::hidden_command};
 
 const ROOT_MIGRATION_PATH: &str = r"C:\okx-control\root-migration.json";
 const ROOT_MIGRATION_SCHEMA_V1: &str = "okx.host-control.root-migration/v1";
@@ -152,7 +152,7 @@ pub fn spawn_migrator() -> HostControlResult<Value> {
         .append(true)
         .open(root.join("root-migration.stderr.log"))?;
     let migrator = okx_host_launcher::active_controller_binary_path()?;
-    let child = Command::new(migrator)
+    let child = hidden_command(migrator)
         .arg("migrate-launcher-root")
         .arg("--request-id")
         .arg(&migration.request_id)
