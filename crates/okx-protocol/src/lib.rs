@@ -927,6 +927,34 @@ mod tests {
     }
 
     #[test]
+    fn trading_capabilities_request_is_strict_and_round_trips() {
+        let request = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_caps_0123456789".to_owned(),
+            operation: AgentOperation::TradingCapabilities {
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                margin_mode: TradingMarginMode::Isolated,
+            },
+        };
+
+        request.validate().expect("valid trading capabilities request");
+        let json = serde_json::to_string(&request).expect("serialize");
+        let decoded: AgentRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, request);
+        decoded.validate().expect("valid decoded request");
+
+        let invalid = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_caps_invalid_012345".to_owned(),
+            operation: AgentOperation::TradingCapabilities {
+                instrument: "doge/usdt".to_owned(),
+                margin_mode: TradingMarginMode::Cross,
+            },
+        };
+        assert_eq!(invalid.validate(), Err(ProtocolError::InvalidInstrument));
+    }
+
+    #[test]
     fn execution_operations_are_strict_and_bounded() {
         let open = AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
