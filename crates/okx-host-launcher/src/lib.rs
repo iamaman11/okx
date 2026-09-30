@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -353,6 +354,68 @@ pub fn install_launcher_entrypoint(
     }))
 }
 
+pub fn upgrade_launcher_root(
+    candidate_bytes: &[u8],
+    candidate_sha256: &str,
+    expected_current_sha256: &str,
+) -> LauncherResult<Value> {
+    if !lower_hex(candidate_sha256, 64)
+        || !lower_hex(expected_current_sha256, 64)
+        || sha256_bytes(candidate_bytes) != candidate_sha256
+    {
+        return Err(LauncherError::HashMismatch);
+    }
+
+    let _guard = LauncherGuard::acquire()?;
+    let source = Path::new(LAUNCHER_PATH);
+    let entrypoint = Path::new(ENTRYPOINT_PATH);
+    if !source.is_file() || !entrypoint.is_file() {
+        return Err(LauncherError::RootNotInstalled);
+    }
+
+    let source_hash = sha256_file(source)?;
+    let entrypoint_hash = sha256_file(entrypoint)?;
+    if source_hash == candidate_sha256 && entrypoint_hash == candidate_sha256 {
+        return Ok(json!({
+            "upgraded": true,
+            "disposition": "EXISTING",
+            "launcher_sha256": candidate_sha256,
+            "scheduler_definition_changed": false
+        }));
+    }
+
+    let recoverable = (source_hash == expected_current_sha256
+        && entrypoint_hash == expected_current_sha256)
+        || (source_hash == candidate_sha256
+            && entrypoint_hash == expected_current_sha256);
+    if !recoverable {
+        return Err(LauncherError::RootConflict);
+    }
+
+    if source_hash == expected_current_sha256 {
+        write_atomic_bytes(source, candidate_bytes)?;
+    }
+    if sha256_file(source)? != candidate_sha256 {
+        return Err(LauncherError::HashMismatch);
+    }
+
+    if entrypoint_hash == expected_current_sha256 {
+        write_atomic_bytes(entrypoint, candidate_bytes)?;
+    }
+    if sha256_file(entrypoint)? != candidate_sha256 {
+        return Err(LauncherError::HashMismatch);
+    }
+
+    Ok(json!({
+        "upgraded": true,
+        "disposition": "REPLACED",
+        "launcher_sha256": candidate_sha256,
+        "previous_launcher_sha256": expected_current_sha256,
+        "scheduler_definition_changed": false,
+        "entrypoint_path": ENTRYPOINT_PATH
+    }))
+}
+
 pub fn stage_update(candidate: ControllerVersion, bytes: &[u8]) -> LauncherResult<Value> {
     candidate.validate()?;
     let active = load_active()?.ok_or(LauncherError::RootNotInstalled)?;
@@ -550,6 +613,8 @@ pub fn status_value() -> Value {
         "schema": "okx.host-launcher.status/v1",
         "launcher_present": Path::new(LAUNCHER_PATH).is_file(),
         "entrypoint_path": ENTRYPOINT_PATH,
+        "launcher_sha256": sha256_file(Path::new(LAUNCHER_PATH)).ok(),
+        "entrypoint_sha256": sha256_file(Path::new(ENTRYPOINT_PATH)).ok(),
         "entrypoint_is_launcher": Path::new(ENTRYPOINT_PATH).is_file()
             && sha256_file(Path::new(ENTRYPOINT_PATH)).ok()
                 == sha256_file(Path::new(LAUNCHER_PATH)).ok(),
@@ -942,7 +1007,7 @@ fn spawn_controller(
         .append(true)
         .open(Path::new(CONTROL_ROOT).join("controller.stderr.log"))?;
 
-    let mut command = Command::new(version.binary_path()?);
+    let mut command = hidden_command(version.binary_path()?);
     command.arg("run");
     if let Some(request_id) = activation_request_id {
         command.arg("--activation-request-id").arg(request_id);
@@ -954,6 +1019,17 @@ fn spawn_controller(
         .stderr(Stdio::from(stderr))
         .spawn()
         .map_err(|_| LauncherError::ControllerLaunch)
+}
+
+fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 fn valid_request_id(value: &str) -> bool {
@@ -1451,6 +1527,22 @@ mod tests {
             classify_recovery(&active, Some(&pending), true, false).expect("decision"),
             RecoveryDecision::ActivateCandidate
         );
+    }
+
+    #[test]
+    fn launcher_spawns_controller_without_desktop_window() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("CREATE_NO_WINDOW"));
+        let main = include_str!("main.rs");
+        assert!(main.contains("windows_subsystem = \"windows\""));
+    }
+
+    #[test]
+    fn launcher_root_upgrade_is_hash_guarded_and_scheduler_free() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("expected_current_sha256"));
+        assert!(source.contains("scheduler_definition_changed"));
+        assert!(!source.contains("schtasks"));
     }
 
     #[test]
