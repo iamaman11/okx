@@ -1,20 +1,19 @@
 use std::{ffi::OsStr, process::Command};
 
 pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
-    let mut command = Command::new(program);
-    apply_no_window(&mut command);
-    command
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = Command::new(program);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(program)
+    }
 }
-
-#[cfg(windows)]
-fn apply_no_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn apply_no_window(_command: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
