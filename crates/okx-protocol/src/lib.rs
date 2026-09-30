@@ -986,6 +986,25 @@ mod tests {
     }
 
     #[test]
+    fn launcher_root_upgrade_requires_exact_sha256() {
+        let valid = HostControlOperation::UpgradeLauncherRoot {
+            run_id: 1,
+            artifact_id: 2,
+            expected_source_tree: "a".repeat(40),
+            expected_current_launcher_sha256: "b".repeat(64),
+        };
+        assert!(valid.validate().is_ok());
+
+        let invalid = HostControlOperation::UpgradeLauncherRoot {
+            run_id: 1,
+            artifact_id: 2,
+            expected_source_tree: "a".repeat(40),
+            expected_current_launcher_sha256: "not-a-sha".to_owned(),
+        };
+        assert_eq!(invalid.validate(), Err(ProtocolError::InvalidSha256));
+    }
+
+    #[test]
     fn unknown_operation_is_rejected_by_deserialization() {
         let json = format!(
             r#"{{"schema":"{}","request_id":"{}","operation":{{"type":"run_shell","command":"whoami"}}}}"#,
