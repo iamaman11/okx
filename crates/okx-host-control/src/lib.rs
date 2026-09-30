@@ -129,6 +129,9 @@ pub enum HostControlError {
 
     #[error("CONTROL result budget invariant failed")]
     ControlResponseBudgetInvariant,
+
+    #[error("secure random source failed: {0}")]
+    Random(String),
 }
 
 impl HostControlError {
@@ -172,6 +175,7 @@ impl HostControlError {
             Self::LegacyBootstrapDisabled => "LEGACY_BOOTSTRAP_DISABLED",
             Self::AcceptanceActivationFailureInjected => "ACCEPTANCE_ACTIVATION_FAILURE_INJECTED",
             Self::ControlResponseBudgetInvariant => "CONTROL_RESPONSE_BUDGET_INVARIANT",
+            Self::Random(_) => "RANDOM_SOURCE_FAILED",
         }
     }
 }
