@@ -75,6 +75,7 @@ impl HostExecutor {
             HostControlOperation::BuildAgent => Err(HostControlError::InvalidExecutionPath),
             HostControlOperation::DeployAgent { .. }
             | HostControlOperation::InstallLauncherRoot { .. }
+            | HostControlOperation::UpgradeLauncherRoot { .. }
             | HostControlOperation::StageControllerUpdate { .. }
             | HostControlOperation::HandoffControllerUpdate => {
                 Err(HostControlError::InvalidExecutionPath)
