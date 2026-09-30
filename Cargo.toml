@@ -8,6 +8,7 @@ members = [
     "crates/okx-agent",
     "crates/okx-host-control",
     "crates/okx-host-launcher",
+    "crates/okx-bridge-mcp",
     "crates/okx-observation",
     "crates/okx-ws",
     "crates/okx-runtime",
