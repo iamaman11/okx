@@ -1,11 +1,11 @@
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::Incoming,
-    header::{CONTENT_TYPE, HeaderValue},
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
     server::conn::http1,
     service::service_fn,
 };
@@ -18,7 +18,6 @@ type Body = Full<Bytes>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let bridge = Arc::new(Bridge::from_env()?);
     let port = std::env::var("PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
@@ -28,17 +27,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     loop {
         let (stream, _) = listener.accept().await?;
-        let bridge = Arc::clone(&bridge);
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
             if let Err(error) = http1::Builder::new()
-                .serve_connection(
-                    io,
-                    service_fn(move |request| {
-                        let bridge = Arc::clone(&bridge);
-                        async move { handle(request, bridge).await }
-                    }),
-                )
+                .serve_connection(io, service_fn(handle))
                 .await
             {
                 eprintln!("okx-bridge connection failed: {error}");
@@ -47,30 +39,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 }
 
-async fn handle(
-    request: Request<Incoming>,
-    bridge: Arc<Bridge>,
-) -> Result<Response<Body>, Infallible> {
+async fn handle(request: Request<Incoming>) -> Result<Response<Body>, Infallible> {
     let response = match (request.method(), request.uri().path()) {
         (&Method::GET, "/health") => json_response(
             StatusCode::OK,
             json!({
                 "status": "ok",
                 "service": "okx-bridge",
-                "transport": "hidden"
+                "transport": "hidden",
+                "credential_storage": "client_vault"
             }),
         ),
-        (&Method::POST, "/mcp") => match request.collect().await {
-            Ok(collected) => match serde_json::from_slice::<Value>(&collected.to_bytes()) {
-                Ok(message) => handle_mcp(message, &bridge).await,
-                Err(error) => jsonrpc_error(Value::Null, -32700, &format!("parse error: {error}")),
-            },
-            Err(error) => jsonrpc_error(
-                Value::Null,
-                -32603,
-                &format!("request body failed: {error}"),
-            ),
-        },
+        (&Method::POST, "/mcp") => {
+            let bearer = bearer_token(&request);
+            match request.collect().await {
+                Ok(collected) => match serde_json::from_slice::<Value>(&collected.to_bytes()) {
+                    Ok(message) => handle_mcp(message, bearer).await,
+                    Err(error) => {
+                        jsonrpc_error(Value::Null, -32700, &format!("parse error: {error}"))
+                    }
+                },
+                Err(error) => jsonrpc_error(
+                    Value::Null,
+                    -32603,
+                    &format!("request body failed: {error}"),
+                ),
+            }
+        }
         (&Method::GET, "/mcp") => response(
             StatusCode::METHOD_NOT_ALLOWED,
             "text/plain; charset=utf-8",
@@ -85,7 +80,7 @@ async fn handle(
     Ok(response)
 }
 
-async fn handle_mcp(message: Value, bridge: &Bridge) -> Response<Body> {
+async fn handle_mcp(message: Value, bearer: Option<String>) -> Response<Body> {
     let Some(object) = message.as_object() else {
         return jsonrpc_error(Value::Null, -32600, "invalid request");
     };
@@ -109,6 +104,14 @@ async fn handle_mcp(message: Value, bridge: &Bridge) -> Response<Body> {
         "ping" => jsonrpc_result(id, json!({})),
         "tools/list" => jsonrpc_result(id, json!({"tools": mcp_tools()})),
         "tools/call" => {
+            let Some(token) = bearer else {
+                return unauthorized(id);
+            };
+            let bridge = match Bridge::from_bearer(token) {
+                Ok(bridge) => bridge,
+                Err(_) => return unauthorized(id),
+            };
+
             let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
             let name = params.get("name").and_then(Value::as_str);
             let arguments = params
@@ -149,6 +152,29 @@ async fn handle_mcp(message: Value, bridge: &Bridge) -> Response<Body> {
         }
         _ => jsonrpc_error(id, -32601, "method not found"),
     }
+}
+
+fn bearer_token(request: &Request<Incoming>) -> Option<String> {
+    let value = request.headers().get(AUTHORIZATION)?.to_str().ok()?;
+    let token = value.strip_prefix("Bearer ")?;
+    if token.is_empty() {
+        return None;
+    }
+    Some(token.to_owned())
+}
+
+fn unauthorized(id: Value) -> Response<Body> {
+    json_response(
+        StatusCode::UNAUTHORIZED,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32001,
+                "message": "authorization required"
+            }
+        }),
+    )
 }
 
 fn jsonrpc_result(id: Value, result: Value) -> Response<Body> {
@@ -205,5 +231,17 @@ mod tests {
         let result = mcp_initialize_result();
         assert_eq!(result["protocolVersion"], "2025-06-18");
         assert_eq!(result["serverInfo"]["name"], "okx-bridge");
+    }
+
+    #[test]
+    fn bearer_parser_requires_exact_scheme_and_nonempty_value() {
+        fn parse(value: &str) -> Option<String> {
+            let value = value.strip_prefix("Bearer ")?;
+            (!value.is_empty()).then(|| value.to_owned())
+        }
+
+        assert_eq!(parse("Bearer github_pat_example").as_deref(), Some("github_pat_example"));
+        assert_eq!(parse("bearer nope"), None);
+        assert_eq!(parse("Bearer "), None);
     }
 }
