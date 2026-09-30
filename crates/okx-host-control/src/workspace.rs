@@ -165,6 +165,8 @@ fn parse_untracked_path(line: &str) -> HostControlResult<PathBuf> {
         || path.starts_with('"')
         || path.ends_with('"')
         || path.contains('\0')
+        || path.contains('\\')
+        || path.contains(':')
     {
         return Err(HostControlError::WorkspaceReconcileUnsafe);
     }
@@ -260,11 +262,7 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(&mut output, "{byte:02x}");
-    }
-    output
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
