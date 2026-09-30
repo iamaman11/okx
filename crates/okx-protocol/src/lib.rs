@@ -160,6 +160,13 @@ pub enum ExecutionTradeMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum TradingMarginMode {
+    Cross,
+    Isolated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExecutionOrderType {
     Limit,
     PostOnly,
@@ -235,6 +242,10 @@ pub enum AgentOperation {
     MailboxTelemetry,
     AccountSnapshot,
     PortfolioRisk,
+    TradingCapabilities {
+        instrument: String,
+        margin_mode: TradingMarginMode,
+    },
     CurrentCost {
         instrument: String,
         contracts: String,
@@ -301,6 +312,7 @@ impl AgentOperation {
             | Self::MailboxTelemetry
             | Self::AccountSnapshot
             | Self::PortfolioRisk => Ok(()),
+            Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
             Self::PrepareOpenExecution {
                 intent_id,
                 instrument,
