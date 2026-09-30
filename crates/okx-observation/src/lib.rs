@@ -14,7 +14,7 @@ pub use account::{
     M4_REST_WS_CONVERGED_REASON, PendingOrderState,
 };
 pub use capabilities::{
-    TRADING_CAPABILITIES_SCHEMA_V1, ConfiguredLeverage, TradingAccountCapabilities,
+    ConfiguredLeverage, TRADING_CAPABILITIES_SCHEMA_V1, TradingAccountCapabilities,
     TradingCapabilitiesError, TradingCapabilitiesInput, TradingCapabilitiesSnapshot,
     TradingInstrumentCapabilities,
 };
