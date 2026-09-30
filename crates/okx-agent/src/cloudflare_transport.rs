@@ -299,13 +299,10 @@ where
 }
 
 fn next_text_frame(
-    message: Option<
-        Result<Message, tokio_tungstenite::tungstenite::Error>,
-    >,
+    message: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
 ) -> AgentResult<DirectTransportFrame> {
-    let message = message.ok_or_else(|| {
-        AgentError::CloudflareTransport("cloudflare WebSocket closed".to_owned())
-    })?;
+    let message = message
+        .ok_or_else(|| AgentError::CloudflareTransport("cloudflare WebSocket closed".to_owned()))?;
     let message = message.map_err(|error| AgentError::CloudflareTransport(error.to_string()))?;
 
     let text = match message {
@@ -355,7 +352,9 @@ fn require_session(
 fn validate_ws_url(value: &str) -> AgentResult<()> {
     if value.len() <= 512
         && value.starts_with("wss://")
-        && !value.bytes().any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        && !value
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
     {
         Ok(())
     } else {
