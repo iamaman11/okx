@@ -175,6 +175,18 @@ pub async fn upgrade_launcher_root(
         return Err(HostControlError::ArtifactHashMismatch);
     }
 
+    let declared_controller_hash = declared_hash(&bundle.manifest, "okx-host-control.exe")?;
+    let actual_controller_hash = sha256_hex(&bundle.controller_bytes);
+    if actual_controller_hash != declared_controller_hash {
+        return Err(HostControlError::ArtifactHashMismatch);
+    }
+    let current_exe = std::env::current_exe()?;
+    if okx_host_launcher::sha256_file(&current_exe)? != actual_controller_hash {
+        return Err(HostControlError::ArtifactVerification(
+            "launcher-root upgrade requires the running controller from the same accepted bundle",
+        ));
+    }
+
     let root = okx_host_launcher::upgrade_launcher_root(
         launcher_bytes,
         &actual_launcher_hash,
