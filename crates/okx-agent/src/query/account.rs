@@ -52,17 +52,14 @@ pub(super) async fn dispatch(
                     return Ok(trading_capabilities_failure(request, generated_at, error));
                 }
             };
-            let warnings = snapshot.warnings.clone();
+            let mut warnings = snapshot.warnings.clone();
+            warnings.push(REFERENCE_RUNTIME_WARNING.to_owned());
             Ok(AgentResponse {
                 schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
                 request_id: request.request_id.clone(),
                 status: AgentResponseStatus::Completed,
                 generated_at: generated_at.to_owned(),
-                quality: if warnings.is_empty() {
-                    DataQuality::Fresh
-                } else {
-                    DataQuality::Degraded
-                },
+                quality: DataQuality::Degraded,
                 result_schema: Some(TRADING_CAPABILITIES_SCHEMA_V1.to_owned()),
                 result: Some(serde_json::to_value(snapshot)?),
                 failure: None,
