@@ -1,8 +1,9 @@
 use chrono::{SecondsFormat, Utc};
-use okx_api::{AccountApi, FeeRate, OkxError, OkxRestClient};
+use okx_api::{AccountApi, FeeRate, MarginMode, OkxError, OkxRestClient};
 use okx_observation::{
     AccountError, AccountSnapshot, FeeScheduleError, FeeScheduleInput, FeeScheduleSnapshot,
-    InstrumentRulesSnapshot,
+    InstrumentRulesSnapshot, TradingCapabilitiesError, TradingCapabilitiesInput,
+    TradingCapabilitiesSnapshot,
 };
 use thiserror::Error;
 
@@ -16,6 +17,21 @@ pub enum AccountBootstrapError {
 
     #[error("account normalization error: {0}")]
     Normalize(#[from] AccountError),
+}
+
+#[derive(Debug, Error)]
+pub enum TradingCapabilitiesBootstrapError {
+    #[error("OKX observer API key is not strictly read-only")]
+    PermissionRejected,
+
+    #[error("OKX private API error: {0}")]
+    Api(#[from] OkxError),
+
+    #[error("fee capability assembly error: {0}")]
+    Fee(#[from] FeeScheduleBootstrapError),
+
+    #[error("trading capability normalization error: {0}")]
+    Normalize(#[from] TradingCapabilitiesError),
 }
 
 #[derive(Debug, Error)]
@@ -55,7 +71,13 @@ impl AccountBootstrapper {
         let config = self.api.config().await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| FeeScheduleBootstrapError::PermissionRejected)?;
+        self.fee_schedule_authorized(rules).await
+    }
 
+    async fn fee_schedule_authorized(
+        &self,
+        rules: &InstrumentRulesSnapshot,
+    ) -> Result<FeeScheduleSnapshot, FeeScheduleBootstrapError> {
         let instrument = &rules.instrument;
         let family = instrument
             .instrument_family
@@ -84,6 +106,67 @@ impl AccountBootstrapper {
         )
     }
 
+    pub async fn trading_capabilities(
+        &self,
+        rules: &InstrumentRulesSnapshot,
+        margin_mode: MarginMode,
+    ) -> Result<TradingCapabilitiesSnapshot, TradingCapabilitiesBootstrapError> {
+        let config = self.api.config().await?;
+        let permissions = strict_read_only_permissions(&config.perm)
+            .map_err(|_| TradingCapabilitiesBootstrapError::PermissionRejected)?;
+
+        let account_instruments = self.api.instruments(rules.instrument.instrument_type).await?;
+        let selected = account_instruments
+            .into_iter()
+            .find(|instrument| instrument.instrument_id == rules.instrument.instrument_id);
+
+        let mut warnings = Vec::new();
+        let (available_to_account, account_max_leverage, configured_leverage, fee_schedule) =
+            if let Some(instrument) = selected {
+                let configured_leverage = match self
+                    .api
+                    .leverage(&rules.instrument.instrument_id, margin_mode)
+                    .await
+                {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        warnings.push(format!("configured leverage unavailable: {error}"));
+                        Vec::new()
+                    }
+                };
+
+                let fee = self.fee_schedule_authorized(rules).await?;
+                (
+                    true,
+                    non_empty_owned(instrument.lever),
+                    configured_leverage,
+                    Some(fee),
+                )
+            } else {
+                warnings.push(format!(
+                    "instrument '{}' is not available to the authenticated account",
+                    rules.instrument.instrument_id
+                ));
+                (false, None, Vec::new(), None)
+            };
+
+        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        Ok(TradingCapabilitiesSnapshot::from_input(
+            TradingCapabilitiesInput {
+                source_received_at,
+                config,
+                api_key_permissions: permissions,
+                rules: rules.clone(),
+                available_to_account,
+                account_max_leverage,
+                requested_margin_mode: margin_mode.to_string(),
+                configured_leverage,
+                fee_schedule,
+                warnings,
+            },
+        )?)
+    }
+
     pub async fn snapshot(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
         let config = self.api.config().await?;
         let permissions = strict_read_only_permissions(&config.perm)?;
@@ -104,6 +187,10 @@ impl AccountBootstrapper {
             permissions,
         )?)
     }
+}
+
+fn non_empty_owned(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
 }
 
 fn normalize_fee_schedule(
