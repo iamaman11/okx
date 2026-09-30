@@ -1,0 +1,96 @@
+name: Cloudflare MCP Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "cloudflare/okx-mcp/**"
+      - ".github/workflows/cloudflare-mcp-deploy.yml"
+
+concurrency:
+  group: cloudflare-mcp-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy-okx-cloudflare-mcp
+    runs-on: ubuntu-latest
+    environment: okx-succession-global-executor
+    defaults:
+      run:
+        working-directory: cloudflare/okx-mcp
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      OKX_MCP_OWNER_SECRET: ${{ secrets.OKX_MCP_OWNER_SECRET }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Secret preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN missing"; exit 20; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "CLOUDFLARE_ACCOUNT_ID missing"; exit 21; }
+          test -n "$OKX_MCP_OWNER_SECRET" || { echo "OKX_MCP_OWNER_SECRET missing"; exit 22; }
+
+      - name: Install pinned package surface
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run check
+
+      - name: Resolve OAuth KV namespace
+        id: kv
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="okx-cloudflare-mcp-oauth"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
+
+          list="$(curl -fsS "${auth[@]}"             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces?per_page=100")"
+          id="$(jq -r --arg title "$title" '.result[] | select(.title == $title) | .id' <<<"$list" | head -n1)"
+
+          if [[ -z "$id" ]]; then
+            created="$(curl -fsS -X POST "${auth[@]}"               --data "$(jq -nc --arg title "$title" '{title:$title}')"               "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces")"
+            id="$(jq -r '.result.id // empty' <<<"$created")"
+          fi
+
+          [[ "$id" =~ ^[0-9a-f]{32}$ ]] || { echo "OAuth KV namespace resolution failed"; exit 23; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Generate deploy config
+        env:
+          OAUTH_KV_ID: ${{ steps.kv.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("fs");
+          const source = fs.readFileSync("wrangler.template.jsonc", "utf8");
+          const id = process.env.OAUTH_KV_ID;
+          if (!/^[0-9a-f]{32}$/.test(id || "")) process.exit(24);
+          fs.writeFileSync("wrangler.deploy.jsonc", source.replace("__OAUTH_KV_ID__", id));
+          NODE
+
+      - name: Deploy Worker
+        run: npx wrangler deploy --config wrangler.deploy.jsonc
+
+      - name: Set owner login secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$OKX_MCP_OWNER_SECRET" |
+            npx wrangler secret put MCP_OWNER_SECRET --config wrangler.deploy.jsonc
+
+      - name: Health check
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error             --retry 5 --retry-delay 2             https://okx-cloudflare-mcp.pvisakp.workers.dev/health |
+            jq -e '.status == "ok" and .service == "okx-cloudflare-mcp"'

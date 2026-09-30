@@ -105,6 +105,32 @@ jobs:
       - name: Test portable crates
         run: cargo test --locked --workspace --exclude okx-agent --exclude okx-host-control
 
+
+  cloudflare-mcp:
+    name: cloudflare-mcp
+    needs: classify
+    if: needs.classify.outputs.build_required == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare/okx-mcp
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Toolchain
+        run: |
+          node --version
+          npm --version
+
+      - name: Install pinned package surface
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run check
+
+
   windows-agent:
     name: windows-native
     needs: classify

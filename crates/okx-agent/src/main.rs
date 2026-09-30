@@ -11,6 +11,8 @@ use clap::{Parser, Subcommand};
 use okx_agent::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
+    cloudflare_auth::{load_native_cloudflare_token, store_native_cloudflare_token},
+    cloudflare_transport::CloudflareTransportConfig,
     config::{AgentConfig, default_root},
     execution_runtime::ExecutionRuntime,
     github_auth::{load_native_github_token, store_native_github_token},
@@ -65,6 +67,9 @@ enum Command {
     /// Store the GitHub mailbox token from stdin in Windows Credential Manager.
     SetGithubToken,
 
+    /// Store the Cloudflare direct-transport runtime token from stdin.
+    SetCloudflareToken,
+
     /// Store the read-only OKX observer credential payload from stdin.
     SetOkxCredentials,
 
@@ -84,6 +89,13 @@ enum Command {
 
         #[arg(long, default_value_t = DEFAULT_DATA_POLL_SECONDS)]
         poll_seconds: u64,
+
+        /// Optional outbound Cloudflare runtime WebSocket. GitHub mailbox remains active when set.
+        #[arg(long)]
+        cloudflare_ws_url: Option<String>,
+
+        #[arg(long, default_value = "windows-primary")]
+        cloudflare_runtime_id: String,
     },
 }
 
@@ -118,6 +130,22 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 "{}",
                 serde_json::json!({
                     "schema": "okx.agent.github-token/v1",
+                    "stored": true
+                })
+            );
+        }
+        Command::SetCloudflareToken => {
+            let mut token = read_stdin()?;
+            while matches!(token.as_bytes().last(), Some(b'\r' | b'\n')) {
+                token.pop();
+            }
+            let result = store_native_cloudflare_token(&token);
+            token.zeroize();
+            result?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.agent.cloudflare-token/v1",
                     "stored": true
                 })
             );
@@ -173,6 +201,8 @@ async fn run(cli: Cli) -> AgentResult<()> {
         Command::Run {
             mailbox_issue,
             poll_seconds,
+            cloudflare_ws_url,
+            cloudflare_runtime_id,
         } => {
             let identity = load_native_identity(&config.key_id)?;
             if let Some(mailbox_issue) = mailbox_issue {
@@ -191,6 +221,29 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 let (public_ws_coordinator, public_ws) =
                     PublicWsCoordinator::new(environment, reference);
                 let execution = optional_execution_runtime(&config, environment);
+                let cloudflare = cloudflare_ws_url.and_then(|ws_url| {
+                    match load_native_cloudflare_token() {
+                        Ok(token) => match CloudflareTransportConfig::new(
+                            ws_url,
+                            cloudflare_runtime_id.clone(),
+                            token,
+                        ) {
+                            Ok(config) => Some(config),
+                            Err(error) => {
+                                eprintln!(
+                                    "Cloudflare direct transport disabled; GitHub fallback remains active: {error}"
+                                );
+                                None
+                            }
+                        },
+                        Err(error) => {
+                            eprintln!(
+                                "Cloudflare direct transport credential unavailable; GitHub fallback remains active: {error}"
+                            );
+                            None
+                        }
+                    }
+                });
                 let mut private_key = load_native_private_key(&config.key_id)?;
                 let result = run_mailbox_until_shutdown(
                     MailboxRuntimeContext {
@@ -204,6 +257,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                         account: account.as_ref(),
                         private_ws: private_ws.as_ref(),
                         execution: execution.as_ref(),
+                        cloudflare: cloudflare.as_ref(),
                     },
                     public_ws_coordinator,
                     private_ws_coordinator,
