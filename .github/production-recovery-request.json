@@ -1,5 +1,5 @@
 {
   "schema": "okx.production-recovery.request/v1",
   "promote": true,
-  "purpose": "Controller self-update acceptance target: promote this exact tested merged tree for remote replacement proof."
+  "purpose": "Final production baseline after immutable no-window launcher acceptance; promote this exact tested merged tree."
 }
