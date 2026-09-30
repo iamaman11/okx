@@ -567,6 +567,7 @@ pub enum HostControlOperation {
     InitAgentIdentity,
     AgentIdentity,
     BootstrapAgentGithubToken,
+    ProvisionCloudflareRuntimeToken,
     StartAgent,
     StopAgent,
     RestartAgent,
