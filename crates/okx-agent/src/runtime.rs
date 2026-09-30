@@ -11,6 +11,9 @@ use tokio::{
 use crate::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
+    cloudflare_transport::{
+        CloudflareQueryRuntimeContext, CloudflareTransportConfig, run_cloudflare_transport,
+    },
     config::{AGENT_RUNTIME_SCHEMA_V1, AgentConfig},
     execution_runtime::ExecutionRuntime,
     github_mailbox::{GitHubMailboxClient, MailboxQueryRuntimeContext},
@@ -55,6 +58,7 @@ pub struct MailboxRuntimeContext<'a> {
     pub account: Option<&'a AccountBootstrapper>,
     pub private_ws: Option<&'a PrivateWsHandle>,
     pub execution: Option<&'a ExecutionRuntime>,
+    pub cloudflare: Option<&'a CloudflareTransportConfig>,
 }
 
 pub async fn run_mailbox_until_shutdown(
@@ -74,6 +78,7 @@ pub async fn run_mailbox_until_shutdown(
         account,
         private_ws,
         execution,
+        cloudflare,
     } = context;
     if !(1..=60).contains(&poll_seconds) {
         return Err(AgentError::InvalidPollInterval);
@@ -90,6 +95,23 @@ pub async fn run_mailbox_until_shutdown(
             }
             result
         })
+    });
+
+    let cloudflare_shutdown_rx = runtime_shutdown_tx.subscribe();
+    let cloudflare_context = CloudflareQueryRuntimeContext {
+        public_ws,
+        market,
+        account,
+        private_ws,
+        execution,
+    };
+    let mut cloudflare_runtime = Box::pin(async move {
+        match cloudflare {
+            Some(config) => {
+                run_cloudflare_transport(config, cloudflare_context, cloudflare_shutdown_rx).await
+            }
+            None => std::future::pending::<AgentResult<()>>().await,
+        }
     });
 
     let mut github_verified = false;
@@ -126,6 +148,20 @@ pub async fn run_mailbox_until_shutdown(
                     )),
                     Ok(Err(error)) => Err(error.into()),
                     Err(error) => Err(AgentError::PublicRuntimeTask(error.to_string())),
+                };
+            }
+            cloudflare_result = &mut cloudflare_runtime => {
+                emit(
+                    RuntimeState::ShuttingDown,
+                    config,
+                    identity,
+                    Some(mailbox_issue),
+                )?;
+                return match cloudflare_result {
+                    Ok(()) => Err(AgentError::CloudflareTransport(
+                        "Cloudflare transport exited before agent shutdown".to_owned(),
+                    )),
+                    Err(error) => Err(error),
                 };
             }
             _ = ticker.tick() => {
