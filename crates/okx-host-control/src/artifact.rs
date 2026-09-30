@@ -151,6 +151,46 @@ pub async fn install_launcher_root(
     }))
 }
 
+pub async fn upgrade_launcher_root(
+    github: &GitHubClient,
+    executor: &HostExecutor,
+    run_id: u64,
+    artifact_id: u64,
+    expected_source_tree: &str,
+    expected_current_launcher_sha256: &str,
+) -> HostControlResult<Value> {
+    let bundle =
+        verified_bundle(github, executor, run_id, artifact_id, expected_source_tree).await?;
+
+    let launcher_bytes =
+        bundle
+            .launcher_bytes
+            .as_deref()
+            .ok_or(HostControlError::ArtifactVerification(
+                "bundle is missing okx-host-launcher.exe",
+            ))?;
+    let declared_launcher_hash = declared_hash(&bundle.manifest, "okx-host-launcher.exe")?;
+    let actual_launcher_hash = sha256_hex(launcher_bytes);
+    if actual_launcher_hash != declared_launcher_hash {
+        return Err(HostControlError::ArtifactHashMismatch);
+    }
+
+    let root = okx_host_launcher::upgrade_launcher_root(
+        launcher_bytes,
+        &actual_launcher_hash,
+        expected_current_launcher_sha256,
+    )?;
+
+    Ok(json!({
+        "run_id": run_id,
+        "artifact_id": artifact_id,
+        "source_head_sha": bundle.manifest.source_head_sha,
+        "source_tree": bundle.manifest.source_tree,
+        "launcher_sha256": actual_launcher_hash,
+        "root": root
+    }))
+}
+
 pub async fn stage_controller_update(
     github: &GitHubClient,
     executor: &HostExecutor,
