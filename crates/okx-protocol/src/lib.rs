@@ -11,6 +11,8 @@ pub const HOST_CONTROL_RESULT_SCHEMA_V1: &str = "okx.windows.control.result/v1";
 pub const MAILBOX_REPOSITORY: &str = "iamaman11/okx";
 pub const KDF_LABEL_CLIENT_TO_AGENT_V1: &str = "okx-mailbox-v1/client-to-agent";
 pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
+pub const DIRECT_TRANSPORT_FRAME_SCHEMA_V1: &str = "okx.direct-transport.frame/v1";
+pub const DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -55,6 +57,12 @@ pub enum ProtocolError {
 
     #[error("invalid SHA-256")]
     InvalidSha256,
+
+    #[error("invalid direct transport token")]
+    InvalidDirectTransportToken,
+
+    #[error("invalid connection generation")]
+    InvalidConnectionGeneration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,6 +381,139 @@ impl AgentOperation {
     }
 }
 
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DirectTransportFrame {
+    Hello {
+        schema: String,
+        runtime_id: String,
+        connection_id: String,
+    },
+    HelloAck {
+        schema: String,
+        session_id: String,
+        connection_generation: u64,
+    },
+    Ping {
+        schema: String,
+        session_id: String,
+        connection_generation: u64,
+        nonce: String,
+    },
+    Pong {
+        schema: String,
+        session_id: String,
+        connection_generation: u64,
+        nonce: String,
+    },
+    Request {
+        schema: String,
+        session_id: String,
+        connection_generation: u64,
+        request: AgentRequest,
+    },
+    DeliveryAck {
+        schema: String,
+        session_id: String,
+        connection_generation: u64,
+        request_id: String,
+    },
+    Response {
+        schema: String,
+        session_id: String,
+        connection_generation: u64,
+        response: AgentResponse,
+    },
+}
+
+impl DirectTransportFrame {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        match self {
+            Self::Hello {
+                schema,
+                runtime_id,
+                connection_id,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(runtime_id, 1, 64)?;
+                validate_direct_token(connection_id, 16, 128)
+            }
+            Self::HelloAck {
+                schema,
+                session_id,
+                connection_generation,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(session_id, 16, 128)?;
+                validate_connection_generation(*connection_generation)
+            }
+            Self::Ping {
+                schema,
+                session_id,
+                connection_generation,
+                nonce,
+            }
+            | Self::Pong {
+                schema,
+                session_id,
+                connection_generation,
+                nonce,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(session_id, 16, 128)?;
+                validate_connection_generation(*connection_generation)?;
+                validate_direct_token(nonce, 16, 128)
+            }
+            Self::Request {
+                schema,
+                session_id,
+                connection_generation,
+                request,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(session_id, 16, 128)?;
+                validate_connection_generation(*connection_generation)?;
+                request.validate()
+            }
+            Self::DeliveryAck {
+                schema,
+                session_id,
+                connection_generation,
+                request_id,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(session_id, 16, 128)?;
+                validate_connection_generation(*connection_generation)?;
+                validate_request_id(request_id)
+            }
+            Self::Response {
+                schema,
+                session_id,
+                connection_generation,
+                response,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(session_id, 16, 128)?;
+                validate_connection_generation(*connection_generation)?;
+                response.validate()
+            }
+        }
+    }
+
+    pub fn schema(&self) -> &str {
+        match self {
+            Self::Hello { schema, .. }
+            | Self::HelloAck { schema, .. }
+            | Self::Ping { schema, .. }
+            | Self::Pong { schema, .. }
+            | Self::Request { schema, .. }
+            | Self::DeliveryAck { schema, .. }
+            | Self::Response { schema, .. } => schema,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostControlRequest {
@@ -574,6 +715,35 @@ pub struct AgentFailure {
     pub code: String,
     pub message: String,
     pub retryable: bool,
+}
+
+
+fn validate_direct_schema(value: &str) -> Result<(), ProtocolError> {
+    if value == DIRECT_TRANSPORT_FRAME_SCHEMA_V1 {
+        Ok(())
+    } else {
+        Err(ProtocolError::UnsupportedSchema(value.to_owned()))
+    }
+}
+
+fn validate_connection_generation(value: u64) -> Result<(), ProtocolError> {
+    if value == 0 {
+        Err(ProtocolError::InvalidConnectionGeneration)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_direct_token(value: &str, min: usize, max: usize) -> Result<(), ProtocolError> {
+    if (min..=max).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidDirectTransportToken)
+    }
 }
 
 fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
@@ -1232,5 +1402,61 @@ mod tests {
             invalid.validate(),
             Err(ProtocolError::InvalidDecimalInput("entry_price"))
         );
+    }
+}
+
+
+#[cfg(test)]
+mod direct_transport_tests {
+    use super::*;
+
+    fn request() -> AgentRequest {
+        AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_direct_0123456789".to_owned(),
+            operation: AgentOperation::MarketOverview {
+                instrument: "ADA-USDT-SWAP".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn direct_transport_request_round_trips() {
+        let frame = DirectTransportFrame::Request {
+            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+            session_id: "session_0123456789".to_owned(),
+            connection_generation: 7,
+            request: request(),
+        };
+        frame.validate().expect("valid frame");
+        let encoded = serde_json::to_string(&frame).expect("encode");
+        assert!(encoded.len() < DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES);
+        let decoded: DirectTransportFrame = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(decoded, frame);
+        decoded.validate().expect("valid decoded frame");
+    }
+
+    #[test]
+    fn direct_transport_rejects_zero_generation_and_bad_schema() {
+        let bad_generation = DirectTransportFrame::Request {
+            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+            session_id: "session_0123456789".to_owned(),
+            connection_generation: 0,
+            request: request(),
+        };
+        assert_eq!(
+            bad_generation.validate(),
+            Err(ProtocolError::InvalidConnectionGeneration)
+        );
+
+        let bad_schema = DirectTransportFrame::Hello {
+            schema: "okx.direct-transport.frame/v0".to_owned(),
+            runtime_id: "windows-primary".to_owned(),
+            connection_id: "connection_0123456789".to_owned(),
+        };
+        assert!(matches!(
+            bad_schema.validate(),
+            Err(ProtocolError::UnsupportedSchema(_))
+        ));
     }
 }
