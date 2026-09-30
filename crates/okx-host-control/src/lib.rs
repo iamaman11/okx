@@ -10,6 +10,7 @@ pub mod provenance;
 pub mod root_migration;
 pub mod runtime;
 pub mod single_instance;
+pub mod workspace;
 
 use thiserror::Error;
 
@@ -59,6 +60,15 @@ pub enum HostControlError {
 
     #[error("canonical main is not equal to origin/main; run sync first")]
     MainNotSynced,
+
+    #[error("workspace reconciliation found unsafe or unsupported local state")]
+    WorkspaceReconcileUnsafe,
+
+    #[error("workspace quarantine destination already exists")]
+    WorkspaceQuarantineConflict,
+
+    #[error("workspace reconciliation did not converge to clean origin/main")]
+    WorkspaceReconcileInvariant,
 
     #[error("required command failed: {0}")]
     CommandFailed(&'static str),
@@ -148,6 +158,9 @@ impl HostControlError {
             Self::RepositoryDirty => "REPOSITORY_DIRTY",
             Self::BranchMismatch => "BRANCH_MISMATCH",
             Self::MainNotSynced => "MAIN_NOT_SYNCED",
+            Self::WorkspaceReconcileUnsafe => "WORKSPACE_RECONCILE_UNSAFE",
+            Self::WorkspaceQuarantineConflict => "WORKSPACE_QUARANTINE_CONFLICT",
+            Self::WorkspaceReconcileInvariant => "WORKSPACE_RECONCILE_INVARIANT",
             Self::CommandFailed(_) => "COMMAND_FAILED",
             Self::AgentBinaryMissing => "AGENT_BINARY_MISSING",
             Self::AgentRunning => "AGENT_RUNNING",
