@@ -7,6 +7,7 @@ const MAX_INFLIGHT = 8;
 const PONG_DEADLINE_MS = 2_000;
 const ACK_DEADLINE_MS = 2_000;
 const RESPONSE_DEADLINE_MS = 20_000;
+const AUTH_CSRF_TTL_MS = 5 * 60 * 1000;
 const RUNTIME_NAME = "windows-primary";
 const PUBLIC_ORIGIN = "https://okx-cloudflare-mcp.okx-794.workers.dev";
 
@@ -93,6 +94,57 @@ async function sha256Hex(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function hmacSha256Hex(secret: string, value: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
+  return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function authorizationCsrfMessage(url: URL, expiresAtMs: number): string {
+  return [
+    "okx.oauth.csrf/v1",
+    String(expiresAtMs),
+    url.origin,
+    url.pathname,
+    url.search,
+  ].join("\n");
+}
+
+async function issueAuthorizationCsrf(env: Env, url: URL): Promise<string> {
+  const expiresAtMs = Date.now() + AUTH_CSRF_TTL_MS;
+  const signature = await hmacSha256Hex(
+    env.MCP_OWNER_SECRET,
+    authorizationCsrfMessage(url, expiresAtMs),
+  );
+  return `${expiresAtMs}.${signature}`;
+}
+
+async function verifyAuthorizationCsrf(env: Env, url: URL, token: string): Promise<boolean> {
+  const separator = token.indexOf(".");
+  if (separator <= 0) return false;
+  const expiresText = token.slice(0, separator);
+  const suppliedSignature = token.slice(separator + 1);
+  if (!/^\d{13}$/.test(expiresText) || !/^[0-9a-f]{64}$/.test(suppliedSignature)) return false;
+
+  const expiresAtMs = Number(expiresText);
+  const now = Date.now();
+  if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs < now || expiresAtMs - now > AUTH_CSRF_TTL_MS) {
+    return false;
+  }
+
+  const expectedSignature = await hmacSha256Hex(
+    env.MCP_OWNER_SECRET,
+    authorizationCsrfMessage(url, expiresAtMs),
+  );
+  return sameHex(suppliedSignature, expectedSignature);
 }
 
 function sameHex(left: string, right: string): boolean {
@@ -293,13 +345,21 @@ const defaultHandler = {
 
     if (request.method === "POST") {
       const form = await request.formData();
+      const csrf = String(form.get("csrf") ?? "");
+      if (!(await verifyAuthorizationCsrf(env, url, csrf))) {
+        return new Response("invalid authorization csrf", {
+          status: 400,
+          headers: { "cache-control": "no-store" },
+        });
+      }
+
       const supplied = String(form.get("secret") ?? "");
       const [suppliedHash, expectedHash] = await Promise.all([
         sha256Hex(supplied),
         sha256Hex(env.MCP_OWNER_SECRET),
       ]);
       if (!sameHex(suppliedHash, expectedHash)) {
-        return authorizationPage(url, authRequest, true);
+        return authorizationPage(url, authRequest, true, env);
       }
 
       const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
@@ -314,14 +374,16 @@ const defaultHandler = {
     }
 
     if (request.method === "GET") {
-      return authorizationPage(url, authRequest, false);
+      return authorizationPage(url, authRequest, false, env);
     }
     return new Response("method not allowed", { status: 405 });
   },
 };
 
-function authorizationPage(url: URL, authRequest: any, invalid: boolean): Response {
+async function authorizationPage(url: URL, authRequest: any, invalid: boolean, env: Env): Promise<Response> {
   const action = escapeHtml(url.pathname + url.search);
+  const externalHref = escapeHtml(url.toString());
+  const csrf = escapeHtml(await issueAuthorizationCsrf(env, url));
   const scopes = Array.isArray(authRequest.scope) ? authRequest.scope.join(" ") : "";
   const body = `<!doctype html>
 <meta charset="utf-8">
@@ -329,8 +391,11 @@ function authorizationPage(url: URL, authRequest: any, invalid: boolean): Respon
 <h1>Authorize OKX Cloudflare MCP</h1>
 <p>Client requests access to the Windows OKX read transport.</p>
 <p>Requested scope: <code>${escapeHtml(scopes)}</code></p>
+<p>If the embedded ChatGPT window does not submit the form, open this same secure authorization page in a normal browser window:</p>
+<p><a href="${externalHref}" target="_blank" rel="noopener noreferrer">Open secure authorization in browser</a></p>
 ${invalid ? "<p>Invalid owner secret.</p>" : ""}
-<form method="post" action="${action}">
+<form method="post" action="${action}" target="_top">
+<input type="hidden" name="csrf" value="${csrf}">
 <label>Owner secret <input type="password" name="secret" autocomplete="current-password" required></label>
 <button type="submit">Authorize</button>
 </form>`;
@@ -338,6 +403,7 @@ ${invalid ? "<p>Invalid owner secret.</p>" : ""}
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
     },
   });
