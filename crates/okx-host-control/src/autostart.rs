@@ -1,9 +1,9 @@
-use std::{fs, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf};
 
 use chrono::{Duration as ChronoDuration, Local};
 use serde_json::{Value, json};
 
-use crate::{HostControlError, HostControlResult};
+use crate::{background_process::hidden_command, HostControlError, HostControlResult};
 
 const TASK_NAME: &str = r"\iamaman11-okx-host-control";
 const ENTRYPOINT_PATH: &str = okx_host_launcher::ENTRYPOINT_PATH;
@@ -45,7 +45,7 @@ fn install_action(
         }
         fs::write(&xml_path, xml.as_bytes())?;
 
-        let status = Command::new("schtasks.exe")
+        let status = hidden_command("schtasks.exe")
             .args(["/Create", "/TN", TASK_NAME, "/XML", TASK_XML_PATH, "/F"])
             .status()?;
 
@@ -65,7 +65,7 @@ pub fn run_now() -> HostControlResult<Value> {
     #[cfg(windows)]
     {
         ensure_policy_valid()?;
-        let status = Command::new("schtasks.exe")
+        let status = hidden_command("schtasks.exe")
             .args(["/Run", "/TN", TASK_NAME])
             .status()?;
 
@@ -114,7 +114,7 @@ pub fn status_value() -> HostControlResult<Value> {
 
     #[cfg(windows)]
     {
-        let output = Command::new("schtasks.exe")
+        let output = hidden_command("schtasks.exe")
             .args(["/Query", "/TN", TASK_NAME, "/XML"])
             .output()?;
 
@@ -144,7 +144,7 @@ fn exported_task_xml() -> HostControlResult<String> {
 
     #[cfg(windows)]
     {
-        let output = Command::new("schtasks.exe")
+        let output = hidden_command("schtasks.exe")
             .args(["/Query", "/TN", TASK_NAME, "/XML"])
             .output()?;
         if !output.status.success() {
@@ -179,7 +179,7 @@ fn exported_policy_shape_valid(xml: &str) -> bool {
 }
 
 fn current_account() -> HostControlResult<String> {
-    let output = Command::new("whoami.exe").output()?;
+    let output = hidden_command("whoami.exe").output()?;
     if !output.status.success() {
         return Err(HostControlError::CommandFailed("whoami"));
     }
