@@ -13,7 +13,9 @@ use tokio::time::{Interval, MissedTickBehavior, interval};
 
 use crate::{
     HostControlError, HostControlResult as LocalResult,
-    artifact::{deploy_agent, install_launcher_root, stage_controller_update, upgrade_launcher_root},
+    artifact::{
+        deploy_agent, install_launcher_root, stage_controller_update, upgrade_launcher_root,
+    },
     autostart, controller_update,
     executor::HostExecutor,
     root_migration,
