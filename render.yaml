@@ -6,6 +6,3 @@ services:
     dockerfilePath: ./crates/okx-bridge-mcp/Dockerfile
     dockerContext: .
     healthCheckPath: /health
-    envVars:
-      - key: OKX_BRIDGE_GITHUB_TOKEN
-        sync: false
