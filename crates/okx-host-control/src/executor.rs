@@ -355,7 +355,8 @@ impl HostExecutor {
         self.require_agent_binary()?;
 
         let mut random = [0u8; 32];
-        getrandom::fill(&mut random).map_err(|error| HostControlError::Random(error.to_string()))?;
+        getrandom::fill(&mut random)
+            .map_err(|error| HostControlError::Random(error.to_string()))?;
 
         let mut token = String::with_capacity(64);
         for byte in random {
