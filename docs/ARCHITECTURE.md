@@ -475,3 +475,20 @@ Deferred, non-blocking:
 - no second access transport;
 - no second lifecycle supervisor;
 - no live order mutation until separately authorized and accepted.
+
+
+## Bounded source-workspace reconciliation
+
+The installed runtime does not execute from the mutable source checkout, but `C:\okx` is kept as the canonical operator workspace. Remote reconciliation is deliberately narrower than `git reset` or `git clean`:
+
+- controller verifies the fixed repository identity and `main` branch;
+- local commits are rejected;
+- tracked modifications are rejected;
+- at most 16 untracked conflicting files are accepted per operation;
+- every accepted untracked file must correspond to a blob in the fetched `origin/main`;
+- each local file is preserved under the fixed `C:\okx-control\workspace-quarantine\<origin-main>\...` root with SHA-256 evidence;
+- only then may `git merge --ff-only origin/main` run;
+- the operation must finish on exact `origin/main` with a clean workspace;
+- the owned agent is stopped only for this bounded mutation and restored by the same controller owner.
+
+No `git reset`, `git clean`, arbitrary repository path, or second workspace owner is allowed.
