@@ -23,7 +23,7 @@ pub use model::{
 };
 pub use reconciliation::{
     ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1, AccountLedgerReconciliation,
-    AccountLedgerReconciliationError, reconcile_account_ledger,
+    AccountLedgerReconciliationError, PositionAttributionDiagnostic, reconcile_account_ledger,
 };
 pub use state::{
     ALLOW_LIVE_TRADING_DEFAULT, ExchangeOrderState, ExecutionRecord, ExecutionState,
