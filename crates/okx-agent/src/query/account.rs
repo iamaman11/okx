@@ -149,14 +149,20 @@ pub(super) async fn dispatch(
                                 value.managed_intents_unresolved_in_bounded_exchange_evidence
                             ));
                         }
-                        if value.position_attribution.iter().any(|item| {
-                            item.unattributed_external_or_outside_bounded_history_residual != "0"
-                        }) {
+                        if value.position_attribution_residual_count > 0 {
                             quality = DataQuality::Degraded;
                             warnings.push(
                                 "authoritative exchange position contains an unattributed residual relative to managed fills in the bounded history window; it is not credited to a managed strategy"
                                     .to_owned(),
                             );
+                        }
+                        if value.position_attribution_truncated {
+                            quality = DataQuality::Degraded;
+                            warnings.push(format!(
+                                "position attribution diagnostics were truncated: {} total rows, bounded response includes {}",
+                                value.position_attribution_total,
+                                value.position_attribution.len()
+                            ));
                         }
                         if value.position_attribution_unavailable_events > 0 {
                             quality = DataQuality::Degraded;
