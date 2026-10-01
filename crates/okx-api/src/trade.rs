@@ -1,11 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{MutationTiming, OkxRestClient, client::ApiEnvelope, error::OkxError};
+use crate::{
+    MutationTiming, OkxRestClient, RateOperationClass, client::ApiEnvelope, error::OkxError,
+};
 
 const PLACE_ORDER_PATH: &str = "/api/v5/trade/order";
 const CANCEL_ORDER_PATH: &str = "/api/v5/trade/cancel-order";
 const AMEND_ORDER_PATH: &str = "/api/v5/trade/amend-order";
 const ORDER_DETAILS_PATH: &str = "/api/v5/trade/order";
+const ACCOUNT_RATE_LIMIT_PATH: &str = "/api/v5/trade/account-rate-limit";
+pub const ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1: &str = "okx.account-rate-limit/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -106,6 +110,30 @@ impl OrderOperationAck {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccountRateLimitEvidence {
+    pub schema: &'static str,
+    pub current_orders_per_2s: u32,
+    pub next_orders_per_2s: Option<u32>,
+    pub fill_ratio: Option<String>,
+    pub main_fill_ratio: Option<String>,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawAccountRateLimit {
+    #[serde(rename = "accRateLimit")]
+    current_orders_per_2s: String,
+    #[serde(rename = "nextAccRateLimit", default)]
+    next_orders_per_2s: String,
+    #[serde(rename = "fillRatio", default)]
+    fill_ratio: String,
+    #[serde(rename = "mainFillRatio", default)]
+    main_fill_ratio: String,
+    #[serde(rename = "ts")]
+    updated_at_ms: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TradeResponse<T> {
     pub code: String,
     pub message: String,
@@ -180,6 +208,11 @@ impl TradeApi {
         timing: &MutationTiming,
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
         validate_place(request)?;
+        let rate_plan = self.client.rate_budget().trade_rest_plan(
+            RateOperationClass::PlaceOrder,
+            &request.instrument_id,
+            None,
+        );
         Ok(self
             .client
             .private_post(
@@ -187,6 +220,7 @@ impl TradeApi {
                 request,
                 timing.request_timestamp(),
                 Some(timing.exp_time_ms()),
+                &rate_plan,
             )
             .await?
             .into())
@@ -199,9 +233,20 @@ impl TradeApi {
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
         validate_instrument_id(&request.instrument_id)?;
         validate_client_id("clOrdId", &request.client_order_id)?;
+        let rate_plan = self.client.rate_budget().trade_rest_plan(
+            RateOperationClass::CancelOrder,
+            &request.instrument_id,
+            None,
+        );
         Ok(self
             .client
-            .private_post(CANCEL_ORDER_PATH, request, timing.request_timestamp(), None)
+            .private_post(
+                CANCEL_ORDER_PATH,
+                request,
+                timing.request_timestamp(),
+                None,
+                &rate_plan,
+            )
             .await?
             .into())
     }
@@ -212,6 +257,11 @@ impl TradeApi {
         timing: &MutationTiming,
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
         validate_amend(request)?;
+        let rate_plan = self.client.rate_budget().trade_rest_plan(
+            RateOperationClass::AmendOrder,
+            &request.instrument_id,
+            None,
+        );
         Ok(self
             .client
             .private_post(
@@ -219,9 +269,48 @@ impl TradeApi {
                 request,
                 timing.request_timestamp(),
                 Some(timing.exp_time_ms()),
+                &rate_plan,
             )
             .await?
             .into())
+    }
+
+    pub async fn account_rate_limit(&self) -> Result<AccountRateLimitEvidence, OkxError> {
+        let rows: Vec<RawAccountRateLimit> =
+            self.client.private_get(ACCOUNT_RATE_LIMIT_PATH, &[]).await?;
+        let [row] = rows.as_slice() else {
+            return Err(OkxError::Response(format!(
+                "expected exactly one account-rate-limit row, found {}",
+                rows.len()
+            )));
+        };
+
+        let current_orders_per_2s = parse_positive_u32(
+            "accRateLimit",
+            &row.current_orders_per_2s,
+        )?;
+        let next_orders_per_2s = parse_optional_positive_u32(
+            "nextAccRateLimit",
+            &row.next_orders_per_2s,
+        )?;
+        let updated_at_ms = parse_positive_u64("account-rate-limit ts", &row.updated_at_ms)?;
+        let fill_ratio = parse_optional_ratio("fillRatio", &row.fill_ratio)?;
+        let main_fill_ratio = parse_optional_ratio("mainFillRatio", &row.main_fill_ratio)?;
+
+        self.client.rate_budget().update_subaccount_rate_limit(
+            current_orders_per_2s,
+            next_orders_per_2s,
+            updated_at_ms,
+        );
+
+        Ok(AccountRateLimitEvidence {
+            schema: ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1,
+            current_orders_per_2s,
+            next_orders_per_2s,
+            fill_ratio,
+            main_fill_ratio,
+            updated_at_ms,
+        })
     }
 
     pub async fn order_by_client_id(
@@ -257,6 +346,48 @@ impl TradeApi {
         }
         Ok(order)
     }
+}
+
+fn parse_positive_u32(field: &str, value: &str) -> Result<u32, OkxError> {
+    value
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| OkxError::Response(format!("{field} is not a positive integer")))
+}
+
+fn parse_optional_positive_u32(field: &str, value: &str) -> Result<Option<u32>, OkxError> {
+    if value.trim().is_empty() {
+        Ok(None)
+    } else {
+        parse_positive_u32(field, value).map(Some)
+    }
+}
+
+fn parse_positive_u64(field: &str, value: &str) -> Result<u64, OkxError> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| OkxError::Response(format!("{field} is not a positive integer")))
+}
+
+fn parse_optional_ratio(field: &str, value: &str) -> Result<Option<String>, OkxError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        || value.matches('.').count() > 1
+    {
+        return Err(OkxError::Response(format!("{field} is not a decimal ratio")));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn validate_place(request: &PlaceOrderRequest) -> Result<(), OkxError> {
@@ -407,4 +538,44 @@ mod tests {
         };
         assert!(validate_amend(&request).is_err());
     }
+
+    #[test]
+    fn account_rate_limit_evidence_preserves_non_vip_empty_ratios() {
+        let raw: RawAccountRateLimit = serde_json::from_str(
+            r#"{
+                "accRateLimit":"1000",
+                "fillRatio":"",
+                "mainFillRatio":"",
+                "nextAccRateLimit":"",
+                "ts":"1790884800000"
+            }"#,
+        )
+        .expect("rate row");
+
+        assert_eq!(
+            parse_positive_u32("accRateLimit", &raw.current_orders_per_2s).expect("current"),
+            1000
+        );
+        assert_eq!(
+            parse_optional_positive_u32("nextAccRateLimit", &raw.next_orders_per_2s)
+                .expect("next"),
+            None
+        );
+        assert_eq!(
+            parse_optional_ratio("fillRatio", &raw.fill_ratio).expect("ratio"),
+            None
+        );
+        assert_eq!(
+            parse_positive_u64("ts", &raw.updated_at_ms).expect("timestamp"),
+            1_790_884_800_000
+        );
+    }
+
+    #[test]
+    fn account_rate_limit_rejects_malformed_exchange_evidence() {
+        assert!(parse_positive_u32("accRateLimit", "0").is_err());
+        assert!(parse_positive_u32("accRateLimit", "abc").is_err());
+        assert!(parse_optional_ratio("fillRatio", "1.2.3").is_err());
+    }
+
 }
