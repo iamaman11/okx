@@ -955,9 +955,6 @@ mod tests {
         assert!(!submit.direct_transport_read_only());
     }
 
-
-    use super::*;
-
     fn request_id() -> String {
         "req_0123456789abcdef".to_owned()
     }
