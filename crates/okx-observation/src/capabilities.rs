@@ -245,6 +245,10 @@ mod tests {
                 max_leverage: Some("50".to_owned()),
                 list_time_ms: None,
                 expiry_time_ms: None,
+                initial_price_limit_pct: Some("0.05".to_owned()),
+                floating_price_limit_pct: Some("0.03".to_owned()),
+                maximum_price_limit_pct: Some("0.15".to_owned()),
+                upcoming_rule_changes: Vec::new(),
             },
         }
     }
