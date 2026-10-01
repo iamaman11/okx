@@ -7,6 +7,7 @@ use okx_execution::{
     EXECUTION_STATUS_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionTransitionError,
     OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide, PrepareFailure,
     PrepareOutcome, PrepareRejection, TradeMode, prepare_execution, revalidate_execution_plan,
+    revalidate_venue_execution,
 };
 use okx_protocol::{
     ExecutionOrderType, ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
@@ -24,6 +25,8 @@ pub const EXECUTION_CLOCK_UNAVAILABLE_CODE: &str = "EXECUTION_CLOCK_UNAVAILABLE"
 pub const EXECUTION_CLOCK_UNSAFE_CODE: &str = "EXECUTION_CLOCK_UNSAFE";
 pub const EXECUTION_RUNTIME_UNAVAILABLE_CODE: &str = "EXECUTION_RUNTIME_UNAVAILABLE";
 pub const EXECUTION_ACCOUNT_NOT_FRESH_CODE: &str = "EXECUTION_ACCOUNT_NOT_FRESH";
+pub const EXECUTION_REFERENCE_NOT_FRESH_CODE: &str = "EXECUTION_REFERENCE_NOT_FRESH";
+pub const EXECUTION_VENUE_UNAVAILABLE_CODE: &str = "EXECUTION_VENUE_UNAVAILABLE";
 pub const EXECUTION_INPUT_INCONSISTENT_CODE: &str = "EXECUTION_INPUT_INCONSISTENT";
 pub const EXECUTION_RECORD_NOT_FOUND_CODE: &str = "EXECUTION_RECORD_NOT_FOUND";
 pub const EXECUTION_INTENT_CONFLICT_CODE: &str = "EXECUTION_INTENT_CONFLICT";
@@ -311,6 +314,42 @@ async fn submit_prepared(
         return Ok(validation_failure(request, generated_at, error));
     }
 
+    let Some(public_ws) = context.public_ws else {
+        return Ok(reference_not_fresh(request, generated_at));
+    };
+    let public_state = public_ws.state();
+    if public_state.read().await.connection_state() != okx_runtime::PublicConnectionState::Connected {
+        return Ok(reference_not_fresh(request, generated_at));
+    }
+
+    let venue = match execution.venue_execution_evidence(&plan, &rules).await {
+        Ok(value) => value,
+        Err(crate::AgentError::Okx(error)) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_VENUE_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+        Err(crate::AgentError::Reference(error)) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_INPUT_INCONSISTENT_CODE,
+                error.to_string(),
+                false,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    if let Err(error) = revalidate_venue_execution(&plan, &rules, &venue) {
+        return Ok(validation_failure(request, generated_at, error));
+    }
+
     let clock = match execution.clock_evidence().await {
         Ok(value) => value,
         Err(error) => {
@@ -448,6 +487,18 @@ fn account_not_fresh(request: &AgentRequest, generated_at: &str) -> AgentRespons
         AgentResponseStatus::Rejected,
         EXECUTION_ACCOUNT_NOT_FRESH_CODE,
         "execution requires a private-WS-converged current account snapshot".to_owned(),
+        true,
+    )
+}
+
+fn reference_not_fresh(request: &AgentRequest, generated_at: &str) -> AgentResponse {
+    failure_response(
+        request,
+        generated_at,
+        AgentResponseStatus::Rejected,
+        EXECUTION_REFERENCE_NOT_FRESH_CODE,
+        "execution requires a currently connected public reference owner before mutation"
+            .to_owned(),
         true,
     )
 }
