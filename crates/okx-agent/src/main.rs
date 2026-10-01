@@ -29,7 +29,7 @@ use okx_agent::{
     reference_bootstrap::bootstrap_reference,
     runtime::{MailboxRuntimeContext, run_mailbox_until_shutdown, run_until_shutdown},
 };
-use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, Region};
+use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, RateBudget, Region};
 use okx_protocol::MailboxEnvelope;
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator};
 use zeroize::Zeroize;
@@ -180,10 +180,12 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let payload = read_input(input)?;
             let envelope: MailboxEnvelope = serde_json::from_str(&payload)?;
             let mut private_key = load_native_private_key(&config.key_id)?;
-            let public_client = OkxPublicClient::new(environment)?;
+            let rate_budget = RateBudget::new();
+            let public_client =
+                OkxPublicClient::with_rate_budget(environment, rate_budget.clone())?;
             let reference = bootstrap_reference(public_client.clone()).await?;
             let market = MarketBootstrapper::new(public_client);
-            let account = optional_account_bootstrapper(environment);
+            let account = optional_account_bootstrapper(environment, rate_budget);
             let response = process_once_now(
                 &envelope,
                 &config.key_id,
@@ -208,7 +210,9 @@ async fn run(cli: Cli) -> AgentResult<()> {
             if let Some(mailbox_issue) = mailbox_issue {
                 let token = load_native_github_token()?;
                 let mailbox = GitHubMailboxClient::new(mailbox_issue, token, &config.root)?;
-                let public_client = OkxPublicClient::new(environment)?;
+                let rate_budget = RateBudget::new();
+                let public_client =
+                    OkxPublicClient::with_rate_budget(environment, rate_budget.clone())?;
                 let reference = bootstrap_reference(public_client.clone()).await?;
                 eprintln!(
                     "reference registry ready generation={} instruments={}",
@@ -217,10 +221,14 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 );
                 let market = MarketBootstrapper::new(public_client);
                 let (account, private_ws_coordinator, private_ws) =
-                    optional_private_components(environment);
-                let (public_ws_coordinator, public_ws) =
-                    PublicWsCoordinator::new(environment, reference);
-                let execution = optional_execution_runtime(&config, environment);
+                    optional_private_components(environment, rate_budget.clone());
+                let (public_ws_coordinator, public_ws) = PublicWsCoordinator::new_with_rate_budget(
+                    environment,
+                    reference,
+                    rate_budget.clone(),
+                );
+                let execution =
+                    optional_execution_runtime(&config, environment, rate_budget.clone());
                 let cloudflare = cloudflare_ws_url.and_then(|ws_url| {
                     match load_native_cloudflare_token() {
                         Ok(token) => match CloudflareTransportConfig::new(
@@ -278,6 +286,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
 fn optional_execution_runtime(
     config: &AgentConfig,
     environment: OkxEnvironment,
+    rate_budget: RateBudget,
 ) -> Option<ExecutionRuntime> {
     let credentials = match load_native_executor_okx_credentials() {
         Ok(value) => value,
@@ -294,7 +303,13 @@ fn optional_execution_runtime(
     };
 
     let observed_at_ms = Utc::now().timestamp_millis().max(1) as u64;
-    match ExecutionRuntime::new(&config.root, environment, credentials, observed_at_ms) {
+    match ExecutionRuntime::new(
+        &config.root,
+        environment,
+        credentials,
+        observed_at_ms,
+        rate_budget,
+    ) {
         Ok(value) => Some(value),
         Err(error) => {
             eprintln!("execution runtime unavailable: {error}");
@@ -305,17 +320,26 @@ fn optional_execution_runtime(
 
 fn optional_private_components(
     environment: OkxEnvironment,
+    rate_budget: RateBudget,
 ) -> (
     Option<AccountBootstrapper>,
     Option<PrivateWsCoordinator>,
     Option<PrivateWsHandle>,
 ) {
     match load_native_okx_credentials() {
-        Ok(credentials) => match OkxRestClient::new(environment, credentials.clone()) {
+        Ok(credentials) => match OkxRestClient::with_rate_budget(
+            environment,
+            credentials.clone(),
+            rate_budget.clone(),
+        ) {
             Ok(client) => {
                 let account = AccountBootstrapper::new(client);
                 let (private_ws_coordinator, private_ws) =
-                    PrivateWsCoordinator::new(environment, credentials);
+                    PrivateWsCoordinator::new_with_rate_budget(
+                        environment,
+                        credentials,
+                        rate_budget,
+                    );
                 (
                     Some(account),
                     Some(private_ws_coordinator),
@@ -338,9 +362,16 @@ fn optional_private_components(
     }
 }
 
-fn optional_account_bootstrapper(environment: OkxEnvironment) -> Option<AccountBootstrapper> {
+fn optional_account_bootstrapper(
+    environment: OkxEnvironment,
+    rate_budget: RateBudget,
+) -> Option<AccountBootstrapper> {
     match load_native_okx_credentials() {
-        Ok(credentials) => match OkxRestClient::new(environment, credentials) {
+        Ok(credentials) => match OkxRestClient::with_rate_budget(
+            environment,
+            credentials,
+            rate_budget,
+        ) {
             Ok(client) => Some(AccountBootstrapper::new(client)),
             Err(error) => {
                 eprintln!("OKX observer REST client unavailable: {error}");
