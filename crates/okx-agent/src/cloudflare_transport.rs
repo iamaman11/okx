@@ -3,9 +3,9 @@ use std::time::Duration;
 use chrono::{SecondsFormat, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_protocol::{
-    AGENT_RESPONSE_SCHEMA_V1, DIRECT_TRANSPORT_FRAME_SCHEMA_V1,
-    DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, AgentFailure, AgentResponse, AgentResponseStatus,
-    DataQuality, DirectTransportFrame,
+    AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentResponse, AgentResponseStatus,
+    DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DataQuality,
+    DirectTransportFrame,
 };
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
 use tokio::{
@@ -408,12 +408,7 @@ async fn run_session(
     }
 }
 
-fn direct_rejection(
-    request_id: &str,
-    code: &str,
-    message: &str,
-    retryable: bool,
-) -> AgentResponse {
+fn direct_rejection(request_id: &str, code: &str, message: &str, retryable: bool) -> AgentResponse {
     AgentResponse {
         schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
         request_id: request_id.to_owned(),
