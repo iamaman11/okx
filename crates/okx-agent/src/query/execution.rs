@@ -318,7 +318,8 @@ async fn submit_prepared(
         return Ok(reference_not_fresh(request, generated_at));
     };
     let public_state = public_ws.state();
-    if public_state.read().await.connection_state() != okx_runtime::PublicConnectionState::Connected {
+    if public_state.read().await.connection_state() != okx_runtime::PublicConnectionState::Connected
+    {
         return Ok(reference_not_fresh(request, generated_at));
     }
 
@@ -374,9 +375,7 @@ async fn submit_prepared(
             ));
         }
     };
-    if let Err(error) =
-        revalidate_venue_execution(&plan, &rules, &venue, timing.exp_time_ms())
-    {
+    if let Err(error) = revalidate_venue_execution(&plan, &rules, &venue, timing.exp_time_ms()) {
         return Ok(validation_failure(request, generated_at, error));
     }
     let observed_at_ms = timing.request_time_ms();
