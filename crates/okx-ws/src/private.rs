@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use okx_api::{OkxEnvironment, WsLoginMaterial};
+use okx_api::{OkxEnvironment, RateBudget, RateOperationClass, RateThrottleEvidence, WsLoginMaterial};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -18,6 +18,8 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub struct PrivateWsConnection {
     socket: Socket,
+    rate_budget: RateBudget,
+    connection_scope: String,
 }
 
 #[derive(Debug, Error)]
@@ -36,15 +38,36 @@ pub enum PrivateWsError {
 
     #[error("OKX private websocket sent an unexpected binary frame")]
     UnexpectedBinaryFrame,
+
+    #[error("OKX websocket rate/backpressure defer: {evidence:?}")]
+    RateLimited { evidence: Box<RateThrottleEvidence> },
 }
 
 impl PrivateWsConnection {
     pub async fn connect(environment: OkxEnvironment) -> Result<Self, PrivateWsError> {
+        Self::connect_with_rate_budget(
+            environment,
+            RateBudget::new(),
+            "private-standalone".to_owned(),
+        )
+        .await
+    }
+
+    pub async fn connect_with_rate_budget(
+        environment: OkxEnvironment,
+        rate_budget: RateBudget,
+        connection_scope: String,
+    ) -> Result<Self, PrivateWsError> {
         let (socket, _response) = connect_async(environment.private_ws_url()).await?;
-        Ok(Self { socket })
+        Ok(Self {
+            socket,
+            rate_budget,
+            connection_scope,
+        })
     }
 
     pub async fn login(&mut self, material: &WsLoginMaterial) -> Result<(), PrivateWsError> {
+        self.admit_control(RateOperationClass::WsLogin)?;
         self.socket
             .send(Message::Text(login_payload(material)?.into()))
             .await?;
@@ -57,6 +80,7 @@ impl PrivateWsConnection {
     ) -> Result<(), PrivateWsError> {
         let payload = private_subscribe_payload(subscriptions)?;
         validate_subscription_payload(subscriptions, &payload)?;
+        self.admit_control(RateOperationClass::WsSubscribe)?;
         self.socket.send(Message::Text(payload.into())).await?;
         Ok(())
     }
@@ -67,8 +91,20 @@ impl PrivateWsConnection {
     ) -> Result<(), PrivateWsError> {
         let payload = private_unsubscribe_payload(subscriptions)?;
         validate_subscription_payload(subscriptions, &payload)?;
+        self.admit_control(RateOperationClass::WsUnsubscribe)?;
         self.socket.send(Message::Text(payload.into())).await?;
         Ok(())
+    }
+
+    fn admit_control(&self, operation: RateOperationClass) -> Result<(), PrivateWsError> {
+        let plan = self
+            .rate_budget
+            .ws_control_plan(operation, self.connection_scope.clone());
+        self.rate_budget
+            .admit(&plan)
+            .map_err(|evidence| PrivateWsError::RateLimited {
+                evidence: Box::new(evidence),
+            })
     }
 
     pub async fn send_application_ping(&mut self) -> Result<(), PrivateWsError> {
