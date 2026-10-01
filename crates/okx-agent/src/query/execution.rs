@@ -244,12 +244,30 @@ async fn executor_preflight(
             ));
         }
     };
-    let evidence =
-        crate::execution_preflight::ExecutorPreflightSnapshot::new(credential, clock.snapshot());
+    let account_rate_limit = match execution.account_rate_limit_evidence().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_PREFLIGHT_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+    let rate_budget = execution.rate_budget_snapshot();
+    let evidence = crate::execution_preflight::ExecutorPreflightSnapshot::new(
+        credential,
+        clock.snapshot(),
+        account_rate_limit,
+        rate_budget,
+    );
     Ok(completed(
         request,
         generated_at,
-        crate::execution_preflight::EXECUTOR_PREFLIGHT_SCHEMA_V2,
+        crate::execution_preflight::EXECUTOR_PREFLIGHT_SCHEMA_V3,
         serde_json::to_value(evidence)?,
     ))
 }

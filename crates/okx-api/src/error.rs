@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::RateThrottleEvidence;
+
 #[derive(Debug, Error)]
 pub enum OkxError {
     #[error("configuration error: {0}")]
@@ -7,6 +9,9 @@ pub enum OkxError {
 
     #[error("OKX API error {code}: {message}")]
     Api { code: String, message: String },
+
+    #[error("OKX rate/backpressure defer: {evidence:?}")]
+    RateLimited { evidence: Box<RateThrottleEvidence> },
 
     #[error("OKX response error: {0}")]
     Response(String),
@@ -22,4 +27,13 @@ pub enum OkxError {
 
     #[error("OKX clock error: {0}")]
     Clock(String),
+}
+
+impl OkxError {
+    pub fn rate_throttle_evidence(&self) -> Option<&RateThrottleEvidence> {
+        match self {
+            Self::RateLimited { evidence } => Some(evidence.as_ref()),
+            _ => None,
+        }
+    }
 }

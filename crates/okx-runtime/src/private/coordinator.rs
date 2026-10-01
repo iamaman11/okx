@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
-use okx_api::{BalanceSnapshot, Credentials, OkxEnvironment, PendingOrder, Position};
+use okx_api::{BalanceSnapshot, Credentials, OkxEnvironment, PendingOrder, Position, RateBudget};
 use okx_ws::{PrivateInboundMessage, PrivateWsConnection, PrivateWsError};
 use tokio::{
     sync::{RwLock, watch},
@@ -31,6 +31,7 @@ pub struct PrivateWsCoordinator {
     credentials: Credentials,
     state: Arc<RwLock<PrivateRuntimeState>>,
     generation: u64,
+    rate_budget: RateBudget,
 }
 
 #[derive(Debug)]
@@ -64,6 +65,14 @@ impl PrivateWsHandle {
 
 impl PrivateWsCoordinator {
     pub fn new(environment: OkxEnvironment, credentials: Credentials) -> (Self, PrivateWsHandle) {
+        Self::new_with_rate_budget(environment, credentials, RateBudget::new())
+    }
+
+    pub fn new_with_rate_budget(
+        environment: OkxEnvironment,
+        credentials: Credentials,
+        rate_budget: RateBudget,
+    ) -> (Self, PrivateWsHandle) {
         let state = Arc::new(RwLock::new(PrivateRuntimeState::new()));
         (
             Self {
@@ -71,6 +80,7 @@ impl PrivateWsCoordinator {
                 credentials,
                 state: Arc::clone(&state),
                 generation: 0,
+                rate_budget,
             },
             PrivateWsHandle { state },
         )
@@ -92,7 +102,15 @@ impl PrivateWsCoordinator {
             }
 
             self.state.write().await.set_connecting();
-            let outcome = match PrivateWsConnection::connect(self.environment).await {
+            let connection_scope =
+                format!("private-generation-{}", self.generation.saturating_add(1));
+            let outcome = match PrivateWsConnection::connect_with_rate_budget(
+                self.environment,
+                self.rate_budget.clone(),
+                connection_scope,
+            )
+            .await
+            {
                 Ok(mut connection) => {
                     self.generation = self.generation.saturating_add(1);
                     self.state.write().await.begin_generation(self.generation);

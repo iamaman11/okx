@@ -9,6 +9,7 @@ pub mod instrument;
 pub mod ledger;
 pub mod market_data;
 pub mod public_data;
+pub mod rate;
 pub mod trade;
 
 pub use account::{
@@ -35,9 +36,15 @@ pub use market_data::{
 pub use public_data::{
     PublicDataApi, PublicInstrument, PublicPriceLimit, SystemStatus, UpcomingParameterChange,
 };
+pub use rate::{
+    DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S, GENERAL_RATE_LIMIT_CODE, RATE_BUDGET_SNAPSHOT_SCHEMA_V1,
+    RATE_THROTTLE_SCHEMA_V1, RateBudget, RateBudgetSnapshot, RateDecision, RateDomainEvidence,
+    RateDomainKind, RateOperationClass, RateRequestPlan, RateThrottleEvidence, RateThrottleSource,
+    SUBACCOUNT_RATE_LIMIT_CODE,
+};
 
 pub use trade::{
-    AmendOrderRequest, ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode,
-    CancelOrderRequest, OrderOperationAck, PlaceOrderRequest, TradeApi, TradeOrderDetails,
-    TradeResponse,
+    ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1, AccountRateLimitEvidence, AmendOrderRequest,
+    ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, CancelOrderRequest,
+    OrderOperationAck, PlaceOrderRequest, TradeApi, TradeOrderDetails, TradeResponse,
 };

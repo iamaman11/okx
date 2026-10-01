@@ -7,7 +7,7 @@ use std::{
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
     OkxEnvironment, PublicFundingRate, PublicIndexTicker, PublicInstrument, PublicMarkPrice,
-    PublicOpenInterest, PublicTicker,
+    PublicOpenInterest, PublicTicker, RateBudget,
 };
 use okx_observation::{
     FundingRequirement, InstrumentRulesSnapshot, LiveMarketSnapshot, MarketStreamState,
@@ -48,6 +48,7 @@ pub struct PublicWsCoordinator {
     demands: BTreeSet<String>,
     demand_recency: VecDeque<String>,
     generation: u64,
+    rate_budget: RateBudget,
 }
 
 #[derive(Debug)]
@@ -149,6 +150,14 @@ impl PublicWsCoordinator {
         environment: OkxEnvironment,
         reference: ReferenceRegistry,
     ) -> (Self, PublicWsHandle) {
+        Self::new_with_rate_budget(environment, reference, RateBudget::new())
+    }
+
+    pub fn new_with_rate_budget(
+        environment: OkxEnvironment,
+        reference: ReferenceRegistry,
+        rate_budget: RateBudget,
+    ) -> (Self, PublicWsHandle) {
         let state = Arc::new(RwLock::new(PublicRuntimeState::new(reference)));
         let (commands_tx, commands_rx) = mpsc::channel(COMMAND_CAPACITY);
         (
@@ -159,6 +168,7 @@ impl PublicWsCoordinator {
                 demands: BTreeSet::new(),
                 demand_recency: VecDeque::new(),
                 generation: 0,
+                rate_budget,
             },
             PublicWsHandle {
                 commands: commands_tx,
@@ -183,7 +193,15 @@ impl PublicWsCoordinator {
             }
 
             self.state.write().await.set_connecting();
-            let outcome = match PublicWsConnection::connect(self.environment).await {
+            let connection_scope =
+                format!("public-generation-{}", self.generation.saturating_add(1));
+            let outcome = match PublicWsConnection::connect_with_rate_budget(
+                self.environment,
+                self.rate_budget.clone(),
+                connection_scope,
+            )
+            .await
+            {
                 Ok(mut connection) => {
                     self.generation = self.generation.saturating_add(1);
                     self.state
