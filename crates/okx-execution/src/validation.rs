@@ -334,7 +334,13 @@ pub fn revalidate_venue_execution(
             OrderSide::Buy => &max_order_size.max_buy,
             OrderSide::Sell => &max_order_size.max_sell,
         };
-        let max_size = positive_decimal("current_max_order_size", max_size_text)?;
+        let max_size = decimal("current_max_order_size", max_size_text)?;
+        if max_size < Decimal::ZERO {
+            return Err(ExecutionValidationError::InvalidDecimal {
+                field: "current_max_order_size",
+                value: max_size_text.clone(),
+            });
+        }
         if size > max_size {
             return Err(ExecutionValidationError::ExceedsCurrentMaxOrderSize {
                 size: normalized(size),
@@ -840,6 +846,20 @@ mod tests {
             revalidate_venue_execution(&plan, &rules, &quota_blocked, 1_790_884_805_000),
             Err(ExecutionValidationError::ExceedsCurrentMaxOrderSize { .. })
         ));
+
+        let mut zero_capacity = venue(&rules);
+        zero_capacity
+            .max_order_size
+            .as_mut()
+            .expect("max-size")
+            .max_buy = "0".to_owned();
+        assert_eq!(
+            revalidate_venue_execution(&plan, &rules, &zero_capacity, 1_790_884_805_000),
+            Err(ExecutionValidationError::ExceedsCurrentMaxOrderSize {
+                size: "4.95".to_owned(),
+                max_size: "0".to_owned(),
+            })
+        );
 
         let mut account_blocked = venue(&rules);
         account_blocked.account_instrument.state = "suspend".to_owned();
