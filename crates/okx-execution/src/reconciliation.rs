@@ -36,6 +36,14 @@ pub fn reconcile_account_ledger(
     ledger: &DurableExecutionLedger,
     facts: &AccountLedgerFacts,
 ) -> Result<AccountLedgerReconciliation, AccountLedgerReconciliationError> {
+    reconcile_exchange_evidence(ledger, &facts.exchange_orders, &facts.exchange_fills)
+}
+
+fn reconcile_exchange_evidence(
+    ledger: &DurableExecutionLedger,
+    exchange_orders: &[okx_observation::ExchangeOrderIdentity],
+    exchange_fills: &[okx_observation::ExchangeFillIdentity],
+) -> Result<AccountLedgerReconciliation, AccountLedgerReconciliationError> {
     let entries = ledger.entries().collect::<Vec<_>>();
     let managed_clients = entries
         .iter()
@@ -46,15 +54,13 @@ pub fn reconcile_account_ledger(
         .filter_map(|entry| entry.record.order_id.as_deref())
         .collect::<BTreeSet<_>>();
 
-    let managed_exchange_orders_observed = facts
-        .exchange_orders
+    let managed_exchange_orders_observed = exchange_orders
         .iter()
         .filter(|order| managed_clients.contains(order.client_order_id.as_str()))
         .count();
-    let unattributed_orders = facts.exchange_orders.len() - managed_exchange_orders_observed;
+    let unattributed_orders = exchange_orders.len() - managed_exchange_orders_observed;
 
-    let managed_exchange_fills_observed = facts
-        .exchange_fills
+    let managed_exchange_fills_observed = exchange_fills
         .iter()
         .filter(|fill| {
             managed_clients.contains(fill.client_order_id.as_str())
@@ -64,10 +70,10 @@ pub fn reconcile_account_ledger(
                     .is_some_and(|order_id| managed_order_ids.contains(order_id))
         })
         .count();
-    let unattributed_fills = facts.exchange_fills.len() - managed_exchange_fills_observed;
+    let unattributed_fills = exchange_fills.len() - managed_exchange_fills_observed;
 
     let mut by_client = BTreeMap::<&str, Vec<_>>::new();
-    for order in &facts.exchange_orders {
+    for order in exchange_orders {
         if !order.client_order_id.trim().is_empty() {
             by_client
                 .entry(order.client_order_id.as_str())
@@ -150,30 +156,13 @@ pub fn reconcile_account_ledger(
 mod tests {
     use std::path::PathBuf;
 
-    use okx_execution_test_support::*;
-    use okx_observation::{
-        AccountAuthorityEvidence, AccountLedgerSummary, CurrencyAggregate, ExchangeFillIdentity,
-        ExchangeOrderIdentity,
-    };
+    use okx_observation::{ExchangeFillIdentity, ExchangeOrderIdentity};
 
     use super::*;
     use crate::{
-        ExecutionLedgerStore, ExecutionPlan, OrderSide, OrderType, PositionSide, PrepareDisposition,
-        TradeMode, derive_client_order_id,
+        ExecutionAction, ExecutionLedgerStore, ExecutionPlan, OrderSide, OrderType, PositionSide,
+        PrepareDisposition, TradeMode, derive_client_order_id,
     };
-
-    mod okx_execution_test_support {
-        use okx_observation::{AccountLedgerFacts, AccountLedgerSummary};
-        use std::collections::BTreeMap;
-
-        pub fn facts(
-            summary: AccountLedgerSummary,
-            exchange_orders: Vec<okx_observation::ExchangeOrderIdentity>,
-            exchange_fills: Vec<okx_observation::ExchangeFillIdentity>,
-        ) -> AccountLedgerFacts {
-            AccountLedgerFacts::for_test(summary, exchange_orders, exchange_fills, BTreeMap::new())
-        }
-    }
 
     fn path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -194,42 +183,11 @@ mod tests {
             trade_mode: TradeMode::Cross,
             side: OrderSide::Buy,
             position_side: PositionSide::Long,
-            action: crate::ExecutionAction::Open,
+            action: ExecutionAction::Open,
             order_type: OrderType::Limit,
             size: "1".to_owned(),
             price: "0.1".to_owned(),
             open_risk: None,
-        }
-    }
-
-    fn summary() -> AccountLedgerSummary {
-        AccountLedgerSummary {
-            schema: "okx.account-ledger-summary/v1",
-            source_received_at: "2026-10-01T20:00:00Z".to_owned(),
-            account_generation: "sha256:account".to_owned(),
-            authority: AccountAuthorityEvidence {
-                scope: "authenticated_account_only",
-                account_type: "1".to_owned(),
-                is_subaccount: true,
-                account_uid_fingerprint: "uid-fingerprint".to_owned(),
-                main_account_uid_fingerprint: Some("main".to_owned()),
-                api_key_permissions: vec!["read_only".to_owned()],
-                multi_account_inventory_complete: false,
-            },
-            total_equity_usd: "100".to_owned(),
-            open_positions: 0,
-            pending_orders: 0,
-            current_unrealized_pnl: Vec::<CurrencyAggregate>::new(),
-            history_coverage: Vec::new(),
-            realized_pnl_basis: "positions",
-            realized_pnl: Vec::new(),
-            trade_fee_basis: "fills",
-            trade_fees: Vec::new(),
-            funding_basis: "bills",
-            funding: Vec::new(),
-            position_pnl_identity_rows_checked: 0,
-            fill_order_links_checked: 0,
-            fill_order_links_unresolved_due_to_truncation: 0,
         }
     }
 
@@ -244,20 +202,16 @@ mod tests {
             PrepareDisposition::Created(_)
         ));
 
-        let client_order_id = plan.client_order_id.clone();
-        let facts = facts(
-            summary(),
-            vec![ExchangeOrderIdentity {
-                instrument_type: "SWAP".to_owned(),
-                instrument_id: plan.instrument_id,
-                order_id: "ord-1".to_owned(),
-                client_order_id,
-                state: "live".to_owned(),
-                update_time_ms: "1790884800000".to_owned(),
-            }],
-            Vec::new(),
-        );
-        let result = reconcile_account_ledger(&ledger, &facts).expect("reconcile");
+        let orders = vec![ExchangeOrderIdentity {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: plan.instrument_id,
+            order_id: "ord-1".to_owned(),
+            client_order_id: plan.client_order_id,
+            state: "live".to_owned(),
+            update_time_ms: "1790884800000".to_owned(),
+        }];
+        let result =
+            reconcile_exchange_evidence(&ledger, &orders, &[]).expect("reconcile");
         assert!(!result.consistent);
         assert_eq!(
             result.unexpected_exchange_orders_for_non_submitted_intents,
@@ -271,25 +225,23 @@ mod tests {
         let p = path("external");
         let store = ExecutionLedgerStore::at(&p);
         let ledger = DurableExecutionLedger::open(store, 100).expect("ledger");
-        let facts = facts(
-            summary(),
-            vec![ExchangeOrderIdentity {
-                instrument_type: "SWAP".to_owned(),
-                instrument_id: "DOGE-USDT-SWAP".to_owned(),
-                order_id: "manual-1".to_owned(),
-                client_order_id: String::new(),
-                state: "filled".to_owned(),
-                update_time_ms: "1790884800000".to_owned(),
-            }],
-            vec![ExchangeFillIdentity {
-                instrument_type: "SWAP".to_owned(),
-                instrument_id: "DOGE-USDT-SWAP".to_owned(),
-                order_id: Some("manual-1".to_owned()),
-                client_order_id: String::new(),
-                trade_id: "trade-1".to_owned(),
-            }],
-        );
-        let result = reconcile_account_ledger(&ledger, &facts).expect("reconcile");
+        let orders = vec![ExchangeOrderIdentity {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            order_id: "manual-1".to_owned(),
+            client_order_id: String::new(),
+            state: "filled".to_owned(),
+            update_time_ms: "1790884800000".to_owned(),
+        }];
+        let fills = vec![ExchangeFillIdentity {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            order_id: Some("manual-1".to_owned()),
+            client_order_id: String::new(),
+            trade_id: "trade-1".to_owned(),
+        }];
+        let result =
+            reconcile_exchange_evidence(&ledger, &orders, &fills).expect("reconcile");
         assert!(result.consistent);
         assert_eq!(result.managed_intents, 0);
         assert_eq!(
