@@ -206,12 +206,9 @@ async fn fetch_clock_evidence(
             rows.len()
         )));
     };
-    let server_time_ms = row
-        .ts
-        .parse::<u64>()
-        .map_err(|_| {
-            OkxError::Clock("OKX server time is not a Unix millisecond timestamp".to_owned())
-        })?;
+    let server_time_ms = row.ts.parse::<u64>().map_err(|_| {
+        OkxError::Clock("OKX server time is not a Unix millisecond timestamp".to_owned())
+    })?;
     ClockEvidence::from_sample(server_time_ms, local_started_ms, round_trip, Instant::now())
 }
 
