@@ -25,7 +25,9 @@ pub use market_data::{
     MarketDataApi, PublicCandle, PublicFundingRate, PublicIndexTicker, PublicMarkPrice,
     PublicOpenInterest, PublicTicker,
 };
-pub use public_data::{PublicDataApi, PublicInstrument};
+pub use public_data::{
+    PublicDataApi, PublicInstrument, PublicPriceLimit, SystemStatus, UpcomingParameterChange,
+};
 
 pub use trade::{
     AmendOrderRequest, ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode,
