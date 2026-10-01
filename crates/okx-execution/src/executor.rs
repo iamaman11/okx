@@ -547,13 +547,13 @@ mod tests {
             source: RateThrottleSource::LocalBudget,
             exchange_code: None,
             operation: RateOperationClass::PlaceOrder,
-            domain: RateDomainEvidence {
+            domain: Box::new(RateDomainEvidence {
                 kind: RateDomainKind::TradePlaceInstrument,
                 endpoint: Some("/api/v5/trade/order".to_owned()),
                 scope: Some("DOGE-USDT-SWAP".to_owned()),
                 local_max_requests: 60,
                 local_window_ms: 2_000,
-            },
+            }),
             attempt_count: 1,
             local_defer_ms: 250,
             server_retry_after_ms: None,
@@ -569,13 +569,13 @@ mod tests {
             source: RateThrottleSource::Exchange,
             exchange_code: Some(GENERAL_RATE_LIMIT_CODE.to_owned()),
             operation: RateOperationClass::PlaceOrder,
-            domain: RateDomainEvidence {
+            domain: Box::new(RateDomainEvidence {
                 kind: RateDomainKind::TradePlaceInstrument,
                 endpoint: Some("/api/v5/trade/order".to_owned()),
                 scope: Some("DOGE-USDT-SWAP".to_owned()),
                 local_max_requests: 60,
                 local_window_ms: 2_000,
-            },
+            }),
             attempt_count: 1,
             local_defer_ms: 2_000,
             server_retry_after_ms: None,
