@@ -205,6 +205,7 @@ mod tests {
             "configuration error: API secret is invalid"
         );
     }
+
     #[test]
     fn websocket_urls_use_canonical_default_tls_port_for_every_environment() {
         let cases = [
@@ -247,5 +248,4 @@ mod tests {
             assert!(!environment.private_ws_url().contains(":8443"));
         }
     }
-
 }
