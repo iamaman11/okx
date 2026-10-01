@@ -367,17 +367,15 @@ fn optional_account_bootstrapper(
     rate_budget: RateBudget,
 ) -> Option<AccountBootstrapper> {
     match load_native_okx_credentials() {
-        Ok(credentials) => match OkxRestClient::with_rate_budget(
-            environment,
-            credentials,
-            rate_budget,
-        ) {
-            Ok(client) => Some(AccountBootstrapper::new(client)),
-            Err(error) => {
-                eprintln!("OKX observer REST client unavailable: {error}");
-                None
+        Ok(credentials) => {
+            match OkxRestClient::with_rate_budget(environment, credentials, rate_budget) {
+                Ok(client) => Some(AccountBootstrapper::new(client)),
+                Err(error) => {
+                    eprintln!("OKX observer REST client unavailable: {error}");
+                    None
+                }
             }
-        },
+        }
         Err(AgentError::OkxCredentialsNotFound) => {
             eprintln!("OKX observer credential not provisioned; private queries are NOT_READY");
             None
