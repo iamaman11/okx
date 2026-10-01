@@ -298,9 +298,7 @@ fn request_path_with_query(path: &str, params: &[(&str, String)]) -> String {
 fn admit(rate_budget: &RateBudget, plan: &RateRequestPlan) -> Result<(), OkxError> {
     rate_budget
         .admit(plan)
-        .map_err(|evidence| OkxError::RateLimited {
-            evidence,
-        })
+        .map_err(|evidence| OkxError::RateLimited { evidence })
 }
 
 async fn decode<T>(
