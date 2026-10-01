@@ -134,8 +134,9 @@ pub(super) async fn dispatch(
                                 AgentResponseStatus::Failed,
                                 ACCOUNT_LEDGER_INCONSISTENT_CODE,
                                 format!(
-                                    "durable execution ledger does not reconcile with bounded exchange evidence: unexpected_orders={}, identity_mismatches={}",
+                                    "durable execution ledger does not reconcile with bounded exchange evidence: unexpected_orders={}, unexpected_fills={}, identity_mismatches={}",
                                     value.unexpected_exchange_orders_for_non_submitted_intents,
+                                    value.unexpected_exchange_fills_for_non_submitted_intents,
                                     value.identity_mismatches
                                 ),
                                 false,
@@ -146,6 +147,22 @@ pub(super) async fn dispatch(
                             warnings.push(format!(
                                 "{} managed intent(s) are not observable in the bounded exchange order window; no absence claim is made",
                                 value.managed_intents_unresolved_in_bounded_exchange_evidence
+                            ));
+                        }
+                        if value.position_attribution.iter().any(|item| {
+                            item.unattributed_external_or_outside_bounded_history_residual != "0"
+                        }) {
+                            quality = DataQuality::Degraded;
+                            warnings.push(
+                                "authoritative exchange position contains an unattributed residual relative to managed fills in the bounded history window; it is not credited to a managed strategy"
+                                    .to_owned(),
+                            );
+                        }
+                        if value.position_attribution_unavailable_events > 0 {
+                            quality = DataQuality::Degraded;
+                            warnings.push(format!(
+                                "{} position/fill event(s) could not be attributed because their position-side semantics are outside the supported hedge long/short projection",
+                                value.position_attribution_unavailable_events
                             ));
                         }
                         Some(value)
