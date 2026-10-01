@@ -32,10 +32,7 @@ pub struct ExecutorPreflightSnapshot {
 }
 
 impl ExecutorPreflightSnapshot {
-    pub fn new(
-        credential: ExecutorCredentialPreflight,
-        clock: ClockEvidenceSnapshot,
-    ) -> Self {
+    pub fn new(credential: ExecutorCredentialPreflight, clock: ClockEvidenceSnapshot) -> Self {
         Self {
             schema: EXECUTOR_PREFLIGHT_SCHEMA_V2,
             accepted: credential.accepted && clock.accepted,
