@@ -5,6 +5,7 @@ pub mod clock;
 pub mod config;
 pub mod error;
 pub mod instrument;
+pub mod ledger;
 pub mod market_data;
 pub mod public_data;
 pub mod trade;
@@ -22,6 +23,9 @@ pub use clock::{
 pub use config::{Credentials, OkxEnvironment, Region, WsLoginMaterial};
 pub use error::OkxError;
 pub use instrument::InstrumentType;
+pub use ledger::{
+    AccountBill, AccountHistoryApi, BoundedHistory, FillHistory, HistoricalOrder, PositionHistory,
+};
 pub use market_data::{
     MarketDataApi, PublicCandle, PublicFundingRate, PublicIndexTicker, PublicMarkPrice,
     PublicOpenInterest, PublicTicker,
