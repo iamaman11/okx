@@ -4,8 +4,8 @@ use std::{
 };
 
 use okx_api::{
-    AccountBill, AccountConfig, BoundedHistory, FillHistory, HistoricalOrder, PositionHistory,
-    account_uid_fingerprint,
+    AccountBill, AccountConfig, BoundedHistory, FillHistory, FundingBalance, HistoricalOrder,
+    PositionHistory, account_uid_fingerprint,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -42,6 +42,14 @@ pub struct AccountHistoryCoverage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FundingBalanceEvidence {
+    pub currency: String,
+    pub balance: String,
+    pub available_balance: String,
+    pub frozen_balance: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CurrencyAggregate {
     pub currency: String,
     pub amount: String,
@@ -55,6 +63,9 @@ pub struct AccountLedgerSummary {
     pub account_generation: String,
     pub authority: AccountAuthorityEvidence,
     pub total_equity_usd: String,
+    pub trading_equity_detail_usd_sum: String,
+    pub trading_equity_residual_usd: String,
+    pub funding_balances: Vec<FundingBalanceEvidence>,
     pub open_positions: usize,
     pub pending_orders: usize,
     pub current_unrealized_pnl: Vec<CurrencyAggregate>,
@@ -110,6 +121,7 @@ impl AccountLedgerFacts {
         source_received_at: impl Into<String>,
         snapshot: &AccountSnapshot,
         config: AccountConfig,
+        funding_balances: Vec<FundingBalance>,
         position_histories: Vec<(String, BoundedHistory<PositionHistory>)>,
         order_histories: Vec<(String, BoundedHistory<HistoricalOrder>)>,
         fill_histories: Vec<(String, BoundedHistory<FillHistory>)>,
@@ -136,10 +148,25 @@ impl AccountLedgerFacts {
             multi_account_inventory_complete: false,
         };
 
-        let total_equity_usd =
-            decimal_required("balance.totalEq", &snapshot.balance.total_equity_usd)?
-                .normalize()
-                .to_string();
+        let total_equity =
+            decimal_required("balance.totalEq", &snapshot.balance.total_equity_usd)?;
+        let detail_equity_sum = snapshot.balance.details.iter().try_fold(
+            Decimal::ZERO,
+            |total, detail| {
+                let Some(eq_usd) = detail.equity_usd.as_deref() else {
+                    return Ok::<Decimal, AccountLedgerError>(total);
+                };
+                if eq_usd.trim().is_empty() {
+                    return Ok(total);
+                }
+                Ok(total + decimal_required("balance.details.eqUsd", eq_usd)?)
+            },
+        )?;
+        let total_equity_usd = total_equity.normalize().to_string();
+        let trading_equity_detail_usd_sum = detail_equity_sum.normalize().to_string();
+        let trading_equity_residual_usd =
+            (total_equity - detail_equity_sum).normalize().to_string();
+        let funding_balances = normalize_funding_balances(funding_balances)?;
         let current_unrealized_pnl = aggregate_current_unrealized(snapshot)?;
 
         let mut coverage = Vec::new();
@@ -332,6 +359,9 @@ impl AccountLedgerFacts {
                 account_generation: snapshot.account_generation.clone(),
                 authority,
                 total_equity_usd,
+                trading_equity_detail_usd_sum,
+                trading_equity_residual_usd,
+                funding_balances,
                 open_positions: snapshot.positions.len(),
                 pending_orders: snapshot.pending_orders.len(),
                 current_unrealized_pnl,
@@ -399,6 +429,42 @@ pub enum AccountLedgerError {
 struct Aggregate {
     amount: Decimal,
     events: usize,
+}
+
+fn normalize_funding_balances(
+    rows: Vec<FundingBalance>,
+) -> Result<Vec<FundingBalanceEvidence>, AccountLedgerError> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(rows.len());
+    for row in rows {
+        let currency = required("funding_balance.ccy", &row.ccy)?;
+        if !seen.insert(currency.to_owned()) {
+            return Err(AccountLedgerError::DuplicateIdentity(format!(
+                "funding_balance:{currency}"
+            )));
+        }
+        let balance = decimal_required("funding_balance.bal", &row.bal)?;
+        let available =
+            decimal_required("funding_balance.availBal", &row.available_balance)?;
+        let frozen = decimal_required("funding_balance.frozenBal", &row.frozen_balance)?;
+        if balance < Decimal::ZERO || available < Decimal::ZERO || frozen < Decimal::ZERO {
+            return Err(AccountLedgerError::InvalidDecimal {
+                field: "funding_balance",
+                value: format!(
+                    "bal={},availBal={},frozenBal={}",
+                    row.bal, row.available_balance, row.frozen_balance
+                ),
+            });
+        }
+        normalized.push(FundingBalanceEvidence {
+            currency: currency.to_owned(),
+            balance: balance.normalize().to_string(),
+            available_balance: available.normalize().to_string(),
+            frozen_balance: frozen.normalize().to_string(),
+        });
+    }
+    normalized.sort_by(|a, b| a.currency.cmp(&b.currency));
+    Ok(normalized)
 }
 
 fn aggregate_current_unrealized(
@@ -728,6 +794,12 @@ mod tests {
             "2026-10-01T20:00:01.000Z",
             &snapshot(),
             config(),
+            vec![FundingBalance {
+                ccy: "USDT".to_owned(),
+                bal: "5".to_owned(),
+                frozen_balance: "1".to_owned(),
+                available_balance: "4".to_owned(),
+            }],
             vec![
                 ("SWAP".to_owned(), bounded(vec![position_history("1.05")])),
                 ("FUTURES".to_owned(), bounded(Vec::new())),
@@ -747,6 +819,9 @@ mod tests {
         assert!(facts.summary.authority.is_subaccount);
         assert!(!facts.summary.authority.multi_account_inventory_complete);
         assert_eq!(facts.summary.total_equity_usd, "100.5");
+        assert_eq!(facts.summary.trading_equity_detail_usd_sum, "100.5");
+        assert_eq!(facts.summary.trading_equity_residual_usd, "0");
+        assert_eq!(facts.summary.funding_balances[0].balance, "5");
         assert_eq!(facts.summary.current_unrealized_pnl[0].amount, "1.5");
         assert_eq!(facts.summary.realized_pnl[0].amount, "1.05");
         assert_eq!(facts.summary.trade_fees[0].amount, "-0.1");
@@ -765,6 +840,12 @@ mod tests {
             "2026-10-01T20:00:01.000Z",
             &snapshot(),
             config(),
+            vec![FundingBalance {
+                ccy: "USDT".to_owned(),
+                bal: "5".to_owned(),
+                frozen_balance: "1".to_owned(),
+                available_balance: "4".to_owned(),
+            }],
             vec![
                 ("SWAP".to_owned(), bounded(vec![position_history("9")])),
                 ("FUTURES".to_owned(), bounded(Vec::new())),
@@ -794,6 +875,12 @@ mod tests {
             "2026-10-01T20:00:01.000Z",
             &snapshot(),
             config(),
+            vec![FundingBalance {
+                ccy: "USDT".to_owned(),
+                bal: "5".to_owned(),
+                frozen_balance: "1".to_owned(),
+                available_balance: "4".to_owned(),
+            }],
             vec![
                 ("SWAP".to_owned(), bounded(vec![position_history("1.05")])),
                 ("FUTURES".to_owned(), bounded(Vec::new())),
