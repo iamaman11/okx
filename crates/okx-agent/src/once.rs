@@ -171,7 +171,8 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         | AgentOperation::PrepareCloseExecution { .. }
         | AgentOperation::PortfolioRisk
         | AgentOperation::AnalyzeCandidateOrder { .. }
-        | AgentOperation::TradingCapabilities { .. } => STANDARD_RESPONSE_PLAINTEXT_BYTES,
+        | AgentOperation::TradingCapabilities { .. }
+        | AgentOperation::AccountSummary => STANDARD_RESPONSE_PLAINTEXT_BYTES,
         AgentOperation::MarketHistory { .. }
         | AgentOperation::FindInstruments { .. }
         | AgentOperation::AccountSnapshot => LARGE_RESPONSE_PLAINTEXT_BYTES,
@@ -569,6 +570,7 @@ mod tests {
         let standard = AgentOperation::MarketOverview {
             instrument: "DOGE-USDT-SWAP".to_owned(),
         };
+        let account_summary = AgentOperation::AccountSummary;
         let history = AgentOperation::MarketHistory {
             instrument: "DOGE-USDT-SWAP".to_owned(),
             bar: "1H".to_owned(),
@@ -586,6 +588,10 @@ mod tests {
         );
         assert_eq!(
             response_budget(&standard).plaintext_bytes,
+            STANDARD_RESPONSE_PLAINTEXT_BYTES
+        );
+        assert_eq!(
+            response_budget(&account_summary).plaintext_bytes,
             STANDARD_RESPONSE_PLAINTEXT_BYTES
         );
         assert_eq!(
