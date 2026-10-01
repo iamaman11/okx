@@ -363,6 +363,60 @@ mod tests {
     }
 
     #[test]
+    fn managed_fill_delta_leaves_unattributed_position_residual() {
+        let positions = vec![AccountPositionState {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            position: "2".to_owned(),
+            position_side: "long".to_owned(),
+            margin_mode: "cross".to_owned(),
+            average_price: Some("0.1".to_owned()),
+            mark_price: Some("0.11".to_owned()),
+            liquidation_price: None,
+            unrealized_pnl: Some("0.02".to_owned()),
+            unrealized_pnl_ratio: None,
+            leverage: Some("5".to_owned()),
+            margin: None,
+            initial_margin_requirement: None,
+            maintenance_margin_requirement: None,
+            margin_ratio: None,
+            notional_usd: None,
+            margin_currency: Some("USDT".to_owned()),
+            creation_time_ms: Some("1790884700000".to_owned()),
+            update_time_ms: Some("1790884800000".to_owned()),
+        }];
+        let fills = vec![ExchangeFillIdentity {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            order_id: Some("ord-1".to_owned()),
+            client_order_id: "managed-client".to_owned(),
+            trade_id: "trade-managed-1".to_owned(),
+            side: "buy".to_owned(),
+            position_side: "long".to_owned(),
+            fill_size: "1".to_owned(),
+        }];
+        let managed_clients = BTreeSet::from(["managed-client"]);
+        let managed_order_ids = BTreeSet::from(["ord-1"]);
+
+        let (diagnostics, unavailable) = reconcile_position_attribution(
+            &positions,
+            &fills,
+            &managed_clients,
+            &managed_order_ids,
+        )
+        .expect("position attribution");
+
+        assert_eq!(unavailable, 0);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].authoritative_exchange_position, "2");
+        assert_eq!(diagnostics[0].managed_fill_delta_in_bounded_history, "1");
+        assert_eq!(
+            diagnostics[0].unattributed_external_or_outside_bounded_history_residual,
+            "1"
+        );
+    }
+
+    #[test]
     fn external_activity_is_not_attributed_to_managed_intent() {
         let p = path("external");
         let store = ExecutionLedgerStore::at(&p);
