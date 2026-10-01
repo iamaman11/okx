@@ -93,6 +93,10 @@ impl PublicRuntimeState {
         self.acknowledged_subscriptions.len()
     }
 
+    pub(super) fn remove_market(&mut self, instrument_id: &str) {
+        self.markets.remove(instrument_id);
+    }
+
     pub(super) fn begin_generation(&mut self, generation: u64, demands: &BTreeSet<String>) {
         self.connection_state = PublicConnectionState::Connected;
         self.generation = generation;
