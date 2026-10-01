@@ -323,20 +323,6 @@ async fn submit_prepared(
         return Ok(reference_not_fresh(request, generated_at));
     }
 
-    let clock = match execution.clock_evidence().await {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Failed,
-                EXECUTION_CLOCK_UNAVAILABLE_CODE,
-                error.to_string(),
-                true,
-            ));
-        }
-    };
-
     let venue = match execution.venue_execution_evidence(&plan, &rules).await {
         Ok(value) => value,
         Err(crate::AgentError::Okx(error)) => {
@@ -360,6 +346,22 @@ async fn submit_prepared(
             ));
         }
         Err(error) => return Err(error),
+    };
+
+    // Venue REST evidence can take long enough to consume the clock-evidence age budget.
+    // Sample exchange time only after all pre-mutation venue I/O is complete.
+    let clock = match execution.clock_evidence().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_CLOCK_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
     };
 
     let timing = match clock.mutation_timing(MUTATION_REQUEST_TTL_MS) {
