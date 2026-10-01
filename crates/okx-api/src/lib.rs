@@ -11,7 +11,8 @@ pub mod trade;
 
 pub use account::{
     AccountApi, AccountCapabilities, AccountConfig, BalanceDetail, BalanceSnapshot, FeeRate,
-    Instrument, LeverageInfo, MarginMode, PendingOrder, Position, account_uid_fingerprint,
+    Instrument, LeverageInfo, MarginMode, MaxOrderSize, PendingOrder, Position,
+    account_uid_fingerprint,
 };
 pub use client::{OkxPublicClient, OkxRestClient};
 pub use clock::{
