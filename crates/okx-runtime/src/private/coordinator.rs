@@ -102,10 +102,8 @@ impl PrivateWsCoordinator {
             }
 
             self.state.write().await.set_connecting();
-            let connection_scope = format!(
-                "private-generation-{}",
-                self.generation.saturating_add(1)
-            );
+            let connection_scope =
+                format!("private-generation-{}", self.generation.saturating_add(1));
             let outcome = match PrivateWsConnection::connect_with_rate_budget(
                 self.environment,
                 self.rate_budget.clone(),
