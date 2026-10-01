@@ -286,6 +286,19 @@ const mcpApi = {
               additionalProperties: false,
             },
           },
+          {
+            name: "trading_capabilities",
+            description: "Get read-only authenticated OKX account and trading capabilities for one instrument through the Windows product runtime.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                instrument: { type: "string", minLength: 3, maxLength: 64 },
+                margin_mode: { type: "string", enum: ["cross", "isolated"] },
+              },
+              required: ["instrument", "margin_mode"],
+              additionalProperties: false,
+            },
+          },
         ],
       });
     }
@@ -327,6 +340,24 @@ const mcpApi = {
           schema: "okx.agent.request/v1",
           request_id: requestId(),
           operation: { type: "market_overview", instrument: args.instrument },
+        };
+        return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+      }
+      if (name === "trading_capabilities") {
+        if (!validInstrument(args.instrument)) {
+          return jsonRpcError(id, -32602, "invalid instrument");
+        }
+        if (!["cross", "isolated"].includes(String(args.margin_mode))) {
+          return jsonRpcError(id, -32602, "invalid margin_mode");
+        }
+        const agentRequest = {
+          schema: "okx.agent.request/v1",
+          request_id: requestId(),
+          operation: {
+            type: "trading_capabilities",
+            instrument: args.instrument,
+            margin_mode: args.margin_mode,
+          },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }
