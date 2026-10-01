@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use okx_api::{AccountApi, ClockEvidence, Credentials, MutationTiming, OkxEnvironment, OkxRestClient, TradeApi};
+use okx_api::{
+    AccountApi, ClockEvidence, Credentials, MutationTiming, OkxEnvironment, OkxRestClient, TradeApi,
+};
 use okx_execution::{
     DurableExecutionLedger, ExecutionLedgerEntry, ExecutionLedgerStore, ExecutionPlan,
     ExecutionStatusSnapshot, OrderExecutor, OrderExecutorError, PrepareOutcome, SubmitDisposition,
