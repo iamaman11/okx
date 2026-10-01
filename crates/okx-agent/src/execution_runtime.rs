@@ -11,7 +11,9 @@ use okx_execution::{
     OrderExecutor, OrderExecutorError, PrepareOutcome, SubmitDisposition, execution_status,
     reconcile_account_ledger,
 };
-use okx_observation::{AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence};
+use okx_observation::{
+    AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
+};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
