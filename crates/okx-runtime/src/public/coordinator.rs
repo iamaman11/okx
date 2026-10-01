@@ -193,10 +193,8 @@ impl PublicWsCoordinator {
             }
 
             self.state.write().await.set_connecting();
-            let connection_scope = format!(
-                "public-generation-{}",
-                self.generation.saturating_add(1)
-            );
+            let connection_scope =
+                format!("public-generation-{}", self.generation.saturating_add(1));
             let outcome = match PublicWsConnection::connect_with_rate_budget(
                 self.environment,
                 self.rate_budget.clone(),
