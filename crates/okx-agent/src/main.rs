@@ -34,7 +34,7 @@ use okx_protocol::MailboxEnvelope;
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator};
 use zeroize::Zeroize;
 
-const DEFAULT_DATA_POLL_SECONDS: u64 = 2;
+const DEFAULT_DATA_POLL_SECONDS: u64 = 15;
 
 #[derive(Debug, Parser)]
 #[command(name = "okx-agent")]
