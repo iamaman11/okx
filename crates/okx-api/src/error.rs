@@ -19,4 +19,7 @@ pub enum OkxError {
 
     #[error("cryptographic error: {0}")]
     Crypto(String),
+
+    #[error("OKX clock error: {0}")]
+    Clock(String),
 }
