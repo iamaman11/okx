@@ -3,7 +3,9 @@ use std::{
     str::FromStr,
 };
 
-use okx_observation::{AccountLedgerFacts, AccountPositionState, ExchangeFillIdentity, ExchangeOrderIdentity};
+use okx_observation::{
+    AccountLedgerFacts, AccountPositionState, ExchangeFillIdentity, ExchangeOrderIdentity,
+};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use thiserror::Error;
@@ -189,8 +191,7 @@ fn reconcile_exchange_evidence(
         .iter()
         .filter(|item| item.unattributed_external_or_outside_bounded_history_residual != "0")
         .count();
-    let position_attribution_truncated =
-        position_attribution_total > MAX_POSITION_ATTRIBUTION_ROWS;
+    let position_attribution_truncated = position_attribution_total > MAX_POSITION_ATTRIBUTION_ROWS;
     let position_attribution = position_attribution
         .into_iter()
         .take(MAX_POSITION_ATTRIBUTION_ROWS)
@@ -234,7 +235,10 @@ fn reconcile_position_attribution(
         }
         let value = decimal("account.position", &position.position)?;
         authoritative.insert(
-            (position.instrument_id.clone(), position.position_side.clone()),
+            (
+                position.instrument_id.clone(),
+                position.position_side.clone(),
+            ),
             value,
         );
     }
@@ -304,10 +308,7 @@ fn reconcile_position_attribution(
     Ok((diagnostics, unavailable))
 }
 
-fn decimal(
-    field: &'static str,
-    value: &str,
-) -> Result<Decimal, AccountLedgerReconciliationError> {
+fn decimal(field: &'static str, value: &str) -> Result<Decimal, AccountLedgerReconciliationError> {
     Decimal::from_str(value.trim()).map_err(|_| AccountLedgerReconciliationError::InvalidDecimal {
         field,
         value: value.to_owned(),
