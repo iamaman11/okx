@@ -222,6 +222,10 @@ impl DurableExecutionLedger {
         self.entries.get(intent_id)
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = &ExecutionLedgerEntry> {
+        self.entries.values()
+    }
+
     pub fn prepare(
         &mut self,
         plan: ExecutionPlan,
