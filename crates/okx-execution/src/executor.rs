@@ -3,7 +3,8 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use okx_api::{
     ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, MutationTiming, OkxError,
-    OrderOperationAck, PlaceOrderRequest, TradeApi, TradeOrderDetails, TradeResponse,
+    OrderOperationAck, PlaceOrderRequest, RateDecision, RateRequestPlan, RateThrottleEvidence,
+    TradeApi, TradeOrderDetails, TradeResponse,
 };
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -16,10 +17,18 @@ use crate::{
 
 #[async_trait]
 pub trait ExecutionGateway: Send + Sync {
+    fn admit_place_order(
+        &self,
+        _request: &PlaceOrderRequest,
+    ) -> Result<Option<RateRequestPlan>, OkxError> {
+        Ok(None)
+    }
+
     async fn place_order(
         &self,
         request: PlaceOrderRequest,
         timing: MutationTiming,
+        rate_plan: Option<RateRequestPlan>,
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError>;
 
     async fn order_by_client_id(
@@ -31,12 +40,25 @@ pub trait ExecutionGateway: Send + Sync {
 
 #[async_trait]
 impl ExecutionGateway for TradeApi {
+    fn admit_place_order(
+        &self,
+        request: &PlaceOrderRequest,
+    ) -> Result<Option<RateRequestPlan>, OkxError> {
+        TradeApi::admit_place_order(self, request).map(Some)
+    }
+
     async fn place_order(
         &self,
         request: PlaceOrderRequest,
         timing: MutationTiming,
+        rate_plan: Option<RateRequestPlan>,
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
-        TradeApi::place_order(self, &request, &timing).await
+        match rate_plan {
+            Some(rate_plan) => {
+                TradeApi::place_order_after_admission(self, &request, &timing, &rate_plan).await
+            }
+            None => TradeApi::place_order(self, &request, &timing).await,
+        }
     }
 
     async fn order_by_client_id(
@@ -52,6 +74,10 @@ impl ExecutionGateway for TradeApi {
 pub enum SubmitDisposition {
     Acknowledged(ExecutionLedgerEntry),
     Rejected(ExecutionLedgerEntry),
+    RateRejected {
+        entry: ExecutionLedgerEntry,
+        evidence: RateThrottleEvidence,
+    },
     UnknownSubmission(ExecutionLedgerEntry),
 }
 
@@ -80,6 +106,12 @@ pub enum OrderExecutorError {
 
     #[error("unsupported exchange order state '{0}'")]
     UnsupportedExchangeState(String),
+
+    #[error("mutation locally deferred by rate/backpressure policy: {evidence:?}")]
+    RateDeferred { evidence: RateThrottleEvidence },
+
+    #[error("pre-submit exchange request admission failed: {0}")]
+    PreSubmit(OkxError),
 }
 
 pub struct OrderExecutor<G> {
@@ -140,9 +172,32 @@ where
         }
 
         let request = place_request(&entry.record.plan);
+        let rate_plan = match self.gateway.admit_place_order(&request) {
+            Ok(value) => value,
+            Err(OkxError::RateLimited { evidence }) if !evidence.request_sent => {
+                return Err(OrderExecutorError::RateDeferred {
+                    evidence: *evidence,
+                });
+            }
+            Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
+        };
+
         self.ledger.begin_submission(intent_id, observed_at_ms)?;
 
-        match self.gateway.place_order(request, timing).await {
+        match self.gateway.place_order(request, timing, rate_plan).await {
+            Err(OkxError::RateLimited { evidence }) if evidence.request_sent => {
+                let mut evidence = *evidence;
+                evidence.decision = RateDecision::Rejected;
+                evidence.retryable = false;
+                let rejection_code = evidence
+                    .exchange_code
+                    .clone()
+                    .unwrap_or_else(|| "RATE_LIMIT".to_owned());
+                let entry =
+                    self.ledger
+                        .reject_known(intent_id, rejection_code, observed_at_ms)?;
+                Ok(SubmitDisposition::RateRejected { entry, evidence })
+            }
             Err(_) => {
                 let entry = self
                     .ledger
@@ -424,6 +479,7 @@ mod tests {
             &self,
             _request: PlaceOrderRequest,
             _timing: MutationTiming,
+            _rate_plan: Option<RateRequestPlan>,
         ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
             self.place_calls.fetch_add(1, Ordering::SeqCst);
             self.place_results
