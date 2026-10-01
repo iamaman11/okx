@@ -72,6 +72,9 @@ pub enum ExecutionValidationError {
     #[error("sell price '{price}' is below current OKX sell limit '{limit}'")]
     PriceBelowCurrentLimit { price: String, limit: String },
 
+    #[error("opening execution requires current OKX maximum-order-size evidence")]
+    MissingCurrentMaxOrderSize,
+
     #[error("opening size '{size}' exceeds current OKX maximum '{max_size}' for the order side")]
     ExceedsCurrentMaxOrderSize { size: String, max_size: String },
 
@@ -251,7 +254,10 @@ pub fn revalidate_venue_execution(
 
     if evidence.public_instrument.instrument_id != plan.instrument_id
         || evidence.price_limit.instrument_id != plan.instrument_id
-        || evidence.max_order_size.instrument_id != plan.instrument_id
+        || evidence
+            .max_order_size
+            .as_ref()
+            .is_some_and(|value| value.instrument_id != plan.instrument_id)
     {
         return Err(ExecutionValidationError::VenueEvidenceInstrumentMismatch);
     }
@@ -290,9 +296,13 @@ pub fn revalidate_venue_execution(
 
     if plan.action == ExecutionAction::Open {
         let size = positive_decimal("size", &plan.size)?;
+        let max_order_size = evidence
+            .max_order_size
+            .as_ref()
+            .ok_or(ExecutionValidationError::MissingCurrentMaxOrderSize)?;
         let max_size_text = match plan.side {
-            OrderSide::Buy => &evidence.max_order_size.max_buy,
-            OrderSide::Sell => &evidence.max_order_size.max_sell,
+            OrderSide::Buy => &max_order_size.max_buy,
+            OrderSide::Sell => &max_order_size.max_sell,
         };
         let max_size = positive_decimal("current_max_order_size", max_size_text)?;
         if size > max_size {
