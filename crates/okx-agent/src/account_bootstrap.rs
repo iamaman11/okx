@@ -1,9 +1,9 @@
 use chrono::{SecondsFormat, Utc};
-use okx_api::{AccountApi, FeeRate, MarginMode, OkxError, OkxRestClient};
+use okx_api::{AccountApi, AccountHistoryApi, FeeRate, InstrumentType, MarginMode, OkxError, OkxRestClient};
 use okx_observation::{
-    AccountError, AccountSnapshot, FeeScheduleError, FeeScheduleInput, FeeScheduleSnapshot,
-    InstrumentRulesSnapshot, TradingCapabilitiesError, TradingCapabilitiesInput,
-    TradingCapabilitiesSnapshot,
+    AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, FeeScheduleError,
+    FeeScheduleInput, FeeScheduleSnapshot, InstrumentRulesSnapshot, TradingCapabilitiesError,
+    TradingCapabilitiesInput, TradingCapabilitiesSnapshot,
 };
 use thiserror::Error;
 
@@ -17,6 +17,18 @@ pub enum AccountBootstrapError {
 
     #[error("account normalization error: {0}")]
     Normalize(#[from] AccountError),
+}
+
+#[derive(Debug, Error)]
+pub enum AccountLedgerBootstrapError {
+    #[error("OKX observer API key is not strictly read-only")]
+    PermissionRejected,
+
+    #[error("OKX private API error: {0}")]
+    Api(#[from] OkxError),
+
+    #[error("account ledger normalization error: {0}")]
+    Normalize(#[from] AccountLedgerError),
 }
 
 #[derive(Debug, Error)]
@@ -55,12 +67,14 @@ pub enum FeeScheduleBootstrapError {
 #[derive(Clone)]
 pub struct AccountBootstrapper {
     api: AccountApi,
+    history: AccountHistoryApi,
 }
 
 impl AccountBootstrapper {
     pub fn new(client: OkxRestClient) -> Self {
         Self {
-            api: AccountApi::new(client),
+            api: AccountApi::new(client.clone()),
+            history: AccountHistoryApi::new(client),
         }
     }
 
@@ -167,6 +181,52 @@ impl AccountBootstrapper {
                 fee_schedule,
                 warnings,
             },
+        )?)
+    }
+
+    pub async fn ledger_facts(
+        &self,
+        snapshot: &AccountSnapshot,
+    ) -> Result<AccountLedgerFacts, AccountLedgerBootstrapError> {
+        let config = self.api.config().await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
+
+        let positions_swap = self.history.positions_history(InstrumentType::Swap).await?;
+        let positions_futures = self
+            .history
+            .positions_history(InstrumentType::Futures)
+            .await?;
+        let orders_swap = self.history.orders_history(InstrumentType::Swap).await?;
+        let orders_futures = self
+            .history
+            .orders_history(InstrumentType::Futures)
+            .await?;
+        let fills_swap = self.history.fills_history(InstrumentType::Swap).await?;
+        let fills_futures = self
+            .history
+            .fills_history(InstrumentType::Futures)
+            .await?;
+        let bills = self.history.bills_history().await?;
+
+        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        Ok(AccountLedgerFacts::from_okx(
+            source_received_at,
+            snapshot,
+            config,
+            vec![
+                ("SWAP".to_owned(), positions_swap),
+                ("FUTURES".to_owned(), positions_futures),
+            ],
+            vec![
+                ("SWAP".to_owned(), orders_swap),
+                ("FUTURES".to_owned(), orders_futures),
+            ],
+            vec![
+                ("SWAP".to_owned(), fills_swap),
+                ("FUTURES".to_owned(), fills_futures),
+            ],
+            bills,
         )?)
     }
 
