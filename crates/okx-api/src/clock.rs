@@ -198,12 +198,7 @@ mod tests {
 
     #[test]
     fn stale_evidence_is_rejected_without_sleeping() {
-        let stale = evidence(
-            1_000_000,
-            1_000_000,
-            0,
-            MAX_CLOCK_EVIDENCE_AGE_MS + 1,
-        );
+        let stale = evidence(1_000_000, 1_000_000, 0, MAX_CLOCK_EVIDENCE_AGE_MS + 1);
         assert!(!stale.snapshot().accepted);
         assert!(matches!(
             stale.mutation_timing(MUTATION_REQUEST_TTL_MS),
@@ -221,8 +216,6 @@ mod tests {
         assert_eq!(timing.request_timestamp(), "2020-12-08T09:08:57.715Z");
         assert_eq!(timing.exp_time_ms(), 1_607_428_142_715);
         assert!(MutationTiming::from_exchange_time_ms(1, 0).is_err());
-        assert!(
-            MutationTiming::from_exchange_time_ms(1, MAX_MUTATION_REQUEST_TTL_MS + 1).is_err()
-        );
+        assert!(MutationTiming::from_exchange_time_ms(1, MAX_MUTATION_REQUEST_TTL_MS + 1).is_err());
     }
 }
