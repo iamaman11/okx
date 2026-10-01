@@ -193,9 +193,9 @@ where
                     .exchange_code
                     .clone()
                     .unwrap_or_else(|| "RATE_LIMIT".to_owned());
-                let entry =
-                    self.ledger
-                        .reject_known(intent_id, rejection_code, observed_at_ms)?;
+                let entry = self
+                    .ledger
+                    .reject_known(intent_id, rejection_code, observed_at_ms)?;
                 Ok(SubmitDisposition::RateRejected { entry, evidence })
             }
             Err(_) => {
