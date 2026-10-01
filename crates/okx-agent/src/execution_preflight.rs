@@ -1,9 +1,13 @@
-use okx_api::{AccountConfig, ClockEvidenceSnapshot, OkxEnvironment, account_uid_fingerprint};
+use okx_api::{
+    AccountConfig, AccountRateLimitEvidence, ClockEvidenceSnapshot, OkxEnvironment,
+    RateBudgetSnapshot, account_uid_fingerprint,
+};
 use okx_observation::{ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot};
 use serde::Serialize;
 
 pub const EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1: &str = "okx.executor-credential-preflight/v1";
 pub const EXECUTOR_PREFLIGHT_SCHEMA_V2: &str = "okx.executor-preflight/v2";
+pub const EXECUTOR_PREFLIGHT_SCHEMA_V3: &str = "okx.executor-preflight/v3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutorCredentialPreflight {
@@ -29,15 +33,26 @@ pub struct ExecutorPreflightSnapshot {
     pub accepted: bool,
     pub credential: ExecutorCredentialPreflight,
     pub clock: ClockEvidenceSnapshot,
+    pub account_rate_limit: AccountRateLimitEvidence,
+    pub rate_budget: RateBudgetSnapshot,
 }
 
 impl ExecutorPreflightSnapshot {
-    pub fn new(credential: ExecutorCredentialPreflight, clock: ClockEvidenceSnapshot) -> Self {
+    pub fn new(
+        credential: ExecutorCredentialPreflight,
+        clock: ClockEvidenceSnapshot,
+        account_rate_limit: AccountRateLimitEvidence,
+        rate_budget: RateBudgetSnapshot,
+    ) -> Self {
         Self {
-            schema: EXECUTOR_PREFLIGHT_SCHEMA_V2,
-            accepted: credential.accepted && clock.accepted,
+            schema: EXECUTOR_PREFLIGHT_SCHEMA_V3,
+            accepted: credential.accepted
+                && clock.accepted
+                && account_rate_limit.current_orders_per_2s > 0,
             credential,
             clock,
+            account_rate_limit,
+            rate_budget,
         }
     }
 }
@@ -199,9 +214,24 @@ mod tests {
             accepted: true,
         };
 
-        let accepted = ExecutorPreflightSnapshot::new(credential.clone(), clock.clone());
+        let account_rate_limit = AccountRateLimitEvidence {
+            schema: okx_api::ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1,
+            current_orders_per_2s: 1000,
+            next_orders_per_2s: None,
+            fill_ratio: None,
+            main_fill_ratio: None,
+            updated_at_ms: 1_790_000_000_000,
+        };
+        let rate_budget = okx_api::RateBudget::new().snapshot();
+
+        let accepted = ExecutorPreflightSnapshot::new(
+            credential.clone(),
+            clock.clone(),
+            account_rate_limit.clone(),
+            rate_budget.clone(),
+        );
         assert!(accepted.accepted);
-        assert_eq!(accepted.schema, EXECUTOR_PREFLIGHT_SCHEMA_V2);
+        assert_eq!(accepted.schema, EXECUTOR_PREFLIGHT_SCHEMA_V3);
 
         let rejected_clock = ExecutorPreflightSnapshot::new(
             credential,
@@ -209,6 +239,8 @@ mod tests {
                 accepted: false,
                 ..clock
             },
+            account_rate_limit,
+            rate_budget,
         );
         assert!(!rejected_clock.accepted);
     }
