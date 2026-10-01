@@ -132,7 +132,7 @@ impl OkxRestClient {
             .get(url)
             .header("OK-ACCESS-KEY", self.credentials.api_key())
             .header("OK-ACCESS-SIGN", signature)
-            .header("OK-ACCESS-TIMESTAMP", request_timestamp)
+            .header("OK-ACCESS-TIMESTAMP", timestamp)
             .header("OK-ACCESS-PASSPHRASE", self.credentials.passphrase());
 
         if self.environment.demo {
@@ -170,7 +170,7 @@ impl OkxRestClient {
             .header("Content-Type", "application/json")
             .header("OK-ACCESS-KEY", self.credentials.api_key())
             .header("OK-ACCESS-SIGN", signature)
-            .header("OK-ACCESS-TIMESTAMP", timestamp)
+            .header("OK-ACCESS-TIMESTAMP", request_timestamp)
             .header("OK-ACCESS-PASSPHRASE", self.credentials.passphrase())
             .body(encoded);
 
@@ -192,7 +192,13 @@ async fn fetch_clock_evidence(
     let local_started_ms = system_unix_ms()?;
     let started = Instant::now();
     let url = format!("{}{}", environment.rest_base_url(), OKX_PUBLIC_TIME_PATH);
-    let rows: Vec<ServerTime> = decode(http.get(url).header("Accept", "application/json").send().await?).await?;
+    let rows: Vec<ServerTime> = decode(
+        http.get(url)
+            .header("Accept", "application/json")
+            .send()
+            .await?,
+    )
+    .await?;
     let round_trip = started.elapsed();
     let [row] = rows.as_slice() else {
         return Err(OkxError::Clock(format!(
@@ -203,7 +209,9 @@ async fn fetch_clock_evidence(
     let server_time_ms = row
         .ts
         .parse::<u64>()
-        .map_err(|_| OkxError::Clock("OKX server time is not a Unix millisecond timestamp".to_owned()))?;
+        .map_err(|_| {
+            OkxError::Clock("OKX server time is not a Unix millisecond timestamp".to_owned())
+        })?;
     ClockEvidence::from_sample(server_time_ms, local_started_ms, round_trip, Instant::now())
 }
 
