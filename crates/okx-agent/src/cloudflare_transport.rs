@@ -409,10 +409,7 @@ async fn run_session(
     }
 }
 
-fn completed_read_response(
-    request_id: &str,
-    result: AgentResult<AgentResponse>,
-) -> AgentResponse {
+fn completed_read_response(request_id: &str, result: AgentResult<AgentResponse>) -> AgentResponse {
     match result {
         Ok(response) => response,
         Err(error) => {
