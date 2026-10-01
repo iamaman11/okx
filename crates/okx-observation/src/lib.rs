@@ -33,9 +33,11 @@ pub use order_book::{
     OrderBookState, OrderBookStatus,
 };
 pub use reference::{
-    FundingRequirement, INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1,
-    InstrumentRulesSnapshot, InstrumentSearchSnapshot, InstrumentSpec,
-    REFERENCE_REGISTRY_SCHEMA_V1, ReferenceError, ReferenceGeneration, ReferenceRegistry,
+    AccountInstrumentExecutionLimits, FundingRequirement, INSTRUMENT_RULES_SCHEMA_V1,
+    INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot, InstrumentSearchSnapshot,
+    InstrumentSpec, MaxOrderSizeEvidence, PriceLimitEvidence, REFERENCE_REGISTRY_SCHEMA_V1,
+    ReferenceError, ReferenceGeneration, ReferenceRegistry, SystemStatusEvidence,
+    UpcomingRuleChange, VENUE_EXECUTION_EVIDENCE_SCHEMA_V1, VenueExecutionEvidence,
 };
 
 pub use stream::{
