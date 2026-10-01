@@ -84,7 +84,7 @@ pub struct ExchangeOrderIdentity {
 pub struct ExchangeFillIdentity {
     pub instrument_type: String,
     pub instrument_id: String,
-    pub order_id: String,
+    pub order_id: Option<String>,
     pub client_order_id: String,
     pub trade_id: String,
 }
@@ -273,27 +273,29 @@ impl AccountLedgerFacts {
                     add_aggregate(&mut fees, currency, fee);
                 }
 
-                let order_id = required("fills_history.ordId", &row.order_id)?;
-                fill_order_links_checked += 1;
-                if !order_ids.contains(order_id) {
-                    if order_history_complete
-                        .get(expected_type)
-                        .copied()
-                        .unwrap_or(false)
-                    {
-                        return Err(AccountLedgerError::FillOrderMissing {
-                            instrument_type: expected_type.clone(),
-                            order_id: order_id.to_owned(),
-                            trade_id: trade_id.to_owned(),
-                        });
+                let order_id = optional(&row.order_id).map(str::to_owned);
+                if let Some(order_id) = order_id.as_deref() {
+                    fill_order_links_checked += 1;
+                    if !order_ids.contains(order_id) {
+                        if order_history_complete
+                            .get(expected_type)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            return Err(AccountLedgerError::FillOrderMissing {
+                                instrument_type: expected_type.clone(),
+                                order_id: order_id.to_owned(),
+                                trade_id: trade_id.to_owned(),
+                            });
+                        }
+                        unresolved_due_to_truncation += 1;
                     }
-                    unresolved_due_to_truncation += 1;
                 }
 
                 exchange_fills.push(ExchangeFillIdentity {
                     instrument_type: row.instrument_type.clone(),
                     instrument_id: instrument_id.to_owned(),
-                    order_id: order_id.to_owned(),
+                    order_id,
                     client_order_id: row.client_order_id.clone(),
                     trade_id: trade_id.to_owned(),
                 });
