@@ -1,10 +1,12 @@
 pub mod account;
+pub mod asset;
 pub mod auth;
 pub mod client;
 pub mod clock;
 pub mod config;
 pub mod error;
 pub mod instrument;
+pub mod ledger;
 pub mod market_data;
 pub mod public_data;
 pub mod trade;
@@ -14,6 +16,7 @@ pub use account::{
     Instrument, LeverageInfo, MarginMode, MaxOrderSize, PendingOrder, Position,
     account_uid_fingerprint,
 };
+pub use asset::{AssetApi, FundingBalance};
 pub use client::{OkxPublicClient, OkxRestClient};
 pub use clock::{
     ClockEvidence, ClockEvidenceSnapshot, MAX_CLOCK_ABS_OFFSET_MS, MAX_CLOCK_EVIDENCE_AGE_MS,
@@ -22,6 +25,9 @@ pub use clock::{
 pub use config::{Credentials, OkxEnvironment, Region, WsLoginMaterial};
 pub use error::OkxError;
 pub use instrument::InstrumentType;
+pub use ledger::{
+    AccountBill, AccountHistoryApi, BoundedHistory, FillHistory, HistoricalOrder, PositionHistory,
+};
 pub use market_data::{
     MarketDataApi, PublicCandle, PublicFundingRate, PublicIndexTicker, PublicMarkPrice,
     PublicOpenInterest, PublicTicker,

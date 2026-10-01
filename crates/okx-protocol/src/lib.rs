@@ -241,6 +241,7 @@ pub enum AgentOperation {
     },
     MailboxTelemetry,
     AccountSnapshot,
+    AccountSummary,
     PortfolioRisk,
     TradingCapabilities {
         instrument: String,
@@ -320,6 +321,7 @@ impl AgentOperation {
             Self::ExecutorPreflight
             | Self::MailboxTelemetry
             | Self::AccountSnapshot
+            | Self::AccountSummary
             | Self::PortfolioRisk => Ok(()),
             Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
             Self::PrepareOpenExecution {
@@ -1219,6 +1221,17 @@ mod tests {
             limit: Some(101),
         };
         assert_eq!(too_many.validate(), Err(ProtocolError::InvalidHistoryLimit));
+    }
+
+    #[test]
+    fn account_summary_is_typed_and_read_only() {
+        let operation = AgentOperation::AccountSummary;
+        assert!(operation.validate().is_ok());
+        assert!(operation.direct_transport_read_only());
+        assert_eq!(
+            serde_json::to_string(&operation).expect("serialize"),
+            r#"{"type":"account_summary"}"#
+        );
     }
 
     #[test]

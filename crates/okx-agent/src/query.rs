@@ -27,8 +27,8 @@ use okx_runtime::{
 use crate::{
     AgentResult,
     account_bootstrap::{
-        AccountBootstrapError, AccountBootstrapper, FeeScheduleBootstrapError,
-        TradingCapabilitiesBootstrapError,
+        AccountBootstrapError, AccountBootstrapper, AccountLedgerBootstrapError,
+        FeeScheduleBootstrapError, TradingCapabilitiesBootstrapError,
     },
     execution_runtime::ExecutionRuntime,
     market_bootstrap::{MarketBootstrapError, MarketBootstrapper},
@@ -55,6 +55,8 @@ pub const ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE: &str = "ACCOUNT_PRIVATE_API_UNAV
 pub const ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE: &str = "ACCOUNT_BOOTSTRAP_INCONSISTENT";
 pub const ACCOUNT_TRADING_CAPABILITIES_INCONSISTENT_CODE: &str =
     "ACCOUNT_TRADING_CAPABILITIES_INCONSISTENT";
+pub const ACCOUNT_LEDGER_INCONSISTENT_CODE: &str = "ACCOUNT_LEDGER_INCONSISTENT";
+pub const ACCOUNT_SUMMARY_SCHEMA_V1: &str = "okx.account-summary/v1";
 pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT";
 pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
@@ -198,6 +200,7 @@ pub(crate) async fn dispatch(
             market::dispatch(request, context, generated_at).await
         }
         AgentOperation::AccountSnapshot
+        | AgentOperation::AccountSummary
         | AgentOperation::PortfolioRisk
         | AgentOperation::TradingCapabilities { .. } => {
             account::dispatch(request, context, generated_at).await

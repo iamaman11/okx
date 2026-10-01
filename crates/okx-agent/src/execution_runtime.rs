@@ -6,11 +6,14 @@ use okx_api::{
     OkxPublicClient, OkxRestClient, PublicDataApi, TradeApi,
 };
 use okx_execution::{
-    DurableExecutionLedger, ExecutionLedgerEntry, ExecutionLedgerStore, ExecutionPlan,
-    ExecutionStatusSnapshot, OrderExecutor, OrderExecutorError, PrepareOutcome, SubmitDisposition,
-    execution_status,
+    AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
+    ExecutionLedgerEntry, ExecutionLedgerStore, ExecutionPlan, ExecutionStatusSnapshot,
+    OrderExecutor, OrderExecutorError, PrepareOutcome, SubmitDisposition, execution_status,
+    reconcile_account_ledger,
 };
-use okx_observation::{AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence};
+use okx_observation::{
+    AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
+};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
@@ -68,6 +71,14 @@ impl ExecutionRuntime {
             public_data,
             executor: Mutex::new(OrderExecutor::new(ledger, trade)),
         })
+    }
+
+    pub async fn reconcile_account_ledger(
+        &self,
+        facts: &AccountLedgerFacts,
+    ) -> Result<AccountLedgerReconciliation, AccountLedgerReconciliationError> {
+        let executor = self.executor.lock().await;
+        reconcile_account_ledger(executor.ledger(), facts)
     }
 
     pub async fn preflight(

@@ -1,4 +1,5 @@
 pub mod account;
+pub mod account_ledger;
 pub mod capabilities;
 pub mod fee;
 pub mod history;
@@ -12,6 +13,11 @@ pub use account::{
     ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountBalanceDetail, AccountBalanceState, AccountError,
     AccountPositionState, AccountSnapshot, AccountWsEvent, M4_REST_BOOTSTRAP_REASON,
     M4_REST_WS_CONVERGED_REASON, PendingOrderState,
+};
+pub use account_ledger::{
+    ACCOUNT_LEDGER_HISTORY_WINDOW, ACCOUNT_LEDGER_SUMMARY_SCHEMA_V1, AccountAuthorityEvidence,
+    AccountHistoryCoverage, AccountLedgerError, AccountLedgerFacts, AccountLedgerSummary,
+    CurrencyAggregate, ExchangeFillIdentity, ExchangeOrderIdentity, FundingBalanceEvidence,
 };
 pub use capabilities::{
     ConfiguredLeverage, TRADING_CAPABILITIES_SCHEMA_V1, TradingAccountCapabilities,
