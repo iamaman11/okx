@@ -216,9 +216,7 @@ impl TradeApi {
         self.client
             .rate_budget()
             .admit(&rate_plan)
-            .map_err(|evidence| OkxError::RateLimited {
-                evidence,
-            })?;
+            .map_err(|evidence| OkxError::RateLimited { evidence })?;
         Ok(rate_plan)
     }
 
