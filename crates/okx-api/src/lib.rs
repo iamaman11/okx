@@ -1,4 +1,5 @@
 pub mod account;
+pub mod asset;
 pub mod auth;
 pub mod client;
 pub mod clock;
@@ -15,6 +16,7 @@ pub use account::{
     Instrument, LeverageInfo, MarginMode, MaxOrderSize, PendingOrder, Position,
     account_uid_fingerprint,
 };
+pub use asset::{AssetApi, FundingBalance};
 pub use client::{OkxPublicClient, OkxRestClient};
 pub use clock::{
     ClockEvidence, ClockEvidenceSnapshot, MAX_CLOCK_ABS_OFFSET_MS, MAX_CLOCK_EVIDENCE_AGE_MS,
