@@ -287,6 +287,29 @@ const mcpApi = {
             },
           },
           {
+            name: "market_research",
+            description: "Get one bounded multi-instrument market research result computed by the Windows runtime for 2 to 8 instruments.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                instruments: {
+                  type: "array",
+                  minItems: 2,
+                  maxItems: 8,
+                  uniqueItems: true,
+                  items: { type: "string", minLength: 3, maxLength: 64 },
+                },
+                bar: {
+                  type: "string",
+                  enum: ["1s","1m","3m","5m","15m","30m","1H","2H","4H","6H","12H","1D","2D","3D","1W","1M","3M","6Hutc","12Hutc","1Dutc","2Dutc","3Dutc","1Wutc","1Mutc","3Mutc"],
+                },
+                limit: { type: "integer", minimum: 1, maximum: 100 },
+              },
+              required: ["instruments", "bar"],
+              additionalProperties: false,
+            },
+          },
+          {
             name: "trading_capabilities",
             description: "Get read-only authenticated OKX account and trading capabilities for one instrument through the Windows product runtime.",
             inputSchema: {
@@ -340,6 +363,33 @@ const mcpApi = {
           schema: "okx.agent.request/v1",
           request_id: requestId(),
           operation: { type: "market_overview", instrument: args.instrument },
+        };
+        return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+      }
+      if (name === "market_research") {
+        if (!Array.isArray(args.instruments) || args.instruments.length < 2 || args.instruments.length > 8) {
+          return jsonRpcError(id, -32602, "invalid instruments");
+        }
+        const instruments = (args.instruments as unknown[]).map((value: unknown) => String(value));
+        if (new Set(instruments).size !== instruments.length || !instruments.every(validInstrument)) {
+          return jsonRpcError(id, -32602, "invalid instruments");
+        }
+        const validBars = ["1s","1m","3m","5m","15m","30m","1H","2H","4H","6H","12H","1D","2D","3D","1W","1M","3M","6Hutc","12Hutc","1Dutc","2Dutc","3Dutc","1Wutc","1Mutc","3Mutc"];
+        if (!validBars.includes(String(args.bar))) {
+          return jsonRpcError(id, -32602, "invalid bar");
+        }
+        if (args.limit !== undefined && (!Number.isInteger(args.limit) || Number(args.limit) < 1 || Number(args.limit) > 100)) {
+          return jsonRpcError(id, -32602, "invalid limit");
+        }
+        const agentRequest = {
+          schema: "okx.agent.request/v1",
+          request_id: requestId(),
+          operation: {
+            type: "market_research",
+            instruments,
+            bar: args.bar,
+            limit: args.limit ?? null,
+          },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }
