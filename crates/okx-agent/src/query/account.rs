@@ -1,10 +1,18 @@
 use super::*;
 
 #[derive(serde::Serialize)]
+struct AccountSummaryCoherence {
+    private_ws_generation: Option<u64>,
+    events_during_history_read: Option<usize>,
+    coherent: bool,
+}
+
+#[derive(serde::Serialize)]
 struct AccountSummaryResult {
     schema: &'static str,
     account_ledger: okx_observation::AccountLedgerSummary,
     reconciliation: Option<okx_execution::AccountLedgerReconciliation>,
+    coherence: AccountSummaryCoherence,
 }
 
 pub(super) async fn dispatch(
@@ -47,6 +55,11 @@ pub(super) async fn dispatch(
                 ));
             };
 
+            let history_cursor = match context.private_ws {
+                Some(private_ws) => private_ws.convergence_cursor().await.ok(),
+                None => None,
+            };
+
             let facts = match account.ledger_facts(&assembled.snapshot).await {
                 Ok(value) => value,
                 Err(error) => {
@@ -80,6 +93,35 @@ pub(super) async fn dispatch(
                     "summary covers only the authenticated account; main + all-subaccounts inventory requires the separate master read credential"
                         .to_owned(),
                 );
+            }
+
+            let mut coherence = AccountSummaryCoherence {
+                private_ws_generation: assembled.snapshot.private_ws_generation,
+                events_during_history_read: None,
+                coherent: assembled.quality == DataQuality::Fresh,
+            };
+            if let (Some(private_ws), Some(cursor)) = (context.private_ws, history_cursor) {
+                match private_ws.convergence_window(cursor).await {
+                    Ok(window) => {
+                        coherence.private_ws_generation = Some(window.generation);
+                        coherence.events_during_history_read = Some(window.events.len());
+                        if !window.events.is_empty() {
+                            coherence.coherent = false;
+                            quality = DataQuality::Degraded;
+                            warnings.push(format!(
+                                "{} private account event(s) arrived while history evidence was read; current account values are not silently joined as a coherent as-of",
+                                window.events.len()
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        coherence.coherent = false;
+                        quality = DataQuality::Degraded;
+                        warnings.push(format!(
+                            "private account coherence changed while history evidence was read: {error}"
+                        ));
+                    }
+                }
             }
 
             let reconciliation = match context.execution {
@@ -140,6 +182,7 @@ pub(super) async fn dispatch(
                     schema: ACCOUNT_SUMMARY_SCHEMA_V1,
                     account_ledger: facts.summary,
                     reconciliation,
+                    coherence,
                 })?),
                 failure: None,
                 warnings,
