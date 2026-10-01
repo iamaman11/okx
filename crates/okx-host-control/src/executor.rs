@@ -596,17 +596,7 @@ impl HostExecutor {
             .open(self.runtime_dir().join("okx-agent.stderr.log"))?;
 
         let mut child = hidden_command(self.agent_binary())
-            .args([
-                "run",
-                "--mailbox-issue",
-                AGENT_MAILBOX_ISSUE,
-                "--poll-seconds",
-                "2",
-                "--cloudflare-ws-url",
-                AGENT_CLOUDFLARE_WS_URL,
-                "--cloudflare-runtime-id",
-                AGENT_CLOUDFLARE_RUNTIME_ID,
-            ])
+            .args(production_agent_args())
             .current_dir(&self.repo_root)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
@@ -773,6 +763,18 @@ impl HostExecutor {
     }
 }
 
+fn production_agent_args() -> [&'static str; 7] {
+    [
+        "run",
+        "--mailbox-issue",
+        AGENT_MAILBOX_ISSUE,
+        "--cloudflare-ws-url",
+        AGENT_CLOUDFLARE_WS_URL,
+        "--cloudflare-runtime-id",
+        AGENT_CLOUDFLARE_RUNTIME_ID,
+    ]
+}
+
 fn bounded_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
@@ -851,6 +853,14 @@ mod tests {
     #[test]
     fn restart_backoff_is_bounded() {
         assert_eq!(RESTART_BACKOFF_SECS, [1, 5, 15, 30, 60]);
+    }
+
+    #[test]
+    fn production_agent_launch_uses_agent_owned_data_poll_default() {
+        let args = production_agent_args();
+        assert!(!args.contains(&"--poll-seconds"));
+        assert!(args.contains(&"--cloudflare-ws-url"));
+        assert!(args.contains(&"--mailbox-issue"));
     }
 
     #[test]
