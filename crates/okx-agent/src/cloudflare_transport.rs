@@ -37,6 +37,7 @@ const HEARTBEAT_IDLE_RESET_SECONDS: u64 = 24 * 60 * 60;
 const MAX_INFLIGHT_READ_QUERIES: usize = 8;
 const DIRECT_TRANSPORT_MUTATION_REJECTED: &str = "DIRECT_TRANSPORT_MUTATION_REJECTED";
 const DIRECT_TRANSPORT_BUSY: &str = "DIRECT_TRANSPORT_BUSY";
+const DIRECT_TRANSPORT_QUERY_FAILED: &str = "DIRECT_TRANSPORT_QUERY_FAILED";
 
 pub struct CloudflareTransportConfig {
     ws_url: String,
@@ -241,10 +242,10 @@ async fn run_session(
                     .reset(Instant::now() + Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
             }
             completed = in_flight.next(), if !in_flight.is_empty() => {
-                let Some((_request_id, result)) = completed else {
+                let Some((request_id, result)) = completed else {
                     continue;
                 };
-                let response = result?;
+                let response = completed_read_response(&request_id, result);
                 response.validate()?;
                 send_frame(
                     &mut sink,
@@ -408,6 +409,33 @@ async fn run_session(
     }
 }
 
+fn completed_read_response(
+    request_id: &str,
+    result: AgentResult<AgentResponse>,
+) -> AgentResponse {
+    match result {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("direct transport read request {request_id} failed: {error}");
+            AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request_id.to_owned(),
+                status: AgentResponseStatus::Failed,
+                generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                quality: DataQuality::NotReady,
+                result_schema: None,
+                result: None,
+                failure: Some(AgentFailure {
+                    code: DIRECT_TRANSPORT_QUERY_FAILED.to_owned(),
+                    message: "direct transport read query failed".to_owned(),
+                    retryable: true,
+                }),
+                warnings: Vec::new(),
+            }
+        }
+    }
+}
+
 fn direct_rejection(request_id: &str, code: &str, message: &str, retryable: bool) -> AgentResponse {
     AgentResponse {
         schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
@@ -554,5 +582,22 @@ mod tests {
         assert!(require_session("session_0123456789", 4, "session_0123456789", 4).is_ok());
         assert!(require_session("session_0123456789", 4, "session_0123456789", 3).is_err());
         assert!(require_session("session_0123456789", 4, "session_other_012345", 4).is_err());
+    }
+
+    #[test]
+    fn request_local_read_error_becomes_typed_failure() {
+        let response = completed_read_response(
+            "req_direct_query_failure_0001",
+            Err(AgentError::CloudflareTransport(
+                "internal detail must stay local".to_owned(),
+            )),
+        );
+
+        assert_eq!(response.status, AgentResponseStatus::Failed);
+        let failure = response.failure.expect("typed failure");
+        assert_eq!(failure.code, DIRECT_TRANSPORT_QUERY_FAILED);
+        assert_eq!(failure.message, "direct transport read query failed");
+        assert!(failure.retryable);
+        assert!(!failure.message.contains("internal detail"));
     }
 }
