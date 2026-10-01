@@ -84,6 +84,48 @@ Required principles:
 - manual/external/exchange-system actions remain separately attributed unless managed lineage exists;
 - one logical mutation identity is transport-independent across Cloudflare primary and GitHub fallback.
 
+## Universal question coverage rule
+
+Natural-language questions are **not** backend/API methods. The platform must not add one Rust operation or one MCP tool for every wording such as “top gainers”, “highest volume”, “largest funding”, “compare these markets”, or “which contracts changed most”.
+
+The reusable read path is a **bounded typed analytical plan** executed by the existing Rust owners:
+
+```text
+user question
+ -> ChatGPT semantic planning
+ -> versioned bounded typed query plan
+ -> existing observation/runtime facts
+ -> allowlisted deterministic analysis operators
+ -> bounded evidence result
+ -> ChatGPT interpretation/explanation
+```
+
+The typed plan may compose only explicit product primitives:
+- universe selection: instrument type, settlement currency, lifecycle/state and other normalized factual selectors;
+- factual projection: allowlisted normalized market/reference/account fields;
+- deterministic operators: filter, stable sort, top/bottom-K, bounded grouping/aggregation and explicitly supported time-window comparisons;
+- versioned derived metrics owned by `okx-analysis`;
+- explicit `as_of`, freshness/coherence policy, result limit and response budget.
+
+This is **not** SQL, an arbitrary expression language, a raw OKX endpoint proxy or executable code. Every field/operator/metric is an enum/versioned contract with deterministic validation and hard bounds.
+
+Architecture rule:
+- a **new wording or combination** of already-supported facts/operators requires no backend change;
+- a **new factual source** is added once to the factual layer;
+- a **new calculation/metric** is added once to `okx-analysis` with deterministic tests;
+- a **new mutation/safety semantic** remains an explicit dedicated capability and never enters the generic read planner.
+
+The external MCP surface stays deliberately small. The first broad read capability after Stage 1 should be a bounded market-universe scan (for example top/bottom-N by supported price change, volume, funding, basis or another accepted metric), rather than separate `top_gainers`, `top_losers`, `top_volume`, etc. tools. Coarse account/risk/scenario capabilities remain dedicated where their contracts carry materially different authority or safety semantics.
+
+Acceptance for a general analytical query capability must prove:
+- whole-universe selection is bounded and rate-budget aware;
+- stable deterministic ranking/tie behavior;
+- no silent missing instruments or unreported truncation;
+- freshness/provenance/metric version is present;
+- result cardinality and payload size are bounded;
+- unsupported fields/operators fail closed;
+- no second collector, cache owner, scheduler, database or formula owner is introduced.
+
 ## Five development stages
 
 ### Stage 1 — TRUTH
@@ -106,6 +148,7 @@ Market microstructure, derivatives structure, portfolio exposures, stress/scenar
 
 Important proof includes:
 - decision-grade evidence with explicit coherence;
+- one bounded typed market-universe scan that can answer cross-universe ranking/filtering questions without endpoint-per-question growth;
 - depth/spread/impact/basis/carry;
 - exact sizing/margin/risk boundaries;
 - exchange-oracle differential checks against supported account-position-risk / max-size / position-builder evidence;
