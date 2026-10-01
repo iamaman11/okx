@@ -1,6 +1,7 @@
 pub mod account;
 pub mod auth;
 pub mod client;
+pub mod clock;
 pub mod config;
 pub mod error;
 pub mod instrument;
@@ -13,6 +14,10 @@ pub use account::{
     Instrument, LeverageInfo, MarginMode, PendingOrder, Position, account_uid_fingerprint,
 };
 pub use client::{OkxPublicClient, OkxRestClient};
+pub use clock::{
+    ClockEvidence, ClockEvidenceSnapshot, MAX_CLOCK_ABS_OFFSET_MS, MAX_CLOCK_EVIDENCE_AGE_MS,
+    MAX_CLOCK_RTT_MS, MAX_MUTATION_REQUEST_TTL_MS, MUTATION_REQUEST_TTL_MS, MutationTiming,
+};
 pub use config::{Credentials, OkxEnvironment, Region, WsLoginMaterial};
 pub use error::OkxError;
 pub use instrument::InstrumentType;
