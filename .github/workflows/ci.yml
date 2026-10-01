@@ -79,8 +79,24 @@ jobs:
           echo "BUILD_REQUIRED=${{ steps.classify.outputs.build_required }}"
           echo "REASON=${{ steps.classify.outputs.reason }}"
 
-  linux:
-    name: linux-core
+  architecture:
+    name: architecture
+    needs: classify
+    if: needs.classify.outputs.build_required == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Architecture checker self-test
+        run: python3 scripts/check_architecture.py --self-test
+
+      - name: Enforce accepted local-crate dependency graph
+        run: python3 scripts/check_architecture.py
+
+  linux-rust:
+    name: linux-rust
     needs: classify
     if: needs.classify.outputs.build_required == 'true'
     runs-on: ubuntu-latest
@@ -129,6 +145,36 @@ jobs:
 
       - name: Typecheck
         run: npm run check
+
+      - name: Upload resolved package lock for guard bootstrap
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cloudflare-package-lock-${{ github.event.pull_request.head.sha }}
+          path: cloudflare/okx-mcp/package-lock.json
+          if-no-files-found: error
+          retention-days: 1
+
+
+  linux:
+    name: linux-core
+    needs: [classify, architecture, linux-rust, cloudflare-mcp]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate required Linux, architecture and Cloudflare gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ needs.classify.result }}" = "success"
+          if [[ "${{ needs.classify.outputs.build_required }}" == "false" ]]; then
+            echo "REUSED_SUCCESSFUL_PR_CI=true"
+            exit 0
+          fi
+          test "${{ needs.architecture.result }}" = "success"
+          test "${{ needs.linux-rust.result }}" = "success"
+          test "${{ needs.cloudflare-mcp.result }}" = "success"
+          echo "REPOSITORY_GUARD_AND_LINUX=PASS"
 
 
   windows-agent:
