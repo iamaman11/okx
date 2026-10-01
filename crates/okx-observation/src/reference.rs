@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use okx_api::{InstrumentType, PublicInstrument};
+use okx_api::{
+    Instrument as AccountInstrument, InstrumentType, MaxOrderSize, PublicInstrument,
+    PublicPriceLimit, SystemStatus,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -8,6 +11,7 @@ use thiserror::Error;
 pub const REFERENCE_REGISTRY_SCHEMA_V1: &str = "okx.reference-registry/v1";
 pub const INSTRUMENT_RULES_SCHEMA_V1: &str = "okx.instrument-rules/v1";
 pub const INSTRUMENT_SEARCH_SCHEMA_V1: &str = "okx.instrument-search/v1";
+pub const VENUE_EXECUTION_EVIDENCE_SCHEMA_V1: &str = "okx.venue-execution-evidence/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -25,6 +29,13 @@ pub enum FundingRequirement {
     Required,
     NotApplicable,
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpcomingRuleChange {
+    pub param: String,
+    pub new_value: String,
+    pub effective_time_ms: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -53,6 +64,125 @@ pub struct InstrumentSpec {
     pub max_leverage: Option<String>,
     pub list_time_ms: Option<String>,
     pub expiry_time_ms: Option<String>,
+    pub initial_price_limit_pct: Option<String>,
+    pub floating_price_limit_pct: Option<String>,
+    pub maximum_price_limit_pct: Option<String>,
+    pub upcoming_rule_changes: Vec<UpcomingRuleChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccountInstrumentExecutionLimits {
+    pub state: String,
+    pub max_limit_size: Option<String>,
+    pub max_market_size: Option<String>,
+    pub position_limit_amount_usd: Option<String>,
+    pub position_limit_pct: Option<String>,
+    pub platform_open_interest_limit_usd: Option<String>,
+    pub platform_open_interest_limit_coin: Option<String>,
+    pub long_position_remaining_quota_usd: Option<String>,
+    pub short_position_remaining_quota_usd: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PriceLimitEvidence {
+    pub instrument_id: String,
+    pub buy_limit: String,
+    pub sell_limit: String,
+    pub exchange_timestamp_ms: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MaxOrderSizeEvidence {
+    pub instrument_id: String,
+    pub max_buy: String,
+    pub max_sell: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SystemStatusEvidence {
+    pub id: String,
+    pub state: String,
+    pub service_type: String,
+    pub system: String,
+    pub maintenance_type: String,
+    pub environment: String,
+    pub begin_ms: String,
+    pub end_ms: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VenueExecutionEvidence {
+    pub schema: &'static str,
+    pub source_received_at: String,
+    pub public_instrument: InstrumentSpec,
+    pub account_instrument: AccountInstrumentExecutionLimits,
+    pub price_limit: PriceLimitEvidence,
+    pub max_order_size: Option<MaxOrderSizeEvidence>,
+    pub ongoing_system_statuses: Vec<SystemStatusEvidence>,
+}
+
+impl VenueExecutionEvidence {
+    pub fn from_okx(
+        source_received_at: impl Into<String>,
+        public_instrument: PublicInstrument,
+        account_instrument: AccountInstrument,
+        price_limit: PublicPriceLimit,
+        max_order_size: Option<MaxOrderSize>,
+        ongoing_system_statuses: Vec<SystemStatus>,
+    ) -> Result<Self, ReferenceError> {
+        let source_received_at = source_received_at.into();
+        if source_received_at.trim().is_empty() {
+            return Err(ReferenceError::EmptySourceTimestamp);
+        }
+        Ok(Self {
+            schema: VENUE_EXECUTION_EVIDENCE_SCHEMA_V1,
+            source_received_at,
+            public_instrument: InstrumentSpec::try_from(public_instrument)?,
+            account_instrument: AccountInstrumentExecutionLimits {
+                state: account_instrument.state,
+                max_limit_size: optional(account_instrument.max_limit_size),
+                max_market_size: optional(account_instrument.max_market_size),
+                position_limit_amount_usd: optional(account_instrument.position_limit_amount_usd),
+                position_limit_pct: optional(account_instrument.position_limit_pct),
+                platform_open_interest_limit_usd: optional(
+                    account_instrument.platform_open_interest_limit_usd,
+                ),
+                platform_open_interest_limit_coin: optional(
+                    account_instrument.platform_open_interest_limit_coin,
+                ),
+                long_position_remaining_quota_usd: optional(
+                    account_instrument.long_position_remaining_quota_usd,
+                ),
+                short_position_remaining_quota_usd: optional(
+                    account_instrument.short_position_remaining_quota_usd,
+                ),
+            },
+            price_limit: PriceLimitEvidence {
+                instrument_id: price_limit.instrument_id,
+                buy_limit: price_limit.buy_limit,
+                sell_limit: price_limit.sell_limit,
+                exchange_timestamp_ms: price_limit.timestamp_ms,
+            },
+            max_order_size: max_order_size.map(|max_order_size| MaxOrderSizeEvidence {
+                instrument_id: max_order_size.instrument_id,
+                max_buy: max_order_size.max_buy,
+                max_sell: max_order_size.max_sell,
+            }),
+            ongoing_system_statuses: ongoing_system_statuses
+                .into_iter()
+                .map(|status| SystemStatusEvidence {
+                    id: status.id,
+                    state: status.state,
+                    service_type: status.service_type,
+                    system: status.system,
+                    maintenance_type: status.maintenance_type,
+                    environment: status.env,
+                    begin_ms: status.begin,
+                    end_ms: status.end,
+                })
+                .collect(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -95,6 +225,18 @@ pub enum ReferenceError {
 
     #[error("duplicate instrument '{0}' in reference snapshot")]
     DuplicateInstrument(String),
+
+    #[error("instrument '{instrument_id}' announced unsupported upcoming parameter '{param}'")]
+    UnsupportedUpcomingParameter {
+        instrument_id: String,
+        param: String,
+    },
+
+    #[error("instrument '{instrument_id}' has malformed upcoming parameter change for '{param}'")]
+    MalformedUpcomingParameter {
+        instrument_id: String,
+        param: String,
+    },
 
     #[error("failed to serialize normalized reference registry: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -265,6 +407,8 @@ impl TryFrom<PublicInstrument> for InstrumentSpec {
 
         let rule_type = optional(value.rule_type);
         let funding_requirement = funding_requirement(instrument_type, rule_type.as_deref());
+        let upcoming_rule_changes =
+            normalize_upcoming_changes(instrument_id, value.upcoming_parameter_changes)?;
 
         Ok(Self {
             instrument_id: instrument_id.to_owned(),
@@ -291,8 +435,58 @@ impl TryFrom<PublicInstrument> for InstrumentSpec {
             max_leverage: optional(value.lever),
             list_time_ms: optional(value.list_time),
             expiry_time_ms: optional(value.expiry_time),
+            initial_price_limit_pct: optional(value.initial_price_limit_pct),
+            floating_price_limit_pct: optional(value.floating_price_limit_pct),
+            maximum_price_limit_pct: optional(value.maximum_price_limit_pct),
+            upcoming_rule_changes,
         })
     }
+}
+
+fn normalize_upcoming_changes(
+    instrument_id: &str,
+    changes: Vec<okx_api::UpcomingParameterChange>,
+) -> Result<Vec<UpcomingRuleChange>, ReferenceError> {
+    let mut normalized = Vec::with_capacity(changes.len());
+    for change in changes {
+        if !matches!(change.param.as_str(), "tickSz" | "minSz" | "maxMktSz") {
+            return Err(ReferenceError::UnsupportedUpcomingParameter {
+                instrument_id: instrument_id.to_owned(),
+                param: change.param,
+            });
+        }
+        if change.new_value.trim().is_empty()
+            || change
+                .effective_time_ms
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .is_none()
+        {
+            return Err(ReferenceError::MalformedUpcomingParameter {
+                instrument_id: instrument_id.to_owned(),
+                param: change.param,
+            });
+        }
+        normalized.push(UpcomingRuleChange {
+            param: change.param,
+            new_value: change.new_value,
+            effective_time_ms: change.effective_time_ms,
+        });
+    }
+    normalized.sort_by(|left, right| {
+        (
+            left.effective_time_ms.as_str(),
+            left.param.as_str(),
+            left.new_value.as_str(),
+        )
+            .cmp(&(
+                right.effective_time_ms.as_str(),
+                right.param.as_str(),
+                right.new_value.as_str(),
+            ))
+    });
+    Ok(normalized)
 }
 
 fn is_preopen(instrument: &PublicInstrument) -> bool {
@@ -378,6 +572,10 @@ mod tests {
             lever: "100".to_owned(),
             list_time: "1700000000000".to_owned(),
             expiry_time: String::new(),
+            initial_price_limit_pct: "0.05".to_owned(),
+            floating_price_limit_pct: "0.03".to_owned(),
+            maximum_price_limit_pct: "0.15".to_owned(),
+            upcoming_parameter_changes: Vec::new(),
         }
     }
 
@@ -394,6 +592,7 @@ mod tests {
         assert_eq!(spec.lot_size, "0.01");
         assert_eq!(spec.contract_value.as_deref(), Some("1000"));
         assert_eq!(spec.contract_value_currency.as_deref(), Some("DOGE"));
+        assert_eq!(spec.initial_price_limit_pct.as_deref(), Some("0.05"));
         assert_eq!(registry.len(), 1);
 
         let rules = registry
@@ -402,6 +601,38 @@ mod tests {
         assert_eq!(rules.reference_generation, registry.generation().as_str());
         assert_eq!(rules.source_received_at, registry.source_received_at());
         assert_eq!(rules.instrument.instrument_id, "DOGE-USDT-SWAP");
+    }
+
+    #[test]
+    fn upcoming_rule_change_changes_reference_generation_before_effective_time() {
+        let mut registry = ReferenceRegistry::from_public(
+            "2026-10-01T19:00:00.000Z",
+            vec![swap("DOGE-USDT-SWAP")],
+        )
+        .expect("registry");
+        let before = registry.generation().as_str().to_owned();
+
+        let mut changed = swap("DOGE-USDT-SWAP");
+        changed
+            .upcoming_parameter_changes
+            .push(okx_api::UpcomingParameterChange {
+                param: "tickSz".to_owned(),
+                new_value: "0.000001".to_owned(),
+                effective_time_ms: "1790900000000".to_owned(),
+            });
+
+        assert!(
+            registry
+                .apply_public_updates("2026-10-01T19:00:01.000Z", vec![changed])
+                .expect("update")
+        );
+        assert_ne!(registry.generation().as_str(), before);
+        let rule_change = &registry
+            .get("DOGE-USDT-SWAP")
+            .expect("instrument")
+            .upcoming_rule_changes[0];
+        assert_eq!(rule_change.param, "tickSz");
+        assert_eq!(rule_change.new_value, "0.000001");
     }
 
     #[test]

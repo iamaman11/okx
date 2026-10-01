@@ -11,7 +11,8 @@ pub mod trade;
 
 pub use account::{
     AccountApi, AccountCapabilities, AccountConfig, BalanceDetail, BalanceSnapshot, FeeRate,
-    Instrument, LeverageInfo, MarginMode, PendingOrder, Position, account_uid_fingerprint,
+    Instrument, LeverageInfo, MarginMode, MaxOrderSize, PendingOrder, Position,
+    account_uid_fingerprint,
 };
 pub use client::{OkxPublicClient, OkxRestClient};
 pub use clock::{
@@ -25,7 +26,9 @@ pub use market_data::{
     MarketDataApi, PublicCandle, PublicFundingRate, PublicIndexTicker, PublicMarkPrice,
     PublicOpenInterest, PublicTicker,
 };
-pub use public_data::{PublicDataApi, PublicInstrument};
+pub use public_data::{
+    PublicDataApi, PublicInstrument, PublicPriceLimit, SystemStatus, UpcomingParameterChange,
+};
 
 pub use trade::{
     AmendOrderRequest, ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode,
