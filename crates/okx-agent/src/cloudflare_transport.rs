@@ -1,9 +1,11 @@
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_protocol::{
-    DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DirectTransportFrame,
+    AGENT_RESPONSE_SCHEMA_V1, DIRECT_TRANSPORT_FRAME_SCHEMA_V1,
+    DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, AgentFailure, AgentResponse, AgentResponseStatus,
+    DataQuality, DirectTransportFrame,
 };
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
 use tokio::{
@@ -32,6 +34,9 @@ const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
 const HEARTBEAT_INTERVAL_SECONDS: u64 = 15;
 const HEARTBEAT_DEADLINE_SECONDS: u64 = 5;
 const HEARTBEAT_IDLE_RESET_SECONDS: u64 = 24 * 60 * 60;
+const MAX_INFLIGHT_READ_QUERIES: usize = 8;
+const DIRECT_TRANSPORT_MUTATION_REJECTED: &str = "DIRECT_TRANSPORT_MUTATION_REJECTED";
+const DIRECT_TRANSPORT_BUSY: &str = "DIRECT_TRANSPORT_BUSY";
 
 pub struct CloudflareTransportConfig {
     ws_url: String,
@@ -188,6 +193,8 @@ async fn run_session(
     let mut heartbeat_nonce: Option<String> = None;
     let heartbeat_deadline = sleep(Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
     tokio::pin!(heartbeat_deadline);
+    let mut in_flight: FuturesUnordered<BoxFuture<'_, (String, AgentResult<AgentResponse>)>> =
+        FuturesUnordered::new();
 
     loop {
         tokio::select! {
@@ -232,6 +239,23 @@ async fn run_session(
                 heartbeat_deadline
                     .as_mut()
                     .reset(Instant::now() + Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
+            }
+            completed = in_flight.next(), if !in_flight.is_empty() => {
+                let Some((_request_id, result)) = completed else {
+                    continue;
+                };
+                let response = result?;
+                response.validate()?;
+                send_frame(
+                    &mut sink,
+                    &DirectTransportFrame::Response {
+                        schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                        session_id: session_id.clone(),
+                        connection_generation,
+                        response,
+                    },
+                )
+                .await?;
             }
             message = source.next() => {
                 let frame = next_text_frame(message)?;
@@ -310,32 +334,65 @@ async fn run_session(
                         )
                         .await?;
 
-                        let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-                        let response = dispatch(
-                            &request,
-                            ObservationQueryContext::live_with_execution(
-                                context.public_ws,
-                                context.market,
-                                None,
-                                context.account,
-                                context.private_ws,
-                                context.execution,
-                            ),
-                            &generated_at,
-                        )
-                        .await?;
-                        response.validate()?;
+                        if !request.operation.direct_transport_read_only() {
+                            let response = direct_rejection(
+                                &request.request_id,
+                                DIRECT_TRANSPORT_MUTATION_REJECTED,
+                                "mutation-capable operations are not accepted on the direct ChatGPT transport",
+                                false,
+                            );
+                            send_frame(
+                                &mut sink,
+                                &DirectTransportFrame::Response {
+                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                                    session_id: session_id.clone(),
+                                    connection_generation,
+                                    response,
+                                },
+                            )
+                            .await?;
+                            continue;
+                        }
 
-                        send_frame(
-                            &mut sink,
-                            &DirectTransportFrame::Response {
-                                schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
-                                session_id: session_id.clone(),
-                                connection_generation,
-                                response,
-                            },
-                        )
-                        .await?;
+                        if in_flight.len() >= MAX_INFLIGHT_READ_QUERIES {
+                            let response = direct_rejection(
+                                &request.request_id,
+                                DIRECT_TRANSPORT_BUSY,
+                                "direct transport read concurrency bound reached",
+                                true,
+                            );
+                            send_frame(
+                                &mut sink,
+                                &DirectTransportFrame::Response {
+                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                                    session_id: session_id.clone(),
+                                    connection_generation,
+                                    response,
+                                },
+                            )
+                            .await?;
+                            continue;
+                        }
+
+                        let query_context = ObservationQueryContext::live_with_execution(
+                            context.public_ws,
+                            context.market,
+                            None,
+                            context.account,
+                            context.private_ws,
+                            context.execution,
+                        );
+                        let generated_at =
+                            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+                        let response_request_id = request.request_id.clone();
+                        in_flight.push(
+                            async move {
+                                let result =
+                                    dispatch(&request, query_context, &generated_at).await;
+                                (response_request_id, result)
+                            }
+                            .boxed(),
+                        );
                     }
                     DirectTransportFrame::Hello { .. }
                     | DirectTransportFrame::HelloAck { .. }
@@ -348,6 +405,29 @@ async fn run_session(
                 }
             }
         }
+    }
+}
+
+fn direct_rejection(
+    request_id: &str,
+    code: &str,
+    message: &str,
+    retryable: bool,
+) -> AgentResponse {
+    AgentResponse {
+        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+        request_id: request_id.to_owned(),
+        status: AgentResponseStatus::Rejected,
+        generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        quality: DataQuality::NotReady,
+        result_schema: None,
+        result: None,
+        failure: Some(AgentFailure {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            retryable,
+        }),
+        warnings: Vec::new(),
     }
 }
 
