@@ -322,6 +322,20 @@ async fn submit_prepared(
         return Ok(reference_not_fresh(request, generated_at));
     }
 
+    let clock = match execution.clock_evidence().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_CLOCK_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+
     let venue = match execution.venue_execution_evidence(&plan, &rules).await {
         Ok(value) => value,
         Err(crate::AgentError::Okx(error)) => {
@@ -346,23 +360,7 @@ async fn submit_prepared(
         }
         Err(error) => return Err(error),
     };
-    if let Err(error) = revalidate_venue_execution(&plan, &rules, &venue) {
-        return Ok(validation_failure(request, generated_at, error));
-    }
 
-    let clock = match execution.clock_evidence().await {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Failed,
-                EXECUTION_CLOCK_UNAVAILABLE_CODE,
-                error.to_string(),
-                true,
-            ));
-        }
-    };
     let timing = match clock.mutation_timing(MUTATION_REQUEST_TTL_MS) {
         Ok(value) => value,
         Err(error) => {
@@ -376,6 +374,11 @@ async fn submit_prepared(
             ));
         }
     };
+    if let Err(error) =
+        revalidate_venue_execution(&plan, &rules, &venue, timing.exp_time_ms())
+    {
+        return Ok(validation_failure(request, generated_at, error));
+    }
     let observed_at_ms = timing.request_time_ms();
     match execution
         .submit_prepared(intent_id, timing, observed_at_ms)
