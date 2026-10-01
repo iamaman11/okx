@@ -127,6 +127,8 @@ jobs:
     needs: classify
     if: needs.classify.outputs.build_required == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: cloudflare/okx-mcp
@@ -146,14 +148,23 @@ jobs:
       - name: Typecheck
         run: npm run check
 
-      - name: Upload resolved package lock for guard bootstrap
+      - name: Bootstrap resolved package lock into this PR branch
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: cloudflare-package-lock-${{ github.event.pull_request.head.sha }}
-          path: cloudflare/okx-mcp/package-lock.json
-          if-no-files-found: error
-          retention-days: 1
+        shell: bash
+        env:
+          PR_HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          cd ../..
+          if git cat-file -e HEAD:cloudflare/okx-mcp/package-lock.json 2>/dev/null; then
+            echo "PACKAGE_LOCK_ALREADY_COMMITTED=true"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cloudflare/okx-mcp/package-lock.json
+          git commit -m "Lock Cloudflare MCP dependency graph"
+          git push origin "HEAD:$PR_HEAD_REF"
 
 
   linux:
