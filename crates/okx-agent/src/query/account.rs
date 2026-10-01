@@ -7,7 +7,6 @@ struct AccountSummaryResult {
     reconciliation: Option<okx_execution::AccountLedgerReconciliation>,
 }
 
-
 pub(super) async fn dispatch(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
@@ -69,11 +68,7 @@ pub(super) async fn dispatch(
                         .to_owned(),
                 );
             }
-            if facts
-                .summary
-                .fill_order_links_unresolved_due_to_truncation
-                > 0
-            {
+            if facts.summary.fill_order_links_unresolved_due_to_truncation > 0 {
                 quality = DataQuality::Degraded;
                 warnings.push(
                     "some fill-to-order links are unresolved because bounded order history is truncated"
@@ -224,7 +219,6 @@ pub(super) async fn dispatch(
         _ => unreachable!("query domain dispatcher received unsupported operation"),
     }
 }
-
 
 fn account_ledger_failure(
     request: &AgentRequest,
