@@ -63,14 +63,18 @@ pub enum ExecutionValidationError {
     #[error("account instrument '{0}' is not currently live")]
     AccountInstrumentNotLive(String),
 
-    #[error("upcoming exchange rule '{param}' becomes effective at {effective_time_ms} before mutation deadline {mutation_deadline_ms}")]
+    #[error(
+        "upcoming exchange rule '{param}' becomes effective at {effective_time_ms} before mutation deadline {mutation_deadline_ms}"
+    )]
     UpcomingRuleChangeInsideMutationWindow {
         param: String,
         effective_time_ms: u64,
         mutation_deadline_ms: u64,
     },
 
-    #[error("OKX reports {0} ongoing system status event(s); venue mutation eligibility is not proven")]
+    #[error(
+        "OKX reports {0} ongoing system status event(s); venue mutation eligibility is not proven"
+    )]
     OngoingSystemStatus(usize),
 
     #[error("buy price '{price}' exceeds current OKX buy limit '{limit}'")]
@@ -585,8 +589,8 @@ mod tests {
         ACCOUNT_CONVERGED_SOURCE_V2, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountBalanceState,
         AccountInstrumentExecutionLimits, AccountPositionState, FeeScheduleInput,
         FeeScheduleSnapshot, InstrumentSpec, M4_REST_WS_CONVERGED_REASON, MaxOrderSizeEvidence,
-        PendingOrderState, PriceLimitEvidence, SystemStatusEvidence, VenueExecutionEvidence,
-        VENUE_EXECUTION_EVIDENCE_SCHEMA_V1,
+        PendingOrderState, PriceLimitEvidence, SystemStatusEvidence,
+        VENUE_EXECUTION_EVIDENCE_SCHEMA_V1, VenueExecutionEvidence,
     };
 
     use super::*;
@@ -780,7 +784,8 @@ mod tests {
             prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("execution plan");
         let evidence = venue(&rules);
 
-        revalidate_venue_execution(&plan, &rules, &evidence, 1_790_884_805_000).expect("current venue evidence");
+        revalidate_venue_execution(&plan, &rules, &evidence, 1_790_884_805_000)
+            .expect("current venue evidence");
     }
 
     #[test]
@@ -826,7 +831,11 @@ mod tests {
         );
 
         let mut quota_blocked = venue(&rules);
-        quota_blocked.max_order_size.as_mut().expect("max-size").max_buy = "0.01".to_owned();
+        quota_blocked
+            .max_order_size
+            .as_mut()
+            .expect("max-size")
+            .max_buy = "0.01".to_owned();
         assert!(matches!(
             revalidate_venue_execution(&plan, &rules, &quota_blocked, 1_790_884_805_000),
             Err(ExecutionValidationError::ExceedsCurrentMaxOrderSize { .. })
@@ -860,12 +869,7 @@ mod tests {
         let evidence = venue(&rules_with_change);
 
         assert_eq!(
-            revalidate_venue_execution(
-                &plan,
-                &rules_with_change,
-                &evidence,
-                1_790_884_805_000,
-            ),
+            revalidate_venue_execution(&plan, &rules_with_change, &evidence, 1_790_884_805_000,),
             Err(
                 ExecutionValidationError::UpcomingRuleChangeInsideMutationWindow {
                     param: "tickSz".to_owned(),
