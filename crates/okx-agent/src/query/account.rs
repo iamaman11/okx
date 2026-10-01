@@ -1,5 +1,13 @@
 use super::*;
 
+#[derive(serde::Serialize)]
+struct AccountSummaryResult {
+    schema: &'static str,
+    account_ledger: okx_observation::AccountLedgerSummary,
+    reconciliation: Option<okx_execution::AccountLedgerReconciliation>,
+}
+
+
 pub(super) async fn dispatch(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
@@ -21,6 +29,125 @@ pub(super) async fn dispatch(
                 result: Some(serde_json::to_value(assembled.snapshot)?),
                 failure: None,
                 warnings: assembled.warnings,
+            })
+        }
+        AgentOperation::AccountSummary => {
+            let assembled = match assemble_account_snapshot(context).await {
+                Ok(value) => value,
+                Err(error) => return Ok(account_query_failure(request, generated_at, error)),
+            };
+            let Some(account) = context.account_fallback else {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE,
+                    "OKX observer credential is not provisioned in native secret storage"
+                        .to_owned(),
+                    false,
+                ));
+            };
+
+            let facts = match account.ledger_facts(&assembled.snapshot).await {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(account_ledger_failure(request, generated_at, error));
+                }
+            };
+
+            let mut quality = assembled.quality;
+            let mut warnings = assembled.warnings;
+            if facts
+                .summary
+                .history_coverage
+                .iter()
+                .any(|coverage| !coverage.complete_within_bound)
+            {
+                quality = DataQuality::Degraded;
+                warnings.push(
+                    "one or more account history surfaces reached the bounded one-page limit; coverage is explicitly truncated"
+                        .to_owned(),
+                );
+            }
+            if facts
+                .summary
+                .fill_order_links_unresolved_due_to_truncation
+                > 0
+            {
+                quality = DataQuality::Degraded;
+                warnings.push(
+                    "some fill-to-order links are unresolved because bounded order history is truncated"
+                        .to_owned(),
+                );
+            }
+            if !facts.summary.authority.multi_account_inventory_complete {
+                warnings.push(
+                    "summary covers only the authenticated account; main + all-subaccounts inventory requires the separate master read credential"
+                        .to_owned(),
+                );
+            }
+
+            let reconciliation = match context.execution {
+                Some(execution) => match execution.reconcile_account_ledger(&facts).await {
+                    Ok(value) => {
+                        if !value.consistent {
+                            return Ok(failure_response(
+                                request,
+                                generated_at,
+                                AgentResponseStatus::Failed,
+                                ACCOUNT_LEDGER_INCONSISTENT_CODE,
+                                format!(
+                                    "durable execution ledger does not reconcile with bounded exchange evidence: unexpected_orders={}, identity_mismatches={}",
+                                    value.unexpected_exchange_orders_for_non_submitted_intents,
+                                    value.identity_mismatches
+                                ),
+                                false,
+                            ));
+                        }
+                        if value.managed_intents_unresolved_in_bounded_exchange_evidence > 0 {
+                            quality = DataQuality::Degraded;
+                            warnings.push(format!(
+                                "{} managed intent(s) are not observable in the bounded exchange order window; no absence claim is made",
+                                value.managed_intents_unresolved_in_bounded_exchange_evidence
+                            ));
+                        }
+                        Some(value)
+                    }
+                    Err(error) => {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            ACCOUNT_LEDGER_INCONSISTENT_CODE,
+                            error.to_string(),
+                            false,
+                        ));
+                    }
+                },
+                None => {
+                    quality = DataQuality::Degraded;
+                    warnings.push(
+                        "durable execution-ledger reconciliation is unavailable because the execution owner is not configured"
+                            .to_owned(),
+                    );
+                    None
+                }
+            };
+
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality,
+                result_schema: Some(ACCOUNT_SUMMARY_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(AccountSummaryResult {
+                    schema: ACCOUNT_SUMMARY_SCHEMA_V1,
+                    account_ledger: facts.summary,
+                    reconciliation,
+                })?),
+                failure: None,
+                warnings,
             })
         }
         AgentOperation::TradingCapabilities {
@@ -95,5 +222,39 @@ pub(super) async fn dispatch(
             })
         }
         _ => unreachable!("query domain dispatcher received unsupported operation"),
+    }
+}
+
+
+fn account_ledger_failure(
+    request: &AgentRequest,
+    generated_at: &str,
+    error: AccountLedgerBootstrapError,
+) -> AgentResponse {
+    match error {
+        AccountLedgerBootstrapError::PermissionRejected => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            ACCOUNT_OBSERVER_PERMISSION_REJECTED_CODE,
+            "OKX observer credential must be strictly read-only".to_owned(),
+            false,
+        ),
+        AccountLedgerBootstrapError::Api(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE,
+            error.to_string(),
+            true,
+        ),
+        AccountLedgerBootstrapError::Normalize(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            ACCOUNT_LEDGER_INCONSISTENT_CODE,
+            error.to_string(),
+            false,
+        ),
     }
 }
