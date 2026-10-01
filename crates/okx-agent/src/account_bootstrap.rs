@@ -1,6 +1,7 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
-    AccountApi, AccountHistoryApi, FeeRate, InstrumentType, MarginMode, OkxError, OkxRestClient,
+    AccountApi, AccountHistoryApi, AssetApi, FeeRate, InstrumentType, MarginMode, OkxError,
+    OkxRestClient,
 };
 use okx_observation::{
     AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, FeeScheduleError,
@@ -70,13 +71,15 @@ pub enum FeeScheduleBootstrapError {
 pub struct AccountBootstrapper {
     api: AccountApi,
     history: AccountHistoryApi,
+    asset: AssetApi,
 }
 
 impl AccountBootstrapper {
     pub fn new(client: OkxRestClient) -> Self {
         Self {
             api: AccountApi::new(client.clone()),
-            history: AccountHistoryApi::new(client),
+            history: AccountHistoryApi::new(client.clone()),
+            asset: AssetApi::new(client),
         }
     }
 
@@ -194,6 +197,7 @@ impl AccountBootstrapper {
         strict_read_only_permissions(&config.perm)
             .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
 
+        let funding_balances = self.asset.funding_balances().await?;
         let positions_swap = self.history.positions_history(InstrumentType::Swap).await?;
         let positions_futures = self
             .history
@@ -210,6 +214,7 @@ impl AccountBootstrapper {
             source_received_at,
             snapshot,
             config,
+            funding_balances,
             vec![
                 ("SWAP".to_owned(), positions_swap),
                 ("FUTURES".to_owned(), positions_futures),
