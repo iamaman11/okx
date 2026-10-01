@@ -302,8 +302,10 @@ impl TradeApi {
     }
 
     pub async fn account_rate_limit(&self) -> Result<AccountRateLimitEvidence, OkxError> {
-        let rows: Vec<RawAccountRateLimit> =
-            self.client.private_get(ACCOUNT_RATE_LIMIT_PATH, &[]).await?;
+        let rows: Vec<RawAccountRateLimit> = self
+            .client
+            .private_get(ACCOUNT_RATE_LIMIT_PATH, &[])
+            .await?;
         let [row] = rows.as_slice() else {
             return Err(OkxError::Response(format!(
                 "expected exactly one account-rate-limit row, found {}",
@@ -311,14 +313,9 @@ impl TradeApi {
             )));
         };
 
-        let current_orders_per_2s = parse_positive_u32(
-            "accRateLimit",
-            &row.current_orders_per_2s,
-        )?;
-        let next_orders_per_2s = parse_optional_positive_u32(
-            "nextAccRateLimit",
-            &row.next_orders_per_2s,
-        )?;
+        let current_orders_per_2s = parse_positive_u32("accRateLimit", &row.current_orders_per_2s)?;
+        let next_orders_per_2s =
+            parse_optional_positive_u32("nextAccRateLimit", &row.next_orders_per_2s)?;
         let updated_at_ms = parse_positive_u64("account-rate-limit ts", &row.updated_at_ms)?;
         let fill_ratio = parse_optional_ratio("fillRatio", &row.fill_ratio)?;
         let main_fill_ratio = parse_optional_ratio("mainFillRatio", &row.main_fill_ratio)?;
@@ -411,7 +408,9 @@ fn parse_optional_ratio(field: &str, value: &str) -> Result<Option<String>, OkxE
             .all(|byte| byte.is_ascii_digit() || byte == b'.')
         || value.matches('.').count() > 1
     {
-        return Err(OkxError::Response(format!("{field} is not a decimal ratio")));
+        return Err(OkxError::Response(format!(
+            "{field} is not a decimal ratio"
+        )));
     }
     Ok(Some(value.to_owned()))
 }
@@ -583,8 +582,7 @@ mod tests {
             1000
         );
         assert_eq!(
-            parse_optional_positive_u32("nextAccRateLimit", &raw.next_orders_per_2s)
-                .expect("next"),
+            parse_optional_positive_u32("nextAccRateLimit", &raw.next_orders_per_2s).expect("next"),
             None
         );
         assert_eq!(
@@ -603,5 +601,4 @@ mod tests {
         assert!(parse_positive_u32("accRateLimit", "abc").is_err());
         assert!(parse_optional_ratio("fillRatio", "1.2.3").is_err());
     }
-
 }
