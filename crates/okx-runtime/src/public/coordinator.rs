@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::{BTreeSet, VecDeque}, sync::Arc, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
@@ -30,6 +30,7 @@ const IDLE_BEFORE_PING_SECONDS: u64 = 20;
 const PONG_TIMEOUT_SECONDS: u64 = 10;
 const SERVICE_UPGRADE_NOTICE_CODE: &str = "64008";
 const COMMAND_CAPACITY: usize = 128;
+pub const MAX_ACTIVE_MARKETS: usize = 12;
 
 pub struct PublicWsHandle {
     commands: mpsc::Sender<CoordinatorCommand>,
@@ -41,6 +42,7 @@ pub struct PublicWsCoordinator {
     state: Arc<RwLock<PublicRuntimeState>>,
     commands: mpsc::Receiver<CoordinatorCommand>,
     demands: BTreeSet<String>,
+    demand_recency: VecDeque<String>,
     generation: u64,
 }
 
@@ -69,9 +71,6 @@ impl PublicWsHandle {
         instrument_id: impl Into<String>,
     ) -> Result<(), PublicRuntimeError> {
         let instrument_id = instrument_id.into();
-        if self.state.read().await.markets.contains_key(&instrument_id) {
-            return Ok(());
-        }
 
         self.commands
             .try_send(CoordinatorCommand::DemandInstrument(instrument_id.clone()))
@@ -154,6 +153,7 @@ impl PublicWsCoordinator {
                 state: Arc::clone(&state),
                 commands: commands_rx,
                 demands: BTreeSet::new(),
+                demand_recency: VecDeque::new(),
                 generation: 0,
             },
             PublicWsHandle {
@@ -389,6 +389,17 @@ impl PublicWsCoordinator {
         };
         let observed = self.state.read().await.acknowledged_subscriptions.clone();
 
+        let removals: Vec<_> = observed
+            .difference(&desired)
+            .filter(|subscription| !pending.contains(*subscription))
+            .cloned()
+            .collect();
+
+        if !removals.is_empty() {
+            connection.unsubscribe(&removals).await?;
+            pending.extend(removals);
+        }
+
         let additions: Vec<_> = desired
             .difference(&observed)
             .filter(|subscription| !pending.contains(*subscription))
@@ -406,8 +417,16 @@ impl PublicWsCoordinator {
     async fn apply_command(&mut self, command: CoordinatorCommand) {
         match command {
             CoordinatorCommand::DemandInstrument(instrument_id) => {
-                self.demands.insert(instrument_id.clone());
+                let evicted = touch_demand(
+                    &mut self.demands,
+                    &mut self.demand_recency,
+                    instrument_id.clone(),
+                );
                 let mut state = self.state.write().await;
+
+                if let Some(evicted) = evicted {
+                    state.remove_market(&evicted);
+                }
 
                 let generation = state.generation;
                 let reference_generation = state.reference.generation().as_str().to_owned();
@@ -566,7 +585,73 @@ impl PublicWsCoordinator {
     }
 }
 
+fn touch_demand(
+    demands: &mut BTreeSet<String>,
+    recency: &mut VecDeque<String>,
+    instrument_id: String,
+) -> Option<String> {
+    if let Some(position) = recency.iter().position(|value| value == &instrument_id) {
+        recency.remove(position);
+    }
+    demands.insert(instrument_id.clone());
+    recency.push_back(instrument_id);
+
+    if recency.len() <= MAX_ACTIVE_MARKETS {
+        return None;
+    }
+
+    let evicted = recency
+        .pop_front()
+        .expect("working set exceeds bound only with an eviction candidate");
+    demands.remove(&evicted);
+    Some(evicted)
+}
+
 pub fn reconnect_delay(attempt: usize) -> Duration {
     let index = attempt.min(RECONNECT_BACKOFF_SECONDS.len() - 1);
     Duration::from_secs(RECONNECT_BACKOFF_SECONDS[index])
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demand_working_set_is_bounded_and_lru() {
+        let mut demands = BTreeSet::new();
+        let mut recency = VecDeque::new();
+
+        for index in 0..MAX_ACTIVE_MARKETS {
+            assert_eq!(
+                touch_demand(
+                    &mut demands,
+                    &mut recency,
+                    format!("ASSET{index:02}-USDT-SWAP"),
+                ),
+                None
+            );
+        }
+        assert_eq!(demands.len(), MAX_ACTIVE_MARKETS);
+
+        assert_eq!(
+            touch_demand(
+                &mut demands,
+                &mut recency,
+                "ASSET00-USDT-SWAP".to_owned(),
+            ),
+            None
+        );
+
+        let evicted = touch_demand(
+            &mut demands,
+            &mut recency,
+            "NEW-USDT-SWAP".to_owned(),
+        );
+        assert_eq!(evicted.as_deref(), Some("ASSET01-USDT-SWAP"));
+        assert_eq!(demands.len(), MAX_ACTIVE_MARKETS);
+        assert!(demands.contains("ASSET00-USDT-SWAP"));
+        assert!(demands.contains("NEW-USDT-SWAP"));
+        assert!(!demands.contains("ASSET01-USDT-SWAP"));
+    }
 }
