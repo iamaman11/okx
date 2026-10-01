@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MutationTiming, OkxRestClient, RateOperationClass, client::ApiEnvelope, error::OkxError,
+    MutationTiming, OkxRestClient, RateOperationClass, RateRequestPlan, client::ApiEnvelope,
+    error::OkxError,
 };
 
 const PLACE_ORDER_PATH: &str = "/api/v5/trade/order";
@@ -202,28 +203,53 @@ impl TradeApi {
         Self { client }
     }
 
-    pub async fn place_order(
+    pub fn admit_place_order(
         &self,
         request: &PlaceOrderRequest,
-        timing: &MutationTiming,
-    ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+    ) -> Result<RateRequestPlan, OkxError> {
         validate_place(request)?;
         let rate_plan = self.client.rate_budget().trade_rest_plan(
             RateOperationClass::PlaceOrder,
             &request.instrument_id,
             None,
         );
+        self.client
+            .rate_budget()
+            .admit(&rate_plan)
+            .map_err(|evidence| OkxError::RateLimited {
+                evidence: Box::new(evidence),
+            })?;
+        Ok(rate_plan)
+    }
+
+    pub async fn place_order_after_admission(
+        &self,
+        request: &PlaceOrderRequest,
+        timing: &MutationTiming,
+        rate_plan: &RateRequestPlan,
+    ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+        validate_place(request)?;
         Ok(self
             .client
-            .private_post(
+            .private_post_after_admission(
                 PLACE_ORDER_PATH,
                 request,
                 timing.request_timestamp(),
                 Some(timing.exp_time_ms()),
-                &rate_plan,
+                rate_plan,
             )
             .await?
             .into())
+    }
+
+    pub async fn place_order(
+        &self,
+        request: &PlaceOrderRequest,
+        timing: &MutationTiming,
+    ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+        let rate_plan = self.admit_place_order(request)?;
+        self.place_order_after_admission(request, timing, &rate_plan)
+            .await
     }
 
     pub async fn cancel_order(
