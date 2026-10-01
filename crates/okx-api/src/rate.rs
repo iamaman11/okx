@@ -563,8 +563,18 @@ mod tests {
         assert_eq!(orders.domains[0].max_requests, 20);
         assert_eq!(fills.domains[0].max_requests, 10);
         assert_eq!(bills.domains[0].max_requests, 5);
-        assert!(positions.domains.iter().all(|domain| domain.window_ms == 2_000));
-        assert!(orders.domains.iter().all(|domain| domain.window_ms == 2_000));
+        assert!(
+            positions
+                .domains
+                .iter()
+                .all(|domain| domain.window_ms == 2_000)
+        );
+        assert!(
+            orders
+                .domains
+                .iter()
+                .all(|domain| domain.window_ms == 2_000)
+        );
         assert!(fills.domains.iter().all(|domain| domain.window_ms == 2_000));
         assert!(bills.domains.iter().all(|domain| domain.window_ms == 2_000));
     }
