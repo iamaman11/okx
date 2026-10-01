@@ -284,7 +284,7 @@ impl RateBudget {
         plan
     }
 
-    pub fn admit(&self, plan: &RateRequestPlan) -> Result<(), RateThrottleEvidence> {
+    pub fn admit(&self, plan: &RateRequestPlan) -> Result<(), Box<RateThrottleEvidence>> {
         self.admit_at(plan, Instant::now())
     }
 
@@ -349,7 +349,11 @@ impl RateBudget {
         }
     }
 
-    fn admit_at(&self, plan: &RateRequestPlan, now: Instant) -> Result<(), RateThrottleEvidence> {
+    fn admit_at(
+        &self,
+        plan: &RateRequestPlan,
+        now: Instant,
+    ) -> Result<(), Box<RateThrottleEvidence>> {
         let mut state = self.lock_state();
         let mut constraining: Option<(&RateWindowSpec, u64)> = None;
 
@@ -398,7 +402,7 @@ impl RateBudget {
                 decision: RateDecision::Deferred,
             };
             state.last_throttle = Some(evidence.clone());
-            return Err(evidence);
+            return Err(Box::new(evidence));
         }
 
         for spec in &plan.domains {
