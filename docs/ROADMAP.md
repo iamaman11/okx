@@ -115,7 +115,13 @@ Architecture rule:
 - a **new calculation/metric** is added once to `okx-analysis` with deterministic tests;
 - a **new mutation/safety semantic** remains an explicit dedicated capability and never enters the generic read planner.
 
-The external MCP surface stays deliberately small. The first broad read capability after Stage 1 should be a bounded market-universe scan (for example top/bottom-N by supported price change, volume, funding, basis or another accepted metric), rather than separate `top_gainers`, `top_losers`, `top_volume`, etc. tools. Coarse account/risk/scenario capabilities remain dedicated where their contracts carry materially different authority or safety semantics.
+The external MCP surface stays deliberately small. Prefer one stable universal read contract rather than metric-specific tools:
+- `query_capabilities` returns the current query-contract/catalog version, supported field IDs, metric IDs + versions/units, operators and hard limits;
+- `query` accepts one bounded analytical plan that declares the catalog version it was built against and fails closed on an unknown/stale capability or unsupported primitive.
+
+This keeps MCP tool discovery stable as the metric catalog grows: adding a metric does not require adding a new MCP method. Existing coarse tools may remain as convenience/compatibility recipes, but should compile onto the same factual/analysis owners rather than duplicate formulas.
+
+The first broad plan variant after Stage 1 should be a bounded market-universe scan (for example top/bottom-N by supported price change, volume, funding, basis or another accepted metric), rather than separate `top_gainers`, `top_losers`, `top_volume`, etc. tools. Coarse mutation/risk-policy/scenario capabilities remain dedicated where their contracts carry materially different authority or safety semantics.
 
 Acceptance for a general analytical query capability must prove:
 - whole-universe selection is bounded and rate-budget aware;
