@@ -6,8 +6,7 @@ use thiserror::Error;
 
 use crate::{DurableExecutionLedger, ExecutionState};
 
-pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str =
-    "okx.account-ledger-reconciliation/v1";
+pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str = "okx.account-ledger-reconciliation/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AccountLedgerReconciliation {
@@ -26,9 +25,7 @@ pub struct AccountLedgerReconciliation {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AccountLedgerReconciliationError {
-    #[error(
-        "multiple exchange orders resolve to managed client order id '{client_order_id}'"
-    )]
+    #[error("multiple exchange orders resolve to managed client order id '{client_order_id}'")]
     DuplicateManagedExchangeOrder { client_order_id: String },
 }
 
@@ -210,8 +207,7 @@ mod tests {
             state: "live".to_owned(),
             update_time_ms: "1790884800000".to_owned(),
         }];
-        let result =
-            reconcile_exchange_evidence(&ledger, &orders, &[]).expect("reconcile");
+        let result = reconcile_exchange_evidence(&ledger, &orders, &[]).expect("reconcile");
         assert!(!result.consistent);
         assert_eq!(
             result.unexpected_exchange_orders_for_non_submitted_intents,
@@ -240,18 +236,11 @@ mod tests {
             client_order_id: String::new(),
             trade_id: "trade-1".to_owned(),
         }];
-        let result =
-            reconcile_exchange_evidence(&ledger, &orders, &fills).expect("reconcile");
+        let result = reconcile_exchange_evidence(&ledger, &orders, &fills).expect("reconcile");
         assert!(result.consistent);
         assert_eq!(result.managed_intents, 0);
-        assert_eq!(
-            result.unattributed_external_or_exchange_system_orders,
-            1
-        );
-        assert_eq!(
-            result.unattributed_external_or_exchange_system_fills,
-            1
-        );
+        assert_eq!(result.unattributed_external_or_exchange_system_orders, 1);
+        assert_eq!(result.unattributed_external_or_exchange_system_fills, 1);
         let _ = std::fs::remove_file(p);
     }
 }
