@@ -79,6 +79,34 @@ pub struct Instrument {
     pub contract_type: String,
     #[serde(rename = "groupId", default)]
     pub fee_group_id: String,
+    #[serde(rename = "maxLmtSz", default)]
+    pub max_limit_size: String,
+    #[serde(rename = "maxMktSz", default)]
+    pub max_market_size: String,
+    #[serde(rename = "posLmtAmt", default)]
+    pub position_limit_amount_usd: String,
+    #[serde(rename = "posLmtPct", default)]
+    pub position_limit_pct: String,
+    #[serde(rename = "maxPlatOILmt", default)]
+    pub platform_open_interest_limit_usd: String,
+    #[serde(rename = "maxPlatOICoinLmt", default)]
+    pub platform_open_interest_limit_coin: String,
+    #[serde(rename = "longPosRemainingQuota", default)]
+    pub long_position_remaining_quota_usd: String,
+    #[serde(rename = "shortPosRemainingQuota", default)]
+    pub short_position_remaining_quota_usd: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MaxOrderSize {
+    #[serde(rename = "instId", default)]
+    pub instrument_id: String,
+    #[serde(default)]
+    pub ccy: String,
+    #[serde(rename = "maxBuy", default)]
+    pub max_buy: String,
+    #[serde(rename = "maxSell", default)]
+    pub max_sell: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -318,6 +346,56 @@ impl AccountApi {
                 &[("instType", instrument_type.to_string())],
             )
             .await
+    }
+
+    pub async fn instrument(
+        &self,
+        instrument_type: InstrumentType,
+        instrument_id: &str,
+    ) -> Result<Instrument, OkxError> {
+        let rows: Vec<Instrument> = self
+            .client
+            .private_get(
+                "/api/v5/account/instruments",
+                &[
+                    ("instType", instrument_type.to_string()),
+                    ("instId", instrument_id.to_owned()),
+                ],
+            )
+            .await?;
+        let [row] = rows.as_slice() else {
+            return Err(OkxError::Response(format!(
+                "expected exactly one account instrument row for {instrument_id}, found {}",
+                rows.len()
+            )));
+        };
+        Ok(row.clone())
+    }
+
+    pub async fn max_order_size(
+        &self,
+        instrument_id: &str,
+        margin_mode: MarginMode,
+        price: &str,
+    ) -> Result<MaxOrderSize, OkxError> {
+        let rows: Vec<MaxOrderSize> = self
+            .client
+            .private_get(
+                "/api/v5/account/max-size",
+                &[
+                    ("instId", instrument_id.to_owned()),
+                    ("tdMode", margin_mode.to_string()),
+                    ("px", price.to_owned()),
+                ],
+            )
+            .await?;
+        let [row] = rows.as_slice() else {
+            return Err(OkxError::Response(format!(
+                "expected exactly one max-size row for {instrument_id}, found {}",
+                rows.len()
+            )));
+        };
+        Ok(row.clone())
     }
 
     pub async fn leverage(
