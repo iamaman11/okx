@@ -1,8 +1,9 @@
-use okx_api::{AccountConfig, OkxEnvironment, account_uid_fingerprint};
+use okx_api::{AccountConfig, ClockEvidenceSnapshot, OkxEnvironment, account_uid_fingerprint};
 use okx_observation::{ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot};
 use serde::Serialize;
 
 pub const EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1: &str = "okx.executor-credential-preflight/v1";
+pub const EXECUTOR_PREFLIGHT_SCHEMA_V2: &str = "okx.executor-preflight/v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutorCredentialPreflight {
@@ -20,6 +21,28 @@ pub struct ExecutorCredentialPreflight {
     pub long_short_mode: bool,
     pub subaccount: bool,
     pub production_environment: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutorPreflightSnapshot {
+    pub schema: &'static str,
+    pub accepted: bool,
+    pub credential: ExecutorCredentialPreflight,
+    pub clock: ClockEvidenceSnapshot,
+}
+
+impl ExecutorPreflightSnapshot {
+    pub fn new(
+        credential: ExecutorCredentialPreflight,
+        clock: ClockEvidenceSnapshot,
+    ) -> Self {
+        Self {
+            schema: EXECUTOR_PREFLIGHT_SCHEMA_V2,
+            accepted: credential.accepted && clock.accepted,
+            credential,
+            clock,
+        }
+    }
 }
 
 pub fn evaluate_executor_preflight_against_snapshot(
@@ -160,6 +183,37 @@ mod tests {
 
     fn environment() -> OkxEnvironment {
         OkxEnvironment::new(Region::Global, false)
+    }
+
+    #[test]
+    fn combined_preflight_requires_both_credential_and_clock_acceptance() {
+        let observer = config("sub-uid", "main-uid", "read_only", "");
+        let executor = config("sub-uid", "main-uid", "read_only,trade", "");
+        let credential = evaluate_executor_preflight(environment(), &observer, &executor);
+        let clock = ClockEvidenceSnapshot {
+            server_time_ms: 1_790_000_000_000,
+            local_midpoint_ms: 1_790_000_000_001,
+            offset_ms: -1,
+            round_trip_ms: 10,
+            age_ms: 0,
+            max_abs_offset_ms: 5_000,
+            max_round_trip_ms: 2_000,
+            max_age_ms: 2_000,
+            accepted: true,
+        };
+
+        let accepted = ExecutorPreflightSnapshot::new(credential.clone(), clock.clone());
+        assert!(accepted.accepted);
+        assert_eq!(accepted.schema, EXECUTOR_PREFLIGHT_SCHEMA_V2);
+
+        let rejected_clock = ExecutorPreflightSnapshot::new(
+            credential,
+            ClockEvidenceSnapshot {
+                accepted: false,
+                ..clock
+            },
+        );
+        assert!(!rejected_clock.accepted);
     }
 
     #[test]
