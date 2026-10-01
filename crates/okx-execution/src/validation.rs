@@ -63,6 +63,13 @@ pub enum ExecutionValidationError {
     #[error("account instrument '{0}' is not currently live")]
     AccountInstrumentNotLive(String),
 
+    #[error("upcoming exchange rule '{param}' becomes effective at {effective_time_ms} before mutation deadline {mutation_deadline_ms}")]
+    UpcomingRuleChangeInsideMutationWindow {
+        param: String,
+        effective_time_ms: u64,
+        mutation_deadline_ms: u64,
+    },
+
     #[error("OKX reports {0} ongoing system status event(s); venue mutation eligibility is not proven")]
     OngoingSystemStatus(usize),
 
@@ -245,6 +252,7 @@ pub fn revalidate_venue_execution(
     plan: &ExecutionPlan,
     rules: &InstrumentRulesSnapshot,
     evidence: &VenueExecutionEvidence,
+    mutation_deadline_ms: u64,
 ) -> Result<(), ExecutionValidationError> {
     if !evidence.ongoing_system_statuses.is_empty() {
         return Err(ExecutionValidationError::OngoingSystemStatus(
@@ -264,6 +272,24 @@ pub fn revalidate_venue_execution(
 
     if evidence.public_instrument != rules.instrument {
         return Err(ExecutionValidationError::FreshReferenceMismatch);
+    }
+
+    for change in &evidence.public_instrument.upcoming_rule_changes {
+        let effective_time_ms = change.effective_time_ms.parse::<u64>().map_err(|_| {
+            ExecutionValidationError::InvalidDecimal {
+                field: "upcoming_rule_change.effective_time_ms",
+                value: change.effective_time_ms.clone(),
+            }
+        })?;
+        if effective_time_ms <= mutation_deadline_ms {
+            return Err(
+                ExecutionValidationError::UpcomingRuleChangeInsideMutationWindow {
+                    param: change.param.clone(),
+                    effective_time_ms,
+                    mutation_deadline_ms,
+                },
+            );
+        }
     }
 
     if evidence.account_instrument.state != "live" {
@@ -754,7 +780,7 @@ mod tests {
             prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("execution plan");
         let evidence = venue(&rules);
 
-        revalidate_venue_execution(&plan, &rules, &evidence).expect("current venue evidence");
+        revalidate_venue_execution(&plan, &rules, &evidence, 1_790_884_805_000).expect("current venue evidence");
     }
 
     #[test]
@@ -769,7 +795,7 @@ mod tests {
         let mut changed = venue(&rules);
         changed.public_instrument.tick_size = "0.0001".to_owned();
         assert_eq!(
-            revalidate_venue_execution(&plan, &rules, &changed),
+            revalidate_venue_execution(&plan, &rules, &changed, 1_790_884_805_000),
             Err(ExecutionValidationError::FreshReferenceMismatch)
         );
 
@@ -785,14 +811,14 @@ mod tests {
             end_ms: String::new(),
         });
         assert_eq!(
-            revalidate_venue_execution(&plan, &rules, &blocked),
+            revalidate_venue_execution(&plan, &rules, &blocked, 1_790_884_805_000),
             Err(ExecutionValidationError::OngoingSystemStatus(1))
         );
 
         let mut price_blocked = venue(&rules);
         price_blocked.price_limit.buy_limit = "0.09000".to_owned();
         assert_eq!(
-            revalidate_venue_execution(&plan, &rules, &price_blocked),
+            revalidate_venue_execution(&plan, &rules, &price_blocked, 1_790_884_805_000),
             Err(ExecutionValidationError::PriceAboveCurrentLimit {
                 price: "0.1".to_owned(),
                 limit: "0.09".to_owned(),
@@ -802,16 +828,52 @@ mod tests {
         let mut quota_blocked = venue(&rules);
         quota_blocked.max_order_size.as_mut().expect("max-size").max_buy = "0.01".to_owned();
         assert!(matches!(
-            revalidate_venue_execution(&plan, &rules, &quota_blocked),
+            revalidate_venue_execution(&plan, &rules, &quota_blocked, 1_790_884_805_000),
             Err(ExecutionValidationError::ExceedsCurrentMaxOrderSize { .. })
         ));
 
         let mut account_blocked = venue(&rules);
         account_blocked.account_instrument.state = "suspend".to_owned();
         assert!(matches!(
-            revalidate_venue_execution(&plan, &rules, &account_blocked),
+            revalidate_venue_execution(&plan, &rules, &account_blocked, 1_790_884_805_000),
             Err(ExecutionValidationError::AccountInstrumentNotLive(_))
         ));
+    }
+
+    #[test]
+    fn upcoming_rule_change_inside_mutation_deadline_fails_closed() {
+        let rules = rules();
+        let account = account();
+        let candidate = open_candidate(&rules, PositionDirection::Long);
+        let intent = open_intent(&rules, &account, &candidate, PositionSide::Long);
+        let plan =
+            prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("execution plan");
+
+        let mut rules_with_change = rules.clone();
+        rules_with_change.instrument.upcoming_rule_changes.push(
+            okx_observation::UpcomingRuleChange {
+                param: "tickSz".to_owned(),
+                new_value: "0.000001".to_owned(),
+                effective_time_ms: "1790884804000".to_owned(),
+            },
+        );
+        let evidence = venue(&rules_with_change);
+
+        assert_eq!(
+            revalidate_venue_execution(
+                &plan,
+                &rules_with_change,
+                &evidence,
+                1_790_884_805_000,
+            ),
+            Err(
+                ExecutionValidationError::UpcomingRuleChangeInsideMutationWindow {
+                    param: "tickSz".to_owned(),
+                    effective_time_ms: 1_790_884_804_000,
+                    mutation_deadline_ms: 1_790_884_805_000,
+                }
+            )
+        );
     }
 
     #[test]
