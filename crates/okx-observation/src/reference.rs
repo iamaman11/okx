@@ -28,6 +28,13 @@ pub enum FundingRequirement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpcomingRuleChange {
+    pub param: String,
+    pub new_value: String,
+    pub effective_time_ms: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InstrumentSpec {
     pub instrument_id: String,
     pub instrument_type: InstrumentType,
@@ -53,6 +60,10 @@ pub struct InstrumentSpec {
     pub max_leverage: Option<String>,
     pub list_time_ms: Option<String>,
     pub expiry_time_ms: Option<String>,
+    pub initial_price_limit_pct: Option<String>,
+    pub floating_price_limit_pct: Option<String>,
+    pub maximum_price_limit_pct: Option<String>,
+    pub upcoming_rule_changes: Vec<UpcomingRuleChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -291,6 +302,18 @@ impl TryFrom<PublicInstrument> for InstrumentSpec {
             max_leverage: optional(value.lever),
             list_time_ms: optional(value.list_time),
             expiry_time_ms: optional(value.expiry_time),
+            initial_price_limit_pct: optional(value.initial_price_limit_pct),
+            floating_price_limit_pct: optional(value.floating_price_limit_pct),
+            maximum_price_limit_pct: optional(value.maximum_price_limit_pct),
+            upcoming_rule_changes: value
+                .upcoming_parameter_changes
+                .into_iter()
+                .map(|change| UpcomingRuleChange {
+                    param: change.param,
+                    new_value: change.new_value,
+                    effective_time_ms: change.effective_time_ms,
+                })
+                .collect(),
         })
     }
 }
@@ -378,6 +401,10 @@ mod tests {
             lever: "100".to_owned(),
             list_time: "1700000000000".to_owned(),
             expiry_time: String::new(),
+            initial_price_limit_pct: "0.05".to_owned(),
+            floating_price_limit_pct: "0.03".to_owned(),
+            maximum_price_limit_pct: "0.15".to_owned(),
+            upcoming_parameter_changes: Vec::new(),
         }
     }
 
@@ -394,6 +421,7 @@ mod tests {
         assert_eq!(spec.lot_size, "0.01");
         assert_eq!(spec.contract_value.as_deref(), Some("1000"));
         assert_eq!(spec.contract_value_currency.as_deref(), Some("DOGE"));
+        assert_eq!(spec.initial_price_limit_pct.as_deref(), Some("0.05"));
         assert_eq!(registry.len(), 1);
 
         let rules = registry
@@ -402,6 +430,34 @@ mod tests {
         assert_eq!(rules.reference_generation, registry.generation().as_str());
         assert_eq!(rules.source_received_at, registry.source_received_at());
         assert_eq!(rules.instrument.instrument_id, "DOGE-USDT-SWAP");
+    }
+
+    #[test]
+    fn upcoming_rule_change_changes_reference_generation_before_effective_time() {
+        let mut registry = ReferenceRegistry::from_public(
+            "2026-10-01T19:00:00.000Z",
+            vec![swap("DOGE-USDT-SWAP")],
+        )
+        .expect("registry");
+        let before = registry.generation().as_str().to_owned();
+
+        let mut changed = swap("DOGE-USDT-SWAP");
+        changed.upcoming_parameter_changes.push(okx_api::UpcomingParameterChange {
+            param: "tickSz".to_owned(),
+            new_value: "0.000001".to_owned(),
+            effective_time_ms: "1790900000000".to_owned(),
+        });
+
+        assert!(registry
+            .apply_public_updates("2026-10-01T19:00:01.000Z", vec![changed])
+            .expect("update"));
+        assert_ne!(registry.generation().as_str(), before);
+        let rule_change = &registry
+            .get("DOGE-USDT-SWAP")
+            .expect("instrument")
+            .upcoming_rule_changes[0];
+        assert_eq!(rule_change.param, "tickSz");
+        assert_eq!(rule_change.new_value, "0.000001");
     }
 
     #[test]
