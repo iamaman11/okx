@@ -534,7 +534,7 @@ fn private_rest_policy(
         "/api/v5/account/positions-history" => (10, 2_000),
         "/api/v5/trade/orders-pending" => (60, 2_000),
         "/api/v5/trade/orders-history-archive" => (20, 2_000),
-        "/api/v5/trade/fills-history" => (20, 2_000),
+        "/api/v5/trade/fills-history" => (10, 2_000),
         "/api/v5/account/bills-archive" => (5, 2_000),
         "/api/v5/trade/account-rate-limit" => (1, 1_000),
         "/api/v5/trade/order" => (60, 2_000),
@@ -561,6 +561,23 @@ mod tests {
         assert_ne!(config.domains[0].key, positions.domains[0].key);
         assert_eq!(config.domains[0].key.kind, RateDomainKind::PrivateRestUser);
         assert_eq!(positions.domains[0].max_requests, 10);
+    }
+
+    #[test]
+    fn documented_history_endpoint_budgets_are_not_exceeded() {
+        let budget = RateBudget::new();
+        let positions = budget.private_rest_plan("/api/v5/account/positions-history", &[]);
+        let orders = budget.private_rest_plan("/api/v5/trade/orders-history-archive", &[]);
+        let fills = budget.private_rest_plan("/api/v5/trade/fills-history", &[]);
+        let bills = budget.private_rest_plan("/api/v5/account/bills-archive", &[]);
+        assert_eq!(positions.domains[0].max_requests, 10);
+        assert_eq!(orders.domains[0].max_requests, 20);
+        assert_eq!(fills.domains[0].max_requests, 10);
+        assert_eq!(bills.domains[0].max_requests, 5);
+        assert!(positions.domains.iter().all(|domain| domain.window_ms == 2_000));
+        assert!(orders.domains.iter().all(|domain| domain.window_ms == 2_000));
+        assert!(fills.domains.iter().all(|domain| domain.window_ms == 2_000));
+        assert!(bills.domains.iter().all(|domain| domain.window_ms == 2_000));
     }
 
     #[test]
