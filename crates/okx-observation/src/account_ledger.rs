@@ -62,6 +62,7 @@ pub struct CurrencyAggregate {
 pub struct AccountLedgerSummary {
     pub schema: &'static str,
     pub source_received_at: String,
+    pub current_account_as_of_ms: Option<String>,
     pub account_generation: String,
     pub authority: AccountAuthorityEvidence,
     pub total_equity_usd: String,
@@ -173,6 +174,7 @@ impl AccountLedgerFacts {
         let trading_equity_residual_usd =
             (total_equity - detail_equity_sum).normalize().to_string();
         let funding_balances = normalize_funding_balances(funding_balances)?;
+        let current_account_as_of_ms = current_account_as_of(snapshot)?;
         let current_unrealized_pnl = aggregate_current_unrealized(snapshot)?;
 
         let mut coverage = Vec::new();
@@ -377,6 +379,7 @@ impl AccountLedgerFacts {
             summary: AccountLedgerSummary {
                 schema: ACCOUNT_LEDGER_SUMMARY_SCHEMA_V1,
                 source_received_at,
+                current_account_as_of_ms,
                 account_generation: snapshot.account_generation.clone(),
                 authority,
                 total_equity_usd,
@@ -450,6 +453,33 @@ pub enum AccountLedgerError {
 struct Aggregate {
     amount: Decimal,
     events: usize,
+}
+
+fn current_account_as_of(
+    snapshot: &AccountSnapshot,
+) -> Result<Option<String>, AccountLedgerError> {
+    let mut latest = None::<u64>;
+    let mut admit = |field: &'static str, value: Option<&str>| -> Result<(), AccountLedgerError> {
+        let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+            return Ok(());
+        };
+        let timestamp = timestamp_required(field, value)?;
+        latest = Some(latest.map_or(timestamp, |current| current.max(timestamp)));
+        Ok(())
+    };
+
+    admit("balance.uTime", snapshot.balance.update_time_ms.as_deref())?;
+    for detail in &snapshot.balance.details {
+        admit("balance.details.uTime", detail.update_time_ms.as_deref())?;
+    }
+    for position in &snapshot.positions {
+        admit("position.uTime", position.update_time_ms.as_deref())?;
+    }
+    for order in &snapshot.pending_orders {
+        admit("order.uTime", Some(order.update_time_ms.as_str()))?;
+    }
+
+    Ok(latest.map(|value| value.to_string()))
 }
 
 fn normalize_funding_balances(
