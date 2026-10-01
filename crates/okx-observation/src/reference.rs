@@ -226,6 +226,12 @@ pub enum ReferenceError {
     #[error("duplicate instrument '{0}' in reference snapshot")]
     DuplicateInstrument(String),
 
+    #[error("instrument '{instrument_id}' announced unsupported upcoming parameter '{param}'")]
+    UnsupportedUpcomingParameter { instrument_id: String, param: String },
+
+    #[error("instrument '{instrument_id}' has malformed upcoming parameter change for '{param}'")]
+    MalformedUpcomingParameter { instrument_id: String, param: String },
+
     #[error("failed to serialize normalized reference registry: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -395,6 +401,10 @@ impl TryFrom<PublicInstrument> for InstrumentSpec {
 
         let rule_type = optional(value.rule_type);
         let funding_requirement = funding_requirement(instrument_type, rule_type.as_deref());
+        let upcoming_rule_changes = normalize_upcoming_changes(
+            instrument_id,
+            value.upcoming_parameter_changes,
+        )?;
 
         Ok(Self {
             instrument_id: instrument_id.to_owned(),
@@ -424,17 +434,50 @@ impl TryFrom<PublicInstrument> for InstrumentSpec {
             initial_price_limit_pct: optional(value.initial_price_limit_pct),
             floating_price_limit_pct: optional(value.floating_price_limit_pct),
             maximum_price_limit_pct: optional(value.maximum_price_limit_pct),
-            upcoming_rule_changes: value
-                .upcoming_parameter_changes
-                .into_iter()
-                .map(|change| UpcomingRuleChange {
-                    param: change.param,
-                    new_value: change.new_value,
-                    effective_time_ms: change.effective_time_ms,
-                })
-                .collect(),
+            upcoming_rule_changes,
         })
     }
+}
+
+fn normalize_upcoming_changes(
+    instrument_id: &str,
+    changes: Vec<okx_api::UpcomingParameterChange>,
+) -> Result<Vec<UpcomingRuleChange>, ReferenceError> {
+    let mut normalized = Vec::with_capacity(changes.len());
+    for change in changes {
+        if !matches!(change.param.as_str(), "tickSz" | "minSz" | "maxMktSz") {
+            return Err(ReferenceError::UnsupportedUpcomingParameter {
+                instrument_id: instrument_id.to_owned(),
+                param: change.param,
+            });
+        }
+        if change.new_value.trim().is_empty()
+            || change.effective_time_ms.parse::<u64>().ok().filter(|value| *value > 0).is_none()
+        {
+            return Err(ReferenceError::MalformedUpcomingParameter {
+                instrument_id: instrument_id.to_owned(),
+                param: change.param,
+            });
+        }
+        normalized.push(UpcomingRuleChange {
+            param: change.param,
+            new_value: change.new_value,
+            effective_time_ms: change.effective_time_ms,
+        });
+    }
+    normalized.sort_by(|left, right| {
+        (
+            left.effective_time_ms.as_str(),
+            left.param.as_str(),
+            left.new_value.as_str(),
+        )
+            .cmp(&(
+                right.effective_time_ms.as_str(),
+                right.param.as_str(),
+                right.new_value.as_str(),
+            ))
+    });
+    Ok(normalized)
 }
 
 fn is_preopen(instrument: &PublicInstrument) -> bool {
