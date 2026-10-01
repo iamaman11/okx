@@ -2,8 +2,9 @@ use std::path::Path;
 
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
-    AccountApi, ClockEvidence, Credentials, MarginMode, MutationTiming, OkxEnvironment,
-    OkxPublicClient, OkxRestClient, PublicDataApi, TradeApi,
+    AccountApi, AccountRateLimitEvidence, ClockEvidence, Credentials, MarginMode, MutationTiming,
+    OkxEnvironment, OkxPublicClient, OkxRestClient, PublicDataApi, RateBudget, RateBudgetSnapshot,
+    TradeApi,
 };
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
@@ -54,9 +55,17 @@ impl ExecutionRuntime {
         environment: OkxEnvironment,
         executor_credentials: Credentials,
         observed_at_ms: u64,
+        rate_budget: RateBudget,
     ) -> AgentResult<Self> {
-        let public_data = PublicDataApi::new(OkxPublicClient::new(environment)?);
-        let rest = OkxRestClient::new(environment, executor_credentials)?;
+        let public_data = PublicDataApi::new(OkxPublicClient::with_rate_budget(
+            environment,
+            rate_budget.clone(),
+        )?);
+        let rest = OkxRestClient::with_rate_budget(
+            environment,
+            executor_credentials,
+            rate_budget,
+        )?;
         let executor_clock = rest.clone();
         let executor_account = AccountApi::new(rest.clone());
         let trade = TradeApi::new(rest);
@@ -141,6 +150,18 @@ impl ExecutionRuntime {
 
     pub async fn clock_evidence(&self) -> Result<ClockEvidence, okx_api::OkxError> {
         self.executor_clock.clock_evidence().await
+    }
+
+    pub async fn account_rate_limit_evidence(
+        &self,
+    ) -> Result<AccountRateLimitEvidence, okx_api::OkxError> {
+        TradeApi::new(self.executor_clock.clone())
+            .account_rate_limit()
+            .await
+    }
+
+    pub fn rate_budget_snapshot(&self) -> RateBudgetSnapshot {
+        self.executor_clock.rate_budget().snapshot()
     }
 
     pub async fn prepare(
