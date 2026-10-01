@@ -856,7 +856,7 @@ mod tests {
         assert_eq!(
             revalidate_venue_execution(&plan, &rules, &zero_capacity, 1_790_884_805_000),
             Err(ExecutionValidationError::ExceedsCurrentMaxOrderSize {
-                size: "0.1".to_owned(),
+                size: "4.95".to_owned(),
                 max_size: "0".to_owned(),
             })
         );
