@@ -454,6 +454,12 @@ A read plan may contain only:
 
 The evaluator is not a new state owner. It runs over existing immutable snapshots / bounded one-shot reads and delegates formulas to `okx-analysis`.
 
+Preferred stable MCP read surface:
+- `query_capabilities`: returns a versioned catalog of supported field/metric/operator IDs, units, required evidence classes and hard limits;
+- `query`: accepts a bounded plan plus the exact catalog version used to construct it.
+
+The runtime maps external string IDs to internal typed enums/metric implementations and rejects unknown or stale IDs. This allows the metric catalog to evolve without creating a new MCP tool per metric or question while preserving deterministic validation.
+
 This is deliberately **not** generic SQL, JavaScript, a string expression evaluator, arbitrary endpoint composition or user-provided executable code. Unsupported fields/operators/metrics fail closed at validation. Mutation, risk-policy enforcement and execution never pass through this generic read plan.
 
 Consequences:
