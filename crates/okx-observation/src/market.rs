@@ -404,6 +404,10 @@ mod tests {
                 lever: "50".to_owned(),
                 list_time: "1700000000000".to_owned(),
                 expiry_time: String::new(),
+                initial_price_limit_pct: "0.05".to_owned(),
+                floating_price_limit_pct: "0.03".to_owned(),
+                maximum_price_limit_pct: "0.15".to_owned(),
+                upcoming_parameter_changes: Vec::new(),
             }],
         )
         .expect("reference")
