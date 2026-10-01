@@ -49,23 +49,23 @@ impl OkxEnvironment {
 
     pub const fn public_ws_url(self) -> &'static str {
         match (self.region, self.demo) {
-            (Region::Global, false) => "wss://ws.okx.com:8443/ws/v5/public",
-            (Region::Global, true) => "wss://wspap.okx.com:8443/ws/v5/public",
-            (Region::Eea, false) => "wss://wseea.okx.com:8443/ws/v5/public",
-            (Region::Eea, true) => "wss://wseeapap.okx.com:8443/ws/v5/public",
-            (Region::UsAu, false) => "wss://wsus.okx.com:8443/ws/v5/public",
-            (Region::UsAu, true) => "wss://wsuspap.okx.com:8443/ws/v5/public",
+            (Region::Global, false) => "wss://ws.okx.com/ws/v5/public",
+            (Region::Global, true) => "wss://wspap.okx.com/ws/v5/public",
+            (Region::Eea, false) => "wss://wseea.okx.com/ws/v5/public",
+            (Region::Eea, true) => "wss://wseeapap.okx.com/ws/v5/public",
+            (Region::UsAu, false) => "wss://wsus.okx.com/ws/v5/public",
+            (Region::UsAu, true) => "wss://wsuspap.okx.com/ws/v5/public",
         }
     }
 
     pub const fn private_ws_url(self) -> &'static str {
         match (self.region, self.demo) {
-            (Region::Global, false) => "wss://ws.okx.com:8443/ws/v5/private",
-            (Region::Global, true) => "wss://wspap.okx.com:8443/ws/v5/private",
-            (Region::Eea, false) => "wss://wseea.okx.com:8443/ws/v5/private",
-            (Region::Eea, true) => "wss://wseeapap.okx.com:8443/ws/v5/private",
-            (Region::UsAu, false) => "wss://wsus.okx.com:8443/ws/v5/private",
-            (Region::UsAu, true) => "wss://wsuspap.okx.com:8443/ws/v5/private",
+            (Region::Global, false) => "wss://ws.okx.com/ws/v5/private",
+            (Region::Global, true) => "wss://wspap.okx.com/ws/v5/private",
+            (Region::Eea, false) => "wss://wseea.okx.com/ws/v5/private",
+            (Region::Eea, true) => "wss://wseeapap.okx.com/ws/v5/private",
+            (Region::UsAu, false) => "wss://wsus.okx.com/ws/v5/private",
+            (Region::UsAu, true) => "wss://wsuspap.okx.com/ws/v5/private",
         }
     }
 }
@@ -205,4 +205,47 @@ mod tests {
             "configuration error: API secret is invalid"
         );
     }
+    #[test]
+    fn websocket_urls_use_canonical_default_tls_port_for_every_environment() {
+        let cases = [
+            (
+                OkxEnvironment::new(Region::Global, false),
+                "wss://ws.okx.com/ws/v5/public",
+                "wss://ws.okx.com/ws/v5/private",
+            ),
+            (
+                OkxEnvironment::new(Region::Global, true),
+                "wss://wspap.okx.com/ws/v5/public",
+                "wss://wspap.okx.com/ws/v5/private",
+            ),
+            (
+                OkxEnvironment::new(Region::Eea, false),
+                "wss://wseea.okx.com/ws/v5/public",
+                "wss://wseea.okx.com/ws/v5/private",
+            ),
+            (
+                OkxEnvironment::new(Region::Eea, true),
+                "wss://wseeapap.okx.com/ws/v5/public",
+                "wss://wseeapap.okx.com/ws/v5/private",
+            ),
+            (
+                OkxEnvironment::new(Region::UsAu, false),
+                "wss://wsus.okx.com/ws/v5/public",
+                "wss://wsus.okx.com/ws/v5/private",
+            ),
+            (
+                OkxEnvironment::new(Region::UsAu, true),
+                "wss://wsuspap.okx.com/ws/v5/public",
+                "wss://wsuspap.okx.com/ws/v5/private",
+            ),
+        ];
+
+        for (environment, expected_public, expected_private) in cases {
+            assert_eq!(environment.public_ws_url(), expected_public);
+            assert_eq!(environment.private_ws_url(), expected_private);
+            assert!(!environment.public_ws_url().contains(":8443"));
+            assert!(!environment.private_ws_url().contains(":8443"));
+        }
+    }
+
 }
