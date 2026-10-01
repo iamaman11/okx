@@ -17,6 +17,34 @@ Core rules:
 - installed binaries are verified artifacts, not mutable-workspace builds;
 - uncertain mutation outcome is reconciled, never blindly replayed.
 
+
+## Repository architecture guard
+
+The architecture is enforced by both code review and CI.
+
+Objective repository invariants are encoded in `scripts/check_architecture.py`:
+- the workspace crate set is explicit;
+- local crate dependency directions are explicit;
+- a new workspace crate or forbidden reverse dependency fails CI;
+- the checker contains a negative self-test proving that an example reverse dependency is rejected.
+
+CI keeps the guard cheap:
+- architecture validation, portable Rust validation and Cloudflare MCP validation run in parallel;
+- the already-required `linux-core` check only aggregates their results;
+- architecture validation reads Cargo metadata and does not compile the workspace.
+
+The PR template requires every nontrivial change to state:
+- concrete need/failure;
+- authoritative owner;
+- smallest capability delta;
+- structural architecture delta;
+- invariant/failure-to-test mapping;
+- superseded path/removal condition.
+
+Structural complexity defaults to zero for new crates, long-lived tasks, state owners, stores, schedulers/poll loops, transports, mutation authorities, MCP tools, dependencies and durable schemas. A non-zero delta requires an explicit reason.
+
+Machine checks intentionally do not enforce LOC/file-count/coverage/complexity scores. Those metrics would encourage code for the checker. Semantic simplicity is instead reviewed against ownership, duplication and current product need.
+
 ## Canonical topology
 
 ```text
