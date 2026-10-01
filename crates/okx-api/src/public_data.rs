@@ -133,6 +133,21 @@ impl PublicDataApi {
             .await
     }
 
+    pub async fn instrument(
+        &self,
+        instrument_type: InstrumentType,
+        instrument_id: &str,
+    ) -> Result<PublicInstrument, OkxError> {
+        let rows = self.instruments(instrument_type, Some(instrument_id)).await?;
+        let [row] = rows.as_slice() else {
+            return Err(OkxError::Response(format!(
+                "expected exactly one public instrument row for {instrument_id}, found {}",
+                rows.len()
+            )));
+        };
+        Ok(row.clone())
+    }
+
     pub async fn derivative_instruments(&self) -> Result<Vec<PublicInstrument>, OkxError> {
         let mut instruments = self.instruments(InstrumentType::Swap, None).await?;
         instruments.extend(self.instruments(InstrumentType::Futures, None).await?);
