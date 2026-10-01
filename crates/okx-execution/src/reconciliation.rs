@@ -11,6 +11,7 @@ use thiserror::Error;
 use crate::{DurableExecutionLedger, ExecutionState};
 
 pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str = "okx.account-ledger-reconciliation/v1";
+const MAX_POSITION_ATTRIBUTION_ROWS: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PositionAttributionDiagnostic {
@@ -34,6 +35,9 @@ pub struct AccountLedgerReconciliation {
     pub unexpected_exchange_orders_for_non_submitted_intents: usize,
     pub unexpected_exchange_fills_for_non_submitted_intents: usize,
     pub identity_mismatches: usize,
+    pub position_attribution_total: usize,
+    pub position_attribution_residual_count: usize,
+    pub position_attribution_truncated: bool,
     pub position_attribution: Vec<PositionAttributionDiagnostic>,
     pub position_attribution_unavailable_events: usize,
     pub consistent: bool,
@@ -180,6 +184,18 @@ fn reconcile_exchange_evidence(
             &managed_order_ids,
         )?;
 
+    let position_attribution_total = position_attribution.len();
+    let position_attribution_residual_count = position_attribution
+        .iter()
+        .filter(|item| item.unattributed_external_or_outside_bounded_history_residual != "0")
+        .count();
+    let position_attribution_truncated =
+        position_attribution_total > MAX_POSITION_ATTRIBUTION_ROWS;
+    let position_attribution = position_attribution
+        .into_iter()
+        .take(MAX_POSITION_ATTRIBUTION_ROWS)
+        .collect();
+
     Ok(AccountLedgerReconciliation {
         schema: ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1,
         managed_intents: managed_clients.len(),
@@ -192,6 +208,9 @@ fn reconcile_exchange_evidence(
         unexpected_exchange_orders_for_non_submitted_intents: unexpected_orders,
         unexpected_exchange_fills_for_non_submitted_intents: unexpected_fills,
         identity_mismatches,
+        position_attribution_total,
+        position_attribution_residual_count,
+        position_attribution_truncated,
         position_attribution,
         position_attribution_unavailable_events,
         consistent: unexpected_orders == 0 && unexpected_fills == 0 && identity_mismatches == 0,
