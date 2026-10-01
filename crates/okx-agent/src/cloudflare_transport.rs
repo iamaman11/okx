@@ -6,7 +6,10 @@ use okx_protocol::{
     DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DirectTransportFrame,
 };
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
-use tokio::{sync::watch, time::sleep};
+use tokio::{
+    sync::watch,
+    time::{Instant, MissedTickBehavior, interval, sleep},
+};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -26,6 +29,9 @@ use crate::{
 };
 
 const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
+const HEARTBEAT_INTERVAL_SECONDS: u64 = 15;
+const HEARTBEAT_DEADLINE_SECONDS: u64 = 5;
+const HEARTBEAT_IDLE_RESET_SECONDS: u64 = 24 * 60 * 60;
 
 pub struct CloudflareTransportConfig {
     ws_url: String,
@@ -176,6 +182,13 @@ async fn run_session(
         config.ws_url()
     );
 
+    let mut heartbeat = interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS));
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    heartbeat.tick().await;
+    let mut heartbeat_nonce: Option<String> = None;
+    let heartbeat_deadline = sleep(Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
+    tokio::pin!(heartbeat_deadline);
+
     loop {
         tokio::select! {
             changed = shutdown.changed() => {
@@ -187,6 +200,38 @@ async fn run_session(
                     Ok(()) => {}
                     Err(_) => return Ok(()),
                 }
+            }
+            _ = heartbeat.tick() => {
+                if heartbeat_nonce.is_some() {
+                    return Err(AgentError::CloudflareTransport(
+                        "cloudflare heartbeat already pending".to_owned(),
+                    ));
+                }
+                let nonce = random_token("heartbeat_")?;
+                send_frame(
+                    &mut sink,
+                    &DirectTransportFrame::Ping {
+                        schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                        session_id: session_id.clone(),
+                        connection_generation,
+                        nonce: nonce.clone(),
+                    },
+                )
+                .await?;
+                heartbeat_nonce = Some(nonce);
+                heartbeat_deadline
+                    .as_mut()
+                    .reset(Instant::now() + Duration::from_secs(HEARTBEAT_DEADLINE_SECONDS));
+            }
+            _ = &mut heartbeat_deadline => {
+                if heartbeat_nonce.is_some() {
+                    return Err(AgentError::CloudflareTransport(
+                        "cloudflare heartbeat pong deadline exceeded".to_owned(),
+                    ));
+                }
+                heartbeat_deadline
+                    .as_mut()
+                    .reset(Instant::now() + Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
             }
             message = source.next() => {
                 let frame = next_text_frame(message)?;
@@ -213,6 +258,32 @@ async fn run_session(
                             },
                         )
                         .await?;
+                    }
+                    DirectTransportFrame::Pong {
+                        session_id: frame_session,
+                        connection_generation: frame_generation,
+                        nonce,
+                        ..
+                    } => {
+                        require_session(
+                            &session_id,
+                            connection_generation,
+                            &frame_session,
+                            frame_generation,
+                        )?;
+                        match heartbeat_nonce.as_deref() {
+                            Some(expected) if expected == nonce => {
+                                heartbeat_nonce = None;
+                                heartbeat_deadline
+                                    .as_mut()
+                                    .reset(Instant::now() + Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
+                            }
+                            _ => {
+                                return Err(AgentError::CloudflareTransport(
+                                    "unexpected cloudflare heartbeat pong".to_owned(),
+                                ));
+                            }
+                        }
                     }
                     DirectTransportFrame::Request {
                         session_id: frame_session,
@@ -268,7 +339,6 @@ async fn run_session(
                     }
                     DirectTransportFrame::Hello { .. }
                     | DirectTransportFrame::HelloAck { .. }
-                    | DirectTransportFrame::Pong { .. }
                     | DirectTransportFrame::DeliveryAck { .. }
                     | DirectTransportFrame::Response { .. } => {
                         return Err(AgentError::CloudflareTransport(
