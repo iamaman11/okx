@@ -1,4 +1,8 @@
-use std::{collections::{BTreeSet, VecDeque}, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
@@ -612,7 +616,6 @@ pub fn reconnect_delay(attempt: usize) -> Duration {
     Duration::from_secs(RECONNECT_BACKOFF_SECONDS[index])
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,19 +638,11 @@ mod tests {
         assert_eq!(demands.len(), MAX_ACTIVE_MARKETS);
 
         assert_eq!(
-            touch_demand(
-                &mut demands,
-                &mut recency,
-                "ASSET00-USDT-SWAP".to_owned(),
-            ),
+            touch_demand(&mut demands, &mut recency, "ASSET00-USDT-SWAP".to_owned(),),
             None
         );
 
-        let evicted = touch_demand(
-            &mut demands,
-            &mut recency,
-            "NEW-USDT-SWAP".to_owned(),
-        );
+        let evicted = touch_demand(&mut demands, &mut recency, "NEW-USDT-SWAP".to_owned());
         assert_eq!(evicted.as_deref(), Some("ASSET01-USDT-SWAP"));
         assert_eq!(demands.len(), MAX_ACTIVE_MARKETS);
         assert!(demands.contains("ASSET00-USDT-SWAP"));
