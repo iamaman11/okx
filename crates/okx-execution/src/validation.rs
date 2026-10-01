@@ -557,8 +557,10 @@ mod tests {
     use okx_api::InstrumentType;
     use okx_observation::{
         ACCOUNT_CONVERGED_SOURCE_V2, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountBalanceState,
-        AccountPositionState, FeeScheduleInput, FeeScheduleSnapshot, InstrumentSpec,
-        M4_REST_WS_CONVERGED_REASON, PendingOrderState,
+        AccountInstrumentExecutionLimits, AccountPositionState, FeeScheduleInput,
+        FeeScheduleSnapshot, InstrumentSpec, M4_REST_WS_CONVERGED_REASON, MaxOrderSizeEvidence,
+        PendingOrderState, PriceLimitEvidence, SystemStatusEvidence, VenueExecutionEvidence,
+        VENUE_EXECUTION_EVIDENCE_SCHEMA_V1,
     };
 
     use super::*;
@@ -598,6 +600,37 @@ mod tests {
                 maximum_price_limit_pct: Some("0.15".to_owned()),
                 upcoming_rule_changes: Vec::new(),
             },
+        }
+    }
+
+    fn venue(rules: &InstrumentRulesSnapshot) -> VenueExecutionEvidence {
+        VenueExecutionEvidence {
+            schema: VENUE_EXECUTION_EVIDENCE_SCHEMA_V1,
+            source_received_at: "2026-10-01T20:00:00Z".to_owned(),
+            public_instrument: rules.instrument.clone(),
+            account_instrument: AccountInstrumentExecutionLimits {
+                state: "live".to_owned(),
+                max_limit_size: Some("1000".to_owned()),
+                max_market_size: Some("1000".to_owned()),
+                position_limit_amount_usd: Some("100000".to_owned()),
+                position_limit_pct: Some("30".to_owned()),
+                platform_open_interest_limit_usd: Some("10000000".to_owned()),
+                platform_open_interest_limit_coin: Some("100000000".to_owned()),
+                long_position_remaining_quota_usd: Some("50000".to_owned()),
+                short_position_remaining_quota_usd: Some("50000".to_owned()),
+            },
+            price_limit: PriceLimitEvidence {
+                instrument_id: rules.instrument.instrument_id.clone(),
+                buy_limit: "0.12000".to_owned(),
+                sell_limit: "0.08000".to_owned(),
+                exchange_timestamp_ms: "1790884800000".to_owned(),
+            },
+            max_order_size: Some(MaxOrderSizeEvidence {
+                instrument_id: rules.instrument.instrument_id.clone(),
+                max_buy: "1000".to_owned(),
+                max_sell: "1000".to_owned(),
+            }),
+            ongoing_system_statuses: Vec::new(),
         }
     }
 
@@ -709,6 +742,76 @@ mod tests {
         assert_eq!(plan.price, candidate.entry_price);
         assert!(plan.open_risk.is_some());
         assert_eq!(plan.client_order_id.len(), 32);
+    }
+
+    #[test]
+    fn venue_revalidation_accepts_only_current_exchange_constraints() {
+        let rules = rules();
+        let account = account();
+        let candidate = open_candidate(&rules, PositionDirection::Long);
+        let intent = open_intent(&rules, &account, &candidate, PositionSide::Long);
+        let plan =
+            prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("execution plan");
+        let evidence = venue(&rules);
+
+        revalidate_venue_execution(&plan, &rules, &evidence).expect("current venue evidence");
+    }
+
+    #[test]
+    fn venue_revalidation_rejects_rule_change_status_price_and_account_limits() {
+        let rules = rules();
+        let account = account();
+        let candidate = open_candidate(&rules, PositionDirection::Long);
+        let intent = open_intent(&rules, &account, &candidate, PositionSide::Long);
+        let plan =
+            prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("execution plan");
+
+        let mut changed = venue(&rules);
+        changed.public_instrument.tick_size = "0.0001".to_owned();
+        assert_eq!(
+            revalidate_venue_execution(&plan, &rules, &changed),
+            Err(ExecutionValidationError::FreshReferenceMismatch)
+        );
+
+        let mut blocked = venue(&rules);
+        blocked.ongoing_system_statuses.push(SystemStatusEvidence {
+            id: "maintenance".to_owned(),
+            state: "ongoing".to_owned(),
+            service_type: "trading".to_owned(),
+            system: "trading".to_owned(),
+            maintenance_type: "2".to_owned(),
+            environment: "1".to_owned(),
+            begin_ms: "1790884800000".to_owned(),
+            end_ms: String::new(),
+        });
+        assert_eq!(
+            revalidate_venue_execution(&plan, &rules, &blocked),
+            Err(ExecutionValidationError::OngoingSystemStatus(1))
+        );
+
+        let mut price_blocked = venue(&rules);
+        price_blocked.price_limit.buy_limit = "0.09000".to_owned();
+        assert_eq!(
+            revalidate_venue_execution(&plan, &rules, &price_blocked),
+            Err(ExecutionValidationError::PriceAboveCurrentLimit {
+                price: "0.1".to_owned(),
+                limit: "0.09".to_owned(),
+            })
+        );
+
+        let mut quota_blocked = venue(&rules);
+        quota_blocked.max_order_size.as_mut().expect("max-size").max_buy = "0.01".to_owned();
+        assert!(matches!(
+            revalidate_venue_execution(&plan, &rules, &quota_blocked),
+            Err(ExecutionValidationError::ExceedsCurrentMaxOrderSize { .. })
+        ));
+
+        let mut account_blocked = venue(&rules);
+        account_blocked.account_instrument.state = "suspend".to_owned();
+        assert!(matches!(
+            revalidate_venue_execution(&plan, &rules, &account_blocked),
+            Err(ExecutionValidationError::AccountInstrumentNotLive(_))
+        ));
     }
 
     #[test]
