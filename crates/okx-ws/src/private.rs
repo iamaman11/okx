@@ -1,5 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
-use okx_api::{OkxEnvironment, RateBudget, RateOperationClass, RateThrottleEvidence, WsLoginMaterial};
+use okx_api::{
+    OkxEnvironment, RateBudget, RateOperationClass, RateThrottleEvidence, WsLoginMaterial,
+};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
