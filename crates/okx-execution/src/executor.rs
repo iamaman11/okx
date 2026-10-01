@@ -507,7 +507,6 @@ mod tests {
         }
     }
 
-
     struct LocalDeferredGateway {
         place_calls: AtomicUsize,
     }
