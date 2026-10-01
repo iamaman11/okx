@@ -313,7 +313,6 @@ impl AccountHistoryApi {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
