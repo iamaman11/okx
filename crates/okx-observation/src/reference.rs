@@ -117,7 +117,7 @@ pub struct VenueExecutionEvidence {
     pub public_instrument: InstrumentSpec,
     pub account_instrument: AccountInstrumentExecutionLimits,
     pub price_limit: PriceLimitEvidence,
-    pub max_order_size: MaxOrderSizeEvidence,
+    pub max_order_size: Option<MaxOrderSizeEvidence>,
     pub ongoing_system_statuses: Vec<SystemStatusEvidence>,
 }
 
@@ -127,7 +127,7 @@ impl VenueExecutionEvidence {
         public_instrument: PublicInstrument,
         account_instrument: AccountInstrument,
         price_limit: PublicPriceLimit,
-        max_order_size: MaxOrderSize,
+        max_order_size: Option<MaxOrderSize>,
         ongoing_system_statuses: Vec<SystemStatus>,
     ) -> Result<Self, ReferenceError> {
         let source_received_at = source_received_at.into();
@@ -163,11 +163,11 @@ impl VenueExecutionEvidence {
                 sell_limit: price_limit.sell_limit,
                 exchange_timestamp_ms: price_limit.timestamp_ms,
             },
-            max_order_size: MaxOrderSizeEvidence {
+            max_order_size: max_order_size.map(|max_order_size| MaxOrderSizeEvidence {
                 instrument_id: max_order_size.instrument_id,
                 max_buy: max_order_size.max_buy,
                 max_sell: max_order_size.max_sell,
-            },
+            }),
             ongoing_system_statuses: ongoing_system_statuses
                 .into_iter()
                 .map(|status| SystemStatusEvidence {
