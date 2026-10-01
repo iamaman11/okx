@@ -166,7 +166,13 @@ Backend-change rule:
 - if it needs a new deterministic metric, implement/version/test it once in `okx-analysis`;
 - if it changes mutation/risk/governance semantics, use a dedicated explicit capability rather than the generic read plan.
 
-This keeps the MCP surface small while making the answer space broad. The query-plan evaluator owns no durable business state and must not create a second collector, cache, scheduler or formula owner.
+This keeps the MCP surface small while making the answer space broad. The preferred stable read surface is:
+- `query_capabilities`: fetch the current catalog version, fields, metrics, operators, units and hard bounds;
+- `query`: submit a bounded plan that names the catalog version it was built from.
+
+ChatGPT should refresh the **capability catalog**, not require a new MCP tool schema for every new metric. Unknown/stale field or metric IDs fail closed. The runtime maps IDs to typed internal implementations; free-form formulas are never accepted.
+
+The query-plan evaluator owns no durable business state and must not create a second collector, cache, scheduler or formula owner.
 
 ## Context budget rule
 
