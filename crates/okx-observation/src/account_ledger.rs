@@ -17,6 +17,7 @@ pub const ACCOUNT_LEDGER_SUMMARY_SCHEMA_V1: &str = "okx.account-ledger-summary/v
 pub const ACCOUNT_LEDGER_HISTORY_WINDOW: &str = "last_3_months";
 const FUNDING_EXPENSE_SUBTYPE: &str = "173";
 const FUNDING_INCOME_SUBTYPE: &str = "174";
+const MAX_HISTORY_INSTRUMENT_SAMPLES: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AccountAuthorityEvidence {
@@ -33,7 +34,8 @@ pub struct AccountAuthorityEvidence {
 pub struct AccountHistoryCoverage {
     pub resource: String,
     pub documented_window: &'static str,
-    pub instrument_scope: Vec<String>,
+    pub instrument_count: usize,
+    pub sample_instruments: Vec<String>,
     pub rows: usize,
     pub pages: usize,
     pub complete_within_bound: bool,
@@ -525,10 +527,17 @@ fn coverage_for<T>(
         }
     }
 
+    let instrument_count = instruments.len();
+    let sample_instruments = instruments
+        .into_iter()
+        .take(MAX_HISTORY_INSTRUMENT_SAMPLES)
+        .collect();
+
     Ok(AccountHistoryCoverage {
         resource: resource.to_owned(),
         documented_window: ACCOUNT_LEDGER_HISTORY_WINDOW,
-        instrument_scope: instruments.into_iter().collect(),
+        instrument_count,
+        sample_instruments,
         rows: history.rows.len(),
         pages: history.pages,
         complete_within_bound: history.complete,
