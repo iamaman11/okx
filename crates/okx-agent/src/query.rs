@@ -8,7 +8,8 @@ use okx_analysis::{
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
-    ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountError, AccountSnapshot,
+    ACCOUNT_LEDGER_SUMMARY_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2,
+    AccountError, AccountSnapshot,
     INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
     MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
     MarketHistorySnapshot, MarketReadiness, MarketSnapshot, ReferenceRegistry,
@@ -27,8 +28,8 @@ use okx_runtime::{
 use crate::{
     AgentResult,
     account_bootstrap::{
-        AccountBootstrapError, AccountBootstrapper, FeeScheduleBootstrapError,
-        TradingCapabilitiesBootstrapError,
+        AccountBootstrapError, AccountBootstrapper, AccountLedgerBootstrapError,
+        FeeScheduleBootstrapError, TradingCapabilitiesBootstrapError,
     },
     execution_runtime::ExecutionRuntime,
     market_bootstrap::{MarketBootstrapError, MarketBootstrapper},
@@ -55,6 +56,10 @@ pub const ACCOUNT_PRIVATE_API_UNAVAILABLE_CODE: &str = "ACCOUNT_PRIVATE_API_UNAV
 pub const ACCOUNT_BOOTSTRAP_INCONSISTENT_CODE: &str = "ACCOUNT_BOOTSTRAP_INCONSISTENT";
 pub const ACCOUNT_TRADING_CAPABILITIES_INCONSISTENT_CODE: &str =
     "ACCOUNT_TRADING_CAPABILITIES_INCONSISTENT";
+pub const ACCOUNT_LEDGER_INCONSISTENT_CODE: &str = "ACCOUNT_LEDGER_INCONSISTENT";
+pub const ACCOUNT_LEDGER_RECONCILIATION_UNAVAILABLE_CODE: &str =
+    "ACCOUNT_LEDGER_RECONCILIATION_UNAVAILABLE";
+pub const ACCOUNT_SUMMARY_SCHEMA_V1: &str = "okx.account-summary/v1";
 pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT";
 pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
@@ -198,6 +203,7 @@ pub(crate) async fn dispatch(
             market::dispatch(request, context, generated_at).await
         }
         AgentOperation::AccountSnapshot
+        | AgentOperation::AccountSummary
         | AgentOperation::PortfolioRisk
         | AgentOperation::TradingCapabilities { .. } => {
             account::dispatch(request, context, generated_at).await
