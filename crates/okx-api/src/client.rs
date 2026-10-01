@@ -405,9 +405,7 @@ mod tests {
         );
         assert_eq!(throttle_code_from_http_429_body(b"not-json"), "HTTP_429");
         assert_eq!(
-            throttle_code_from_http_429_body(
-                br#"{"code":"51000","msg":"other error","data":[]}"#
-            ),
+            throttle_code_from_http_429_body(br#"{"code":"51000","msg":"other error","data":[]}"#),
             "HTTP_429"
         );
     }
