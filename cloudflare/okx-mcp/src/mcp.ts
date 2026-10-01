@@ -130,6 +130,11 @@ export const mcpApi = {
             },
           },
           {
+            name: "account_summary",
+            description: "Get a bounded read-only OKX account and ledger truth summary, including history coverage and durable execution-ledger reconciliation.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+          {
             name: "trading_capabilities",
             description: "Get read-only authenticated OKX account and trading capabilities for one instrument through the Windows product runtime.",
             inputSchema: {
@@ -224,6 +229,14 @@ export const mcpApi = {
             bar: args.bar,
             limit: args.limit ?? null,
           },
+        };
+        return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+      }
+      if (name === "account_summary") {
+        const agentRequest = {
+          schema: "okx.agent.request/v1",
+          request_id: requestId(),
+          operation: { type: "account_summary" },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }
