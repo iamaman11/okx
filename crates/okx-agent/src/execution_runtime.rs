@@ -101,13 +101,12 @@ impl ExecutionRuntime {
             .executor_account
             .instrument(rules.instrument.instrument_type, &plan.instrument_id);
 
-        let (public_instrument, price_limit, system_status, account_instrument) =
-            tokio::try_join!(
-                public_instrument,
-                price_limit,
-                system_status,
-                account_instrument
-            )?;
+        let (public_instrument, price_limit, system_status, account_instrument) = tokio::try_join!(
+            public_instrument,
+            price_limit,
+            system_status,
+            account_instrument
+        )?;
 
         let max_order_size = if plan.action == okx_execution::ExecutionAction::Open {
             Some(
