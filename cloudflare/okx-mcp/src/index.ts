@@ -651,6 +651,16 @@ export class RuntimeSession {
       return;
     }
 
+    if (frame.type === "ping" && typeof frame.nonce === "string") {
+      ws.send(JSON.stringify({
+        type: "pong",
+        schema: FRAME_SCHEMA,
+        session_id: attachment.sessionId,
+        connection_generation: attachment.generation,
+        nonce: frame.nonce,
+      }));
+      return;
+    }
     if (frame.type === "pong" && typeof frame.nonce === "string") {
       attachment.lastPongAtMs = Date.now();
       ws.serializeAttachment(attachment);
