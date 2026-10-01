@@ -2,6 +2,10 @@ use super::*;
 
 #[derive(serde::Serialize)]
 struct AccountSummaryCoherence {
+    account_snapshot_source_received_at: String,
+    current_account_as_of_ms: Option<String>,
+    history_source_received_at: String,
+    history_read_duration_ms: u64,
     private_ws_generation: Option<u64>,
     events_during_history_read: Option<usize>,
     coherent: bool,
@@ -60,6 +64,7 @@ pub(super) async fn dispatch(
                 None => None,
             };
 
+            let history_started = std::time::Instant::now();
             let facts = match account.ledger_facts(&assembled.snapshot).await {
                 Ok(value) => value,
                 Err(error) => {
@@ -67,6 +72,8 @@ pub(super) async fn dispatch(
                 }
             };
 
+            let history_read_duration_ms =
+                u64::try_from(history_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let mut quality = assembled.quality;
             let mut warnings = assembled.warnings;
             if facts
@@ -96,6 +103,10 @@ pub(super) async fn dispatch(
             }
 
             let mut coherence = AccountSummaryCoherence {
+                account_snapshot_source_received_at: assembled.snapshot.source_received_at.clone(),
+                current_account_as_of_ms: facts.summary.current_account_as_of_ms.clone(),
+                history_source_received_at: facts.summary.source_received_at.clone(),
+                history_read_duration_ms,
                 private_ws_generation: assembled.snapshot.private_ws_generation,
                 events_during_history_read: None,
                 coherent: assembled.quality == DataQuality::Fresh,
