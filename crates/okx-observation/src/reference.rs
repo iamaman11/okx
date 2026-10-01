@@ -227,10 +227,16 @@ pub enum ReferenceError {
     DuplicateInstrument(String),
 
     #[error("instrument '{instrument_id}' announced unsupported upcoming parameter '{param}'")]
-    UnsupportedUpcomingParameter { instrument_id: String, param: String },
+    UnsupportedUpcomingParameter {
+        instrument_id: String,
+        param: String,
+    },
 
     #[error("instrument '{instrument_id}' has malformed upcoming parameter change for '{param}'")]
-    MalformedUpcomingParameter { instrument_id: String, param: String },
+    MalformedUpcomingParameter {
+        instrument_id: String,
+        param: String,
+    },
 
     #[error("failed to serialize normalized reference registry: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -401,10 +407,8 @@ impl TryFrom<PublicInstrument> for InstrumentSpec {
 
         let rule_type = optional(value.rule_type);
         let funding_requirement = funding_requirement(instrument_type, rule_type.as_deref());
-        let upcoming_rule_changes = normalize_upcoming_changes(
-            instrument_id,
-            value.upcoming_parameter_changes,
-        )?;
+        let upcoming_rule_changes =
+            normalize_upcoming_changes(instrument_id, value.upcoming_parameter_changes)?;
 
         Ok(Self {
             instrument_id: instrument_id.to_owned(),
@@ -452,7 +456,12 @@ fn normalize_upcoming_changes(
             });
         }
         if change.new_value.trim().is_empty()
-            || change.effective_time_ms.parse::<u64>().ok().filter(|value| *value > 0).is_none()
+            || change
+                .effective_time_ms
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .is_none()
         {
             return Err(ReferenceError::MalformedUpcomingParameter {
                 instrument_id: instrument_id.to_owned(),
@@ -604,15 +613,19 @@ mod tests {
         let before = registry.generation().as_str().to_owned();
 
         let mut changed = swap("DOGE-USDT-SWAP");
-        changed.upcoming_parameter_changes.push(okx_api::UpcomingParameterChange {
-            param: "tickSz".to_owned(),
-            new_value: "0.000001".to_owned(),
-            effective_time_ms: "1790900000000".to_owned(),
-        });
+        changed
+            .upcoming_parameter_changes
+            .push(okx_api::UpcomingParameterChange {
+                param: "tickSz".to_owned(),
+                new_value: "0.000001".to_owned(),
+                effective_time_ms: "1790900000000".to_owned(),
+            });
 
-        assert!(registry
-            .apply_public_updates("2026-10-01T19:00:01.000Z", vec![changed])
-            .expect("update"));
+        assert!(
+            registry
+                .apply_public_updates("2026-10-01T19:00:01.000Z", vec![changed])
+                .expect("update")
+        );
         assert_ne!(registry.generation().as_str(), before);
         let rule_change = &registry
             .get("DOGE-USDT-SWAP")
