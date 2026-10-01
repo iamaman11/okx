@@ -339,7 +339,7 @@ where
         let evidence =
             rate_budget.record_exchange_throttle(plan, &exchange_code, server_retry_after_ms);
         return Err(OkxError::RateLimited {
-            evidence,
+            evidence: Box::new(evidence),
         });
     }
 
@@ -353,7 +353,7 @@ where
         let evidence =
             rate_budget.record_exchange_throttle(plan, &envelope.code, server_retry_after_ms);
         return Err(OkxError::RateLimited {
-            evidence,
+            evidence: Box::new(evidence),
         });
     }
 
