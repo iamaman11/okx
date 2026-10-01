@@ -61,11 +61,7 @@ impl ExecutionRuntime {
             environment,
             rate_budget.clone(),
         )?);
-        let rest = OkxRestClient::with_rate_budget(
-            environment,
-            executor_credentials,
-            rate_budget,
-        )?;
+        let rest = OkxRestClient::with_rate_budget(environment, executor_credentials, rate_budget)?;
         let executor_clock = rest.clone();
         let executor_account = AccountApi::new(rest.clone());
         let trade = TradeApi::new(rest);
