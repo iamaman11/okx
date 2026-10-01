@@ -35,8 +35,8 @@ jobs:
           set -euo pipefail
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN missing"; exit 20; }
 
-      - name: Install pinned package surface
-        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Install locked package surface
+        run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Typecheck
         run: npm run check
