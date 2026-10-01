@@ -276,6 +276,15 @@ pub enum AgentOperation {
 }
 
 impl AgentOperation {
+    pub const fn direct_transport_read_only(&self) -> bool {
+        !matches!(
+            self,
+            Self::PrepareOpenExecution { .. }
+                | Self::PrepareCloseExecution { .. }
+                | Self::SubmitPreparedExecution { .. }
+        )
+    }
+
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
             Self::MarketSnapshot { instrument }
@@ -921,6 +930,30 @@ fn validate_decimal_text(value: &str, field: &'static str) -> Result<(), Protoco
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_transport_read_only_gate_rejects_execution_mutations() {
+        let read = AgentOperation::MarketOverview {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+        };
+        assert!(read.direct_transport_read_only());
+
+        let prepare = AgentOperation::PrepareCloseExecution {
+            intent_id: "intent_0123456789abcdef".to_owned(),
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            trade_mode: ExecutionTradeMode::Cross,
+            position_side: PositionSide::Long,
+            order_type: ExecutionOrderType::Limit,
+            size: "1".to_owned(),
+            price: "0.1".to_owned(),
+        };
+        assert!(!prepare.direct_transport_read_only());
+
+        let submit = AgentOperation::SubmitPreparedExecution {
+            intent_id: "intent_0123456789abcdef".to_owned(),
+        };
+        assert!(!submit.direct_transport_read_only());
+    }
 
     fn request_id() -> String {
         "req_0123456789abcdef".to_owned()
