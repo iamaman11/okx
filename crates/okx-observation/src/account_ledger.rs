@@ -887,6 +887,76 @@ mod tests {
     }
 
     #[test]
+    fn zero_account_is_explicit_and_valid() {
+        let mut zero = snapshot();
+        zero.balance.total_equity_usd = "0".to_owned();
+        zero.balance.details.clear();
+        zero.positions.clear();
+        zero.pending_orders.clear();
+
+        let facts = AccountLedgerFacts::from_okx(
+            "2026-10-01T20:00:01.000Z",
+            &zero,
+            config(),
+            Vec::new(),
+            vec![
+                ("SWAP".to_owned(), bounded(Vec::new())),
+                ("FUTURES".to_owned(), bounded(Vec::new())),
+            ],
+            vec![
+                ("SWAP".to_owned(), bounded(Vec::new())),
+                ("FUTURES".to_owned(), bounded(Vec::new())),
+            ],
+            vec![
+                ("SWAP".to_owned(), bounded(Vec::new())),
+                ("FUTURES".to_owned(), bounded(Vec::new())),
+            ],
+            bounded(Vec::new()),
+        )
+        .expect("zero account");
+
+        assert_eq!(facts.summary.total_equity_usd, "0");
+        assert_eq!(facts.summary.trading_equity_detail_usd_sum, "0");
+        assert_eq!(facts.summary.trading_equity_residual_usd, "0");
+        assert!(facts.summary.funding_balances.is_empty());
+        assert_eq!(facts.summary.open_positions, 0);
+        assert_eq!(facts.summary.pending_orders, 0);
+        assert!(facts.summary.realized_pnl.is_empty());
+        assert!(facts.summary.trade_fees.is_empty());
+        assert!(facts.summary.funding.is_empty());
+    }
+
+    #[test]
+    fn duplicate_fill_identity_fails_closed() {
+        let fill = fill_history();
+        let result = AccountLedgerFacts::from_okx(
+            "2026-10-01T20:00:01.000Z",
+            &snapshot(),
+            config(),
+            Vec::new(),
+            vec![
+                ("SWAP".to_owned(), bounded(vec![position_history("1.05")])),
+                ("FUTURES".to_owned(), bounded(Vec::new())),
+            ],
+            vec![
+                ("SWAP".to_owned(), bounded(vec![order_history()])),
+                ("FUTURES".to_owned(), bounded(Vec::new())),
+            ],
+            vec![
+                ("SWAP".to_owned(), bounded(vec![fill.clone(), fill])),
+                ("FUTURES".to_owned(), bounded(Vec::new())),
+            ],
+            bounded(vec![funding_bill()]),
+        );
+
+        assert!(matches!(
+            result,
+            Err(AccountLedgerError::DuplicateIdentity(identity))
+                if identity.starts_with("fill:")
+        ));
+    }
+
+    #[test]
     fn incomplete_order_history_marks_fill_link_unresolved_instead_of_inventing_mismatch() {
         let mut fill = fill_history();
         fill.order_id = "older-order".to_owned();
