@@ -33,20 +33,21 @@ Canonical execution order inside Stage 1:
 1. **P0.1 WebSocket 443 compatibility** — ACCEPTED.
 2. **P0.2 exchange clock discipline** — ACCEPTED.
 3. **Venue/instrument-state execution gate** — ACCEPTED.
-4. **Account + ledger truth** — CURRENT.
-5. **P0.3 named rate/backpressure domains**.
+4. **Account + ledger truth** — ACCEPTED.
+5. **P0.3 named rate/backpressure domains** — CURRENT.
 6. **Stage-1 final T1–T5 acceptance**.
 
 The P0/P1 labels are capability groups, not a competing execution order.
 
-Current Account + Ledger Truth slice must prove:
-- coherent account truth for config, balances, positions and pending orders with explicit temporal coherence/provenance;
-- order history, fills and bills coverage with pagination/retention/truncation made explicit;
-- no double counting across REST/WS/current/history and no regression from older evidence;
-- manual/external/exchange-system activity remains separate from managed strategy attribution unless lineage proves ownership;
-- internal logical lots reconcile in aggregate to the authoritative exchange position, with unattributed residuals surfaced explicitly;
-- reconstructed PnL, fees, funding and related cost components reconcile to exchange evidence with residuals explained rather than hidden;
-- zero balances/positions and unavailable external account-hierarchy capabilities are represented explicitly rather than inferred.
+Current P0.3 named rate/backpressure slice must prove:
+- rate/backpressure is modeled by the named OKX domains that actually exist, not one global requests-per-second counter;
+- public REST/IP, private REST/User ID, WS connection/login/subscription, order-management, instrument/family and sub-account aggregate scopes remain distinguishable where OKX defines them;
+- typed throttle evidence carries exchange code/domain (including 50011 and 50061 where applicable), operation class, relevant account/instrument/family scope, attempt count and the bounded local defer/backoff decision;
+- the runtime never invents a server Retry-After value when OKX does not provide one;
+- read-only account-rate-limit/fill-ratio evidence is ingested as current exchange evidence where the credential/tier exposes it;
+- no tight retry loop or blind mutation retry is introduced; uncertain-result/idempotency rules remain authoritative;
+- expensive research/history work yields to heartbeat/control and mutation reconciliation, while existing bounded concurrency/response-size limits are preserved;
+- ownership stays inside the existing runtime/API boundary: no generic limiter service, second scheduler, daemon or new state authority.
 
 ## Repository Guard v1
 
