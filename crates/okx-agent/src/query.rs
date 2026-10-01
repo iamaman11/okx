@@ -63,7 +63,7 @@ pub const MARKET_RESEARCH_SCHEMA_V2: &str = "okx.market-research/v2";
 const REFERENCE_BOOTSTRAP_WARNING: &str =
     "reference data is REST-bootstrap only; live instruments continuity is not connected until M3";
 const MARKET_REST_BOOTSTRAP_WARNING: &str = "market data is bounded public REST bootstrap; persistent WebSocket continuity is not connected until M3";
-const REFERENCE_RUNTIME_WARNING: &str = "instrument rules come from the live ReferenceRegistry; market FRESH readiness is reported separately";
+const REFERENCE_RUNTIME_WARNING: &str = "reference_registry_quality_scope: this response quality describes reference evidence only; market transport freshness is reported separately by market operations";
 const MARKET_HISTORY_UNCONFIRMED_WARNING: &str =
     "OKX history response contains at least one unconfirmed candlestick";
 const ACCOUNT_REST_BOOTSTRAP_WARNING: &str = "private account state is a bounded authenticated REST bootstrap; private WebSocket convergence is not ready";
