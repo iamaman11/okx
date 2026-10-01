@@ -98,11 +98,15 @@ pub struct ExchangeFillIdentity {
     pub order_id: Option<String>,
     pub client_order_id: String,
     pub trade_id: String,
+    pub side: String,
+    pub position_side: String,
+    pub fill_size: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct AccountLedgerFacts {
     pub summary: AccountLedgerSummary,
+    pub authoritative_positions: Vec<crate::AccountPositionState>,
     pub exchange_orders: Vec<ExchangeOrderIdentity>,
     pub exchange_fills: Vec<ExchangeFillIdentity>,
     order_history_complete: BTreeMap<String, bool>,
@@ -315,12 +319,26 @@ impl AccountLedgerFacts {
                     }
                 }
 
+                let side = required("fills_history.side", &row.side)?.to_owned();
+                let position_side =
+                    required("fills_history.posSide", &row.position_side)?.to_owned();
+                let fill_size = decimal_required("fills_history.fillSz", &row.fill_size)?;
+                if fill_size <= Decimal::ZERO {
+                    return Err(AccountLedgerError::InvalidDecimal {
+                        field: "fills_history.fillSz",
+                        value: row.fill_size.clone(),
+                    });
+                }
+
                 exchange_fills.push(ExchangeFillIdentity {
                     instrument_type: row.instrument_type.clone(),
                     instrument_id: instrument_id.to_owned(),
                     order_id,
                     client_order_id: row.client_order_id.clone(),
                     trade_id: trade_id.to_owned(),
+                    side,
+                    position_side,
+                    fill_size: fill_size.normalize().to_string(),
                 });
                 let _ = fill_time;
             }
@@ -353,6 +371,7 @@ impl AccountLedgerFacts {
         }
 
         Ok(Self {
+            authoritative_positions: snapshot.positions.clone(),
             summary: AccountLedgerSummary {
                 schema: ACCOUNT_LEDGER_SUMMARY_SCHEMA_V1,
                 source_received_at,
