@@ -138,7 +138,9 @@ impl PublicDataApi {
         instrument_type: InstrumentType,
         instrument_id: &str,
     ) -> Result<PublicInstrument, OkxError> {
-        let rows = self.instruments(instrument_type, Some(instrument_id)).await?;
+        let rows = self
+            .instruments(instrument_type, Some(instrument_id))
+            .await?;
         let [row] = rows.as_slice() else {
             return Err(OkxError::Response(format!(
                 "expected exactly one public instrument row for {instrument_id}, found {}",
@@ -173,10 +175,7 @@ impl PublicDataApi {
 
     pub async fn system_status(&self, state: &str) -> Result<Vec<SystemStatus>, OkxError> {
         self.client
-            .public_get(
-                "/api/v5/system/status",
-                &[("state", state.to_owned())],
-            )
+            .public_get("/api/v5/system/status", &[("state", state.to_owned())])
             .await
     }
 }
@@ -226,6 +225,9 @@ mod tests {
         assert_eq!(instrument.initial_price_limit_pct, "0.05");
         assert_eq!(instrument.upcoming_parameter_changes.len(), 1);
         assert_eq!(instrument.upcoming_parameter_changes[0].param, "tickSz");
-        assert_eq!(instrument.upcoming_parameter_changes[0].new_value, "0.000001");
+        assert_eq!(
+            instrument.upcoming_parameter_changes[0].new_value,
+            "0.000001"
+        );
     }
 }
