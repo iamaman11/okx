@@ -1,7 +1,9 @@
 use std::str::FromStr;
 
 use okx_analysis::{CandidateOrderAnalysis, PositionDirection};
-use okx_observation::{ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot, InstrumentRulesSnapshot};
+use okx_observation::{
+    ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
+};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
@@ -51,6 +53,27 @@ pub enum ExecutionValidationError {
 
     #[error("instrument '{0}' is not trade-ready live")]
     InstrumentNotLive(String),
+
+    #[error("fresh public instrument evidence differs from the live reference generation")]
+    FreshReferenceMismatch,
+
+    #[error("fresh venue evidence refers to a different instrument")]
+    VenueEvidenceInstrumentMismatch,
+
+    #[error("account instrument '{0}' is not currently live")]
+    AccountInstrumentNotLive(String),
+
+    #[error("OKX reports {0} ongoing system status event(s); venue mutation eligibility is not proven")]
+    OngoingSystemStatus(usize),
+
+    #[error("buy price '{price}' exceeds current OKX buy limit '{limit}'")]
+    PriceAboveCurrentLimit { price: String, limit: String },
+
+    #[error("sell price '{price}' is below current OKX sell limit '{limit}'")]
+    PriceBelowCurrentLimit { price: String, limit: String },
+
+    #[error("opening size '{size}' exceeds current OKX maximum '{max_size}' for the order side")]
+    ExceedsCurrentMaxOrderSize { size: String, max_size: String },
 
     #[error("invalid decimal field '{field}': '{value}'")]
     InvalidDecimal { field: &'static str, value: String },
@@ -209,6 +232,74 @@ pub fn revalidate_execution_plan(
                 price: plan.price.clone(),
             };
             validate_close_capacity(&intent, account, size, plan.side)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn revalidate_venue_execution(
+    plan: &ExecutionPlan,
+    rules: &InstrumentRulesSnapshot,
+    evidence: &VenueExecutionEvidence,
+) -> Result<(), ExecutionValidationError> {
+    if !evidence.ongoing_system_statuses.is_empty() {
+        return Err(ExecutionValidationError::OngoingSystemStatus(
+            evidence.ongoing_system_statuses.len(),
+        ));
+    }
+
+    if evidence.public_instrument.instrument_id != plan.instrument_id
+        || evidence.price_limit.instrument_id != plan.instrument_id
+        || evidence.max_order_size.instrument_id != plan.instrument_id
+    {
+        return Err(ExecutionValidationError::VenueEvidenceInstrumentMismatch);
+    }
+
+    if evidence.public_instrument != rules.instrument {
+        return Err(ExecutionValidationError::FreshReferenceMismatch);
+    }
+
+    if evidence.account_instrument.state != "live" {
+        return Err(ExecutionValidationError::AccountInstrumentNotLive(
+            plan.instrument_id.clone(),
+        ));
+    }
+
+    let price = positive_decimal("price", &plan.price)?;
+    match plan.side {
+        OrderSide::Buy => {
+            let limit = positive_decimal("buy_limit", &evidence.price_limit.buy_limit)?;
+            if price > limit {
+                return Err(ExecutionValidationError::PriceAboveCurrentLimit {
+                    price: normalized(price),
+                    limit: normalized(limit),
+                });
+            }
+        }
+        OrderSide::Sell => {
+            let limit = positive_decimal("sell_limit", &evidence.price_limit.sell_limit)?;
+            if price < limit {
+                return Err(ExecutionValidationError::PriceBelowCurrentLimit {
+                    price: normalized(price),
+                    limit: normalized(limit),
+                });
+            }
+        }
+    }
+
+    if plan.action == ExecutionAction::Open {
+        let size = positive_decimal("size", &plan.size)?;
+        let max_size_text = match plan.side {
+            OrderSide::Buy => &evidence.max_order_size.max_buy,
+            OrderSide::Sell => &evidence.max_order_size.max_sell,
+        };
+        let max_size = positive_decimal("current_max_order_size", max_size_text)?;
+        if size > max_size {
+            return Err(ExecutionValidationError::ExceedsCurrentMaxOrderSize {
+                size: normalized(size),
+                max_size: normalized(max_size),
+            });
         }
     }
 
@@ -492,6 +583,10 @@ mod tests {
                 max_leverage: Some("20".to_owned()),
                 list_time_ms: None,
                 expiry_time_ms: None,
+                initial_price_limit_pct: Some("0.05".to_owned()),
+                floating_price_limit_pct: Some("0.03".to_owned()),
+                maximum_price_limit_pct: Some("0.15".to_owned()),
+                upcoming_rule_changes: Vec::new(),
             },
         }
     }
