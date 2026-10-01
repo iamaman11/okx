@@ -32,20 +32,21 @@ Canonical execution order inside Stage 1:
 
 1. **P0.1 WebSocket 443 compatibility** — ACCEPTED.
 2. **P0.2 exchange clock discipline** — ACCEPTED.
-3. **Venue/instrument-state execution gate** — CURRENT.
-4. **Account + ledger truth**.
+3. **Venue/instrument-state execution gate** — ACCEPTED.
+4. **Account + ledger truth** — CURRENT.
 5. **P0.3 named rate/backpressure domains**.
 6. **Stage-1 final T1–T5 acceptance**.
 
 The P0/P1 labels are capability groups, not a competing execution order.
 
-Current venue/reference slice must prove:
-- supported system-status evidence;
-- current account/instrument state;
-- upcoming rule changes such as `upcChg` with effective time;
-- computed/current exchange constraints where applicable;
-- immediate pre-mutation reference-generation and eligibility revalidation;
-- stale plans fail/recompute rather than silently requantize.
+Current Account + Ledger Truth slice must prove:
+- coherent account truth for config, balances, positions and pending orders with explicit temporal coherence/provenance;
+- order history, fills and bills coverage with pagination/retention/truncation made explicit;
+- no double counting across REST/WS/current/history and no regression from older evidence;
+- manual/external/exchange-system activity remains separate from managed strategy attribution unless lineage proves ownership;
+- internal logical lots reconcile in aggregate to the authoritative exchange position, with unattributed residuals surfaced explicitly;
+- reconstructed PnL, fees, funding and related cost components reconcile to exchange evidence with residuals explained rather than hidden;
+- zero balances/positions and unavailable external account-hierarchy capabilities are represented explicitly rather than inferred.
 
 ## Repository Guard v1
 
