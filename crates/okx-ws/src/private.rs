@@ -104,9 +104,7 @@ impl PrivateWsConnection {
             .ws_control_plan(operation, self.connection_scope.clone());
         self.rate_budget
             .admit(&plan)
-            .map_err(|evidence| PrivateWsError::RateLimited {
-                evidence,
-            })
+            .map_err(|evidence| PrivateWsError::RateLimited { evidence })
     }
 
     pub async fn send_application_ping(&mut self) -> Result<(), PrivateWsError> {
