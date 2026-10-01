@@ -91,7 +91,7 @@ impl PublicWsConnection {
         self.rate_budget
             .admit(&plan)
             .map_err(|evidence| PublicWsError::RateLimited {
-                evidence: Box::new(evidence),
+                evidence,
             })
     }
 
