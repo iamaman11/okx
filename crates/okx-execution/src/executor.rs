@@ -437,7 +437,11 @@ mod tests {
         },
     };
 
-    use okx_api::{OrderOperationAck, TradeOrderDetails, TradeResponse};
+    use okx_api::{
+        GENERAL_RATE_LIMIT_CODE, OrderOperationAck, RateDecision, RateDomainEvidence,
+        RateDomainKind, RateOperationClass, RateThrottleEvidence, RateThrottleSource,
+        TradeOrderDetails, TradeResponse,
+    };
 
     use super::*;
     use crate::{
@@ -500,6 +504,85 @@ mod tests {
                 .expect("lookup queue")
                 .pop_front()
                 .expect("lookup result")
+        }
+    }
+
+
+    struct LocalDeferredGateway {
+        place_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ExecutionGateway for LocalDeferredGateway {
+        fn admit_place_order(
+            &self,
+            _request: &PlaceOrderRequest,
+        ) -> Result<Option<RateRequestPlan>, OkxError> {
+            Err(OkxError::RateLimited {
+                evidence: Box::new(local_rate_throttle()),
+            })
+        }
+
+        async fn place_order(
+            &self,
+            _request: PlaceOrderRequest,
+            _timing: MutationTiming,
+            _rate_plan: Option<RateRequestPlan>,
+        ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+            self.place_calls.fetch_add(1, Ordering::SeqCst);
+            panic!("locally deferred mutation must not reach gateway send")
+        }
+
+        async fn order_by_client_id(
+            &self,
+            _instrument_id: String,
+            _client_order_id: String,
+        ) -> Result<TradeOrderDetails, OkxError> {
+            panic!("not used")
+        }
+    }
+
+    fn local_rate_throttle() -> RateThrottleEvidence {
+        RateThrottleEvidence {
+            schema: okx_api::RATE_THROTTLE_SCHEMA_V1,
+            source: RateThrottleSource::LocalBudget,
+            exchange_code: None,
+            operation: RateOperationClass::PlaceOrder,
+            domain: RateDomainEvidence {
+                kind: RateDomainKind::TradePlaceInstrument,
+                endpoint: Some("/api/v5/trade/order".to_owned()),
+                scope: Some("DOGE-USDT-SWAP".to_owned()),
+                local_max_requests: 60,
+                local_window_ms: 2_000,
+            },
+            attempt_count: 1,
+            local_defer_ms: 250,
+            server_retry_after_ms: None,
+            request_sent: false,
+            retryable: true,
+            decision: RateDecision::Deferred,
+        }
+    }
+
+    fn exchange_rate_throttle() -> RateThrottleEvidence {
+        RateThrottleEvidence {
+            schema: okx_api::RATE_THROTTLE_SCHEMA_V1,
+            source: RateThrottleSource::Exchange,
+            exchange_code: Some(GENERAL_RATE_LIMIT_CODE.to_owned()),
+            operation: RateOperationClass::PlaceOrder,
+            domain: RateDomainEvidence {
+                kind: RateDomainKind::TradePlaceInstrument,
+                endpoint: Some("/api/v5/trade/order".to_owned()),
+                scope: Some("DOGE-USDT-SWAP".to_owned()),
+                local_max_requests: 60,
+                local_window_ms: 2_000,
+            },
+            attempt_count: 1,
+            local_defer_ms: 2_000,
+            server_retry_after_ms: None,
+            request_sent: true,
+            retryable: true,
+            decision: RateDecision::Deferred,
         }
     }
 
@@ -603,6 +686,73 @@ mod tests {
                 .state,
             ExecutionState::Prepared
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn local_rate_defer_keeps_prepared_and_never_sends() {
+        let (root, ledger) = ledger("local-rate-defer");
+        let plan = plan();
+        let gateway = LocalDeferredGateway {
+            place_calls: AtomicUsize::new(0),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        executor.prepare(plan.clone(), 101).expect("prepare");
+
+        let error = executor
+            .submit_prepared(&plan.intent_id, timing(), 102)
+            .await
+            .expect_err("local defer");
+
+        let OrderExecutorError::RateDeferred { evidence } = error else {
+            panic!("expected typed local rate defer");
+        };
+        assert!(!evidence.request_sent);
+        assert!(evidence.retryable);
+        assert_eq!(evidence.decision, RateDecision::Deferred);
+        assert_eq!(executor.gateway().place_calls.load(Ordering::SeqCst), 0);
+        let entry = executor.ledger().get(&plan.intent_id).expect("entry");
+        assert_eq!(entry.record.state, ExecutionState::Prepared);
+        assert_eq!(entry.updated_at_ms, 101);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explicit_exchange_rate_rejection_is_known_and_never_unknown_submission() {
+        let (root, ledger) = ledger("exchange-rate-reject");
+        let plan = plan();
+        let gateway = MockGateway::new(
+            vec![Err(OkxError::RateLimited {
+                evidence: Box::new(exchange_rate_throttle()),
+            })],
+            vec![],
+        );
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        executor.prepare(plan.clone(), 101).expect("prepare");
+
+        let result = executor
+            .submit_prepared(&plan.intent_id, timing(), 102)
+            .await
+            .expect("known rate rejection");
+
+        let SubmitDisposition::RateRejected { entry, evidence } = result else {
+            panic!("expected rate rejection");
+        };
+        assert_eq!(entry.record.state, ExecutionState::Rejected);
+        assert_eq!(
+            entry.record.rejection_code.as_deref(),
+            Some(GENERAL_RATE_LIMIT_CODE)
+        );
+        assert_eq!(evidence.decision, RateDecision::Rejected);
+        assert!(!evidence.retryable);
+        assert!(evidence.request_sent);
+        assert_eq!(
+            evidence.exchange_code.as_deref(),
+            Some(GENERAL_RATE_LIMIT_CODE)
+        );
+        assert_eq!(executor.gateway().place_calls(), 1);
 
         let _ = fs::remove_dir_all(root);
     }
