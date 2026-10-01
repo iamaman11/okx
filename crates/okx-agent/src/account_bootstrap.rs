@@ -1,5 +1,7 @@
 use chrono::{SecondsFormat, Utc};
-use okx_api::{AccountApi, AccountHistoryApi, FeeRate, InstrumentType, MarginMode, OkxError, OkxRestClient};
+use okx_api::{
+    AccountApi, AccountHistoryApi, FeeRate, InstrumentType, MarginMode, OkxError, OkxRestClient,
+};
 use okx_observation::{
     AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, FeeScheduleError,
     FeeScheduleInput, FeeScheduleSnapshot, InstrumentRulesSnapshot, TradingCapabilitiesError,
@@ -198,15 +200,9 @@ impl AccountBootstrapper {
             .positions_history(InstrumentType::Futures)
             .await?;
         let orders_swap = self.history.orders_history(InstrumentType::Swap).await?;
-        let orders_futures = self
-            .history
-            .orders_history(InstrumentType::Futures)
-            .await?;
+        let orders_futures = self.history.orders_history(InstrumentType::Futures).await?;
         let fills_swap = self.history.fills_history(InstrumentType::Swap).await?;
-        let fills_futures = self
-            .history
-            .fills_history(InstrumentType::Futures)
-            .await?;
+        let fills_futures = self.history.fills_history(InstrumentType::Futures).await?;
         let bills = self.history.bills_history().await?;
 
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
