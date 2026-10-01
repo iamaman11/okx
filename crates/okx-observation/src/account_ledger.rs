@@ -157,11 +157,9 @@ impl AccountLedgerFacts {
             for row in &history.rows {
                 require_expected_type(expected_type, &row.instrument_type)?;
                 let position_id = required("positions_history.posId", &row.position_id)?;
-                let event_time = timestamp_required("positions_history.uTime", &row.update_time_ms)?;
-                let identity = format!(
-                    "{}:{}:{}",
-                    row.instrument_type, position_id, event_time
-                );
+                let event_time =
+                    timestamp_required("positions_history.uTime", &row.update_time_ms)?;
+                let identity = format!("{}:{}:{}", row.instrument_type, position_id, event_time);
                 if !seen_position_rows.insert(identity.clone()) {
                     return Err(AccountLedgerError::DuplicateIdentity(identity));
                 }
@@ -170,12 +168,10 @@ impl AccountLedgerFacts {
                     decimal_required("positions_history.realizedPnl", &row.realized_pnl)?;
                 let pnl = decimal_or_zero("positions_history.pnl", &row.pnl)?;
                 let fee = decimal_or_zero("positions_history.fee", &row.fee)?;
-                let funding =
-                    decimal_or_zero("positions_history.fundingFee", &row.funding_fee)?;
+                let funding = decimal_or_zero("positions_history.fundingFee", &row.funding_fee)?;
                 let liquidation =
                     decimal_or_zero("positions_history.liqPenalty", &row.liquidation_penalty)?;
-                let settled =
-                    decimal_or_zero("positions_history.settledPnl", &row.settled_pnl)?;
+                let settled = decimal_or_zero("positions_history.settledPnl", &row.settled_pnl)?;
                 let components = pnl + fee + funding + liquidation + settled;
                 if realized_value != components {
                     return Err(AccountLedgerError::PositionPnlIdentityMismatch {
@@ -340,8 +336,7 @@ impl AccountLedgerFacts {
                 pending_orders: snapshot.pending_orders.len(),
                 current_unrealized_pnl,
                 history_coverage: coverage,
-                realized_pnl_basis:
-                    "positions-history.realizedPnl; exact OKX identity checked per row",
+                realized_pnl_basis: "positions-history.realizedPnl; exact OKX identity checked per row",
                 realized_pnl: finish_aggregates(realized),
                 trade_fee_basis: "fills-history.fee; deduplicated by instId+tradeId",
                 trade_fees: finish_aggregates(fees),
