@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use okx_api::{InstrumentType, PublicInstrument};
+use okx_api::{
+    Instrument as AccountInstrument, InstrumentType, MaxOrderSize, PublicInstrument,
+    PublicPriceLimit, SystemStatus,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -8,6 +11,7 @@ use thiserror::Error;
 pub const REFERENCE_REGISTRY_SCHEMA_V1: &str = "okx.reference-registry/v1";
 pub const INSTRUMENT_RULES_SCHEMA_V1: &str = "okx.instrument-rules/v1";
 pub const INSTRUMENT_SEARCH_SCHEMA_V1: &str = "okx.instrument-search/v1";
+pub const VENUE_EXECUTION_EVIDENCE_SCHEMA_V1: &str = "okx.venue-execution-evidence/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -64,6 +68,121 @@ pub struct InstrumentSpec {
     pub floating_price_limit_pct: Option<String>,
     pub maximum_price_limit_pct: Option<String>,
     pub upcoming_rule_changes: Vec<UpcomingRuleChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccountInstrumentExecutionLimits {
+    pub state: String,
+    pub max_limit_size: Option<String>,
+    pub max_market_size: Option<String>,
+    pub position_limit_amount_usd: Option<String>,
+    pub position_limit_pct: Option<String>,
+    pub platform_open_interest_limit_usd: Option<String>,
+    pub platform_open_interest_limit_coin: Option<String>,
+    pub long_position_remaining_quota_usd: Option<String>,
+    pub short_position_remaining_quota_usd: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PriceLimitEvidence {
+    pub instrument_id: String,
+    pub buy_limit: String,
+    pub sell_limit: String,
+    pub exchange_timestamp_ms: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MaxOrderSizeEvidence {
+    pub instrument_id: String,
+    pub max_buy: String,
+    pub max_sell: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SystemStatusEvidence {
+    pub id: String,
+    pub state: String,
+    pub service_type: String,
+    pub system: String,
+    pub maintenance_type: String,
+    pub environment: String,
+    pub begin_ms: String,
+    pub end_ms: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VenueExecutionEvidence {
+    pub schema: &'static str,
+    pub source_received_at: String,
+    pub public_instrument: InstrumentSpec,
+    pub account_instrument: AccountInstrumentExecutionLimits,
+    pub price_limit: PriceLimitEvidence,
+    pub max_order_size: MaxOrderSizeEvidence,
+    pub ongoing_system_statuses: Vec<SystemStatusEvidence>,
+}
+
+impl VenueExecutionEvidence {
+    pub fn from_okx(
+        source_received_at: impl Into<String>,
+        public_instrument: PublicInstrument,
+        account_instrument: AccountInstrument,
+        price_limit: PublicPriceLimit,
+        max_order_size: MaxOrderSize,
+        ongoing_system_statuses: Vec<SystemStatus>,
+    ) -> Result<Self, ReferenceError> {
+        let source_received_at = source_received_at.into();
+        if source_received_at.trim().is_empty() {
+            return Err(ReferenceError::EmptySourceTimestamp);
+        }
+        Ok(Self {
+            schema: VENUE_EXECUTION_EVIDENCE_SCHEMA_V1,
+            source_received_at,
+            public_instrument: InstrumentSpec::try_from(public_instrument)?,
+            account_instrument: AccountInstrumentExecutionLimits {
+                state: account_instrument.state,
+                max_limit_size: optional(account_instrument.max_limit_size),
+                max_market_size: optional(account_instrument.max_market_size),
+                position_limit_amount_usd: optional(account_instrument.position_limit_amount_usd),
+                position_limit_pct: optional(account_instrument.position_limit_pct),
+                platform_open_interest_limit_usd: optional(
+                    account_instrument.platform_open_interest_limit_usd,
+                ),
+                platform_open_interest_limit_coin: optional(
+                    account_instrument.platform_open_interest_limit_coin,
+                ),
+                long_position_remaining_quota_usd: optional(
+                    account_instrument.long_position_remaining_quota_usd,
+                ),
+                short_position_remaining_quota_usd: optional(
+                    account_instrument.short_position_remaining_quota_usd,
+                ),
+            },
+            price_limit: PriceLimitEvidence {
+                instrument_id: price_limit.instrument_id,
+                buy_limit: price_limit.buy_limit,
+                sell_limit: price_limit.sell_limit,
+                exchange_timestamp_ms: price_limit.timestamp_ms,
+            },
+            max_order_size: MaxOrderSizeEvidence {
+                instrument_id: max_order_size.instrument_id,
+                max_buy: max_order_size.max_buy,
+                max_sell: max_order_size.max_sell,
+            },
+            ongoing_system_statuses: ongoing_system_statuses
+                .into_iter()
+                .map(|status| SystemStatusEvidence {
+                    id: status.id,
+                    state: status.state,
+                    service_type: status.service_type,
+                    system: status.system,
+                    maintenance_type: status.maintenance_type,
+                    environment: status.env,
+                    begin_ms: status.begin,
+                    end_ms: status.end,
+                })
+                .collect(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
