@@ -1,12 +1,25 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+};
 
-use okx_observation::AccountLedgerFacts;
+use okx_observation::{AccountLedgerFacts, AccountPositionState, ExchangeFillIdentity, ExchangeOrderIdentity};
+use rust_decimal::Decimal;
 use serde::Serialize;
 use thiserror::Error;
 
 use crate::{DurableExecutionLedger, ExecutionState};
 
 pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str = "okx.account-ledger-reconciliation/v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PositionAttributionDiagnostic {
+    pub instrument_id: String,
+    pub position_side: String,
+    pub authoritative_exchange_position: String,
+    pub managed_fill_delta_in_bounded_history: String,
+    pub unattributed_external_or_outside_bounded_history_residual: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AccountLedgerReconciliation {
@@ -19,7 +32,10 @@ pub struct AccountLedgerReconciliation {
     pub managed_intents_with_exchange_match: usize,
     pub managed_intents_unresolved_in_bounded_exchange_evidence: usize,
     pub unexpected_exchange_orders_for_non_submitted_intents: usize,
+    pub unexpected_exchange_fills_for_non_submitted_intents: usize,
     pub identity_mismatches: usize,
+    pub position_attribution: Vec<PositionAttributionDiagnostic>,
+    pub position_attribution_unavailable_events: usize,
     pub consistent: bool,
 }
 
@@ -27,19 +43,28 @@ pub struct AccountLedgerReconciliation {
 pub enum AccountLedgerReconciliationError {
     #[error("multiple exchange orders resolve to managed client order id '{client_order_id}'")]
     DuplicateManagedExchangeOrder { client_order_id: String },
+
+    #[error("position attribution decimal '{field}' is invalid: '{value}'")]
+    InvalidDecimal { field: &'static str, value: String },
 }
 
 pub fn reconcile_account_ledger(
     ledger: &DurableExecutionLedger,
     facts: &AccountLedgerFacts,
 ) -> Result<AccountLedgerReconciliation, AccountLedgerReconciliationError> {
-    reconcile_exchange_evidence(ledger, &facts.exchange_orders, &facts.exchange_fills)
+    reconcile_exchange_evidence(
+        ledger,
+        &facts.authoritative_positions,
+        &facts.exchange_orders,
+        &facts.exchange_fills,
+    )
 }
 
 fn reconcile_exchange_evidence(
     ledger: &DurableExecutionLedger,
-    exchange_orders: &[okx_observation::ExchangeOrderIdentity],
-    exchange_fills: &[okx_observation::ExchangeFillIdentity],
+    authoritative_positions: &[AccountPositionState],
+    exchange_orders: &[ExchangeOrderIdentity],
+    exchange_fills: &[ExchangeFillIdentity],
 ) -> Result<AccountLedgerReconciliation, AccountLedgerReconciliationError> {
     let entries = ledger.entries().collect::<Vec<_>>();
     let managed_clients = entries
@@ -81,7 +106,8 @@ fn reconcile_exchange_evidence(
 
     let mut matched = 0usize;
     let mut unresolved = 0usize;
-    let mut unexpected = 0usize;
+    let mut unexpected_orders = 0usize;
+    let mut unexpected_fills = 0usize;
     let mut identity_mismatches = 0usize;
 
     for entry in entries {
@@ -112,10 +138,22 @@ fn reconcile_exchange_evidence(
             }
         }
 
+        let fill_observed = exchange_fills.iter().any(|fill| {
+            fill.client_order_id == plan.client_order_id
+                || entry
+                    .record
+                    .order_id
+                    .as_deref()
+                    .is_some_and(|order_id| fill.order_id.as_deref() == Some(order_id))
+        });
+
         match entry.record.state {
             ExecutionState::Prepared | ExecutionState::Rejected => {
                 if observed.is_some() {
-                    unexpected += 1;
+                    unexpected_orders += 1;
+                }
+                if fill_observed {
+                    unexpected_fills += 1;
                 }
             }
             ExecutionState::Submitting
@@ -134,6 +172,14 @@ fn reconcile_exchange_evidence(
         }
     }
 
+    let (position_attribution, position_attribution_unavailable_events) =
+        reconcile_position_attribution(
+            authoritative_positions,
+            exchange_fills,
+            &managed_clients,
+            &managed_order_ids,
+        )?;
+
     Ok(AccountLedgerReconciliation {
         schema: ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1,
         managed_intents: managed_clients.len(),
@@ -143,9 +189,109 @@ fn reconcile_exchange_evidence(
         unattributed_external_or_exchange_system_fills: unattributed_fills,
         managed_intents_with_exchange_match: matched,
         managed_intents_unresolved_in_bounded_exchange_evidence: unresolved,
-        unexpected_exchange_orders_for_non_submitted_intents: unexpected,
+        unexpected_exchange_orders_for_non_submitted_intents: unexpected_orders,
+        unexpected_exchange_fills_for_non_submitted_intents: unexpected_fills,
         identity_mismatches,
-        consistent: unexpected == 0 && identity_mismatches == 0,
+        position_attribution,
+        position_attribution_unavailable_events,
+        consistent: unexpected_orders == 0 && unexpected_fills == 0 && identity_mismatches == 0,
+    })
+}
+
+fn reconcile_position_attribution(
+    authoritative_positions: &[AccountPositionState],
+    exchange_fills: &[ExchangeFillIdentity],
+    managed_clients: &BTreeSet<&str>,
+    managed_order_ids: &BTreeSet<&str>,
+) -> Result<(Vec<PositionAttributionDiagnostic>, usize), AccountLedgerReconciliationError> {
+    let mut authoritative = BTreeMap::<(String, String), Decimal>::new();
+    let mut managed = BTreeMap::<(String, String), Decimal>::new();
+    let mut unavailable = 0usize;
+
+    for position in authoritative_positions {
+        if !matches!(position.position_side.as_str(), "long" | "short") {
+            unavailable += 1;
+            continue;
+        }
+        let value = decimal("account.position", &position.position)?;
+        authoritative.insert(
+            (position.instrument_id.clone(), position.position_side.clone()),
+            value,
+        );
+    }
+
+    for fill in exchange_fills {
+        let is_managed = managed_clients.contains(fill.client_order_id.as_str())
+            || fill
+                .order_id
+                .as_deref()
+                .is_some_and(|order_id| managed_order_ids.contains(order_id));
+        if !is_managed {
+            continue;
+        }
+        if !matches!(fill.position_side.as_str(), "long" | "short") {
+            unavailable += 1;
+            continue;
+        }
+        let size = decimal("fill.fillSz", &fill.fill_size)?;
+        if size <= Decimal::ZERO {
+            return Err(AccountLedgerReconciliationError::InvalidDecimal {
+                field: "fill.fillSz",
+                value: fill.fill_size.clone(),
+            });
+        }
+        let signed = match (fill.position_side.as_str(), fill.side.as_str()) {
+            ("long", "buy") | ("short", "sell") => size,
+            ("long", "sell") | ("short", "buy") => -size,
+            _ => {
+                unavailable += 1;
+                continue;
+            }
+        };
+        *managed
+            .entry((fill.instrument_id.clone(), fill.position_side.clone()))
+            .or_default() += signed;
+    }
+
+    let keys = authoritative
+        .keys()
+        .chain(managed.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let diagnostics = keys
+        .into_iter()
+        .map(|(instrument_id, position_side)| {
+            let exchange = authoritative
+                .get(&(instrument_id.clone(), position_side.clone()))
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            let managed_delta = managed
+                .get(&(instrument_id.clone(), position_side.clone()))
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            PositionAttributionDiagnostic {
+                instrument_id,
+                position_side,
+                authoritative_exchange_position: exchange.normalize().to_string(),
+                managed_fill_delta_in_bounded_history: managed_delta.normalize().to_string(),
+                unattributed_external_or_outside_bounded_history_residual: (exchange
+                    - managed_delta)
+                    .normalize()
+                    .to_string(),
+            }
+        })
+        .collect();
+
+    Ok((diagnostics, unavailable))
+}
+
+fn decimal(
+    field: &'static str,
+    value: &str,
+) -> Result<Decimal, AccountLedgerReconciliationError> {
+    Decimal::from_str(value.trim()).map_err(|_| AccountLedgerReconciliationError::InvalidDecimal {
+        field,
+        value: value.to_owned(),
     })
 }
 
@@ -207,7 +353,7 @@ mod tests {
             state: "live".to_owned(),
             update_time_ms: "1790884800000".to_owned(),
         }];
-        let result = reconcile_exchange_evidence(&ledger, &orders, &[]).expect("reconcile");
+        let result = reconcile_exchange_evidence(&ledger, &[], &orders, &[]).expect("reconcile");
         assert!(!result.consistent);
         assert_eq!(
             result.unexpected_exchange_orders_for_non_submitted_intents,
@@ -235,8 +381,11 @@ mod tests {
             order_id: Some("manual-1".to_owned()),
             client_order_id: String::new(),
             trade_id: "trade-1".to_owned(),
+            side: "buy".to_owned(),
+            position_side: "long".to_owned(),
+            fill_size: "1".to_owned(),
         }];
-        let result = reconcile_exchange_evidence(&ledger, &orders, &fills).expect("reconcile");
+        let result = reconcile_exchange_evidence(&ledger, &[], &orders, &fills).expect("reconcile");
         assert!(result.consistent);
         assert_eq!(result.managed_intents, 0);
         assert_eq!(result.unattributed_external_or_exchange_system_orders, 1);
