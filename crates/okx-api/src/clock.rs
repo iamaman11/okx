@@ -213,7 +213,7 @@ mod tests {
                 .expect("timing");
 
         assert_eq!(timing.request_time_ms(), 1_607_428_137_715);
-        assert_eq!(timing.request_timestamp(), "2020-12-08T09:08:57.715Z");
+        assert_eq!(timing.request_timestamp(), "2020-12-08T11:48:57.715Z");
         assert_eq!(timing.exp_time_ms(), 1_607_428_142_715);
         assert!(MutationTiming::from_exchange_time_ms(1, 0).is_err());
         assert!(MutationTiming::from_exchange_time_ms(1, MAX_MUTATION_REQUEST_TTL_MS + 1).is_err());
