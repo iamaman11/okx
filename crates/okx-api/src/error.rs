@@ -29,7 +29,6 @@ pub enum OkxError {
     Clock(String),
 }
 
-
 impl OkxError {
     pub fn rate_throttle_evidence(&self) -> Option<&RateThrottleEvidence> {
         match self {
