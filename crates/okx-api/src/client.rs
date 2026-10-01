@@ -299,7 +299,7 @@ fn admit(rate_budget: &RateBudget, plan: &RateRequestPlan) -> Result<(), OkxErro
     rate_budget
         .admit(plan)
         .map_err(|evidence| OkxError::RateLimited {
-            evidence: Box::new(evidence),
+            evidence,
         })
 }
 
@@ -339,7 +339,7 @@ where
         let evidence =
             rate_budget.record_exchange_throttle(plan, &exchange_code, server_retry_after_ms);
         return Err(OkxError::RateLimited {
-            evidence: Box::new(evidence),
+            evidence,
         });
     }
 
@@ -353,7 +353,7 @@ where
         let evidence =
             rate_budget.record_exchange_throttle(plan, &envelope.code, server_retry_after_ms);
         return Err(OkxError::RateLimited {
-            evidence: Box::new(evidence),
+            evidence,
         });
     }
 
