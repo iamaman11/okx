@@ -1,15 +1,18 @@
 # ChatGPT operator contract
 
-This document defines the normal operating discipline for ChatGPT over the existing GitHub transport.
+This document defines the normal operating discipline for ChatGPT over the accepted Cloudflare-primary / GitHub-fallback architecture.
 
-The goal is to keep queries attributable, replay-safe, context-efficient and fail-closed without adding a new backend, MCP server, Worker, database or transport owner.
+The goal is to keep queries attributable, context-efficient and fail-closed while allowing broad analytical question coverage without turning every natural-language question into a new backend endpoint.
 
 ## Transport split
 
-- CONTROL uses GitHub issue #12 and plaintext strongly typed control requests.
-- DATA uses GitHub issue #10 and encrypted strongly typed request/result envelopes.
-- The repository is public, so account/risk DATA must never be published as plaintext.
-- The DATA cryptographic contract remains X25519 -> HKDF-SHA256 -> ChaCha20-Poly1305.
+- **Primary DATA:** ChatGPT -> OAuth `okx-cloudflare-mcp` -> one Durable Object rendezvous -> one outbound authenticated Windows WSS -> existing typed `AgentRequest/AgentResponse` path.
+- **Fallback DATA:** GitHub issue #10 with encrypted strongly typed request/result envelopes. It is parity/recovery only, not the normal product path.
+- **CONTROL:** GitHub issue #12 with plaintext strongly typed lifecycle/deploy/diagnostic requests.
+- Cloudflare owns authentication/rendezvous/correlation only; Windows/Rust remains the product authority.
+- The repository is public, so private account/risk DATA must never be published as plaintext.
+- The GitHub DATA cryptographic contract remains X25519 -> HKDF-SHA256 -> ChaCha20-Poly1305.
+- Every new product capability must be black-box accepted through the connected Cloudflare MCP surface first. A healthy runtime or newer Worker contract is not enough; the capability itself must be callable. If the ChatGPT tool list is stale, refresh tools and rerun the primary call before using GitHub fallback as parity evidence.
 
 ## Context-budget invariants
 
@@ -26,14 +29,15 @@ Runtime bounds:
 
 ChatGPT-side rules:
 
-1. Do not fetch the complete comment history of #10 or #12 during normal operation.
-2. Read issue metadata for counts/capacity, then retrieve only the exact request tail/result needed.
-3. If a connector call returns many records, reduce/filter inside the tool orchestration before emitting anything into conversational context.
-4. Never copy ciphertext, complete successful workflow logs, complete PR diffs or complete mailbox history into normal context.
-5. Prefer structured workflow/job/artifact metadata; fetch only the failing log section when diagnosing CI.
-6. Prefer Level 2 application operations for ordinary analysis. Level 1 bulk/detail operations are forensic tools and should be used only when the extra detail is necessary.
-7. Decrypt a DATA terminal once, validate it, reduce it immediately to compact evidence, and discard the large plaintext from the working conversational summary.
-8. Reuse the compact evidence record rather than repeatedly reopening the same mailbox terminal.
+1. Prefer the primary Cloudflare MCP path for normal product questions; use GitHub DATA only for explicit fallback/parity/recovery proof.
+2. Do not fetch the complete comment history of #10 or #12 during fallback/control operation.
+3. Read issue metadata for counts/capacity, then retrieve only the exact request tail/result needed.
+4. If a connector call returns many records, reduce/filter inside the backend/tool orchestration before emitting anything into conversational context.
+5. Never copy ciphertext, complete successful workflow logs, complete PR diffs or complete mailbox history into normal context.
+6. Prefer structured workflow/job/artifact metadata; fetch only the failing log section when diagnosing CI.
+7. Prefer bounded application/query-plan operations for ordinary analysis. Low-level bulk/detail operations are forensic tools and should be used only when the extra detail is necessary.
+8. Decrypt a fallback DATA terminal once, validate it, reduce it immediately to compact evidence, and discard the large plaintext from the working conversational summary.
+9. Reuse compact evidence rather than repeatedly reopening the same mailbox terminal or re-fetching the same large primary result.
 
 A ChatGPT stream/tool timeout must therefore be diagnosed separately from application transport health. DATA/CONTROL evidence is considered implicated only when their own typed telemetry/status shows a transport failure.
 
@@ -129,11 +133,40 @@ Fetch step/job logs only when a job fails or when a specific acceptance fact is 
 
 ## Normal vs forensic operations
 
-Normal research should prefer bounded application-level operations such as MarketOverview, MarketResearch, PortfolioRisk and deterministic scenario operations.
+Normal research should prefer bounded application-level operations such as MarketOverview, MarketResearch, AccountSummary, PortfolioRisk and deterministic scenario operations.
 
 Low-level operations such as raw market/reference/history snapshots remain supported for forensic diagnosis and contract inspection.
 
-Do not replace the typed operation surface with a generic batch language, expression engine or arbitrary request executor.
+Do not replace the typed operation surface with arbitrary SQL, a string expression engine, user-supplied code or an arbitrary OKX request executor.
+
+## Universal analytical question rule
+
+ChatGPT owns **semantic planning**, not numerical truth. For a broad read-only question, ChatGPT should map the request onto the smallest supported **versioned bounded typed analytical plan** rather than asking for a new endpoint whose name mirrors the wording of the question.
+
+A plan may specify only accepted primitives such as:
+- normalized universe selectors;
+- allowlisted factual fields;
+- typed filters;
+- stable sort and top/bottom-K;
+- bounded grouping/aggregation;
+- supported time-window comparisons;
+- versioned deterministic metrics owned by Rust;
+- freshness/coherence policy and hard response limits.
+
+Examples that should share one capability rather than become separate MCP tools:
+- top 10 derivatives by 24h change;
+- bottom 10 USDT swaps by 24h change;
+- highest-volume live swaps;
+- highest/lowest supported funding metric;
+- rank a bounded universe by an already-supported derived metric.
+
+Backend-change rule:
+- if the question only recombines existing facts/operators, **no backend code change**;
+- if it needs a new factual primitive, implement that primitive once in the factual layer;
+- if it needs a new deterministic metric, implement/version/test it once in `okx-analysis`;
+- if it changes mutation/risk/governance semantics, use a dedicated explicit capability rather than the generic read plan.
+
+This keeps the MCP surface small while making the answer space broad. The query-plan evaluator owns no durable business state and must not create a second collector, cache, scheduler or formula owner.
 
 ## Context budget rule
 
@@ -145,7 +178,7 @@ OKX REST/WS
   -> quality / generation gates
   -> deterministic local Rust analysis
   -> bounded typed query result
-  -> compact encrypted DATA evidence
+  -> compact Cloudflare MCP result (or encrypted GitHub fallback evidence)
   -> ChatGPT semantic interpretation
 ```
 
@@ -161,4 +194,4 @@ H1-F is accepted when:
 - one-shot decrypt/validate/reduce is documented and used in acceptance;
 - successful CI is accepted from structured metadata without whole-log expansion;
 - canonical evidence summaries are used for physical H1-G acceptance;
-- no new backend, MCP, Worker, database or transport owner is introduced.
+- no extra backend/service/database/transport owner is introduced; primary Cloudflare MCP and GitHub fallback reuse the accepted owners.
