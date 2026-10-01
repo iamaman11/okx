@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{OkxError, OkxRestClient, instrument::InstrumentType};
 
 const HISTORY_PAGE_LIMIT: usize = 100;
-const HISTORY_MAX_PAGES: usize = 10;
+const HISTORY_MAX_PAGES: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct BoundedHistory<T> {
@@ -142,6 +142,8 @@ pub struct FillHistory {
     pub execution_type: String,
     #[serde(rename = "ts", default)]
     pub timestamp_ms: String,
+    #[serde(rename = "fillTime", default)]
+    pub fill_time_ms: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -164,14 +166,28 @@ pub struct AccountBill {
     pub bill_sub_type: String,
     #[serde(rename = "balChg", default)]
     pub balance_change: String,
+    #[serde(rename = "posBalChg", default)]
+    pub position_balance_change: String,
     #[serde(default)]
     pub bal: String,
+    #[serde(rename = "posBal", default)]
+    pub position_balance: String,
+    #[serde(default)]
+    pub sz: String,
+    #[serde(default)]
+    pub px: String,
     #[serde(default)]
     pub pnl: String,
     #[serde(default)]
     pub fee: String,
     #[serde(rename = "mgnMode", default)]
     pub margin_mode: String,
+    #[serde(rename = "execType", default)]
+    pub execution_type: String,
+    #[serde(rename = "clOrdId", default)]
+    pub client_order_id: String,
+    #[serde(rename = "fillTime", default)]
+    pub fill_time_ms: String,
     #[serde(rename = "ts", default)]
     pub timestamp_ms: String,
 }
