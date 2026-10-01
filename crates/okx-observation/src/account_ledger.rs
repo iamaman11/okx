@@ -155,20 +155,21 @@ impl AccountLedgerFacts {
             multi_account_inventory_complete: false,
         };
 
-        let total_equity =
-            decimal_required("balance.totalEq", &snapshot.balance.total_equity_usd)?;
-        let detail_equity_sum = snapshot.balance.details.iter().try_fold(
-            Decimal::ZERO,
-            |total, detail| {
-                let Some(eq_usd) = detail.equity_usd.as_deref() else {
-                    return Ok::<Decimal, AccountLedgerError>(total);
-                };
-                if eq_usd.trim().is_empty() {
-                    return Ok(total);
-                }
-                Ok(total + decimal_required("balance.details.eqUsd", eq_usd)?)
-            },
-        )?;
+        let total_equity = decimal_required("balance.totalEq", &snapshot.balance.total_equity_usd)?;
+        let detail_equity_sum =
+            snapshot
+                .balance
+                .details
+                .iter()
+                .try_fold(Decimal::ZERO, |total, detail| {
+                    let Some(eq_usd) = detail.equity_usd.as_deref() else {
+                        return Ok::<Decimal, AccountLedgerError>(total);
+                    };
+                    if eq_usd.trim().is_empty() {
+                        return Ok(total);
+                    }
+                    Ok(total + decimal_required("balance.details.eqUsd", eq_usd)?)
+                })?;
         let total_equity_usd = total_equity.normalize().to_string();
         let trading_equity_detail_usd_sum = detail_equity_sum.normalize().to_string();
         let trading_equity_residual_usd =
@@ -455,9 +456,7 @@ struct Aggregate {
     events: usize,
 }
 
-fn current_account_as_of(
-    snapshot: &AccountSnapshot,
-) -> Result<Option<String>, AccountLedgerError> {
+fn current_account_as_of(snapshot: &AccountSnapshot) -> Result<Option<String>, AccountLedgerError> {
     let mut latest = None::<u64>;
     let mut admit = |field: &'static str, value: Option<&str>| -> Result<(), AccountLedgerError> {
         let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
@@ -495,8 +494,7 @@ fn normalize_funding_balances(
             )));
         }
         let balance = decimal_required("funding_balance.bal", &row.bal)?;
-        let available =
-            decimal_required("funding_balance.availBal", &row.available_balance)?;
+        let available = decimal_required("funding_balance.availBal", &row.available_balance)?;
         let frozen = decimal_required("funding_balance.frozenBal", &row.frozen_balance)?;
         if balance < Decimal::ZERO || available < Decimal::ZERO || frozen < Decimal::ZERO {
             return Err(AccountLedgerError::InvalidDecimal {
