@@ -9,9 +9,7 @@ use crate::{
     clock::ClockEvidence,
     config::{Credentials, OkxEnvironment},
     error::OkxError,
-    rate::{
-        GENERAL_RATE_LIMIT_CODE, RateBudget, RateRequestPlan, SUBACCOUNT_RATE_LIMIT_CODE,
-    },
+    rate::{GENERAL_RATE_LIMIT_CODE, RateBudget, RateRequestPlan, SUBACCOUNT_RATE_LIMIT_CODE},
 };
 
 #[derive(Debug, Deserialize)]
@@ -194,14 +192,8 @@ impl OkxRestClient {
         B: Serialize + ?Sized,
     {
         admit(&self.rate_budget, rate_plan)?;
-        self.private_post_after_admission(
-            path,
-            body,
-            request_timestamp,
-            exp_time_ms,
-            rate_plan,
-        )
-        .await
+        self.private_post_after_admission(path, body, request_timestamp, exp_time_ms, rate_plan)
+            .await
     }
 
     pub(crate) async fn private_post_after_admission<T, B>(
@@ -356,11 +348,8 @@ where
         envelope.code.as_str(),
         GENERAL_RATE_LIMIT_CODE | SUBACCOUNT_RATE_LIMIT_CODE
     ) {
-        let evidence = rate_budget.record_exchange_throttle(
-            plan,
-            &envelope.code,
-            server_retry_after_ms,
-        );
+        let evidence =
+            rate_budget.record_exchange_throttle(plan, &envelope.code, server_retry_after_ms);
         return Err(OkxError::RateLimited {
             evidence: Box::new(evidence),
         });
