@@ -370,7 +370,7 @@ const mcpApi = {
         if (!Array.isArray(args.instruments) || args.instruments.length < 2 || args.instruments.length > 8) {
           return jsonRpcError(id, -32602, "invalid instruments");
         }
-        const instruments = args.instruments.map((value) => String(value));
+        const instruments = (args.instruments as unknown[]).map((value: unknown) => String(value));
         if (new Set(instruments).size !== instruments.length || !instruments.every(validInstrument)) {
           return jsonRpcError(id, -32602, "invalid instruments");
         }
