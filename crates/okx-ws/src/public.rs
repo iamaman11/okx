@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use okx_api::OkxEnvironment;
+use okx_api::{OkxEnvironment, RateBudget, RateOperationClass, RateThrottleEvidence};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -17,6 +17,8 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub struct PublicWsConnection {
     socket: Socket,
+    rate_budget: RateBudget,
+    connection_scope: String,
 }
 
 #[derive(Debug, Error)]
@@ -35,17 +37,38 @@ pub enum PublicWsError {
 
     #[error("OKX public websocket sent an unexpected binary frame")]
     UnexpectedBinaryFrame,
+
+    #[error("OKX websocket rate/backpressure defer: {evidence:?}")]
+    RateLimited { evidence: Box<RateThrottleEvidence> },
 }
 
 impl PublicWsConnection {
     pub async fn connect(environment: OkxEnvironment) -> Result<Self, PublicWsError> {
+        Self::connect_with_rate_budget(
+            environment,
+            RateBudget::new(),
+            "public-standalone".to_owned(),
+        )
+        .await
+    }
+
+    pub async fn connect_with_rate_budget(
+        environment: OkxEnvironment,
+        rate_budget: RateBudget,
+        connection_scope: String,
+    ) -> Result<Self, PublicWsError> {
         let (socket, _response) = connect_async(environment.public_ws_url()).await?;
-        Ok(Self { socket })
+        Ok(Self {
+            socket,
+            rate_budget,
+            connection_scope,
+        })
     }
 
     pub async fn subscribe(&mut self, subscriptions: &[Subscription]) -> Result<(), PublicWsError> {
         let payload = subscribe_payload(subscriptions)?;
         validate_subscription_payload(subscriptions, &payload)?;
+        self.admit_control(RateOperationClass::WsSubscribe)?;
         self.socket.send(Message::Text(payload.into())).await?;
         Ok(())
     }
@@ -56,8 +79,20 @@ impl PublicWsConnection {
     ) -> Result<(), PublicWsError> {
         let payload = unsubscribe_payload(subscriptions)?;
         validate_subscription_payload(subscriptions, &payload)?;
+        self.admit_control(RateOperationClass::WsUnsubscribe)?;
         self.socket.send(Message::Text(payload.into())).await?;
         Ok(())
+    }
+
+    fn admit_control(&self, operation: RateOperationClass) -> Result<(), PublicWsError> {
+        let plan = self
+            .rate_budget
+            .ws_control_plan(operation, self.connection_scope.clone());
+        self.rate_budget
+            .admit(&plan)
+            .map_err(|evidence| PublicWsError::RateLimited {
+                evidence: Box::new(evidence),
+            })
     }
 
     pub async fn send_application_ping(&mut self) -> Result<(), PublicWsError> {
