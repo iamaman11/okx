@@ -334,8 +334,10 @@ where
     let server_retry_after_ms = retry_after_ms(&response);
 
     if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        let body = response.bytes().await?;
+        let exchange_code = throttle_code_from_http_429_body(&body);
         let evidence =
-            rate_budget.record_exchange_throttle(plan, "HTTP_429", server_retry_after_ms);
+            rate_budget.record_exchange_throttle(plan, &exchange_code, server_retry_after_ms);
         return Err(OkxError::RateLimited {
             evidence: Box::new(evidence),
         });
@@ -358,6 +360,19 @@ where
     Ok(envelope)
 }
 
+fn throttle_code_from_http_429_body(body: &[u8]) -> String {
+    serde_json::from_slice::<ApiEnvelope<serde_json::Value>>(body)
+        .ok()
+        .map(|envelope| envelope.code)
+        .filter(|code| {
+            matches!(
+                code.as_str(),
+                GENERAL_RATE_LIMIT_CODE | SUBACCOUNT_RATE_LIMIT_CODE
+            )
+        })
+        .unwrap_or_else(|| "HTTP_429".to_owned())
+}
+
 fn retry_after_ms(response: &reqwest::Response) -> Option<u64> {
     response
         .headers()
@@ -373,6 +388,29 @@ fn retry_after_ms(response: &reqwest::Response) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn throttle_code_from_http_429_body_preserves_okx_code() {
+        assert_eq!(
+            throttle_code_from_http_429_body(
+                br#"{"code":"50061","msg":"sub-account rate limit","data":[]}"#
+            ),
+            "50061"
+        );
+        assert_eq!(
+            throttle_code_from_http_429_body(
+                br#"{"code":"50011","msg":"rate limit reached","data":[]}"#
+            ),
+            "50011"
+        );
+        assert_eq!(throttle_code_from_http_429_body(b"not-json"), "HTTP_429");
+        assert_eq!(
+            throttle_code_from_http_429_body(
+                br#"{"code":"51000","msg":"other error","data":[]}"#
+            ),
+            "HTTP_429"
+        );
+    }
 
     #[test]
     fn request_query_encoding_is_deterministic() {
