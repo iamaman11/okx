@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use okx_api::{AccountApi, Credentials, OkxEnvironment, OkxRestClient, TradeApi};
+use okx_api::{
+    AccountApi, ClockEvidence, Credentials, MutationTiming, OkxEnvironment, OkxRestClient, TradeApi,
+};
 use okx_execution::{
     DurableExecutionLedger, ExecutionLedgerEntry, ExecutionLedgerStore, ExecutionPlan,
     ExecutionStatusSnapshot, OrderExecutor, OrderExecutorError, PrepareOutcome, SubmitDisposition,
@@ -35,6 +37,7 @@ pub struct PreparedExecutionResult {
 
 pub struct ExecutionRuntime {
     environment: OkxEnvironment,
+    executor_clock: OkxRestClient,
     executor_account: AccountApi,
     executor: Mutex<OrderExecutor<TradeApi>>,
 }
@@ -47,6 +50,7 @@ impl ExecutionRuntime {
         observed_at_ms: u64,
     ) -> AgentResult<Self> {
         let rest = OkxRestClient::new(environment, executor_credentials)?;
+        let executor_clock = rest.clone();
         let executor_account = AccountApi::new(rest.clone());
         let trade = TradeApi::new(rest);
         let ledger = DurableExecutionLedger::open(
@@ -55,6 +59,7 @@ impl ExecutionRuntime {
         )?;
         Ok(Self {
             environment,
+            executor_clock,
             executor_account,
             executor: Mutex::new(OrderExecutor::new(ledger, trade)),
         })
@@ -70,6 +75,10 @@ impl ExecutionRuntime {
             observer,
             &executor,
         ))
+    }
+
+    pub async fn clock_evidence(&self) -> Result<ClockEvidence, okx_api::OkxError> {
+        self.executor_clock.clock_evidence().await
     }
 
     pub async fn prepare(
@@ -101,13 +110,13 @@ impl ExecutionRuntime {
     pub async fn submit_prepared(
         &self,
         intent_id: &str,
-        exp_time_ms: u64,
+        timing: MutationTiming,
         observed_at_ms: u64,
     ) -> Result<SubmitDisposition, OrderExecutorError> {
         self.executor
             .lock()
             .await
-            .submit_prepared(intent_id, exp_time_ms, observed_at_ms)
+            .submit_prepared(intent_id, timing, observed_at_ms)
             .await
     }
 }

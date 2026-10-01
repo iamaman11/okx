@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     auth::{sign, timestamp_now},
+    clock::ClockEvidence,
     config::{Credentials, OkxEnvironment},
     error::OkxError,
 };
@@ -24,6 +25,12 @@ pub(crate) struct ApiEnvelope<T> {
 
 const OKX_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const OKX_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const OKX_PUBLIC_TIME_PATH: &str = "/api/v5/public/time";
+
+#[derive(Debug, Deserialize)]
+struct ServerTime {
+    ts: String,
+}
 
 fn build_http_client() -> Result<Client, reqwest::Error> {
     Client::builder()
@@ -47,6 +54,10 @@ impl OkxPublicClient {
 
     pub fn environment(&self) -> OkxEnvironment {
         self.environment
+    }
+
+    pub async fn clock_evidence(&self) -> Result<ClockEvidence, OkxError> {
+        fetch_clock_evidence(&self.http, self.environment).await
     }
 
     pub(crate) async fn public_get<T>(
@@ -92,6 +103,10 @@ impl OkxRestClient {
         self.environment
     }
 
+    pub async fn clock_evidence(&self) -> Result<ClockEvidence, OkxError> {
+        fetch_clock_evidence(&self.http, self.environment).await
+    }
+
     pub(crate) async fn private_get<T>(
         &self,
         path: &str,
@@ -131,6 +146,7 @@ impl OkxRestClient {
         &self,
         path: &str,
         body: &B,
+        request_timestamp: &str,
         exp_time_ms: Option<u64>,
     ) -> Result<ApiEnvelope<T>, OkxError>
     where
@@ -138,9 +154,8 @@ impl OkxRestClient {
         B: Serialize + ?Sized,
     {
         let encoded = serde_json::to_string(body)?;
-        let timestamp = timestamp_now();
         let signature = sign(
-            &timestamp,
+            request_timestamp,
             "POST",
             path,
             &encoded,
@@ -155,7 +170,7 @@ impl OkxRestClient {
             .header("Content-Type", "application/json")
             .header("OK-ACCESS-KEY", self.credentials.api_key())
             .header("OK-ACCESS-SIGN", signature)
-            .header("OK-ACCESS-TIMESTAMP", timestamp)
+            .header("OK-ACCESS-TIMESTAMP", request_timestamp)
             .header("OK-ACCESS-PASSPHRASE", self.credentials.passphrase())
             .body(encoded);
 
@@ -168,6 +183,41 @@ impl OkxRestClient {
 
         decode_envelope(request.send().await?).await
     }
+}
+
+async fn fetch_clock_evidence(
+    http: &Client,
+    environment: OkxEnvironment,
+) -> Result<ClockEvidence, OkxError> {
+    let local_started_ms = system_unix_ms()?;
+    let started = Instant::now();
+    let url = format!("{}{}", environment.rest_base_url(), OKX_PUBLIC_TIME_PATH);
+    let rows: Vec<ServerTime> = decode(
+        http.get(url)
+            .header("Accept", "application/json")
+            .send()
+            .await?,
+    )
+    .await?;
+    let round_trip = started.elapsed();
+    let [row] = rows.as_slice() else {
+        return Err(OkxError::Clock(format!(
+            "expected exactly one OKX server-time row, found {}",
+            rows.len()
+        )));
+    };
+    let server_time_ms = row.ts.parse::<u64>().map_err(|_| {
+        OkxError::Clock("OKX server time is not a Unix millisecond timestamp".to_owned())
+    })?;
+    ClockEvidence::from_sample(server_time_ms, local_started_ms, round_trip, Instant::now())
+}
+
+fn system_unix_ms() -> Result<u64, OkxError> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| OkxError::Clock("local wall clock is before Unix epoch".to_owned()))?;
+    u64::try_from(elapsed.as_millis())
+        .map_err(|_| OkxError::Clock("local Unix millisecond clock overflowed u64".to_owned()))
 }
 
 fn request_path_with_query(path: &str, params: &[(&str, String)]) -> String {

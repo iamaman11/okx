@@ -2,8 +2,8 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use okx_api::{
-    ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, OkxError, OrderOperationAck,
-    PlaceOrderRequest, TradeApi, TradeOrderDetails, TradeResponse,
+    ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, MutationTiming, OkxError,
+    OrderOperationAck, PlaceOrderRequest, TradeApi, TradeOrderDetails, TradeResponse,
 };
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -19,7 +19,7 @@ pub trait ExecutionGateway: Send + Sync {
     async fn place_order(
         &self,
         request: PlaceOrderRequest,
-        exp_time_ms: u64,
+        timing: MutationTiming,
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError>;
 
     async fn order_by_client_id(
@@ -34,9 +34,9 @@ impl ExecutionGateway for TradeApi {
     async fn place_order(
         &self,
         request: PlaceOrderRequest,
-        exp_time_ms: u64,
+        timing: MutationTiming,
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
-        TradeApi::place_order(self, &request, Some(exp_time_ms)).await
+        TradeApi::place_order(self, &request, &timing).await
     }
 
     async fn order_by_client_id(
@@ -74,9 +74,6 @@ pub enum OrderExecutorError {
 
     #[error("execution record state {0:?} is not reconcilable")]
     NotReconcilable(ExecutionState),
-
-    #[error("submission expTime must be a non-zero Unix millisecond timestamp")]
-    InvalidExpiry,
 
     #[error("exchange order details do not match the execution plan identity")]
     ReconciliationIdentityMismatch,
@@ -124,17 +121,13 @@ where
     pub async fn submit_prepared(
         &mut self,
         intent_id: &str,
-        exp_time_ms: u64,
+        timing: MutationTiming,
         observed_at_ms: u64,
     ) -> Result<SubmitDisposition, OrderExecutorError> {
         // The production constructor is intentionally fail-closed. The hard
         // gate is the first operation: disabled execution must not validate,
         // persist SUBMITTING, or call the exchange gateway.
         require_live_trading_enabled(self.live_trading_enabled)?;
-
-        if exp_time_ms == 0 {
-            return Err(OrderExecutorError::InvalidExpiry);
-        }
 
         let entry = self
             .ledger
@@ -149,7 +142,7 @@ where
         let request = place_request(&entry.record.plan);
         self.ledger.begin_submission(intent_id, observed_at_ms)?;
 
-        match self.gateway.place_order(request, exp_time_ms).await {
+        match self.gateway.place_order(request, timing).await {
             Err(_) => {
                 let entry = self
                     .ledger
@@ -430,7 +423,7 @@ mod tests {
         async fn place_order(
             &self,
             _request: PlaceOrderRequest,
-            _exp_time_ms: u64,
+            _timing: MutationTiming,
         ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
             self.place_calls.fetch_add(1, Ordering::SeqCst);
             self.place_results
@@ -487,6 +480,10 @@ mod tests {
         }
     }
 
+    fn timing() -> MutationTiming {
+        MutationTiming::from_exchange_time_ms(1790000000000, 5_000).expect("timing")
+    }
+
     fn accepted_response(plan: &ExecutionPlan) -> TradeResponse<OrderOperationAck> {
         TradeResponse {
             code: "0".to_owned(),
@@ -532,7 +529,7 @@ mod tests {
         let mut executor = OrderExecutor::new(ledger, gateway);
 
         let error = executor
-            .submit_prepared(&plan.intent_id, 0, 102)
+            .submit_prepared(&plan.intent_id, timing(), 102)
             .await
             .expect_err("disabled");
 
@@ -563,7 +560,7 @@ mod tests {
         executor.prepare(plan.clone(), 101).expect("prepare");
 
         let result = executor
-            .submit_prepared(&plan.intent_id, 200, 102)
+            .submit_prepared(&plan.intent_id, timing(), 102)
             .await
             .expect("submit");
 
@@ -588,14 +585,14 @@ mod tests {
         executor.prepare(plan.clone(), 101).expect("prepare");
 
         let first = executor
-            .submit_prepared(&plan.intent_id, 200, 102)
+            .submit_prepared(&plan.intent_id, timing(), 102)
             .await
             .expect("unknown");
         assert!(matches!(first, SubmitDisposition::UnknownSubmission(_)));
         assert_eq!(executor.gateway().place_calls(), 1);
 
         let second = executor
-            .submit_prepared(&plan.intent_id, 201, 103)
+            .submit_prepared(&plan.intent_id, timing(), 103)
             .await
             .expect_err("must not resubmit");
         assert!(matches!(
@@ -630,7 +627,7 @@ mod tests {
         executor.prepare(plan.clone(), 101).expect("prepare");
 
         let result = executor
-            .submit_prepared(&plan.intent_id, 200, 102)
+            .submit_prepared(&plan.intent_id, timing(), 102)
             .await
             .expect("rejected");
         assert!(matches!(result, SubmitDisposition::Rejected(_)));
@@ -652,7 +649,7 @@ mod tests {
         executor.prepare(plan.clone(), 101).expect("prepare");
 
         let result = executor
-            .submit_prepared(&plan.intent_id, 200, 102)
+            .submit_prepared(&plan.intent_id, timing(), 102)
             .await
             .expect("ambiguous");
         assert!(matches!(result, SubmitDisposition::UnknownSubmission(_)));

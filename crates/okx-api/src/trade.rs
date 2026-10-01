@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{OkxRestClient, client::ApiEnvelope, error::OkxError};
+use crate::{MutationTiming, OkxRestClient, client::ApiEnvelope, error::OkxError};
 
 const PLACE_ORDER_PATH: &str = "/api/v5/trade/order";
 const CANCEL_ORDER_PATH: &str = "/api/v5/trade/cancel-order";
@@ -177,12 +177,17 @@ impl TradeApi {
     pub async fn place_order(
         &self,
         request: &PlaceOrderRequest,
-        exp_time_ms: Option<u64>,
+        timing: &MutationTiming,
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
         validate_place(request)?;
         Ok(self
             .client
-            .private_post(PLACE_ORDER_PATH, request, exp_time_ms)
+            .private_post(
+                PLACE_ORDER_PATH,
+                request,
+                timing.request_timestamp(),
+                Some(timing.exp_time_ms()),
+            )
             .await?
             .into())
     }
@@ -190,12 +195,13 @@ impl TradeApi {
     pub async fn cancel_order(
         &self,
         request: &CancelOrderRequest,
+        timing: &MutationTiming,
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
         validate_instrument_id(&request.instrument_id)?;
         validate_client_id("clOrdId", &request.client_order_id)?;
         Ok(self
             .client
-            .private_post(CANCEL_ORDER_PATH, request, None)
+            .private_post(CANCEL_ORDER_PATH, request, timing.request_timestamp(), None)
             .await?
             .into())
     }
@@ -203,12 +209,17 @@ impl TradeApi {
     pub async fn amend_order(
         &self,
         request: &AmendOrderRequest,
-        exp_time_ms: Option<u64>,
+        timing: &MutationTiming,
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
         validate_amend(request)?;
         Ok(self
             .client
-            .private_post(AMEND_ORDER_PATH, request, exp_time_ms)
+            .private_post(
+                AMEND_ORDER_PATH,
+                request,
+                timing.request_timestamp(),
+                Some(timing.exp_time_ms()),
+            )
             .await?
             .into())
     }

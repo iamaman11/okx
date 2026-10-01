@@ -2,6 +2,7 @@ use okx_analysis::{
     CandidateOrderAssumptions, LiquidityRole as AnalysisLiquidityRole, PositionDirection,
     analyze_candidate_order,
 };
+use okx_api::MUTATION_REQUEST_TTL_MS;
 use okx_execution::{
     EXECUTION_STATUS_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionTransitionError,
     OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide, PrepareFailure,
@@ -19,6 +20,8 @@ use crate::execution_runtime::{
 
 pub const EXECUTION_PREFLIGHT_REJECTED_CODE: &str = "EXECUTION_PREFLIGHT_REJECTED";
 pub const EXECUTION_PREFLIGHT_UNAVAILABLE_CODE: &str = "EXECUTION_PREFLIGHT_UNAVAILABLE";
+pub const EXECUTION_CLOCK_UNAVAILABLE_CODE: &str = "EXECUTION_CLOCK_UNAVAILABLE";
+pub const EXECUTION_CLOCK_UNSAFE_CODE: &str = "EXECUTION_CLOCK_UNSAFE";
 pub const EXECUTION_RUNTIME_UNAVAILABLE_CODE: &str = "EXECUTION_RUNTIME_UNAVAILABLE";
 pub const EXECUTION_ACCOUNT_NOT_FRESH_CODE: &str = "EXECUTION_ACCOUNT_NOT_FRESH";
 pub const EXECUTION_INPUT_INCONSISTENT_CODE: &str = "EXECUTION_INPUT_INCONSISTENT";
@@ -220,15 +223,30 @@ async fn executor_preflight(
         FreshAccount::Ready(value) => value,
         FreshAccount::Response(response) => return Ok(*response),
     };
-    let evidence =
+    let credential =
         match executor_preflight_check(request, generated_at, execution, &account).await? {
             ExecutorPreflightCheck::Ready(value) => value,
             ExecutorPreflightCheck::Response(response) => return Ok(*response),
         };
+    let clock = match execution.clock_evidence().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_CLOCK_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+    let evidence =
+        crate::execution_preflight::ExecutorPreflightSnapshot::new(credential, clock.snapshot());
     Ok(completed(
         request,
         generated_at,
-        crate::execution_preflight::EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1,
+        crate::execution_preflight::EXECUTOR_PREFLIGHT_SCHEMA_V2,
         serde_json::to_value(evidence)?,
     ))
 }
@@ -293,10 +311,35 @@ async fn submit_prepared(
         return Ok(validation_failure(request, generated_at, error));
     }
 
-    let observed_at_ms = utc_now_ms();
-    let exp_time_ms = observed_at_ms.saturating_add(5_000);
+    let clock = match execution.clock_evidence().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_CLOCK_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+    let timing = match clock.mutation_timing(MUTATION_REQUEST_TTL_MS) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_CLOCK_UNSAFE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+    let observed_at_ms = timing.request_time_ms();
     match execution
-        .submit_prepared(intent_id, exp_time_ms, observed_at_ms)
+        .submit_prepared(intent_id, timing, observed_at_ms)
         .await
     {
         Err(OrderExecutorError::Transition(ExecutionTransitionError::LiveTradingDisabled)) => {
