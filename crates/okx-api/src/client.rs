@@ -193,8 +193,30 @@ impl OkxRestClient {
         T: DeserializeOwned,
         B: Serialize + ?Sized,
     {
-        let encoded = serde_json::to_string(body)?;
         admit(&self.rate_budget, rate_plan)?;
+        self.private_post_after_admission(
+            path,
+            body,
+            request_timestamp,
+            exp_time_ms,
+            rate_plan,
+        )
+        .await
+    }
+
+    pub(crate) async fn private_post_after_admission<T, B>(
+        &self,
+        path: &str,
+        body: &B,
+        request_timestamp: &str,
+        exp_time_ms: Option<u64>,
+        rate_plan: &RateRequestPlan,
+    ) -> Result<ApiEnvelope<T>, OkxError>
+    where
+        T: DeserializeOwned,
+        B: Serialize + ?Sized,
+    {
+        let encoded = serde_json::to_string(body)?;
 
         let signature = sign(
             request_timestamp,
