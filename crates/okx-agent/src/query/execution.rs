@@ -241,10 +241,8 @@ async fn executor_preflight(
             ));
         }
     };
-    let evidence = crate::execution_preflight::ExecutorPreflightSnapshot::new(
-        credential,
-        clock.snapshot(),
-    );
+    let evidence =
+        crate::execution_preflight::ExecutorPreflightSnapshot::new(credential, clock.snapshot());
     Ok(completed(
         request,
         generated_at,
