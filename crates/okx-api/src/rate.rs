@@ -101,7 +101,7 @@ pub struct RateThrottleEvidence {
     pub source: RateThrottleSource,
     pub exchange_code: Option<String>,
     pub operation: RateOperationClass,
-    pub domain: RateDomainEvidence,
+    pub domain: Box<RateDomainEvidence>,
     pub attempt_count: u32,
     pub local_defer_ms: u64,
     pub server_retry_after_ms: Option<u64>,
@@ -302,7 +302,7 @@ impl RateBudget {
             source: RateThrottleSource::Exchange,
             exchange_code: Some(exchange_code.to_owned()),
             operation: plan.operation,
-            domain: domain_evidence(domain),
+            domain: Box::new(domain_evidence(domain)),
             attempt_count: 1,
             local_defer_ms,
             server_retry_after_ms,
@@ -368,17 +368,17 @@ impl RateBudget {
                 window.blocked_until = None;
             }
 
-            if window.attempts.len() >= spec.max_requests as usize {
-                if let Some(oldest) = window.attempts.front().copied() {
-                    let release_at = oldest + Duration::from_millis(spec.window_ms);
-                    let wait_ms = if release_at > now {
-                        duration_ms_ceil(release_at.duration_since(now))
-                    } else {
-                        1
-                    };
-                    if constraining.is_none_or(|(_, current)| wait_ms > current) {
-                        constraining = Some((spec, wait_ms));
-                    }
+            if window.attempts.len() >= spec.max_requests as usize
+                && let Some(oldest) = window.attempts.front().copied()
+            {
+                let release_at = oldest + Duration::from_millis(spec.window_ms);
+                let wait_ms = if release_at > now {
+                    duration_ms_ceil(release_at.duration_since(now))
+                } else {
+                    1
+                };
+                if constraining.is_none_or(|(_, current)| wait_ms > current) {
+                    constraining = Some((spec, wait_ms));
                 }
             }
         }
@@ -389,9 +389,9 @@ impl RateBudget {
                 source: RateThrottleSource::LocalBudget,
                 exchange_code: None,
                 operation: plan.operation,
-                domain: domain_evidence(spec),
+                domain: Box::new(domain_evidence(spec)),
                 attempt_count: 1,
-                local_defer_ms: wait_ms.min(MAX_LOCAL_DEFER_MS).max(1),
+                local_defer_ms: wait_ms.clamp(1, MAX_LOCAL_DEFER_MS),
                 server_retry_after_ms: None,
                 request_sent: false,
                 retryable: true,
@@ -434,7 +434,7 @@ fn duration_ms_ceil(duration: Duration) -> u64 {
     let millis = duration.as_millis();
     u64::try_from(millis)
         .unwrap_or(u64::MAX)
-        .saturating_add((duration.subsec_nanos() % 1_000_000 != 0) as u64)
+        .saturating_add((!duration.subsec_nanos().is_multiple_of(1_000_000)) as u64)
 }
 
 fn domain_evidence(spec: &RateWindowSpec) -> RateDomainEvidence {
@@ -451,14 +451,13 @@ fn select_exchange_domain<'a>(
     plan: &'a RateRequestPlan,
     exchange_code: &str,
 ) -> &'a RateWindowSpec {
-    if exchange_code == SUBACCOUNT_RATE_LIMIT_CODE {
-        if let Some(domain) = plan
+    if exchange_code == SUBACCOUNT_RATE_LIMIT_CODE
+        && let Some(domain) = plan
             .domains
             .iter()
             .find(|domain| domain.key.kind == RateDomainKind::SubaccountAggregate)
-        {
-            return domain;
-        }
+    {
+        return domain;
     }
     plan.domains
         .first()
@@ -478,13 +477,11 @@ fn exchange_defer_ms(
             .map(|domain| domain.window_ms)
             .max()
             .unwrap_or(LOCAL_FALLBACK_WINDOW_MS)
-            .min(TRADE_WINDOW_MS)
-            .max(250)
+            .clamp(250, TRADE_WINDOW_MS)
     };
     server_retry_after_ms
         .map_or(local, |server| server.max(local))
-        .min(MAX_LOCAL_DEFER_MS)
-        .max(1)
+        .clamp(1, MAX_LOCAL_DEFER_MS)
 }
 
 fn public_rest_policy(path: &str, _params: &[(&str, String)]) -> (u32, u64, Option<String>) {
