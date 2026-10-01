@@ -208,13 +208,15 @@ impl RateBudget {
         let mut domains = vec![RateWindowSpec {
             key: RateDomainKey {
                 kind: trade_domain,
-                endpoint: Some(match operation {
-                    RateOperationClass::PlaceOrder => "/api/v5/trade/order",
-                    RateOperationClass::AmendOrder => "/api/v5/trade/amend-order",
-                    RateOperationClass::CancelOrder => "/api/v5/trade/cancel-order",
-                    _ => "trade",
-                }
-                .to_owned()),
+                endpoint: Some(
+                    match operation {
+                        RateOperationClass::PlaceOrder => "/api/v5/trade/order",
+                        RateOperationClass::AmendOrder => "/api/v5/trade/amend-order",
+                        RateOperationClass::CancelOrder => "/api/v5/trade/cancel-order",
+                        _ => "trade",
+                    }
+                    .to_owned(),
+                ),
                 scope: Some(trade_scope),
             },
             max_requests: TRADE_INSTRUMENT_LIMIT_PER_2S,
@@ -225,10 +227,7 @@ impl RateBudget {
             operation,
             RateOperationClass::PlaceOrder | RateOperationClass::AmendOrder
         ) {
-            let current_limit = self
-                .lock_state()
-                .current_subaccount_limit_per_2s
-                .max(1);
+            let current_limit = self.lock_state().current_subaccount_limit_per_2s.max(1);
             domains.push(RateWindowSpec {
                 key: RateDomainKey {
                     kind: RateDomainKind::SubaccountAggregate,
@@ -350,11 +349,7 @@ impl RateBudget {
         }
     }
 
-    fn admit_at(
-        &self,
-        plan: &RateRequestPlan,
-        now: Instant,
-    ) -> Result<(), RateThrottleEvidence> {
+    fn admit_at(&self, plan: &RateRequestPlan, now: Instant) -> Result<(), RateThrottleEvidence> {
         let mut state = self.lock_state();
         let mut constraining: Option<(&RateWindowSpec, u64)> = None;
 
@@ -492,10 +487,7 @@ fn exchange_defer_ms(
         .max(1)
 }
 
-fn public_rest_policy(
-    path: &str,
-    _params: &[(&str, String)],
-) -> (u32, u64, Option<String>) {
+fn public_rest_policy(path: &str, _params: &[(&str, String)]) -> (u32, u64, Option<String>) {
     let (max_requests, window_ms) = match path {
         "/api/v5/public/time" => (5, 2_000),
         "/api/v5/public/instruments" => (10, 2_000),
@@ -512,10 +504,7 @@ fn public_rest_policy(
     (max_requests, window_ms, Some("public_ip".to_owned()))
 }
 
-fn private_rest_policy(
-    path: &str,
-    params: &[(&str, String)],
-) -> (u32, u64, Option<String>) {
+fn private_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Option<String>) {
     let scope = if path == "/api/v5/account/instruments" {
         param(params, "instType").map(|value| format!("authenticated_user+inst_type:{value}"))
     } else if path == "/api/v5/trade/order" {
@@ -611,46 +600,37 @@ mod tests {
     #[test]
     fn place_and_amend_share_parallel_subaccount_budget_but_cancel_does_not() {
         let budget = RateBudget::new();
-        let place = budget.trade_rest_plan(
-            RateOperationClass::PlaceOrder,
-            "DOGE-USDT-SWAP",
-            None,
+        let place = budget.trade_rest_plan(RateOperationClass::PlaceOrder, "DOGE-USDT-SWAP", None);
+        let amend = budget.trade_rest_plan(RateOperationClass::AmendOrder, "DOGE-USDT-SWAP", None);
+        let cancel =
+            budget.trade_rest_plan(RateOperationClass::CancelOrder, "DOGE-USDT-SWAP", None);
+        assert!(
+            place
+                .domains
+                .iter()
+                .any(|domain| { domain.key.kind == RateDomainKind::SubaccountAggregate })
         );
-        let amend = budget.trade_rest_plan(
-            RateOperationClass::AmendOrder,
-            "DOGE-USDT-SWAP",
-            None,
+        assert!(
+            amend
+                .domains
+                .iter()
+                .any(|domain| { domain.key.kind == RateDomainKind::SubaccountAggregate })
         );
-        let cancel = budget.trade_rest_plan(
-            RateOperationClass::CancelOrder,
-            "DOGE-USDT-SWAP",
-            None,
+        assert!(
+            !cancel
+                .domains
+                .iter()
+                .any(|domain| { domain.key.kind == RateDomainKind::SubaccountAggregate })
         );
-        assert!(place.domains.iter().any(|domain| {
-            domain.key.kind == RateDomainKind::SubaccountAggregate
-        }));
-        assert!(amend.domains.iter().any(|domain| {
-            domain.key.kind == RateDomainKind::SubaccountAggregate
-        }));
-        assert!(!cancel.domains.iter().any(|domain| {
-            domain.key.kind == RateDomainKind::SubaccountAggregate
-        }));
     }
 
     #[test]
     fn exchange_50061_is_attributed_to_subaccount_domain_without_fake_retry_after() {
         let budget = RateBudget::new();
-        let plan = budget.trade_rest_plan(
-            RateOperationClass::PlaceOrder,
-            "DOGE-USDT-SWAP",
-            None,
-        );
+        let plan = budget.trade_rest_plan(RateOperationClass::PlaceOrder, "DOGE-USDT-SWAP", None);
         let evidence = budget.record_exchange_throttle(&plan, SUBACCOUNT_RATE_LIMIT_CODE, None);
         assert_eq!(evidence.source, RateThrottleSource::Exchange);
-        assert_eq!(
-            evidence.domain.kind,
-            RateDomainKind::SubaccountAggregate
-        );
+        assert_eq!(evidence.domain.kind, RateDomainKind::SubaccountAggregate);
         assert_eq!(evidence.exchange_code.as_deref(), Some("50061"));
         assert_eq!(evidence.server_retry_after_ms, None);
         assert_eq!(evidence.local_defer_ms, 2_000);
@@ -668,11 +648,7 @@ mod tests {
             snapshot.exchange_rate_limit_observed_at_ms,
             Some(1_790_000_000_000)
         );
-        let plan = budget.trade_rest_plan(
-            RateOperationClass::AmendOrder,
-            "DOGE-USDT-SWAP",
-            None,
-        );
+        let plan = budget.trade_rest_plan(RateOperationClass::AmendOrder, "DOGE-USDT-SWAP", None);
         let aggregate = plan
             .domains
             .iter()
