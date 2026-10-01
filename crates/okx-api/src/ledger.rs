@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{OkxError, OkxRestClient, instrument::InstrumentType};
 
 const HISTORY_PAGE_LIMIT: usize = 100;
-const HISTORY_MAX_PAGES: usize = 3;
+const HISTORY_MAX_PAGES: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct BoundedHistory<T> {
@@ -202,10 +202,13 @@ impl AccountHistoryApi {
         Self { client }
     }
 
-    pub async fn positions_history(&self) -> Result<BoundedHistory<PositionHistory>, OkxError> {
+    pub async fn positions_history(
+        &self,
+        instrument_type: InstrumentType,
+    ) -> Result<BoundedHistory<PositionHistory>, OkxError> {
         self.bounded_history(
             "/api/v5/account/positions-history",
-            Vec::new(),
+            vec![("instType", instrument_type.to_string())],
             |row: &PositionHistory| row.update_time_ms.as_str(),
         )
         .await
@@ -307,5 +310,63 @@ impl AccountHistoryApi {
             pages: HISTORY_MAX_PAGES,
             complete: false,
         })
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_fill_and_bill_event_time_fields() {
+        let fill: FillHistory = serde_json::from_str(
+            r#"{
+                "instType":"SWAP",
+                "instId":"DOGE-USDT-SWAP",
+                "tradeId":"trade-1",
+                "ordId":"ord-1",
+                "billId":"bill-1",
+                "fillPx":"0.1",
+                "fillSz":"1",
+                "fillPnl":"0.01",
+                "fee":"-0.001",
+                "feeCcy":"USDT",
+                "ts":"1790884800001",
+                "fillTime":"1790884800000"
+            }"#,
+        )
+        .expect("fill");
+        assert_eq!(fill.timestamp_ms, "1790884800001");
+        assert_eq!(fill.fill_time_ms, "1790884800000");
+
+        let bill: AccountBill = serde_json::from_str(
+            r#"{
+                "billId":"bill-2",
+                "instType":"SWAP",
+                "instId":"DOGE-USDT-SWAP",
+                "subType":"173",
+                "ccy":"USDT",
+                "pnl":"-0.05",
+                "posBalChg":"-0.05",
+                "posBal":"1",
+                "sz":"10",
+                "px":"0.095",
+                "execType":"",
+                "clOrdId":"",
+                "fillTime":"",
+                "ts":"1790884800000"
+            }"#,
+        )
+        .expect("bill");
+        assert_eq!(bill.bill_sub_type, "173");
+        assert_eq!(bill.position_balance_change, "-0.05");
+        assert_eq!(bill.timestamp_ms, "1790884800000");
+    }
+
+    #[test]
+    fn bounded_history_limit_is_one_page_of_one_hundred_rows() {
+        assert_eq!(HISTORY_PAGE_LIMIT, 100);
+        assert_eq!(HISTORY_MAX_PAGES, 1);
     }
 }
