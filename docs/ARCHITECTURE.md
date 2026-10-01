@@ -12,6 +12,7 @@ Core rules:
 - analysis owns deterministic calculations;
 - execution owns all mutations;
 - transport only transports;
+- Cloudflare MCP is the primary ChatGPT data plane; GitHub encrypted DATA is fallback/parity only;
 - Windows control only controls lifecycle/deployment;
 - GitHub-hosted CI is the normal build authority;
 - installed binaries are verified artifacts, not mutable-workspace builds;
@@ -57,23 +58,14 @@ GitHub PR
   -> verified deploy
   -> durable versioned recovery Release
 
-                       WINDOWS LIFECYCLE
-Task Scheduler
-  ONE TimeTrigger / PT1M / StartWhenAvailable / IgnoreNew
+                    PRIMARY CHATGPT DATA PLANE
+ChatGPT
+  -> OAuth MCP Worker
+  -> ONE Durable Object rendezvous/correlation owner
+  <- ONE outbound authenticated Windows WSS
         |
         v
-ONE fixed Scheduler entrypoint: C:\okx-control\okx-host-control.exe
-  contains immutable launcher after one-time root migration
-  fixed paths + hash verification + activation transaction
-  process/event-handle recovery + commit/rollback
-        |
-        v
-ONE versioned okx-host-control
-  mutex + desired state + Job Object
-  fixed typed CONTROL operations
-        |
-        v
-ONE okx-agent
+ONE okx-agent / ONE Tokio runtime
         |
         +----------------------+--------------------+
         |                      |                    |
@@ -85,11 +77,20 @@ ONE okx-agent
  readiness
         |
         v
- immutable snapshots
+ immutable normalized facts/evidence
+
+                   FALLBACK / LIFECYCLE PLANES
+GitHub encrypted DATA #10 -> okx-agent        (fallback/parity only)
+GitHub CONTROL #12        -> okx-host-control (deploy/lifecycle/recovery)
+
+                       WINDOWS LIFECYCLE
+Task Scheduler
+  ONE TimeTrigger / PT1M / StartWhenAvailable / IgnoreNew
         |
-        +----------------------+
-                               v
-                     typed encrypted DATA
+        v
+ONE fixed Scheduler entrypoint: C:\\okx-control\\okx-host-control.exe
+  -> ONE versioned okx-host-control
+  -> ONE Job-Object-owned okx-agent
 ```
 
 ## Crate boundaries
@@ -189,6 +190,23 @@ It does not duplicate observation/runtime/execution state machines.
 
 Versioned DATA/CONTROL contracts only.
 
+### `cloudflare/okx-mcp`
+
+Primary ChatGPT transport adapter only:
+
+- OAuth/authz;
+- MCP schema and argument validation;
+- one Durable Object for Windows WSS rendezvous, freshness and request correlation;
+- thin mapping from a small public tool surface to versioned `AgentOperation` contracts;
+- bounded request/response deadlines and payloads;
+- no OKX client, financial formula, account/market authority, execution policy or duplicate business state.
+
+A Worker deploy may interrupt the direct session transiently; the Windows-owned outbound reconnect path restores a fresh generation. Socket existence alone is never liveness.
+
+### `okx-bridge-mcp` (legacy/superseded)
+
+This GitHub-backed MCP adapter predates the accepted Cloudflare-primary path. It is **not** a product authority and must receive no new product capabilities. Keep it only while a concrete deployment/recovery dependency still exists; otherwise remove it from the workspace and architecture allowlist rather than maintaining two MCP implementations.
+
 ### `okx-github`
 
 GitHub transport primitives only:
@@ -234,34 +252,41 @@ Physical rollback acceptance uses one bounded typed hook, `AcceptanceFailNextCon
 
 Remote legacy `BuildAgent` is not a production execution path and fails closed. Normal production deployment accepts only a verified hosted-CI artifact whose provenance matches current accepted source tree and binary hashes.
 
-## DATA and CONTROL planes
+## ChatGPT primary, fallback DATA and CONTROL planes
 
-### DATA #10
+### Primary Cloudflare MCP
 
-Encrypted application/query path:
+Normal ChatGPT product queries use:
+
+```text
+ChatGPT
+ -> OAuth MCP Worker
+ -> RuntimeSession Durable Object
+ -> existing authenticated outbound Windows WSS
+ -> okx-agent typed AgentRequest
+ -> existing observation / analysis / execution-status owners
+ -> bounded typed AgentResponse
+ -> ChatGPT
+```
+
+Acceptance rule: a new product capability is not T4-accepted until that capability itself is callable through the connected `okx-cloudflare-mcp` surface. A fresh Worker version or healthy transport status alone is insufficient. If ChatGPT has a stale tool schema, the tools must be refreshed and the primary call repeated.
+
+Cloudflare owns transport/auth/correlation only. Product calculations and exchange truth remain Windows/Rust-owned.
+
+### Fallback DATA #10
+
+GitHub encrypted DATA remains an independent fallback/parity/recovery path, not the normal product path:
 
 ```text
 client
  -> X25519/HKDF/ChaCha20-Poly1305 envelope
  -> GitHub issue #10
  -> okx-agent
- -> authenticated typed operation
- -> local immutable state / pure analysis / execution-status boundary
+ -> same typed operation / same product owners
  -> encrypted terminal response
 ```
 
-Properties already physically accepted:
-
-- request correlation;
-- authenticated terminal result;
-- replay suppression;
-- incremental cursor;
-- bounded state-loss bootstrap;
-- network/GitHub-loss recovery;
-- restart recovery;
-- compact Level 1 and Level 2 operations.
-
-GitHub issue history is transport evidence, not market history/state.
+It keeps request correlation, replay suppression, bounded cursor recovery and restart/network recovery. GitHub issue history is transport evidence, never market/account state authority. Fallback success cannot substitute for missing primary Cloudflare capability acceptance.
 
 ### CONTROL #12
 
@@ -413,6 +438,36 @@ Admission rule:
 
 Level 2 creates no new engine or state owner.
 
+### Universal bounded analytical plan
+
+The system must answer broad classes of questions without adding one operation per natural-language phrasing. ChatGPT may translate a question into one **versioned bounded typed read plan** composed from allowlisted enums, while Rust remains the factual and numerical authority.
+
+A read plan may contain only:
+- a bounded universe selector over normalized facts (for example derivative type, settlement currency and instrument state);
+- an allowlisted field projection;
+- typed predicates over those fields;
+- stable sort + top/bottom-K;
+- bounded grouping/aggregation;
+- explicitly supported time-window comparisons;
+- versioned deterministic metrics from `okx-analysis`;
+- an explicit freshness/coherence requirement and hard output budget.
+
+The evaluator is not a new state owner. It runs over existing immutable snapshots / bounded one-shot reads and delegates formulas to `okx-analysis`.
+
+Preferred stable MCP read surface:
+- `query_capabilities`: returns a versioned catalog of supported field/metric/operator IDs, units, required evidence classes and hard limits;
+- `query`: accepts a bounded plan plus the exact catalog version used to construct it.
+
+The runtime maps external string IDs to internal typed enums/metric implementations and rejects unknown or stale IDs. This allows the metric catalog to evolve without creating a new MCP tool per metric or question while preserving deterministic validation.
+
+This is deliberately **not** generic SQL, JavaScript, a string expression evaluator, arbitrary endpoint composition or user-provided executable code. Unsupported fields/operators/metrics fail closed at validation. Mutation, risk-policy enforcement and execution never pass through this generic read plan.
+
+Consequences:
+- “top 10 gainers”, “bottom 5 by 24h change”, “highest volume USDT swaps” and similar questions become different plans over the same capability, not different backend endpoints;
+- backend code changes only when a genuinely new factual primitive or metric is required;
+- the MCP surface stays small and stable while question coverage grows through safe composition;
+- large universe work is performed below ChatGPT and only compact evidence crosses MCP.
+
 ## Market/order-state integrity
 
 Persistent WebSocket state is the live owner after REST bootstrap/recovery.
@@ -469,37 +524,26 @@ Any future live-write work is a separate explicitly authorized post-#113 accepta
 
 ## Current acceptance state
 
-Accepted:
+Canonical forward authority is issue #160 / `docs/ROADMAP.md`.
 
-- M1–M6;
-- H1;
-- A2;
-- Phase 2 pre-enable execution safety;
-- reproducible locked dependency graph;
-- immutable Action references;
-- removal of remote local-build deploy bypass;
-- durable recovery release.
+Stage 1 status:
+- Repository Guard v1: ACCEPTED;
+- P0.1 WebSocket 443: ACCEPTED;
+- P0.2 exchange clock discipline: ACCEPTED;
+- venue/instrument-state execution gate: ACCEPTED;
+- account + ledger truth: ACCEPTED;
+- P0.3 named rate/backpressure implementation: merged; physical/canonical acceptance remains the current cursor;
+- Stage-1 final T1–T5 acceptance follows P0.3.
 
-Remaining before final production-baseline closure:
-
-- one final exact-artifact physical acceptance after the launcher-root lifecycle changes.
-
-Remaining operational closure:
-
-- #126 immutable launcher/root-of-trust: ACTIVE until root migration plus remote commit/rollback/reboot acceptance;
-- #54 is absorbed into #126 for the final controller-lifecycle closure.
-
-Deferred, non-blocking:
-
-- #58 mailbox compaction at its existing capacity trigger.
+Primary Cloudflare MCP is live and the refreshed ChatGPT tool surface can call `account_summary` under tool contract `okx.mcp.tools/2026-10-01.2`; GitHub DATA remains fallback/parity only.
 
 ## Non-goals
 
 - no withdrawal/transfer API;
 - no arbitrary shell/HTTP proxy;
-- no generic batch/DSL/expression language;
+- no arbitrary SQL/string-expression/executable query language; only the bounded typed analytical plan described above;
 - no local LLM/SQL state layer;
-- no autonomous strategy engine in production-baseline closure;
-- no second access transport;
+- no autonomous strategy engine before the roadmap creates a real strategy boundary;
+- no additional access transport beyond the accepted Cloudflare-primary + GitHub-fallback/control topology without a reproduced need;
 - no second lifecycle supervisor;
 - no live order mutation until separately authorized and accepted.
