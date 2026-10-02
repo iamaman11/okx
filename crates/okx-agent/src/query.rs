@@ -80,6 +80,7 @@ const CANDIDATE_EXPLICIT_ASSUMPTIONS_WARNING: &str = "candidate analysis uses ex
 const POSITION_SCENARIO_EXPLICIT_ASSUMPTIONS_WARNING: &str = "position scenario uses explicit hypothetical entry/exit assumptions and exact account fee evidence; funding, slippage, spread, margin, FX conversion and execution price are not included";
 const CURRENT_COST_MARK_OBSERVATION_WARNING: &str = "current cost uses the current mark/reference market snapshot and exact account fee evidence; it is not a promised execution price, and funding is current event evidence only with no holding horizon";
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
+pub const MARKET_INTELLIGENCE_MAX_AGE_MS: u64 = 60_000;
 
 #[derive(serde::Serialize)]
 struct MarketOverviewResult {
