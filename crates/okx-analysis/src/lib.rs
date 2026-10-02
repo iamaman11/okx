@@ -15,7 +15,9 @@ pub use derivatives::{
 };
 pub use history_features::{
     FUNDING_REGIME_ANALYSIS_SCHEMA_V1, FundingRegime, FundingRegimeAnalysis,
-    TRADE_FLOW_ANALYSIS_SCHEMA_V1, TradeFlowAnalysis, analyze_funding_regime, analyze_trade_flow,
+    OPEN_INTEREST_CHANGE_ANALYSIS_SCHEMA_V1, OpenInterestChangeAnalysis,
+    TRADE_FLOW_ANALYSIS_SCHEMA_V1, TradeFlowAnalysis, analyze_funding_regime,
+    analyze_open_interest_change, analyze_trade_flow,
 };
 pub use market_query::{
     RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT, Return24hPct,
