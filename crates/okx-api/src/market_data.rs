@@ -214,6 +214,18 @@ impl MarketDataApi {
         )
     }
 
+    pub async fn tickers(
+        &self,
+        instrument_type: InstrumentType,
+    ) -> Result<Vec<PublicTicker>, OkxError> {
+        self.client
+            .public_get(
+                "/api/v5/market/tickers",
+                &[("instType", instrument_type.to_string())],
+            )
+            .await
+    }
+
     pub async fn mark_price(
         &self,
         instrument_type: InstrumentType,
