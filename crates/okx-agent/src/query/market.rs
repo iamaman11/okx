@@ -461,10 +461,7 @@ fn market_research_coherence(
     {
         stamps.push(EvidenceStamp {
             effective_ms: parse_exchange_timestamp("funding_history", value)?,
-            received_ms: parse_receive_timestamp(
-                "funding_history",
-                &funding.source_received_at,
-            )?,
+            received_ms: parse_receive_timestamp("funding_history", &funding.source_received_at)?,
         });
     }
     if let Some(open_interest) = open_interest
