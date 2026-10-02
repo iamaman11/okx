@@ -2,9 +2,10 @@ use chrono::Utc;
 use okx_analysis::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
     COST_ANALYSIS_SCHEMA_V1, CandidateOrderAssumptions, HISTORY_BEHAVIOR_SCHEMA_V1,
-    LiquidityRole as AnalysisLiquidityRole, POSITION_SCENARIO_SCHEMA_V1, PositionDirection,
-    PositionScenarioAssumptions, ScenarioExitAssumption, analyze_account_risk,
-    analyze_candidate_order, analyze_cost, analyze_history_behavior, analyze_position_scenario,
+    LiquidityRole as AnalysisLiquidityRole, MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
+    POSITION_SCENARIO_SCHEMA_V1, PositionDirection, PositionScenarioAssumptions,
+    ScenarioExitAssumption, analyze_account_risk, analyze_candidate_order, analyze_cost,
+    analyze_history_behavior, analyze_market_intelligence, analyze_position_scenario,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
@@ -47,6 +48,8 @@ pub const MARKET_PUBLIC_API_UNAVAILABLE_CODE: &str = "MARKET_PUBLIC_API_UNAVAILA
 pub const MARKET_BOOTSTRAP_INCONSISTENT_CODE: &str = "MARKET_BOOTSTRAP_INCONSISTENT";
 pub const MARKET_INSTRUMENT_NOT_LIVE_CODE: &str = "MARKET_INSTRUMENT_NOT_LIVE";
 pub const MARKET_OVERVIEW_INCONSISTENT_CODE: &str = "MARKET_OVERVIEW_INCONSISTENT";
+pub const MARKET_INTELLIGENCE_NOT_READY_CODE: &str = "MARKET_INTELLIGENCE_NOT_READY";
+pub const MARKET_INTELLIGENCE_INCONSISTENT_CODE: &str = "MARKET_INTELLIGENCE_INCONSISTENT";
 pub const MARKET_HISTORY_INCONSISTENT_CODE: &str = "MARKET_HISTORY_INCONSISTENT";
 pub const MARKET_RESEARCH_INCONSISTENT_CODE: &str = "MARKET_RESEARCH_INCONSISTENT";
 pub const ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE: &str =
@@ -61,6 +64,7 @@ pub const ACCOUNT_SUMMARY_SCHEMA_V1: &str = "okx.account-summary/v1";
 pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT";
 pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
+pub const MARKET_INTELLIGENCE_SCHEMA_V1: &str = "okx.market-intelligence/v1";
 pub const MARKET_RESEARCH_SCHEMA_V2: &str = "okx.market-research/v2";
 
 const REFERENCE_BOOTSTRAP_WARNING: &str =
@@ -194,6 +198,7 @@ pub(crate) async fn dispatch(
         | AgentOperation::InstrumentRules { .. }
         | AgentOperation::FindInstruments { .. }
         | AgentOperation::MarketOverview { .. }
+        | AgentOperation::MarketIntelligence { .. }
         | AgentOperation::MarketResearch { .. }
         | AgentOperation::MarketHistory { .. }
         | AgentOperation::HistoryBehavior { .. }
