@@ -156,7 +156,7 @@ Pure deterministic analysis:
 - current cost;
 - position scenarios.
 
-Inputs are immutable accepted snapshots. No collector, transport, lifecycle or mutation ownership lives here.
+Inputs are immutable accepted snapshots. Portfolio mandate/hard-policy arithmetic, covariance/correlation, scenario/stress and future statistical risk calculations belong here as pure deterministic/statistical functions. No collector, transport, lifecycle or mutation ownership lives here.
 
 ### `okx-execution`
 
@@ -412,6 +412,8 @@ Verified account invariants:
 
 GitHub Environment variables are not a live-trading enable authority. Runtime correctness depends on the production executor boundary, whose accepted constructor remains disabled.
 
+Stage-1 account truth is scoped to this authenticated production execution account. Full main+subaccounts treasury inventory requires a separate least-privilege master read credential; until that exists, `multi_account_inventory_complete=false` is expected and no treasury-wide aggregation claim is allowed.
+
 ## Observation and query model
 
 Level 1 forensic/detail operations expose bounded factual evidence such as:
@@ -494,6 +496,8 @@ ONE OrderExecutor
       |
       +--> future live path only:
              reacquire current authoritative state
+             revalidate current reference/venue/account generations
+             re-evaluate the accepted versioned hard-risk policy
              exact continuity/risk checks
              persist SUBMITTING
              send once
@@ -520,7 +524,7 @@ Phase 2 pre-enable is physically accepted:
 - ledger survives restart unchanged;
 - live orders sent in acceptance = 0.
 
-Any future live-write work is a separate explicitly authorized post-#113 acceptance slice.
+Any future production live-write work remains behind the final explicit activation gate after Stages 1–5; current Stage-2 work may extend pre-mutation validation while production writes remain disabled.
 
 ## Current acceptance state
 
@@ -531,15 +535,23 @@ Stage 1 status:
 - P0.1 WebSocket 443: ACCEPTED;
 - P0.2 exchange clock discipline: ACCEPTED;
 - venue/instrument-state execution gate: ACCEPTED;
-- account + ledger truth: ACCEPTED;
+- account + ledger truth for the authenticated production execution account: ACCEPTED;
 - P0.3 named rate/backpressure: ACCEPTED;
-- Stage-1 final T1–T5 acceptance: ACCEPTED/CLOSED;
+- Stage-1 final T1–T5 acceptance: ACCEPTED/CLOSED for that scope;
+- full main+subaccounts treasury inventory remains external/deferred until a separate master read credential exists;
 - exact final #173 artifact is installed with verified provenance;
 - Cloudflare-primary and encrypted GitHub fallback parity passed on the exact binary;
-- exact-tree restart/recovery reconverged account and public market evidence to FRESH;
-- current forward cursor is Stage 2 — INTELLIGENCE + RISK.
+- exact-tree restart/recovery reconverged account and public market evidence to FRESH.
 
-Primary Cloudflare MCP is live and the refreshed ChatGPT tool surface can call `account_summary` under tool contract `okx.mcp.tools/2026-10-01.2`; GitHub DATA remains fallback/parity only.
+Stage 2 status:
+- bounded universal analytical query: ACCEPTED;
+- live microstructure core: ACCEPTED;
+- derivatives/history intelligence: ACCEPTED;
+- portfolio mandate/hard-policy implementation: MERGED + DEPLOYED from PR #184, but primary capability T4 remains OPEN until `portfolio_risk` itself is callable through the connected Cloudflare MCP surface;
+- after primary T4, close identified risk correctness edges, then covariance/correlation + scenario/stress, then bind the same versioned hard policy into fresh pre-mutation revalidation inside the existing execution owner;
+- production live trading remains disabled.
+
+Primary Cloudflare MCP is currently healthy on Worker contract `okx.mcp.tools/2026-10-03.1`; `account_summary` is callable/FRESH. A healthy runtime or newer Worker contract does not substitute for missing `portfolio_risk` exposure in the connected ChatGPT tool schema. GitHub DATA remains fallback/parity only.
 
 ## Non-goals
 
