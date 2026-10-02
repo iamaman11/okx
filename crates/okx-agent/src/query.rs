@@ -14,7 +14,8 @@ use okx_observation::{
     FundingHistorySnapshot, INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1,
     InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError,
     MarketHistoryError, MarketHistorySnapshot, MarketReadiness, MarketSnapshot,
-    MarketTradesSnapshot, ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
+    MarketTradesSnapshot, OpenInterestHistorySnapshot, ReferenceRegistry,
+    SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
     TRADING_CAPABILITIES_SCHEMA_V1,
 };
 use okx_protocol::{
@@ -403,6 +404,37 @@ async fn assemble_market_history(
         } else {
             vec![MARKET_HISTORY_UNCONFIRMED_WARNING.to_owned()]
         },
+    }))
+}
+
+struct AssembledOpenInterestHistory {
+    snapshot: OpenInterestHistorySnapshot,
+    quality: DataQuality,
+}
+
+async fn assemble_open_interest_history(
+    context: ObservationQueryContext<'_>,
+    instrument: &str,
+    period: &str,
+    requested_limit: u16,
+) -> Result<Option<AssembledOpenInterestHistory>, MarketBootstrapError> {
+    let Some(market) = context.market_fallback else {
+        return Ok(None);
+    };
+    let reference = if let Some(public_ws) = context.public_ws {
+        public_ws.reference_snapshot().await
+    } else if let Some(reference) = context.standalone_reference {
+        reference.clone()
+    } else {
+        return Ok(None);
+    };
+
+    let snapshot = market
+        .open_interest_history(&reference, instrument, period, requested_limit)
+        .await?;
+    Ok(Some(AssembledOpenInterestHistory {
+        snapshot,
+        quality: DataQuality::Fresh,
     }))
 }
 
