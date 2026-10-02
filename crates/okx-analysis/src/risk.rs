@@ -482,7 +482,13 @@ pub fn analyze_portfolio_risk(
         &policy.max_drawdown_ratio,
     )?;
     if let Some(loss) = daily_loss {
-        compare_limit(&mut violations, "MAX_DAILY_REALIZED_LOSS", "utc_day", loss, &policy.max_daily_realized_loss_usd)?;
+        compare_limit(
+            &mut violations,
+            "MAX_DAILY_REALIZED_LOSS",
+            "utc_day",
+            loss,
+            &policy.max_daily_realized_loss_usd,
+        )?;
     }
 
     for row in &instrument_exposure {
@@ -574,7 +580,8 @@ pub fn analyze_portfolio_risk(
             &mandate.leverage_ceiling,
         )?;
 
-        let current_instrument = instrument_exposure.iter()
+        let current_instrument = instrument_exposure
+            .iter()
             .find(|row| row.key == candidate.instrument)
             .map(|row| decimal("instrument_gross", &row.gross_notional_usd))
             .transpose()?
@@ -1127,10 +1134,7 @@ mod tests {
             max_daily_realized_loss_usd: "100".to_owned(),
             max_drawdown_ratio: "0.5".to_owned(),
             max_leverage: "10".to_owned(),
-            allowed_instruments: vec![
-                "BTC-USDT-SWAP".to_owned(),
-                "ETH-USDT-SWAP".to_owned(),
-            ],
+            allowed_instruments: vec!["BTC-USDT-SWAP".to_owned(), "ETH-USDT-SWAP".to_owned()],
             minimum_quality: RiskMinimumQuality::Fresh,
             degraded_mode: RiskDegradedMode::Reject,
             correlated_clusters: vec![CorrelatedClusterLimit {
