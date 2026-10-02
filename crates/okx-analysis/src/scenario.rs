@@ -87,6 +87,10 @@ pub struct HistoryBehaviorAnalysis {
     pub mean_absolute_close_return_ratio: String,
     pub max_absolute_close_return_ratio: String,
     pub max_close_drawdown_ratio: String,
+    pub realized_volatility_ratio: String,
+    pub first_confirmed_volume: String,
+    pub last_confirmed_volume: String,
+    pub volume_change_ratio: Option<String>,
     pub highest_high: String,
     pub lowest_low: String,
     pub confirmed_high_low_range_ratio: String,
@@ -283,6 +287,7 @@ pub fn analyze_history_behavior(
 
     let mut previous_timestamp = None;
     let mut closes = Vec::with_capacity(confirmed.len());
+    let mut volumes = Vec::with_capacity(confirmed.len());
     let mut highest_high = None::<Decimal>;
     let mut lowest_low = None::<Decimal>;
 
@@ -300,6 +305,10 @@ pub fn analyze_history_behavior(
         let high = positive_decimal("history_high", &candle.high)?;
         let low = positive_decimal("history_low", &candle.low)?;
         let close = positive_decimal("history_close", &candle.close)?;
+        let volume = decimal("history_volume", &candle.volume)?;
+        if volume < Decimal::ZERO {
+            return Err(AnalysisError::Negative("history_volume"));
+        }
         if high < open || high < close || high < low || low > open || low > close {
             return Err(AnalysisError::InvalidHistoryCandle(
                 candle.open_time_ms.clone(),
@@ -309,6 +318,7 @@ pub fn analyze_history_behavior(
         highest_high = Some(highest_high.map_or(high, |current| current.max(high)));
         lowest_low = Some(lowest_low.map_or(low, |current| current.min(low)));
         closes.push(close);
+        volumes.push(volume);
     }
 
     let first_close = closes[0];
@@ -316,6 +326,7 @@ pub fn analyze_history_behavior(
     let mut return_sum = Decimal::ZERO;
     let mut absolute_return_sum = Decimal::ZERO;
     let mut max_absolute_return = Decimal::ZERO;
+    let mut squared_return_sum = Decimal::ZERO;
     let mut peak_close = first_close;
     let mut max_drawdown = Decimal::ZERO;
 
@@ -325,6 +336,7 @@ pub fn analyze_history_behavior(
         return_sum += value;
         absolute_return_sum += absolute;
         max_absolute_return = max_absolute_return.max(absolute);
+        squared_return_sum += value * value;
 
         peak_close = peak_close.max(pair[1]);
         if pair[1] < peak_close {
@@ -334,6 +346,14 @@ pub fn analyze_history_behavior(
     }
 
     let return_count = Decimal::from((closes.len() - 1) as u64);
+    let realized_volatility = decimal_sqrt(squared_return_sum);
+    let first_volume = volumes[0];
+    let last_volume = *volumes.last().expect("confirmed history is non-empty");
+    let volume_change_ratio = if first_volume > Decimal::ZERO {
+        Some((last_volume / first_volume - Decimal::ONE).normalize().to_string())
+    } else {
+        None
+    };
     let highest_high = highest_high.expect("confirmed history is non-empty");
     let lowest_low = lowest_low.expect("confirmed history is non-empty");
 
@@ -366,12 +386,36 @@ pub fn analyze_history_behavior(
             .to_string(),
         max_absolute_close_return_ratio: max_absolute_return.normalize().to_string(),
         max_close_drawdown_ratio: max_drawdown.normalize().to_string(),
+        realized_volatility_ratio: realized_volatility.normalize().to_string(),
+        first_confirmed_volume: first_volume.normalize().to_string(),
+        last_confirmed_volume: last_volume.normalize().to_string(),
+        volume_change_ratio,
         highest_high: highest_high.normalize().to_string(),
         lowest_low: lowest_low.normalize().to_string(),
         confirmed_high_low_range_ratio: (highest_high / lowest_low - Decimal::ONE)
             .normalize()
             .to_string(),
     })
+}
+
+fn decimal_sqrt(value: Decimal) -> Decimal {
+    if value <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+    let two = Decimal::from(2_u32);
+    let mut estimate = if value > Decimal::ONE {
+        value / two
+    } else {
+        Decimal::ONE
+    };
+    for _ in 0..64 {
+        let next = (estimate + value / estimate) / two;
+        if next == estimate {
+            break;
+        }
+        estimate = next;
+    }
+    estimate
 }
 
 #[cfg(test)]
@@ -517,12 +561,44 @@ mod tests {
         assert_eq!(result.first_close, "100");
         assert_eq!(result.last_close, "95");
         assert_eq!(result.total_close_return_ratio, "-0.05");
+        assert_eq!(result.first_confirmed_volume, "1");
+        assert_eq!(result.last_confirmed_volume, "1");
+        assert_eq!(result.volume_change_ratio.as_deref(), Some("0"));
+        assert!(decimal("rv", &result.realized_volatility_ratio).expect("rv") > Decimal::ZERO);
         assert_eq!(result.highest_high, "112");
         assert_eq!(result.lowest_low, "88");
         assert_eq!(
             result.max_close_drawdown_ratio,
             "0.1818181818181818181818181818"
         );
+    }
+
+    #[test]
+    fn history_volume_change_and_realized_volatility_are_deterministic() {
+        let mut first = candle("1", "100", "101", "99", "100", true);
+        first.volume = "10".to_owned();
+        let mut second = candle("2", "100", "111", "99", "110", true);
+        second.volume = "15".to_owned();
+        let input = history(vec![first, second]);
+
+        let result = analyze_history_behavior(&input).expect("history");
+
+        assert_eq!(result.realized_volatility_ratio, "0.1");
+        assert_eq!(result.first_confirmed_volume, "10");
+        assert_eq!(result.last_confirmed_volume, "15");
+        assert_eq!(result.volume_change_ratio.as_deref(), Some("0.5"));
+    }
+
+    #[test]
+    fn zero_starting_volume_has_explicit_undefined_change() {
+        let mut first = candle("1", "100", "101", "99", "100", true);
+        first.volume = "0".to_owned();
+        let mut second = candle("2", "100", "101", "99", "100", true);
+        second.volume = "1".to_owned();
+        let input = history(vec![first, second]);
+
+        let result = analyze_history_behavior(&input).expect("history");
+        assert_eq!(result.volume_change_ratio, None);
     }
 
     #[test]
