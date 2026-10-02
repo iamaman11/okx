@@ -1,8 +1,82 @@
+use okx_observation::MarketHistorySnapshot;
 use rust_decimal::Decimal;
+use serde::Serialize;
 
 use crate::AnalysisError;
 
 pub const SAMPLE_COVARIANCE_FORMULA_V1: &str = "sample-covariance/v1";
+
+pub const PORTFOLIO_STATISTICS_SCHEMA_V1: &str = "okx.portfolio-statistics/v1";
+pub const PORTFOLIO_VOLATILITY_FORMULA_V1: &str = "signed-notional-covariance-volatility/v1";
+pub const HISTORICAL_STRESS_FORMULA_V1: &str = "aligned-one-bar-return-replay/v1";
+pub const PARALLEL_SCENARIO_FORMULA_V1: &str = "parallel-price-move-signed-notional/v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatisticalExposure {
+    pub instrument_id: String,
+    pub signed_notional_usd: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortfolioStatisticsStatus {
+    NotApplicable,
+    Ready,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CovarianceCell {
+    pub left_instrument: String,
+    pub right_instrument: String,
+    pub covariance: String,
+    pub correlation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VolatilityContribution {
+    pub instrument_id: String,
+    pub signed_notional_usd: String,
+    pub return_volatility_ratio: String,
+    pub component_volatility_usd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HistoricalStressResult {
+    pub formula_version: &'static str,
+    pub worst_return_endpoint_ms: String,
+    pub worst_portfolio_pnl_usd: String,
+    pub worst_portfolio_loss_usd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ParallelScenarioResult {
+    pub formula_version: &'static str,
+    pub price_move_ratio: String,
+    pub portfolio_pnl_usd: String,
+    pub portfolio_loss_usd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PortfolioStatisticsAnalysis {
+    pub schema: &'static str,
+    pub status: PortfolioStatisticsStatus,
+    pub valuation_basis: &'static str,
+    pub covariance_formula_version: &'static str,
+    pub volatility_formula_version: &'static str,
+    pub bar: Option<String>,
+    pub confirmed_aligned_close_count: usize,
+    pub return_sample_count: usize,
+    pub oldest_aligned_close_time_ms: Option<String>,
+    pub newest_aligned_close_time_ms: Option<String>,
+    pub instruments: Vec<String>,
+    pub covariance: Vec<CovarianceCell>,
+    pub portfolio_volatility_usd: Option<String>,
+    pub volatility_contribution: Vec<VolatilityContribution>,
+    pub historical_stress: Option<HistoricalStressResult>,
+    pub parallel_scenario: Option<ParallelScenarioResult>,
+    pub expected_shortfall: Option<String>,
+    pub expected_shortfall_status: &'static str,
+}
 
 pub fn sample_covariance_matrix(
     series: &[Vec<Decimal>],
@@ -67,6 +141,213 @@ pub fn decimal_sqrt(value: Decimal) -> Decimal {
         estimate = next;
     }
     estimate.normalize()
+}
+
+
+pub fn analyze_portfolio_statistics(
+    exposures: &[StatisticalExposure],
+    histories: &[MarketHistorySnapshot],
+    parallel_scenario_move_ratio: Option<&str>,
+) -> Result<PortfolioStatisticsAnalysis, AnalysisError> {
+    if exposures.is_empty() {
+        return Ok(PortfolioStatisticsAnalysis {
+            schema: PORTFOLIO_STATISTICS_SCHEMA_V1,
+            status: PortfolioStatisticsStatus::NotApplicable,
+            valuation_basis:
+                "current signed position notionalUsd multiplied by simple confirmed close-to-close returns",
+            covariance_formula_version: SAMPLE_COVARIANCE_FORMULA_V1,
+            volatility_formula_version: PORTFOLIO_VOLATILITY_FORMULA_V1,
+            bar: histories.first().map(|history| history.bar.clone()),
+            confirmed_aligned_close_count: 0,
+            return_sample_count: 0,
+            oldest_aligned_close_time_ms: None,
+            newest_aligned_close_time_ms: None,
+            instruments: Vec::new(),
+            covariance: Vec::new(),
+            portfolio_volatility_usd: None,
+            volatility_contribution: Vec::new(),
+            historical_stress: None,
+            parallel_scenario: None,
+            expected_shortfall: None,
+            expected_shortfall_status: "not_computed_without_declared_tail_sample_contract",
+        });
+    }
+    if exposures.len() > 8 {
+        return Err(AnalysisError::StatisticalUniverseTooLarge(exposures.len()));
+    }
+    if histories.len() != exposures.len() {
+        return Err(AnalysisError::StatisticalHistoryMismatch);
+    }
+
+    let bar = histories
+        .first()
+        .ok_or(AnalysisError::StatisticalHistoryMismatch)?
+        .bar
+        .clone();
+    if histories.iter().any(|history| history.bar != bar) {
+        return Err(AnalysisError::StatisticalBarMismatch);
+    }
+
+    let mut instruments = Vec::with_capacity(exposures.len());
+    let mut signed_notionals = Vec::with_capacity(exposures.len());
+    let mut aligned_timestamps: Option<Vec<String>> = None;
+    let mut return_series = Vec::with_capacity(exposures.len());
+
+    for exposure in exposures {
+        let history = histories
+            .iter()
+            .find(|history| history.instrument_id == exposure.instrument_id)
+            .ok_or(AnalysisError::StatisticalHistoryMismatch)?;
+        let confirmed = history
+            .candles
+            .iter()
+            .filter(|candle| candle.confirmed)
+            .collect::<Vec<_>>();
+        if confirmed.len() < 3 {
+            return Err(AnalysisError::InsufficientConfirmedStatisticalHistory {
+                instrument: exposure.instrument_id.clone(),
+                confirmed: confirmed.len(),
+            });
+        }
+        let timestamps = confirmed
+            .iter()
+            .map(|candle| candle.open_time_ms.clone())
+            .collect::<Vec<_>>();
+        if let Some(expected) = aligned_timestamps.as_ref() {
+            if expected != &timestamps {
+                return Err(AnalysisError::StatisticalHistoryNotAligned);
+            }
+        } else {
+            aligned_timestamps = Some(timestamps);
+        }
+
+        let closes = confirmed
+            .iter()
+            .map(|candle| crate::positive_decimal("statistical_history_close", &candle.close))
+            .collect::<Result<Vec<_>, _>>()?;
+        let returns = closes
+            .windows(2)
+            .map(|pair| pair[1] / pair[0] - Decimal::ONE)
+            .collect::<Vec<_>>();
+
+        instruments.push(exposure.instrument_id.clone());
+        signed_notionals.push(crate::decimal(
+            "statistical_signed_notional_usd",
+            &exposure.signed_notional_usd,
+        )?);
+        return_series.push(returns);
+    }
+
+    let timestamps = aligned_timestamps.expect("non-empty exposure set establishes timestamps");
+    let covariance_matrix = sample_covariance_matrix(&return_series)?;
+    let sample_count = return_series[0].len();
+    let count = instruments.len();
+    let return_volatility = (0..count)
+        .map(|index| decimal_sqrt(covariance_matrix[index][index].max(Decimal::ZERO)))
+        .collect::<Vec<_>>();
+
+    let mut covariance = Vec::with_capacity(count * count);
+    for left in 0..count {
+        for right in 0..count {
+            covariance.push(CovarianceCell {
+                left_instrument: instruments[left].clone(),
+                right_instrument: instruments[right].clone(),
+                covariance: covariance_matrix[left][right].normalize().to_string(),
+                correlation: covariance_correlation(
+                    covariance_matrix[left][right],
+                    covariance_matrix[left][left],
+                    covariance_matrix[right][right],
+                )
+                .map(|value| value.normalize().to_string()),
+            });
+        }
+    }
+
+    let sigma_weight = (0..count)
+        .map(|left| {
+            (0..count).fold(Decimal::ZERO, |acc, right| {
+                acc + covariance_matrix[left][right] * signed_notionals[right]
+            })
+        })
+        .collect::<Vec<_>>();
+    let portfolio_variance = (0..count)
+        .fold(Decimal::ZERO, |acc, index| {
+            acc + signed_notionals[index] * sigma_weight[index]
+        })
+        .max(Decimal::ZERO);
+    let portfolio_volatility = decimal_sqrt(portfolio_variance);
+
+    let volatility_contribution = (0..count)
+        .map(|index| {
+            let component = if portfolio_volatility > Decimal::ZERO {
+                signed_notionals[index] * sigma_weight[index] / portfolio_volatility
+            } else {
+                Decimal::ZERO
+            };
+            VolatilityContribution {
+                instrument_id: instruments[index].clone(),
+                signed_notional_usd: signed_notionals[index].normalize().to_string(),
+                return_volatility_ratio: return_volatility[index].normalize().to_string(),
+                component_volatility_usd: component.normalize().to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut worst = None::<(usize, Decimal)>;
+    for sample in 0..sample_count {
+        let pnl = (0..count).fold(Decimal::ZERO, |acc, index| {
+            acc + signed_notionals[index] * return_series[index][sample]
+        });
+        match worst {
+            Some((_, current)) if current <= pnl => {}
+            _ => worst = Some((sample, pnl)),
+        }
+    }
+    let (worst_sample, worst_pnl) = worst.expect("sample covariance requires non-empty samples");
+    let historical_stress = HistoricalStressResult {
+        formula_version: HISTORICAL_STRESS_FORMULA_V1,
+        worst_return_endpoint_ms: timestamps[worst_sample + 1].clone(),
+        worst_portfolio_pnl_usd: worst_pnl.normalize().to_string(),
+        worst_portfolio_loss_usd: (-worst_pnl).max(Decimal::ZERO).normalize().to_string(),
+    };
+
+    let parallel_scenario = parallel_scenario_move_ratio
+        .map(|value| {
+            let move_ratio = crate::decimal("parallel_scenario_move_ratio", value)?;
+            if move_ratio <= -Decimal::ONE {
+                return Err(AnalysisError::ScenarioMoveAtOrBelowNegativeOne);
+            }
+            let pnl = signed_notionals.iter().copied().sum::<Decimal>() * move_ratio;
+            Ok(ParallelScenarioResult {
+                formula_version: PARALLEL_SCENARIO_FORMULA_V1,
+                price_move_ratio: move_ratio.normalize().to_string(),
+                portfolio_pnl_usd: pnl.normalize().to_string(),
+                portfolio_loss_usd: (-pnl).max(Decimal::ZERO).normalize().to_string(),
+            })
+        })
+        .transpose()?;
+
+    Ok(PortfolioStatisticsAnalysis {
+        schema: PORTFOLIO_STATISTICS_SCHEMA_V1,
+        status: PortfolioStatisticsStatus::Ready,
+        valuation_basis:
+            "current signed position notionalUsd multiplied by simple confirmed close-to-close returns",
+        covariance_formula_version: SAMPLE_COVARIANCE_FORMULA_V1,
+        volatility_formula_version: PORTFOLIO_VOLATILITY_FORMULA_V1,
+        bar: Some(bar),
+        confirmed_aligned_close_count: timestamps.len(),
+        return_sample_count: sample_count,
+        oldest_aligned_close_time_ms: timestamps.first().cloned(),
+        newest_aligned_close_time_ms: timestamps.last().cloned(),
+        instruments,
+        covariance,
+        portfolio_volatility_usd: Some(portfolio_volatility.normalize().to_string()),
+        volatility_contribution,
+        historical_stress: Some(historical_stress),
+        parallel_scenario,
+        expected_shortfall: None,
+        expected_shortfall_status: "not_computed_without_declared_tail_sample_contract",
+    })
 }
 
 #[cfg(test)]
