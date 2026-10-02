@@ -566,6 +566,30 @@ fn funding_generation_for(snapshot: &FundingHistorySnapshot) -> Result<String, M
     Ok(format!("sha256:{digest:x}"))
 }
 
+pub const MARKET_RESEARCH_SOURCE_GENERATION_SCHEMA_V1: &str =
+    "okx.market-research-source-generation/v1";
+
+pub fn market_research_source_generation(
+    reference_generation: &str,
+    market_generation: &str,
+    history_generation: &str,
+    trades_generation: &str,
+    funding_generation: Option<&str>,
+    open_interest_generation: Option<&str>,
+) -> Result<String, MarketHistoryError> {
+    let encoded = serde_json::to_vec(&(
+        MARKET_RESEARCH_SOURCE_GENERATION_SCHEMA_V1,
+        reference_generation,
+        market_generation,
+        history_generation,
+        trades_generation,
+        funding_generation,
+        open_interest_generation,
+    ))?;
+    let digest = Sha256::digest(encoded);
+    Ok(format!("sha256:{digest:x}"))
+}
+
 fn required(field: &'static str, value: String) -> Result<String, MarketHistoryError> {
     if value.trim().is_empty() {
         Err(MarketHistoryError::MissingField(field))
@@ -886,4 +910,39 @@ mod tests {
         assert!(!history.all_confirmed);
         assert!(!history.candles[0].confirmed);
     }
+    #[test]
+    fn market_research_source_generation_is_content_addressed() {
+        let first = market_research_source_generation(
+            "ref",
+            "market",
+            "history",
+            "trades",
+            Some("funding"),
+            Some("oi"),
+        )
+        .expect("generation");
+        let repeat = market_research_source_generation(
+            "ref",
+            "market",
+            "history",
+            "trades",
+            Some("funding"),
+            Some("oi"),
+        )
+        .expect("generation");
+        let changed = market_research_source_generation(
+            "ref",
+            "market-2",
+            "history",
+            "trades",
+            Some("funding"),
+            Some("oi"),
+        )
+        .expect("generation");
+
+        assert_eq!(first, repeat);
+        assert_ne!(first, changed);
+        assert!(first.starts_with("sha256:"));
+    }
+
 }
