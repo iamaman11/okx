@@ -138,10 +138,7 @@ fn market_intelligence_coherence(
         .as_ref()
         .map(|value| parse("funding", &value.exchange_timestamp_ms))
         .transpose()?;
-    let open_interest = parse(
-        "open_interest",
-        &market.open_interest.exchange_timestamp_ms,
-    )?;
+    let open_interest = parse("open_interest", &market.open_interest.exchange_timestamp_ms)?;
     let order_book = parse(
         "order_book",
         order_book
@@ -1044,7 +1041,9 @@ mod tests {
                 "impact is a deterministic sweep over the current observed book and is MODELLED, not a promised or observed fill".to_owned(),
             ],
         };
-        serde_json::to_vec(&response).expect("serialize response").len()
+        serde_json::to_vec(&response)
+            .expect("serialize response")
+            .len()
     }
 
     #[test]
