@@ -48,6 +48,39 @@ pub struct TickerState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MarketUniverseTicker {
+    pub instrument_id: String,
+    pub instrument_type: InstrumentType,
+    pub last: Option<String>,
+    pub open_24h: Option<String>,
+    pub volume_24h: Option<String>,
+    pub volume_currency_24h: Option<String>,
+    pub exchange_timestamp_ms: String,
+}
+
+impl TryFrom<PublicTicker> for MarketUniverseTicker {
+    type Error = MarketError;
+
+    fn try_from(value: PublicTicker) -> Result<Self, Self::Error> {
+        let instrument_id = required("bulk ticker", "instId", value.instrument_id)?;
+        let instrument_type = match value.instrument_type.as_str() {
+            "SWAP" => InstrumentType::Swap,
+            "FUTURES" => InstrumentType::Futures,
+            other => return Err(MarketError::UnsupportedInstrumentType(other.to_owned())),
+        };
+        Ok(Self {
+            instrument_id,
+            instrument_type,
+            last: optional(value.last),
+            open_24h: optional(value.open_24h),
+            volume_24h: optional(value.volume_24h),
+            volume_currency_24h: optional(value.volume_currency_24h),
+            exchange_timestamp_ms: required("bulk ticker", "ts", value.ts)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MarkPriceState {
     pub price: String,
     pub exchange_timestamp_ms: String,
@@ -139,6 +172,9 @@ pub enum MarketError {
 
     #[error("instrument '{0}' is not live")]
     InstrumentNotLive(String),
+
+    #[error("unsupported market instrument type '{0}'")]
+    UnsupportedInstrumentType(String),
 
     #[error("instrument '{0}' has no underlying/index id in reference data")]
     MissingUnderlying(String),
