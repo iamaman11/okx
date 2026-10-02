@@ -43,12 +43,13 @@ struct MarketIntelligenceSourceTimestamps {
 #[derive(serde::Serialize)]
 struct MarketResearchResult {
     schema: String,
-    assembled_at: String,
     as_of_ms: u64,
     bar: String,
     history_limit: u16,
+    observed_evidence_label: &'static str,
+    derived_evidence_label: &'static str,
     feature_versions: MarketResearchFeatureVersions,
-    reference: MarketResearchReferenceProvenance,
+    reference_generation: String,
     instruments: Vec<MarketResearchInstrumentResult>,
     term_structure: Vec<MarketResearchTermStructure>,
 }
@@ -64,11 +65,6 @@ struct MarketResearchFeatureVersions {
     term_structure: &'static str,
 }
 
-#[derive(serde::Serialize, PartialEq, Eq)]
-struct MarketResearchReferenceProvenance {
-    generation: String,
-}
-
 #[derive(serde::Serialize)]
 struct MarketResearchInstrumentResult {
     instrument_id: String,
@@ -76,11 +72,15 @@ struct MarketResearchInstrumentResult {
     market: MarketResearchMarket,
     behavior: MarketResearchBehavior,
     trade_flow: MarketResearchTradeFlow,
+    #[serde(skip_serializing_if = "Option::is_none")]
     funding_regime: Option<MarketResearchFundingRegime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     open_interest_change: Option<MarketResearchOpenInterestChange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     dated_basis: Option<MarketResearchDatedBasis>,
     provenance: MarketResearchProvenance,
-    quality: MarketResearchQuality,
+    coherence: MarketResearchCoherence,
+    quality: DataQuality,
     diagnostics: Vec<MarketResearchDiagnostic>,
 }
 
@@ -88,9 +88,6 @@ struct MarketResearchInstrumentResult {
 struct MarketResearchMechanics {
     instrument_type: okx_api::InstrumentType,
     underlying: String,
-    contract_value: Option<String>,
-    contract_value_currency: Option<String>,
-    settle_currency: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     expiry_time_ms: Option<String>,
     funding_semantics: &'static str,
@@ -98,26 +95,17 @@ struct MarketResearchMechanics {
 
 #[derive(serde::Serialize)]
 struct MarketResearchMarket {
-    bid: String,
-    ask: String,
-    last: String,
     mark: String,
     index: String,
     funding_rate: Option<String>,
     open_interest_contracts: String,
-    open_interest_usd: Option<String>,
 }
 
 #[derive(serde::Serialize)]
 struct MarketResearchBehavior {
-    confirmed_count: usize,
     total_close_return_ratio: String,
-    mean_absolute_close_return_ratio: String,
-    max_absolute_close_return_ratio: String,
     max_close_drawdown_ratio: String,
     realized_volatility_ratio: String,
-    first_confirmed_volume: String,
-    last_confirmed_volume: String,
     volume_change_ratio: Option<String>,
 }
 
@@ -126,8 +114,6 @@ struct MarketResearchTradeFlow {
     trade_count: usize,
     oldest_exchange_timestamp_ms: Option<String>,
     newest_exchange_timestamp_ms: Option<String>,
-    buy_contracts: String,
-    sell_contracts: String,
     signed_taker_imbalance_ratio: Option<String>,
     vwap: Option<String>,
 }
@@ -137,13 +123,9 @@ struct MarketResearchFundingRegime {
     event_count: usize,
     oldest_funding_time_ms: Option<String>,
     newest_funding_time_ms: Option<String>,
-    realized_rate_coverage_count: usize,
     rate_basis: &'static str,
     latest_rate: Option<String>,
-    cumulative_rate_sum: Option<String>,
     mean_rate: Option<String>,
-    min_rate: Option<String>,
-    max_rate: Option<String>,
     regime: okx_analysis::FundingRegime,
 }
 
@@ -153,9 +135,6 @@ struct MarketResearchOpenInterestChange {
     point_count: usize,
     oldest_timestamp_ms: Option<String>,
     newest_timestamp_ms: Option<String>,
-    first_contracts: Option<String>,
-    last_contracts: Option<String>,
-    change_contracts: Option<String>,
     change_ratio: Option<String>,
 }
 
@@ -185,26 +164,27 @@ struct MarketResearchTermPoint {
 #[derive(serde::Serialize)]
 struct MarketResearchProvenance {
     market_generation: String,
-    market_received_at: String,
     history_generation: String,
-    history_oldest_confirmed_open_time_ms: String,
-    history_newest_confirmed_open_time_ms: String,
     trades_generation: String,
-    trades_received_at: String,
     funding_generation: Option<String>,
-    funding_received_at: Option<String>,
     open_interest_generation: Option<String>,
-    open_interest_received_at: Option<String>,
     market_source: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EvidenceStamp {
+    effective_ms: u64,
+    received_ms: u64,
+}
+
 #[derive(serde::Serialize)]
-struct MarketResearchQuality {
-    market: DataQuality,
-    history: DataQuality,
-    trades: DataQuality,
-    funding: Option<DataQuality>,
-    open_interest_history: Option<DataQuality>,
+struct MarketResearchCoherence {
+    source_receive_min_ms: u64,
+    source_receive_max_ms: u64,
+    source_receive_skew_ms: u64,
+    effective_time_min_ms: u64,
+    effective_time_max_ms: u64,
+    effective_time_skew_ms: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -348,12 +328,162 @@ fn research_diagnostics(
     diagnostics
 }
 
-const fn research_quality(market: DataQuality, history: DataQuality) -> DataQuality {
-    if matches!(market, DataQuality::Fresh) && matches!(history, DataQuality::Fresh) {
+fn research_quality(qualities: &[DataQuality]) -> DataQuality {
+    if qualities
+        .iter()
+        .all(|quality| matches!(quality, DataQuality::Fresh))
+    {
         DataQuality::Fresh
     } else {
         DataQuality::Degraded
     }
+}
+
+fn parse_exchange_timestamp(name: &'static str, value: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("invalid {name} exchange timestamp"))
+}
+
+fn parse_receive_timestamp(name: &'static str, value: &str) -> Result<u64, String> {
+    let timestamp = chrono::DateTime::parse_from_rfc3339(value)
+        .map_err(|_| format!("invalid {name} receive timestamp"))?
+        .timestamp_millis();
+    u64::try_from(timestamp).map_err(|_| format!("invalid {name} receive timestamp"))
+}
+
+fn prefer_newer_effective(accepted: EvidenceStamp, candidate: EvidenceStamp) -> EvidenceStamp {
+    if candidate.effective_ms > accepted.effective_ms {
+        candidate
+    } else {
+        accepted
+    }
+}
+
+fn market_research_coherence(
+    current: &MarketSnapshot,
+    history: &MarketHistorySnapshot,
+    trades: &MarketTradesSnapshot,
+    funding: Option<&FundingHistorySnapshot>,
+    open_interest: Option<&OpenInterestHistorySnapshot>,
+) -> Result<MarketResearchCoherence, String> {
+    let current_received = parse_receive_timestamp("market", &current.source_received_at)?;
+    let history_received = parse_receive_timestamp("history", &history.source_received_at)?;
+    let trades_received = parse_receive_timestamp("trades", &trades.source_received_at)?;
+
+    let mut receive_times = vec![current_received, history_received, trades_received];
+    if let Some(funding) = funding {
+        receive_times.push(parse_receive_timestamp(
+            "funding_history",
+            &funding.source_received_at,
+        )?);
+    }
+    if let Some(open_interest) = open_interest {
+        receive_times.push(parse_receive_timestamp(
+            "open_interest_history",
+            &open_interest.source_received_at,
+        )?);
+    }
+
+    let mut current_exchange_times = vec![
+        parse_exchange_timestamp("ticker", &current.ticker.exchange_timestamp_ms)?,
+        parse_exchange_timestamp("mark", &current.mark_price.exchange_timestamp_ms)?,
+        parse_exchange_timestamp("index", &current.index_price.exchange_timestamp_ms)?,
+        parse_exchange_timestamp(
+            "open_interest",
+            &current.open_interest.exchange_timestamp_ms,
+        )?,
+    ];
+    if let Some(funding) = &current.funding {
+        current_exchange_times.push(parse_exchange_timestamp(
+            "funding",
+            &funding.exchange_timestamp_ms,
+        )?);
+    }
+    let current_effective = *current_exchange_times
+        .iter()
+        .max()
+        .ok_or_else(|| "missing current market exchange timestamp".to_owned())?;
+
+    let history_effective = parse_exchange_timestamp(
+        "history",
+        history
+            .candles
+            .iter()
+            .rev()
+            .find(|candle| candle.confirmed)
+            .ok_or_else(|| "confirmed history window is empty".to_owned())?
+            .open_time_ms
+            .as_str(),
+    )?;
+
+    let mut stamps = vec![
+        EvidenceStamp {
+            effective_ms: current_effective,
+            received_ms: current_received,
+        },
+        EvidenceStamp {
+            effective_ms: history_effective,
+            received_ms: history_received,
+        },
+    ];
+    if let Some(value) = trades.newest_exchange_timestamp_ms.as_deref() {
+        stamps.push(EvidenceStamp {
+            effective_ms: parse_exchange_timestamp("trades", value)?,
+            received_ms: trades_received,
+        });
+    }
+    if let Some(funding) = funding {
+        if let Some(value) = funding.newest_funding_time_ms.as_deref() {
+            stamps.push(EvidenceStamp {
+                effective_ms: parse_exchange_timestamp("funding_history", value)?,
+                received_ms: parse_receive_timestamp(
+                    "funding_history",
+                    &funding.source_received_at,
+                )?,
+            });
+        }
+    }
+    if let Some(open_interest) = open_interest {
+        if let Some(value) = open_interest.newest_timestamp_ms.as_deref() {
+            stamps.push(EvidenceStamp {
+                effective_ms: parse_exchange_timestamp("open_interest_history", value)?,
+                received_ms: parse_receive_timestamp(
+                    "open_interest_history",
+                    &open_interest.source_received_at,
+                )?,
+            });
+        }
+    }
+
+    let receive_min = *receive_times
+        .iter()
+        .min()
+        .ok_or_else(|| "market research has no receive timestamps".to_owned())?;
+    let receive_max = *receive_times
+        .iter()
+        .max()
+        .ok_or_else(|| "market research has no receive timestamps".to_owned())?;
+    let effective_min = stamps
+        .iter()
+        .map(|stamp| stamp.effective_ms)
+        .min()
+        .ok_or_else(|| "market research has no effective timestamps".to_owned())?;
+    let effective_max = stamps
+        .iter()
+        .copied()
+        .reduce(prefer_newer_effective)
+        .ok_or_else(|| "market research has no effective timestamps".to_owned())?
+        .effective_ms;
+
+    Ok(MarketResearchCoherence {
+        source_receive_min_ms: receive_min,
+        source_receive_max_ms: receive_max,
+        source_receive_skew_ms: receive_max.saturating_sub(receive_min),
+        effective_time_min_ms: effective_min,
+        effective_time_max_ms: effective_max,
+        effective_time_skew_ms: effective_max.saturating_sub(effective_min),
+    })
 }
 
 pub(super) async fn dispatch(
@@ -792,11 +922,9 @@ pub(super) async fn dispatch(
                     ));
                 }
 
-                let reference = MarketResearchReferenceProvenance {
-                    generation: current.rules.reference_generation.clone(),
-                };
+                let reference_generation = current.rules.reference_generation.clone();
                 match &shared_reference {
-                    Some(existing) if existing != &reference => {
+                    Some(existing) if existing != &reference_generation => {
                         return Ok(failure_response(
                             request,
                             generated_at,
@@ -808,7 +936,7 @@ pub(super) async fn dispatch(
                             true,
                         ));
                     }
-                    None => shared_reference = Some(reference),
+                    None => shared_reference = Some(reference_generation),
                     _ => {}
                 }
 
@@ -867,17 +995,25 @@ pub(super) async fn dispatch(
                     None => None,
                 };
 
-                let quality = research_quality(current.quality, history.quality);
-                if !matches!(quality, DataQuality::Fresh) {
-                    response_quality = DataQuality::Degraded;
+                let mut component_qualities =
+                    vec![current.quality, history.quality, trades.quality];
+                if let Some(funding) = funding_history.as_ref() {
+                    component_qualities.push(funding.quality);
                 }
+                if let Some(open_interest) = open_interest_history.as_ref() {
+                    component_qualities.push(open_interest.quality);
+                }
+                let mut quality = research_quality(&component_qualities);
                 let mut diagnostics = research_diagnostics(current.source, &history.warnings);
                 if open_interest_history.is_none() {
-                    response_quality = DataQuality::Degraded;
+                    quality = DataQuality::Degraded;
                     diagnostics.push(MarketResearchDiagnostic {
                         code: "OI_HISTORY_PERIOD_UNSUPPORTED",
                         component: "open_interest_history",
                     });
+                }
+                if !matches!(quality, DataQuality::Fresh) {
+                    response_quality = DataQuality::Degraded;
                 }
                 let ordinary_dated_future = current.rules.instrument.instrument_type
                     == okx_api::InstrumentType::Futures
@@ -925,27 +1061,37 @@ pub(super) async fn dispatch(
                     None
                 };
 
+                let coherence = match market_research_coherence(
+                    &current.snapshot,
+                    &history.snapshot,
+                    &trades.snapshot,
+                    funding_history.as_ref().map(|value| &value.snapshot),
+                    open_interest_history.as_ref().map(|value| &value.snapshot),
+                ) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            MARKET_RESEARCH_INCONSISTENT_CODE,
+                            message,
+                            true,
+                        ));
+                    }
+                };
+
                 results.push(MarketResearchInstrumentResult {
                     instrument_id: instrument.clone(),
                     mechanics: MarketResearchMechanics {
                         instrument_type: current.rules.instrument.instrument_type,
                         underlying: current.snapshot.underlying.clone(),
-                        contract_value: current.rules.instrument.contract_value.clone(),
-                        contract_value_currency: current
-                            .rules
-                            .instrument
-                            .contract_value_currency
-                            .clone(),
-                        settle_currency: current.rules.instrument.settle_currency.clone(),
                         expiry_time_ms: current.rules.instrument.expiry_time_ms.clone(),
                         funding_semantics: funding_semantics(
                             current.rules.instrument.funding_requirement,
                         ),
                     },
                     market: MarketResearchMarket {
-                        bid: current.snapshot.ticker.best_bid.clone(),
-                        ask: current.snapshot.ticker.best_ask.clone(),
-                        last: current.snapshot.ticker.last.clone(),
                         mark: current.snapshot.mark_price.price.clone(),
                         index: current.snapshot.index_price.price.clone(),
                         funding_rate: current
@@ -954,31 +1100,19 @@ pub(super) async fn dispatch(
                             .as_ref()
                             .map(|funding| funding.rate.clone()),
                         open_interest_contracts: current.snapshot.open_interest.contracts.clone(),
-                        open_interest_usd: current.snapshot.open_interest.usd.clone(),
                     },
                     behavior: MarketResearchBehavior {
-                        confirmed_count: history_behavior.confirmed_candle_count,
                         total_close_return_ratio: history_behavior.total_close_return_ratio.clone(),
-                        mean_absolute_close_return_ratio: history_behavior
-                            .mean_absolute_close_return_ratio
-                            .clone(),
-                        max_absolute_close_return_ratio: history_behavior
-                            .max_absolute_close_return_ratio
-                            .clone(),
                         max_close_drawdown_ratio: history_behavior.max_close_drawdown_ratio.clone(),
                         realized_volatility_ratio: history_behavior
                             .realized_volatility_ratio
                             .clone(),
-                        first_confirmed_volume: history_behavior.first_confirmed_volume.clone(),
-                        last_confirmed_volume: history_behavior.last_confirmed_volume.clone(),
                         volume_change_ratio: history_behavior.volume_change_ratio.clone(),
                     },
                     trade_flow: MarketResearchTradeFlow {
                         trade_count: trade_flow.trade_count,
                         oldest_exchange_timestamp_ms: trade_flow.oldest_exchange_timestamp_ms,
                         newest_exchange_timestamp_ms: trade_flow.newest_exchange_timestamp_ms,
-                        buy_contracts: trade_flow.buy_contracts,
-                        sell_contracts: trade_flow.sell_contracts,
                         signed_taker_imbalance_ratio: trade_flow.signed_taker_imbalance_ratio,
                         vwap: trade_flow.vwap,
                     },
@@ -987,13 +1121,9 @@ pub(super) async fn dispatch(
                             event_count: funding.event_count,
                             oldest_funding_time_ms: funding.oldest_funding_time_ms.clone(),
                             newest_funding_time_ms: funding.newest_funding_time_ms.clone(),
-                            realized_rate_coverage_count: funding.realized_rate_coverage_count,
                             rate_basis: funding.regime_rate_basis,
                             latest_rate: funding.latest_rate.clone(),
-                            cumulative_rate_sum: funding.cumulative_rate_sum.clone(),
                             mean_rate: funding.mean_rate.clone(),
-                            min_rate: funding.min_rate.clone(),
-                            max_rate: funding.max_rate.clone(),
                             regime: funding.regime,
                         }
                     }),
@@ -1003,48 +1133,24 @@ pub(super) async fn dispatch(
                             point_count: open_interest.point_count,
                             oldest_timestamp_ms: open_interest.oldest_timestamp_ms.clone(),
                             newest_timestamp_ms: open_interest.newest_timestamp_ms.clone(),
-                            first_contracts: open_interest.first_open_interest_contracts.clone(),
-                            last_contracts: open_interest.last_open_interest_contracts.clone(),
-                            change_contracts: open_interest.change_contracts.clone(),
                             change_ratio: open_interest.change_ratio.clone(),
                         }
                     }),
                     dated_basis,
                     provenance: MarketResearchProvenance {
                         market_generation: current.snapshot.market_generation.clone(),
-                        market_received_at: current.snapshot.source_received_at.clone(),
                         history_generation: history_behavior.history_generation.clone(),
-                        history_oldest_confirmed_open_time_ms: history_behavior
-                            .oldest_confirmed_open_time_ms
-                            .clone(),
-                        history_newest_confirmed_open_time_ms: history_behavior
-                            .newest_confirmed_open_time_ms
-                            .clone(),
                         trades_generation: trades.snapshot.trades_generation.clone(),
-                        trades_received_at: trades.snapshot.source_received_at.clone(),
                         funding_generation: funding_history
                             .as_ref()
                             .map(|funding| funding.snapshot.funding_generation.clone()),
-                        funding_received_at: funding_history
-                            .as_ref()
-                            .map(|funding| funding.snapshot.source_received_at.clone()),
                         open_interest_generation: open_interest_history.as_ref().map(
                             |open_interest| open_interest.snapshot.open_interest_generation.clone(),
                         ),
-                        open_interest_received_at: open_interest_history
-                            .as_ref()
-                            .map(|open_interest| open_interest.snapshot.source_received_at.clone()),
                         market_source: current.source,
                     },
-                    quality: MarketResearchQuality {
-                        market: current.quality,
-                        history: history.quality,
-                        trades: trades.quality,
-                        funding: funding_history.as_ref().map(|funding| funding.quality),
-                        open_interest_history: open_interest_history
-                            .as_ref()
-                            .map(|open_interest| open_interest.quality),
-                    },
+                    coherence,
+                    quality,
                     diagnostics,
                 });
             }
@@ -1064,10 +1170,11 @@ pub(super) async fn dispatch(
 
             let result = MarketResearchResult {
                 schema: MARKET_RESEARCH_SCHEMA_V3.to_owned(),
-                assembled_at: generated_at.to_owned(),
                 as_of_ms: research_as_of_ms,
                 bar: bar.clone(),
                 history_limit,
+                observed_evidence_label: "OBSERVED",
+                derived_evidence_label: "MODELLED",
                 feature_versions: MarketResearchFeatureVersions {
                     realized_volatility: "realized_volatility/simple_return_rss/v1",
                     volume_change: "volume_change/confirmed_candle_contract_volume/v1",
@@ -1077,7 +1184,7 @@ pub(super) async fn dispatch(
                     dated_future_basis: DATED_FUTURE_BASIS_SCHEMA_V1,
                     term_structure: "term_structure/dated_futures/v1",
                 },
-                reference: shared_reference
+                reference_generation: shared_reference
                     .expect("MarketResearch validation requires at least two instruments"),
                 instruments: results,
                 term_structure,
@@ -1227,39 +1334,25 @@ mod tests {
             mechanics: MarketResearchMechanics {
                 instrument_type: okx_api::InstrumentType::Swap,
                 underlying: "ASSET-USDT".to_owned(),
-                contract_value: Some("0.00000001".to_owned()),
-                contract_value_currency: Some("ASSET".to_owned()),
-                settle_currency: Some("USDT".to_owned()),
                 expiry_time_ms: None,
                 funding_semantics: "required",
             },
             market: MarketResearchMarket {
-                bid: "12345.12345678901234".to_owned(),
-                ask: "12345.12345678901235".to_owned(),
-                last: "12345.12345678901234".to_owned(),
                 mark: "12345.12345678901233".to_owned(),
                 index: "12345.12345678901230".to_owned(),
                 funding_rate: Some("0.000123456789012345".to_owned()),
                 open_interest_contracts: "1234567890123456789".to_owned(),
-                open_interest_usd: Some("1234567890123456789012345".to_owned()),
             },
             behavior: MarketResearchBehavior {
-                confirmed_count: 100,
                 total_close_return_ratio: "0.123456789012345678901234567890".to_owned(),
-                mean_absolute_close_return_ratio: "0.012345678901234567890123456789".to_owned(),
-                max_absolute_close_return_ratio: "0.045678901234567890123456789012".to_owned(),
                 max_close_drawdown_ratio: "0.078901234567890123456789012345".to_owned(),
                 realized_volatility_ratio: "0.098765432109876543210987654321".to_owned(),
-                first_confirmed_volume: "123456789012345".to_owned(),
-                last_confirmed_volume: "223456789012345".to_owned(),
                 volume_change_ratio: Some("0.810000000000000000000000000000".to_owned()),
             },
             trade_flow: MarketResearchTradeFlow {
                 trade_count: 100,
                 oldest_exchange_timestamp_ms: Some("1790550000000".to_owned()),
                 newest_exchange_timestamp_ms: Some("1790553600000".to_owned()),
-                buy_contracts: "1234567890123456789".to_owned(),
-                sell_contracts: "987654321098765432".to_owned(),
                 signed_taker_imbalance_ratio: Some("0.123456789012345678901234567890".to_owned()),
                 vwap: Some("12345.123456789012345678901234567890".to_owned()),
             },
@@ -1267,13 +1360,9 @@ mod tests {
                 event_count: 100,
                 oldest_funding_time_ms: Some("1790000000000".to_owned()),
                 newest_funding_time_ms: Some("1790553600000".to_owned()),
-                realized_rate_coverage_count: 100,
                 rate_basis: "realized_rate",
                 latest_rate: Some("0.000123456789012345678901234567".to_owned()),
-                cumulative_rate_sum: Some("0.00123456789012345678901234567".to_owned()),
                 mean_rate: Some("0.000012345678901234567890123456".to_owned()),
-                min_rate: Some("-0.000123456789012345678901234567".to_owned()),
-                max_rate: Some("0.000223456789012345678901234567".to_owned()),
                 regime: okx_analysis::FundingRegime::Mixed,
             }),
             open_interest_change: Some(MarketResearchOpenInterestChange {
@@ -1281,9 +1370,6 @@ mod tests {
                 point_count: 100,
                 oldest_timestamp_ms: Some("1790000000000".to_owned()),
                 newest_timestamp_ms: Some("1790553600000".to_owned()),
-                first_contracts: Some("1234567890123456789".to_owned()),
-                last_contracts: Some("2234567890123456789".to_owned()),
-                change_contracts: Some("1000000000000000000".to_owned()),
                 change_ratio: Some("0.810000000000000000000000000000".to_owned()),
             }),
             dated_basis: None,
@@ -1291,35 +1377,31 @@ mod tests {
                 market_generation:
                     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         .to_owned(),
-                market_received_at: "2026-09-28T00:00:01.000Z".to_owned(),
                 history_generation:
                     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                         .to_owned(),
-                history_oldest_confirmed_open_time_ms: "1790467200000".to_owned(),
-                history_newest_confirmed_open_time_ms: "1790553600000".to_owned(),
                 trades_generation:
                     "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                         .to_owned(),
-                trades_received_at: "2026-09-28T00:00:01.100Z".to_owned(),
                 funding_generation: Some(
                     "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
                         .to_owned(),
                 ),
-                funding_received_at: Some("2026-09-28T00:00:01.200Z".to_owned()),
                 open_interest_generation: Some(
                     "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                         .to_owned(),
                 ),
-                open_interest_received_at: Some("2026-09-28T00:00:01.300Z".to_owned()),
                 market_source: "websocket",
             },
-            quality: MarketResearchQuality {
-                market: DataQuality::Degraded,
-                history: DataQuality::Degraded,
-                trades: DataQuality::Fresh,
-                funding: Some(DataQuality::Fresh),
-                open_interest_history: Some(DataQuality::Fresh),
+            coherence: MarketResearchCoherence {
+                source_receive_min_ms: 1_790_553_600_000,
+                source_receive_max_ms: 1_790_553_600_300,
+                source_receive_skew_ms: 300,
+                effective_time_min_ms: 1_790_550_000_000,
+                effective_time_max_ms: 1_790_553_600_000,
+                effective_time_skew_ms: 3_600_000,
             },
+            quality: DataQuality::Degraded,
             diagnostics: vec![
                 MarketResearchDiagnostic {
                     code: "REST_FALLBACK",
@@ -1336,10 +1418,11 @@ mod tests {
     fn projected_size(instrument_count: usize) -> usize {
         let result = MarketResearchResult {
             schema: MARKET_RESEARCH_SCHEMA_V3.to_owned(),
-            assembled_at: "2026-09-28T00:00:02.000Z".to_owned(),
             as_of_ms: 1_790_553_602_000,
             bar: "1H".to_owned(),
             history_limit: 100,
+            observed_evidence_label: "OBSERVED",
+            derived_evidence_label: "MODELLED",
             feature_versions: MarketResearchFeatureVersions {
                 realized_volatility: "realized_volatility/simple_return_rss/v1",
                 volume_change: "volume_change/confirmed_candle_contract_volume/v1",
@@ -1349,11 +1432,9 @@ mod tests {
                 dated_future_basis: DATED_FUTURE_BASIS_SCHEMA_V1,
                 term_structure: "term_structure/dated_futures/v1",
             },
-            reference: MarketResearchReferenceProvenance {
-                generation:
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        .to_owned(),
-            },
+            reference_generation:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
             instruments: (0..instrument_count).map(fixture).collect(),
             term_structure: Vec::new(),
         };
@@ -1369,6 +1450,55 @@ mod tests {
             warnings: Vec::new(),
         };
         serde_json::to_vec(&response).expect("serialize").len()
+    }
+
+    #[test]
+    fn later_received_older_rest_evidence_cannot_regress_effective_as_of() {
+        let accepted = EvidenceStamp {
+            effective_ms: 200,
+            received_ms: 100,
+        };
+        let older_but_later = EvidenceStamp {
+            effective_ms: 100,
+            received_ms: 300,
+        };
+
+        assert_eq!(
+            prefer_newer_effective(accepted, older_but_later),
+            accepted
+        );
+        assert_eq!(
+            prefer_newer_effective(older_but_later, accepted),
+            accepted
+        );
+    }
+
+    #[test]
+    fn research_quality_is_worst_of_all_required_inputs() {
+        assert_eq!(
+            research_quality(&[
+                DataQuality::Fresh,
+                DataQuality::Fresh,
+                DataQuality::Fresh,
+            ]),
+            DataQuality::Fresh
+        );
+        assert_eq!(
+            research_quality(&[
+                DataQuality::Fresh,
+                DataQuality::Degraded,
+                DataQuality::Fresh,
+            ]),
+            DataQuality::Degraded
+        );
+        assert_eq!(
+            research_quality(&[
+                DataQuality::Fresh,
+                DataQuality::Stale,
+                DataQuality::Fresh,
+            ]),
+            DataQuality::Degraded
+        );
     }
 
     fn market_intelligence_response_size() -> usize {
