@@ -1,6 +1,18 @@
 use super::*;
 
 #[derive(serde::Serialize)]
+struct MarketIntelligenceResult {
+    schema: &'static str,
+    as_of: String,
+    market_source: &'static str,
+    observed_evidence_label: &'static str,
+    impact_evidence_label: &'static str,
+    sequence_continuity_proven: bool,
+    analysis_schema: &'static str,
+    analysis: okx_analysis::MarketIntelligenceAnalysis,
+}
+
+#[derive(serde::Serialize)]
 struct MarketResearchResult {
     schema: String,
     assembled_at: String,
@@ -344,6 +356,109 @@ pub(super) async fn dispatch(
                 }
                 Err(error) => Ok(market_failure(request, generated_at, error)),
             }
+        }
+        AgentOperation::MarketIntelligence {
+            instrument,
+            impact_contracts,
+            depth_levels,
+        } => {
+            let Some(public_ws) = context.public_ws else {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    MARKET_INTELLIGENCE_NOT_READY_CODE,
+                    "market intelligence requires the live public WebSocket owner".to_owned(),
+                    true,
+                ));
+            };
+            let Some(rules) = public_ws.instrument_rules(instrument).await else {
+                return Ok(reference_not_found(request, generated_at, instrument));
+            };
+
+            public_ws.demand_instrument(instrument.clone()).await?;
+            let now_ms = utc_now_ms();
+            let quality = public_ws
+                .quality_snapshot(instrument, now_ms, PUBLIC_MARKET_MAX_AGE_MS, false)
+                .await?;
+            if quality.quality != MarketReadiness::Fresh {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    MARKET_INTELLIGENCE_NOT_READY_CODE,
+                    format!(
+                        "sequence-contiguous FRESH WebSocket market intelligence is not ready: {}",
+                        quality.reason
+                    ),
+                    true,
+                ));
+            }
+
+            let live = public_ws
+                .fresh_snapshot(
+                    instrument,
+                    now_ms,
+                    PUBLIC_MARKET_MAX_AGE_MS,
+                    generated_at.to_owned(),
+                )
+                .await?;
+            if rules.reference_generation != live.market.reference_generation
+                || quality.reference_generation != live.market.reference_generation
+                || live.order_book.generation != quality.connection_generation
+            {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    MARKET_INTELLIGENCE_INCONSISTENT_CODE,
+                    "reference/market/order-book generation changed while building market intelligence"
+                        .to_owned(),
+                    true,
+                ));
+            }
+
+            let analysis = match analyze_market_intelligence(
+                &rules,
+                &live.market,
+                &live.order_book,
+                impact_contracts,
+                *depth_levels,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(analysis_failure(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        error,
+                    ));
+                }
+            };
+
+            let result = MarketIntelligenceResult {
+                schema: MARKET_INTELLIGENCE_SCHEMA_V1,
+                as_of: generated_at.to_owned(),
+                market_source: "websocket",
+                observed_evidence_label: "OBSERVED",
+                impact_evidence_label: "MODELLED",
+                sequence_continuity_proven: quality.sequence_continuity_proven,
+                analysis_schema: MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
+                analysis,
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: DataQuality::Fresh,
+                result_schema: Some(MARKET_INTELLIGENCE_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(result)?),
+                failure: None,
+                warnings: vec![
+                    "impact is a deterministic sweep over the current observed book and is MODELLED, not a promised or observed fill".to_owned(),
+                ],
+            })
         }
         AgentOperation::MarketResearch {
             instruments,
