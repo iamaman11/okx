@@ -598,6 +598,139 @@ export const mcpApi = {
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }
+      if (name === "portfolio_risk") {
+        if (!hasOnlyKeys(args, ["mandate", "policy", "candidate"]) || !isObject(args.mandate) || !isObject(args.policy)) {
+          return jsonRpcError(id, -32602, "invalid portfolio_risk request");
+        }
+        const mandate = args.mandate;
+        const policy = args.policy;
+        if (!hasOnlyKeys(mandate, [
+          "version","capital_base_usd","decision_horizon_hours","benchmark","allowed_instruments",
+          "max_drawdown_ratio","leverage_ceiling","minimum_liquidity_notional_usd","max_turnover_ratio",
+        ])) {
+          return jsonRpcError(id, -32602, "invalid mandate");
+        }
+        const mandateVersion = versionText(mandate.version);
+        const capitalBase = decimalText(mandate.capital_base_usd, true);
+        const mandateAllowed = instrumentList(mandate.allowed_instruments, 32);
+        const maxDrawdown = decimalText(mandate.max_drawdown_ratio, false);
+        const leverageCeiling = decimalText(mandate.leverage_ceiling, true);
+        const minLiquidity = decimalText(mandate.minimum_liquidity_notional_usd, false);
+        const maxTurnover = decimalText(mandate.max_turnover_ratio, false);
+        const benchmark = mandate.benchmark === undefined ? null : versionText(mandate.benchmark);
+        if (
+          !mandateVersion || !capitalBase || !mandateAllowed || !maxDrawdown || !leverageCeiling ||
+          !minLiquidity || !maxTurnover ||
+          (mandate.benchmark !== undefined && !benchmark) ||
+          !Number.isInteger(mandate.decision_horizon_hours) ||
+          Number(mandate.decision_horizon_hours) < 1 ||
+          Number(mandate.decision_horizon_hours) > 8760
+        ) {
+          return jsonRpcError(id, -32602, "invalid mandate");
+        }
+
+        if (!hasOnlyKeys(policy, [
+          "version","max_account_gross_notional_usd","max_instrument_gross_notional_usd",
+          "max_margin_utilization_ratio","max_loss_per_trade_usd","max_daily_realized_loss_usd",
+          "max_drawdown_ratio","max_leverage","allowed_instruments","minimum_quality",
+          "degraded_mode","correlated_clusters",
+        ])) {
+          return jsonRpcError(id, -32602, "invalid policy");
+        }
+        const policyVersion = versionText(policy.version);
+        const policyAllowed = instrumentList(policy.allowed_instruments, 32);
+        const policyNumbers = [
+          decimalText(policy.max_account_gross_notional_usd, false),
+          decimalText(policy.max_instrument_gross_notional_usd, false),
+          decimalText(policy.max_margin_utilization_ratio, false),
+          decimalText(policy.max_loss_per_trade_usd, false),
+          decimalText(policy.max_daily_realized_loss_usd, false),
+          decimalText(policy.max_drawdown_ratio, false),
+        ];
+        const maxLeverage = decimalText(policy.max_leverage, true);
+        const minimumQuality = String(policy.minimum_quality);
+        const degradedMode = String(policy.degraded_mode);
+        if (
+          !policyVersion || !policyAllowed || policyNumbers.some((value) => value === null) ||
+          !maxLeverage || !["fresh", "degraded"].includes(minimumQuality) ||
+          !["reject", "allow_read_only"].includes(degradedMode) ||
+          !Array.isArray(policy.correlated_clusters) || policy.correlated_clusters.length > 16
+        ) {
+          return jsonRpcError(id, -32602, "invalid policy");
+        }
+        const clusters: Array<{id:string; instruments:string[]; max_gross_notional_usd:string}> = [];
+        for (const rawCluster of policy.correlated_clusters) {
+          if (!isObject(rawCluster) || !hasOnlyKeys(rawCluster, ["id","instruments","max_gross_notional_usd"])) {
+            return jsonRpcError(id, -32602, "invalid correlated cluster");
+          }
+          const clusterId = versionText(rawCluster.id);
+          const instruments = instrumentList(rawCluster.instruments, 16);
+          const maxGross = decimalText(rawCluster.max_gross_notional_usd, false);
+          if (!clusterId || !instruments || !maxGross) {
+            return jsonRpcError(id, -32602, "invalid correlated cluster");
+          }
+          clusters.push({ id: clusterId, instruments, max_gross_notional_usd: maxGross });
+        }
+
+        let candidate: Record<string, unknown> | null = null;
+        if (args.candidate !== undefined) {
+          if (!isObject(args.candidate) || !hasOnlyKeys(args.candidate, [
+            "instrument","side","notional_usd","worst_case_loss_usd","leverage",
+          ])) {
+            return jsonRpcError(id, -32602, "invalid candidate");
+          }
+          const instrument = normalizeInstrument(args.candidate.instrument);
+          const side = String(args.candidate.side);
+          const notional = decimalText(args.candidate.notional_usd, true);
+          const worstCaseLoss = decimalText(args.candidate.worst_case_loss_usd, false);
+          const leverage = decimalText(args.candidate.leverage, true);
+          if (!instrument || !["long","short"].includes(side) || !notional || !worstCaseLoss || !leverage) {
+            return jsonRpcError(id, -32602, "invalid candidate");
+          }
+          candidate = {
+            instrument,
+            side,
+            notional_usd: notional,
+            worst_case_loss_usd: worstCaseLoss,
+            leverage,
+          };
+        }
+
+        const agentRequest = {
+          schema: "okx.agent.request/v1",
+          request_id: requestId(),
+          operation: {
+            type: "portfolio_risk",
+            mandate: {
+              version: mandateVersion,
+              capital_base_usd: capitalBase,
+              decision_horizon_hours: mandate.decision_horizon_hours,
+              benchmark,
+              allowed_instruments: mandateAllowed,
+              max_drawdown_ratio: maxDrawdown,
+              leverage_ceiling: leverageCeiling,
+              minimum_liquidity_notional_usd: minLiquidity,
+              max_turnover_ratio: maxTurnover,
+            },
+            policy: {
+              version: policyVersion,
+              max_account_gross_notional_usd: policyNumbers[0],
+              max_instrument_gross_notional_usd: policyNumbers[1],
+              max_margin_utilization_ratio: policyNumbers[2],
+              max_loss_per_trade_usd: policyNumbers[3],
+              max_daily_realized_loss_usd: policyNumbers[4],
+              max_drawdown_ratio: policyNumbers[5],
+              max_leverage: maxLeverage,
+              allowed_instruments: policyAllowed,
+              minimum_quality: minimumQuality,
+              degraded_mode: degradedMode,
+              correlated_clusters: clusters,
+            },
+            candidate,
+          },
+        };
+        return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+      }
       if (name === "trading_capabilities") {
         const instrument = normalizeInstrument(args.instrument);
         if (!instrument) return jsonRpcError(id, -32602, "invalid instrument");
