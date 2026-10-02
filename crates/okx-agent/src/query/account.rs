@@ -19,6 +19,31 @@ struct AccountSummaryResult {
     coherence: AccountSummaryCoherence,
 }
 
+#[derive(serde::Serialize)]
+struct PortfolioRiskCoherence {
+    account_snapshot_source_received_at: String,
+    account_generation: String,
+    ledger_source_received_at: String,
+    oracle_timestamp_ms: String,
+    private_ws_generation: Option<u64>,
+    events_during_read: Option<usize>,
+    coherent: bool,
+}
+
+#[derive(serde::Serialize)]
+struct PortfolioRiskResult {
+    schema: &'static str,
+    as_of: String,
+    observed_evidence_label: &'static str,
+    modelled_evidence_label: &'static str,
+    analysis_schema: &'static str,
+    mandate_schema: &'static str,
+    policy_schema: &'static str,
+    coherence: PortfolioRiskCoherence,
+    analysis: okx_analysis::PortfolioRiskAnalysis,
+    exchange_oracle: okx_analysis::RiskOracleComparison,
+}
+
 pub(super) async fn dispatch(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
@@ -265,12 +290,149 @@ pub(super) async fn dispatch(
                 warnings,
             })
         }
-        AgentOperation::PortfolioRisk => {
+        AgentOperation::PortfolioRisk {
+            mandate,
+            policy,
+            candidate,
+        } => {
             let assembled = match assemble_account_snapshot(context).await {
                 Ok(value) => value,
                 Err(error) => return Ok(account_query_failure(request, generated_at, error)),
             };
-            let result = match analyze_account_risk(&assembled.snapshot) {
+            let Some(account) = context.account_fallback else {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE,
+                    "OKX observer credential is not provisioned in native secret storage".to_owned(),
+                    false,
+                ));
+            };
+
+            let read_cursor = match context.private_ws {
+                Some(private_ws) => private_ws.convergence_cursor().await.ok(),
+                None => None,
+            };
+            let facts = match account.ledger_facts(&assembled.snapshot).await {
+                Ok(value) => value,
+                Err(error) => return Ok(account_ledger_failure(request, generated_at, error)),
+            };
+            let oracle = match account.account_position_risk_oracle().await {
+                Ok(value) => value,
+                Err(error) => return Ok(account_failure(request, generated_at, error)),
+            };
+
+            let mut quality = assembled.quality;
+            let mut warnings = assembled.warnings;
+            if facts
+                .summary
+                .history_coverage
+                .iter()
+                .any(|coverage| !coverage.complete_within_bound)
+            {
+                quality = DataQuality::Degraded;
+                warnings.push(
+                    "portfolio risk history evidence reached a bounded account-history limit; daily realized-loss evidence may be incomplete"
+                        .to_owned(),
+                );
+            }
+
+            let mut coherence = PortfolioRiskCoherence {
+                account_snapshot_source_received_at: assembled.snapshot.source_received_at.clone(),
+                account_generation: assembled.snapshot.account_generation.clone(),
+                ledger_source_received_at: facts.summary.source_received_at.clone(),
+                oracle_timestamp_ms: oracle.ts.clone(),
+                private_ws_generation: assembled.snapshot.private_ws_generation,
+                events_during_read: None,
+                coherent: assembled.quality == DataQuality::Fresh,
+            };
+            if let (Some(private_ws), Some(cursor)) = (context.private_ws, read_cursor) {
+                match private_ws.convergence_window(cursor).await {
+                    Ok(window) => {
+                        coherence.private_ws_generation = Some(window.generation);
+                        coherence.events_during_read = Some(window.events.len());
+                        if !window.events.is_empty() {
+                            coherence.coherent = false;
+                            quality = DataQuality::Degraded;
+                            warnings.push(format!(
+                                "{} private account event(s) arrived while portfolio ledger/oracle evidence was read; inputs are not silently treated as one coherent snapshot",
+                                window.events.len()
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        coherence.coherent = false;
+                        quality = DataQuality::Degraded;
+                        warnings.push(format!(
+                            "private account coherence changed while portfolio risk evidence was read: {error}"
+                        ));
+                    }
+                }
+            }
+
+            let analysis_mandate = TradingMandate {
+                schema: TRADING_MANDATE_SCHEMA_V1,
+                version: mandate.version.clone(),
+                capital_base_usd: mandate.capital_base_usd.clone(),
+                decision_horizon_hours: mandate.decision_horizon_hours,
+                benchmark: mandate.benchmark.clone(),
+                allowed_instruments: mandate.allowed_instruments.clone(),
+                max_drawdown_ratio: mandate.max_drawdown_ratio.clone(),
+                leverage_ceiling: mandate.leverage_ceiling.clone(),
+                minimum_liquidity_notional_usd: mandate.minimum_liquidity_notional_usd.clone(),
+                max_turnover_ratio: mandate.max_turnover_ratio.clone(),
+            };
+            let analysis_policy = HardRiskPolicy {
+                schema: HARD_RISK_POLICY_SCHEMA_V1,
+                version: policy.version.clone(),
+                max_account_gross_notional_usd: policy.max_account_gross_notional_usd.clone(),
+                max_instrument_gross_notional_usd: policy.max_instrument_gross_notional_usd.clone(),
+                max_margin_utilization_ratio: policy.max_margin_utilization_ratio.clone(),
+                max_loss_per_trade_usd: policy.max_loss_per_trade_usd.clone(),
+                max_daily_realized_loss_usd: policy.max_daily_realized_loss_usd.clone(),
+                max_drawdown_ratio: policy.max_drawdown_ratio.clone(),
+                max_leverage: policy.max_leverage.clone(),
+                allowed_instruments: policy.allowed_instruments.clone(),
+                minimum_quality: match policy.minimum_quality {
+                    ProtocolRiskMinimumQuality::Fresh => AnalysisRiskMinimumQuality::Fresh,
+                    ProtocolRiskMinimumQuality::Degraded => AnalysisRiskMinimumQuality::Degraded,
+                },
+                degraded_mode: match policy.degraded_mode {
+                    ProtocolRiskDegradedMode::Reject => AnalysisRiskDegradedMode::Reject,
+                    ProtocolRiskDegradedMode::AllowReadOnly => {
+                        AnalysisRiskDegradedMode::AllowReadOnly
+                    }
+                },
+                correlated_clusters: policy
+                    .correlated_clusters
+                    .iter()
+                    .map(|cluster| CorrelatedClusterLimit {
+                        id: cluster.id.clone(),
+                        instruments: cluster.instruments.clone(),
+                        max_gross_notional_usd: cluster.max_gross_notional_usd.clone(),
+                    })
+                    .collect(),
+            };
+            let analysis_candidate = candidate.as_ref().map(|candidate| PortfolioCandidate {
+                instrument: candidate.instrument.clone(),
+                direction: match candidate.side {
+                    PositionSide::Long => PositionDirection::Long,
+                    PositionSide::Short => PositionDirection::Short,
+                },
+                notional_usd: candidate.notional_usd.clone(),
+                worst_case_loss_usd: candidate.worst_case_loss_usd.clone(),
+                leverage: candidate.leverage.clone(),
+            });
+
+            let analysis = match analyze_portfolio_risk(
+                &assembled.snapshot,
+                &facts.summary,
+                analysis_mandate,
+                analysis_policy,
+                analysis_candidate,
+                coherence.coherent && quality == DataQuality::Fresh,
+            ) {
                 Ok(value) => value,
                 Err(error) => {
                     return Ok(analysis_failure(
@@ -281,16 +443,74 @@ pub(super) async fn dispatch(
                     ));
                 }
             };
+
+            let oracle_notional = oracle
+                .positions
+                .iter()
+                .map(|position| position.notional_usd.as_str())
+                .collect::<Vec<_>>();
+            let oracle_comparison = match compare_account_position_risk_oracle(
+                &analysis,
+                &oracle.ts,
+                (!oracle.adjusted_equity_usd.trim().is_empty())
+                    .then_some(oracle.adjusted_equity_usd.as_str()),
+                &oracle_notional,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(analysis_failure(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        error,
+                    ));
+                }
+            };
+            if coherence.coherent && !oracle_comparison.consistent {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    PORTFOLIO_RISK_ORACLE_MISMATCH_CODE,
+                    format!(
+                        "coherent local portfolio risk does not match OKX account-position-risk oracle: gross_residual_usd={}, adjusted_equity_residual_usd={}",
+                        oracle_comparison.gross_notional_residual_usd,
+                        oracle_comparison
+                            .adjusted_equity_residual_usd
+                            .as_deref()
+                            .unwrap_or("<unavailable>")
+                    ),
+                    false,
+                ));
+            }
+            if !coherence.coherent && !oracle_comparison.consistent {
+                warnings.push(
+                    "OKX account-position-risk differs from local account evidence across an incoherent read window; residual is reported but not classified as a correctness failure"
+                        .to_owned(),
+                );
+            }
+
             Ok(AgentResponse {
                 schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
                 request_id: request.request_id.clone(),
                 status: AgentResponseStatus::Completed,
                 generated_at: generated_at.to_owned(),
-                quality: assembled.quality,
-                result_schema: Some(ACCOUNT_RISK_ANALYSIS_SCHEMA_V1.to_owned()),
-                result: Some(serde_json::to_value(result)?),
+                quality,
+                result_schema: Some(PORTFOLIO_RISK_SCHEMA_V2.to_owned()),
+                result: Some(serde_json::to_value(PortfolioRiskResult {
+                    schema: PORTFOLIO_RISK_SCHEMA_V2,
+                    as_of: generated_at.to_owned(),
+                    observed_evidence_label: "OBSERVED",
+                    modelled_evidence_label: "MODELLED",
+                    analysis_schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2,
+                    mandate_schema: TRADING_MANDATE_SCHEMA_V1,
+                    policy_schema: HARD_RISK_POLICY_SCHEMA_V1,
+                    coherence,
+                    analysis,
+                    exchange_oracle: oracle_comparison,
+                })?),
                 failure: None,
-                warnings: assembled.warnings,
+                warnings,
             })
         }
         _ => unreachable!("query domain dispatcher received unsupported operation"),
