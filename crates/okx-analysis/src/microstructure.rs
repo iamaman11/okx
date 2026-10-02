@@ -1,8 +1,6 @@
 use std::{cmp::Ordering, str::FromStr};
 
-use okx_observation::{
-    InstrumentRulesSnapshot, MarketSnapshot, OrderBookSnapshot, OrderBookStatus,
-};
+use okx_observation::{MarketSnapshot, OrderBookSnapshot, OrderBookStatus};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -92,16 +90,17 @@ pub fn analyze_spread_bps(best_bid: &str, best_ask: &str) -> Result<SpreadBps, A
 }
 
 pub fn analyze_market_intelligence(
-    rules: &InstrumentRulesSnapshot,
+    instrument_id: &str,
+    reference_generation: &str,
     market: &MarketSnapshot,
     order_book: &OrderBookSnapshot,
     impact_contracts: &str,
     depth_levels: u16,
 ) -> Result<MarketIntelligenceAnalysis, AnalysisError> {
-    if rules.instrument.instrument_id != market.instrument_id {
+    if instrument_id != market.instrument_id {
         return Err(AnalysisError::InstrumentMismatch);
     }
-    if rules.reference_generation != market.reference_generation {
+    if reference_generation != market.reference_generation {
         return Err(AnalysisError::ReferenceGenerationMismatch);
     }
     if order_book.status != OrderBookStatus::Contiguous {
@@ -309,48 +308,9 @@ fn positive_decimal(field: &'static str, value: &str) -> Result<Decimal, Analysi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_api::{InstrumentType, PublicInstrument};
     use okx_observation::{
-        BookLevel, FundingRequirement, FundingState, IndexPriceState, InstrumentSpec,
-        MarkPriceState, OpenInterestState, TickerState,
+        BookLevel, FundingState, IndexPriceState, MarkPriceState, OpenInterestState, TickerState,
     };
-
-    fn rules() -> InstrumentRulesSnapshot {
-        InstrumentRulesSnapshot {
-            reference_generation: "ref-1".to_owned(),
-            source_received_at: "2026-10-02T14:00:00Z".to_owned(),
-            instrument: InstrumentSpec {
-                instrument_id: "AAA-USDT-SWAP".to_owned(),
-                instrument_type: InstrumentType::Swap,
-                instrument_family: Some("AAA-USDT".to_owned()),
-                underlying: Some("AAA-USDT".to_owned()),
-                state: "live".to_owned(),
-                rule_type: Some("normal".to_owned()),
-                base_currency: None,
-                quote_currency: None,
-                settle_currency: Some("USDT".to_owned()),
-                tick_size: "0.1".to_owned(),
-                lot_size: "1".to_owned(),
-                min_size: "1".to_owned(),
-                max_limit_size: Some("1000".to_owned()),
-                max_market_size: Some("1000".to_owned()),
-                max_limit_amount: None,
-                max_market_amount: None,
-                contract_type: Some("linear".to_owned()),
-                contract_value: Some("1".to_owned()),
-                contract_value_currency: Some("AAA".to_owned()),
-                fee_group_id: Some("4".to_owned()),
-                max_leverage: Some("50".to_owned()),
-                list_time_ms: Some("1700000000000".to_owned()),
-                expiry_time_ms: None,
-                funding_requirement: FundingRequirement::Required,
-                initial_price_limit_pct: Some("0.05".to_owned()),
-                floating_price_limit_pct: Some("0.03".to_owned()),
-                maximum_price_limit_pct: Some("0.15".to_owned()),
-                upcoming_rule_changes: Vec::new(),
-            },
-        }
-    }
 
     fn market() -> MarketSnapshot {
         MarketSnapshot {
@@ -448,7 +408,7 @@ mod tests {
     #[test]
     fn microstructure_computes_depth_basis_and_symmetric_sweeps() {
         let result =
-            analyze_market_intelligence(&rules(), &market(), &book(), "3", 2).expect("analysis");
+            analyze_market_intelligence("AAA-USDT-SWAP", "ref-1", &market(), &book(), "3", 2).expect("analysis");
 
         assert_eq!(result.best_bid, "100");
         assert_eq!(result.best_ask, "101");
@@ -465,7 +425,7 @@ mod tests {
     #[test]
     fn insufficient_depth_is_evidence_not_an_analysis_failure() {
         let result =
-            analyze_market_intelligence(&rules(), &market(), &book(), "10", 2).expect("analysis");
+            analyze_market_intelligence("AAA-USDT-SWAP", "ref-1", &market(), &book(), "10", 2).expect("analysis");
         assert!(!result.buy_sweep.complete);
         assert_eq!(result.buy_sweep.filled_contracts, "5");
         assert!(!result.sell_sweep.complete);
