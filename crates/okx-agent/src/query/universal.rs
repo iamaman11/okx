@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use okx_analysis::{
-    RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT,
-    SPREAD_BPS_METRIC_ID, SPREAD_BPS_METRIC_VERSION_V1, SPREAD_BPS_UNIT, Return24hPct, SpreadBps,
+    RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT, Return24hPct,
+    SPREAD_BPS_METRIC_ID, SPREAD_BPS_METRIC_VERSION_V1, SPREAD_BPS_UNIT, SpreadBps,
     analyze_return_24h_pct, analyze_spread_bps,
 };
 use okx_api::InstrumentType;
