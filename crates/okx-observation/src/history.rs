@@ -610,9 +610,7 @@ fn generation_for(snapshot: &MarketHistorySnapshot) -> Result<String, MarketHist
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_api::{
-        PublicFundingHistory, PublicInstrument, PublicOpenInterestHistory, PublicTrade,
-    };
+    use okx_api::{PublicFundingHistory, PublicInstrument, PublicOpenInterestHistory, PublicTrade};
 
     fn reference() -> ReferenceRegistry {
         ReferenceRegistry::from_public(
