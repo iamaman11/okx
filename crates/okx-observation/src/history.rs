@@ -1,14 +1,18 @@
 use std::collections::BTreeSet;
 
-use okx_api::PublicCandle;
+use okx_api::{PublicCandle, PublicFundingHistory, PublicTrade};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::ReferenceRegistry;
+use crate::{FundingRequirement, ReferenceRegistry};
 
 pub const MARKET_HISTORY_SCHEMA_V1: &str = "okx.market-history/v1";
 pub const MARKET_HISTORY_SOURCE_V1: &str = "okx_public_rest_history";
+pub const MARKET_TRADES_SCHEMA_V1: &str = "okx.market-trades/v1";
+pub const MARKET_TRADES_SOURCE_V1: &str = "okx_public_rest_trades";
+pub const FUNDING_HISTORY_SCHEMA_V1: &str = "okx.funding-history/v1";
+pub const FUNDING_HISTORY_SOURCE_V1: &str = "okx_public_rest_funding_history";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +43,64 @@ pub struct MarketHistorySnapshot {
     pub oldest_open_time_ms: String,
     pub newest_open_time_ms: String,
     pub candles: Vec<HistoryCandle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketTradeSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketTrade {
+    pub trade_id: String,
+    pub price: String,
+    pub size_contracts: String,
+    pub side: MarketTradeSide,
+    pub source: Option<String>,
+    pub exchange_timestamp_ms: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketTradesSnapshot {
+    pub schema: String,
+    pub instrument_id: String,
+    pub requested_limit: u16,
+    pub reference_generation: String,
+    pub source: String,
+    pub source_received_at: String,
+    pub trades_generation: String,
+    pub oldest_exchange_timestamp_ms: Option<String>,
+    pub newest_exchange_timestamp_ms: Option<String>,
+    pub trades: Vec<MarketTrade>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FundingHistoryEvent {
+    pub funding_time_ms: String,
+    pub funding_rate: String,
+    pub realized_rate: Option<String>,
+    pub formula_type: Option<String>,
+    pub method: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FundingHistorySnapshot {
+    pub schema: String,
+    pub instrument_id: String,
+    pub requested_limit: u16,
+    pub reference_generation: String,
+    pub source: String,
+    pub source_received_at: String,
+    pub funding_generation: String,
+    pub oldest_funding_time_ms: Option<String>,
+    pub newest_funding_time_ms: Option<String>,
+    pub events: Vec<FundingHistoryEvent>,
 }
 
 #[derive(Debug, Error)]
@@ -72,6 +134,21 @@ pub enum MarketHistoryError {
 
     #[error("history candle confirm value '{0}' is invalid")]
     InvalidConfirm(String),
+
+    #[error("history row instrument mismatch: expected '{expected}', got '{actual}'")]
+    InstrumentMismatch { expected: String, actual: String },
+
+    #[error("history contains duplicate trade id '{0}'")]
+    DuplicateTradeId(String),
+
+    #[error("trade side '{0}' is invalid")]
+    InvalidTradeSide(String),
+
+    #[error("history contains duplicate funding timestamp '{0}'")]
+    DuplicateFundingTimestamp(String),
+
+    #[error("funding history is not applicable to instrument '{0}'")]
+    FundingNotApplicable(String),
 
     #[error("failed to serialize normalized market history: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -181,6 +258,218 @@ impl MarketHistorySnapshot {
     }
 }
 
+
+impl MarketTradesSnapshot {
+    pub fn from_public(
+        reference: &ReferenceRegistry,
+        instrument_id: &str,
+        requested_limit: u16,
+        source_received_at: impl Into<String>,
+        rows: Vec<PublicTrade>,
+    ) -> Result<Self, MarketHistoryError> {
+        validate_history_request(reference, instrument_id, requested_limit)?;
+        let source_received_at = validate_source_timestamp(source_received_at.into())?;
+        if rows.len() > requested_limit as usize {
+            return Err(MarketHistoryError::TooManyRows);
+        }
+
+        let mut trade_ids = BTreeSet::new();
+        let mut normalized = Vec::with_capacity(rows.len());
+        for row in rows {
+            if row.instrument_id != instrument_id {
+                return Err(MarketHistoryError::InstrumentMismatch {
+                    expected: instrument_id.to_owned(),
+                    actual: row.instrument_id,
+                });
+            }
+            if !trade_ids.insert(row.trade_id.clone()) {
+                return Err(MarketHistoryError::DuplicateTradeId(row.trade_id));
+            }
+            let timestamp = row
+                .timestamp_ms
+                .parse::<u64>()
+                .map_err(|_| MarketHistoryError::InvalidTimestamp(row.timestamp_ms.clone()))?;
+            let side = match row.side.as_str() {
+                "buy" => MarketTradeSide::Buy,
+                "sell" => MarketTradeSide::Sell,
+                _ => return Err(MarketHistoryError::InvalidTradeSide(row.side)),
+            };
+            normalized.push((
+                timestamp,
+                MarketTrade {
+                    trade_id: required("tradeId", row.trade_id)?,
+                    price: required("px", row.price)?,
+                    size_contracts: required("sz", row.size)?,
+                    side,
+                    source: optional_text(row.source),
+                    exchange_timestamp_ms: required("ts", row.timestamp_ms)?,
+                },
+            ));
+        }
+        normalized.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.trade_id.cmp(&right.1.trade_id))
+        });
+        let trades = normalized
+            .into_iter()
+            .map(|(_, trade)| trade)
+            .collect::<Vec<_>>();
+
+        let mut snapshot = Self {
+            schema: MARKET_TRADES_SCHEMA_V1.to_owned(),
+            instrument_id: instrument_id.to_owned(),
+            requested_limit,
+            reference_generation: reference.generation().as_str().to_owned(),
+            source: MARKET_TRADES_SOURCE_V1.to_owned(),
+            source_received_at,
+            trades_generation: String::new(),
+            oldest_exchange_timestamp_ms: trades
+                .first()
+                .map(|trade| trade.exchange_timestamp_ms.clone()),
+            newest_exchange_timestamp_ms: trades
+                .last()
+                .map(|trade| trade.exchange_timestamp_ms.clone()),
+            trades,
+        };
+        snapshot.trades_generation = trades_generation_for(&snapshot)?;
+        Ok(snapshot)
+    }
+}
+
+impl FundingHistorySnapshot {
+    pub fn from_public(
+        reference: &ReferenceRegistry,
+        instrument_id: &str,
+        requested_limit: u16,
+        source_received_at: impl Into<String>,
+        rows: Vec<PublicFundingHistory>,
+    ) -> Result<Self, MarketHistoryError> {
+        validate_history_request(reference, instrument_id, requested_limit)?;
+        let instrument = reference
+            .get(instrument_id)
+            .ok_or_else(|| MarketHistoryError::InstrumentNotFound(instrument_id.to_owned()))?;
+        if instrument.funding_requirement != FundingRequirement::Required {
+            return Err(MarketHistoryError::FundingNotApplicable(
+                instrument_id.to_owned(),
+            ));
+        }
+        let source_received_at = validate_source_timestamp(source_received_at.into())?;
+        if rows.len() > requested_limit as usize {
+            return Err(MarketHistoryError::TooManyRows);
+        }
+
+        let mut timestamps = BTreeSet::new();
+        let mut normalized = Vec::with_capacity(rows.len());
+        for row in rows {
+            if row.instrument_id != instrument_id {
+                return Err(MarketHistoryError::InstrumentMismatch {
+                    expected: instrument_id.to_owned(),
+                    actual: row.instrument_id,
+                });
+            }
+            let timestamp = row
+                .funding_time_ms
+                .parse::<u64>()
+                .map_err(|_| MarketHistoryError::InvalidTimestamp(row.funding_time_ms.clone()))?;
+            if !timestamps.insert(timestamp) {
+                return Err(MarketHistoryError::DuplicateFundingTimestamp(
+                    row.funding_time_ms,
+                ));
+            }
+            normalized.push((
+                timestamp,
+                FundingHistoryEvent {
+                    funding_time_ms: required("fundingTime", row.funding_time_ms)?,
+                    funding_rate: required("fundingRate", row.funding_rate)?,
+                    realized_rate: optional_text(row.realized_rate),
+                    formula_type: optional_text(row.formula_type),
+                    method: optional_text(row.method),
+                },
+            ));
+        }
+        normalized.sort_by_key(|(timestamp, _)| *timestamp);
+        let events = normalized
+            .into_iter()
+            .map(|(_, event)| event)
+            .collect::<Vec<_>>();
+
+        let mut snapshot = Self {
+            schema: FUNDING_HISTORY_SCHEMA_V1.to_owned(),
+            instrument_id: instrument_id.to_owned(),
+            requested_limit,
+            reference_generation: reference.generation().as_str().to_owned(),
+            source: FUNDING_HISTORY_SOURCE_V1.to_owned(),
+            source_received_at,
+            funding_generation: String::new(),
+            oldest_funding_time_ms: events
+                .first()
+                .map(|event| event.funding_time_ms.clone()),
+            newest_funding_time_ms: events
+                .last()
+                .map(|event| event.funding_time_ms.clone()),
+            events,
+        };
+        snapshot.funding_generation = funding_generation_for(&snapshot)?;
+        Ok(snapshot)
+    }
+}
+
+fn validate_history_request(
+    reference: &ReferenceRegistry,
+    instrument_id: &str,
+    requested_limit: u16,
+) -> Result<(), MarketHistoryError> {
+    if !(1..=100).contains(&requested_limit) {
+        return Err(MarketHistoryError::InvalidLimit);
+    }
+    let instrument = reference
+        .get(instrument_id)
+        .ok_or_else(|| MarketHistoryError::InstrumentNotFound(instrument_id.to_owned()))?;
+    if instrument.state != "live" {
+        return Err(MarketHistoryError::InstrumentNotLive(
+            instrument_id.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_source_timestamp(value: String) -> Result<String, MarketHistoryError> {
+    if value.trim().is_empty() {
+        Err(MarketHistoryError::EmptySourceTimestamp)
+    } else {
+        Ok(value)
+    }
+}
+
+fn trades_generation_for(snapshot: &MarketTradesSnapshot) -> Result<String, MarketHistoryError> {
+    let encoded = serde_json::to_vec(&(
+        MARKET_TRADES_SCHEMA_V1,
+        &snapshot.instrument_id,
+        snapshot.requested_limit,
+        &snapshot.reference_generation,
+        MARKET_TRADES_SOURCE_V1,
+        &snapshot.trades,
+    ))?;
+    let digest = Sha256::digest(encoded);
+    Ok(format!("sha256:{digest:x}"))
+}
+
+fn funding_generation_for(
+    snapshot: &FundingHistorySnapshot,
+) -> Result<String, MarketHistoryError> {
+    let encoded = serde_json::to_vec(&(
+        FUNDING_HISTORY_SCHEMA_V1,
+        &snapshot.instrument_id,
+        snapshot.requested_limit,
+        &snapshot.reference_generation,
+        FUNDING_HISTORY_SOURCE_V1,
+        &snapshot.events,
+    ))?;
+    let digest = Sha256::digest(encoded);
+    Ok(format!("sha256:{digest:x}"))
+}
+
 fn required(field: &'static str, value: String) -> Result<String, MarketHistoryError> {
     if value.trim().is_empty() {
         Err(MarketHistoryError::MissingField(field))
@@ -191,6 +480,10 @@ fn required(field: &'static str, value: String) -> Result<String, MarketHistoryE
 
 fn optional(value: Option<String>) -> Option<String> {
     value.and_then(|value| (!value.trim().is_empty()).then_some(value))
+}
+
+fn optional_text(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
 }
 
 fn generation_for(snapshot: &MarketHistorySnapshot) -> Result<String, MarketHistoryError> {
@@ -221,7 +514,7 @@ fn generation_for(snapshot: &MarketHistorySnapshot) -> Result<String, MarketHist
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_api::PublicInstrument;
+    use okx_api::{PublicFundingHistory, PublicInstrument, PublicTrade};
 
     fn reference() -> ReferenceRegistry {
         ReferenceRegistry::from_public(
@@ -271,6 +564,115 @@ mod tests {
             volume_quote: Some("12.5".to_owned()),
             confirm: confirm.to_owned(),
         }
+    }
+
+    #[test]
+    fn trades_are_chronological_content_addressed_and_typed() {
+        let rows = vec![
+            PublicTrade {
+                instrument_id: "DOGE-USDT-SWAP".to_owned(),
+                trade_id: "2".to_owned(),
+                price: "0.126".to_owned(),
+                size: "5".to_owned(),
+                side: "sell".to_owned(),
+                source: "0".to_owned(),
+                timestamp_ms: "1790470800000".to_owned(),
+            },
+            PublicTrade {
+                instrument_id: "DOGE-USDT-SWAP".to_owned(),
+                trade_id: "1".to_owned(),
+                price: "0.125".to_owned(),
+                size: "7".to_owned(),
+                side: "buy".to_owned(),
+                source: "0".to_owned(),
+                timestamp_ms: "1790467200000".to_owned(),
+            },
+        ];
+
+        let first = MarketTradesSnapshot::from_public(
+            &reference(),
+            "DOGE-USDT-SWAP",
+            2,
+            "2026-09-27T14:00:00Z",
+            rows.clone(),
+        )
+        .expect("trades");
+        let second = MarketTradesSnapshot::from_public(
+            &reference(),
+            "DOGE-USDT-SWAP",
+            2,
+            "2026-09-27T14:01:00Z",
+            rows,
+        )
+        .expect("trades");
+
+        assert_eq!(first.trades[0].trade_id, "1");
+        assert_eq!(first.trades[0].side, MarketTradeSide::Buy);
+        assert_eq!(first.trades[1].side, MarketTradeSide::Sell);
+        assert_eq!(first.trades_generation, second.trades_generation);
+        assert_ne!(first.source_received_at, second.source_received_at);
+    }
+
+    #[test]
+    fn funding_history_is_chronological_and_preserves_realized_rate() {
+        let rows = vec![
+            PublicFundingHistory {
+                instrument_type: "SWAP".to_owned(),
+                instrument_id: "DOGE-USDT-SWAP".to_owned(),
+                funding_rate: "-0.0002".to_owned(),
+                funding_time_ms: "1790470800000".to_owned(),
+                realized_rate: "-0.00019".to_owned(),
+                formula_type: "withRate".to_owned(),
+                method: "current_period".to_owned(),
+            },
+            PublicFundingHistory {
+                instrument_type: "SWAP".to_owned(),
+                instrument_id: "DOGE-USDT-SWAP".to_owned(),
+                funding_rate: "0.0001".to_owned(),
+                funding_time_ms: "1790467200000".to_owned(),
+                realized_rate: "0.00011".to_owned(),
+                formula_type: "withRate".to_owned(),
+                method: "current_period".to_owned(),
+            },
+        ];
+
+        let snapshot = FundingHistorySnapshot::from_public(
+            &reference(),
+            "DOGE-USDT-SWAP",
+            2,
+            "2026-09-27T14:00:00Z",
+            rows,
+        )
+        .expect("funding");
+
+        assert_eq!(snapshot.events[0].funding_time_ms, "1790467200000");
+        assert_eq!(snapshot.events[0].realized_rate.as_deref(), Some("0.00011"));
+        assert_eq!(snapshot.events[1].realized_rate.as_deref(), Some("-0.00019"));
+    }
+
+    #[test]
+    fn empty_trade_and_funding_windows_are_explicit_evidence() {
+        let trades = MarketTradesSnapshot::from_public(
+            &reference(),
+            "DOGE-USDT-SWAP",
+            10,
+            "2026-09-27T14:00:00Z",
+            Vec::new(),
+        )
+        .expect("trades");
+        let funding = FundingHistorySnapshot::from_public(
+            &reference(),
+            "DOGE-USDT-SWAP",
+            10,
+            "2026-09-27T14:00:00Z",
+            Vec::new(),
+        )
+        .expect("funding");
+
+        assert!(trades.trades.is_empty());
+        assert_eq!(trades.oldest_exchange_timestamp_ms, None);
+        assert!(funding.events.is_empty());
+        assert_eq!(funding.newest_funding_time_ms, None);
     }
 
     #[test]
