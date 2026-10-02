@@ -547,11 +547,11 @@ Stage 2 status:
 - bounded universal analytical query: ACCEPTED;
 - live microstructure core: ACCEPTED;
 - derivatives/history intelligence: ACCEPTED;
-- portfolio mandate/hard-policy implementation: MERGED + DEPLOYED from PR #184, but primary capability T4 remains OPEN until `portfolio_risk` itself is callable through the connected Cloudflare MCP surface;
-- after primary T4, close identified risk correctness edges, then covariance/correlation + scenario/stress, then bind the same versioned hard policy into fresh pre-mutation revalidation inside the existing execution owner;
+- portfolio mandate/hard-policy primary T4: ACCEPTED through the connected Cloudflare MCP surface with one permissive FRESH/coherent/oracle-consistent case and one intentional typed policy rejection; GitHub fallback was not used as a substitute;
+- current cursor: close identified risk correctness edges, then covariance/correlation + scenario/stress, then bind the same versioned hard policy into fresh pre-mutation revalidation inside the existing execution owner;
 - production live trading remains disabled.
 
-Primary Cloudflare MCP is currently healthy on Worker contract `okx.mcp.tools/2026-10-03.1`; `account_summary` is callable/FRESH. A healthy runtime or newer Worker contract does not substitute for missing `portfolio_risk` exposure in the connected ChatGPT tool schema. GitHub DATA remains fallback/parity only.
+Primary Cloudflare MCP is currently healthy on Worker contract `okx.mcp.tools/2026-10-03.1`; `account_summary` and `portfolio_risk` are callable. PortfolioRisk primary T4 is accepted; GitHub DATA remains fallback/parity only.
 
 ## Non-goals
 
