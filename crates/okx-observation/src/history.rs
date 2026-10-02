@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use okx_api::{PublicCandle, PublicFundingHistory, PublicTrade};
+use okx_api::{PublicCandle, PublicFundingHistory, PublicOpenInterestHistory, PublicTrade};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -13,6 +13,8 @@ pub const MARKET_TRADES_SCHEMA_V1: &str = "okx.market-trades/v1";
 pub const MARKET_TRADES_SOURCE_V1: &str = "okx_public_rest_trades";
 pub const FUNDING_HISTORY_SCHEMA_V1: &str = "okx.funding-history/v1";
 pub const FUNDING_HISTORY_SOURCE_V1: &str = "okx_public_rest_funding_history";
+pub const OPEN_INTEREST_HISTORY_SCHEMA_V1: &str = "okx.open-interest-history/v1";
+pub const OPEN_INTEREST_HISTORY_SOURCE_V1: &str = "okx_public_rest_contract_oi_history";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +105,30 @@ pub struct FundingHistorySnapshot {
     pub events: Vec<FundingHistoryEvent>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenInterestHistoryPoint {
+    pub timestamp_ms: String,
+    pub open_interest_contracts: String,
+    pub open_interest_currency: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenInterestHistorySnapshot {
+    pub schema: String,
+    pub instrument_id: String,
+    pub period: String,
+    pub requested_limit: u16,
+    pub reference_generation: String,
+    pub source: String,
+    pub source_received_at: String,
+    pub open_interest_generation: String,
+    pub oldest_timestamp_ms: Option<String>,
+    pub newest_timestamp_ms: Option<String>,
+    pub points: Vec<OpenInterestHistoryPoint>,
+}
+
 #[derive(Debug, Error)]
 pub enum MarketHistoryError {
     #[error("history source receive timestamp is empty")]
@@ -146,6 +172,9 @@ pub enum MarketHistoryError {
 
     #[error("history contains duplicate funding timestamp '{0}'")]
     DuplicateFundingTimestamp(String),
+
+    #[error("history contains duplicate open-interest timestamp '{0}'")]
+    DuplicateOpenInterestTimestamp(String),
 
     #[error("funding history is not applicable to instrument '{0}'")]
     FundingNotApplicable(String),
@@ -254,6 +283,64 @@ impl MarketHistorySnapshot {
             candles,
         };
         snapshot.history_generation = generation_for(&snapshot)?;
+        Ok(snapshot)
+    }
+}
+
+impl OpenInterestHistorySnapshot {
+    pub fn from_public(
+        reference: &ReferenceRegistry,
+        instrument_id: &str,
+        period: &str,
+        requested_limit: u16,
+        source_received_at: impl Into<String>,
+        rows: Vec<PublicOpenInterestHistory>,
+    ) -> Result<Self, MarketHistoryError> {
+        validate_history_request(reference, instrument_id, requested_limit)?;
+        let source_received_at = validate_source_timestamp(source_received_at.into())?;
+        if rows.len() > requested_limit as usize {
+            return Err(MarketHistoryError::TooManyRows);
+        }
+
+        let mut timestamps = BTreeSet::new();
+        let mut normalized = Vec::with_capacity(rows.len());
+        for row in rows {
+            let timestamp = row
+                .ts
+                .parse::<u64>()
+                .map_err(|_| MarketHistoryError::InvalidTimestamp(row.ts.clone()))?;
+            if !timestamps.insert(timestamp) {
+                return Err(MarketHistoryError::DuplicateOpenInterestTimestamp(row.ts));
+            }
+            normalized.push((
+                timestamp,
+                OpenInterestHistoryPoint {
+                    timestamp_ms: required("ts", row.ts)?,
+                    open_interest_contracts: required("oi", row.oi)?,
+                    open_interest_currency: required("oiCcy", row.oi_currency)?,
+                },
+            ));
+        }
+        normalized.sort_by_key(|(timestamp, _)| *timestamp);
+        let points = normalized
+            .into_iter()
+            .map(|(_, point)| point)
+            .collect::<Vec<_>>();
+
+        let mut snapshot = Self {
+            schema: OPEN_INTEREST_HISTORY_SCHEMA_V1.to_owned(),
+            instrument_id: instrument_id.to_owned(),
+            period: period.to_owned(),
+            requested_limit,
+            reference_generation: reference.generation().as_str().to_owned(),
+            source: OPEN_INTEREST_HISTORY_SOURCE_V1.to_owned(),
+            source_received_at,
+            open_interest_generation: String::new(),
+            oldest_timestamp_ms: points.first().map(|point| point.timestamp_ms.clone()),
+            newest_timestamp_ms: points.last().map(|point| point.timestamp_ms.clone()),
+            points,
+        };
+        snapshot.open_interest_generation = open_interest_generation_for(&snapshot)?;
         Ok(snapshot)
     }
 }
@@ -437,6 +524,22 @@ fn validate_source_timestamp(value: String) -> Result<String, MarketHistoryError
     }
 }
 
+fn open_interest_generation_for(
+    snapshot: &OpenInterestHistorySnapshot,
+) -> Result<String, MarketHistoryError> {
+    let encoded = serde_json::to_vec(&(
+        OPEN_INTEREST_HISTORY_SCHEMA_V1,
+        &snapshot.instrument_id,
+        &snapshot.period,
+        snapshot.requested_limit,
+        &snapshot.reference_generation,
+        OPEN_INTEREST_HISTORY_SOURCE_V1,
+        &snapshot.points,
+    ))?;
+    let digest = Sha256::digest(encoded);
+    Ok(format!("sha256:{digest:x}"))
+}
+
 fn trades_generation_for(snapshot: &MarketTradesSnapshot) -> Result<String, MarketHistoryError> {
     let encoded = serde_json::to_vec(&(
         MARKET_TRADES_SCHEMA_V1,
@@ -507,7 +610,9 @@ fn generation_for(snapshot: &MarketHistorySnapshot) -> Result<String, MarketHist
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_api::{PublicFundingHistory, PublicInstrument, PublicTrade};
+    use okx_api::{
+        PublicFundingHistory, PublicInstrument, PublicOpenInterestHistory, PublicTrade,
+    };
 
     fn reference() -> ReferenceRegistry {
         ReferenceRegistry::from_public(
@@ -557,6 +662,49 @@ mod tests {
             volume_quote: Some("12.5".to_owned()),
             confirm: confirm.to_owned(),
         }
+    }
+
+    #[test]
+    fn open_interest_history_is_chronological_and_content_addressed() {
+        let rows = vec![
+            PublicOpenInterestHistory {
+                oi: "120".to_owned(),
+                oi_currency: "12".to_owned(),
+                ts: "1790470800000".to_owned(),
+            },
+            PublicOpenInterestHistory {
+                oi: "100".to_owned(),
+                oi_currency: "10".to_owned(),
+                ts: "1790467200000".to_owned(),
+            },
+        ];
+
+        let first = OpenInterestHistorySnapshot::from_public(
+            &reference(),
+            "DOGE-USDT-SWAP",
+            "1H",
+            2,
+            "2026-09-27T14:00:00Z",
+            rows.clone(),
+        )
+        .expect("oi history");
+        let second = OpenInterestHistorySnapshot::from_public(
+            &reference(),
+            "DOGE-USDT-SWAP",
+            "1H",
+            2,
+            "2026-09-27T14:01:00Z",
+            rows,
+        )
+        .expect("oi history");
+
+        assert_eq!(first.points[0].open_interest_contracts, "100");
+        assert_eq!(first.points[1].open_interest_contracts, "120");
+        assert_eq!(
+            first.open_interest_generation,
+            second.open_interest_generation
+        );
+        assert_ne!(first.source_received_at, second.source_received_at);
     }
 
     #[test]
