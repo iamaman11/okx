@@ -49,7 +49,8 @@ pub use statistics::{
     PORTFOLIO_STATISTICS_SCHEMA_V1, PORTFOLIO_VOLATILITY_FORMULA_V1,
     SAMPLE_COVARIANCE_FORMULA_V1, CovarianceCell, HistoricalStressResult,
     ParallelScenarioResult, PortfolioStatisticsAnalysis, PortfolioStatisticsStatus,
-    StatisticalExposure, VolatilityContribution, analyze_portfolio_statistics,
+    StatisticalExposure, StatisticalHistoryEvidence, VolatilityContribution,
+    analyze_portfolio_statistics,
     covariance_correlation, decimal_sqrt, sample_covariance_matrix,
 };
 
