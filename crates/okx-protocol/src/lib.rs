@@ -163,22 +163,28 @@ pub enum QueryField {
     SettleCurrency,
     State,
     Last,
+    #[serde(rename = "open_24h")]
     Open24h,
+    #[serde(rename = "volume_24h")]
     Volume24h,
+    #[serde(rename = "volume_currency_24h")]
     VolumeCurrency24h,
     ExchangeTimestampMs,
+    #[serde(rename = "return_24h_pct")]
     Return24hPct,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryMetric {
+    #[serde(rename = "return_24h_pct")]
     Return24hPct,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuerySortKey {
+    #[serde(rename = "return_24h_pct")]
     Return24hPct,
 }
 
@@ -1129,6 +1135,49 @@ mod tests {
                 "return_24h_pct metric must be declared"
             ))
         ));
+    }
+
+    #[test]
+    fn analytical_query_json_contract_matches_mcp_field_ids_exactly() {
+        let json = r#"{
+            "schema":"okx.agent.request/v1",
+            "request_id":"req_query_json_contract_0001",
+            "operation":{
+                "type":"query",
+                "plan":{
+                    "catalog_version":"okx.query.catalog/2026-10-02.1",
+                    "universe":{
+                        "instrument_types":["SWAP","FUTURES"],
+                        "settle_currency":null,
+                        "state":"live"
+                    },
+                    "select":[
+                        "instrument_id",
+                        "open_24h",
+                        "volume_24h",
+                        "volume_currency_24h",
+                        "return_24h_pct"
+                    ],
+                    "metric":"return_24h_pct",
+                    "sort":{"key":"return_24h_pct","direction":"desc"},
+                    "limit":10
+                }
+            }
+        }"#;
+
+        let request: AgentRequest =
+            serde_json::from_str(json).expect("MCP query contract must deserialize");
+        request
+            .validate()
+            .expect("MCP query contract must validate");
+
+        let encoded = serde_json::to_string(&request).expect("serialize query contract");
+        assert!(encoded.contains(r#""open_24h""#));
+        assert!(encoded.contains(r#""volume_24h""#));
+        assert!(encoded.contains(r#""volume_currency_24h""#));
+        assert!(encoded.contains(r#""return_24h_pct""#));
+        assert!(!encoded.contains(r#""open24h""#));
+        assert!(!encoded.contains(r#""return24h_pct""#));
     }
 
     #[test]
