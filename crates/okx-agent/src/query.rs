@@ -1,11 +1,13 @@
 use chrono::Utc;
 use okx_analysis::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
-    COST_ANALYSIS_SCHEMA_V1, CandidateOrderAssumptions, HISTORY_BEHAVIOR_SCHEMA_V1,
-    LiquidityRole as AnalysisLiquidityRole, MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
+    COST_ANALYSIS_SCHEMA_V1, CandidateOrderAssumptions, DATED_FUTURE_BASIS_SCHEMA_V1,
+    HISTORY_BEHAVIOR_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
+    MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
     POSITION_SCENARIO_SCHEMA_V1, PositionDirection, PositionScenarioAssumptions,
     ScenarioExitAssumption, analyze_account_risk, analyze_candidate_order, analyze_cost,
-    analyze_history_behavior, analyze_market_intelligence, analyze_position_scenario,
+    analyze_dated_future_basis, analyze_history_behavior, analyze_market_intelligence,
+    analyze_position_scenario,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
@@ -65,7 +67,7 @@ pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT"
 pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
 pub const MARKET_INTELLIGENCE_SCHEMA_V1: &str = "okx.market-intelligence/v1";
-pub const MARKET_RESEARCH_SCHEMA_V2: &str = "okx.market-research/v2";
+pub const MARKET_RESEARCH_SCHEMA_V3: &str = "okx.market-research/v3";
 
 const REFERENCE_BOOTSTRAP_WARNING: &str =
     "reference data is REST-bootstrap only; live instruments continuity is not connected until M3";
