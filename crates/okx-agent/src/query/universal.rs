@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use okx_analysis::{
-    RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT,
-    Return24hPct, analyze_return_24h_pct,
+    RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT, Return24hPct,
+    analyze_return_24h_pct,
 };
 use okx_api::InstrumentType;
 use okx_observation::{InstrumentSpec, MarketUniverseTicker, ReferenceRegistry};
@@ -496,7 +496,11 @@ fn project_row(candidate: Candidate, fields: &[QueryField]) -> QueryEvidenceRow 
             QueryField::Last => {
                 values.insert(
                     "last",
-                    candidate.ticker.last.clone().expect("selected field validated"),
+                    candidate
+                        .ticker
+                        .last
+                        .clone()
+                        .expect("selected field validated"),
                 );
             }
             QueryField::Open24h => {
@@ -724,6 +728,11 @@ mod tests {
         )
         .expect("result");
         assert_eq!(result.universe_total, 3);
-        assert!(result.rows.iter().all(|row| row.instrument_id != "DDD-USDC-SWAP"));
+        assert!(
+            result
+                .rows
+                .iter()
+                .all(|row| row.instrument_id != "DDD-USDC-SWAP")
+        );
     }
 }
