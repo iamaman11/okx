@@ -493,6 +493,7 @@ fn public_rest_policy(path: &str, _params: &[(&str, String)]) -> (u32, u64, Opti
         "/api/v5/public/time" => (5, 2_000),
         "/api/v5/public/instruments" => (10, 2_000),
         "/api/v5/market/ticker" => (10, 2_000),
+        "/api/v5/market/tickers" => (20, 2_000),
         "/api/v5/public/mark-price" => (10, 2_000),
         "/api/v5/market/index-tickers" => (10, 2_000),
         "/api/v5/public/funding-rate" => (10, 2_000),
