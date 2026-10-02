@@ -1626,9 +1626,6 @@ mod tests {
     #[test]
     fn diagnostics_are_structured_and_bounded() {
         let diagnostics = research_diagnostics("rest_fallback", &[String::from("detail")]);
-        assert_eq!(
-            diagnostics,
-            vec!["REST_FALLBACK", "UNCONFIRMED_CANDLE"]
-        );
+        assert_eq!(diagnostics, vec!["REST_FALLBACK", "UNCONFIRMED_CANDLE"]);
     }
 }
