@@ -409,7 +409,8 @@ mod tests {
     #[test]
     fn microstructure_computes_depth_basis_and_symmetric_sweeps() {
         let result =
-            analyze_market_intelligence("AAA-USDT-SWAP", "ref-1", &market(), &book(), "3", 2).expect("analysis");
+            analyze_market_intelligence("AAA-USDT-SWAP", "ref-1", &market(), &book(), "3", 2)
+                .expect("analysis");
 
         assert_eq!(result.best_bid, "100");
         assert_eq!(result.best_ask, "101");
@@ -426,7 +427,8 @@ mod tests {
     #[test]
     fn insufficient_depth_is_evidence_not_an_analysis_failure() {
         let result =
-            analyze_market_intelligence("AAA-USDT-SWAP", "ref-1", &market(), &book(), "10", 2).expect("analysis");
+            analyze_market_intelligence("AAA-USDT-SWAP", "ref-1", &market(), &book(), "10", 2)
+                .expect("analysis");
         assert!(!result.buy_sweep.complete);
         assert_eq!(result.buy_sweep.filled_contracts, "5");
         assert!(!result.sell_sweep.complete);
