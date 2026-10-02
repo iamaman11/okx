@@ -456,7 +456,7 @@ impl AgentOperation {
                 depth_levels,
             } => {
                 validate_instrument(instrument)?;
-                validate_decimal_text(impact_contracts, "impact_contracts")?;
+                validate_positive_decimal_text(impact_contracts, "impact_contracts")?;
                 if !(1..=50).contains(depth_levels) {
                     return Err(ProtocolError::InvalidAnalyticalQuery("depth_levels"));
                 }
@@ -1078,6 +1078,44 @@ fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
+fn validate_positive_decimal_text(
+    value: &str,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    if value.is_empty() || value.len() > 64 {
+        return Err(ProtocolError::InvalidDecimalInput(field));
+    }
+
+    let mut dots = 0usize;
+    let mut digits = 0usize;
+    let mut non_zero_digits = 0usize;
+    let bytes = value.as_bytes();
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match byte {
+            b'0'..=b'9' => {
+                digits += 1;
+                if byte != b'0' {
+                    non_zero_digits += 1;
+                }
+            }
+            b'.'
+                if dots == 0
+                    && index > 0
+                    && index + 1 < bytes.len() =>
+            {
+                dots += 1;
+            }
+            _ => return Err(ProtocolError::InvalidDecimalInput(field)),
+        }
+    }
+
+    if digits == 0 || non_zero_digits == 0 {
+        return Err(ProtocolError::InvalidDecimalInput(field));
+    }
+
+    Ok(())
+}
+
 fn validate_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
     if value.is_empty() || value.len() > 64 {
         return Err(ProtocolError::InvalidDecimalInput(field));
@@ -1277,6 +1315,18 @@ mod tests {
             too_deep.validate(),
             Err(ProtocolError::InvalidAnalyticalQuery("depth_levels"))
         ));
+
+        for invalid_impact in ["0", "0.0", "-1", "+1", "1.", ".1"] {
+            let invalid = AgentOperation::MarketIntelligence {
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                impact_contracts: invalid_impact.to_owned(),
+                depth_levels: 20,
+            };
+            assert!(matches!(
+                invalid.validate(),
+                Err(ProtocolError::InvalidDecimalInput("impact_contracts"))
+            ));
+        }
     }
 
     #[test]
