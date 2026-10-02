@@ -433,27 +433,27 @@ fn market_research_coherence(
             received_ms: trades_received,
         });
     }
-    if let Some(funding) = funding {
-        if let Some(value) = funding.newest_funding_time_ms.as_deref() {
-            stamps.push(EvidenceStamp {
-                effective_ms: parse_exchange_timestamp("funding_history", value)?,
-                received_ms: parse_receive_timestamp(
-                    "funding_history",
-                    &funding.source_received_at,
-                )?,
-            });
-        }
+    if let Some(funding) = funding
+        && let Some(value) = funding.newest_funding_time_ms.as_deref()
+    {
+        stamps.push(EvidenceStamp {
+            effective_ms: parse_exchange_timestamp("funding_history", value)?,
+            received_ms: parse_receive_timestamp(
+                "funding_history",
+                &funding.source_received_at,
+            )?,
+        });
     }
-    if let Some(open_interest) = open_interest {
-        if let Some(value) = open_interest.newest_timestamp_ms.as_deref() {
-            stamps.push(EvidenceStamp {
-                effective_ms: parse_exchange_timestamp("open_interest_history", value)?,
-                received_ms: parse_receive_timestamp(
-                    "open_interest_history",
-                    &open_interest.source_received_at,
-                )?,
-            });
-        }
+    if let Some(open_interest) = open_interest
+        && let Some(value) = open_interest.newest_timestamp_ms.as_deref()
+    {
+        stamps.push(EvidenceStamp {
+            effective_ms: parse_exchange_timestamp("open_interest_history", value)?,
+            received_ms: parse_receive_timestamp(
+                "open_interest_history",
+                &open_interest.source_received_at,
+            )?,
+        });
     }
 
     let receive_min = *receive_times
@@ -1433,8 +1433,7 @@ mod tests {
                 term_structure: "term_structure/dated_futures/v1",
             },
             reference_generation:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .to_owned(),
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             instruments: (0..instrument_count).map(fixture).collect(),
             term_structure: Vec::new(),
         };
@@ -1463,24 +1462,14 @@ mod tests {
             received_ms: 300,
         };
 
-        assert_eq!(
-            prefer_newer_effective(accepted, older_but_later),
-            accepted
-        );
-        assert_eq!(
-            prefer_newer_effective(older_but_later, accepted),
-            accepted
-        );
+        assert_eq!(prefer_newer_effective(accepted, older_but_later), accepted);
+        assert_eq!(prefer_newer_effective(older_but_later, accepted), accepted);
     }
 
     #[test]
     fn research_quality_is_worst_of_all_required_inputs() {
         assert_eq!(
-            research_quality(&[
-                DataQuality::Fresh,
-                DataQuality::Fresh,
-                DataQuality::Fresh,
-            ]),
+            research_quality(&[DataQuality::Fresh, DataQuality::Fresh, DataQuality::Fresh,]),
             DataQuality::Fresh
         );
         assert_eq!(
@@ -1492,11 +1481,7 @@ mod tests {
             DataQuality::Degraded
         );
         assert_eq!(
-            research_quality(&[
-                DataQuality::Fresh,
-                DataQuality::Stale,
-                DataQuality::Fresh,
-            ]),
+            research_quality(&[DataQuality::Fresh, DataQuality::Stale, DataQuality::Fresh,]),
             DataQuality::Degraded
         );
     }
