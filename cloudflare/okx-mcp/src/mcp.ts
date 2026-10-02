@@ -330,9 +330,9 @@ export const mcpApi = {
         ) {
           return jsonRpcError(id, -32602, "invalid instrument_types");
         }
-        const instrumentTypes = universe.instrument_types.map((value) => String(value).toUpperCase());
+        const instrumentTypes = universe.instrument_types.map((value: unknown) => String(value).toUpperCase());
         if (
-          instrumentTypes.some((value) => !["SWAP", "FUTURES"].includes(value)) ||
+          instrumentTypes.some((value: string) => !["SWAP", "FUTURES"].includes(value)) ||
           new Set(instrumentTypes).size !== instrumentTypes.length
         ) {
           return jsonRpcError(id, -32602, "invalid instrument_types");
@@ -351,7 +351,7 @@ export const mcpApi = {
           !Array.isArray(plan.select) ||
           plan.select.length < 1 ||
           plan.select.length > 10 ||
-          plan.select.some((field) => typeof field !== "string" || !QUERY_FIELDS.has(field)) ||
+          plan.select.some((field: unknown) => typeof field !== "string" || !QUERY_FIELDS.has(field)) ||
           new Set(plan.select).size !== plan.select.length
         ) {
           return jsonRpcError(id, -32602, "invalid select");
