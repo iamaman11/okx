@@ -725,6 +725,8 @@ mod tests {
             instrument_id: id.to_owned(),
             instrument_type: InstrumentType::Swap,
             last: Some(last.to_owned()),
+            best_bid: Some("100".to_owned()),
+            best_ask: Some("101".to_owned()),
             open_24h: Some(open.to_owned()),
             volume_24h: Some("1000".to_owned()),
             volume_currency_24h: Some("100".to_owned()),
@@ -795,6 +797,8 @@ mod tests {
                     instrument_id: id,
                     instrument_type: InstrumentType::Swap,
                     last: Some("1234567890.1234567890123456".to_owned()),
+                    best_bid: Some("1234567890.0".to_owned()),
+                    best_ask: Some("1234567890.1".to_owned()),
                     open_24h: Some("1234567880.1234567890123456".to_owned()),
                     volume_24h: Some("9876543210.1234567890123456".to_owned()),
                     volume_currency_24h: Some("8765432109.1234567890123456".to_owned()),
@@ -805,6 +809,8 @@ mod tests {
                     instrument_id: id,
                     instrument_type: InstrumentType::Swap,
                     last: None,
+                    best_bid: Some("1234567890.0".to_owned()),
+                    best_ask: Some("1234567890.1".to_owned()),
                     open_24h: Some("1234567880.1234567890123456".to_owned()),
                     volume_24h: Some("9876543210.1234567890123456".to_owned()),
                     volume_currency_24h: Some("8765432109.1234567890123456".to_owned()),
@@ -869,6 +875,47 @@ mod tests {
             "max bounded query response is {} bytes",
             encoded.len()
         );
+    }
+
+    #[test]
+    fn spread_ranking_uses_bulk_bid_ask_without_new_market_demand() {
+        let mut spread_plan = plan(3, QuerySortDirection::Asc);
+        spread_plan.select = vec![
+            QueryField::InstrumentId,
+            QueryField::BestBid,
+            QueryField::BestAsk,
+            QueryField::SpreadBps,
+        ];
+        spread_plan.metric = Some(QueryMetric::SpreadBps);
+        spread_plan.sort = Some(okx_protocol::QuerySort {
+            key: okx_protocol::QuerySortKey::SpreadBps,
+            direction: QuerySortDirection::Asc,
+        });
+
+        let mut a = ticker("AAA-USDT-SWAP", "100", "99", "1001");
+        a.best_bid = Some("100".to_owned());
+        a.best_ask = Some("100.1".to_owned());
+        let mut b = ticker("BBB-USDT-SWAP", "100", "99", "1002");
+        b.best_bid = Some("100".to_owned());
+        b.best_ask = Some("101".to_owned());
+        let mut c = ticker("CCC-USDT-SWAP", "100", "99", "1003");
+        c.best_bid = Some("100".to_owned());
+        c.best_ask = Some("100.5".to_owned());
+
+        let result = evaluate_market_query(
+            &reference(),
+            vec![b, c, a],
+            &spread_plan,
+            "2026-10-02T10:00:01.000Z",
+        )
+        .expect("spread query");
+
+        assert_eq!(result.rows[0].instrument_id, "AAA-USDT-SWAP");
+        assert_eq!(result.rows[1].instrument_id, "CCC-USDT-SWAP");
+        assert_eq!(result.rows[2].instrument_id, "BBB-USDT-SWAP");
+        assert_eq!(result.coherence.bulk_request_count, 1);
+        assert!(!result.coherence.full_universe_ws_subscription_used);
+        assert_eq!(result.metric_versions[0].id, SPREAD_BPS_METRIC_ID);
     }
 
     #[test]
