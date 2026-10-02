@@ -20,6 +20,7 @@ struct MarketResearchInstrumentResult {
     instrument_id: String,
     mechanics: MarketResearchMechanics,
     market: MarketResearchMarket,
+    microstructure: MarketResearchMicrostructure,
     behavior: MarketResearchBehavior,
     provenance: MarketResearchProvenance,
     quality: MarketResearchQuality,
@@ -50,12 +51,29 @@ struct MarketResearchMarket {
 }
 
 #[derive(serde::Serialize)]
+struct MarketResearchMicrostructure {
+    formula_version: &'static str,
+    spread_quote: String,
+    relative_spread_ratio: String,
+    mid_price: String,
+    microprice: Option<String>,
+    best_level_imbalance_ratio: Option<String>,
+    mark_index_basis_ratio: String,
+    top5_bid_size_contracts: Option<String>,
+    top5_ask_size_contracts: Option<String>,
+    top5_depth_imbalance_ratio: Option<String>,
+}
+
+#[derive(serde::Serialize)]
 struct MarketResearchBehavior {
     confirmed_count: usize,
     total_close_return_ratio: String,
     mean_absolute_close_return_ratio: String,
     max_absolute_close_return_ratio: String,
     max_close_drawdown_ratio: String,
+    realized_volatility_formula_version: &'static str,
+    realized_volatility_return_count: usize,
+    realized_volatility_log_return_ratio: String,
 }
 
 #[derive(serde::Serialize)]
@@ -63,8 +81,16 @@ struct MarketResearchProvenance {
     market_generation: String,
     market_received_at: String,
     history_generation: String,
+    history_received_at: String,
+    history_source: String,
     history_oldest_confirmed_open_time_ms: String,
     history_newest_confirmed_open_time_ms: String,
+    market_event_min_timestamp_ms: String,
+    market_event_max_timestamp_ms: String,
+    market_event_skew_ms: u64,
+    order_book_generation: Option<u64>,
+    order_book_seq_id: Option<i64>,
+    order_book_exchange_timestamp_ms: Option<String>,
     market_source: &'static str,
 }
 
@@ -91,8 +117,9 @@ fn funding_semantics(requirement: okx_observation::FundingRequirement) -> &'stat
 fn research_diagnostics(
     market_source: &'static str,
     history_warnings: &[String],
+    order_book_available: bool,
 ) -> Vec<MarketResearchDiagnostic> {
-    let mut diagnostics = Vec::with_capacity(2);
+    let mut diagnostics = Vec::with_capacity(3);
     match market_source {
         "rest_fallback" => diagnostics.push(MarketResearchDiagnostic {
             code: "REST_FALLBACK",
@@ -103,6 +130,12 @@ fn research_diagnostics(
             component: "market",
         }),
         _ => {}
+    }
+    if !order_book_available {
+        diagnostics.push(MarketResearchDiagnostic {
+            code: "ORDER_BOOK_DEPTH_UNAVAILABLE",
+            component: "microstructure",
+        });
     }
     if !history_warnings.is_empty() {
         diagnostics.push(MarketResearchDiagnostic {
