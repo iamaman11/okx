@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use okx_observation::{FundingHistorySnapshot, MarketTradeSide, MarketTradesSnapshot};
+use okx_observation::{
+    FundingHistorySnapshot, MarketTradeSide, MarketTradesSnapshot, OpenInterestHistorySnapshot,
+};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -8,6 +10,7 @@ use crate::{AnalysisError, decimal, positive_decimal};
 
 pub const TRADE_FLOW_ANALYSIS_SCHEMA_V1: &str = "okx.trade-flow-analysis/v1";
 pub const FUNDING_REGIME_ANALYSIS_SCHEMA_V1: &str = "okx.funding-regime-analysis/v1";
+pub const OPEN_INTEREST_CHANGE_ANALYSIS_SCHEMA_V1: &str = "okx.open-interest-change-analysis/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TradeFlowAnalysis {
@@ -23,6 +26,21 @@ pub struct TradeFlowAnalysis {
     pub vwap: Option<String>,
     pub buy_vwap: Option<String>,
     pub sell_vwap: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OpenInterestChangeAnalysis {
+    pub schema: String,
+    pub instrument_id: String,
+    pub open_interest_generation: String,
+    pub period: String,
+    pub point_count: usize,
+    pub oldest_timestamp_ms: Option<String>,
+    pub newest_timestamp_ms: Option<String>,
+    pub first_open_interest_contracts: Option<String>,
+    pub last_open_interest_contracts: Option<String>,
+    pub change_contracts: Option<String>,
+    pub change_ratio: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -108,6 +126,49 @@ pub fn analyze_trade_flow(
         vwap,
         buy_vwap,
         sell_vwap,
+    })
+}
+
+pub fn analyze_open_interest_change(
+    history: &OpenInterestHistorySnapshot,
+) -> Result<OpenInterestChangeAnalysis, AnalysisError> {
+    let Some(first) = history.points.first() else {
+        return Ok(OpenInterestChangeAnalysis {
+            schema: OPEN_INTEREST_CHANGE_ANALYSIS_SCHEMA_V1.to_owned(),
+            instrument_id: history.instrument_id.clone(),
+            open_interest_generation: history.open_interest_generation.clone(),
+            period: history.period.clone(),
+            point_count: 0,
+            oldest_timestamp_ms: None,
+            newest_timestamp_ms: None,
+            first_open_interest_contracts: None,
+            last_open_interest_contracts: None,
+            change_contracts: None,
+            change_ratio: None,
+        });
+    };
+    let last = history.points.last().expect("non-empty history");
+    let first_oi = decimal("open_interest_history_oi", &first.open_interest_contracts)?;
+    let last_oi = decimal("open_interest_history_oi", &last.open_interest_contracts)?;
+    if first_oi < Decimal::ZERO || last_oi < Decimal::ZERO {
+        return Err(AnalysisError::Negative("open_interest_history_oi"));
+    }
+    let change = last_oi - first_oi;
+    let change_ratio = (first_oi > Decimal::ZERO)
+        .then(|| (change / first_oi).normalize().to_string());
+
+    Ok(OpenInterestChangeAnalysis {
+        schema: OPEN_INTEREST_CHANGE_ANALYSIS_SCHEMA_V1.to_owned(),
+        instrument_id: history.instrument_id.clone(),
+        open_interest_generation: history.open_interest_generation.clone(),
+        period: history.period.clone(),
+        point_count: history.points.len(),
+        oldest_timestamp_ms: history.oldest_timestamp_ms.clone(),
+        newest_timestamp_ms: history.newest_timestamp_ms.clone(),
+        first_open_interest_contracts: Some(first_oi.normalize().to_string()),
+        last_open_interest_contracts: Some(last_oi.normalize().to_string()),
+        change_contracts: Some(change.normalize().to_string()),
+        change_ratio,
     })
 }
 
@@ -224,7 +285,7 @@ mod tests {
     use super::*;
     use okx_observation::{
         FundingHistoryEvent, FundingHistorySnapshot, MarketTrade, MarketTradeSide,
-        MarketTradesSnapshot,
+        MarketTradesSnapshot, OpenInterestHistoryPoint, OpenInterestHistorySnapshot,
     };
 
     fn trades() -> MarketTradesSnapshot {
@@ -302,6 +363,78 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn open_interest_change_uses_contract_units_and_explicit_window() {
+        let input = OpenInterestHistorySnapshot {
+            schema: "okx.open-interest-history/v1".to_owned(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            period: "1H".to_owned(),
+            requested_limit: 3,
+            reference_generation: "ref".to_owned(),
+            source: "okx_public_rest_contract_oi_history".to_owned(),
+            source_received_at: "2026-10-02T18:00:00Z".to_owned(),
+            open_interest_generation: "oi".to_owned(),
+            oldest_timestamp_ms: Some("1".to_owned()),
+            newest_timestamp_ms: Some("3".to_owned()),
+            points: vec![
+                OpenInterestHistoryPoint {
+                    timestamp_ms: "1".to_owned(),
+                    open_interest_contracts: "100".to_owned(),
+                    open_interest_currency: "10".to_owned(),
+                },
+                OpenInterestHistoryPoint {
+                    timestamp_ms: "2".to_owned(),
+                    open_interest_contracts: "110".to_owned(),
+                    open_interest_currency: "11".to_owned(),
+                },
+                OpenInterestHistoryPoint {
+                    timestamp_ms: "3".to_owned(),
+                    open_interest_contracts: "125".to_owned(),
+                    open_interest_currency: "12.5".to_owned(),
+                },
+            ],
+        };
+
+        let analysis = analyze_open_interest_change(&input).expect("oi change");
+
+        assert_eq!(analysis.first_open_interest_contracts.as_deref(), Some("100"));
+        assert_eq!(analysis.last_open_interest_contracts.as_deref(), Some("125"));
+        assert_eq!(analysis.change_contracts.as_deref(), Some("25"));
+        assert_eq!(analysis.change_ratio.as_deref(), Some("0.25"));
+        assert_eq!(analysis.period, "1H");
+    }
+
+    #[test]
+    fn zero_starting_open_interest_has_no_ratio() {
+        let input = OpenInterestHistorySnapshot {
+            schema: "okx.open-interest-history/v1".to_owned(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            period: "5m".to_owned(),
+            requested_limit: 2,
+            reference_generation: "ref".to_owned(),
+            source: "okx_public_rest_contract_oi_history".to_owned(),
+            source_received_at: "2026-10-02T18:00:00Z".to_owned(),
+            open_interest_generation: "oi".to_owned(),
+            oldest_timestamp_ms: Some("1".to_owned()),
+            newest_timestamp_ms: Some("2".to_owned()),
+            points: vec![
+                OpenInterestHistoryPoint {
+                    timestamp_ms: "1".to_owned(),
+                    open_interest_contracts: "0".to_owned(),
+                    open_interest_currency: "0".to_owned(),
+                },
+                OpenInterestHistoryPoint {
+                    timestamp_ms: "2".to_owned(),
+                    open_interest_contracts: "2".to_owned(),
+                    open_interest_currency: "0.2".to_owned(),
+                },
+            ],
+        };
+        let analysis = analyze_open_interest_change(&input).expect("oi change");
+        assert_eq!(analysis.change_contracts.as_deref(), Some("2"));
+        assert_eq!(analysis.change_ratio, None);
     }
 
     #[test]
