@@ -419,7 +419,8 @@ pub(super) async fn dispatch(
             }
 
             let analysis = match analyze_market_intelligence(
-                &rules,
+                &rules.instrument.instrument_id,
+                &rules.reference_generation,
                 &live.market,
                 &live.order_book,
                 impact_contracts,
