@@ -762,7 +762,10 @@ fn normalized(value: Option<Decimal>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use okx_observation::{AccountBalanceState, AccountPositionState, AccountSnapshot};
+    use okx_observation::{
+        AccountAuthorityEvidence, AccountBalanceState, AccountLedgerSummary, AccountPositionState,
+        AccountSnapshot, CurrencyAggregate,
+    };
 
     use super::*;
 
@@ -949,6 +952,305 @@ mod tests {
             analyze_account_risk(&snapshot),
             Err(AnalysisError::MissingPositionNotional(_))
         ));
+    }
+
+    fn ledger(daily_amount: &str) -> AccountLedgerSummary {
+        AccountLedgerSummary {
+            schema: "okx.account-ledger-summary/v1",
+            source_received_at: "2026-10-03T00:00:01Z".to_owned(),
+            current_account_as_of_ms: Some("1790985600000".to_owned()),
+            account_generation: "sha256:test".to_owned(),
+            authority: AccountAuthorityEvidence {
+                scope: "authenticated_account_only",
+                account_type: "0".to_owned(),
+                is_subaccount: true,
+                account_uid_fingerprint: "uid".to_owned(),
+                main_account_uid_fingerprint: Some("main".to_owned()),
+                api_key_permissions: vec!["read_only".to_owned()],
+                multi_account_inventory_complete: false,
+            },
+            total_equity_usd: "500".to_owned(),
+            trading_equity_detail_usd_sum: "500".to_owned(),
+            trading_equity_residual_usd: "0".to_owned(),
+            funding_balances: Vec::new(),
+            open_positions: 0,
+            pending_orders: 0,
+            current_unrealized_pnl: Vec::new(),
+            history_coverage: Vec::new(),
+            realized_pnl_basis: "positions-history.realizedPnl",
+            realized_pnl: Vec::new(),
+            daily_realized_pnl_utc_basis: "positions-history.realizedPnl filtered by UTC day",
+            daily_realized_pnl_utc_day_start_ms: Some("1790985600000".to_owned()),
+            daily_realized_pnl_utc_day_end_ms: Some("1791072000000".to_owned()),
+            daily_realized_pnl_utc: if daily_amount == "0" {
+                Vec::new()
+            } else {
+                vec![CurrencyAggregate {
+                    currency: "USDT".to_owned(),
+                    amount: daily_amount.to_owned(),
+                    events: 1,
+                }]
+            },
+            trade_fee_basis: "fills-history.fee",
+            trade_fees: Vec::new(),
+            funding_basis: "bills-archive funding",
+            funding: Vec::new(),
+            position_pnl_identity_rows_checked: 0,
+            fill_order_links_checked: 0,
+            fill_order_links_unresolved_due_to_truncation: 0,
+        }
+    }
+
+    fn mandate() -> TradingMandate {
+        TradingMandate {
+            schema: TRADING_MANDATE_SCHEMA_V1,
+            version: "test-mandate/v1".to_owned(),
+            capital_base_usd: "500".to_owned(),
+            decision_horizon_hours: 24,
+            benchmark: None,
+            allowed_instruments: vec![
+                "BTC-USDT-SWAP".to_owned(),
+                "ETH-USDT-SWAP".to_owned(),
+            ],
+            max_drawdown_ratio: "0.5".to_owned(),
+            leverage_ceiling: "10".to_owned(),
+            minimum_liquidity_notional_usd: "0".to_owned(),
+            max_turnover_ratio: "10".to_owned(),
+        }
+    }
+
+    fn policy() -> HardRiskPolicy {
+        HardRiskPolicy {
+            schema: HARD_RISK_POLICY_SCHEMA_V1,
+            version: "test-policy/v1".to_owned(),
+            max_account_gross_notional_usd: "2000".to_owned(),
+            max_instrument_gross_notional_usd: "1200".to_owned(),
+            max_margin_utilization_ratio: "0.5".to_owned(),
+            max_loss_per_trade_usd: "100".to_owned(),
+            max_daily_realized_loss_usd: "100".to_owned(),
+            max_drawdown_ratio: "0.5".to_owned(),
+            max_leverage: "10".to_owned(),
+            allowed_instruments: vec![
+                "BTC-USDT-SWAP".to_owned(),
+                "ETH-USDT-SWAP".to_owned(),
+            ],
+            minimum_quality: RiskMinimumQuality::Fresh,
+            degraded_mode: RiskDegradedMode::Reject,
+            correlated_clusters: vec![CorrelatedClusterLimit {
+                id: "majors".to_owned(),
+                instruments: vec![
+                    "BTC-USDT-SWAP".to_owned(),
+                    "ETH-USDT-SWAP".to_owned(),
+                ],
+                max_gross_notional_usd: "1500".to_owned(),
+            }],
+        }
+    }
+
+    #[test]
+    fn hedge_mode_same_instrument_long_short_preserves_gross_and_offsets_net() {
+        let snapshot = account(
+            "long_short_mode",
+            vec![
+                position(
+                    "BTC-USDT-SWAP",
+                    "SWAP",
+                    "long",
+                    "1",
+                    Some("600"),
+                    Some("100"),
+                    Some("80"),
+                ),
+                position(
+                    "BTC-USDT-SWAP",
+                    "SWAP",
+                    "short",
+                    "1",
+                    Some("400"),
+                    Some("100"),
+                    Some("125"),
+                ),
+            ],
+        );
+        let result = analyze_portfolio_risk(
+            &snapshot,
+            &ledger("0"),
+            mandate(),
+            policy(),
+            None,
+            true,
+        )
+        .expect("portfolio risk");
+
+        assert_eq!(result.account.gross_position_notional_usd, "1000");
+        assert_eq!(result.account.directional_net_position_notional_usd, "200");
+        assert_eq!(result.instrument_exposure.len(), 1);
+        assert_eq!(result.instrument_exposure[0].gross_notional_usd, "1000");
+        assert_eq!(result.instrument_exposure[0].signed_net_notional_usd, "200");
+        assert_eq!(result.policy_decision, RiskPolicyDecision::Accepted);
+    }
+
+    #[test]
+    fn candidate_projection_and_daily_loss_fail_closed_with_typed_violations() {
+        let snapshot = account("long_short_mode", Vec::new());
+        let mut strict = policy();
+        strict.max_daily_realized_loss_usd = "20".to_owned();
+        strict.max_loss_per_trade_usd = "25".to_owned();
+        strict.max_account_gross_notional_usd = "100".to_owned();
+        let result = analyze_portfolio_risk(
+            &snapshot,
+            &ledger("-30"),
+            mandate(),
+            strict,
+            Some(PortfolioCandidate {
+                instrument: "BTC-USDT-SWAP".to_owned(),
+                direction: PositionDirection::Long,
+                notional_usd: "150".to_owned(),
+                worst_case_loss_usd: "40".to_owned(),
+                leverage: "5".to_owned(),
+            }),
+            true,
+        )
+        .expect("portfolio risk");
+
+        assert_eq!(result.policy_decision, RiskPolicyDecision::Rejected);
+        let codes = result
+            .violations
+            .iter()
+            .map(|violation| violation.code)
+            .collect::<BTreeSet<_>>();
+        assert!(codes.contains("MAX_DAILY_REALIZED_LOSS"));
+        assert!(codes.contains("MAX_LOSS_PER_TRADE"));
+        assert!(codes.contains("MAX_ACCOUNT_GROSS_NOTIONAL_PROJECTED"));
+        assert_eq!(
+            result
+                .candidate
+                .as_ref()
+                .expect("candidate")
+                .projected_account_gross_notional_usd,
+            "150"
+        );
+    }
+
+    #[test]
+    fn degraded_account_is_rejected_when_policy_requires_fresh() {
+        let snapshot = account("long_short_mode", Vec::new());
+        let result = analyze_portfolio_risk(
+            &snapshot,
+            &ledger("0"),
+            mandate(),
+            policy(),
+            None,
+            false,
+        )
+        .expect("portfolio risk");
+
+        assert_eq!(result.policy_decision, RiskPolicyDecision::Rejected);
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|violation| violation.code == "MINIMUM_DATA_QUALITY")
+        );
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|violation| violation.code == "DEGRADED_MODE_REJECT")
+        );
+    }
+
+    #[test]
+    fn correlated_cluster_limit_uses_gross_not_net_exposure() {
+        let snapshot = account(
+            "long_short_mode",
+            vec![
+                position(
+                    "BTC-USDT-SWAP",
+                    "SWAP",
+                    "long",
+                    "1",
+                    Some("800"),
+                    Some("100"),
+                    Some("80"),
+                ),
+                position(
+                    "ETH-USDT-SWAP",
+                    "SWAP",
+                    "short",
+                    "1",
+                    Some("800"),
+                    Some("100"),
+                    Some("125"),
+                ),
+            ],
+        );
+        let mut bounded = policy();
+        bounded.max_account_gross_notional_usd = "2000".to_owned();
+        bounded.correlated_clusters[0].max_gross_notional_usd = "1500".to_owned();
+
+        let result = analyze_portfolio_risk(
+            &snapshot,
+            &ledger("0"),
+            mandate(),
+            bounded,
+            None,
+            true,
+        )
+        .expect("portfolio risk");
+
+        assert!(
+            result.violations.iter().any(|violation| {
+                violation.code == "MAX_CORRELATED_CLUSTER_GROSS_NOTIONAL"
+                    && violation.observed == "1600"
+            })
+        );
+    }
+
+    #[test]
+    fn account_position_risk_oracle_residual_is_explicit() {
+        let snapshot = account(
+            "long_short_mode",
+            vec![position(
+                "BTC-USDT-SWAP",
+                "SWAP",
+                "long",
+                "1",
+                Some("600"),
+                Some("100"),
+                Some("80"),
+            )],
+        );
+        let local = analyze_portfolio_risk(
+            &snapshot,
+            &ledger("0"),
+            mandate(),
+            policy(),
+            None,
+            true,
+        )
+        .expect("local");
+
+        let exact = compare_account_position_risk_oracle(
+            &local,
+            "1790985600000",
+            Some("480"),
+            &["600"],
+        )
+        .expect("oracle");
+        assert!(exact.consistent);
+        assert_eq!(exact.gross_notional_residual_usd, "0");
+
+        let mismatch = compare_account_position_risk_oracle(
+            &local,
+            "1790985600000",
+            Some("479"),
+            &["590"],
+        )
+        .expect("oracle mismatch");
+        assert!(!mismatch.consistent);
+        assert_eq!(mismatch.gross_notional_residual_usd, "10");
+        assert_eq!(mismatch.adjusted_equity_residual_usd.as_deref(), Some("1"));
     }
 
     #[test]
