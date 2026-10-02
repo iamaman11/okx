@@ -28,8 +28,10 @@ pub use capabilities::{
 };
 pub use fee::{FEE_SCHEDULE_SCHEMA_V1, FeeScheduleError, FeeScheduleInput, FeeScheduleSnapshot};
 pub use history::{
-    HistoryCandle, MARKET_HISTORY_SCHEMA_V1, MARKET_HISTORY_SOURCE_V1, MarketHistoryError,
-    MarketHistorySnapshot,
+    FUNDING_HISTORY_SCHEMA_V1, FUNDING_HISTORY_SOURCE_V1, FundingHistoryEvent,
+    FundingHistorySnapshot, HistoryCandle, MARKET_HISTORY_SCHEMA_V1, MARKET_HISTORY_SOURCE_V1,
+    MARKET_TRADES_SCHEMA_V1, MARKET_TRADES_SOURCE_V1, MarketHistoryError, MarketHistorySnapshot,
+    MarketTrade, MarketTradeSide, MarketTradesSnapshot,
 };
 pub use market::{
     FundingState, IndexPriceState, M2_REST_BOOTSTRAP_REASON, MARKET_SNAPSHOT_SCHEMA_V1,
