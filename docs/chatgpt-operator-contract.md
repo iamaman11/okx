@@ -66,6 +66,23 @@ If preflight fails, nothing is posted.
 
 Permanent malformed/unauthenticated DATA input is not a terminal request and must not starve the mailbox cursor. Internal/runtime failures remain retryable.
 
+## CONTROL publication preflight
+
+A CONTROL `request_id` is an immutable single-publication identity for one logical operation. Controller-side terminal-id deduplication is defense in depth; it must not be used as the normal way to make duplicate publication safe.
+
+Before posting any `okx.windows.control/v1` request to issue #12, ChatGPT must:
+
+1. construct the complete typed request and its candidate `request_id`;
+2. perform an exact GitHub issue search for that id in repository comments, for example `"<request_id>" in:comments`;
+3. inspect the bounded search results and **abort publication if issue #12 is present**, whether the existing comment is the request or its terminal result;
+4. if the operation was already published, retrieve/reuse its existing terminal evidence instead of posting again;
+5. if the prior publication state is uncertain, resolve that state before any new CONTROL mutation; do not create a fresh id merely to bypass uncertainty about whether the original mutation ran;
+6. use a fresh `request_id` only for a genuinely new logical CONTROL operation.
+
+A request already known from compact conversation/operator evidence is also treated as used and must not be reposted. Polling/retrieval never republishes the request.
+
+If a duplicate publication is discovered after the fact, convert the accidental comment into a non-request audit note when possible, preserve the original terminal as canonical evidence, and verify that no second terminal execution occurred.
+
 ## Exact-request retrieval
 
 Normal operation must not repeatedly read the full DATA mailbox.
