@@ -16,8 +16,8 @@ use okx_observation::{
     InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError,
     MarketHistoryError, MarketHistorySnapshot, MarketReadiness, MarketSnapshot,
     MarketTradesSnapshot, OpenInterestHistorySnapshot, ReferenceRegistry,
-    market_research_source_generation,
     SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport, TRADING_CAPABILITIES_SCHEMA_V1,
+    market_research_source_generation,
 };
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
