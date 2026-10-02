@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use okx_analysis::{
-    RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT, Return24hPct,
-    analyze_return_24h_pct,
+    RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT,
+    SPREAD_BPS_METRIC_ID, SPREAD_BPS_METRIC_VERSION_V1, SPREAD_BPS_UNIT, Return24hPct, SpreadBps,
+    analyze_return_24h_pct, analyze_spread_bps,
 };
 use okx_api::InstrumentType;
 use okx_observation::{InstrumentSpec, MarketUniverseTicker, ReferenceRegistry};
@@ -112,6 +113,7 @@ struct Candidate {
     instrument: InstrumentSpec,
     ticker: MarketUniverseTicker,
     return_24h_pct: Option<Return24hPct>,
+    spread_bps: Option<SpreadBps>,
 }
 
 pub(super) async fn dispatch(
@@ -208,17 +210,27 @@ fn capabilities() -> QueryCapabilitiesResult {
             field("settle_currency", "reference"),
             field("state", "reference"),
             field("last", "ticker"),
+            field("best_bid", "ticker"),
+            field("best_ask", "ticker"),
             field("open_24h", "ticker"),
             field("volume_24h", "ticker"),
             field("volume_currency_24h", "ticker"),
             field("exchange_timestamp_ms", "ticker"),
             field("return_24h_pct", "derived"),
+            field("spread_bps", "derived"),
         ],
-        metrics: vec![QueryMetricCapability {
-            id: RETURN_24H_PCT_METRIC_ID,
-            version: RETURN_24H_PCT_METRIC_VERSION_V1,
-            unit: RETURN_24H_PCT_UNIT,
-        }],
+        metrics: vec![
+            QueryMetricCapability {
+                id: RETURN_24H_PCT_METRIC_ID,
+                version: RETURN_24H_PCT_METRIC_VERSION_V1,
+                unit: RETURN_24H_PCT_UNIT,
+            },
+            QueryMetricCapability {
+                id: SPREAD_BPS_METRIC_ID,
+                version: SPREAD_BPS_METRIC_VERSION_V1,
+                unit: SPREAD_BPS_UNIT,
+            },
+        ],
         operators: vec![
             "universe_filter",
             "projection",
@@ -332,6 +344,34 @@ fn evaluate_market_query(
             None
         };
 
+        let spread_bps = if plan.metric == Some(QueryMetric::SpreadBps) {
+            match (ticker.best_bid.as_deref(), ticker.best_ask.as_deref()) {
+                (Some(bid), Some(ask)) => match analyze_spread_bps(bid, ask) {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        excluded_count += 1;
+                        push_exclusion(
+                            &mut excluded,
+                            &instrument.instrument_id,
+                            "invalid_spread_input",
+                        );
+                        continue;
+                    }
+                },
+                _ => {
+                    excluded_count += 1;
+                    push_exclusion(
+                        &mut excluded,
+                        &instrument.instrument_id,
+                        "missing_spread_input",
+                    );
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
         if let Some(reason) = missing_selected_field(plan, &instrument, &ticker) {
             excluded_count += 1;
             push_exclusion(&mut excluded, &instrument.instrument_id, reason);
@@ -342,22 +382,41 @@ fn evaluate_market_query(
             instrument,
             ticker,
             return_24h_pct,
+            spread_bps,
         });
     }
 
     if let Some(sort) = &plan.sort {
         candidates.sort_by(|left, right| {
-            let left_metric = left
-                .return_24h_pct
-                .as_ref()
-                .expect("validated sort requires metric");
-            let right_metric = right
-                .return_24h_pct
-                .as_ref()
-                .expect("validated sort requires metric");
-            let metric_cmp = match sort.direction {
-                QuerySortDirection::Asc => left_metric.cmp(right_metric),
-                QuerySortDirection::Desc => right_metric.cmp(left_metric),
+            let metric_cmp = match sort.key {
+                okx_protocol::QuerySortKey::Return24hPct => {
+                    let left_metric = left
+                        .return_24h_pct
+                        .as_ref()
+                        .expect("validated return sort requires metric");
+                    let right_metric = right
+                        .return_24h_pct
+                        .as_ref()
+                        .expect("validated return sort requires metric");
+                    match sort.direction {
+                        QuerySortDirection::Asc => left_metric.cmp(right_metric),
+                        QuerySortDirection::Desc => right_metric.cmp(left_metric),
+                    }
+                }
+                okx_protocol::QuerySortKey::SpreadBps => {
+                    let left_metric = left
+                        .spread_bps
+                        .as_ref()
+                        .expect("validated spread sort requires metric");
+                    let right_metric = right
+                        .spread_bps
+                        .as_ref()
+                        .expect("validated spread sort requires metric");
+                    match sort.direction {
+                        QuerySortDirection::Asc => left_metric.cmp(right_metric),
+                        QuerySortDirection::Desc => right_metric.cmp(left_metric),
+                    }
+                }
             };
             metric_cmp.then_with(|| {
                 left.instrument
@@ -388,14 +447,18 @@ fn evaluate_market_query(
         .map(|candidate| project_row(candidate, &plan.select))
         .collect::<Vec<_>>();
 
-    let metric_versions = if plan.metric == Some(QueryMetric::Return24hPct) {
-        vec![QueryMetricVersion {
+    let metric_versions = match plan.metric {
+        Some(QueryMetric::Return24hPct) => vec![QueryMetricVersion {
             id: RETURN_24H_PCT_METRIC_ID,
             version: RETURN_24H_PCT_METRIC_VERSION_V1,
             unit: RETURN_24H_PCT_UNIT,
-        }]
-    } else {
-        Vec::new()
+        }],
+        Some(QueryMetric::SpreadBps) => vec![QueryMetricVersion {
+            id: SPREAD_BPS_METRIC_ID,
+            version: SPREAD_BPS_METRIC_VERSION_V1,
+            unit: SPREAD_BPS_UNIT,
+        }],
+        None => Vec::new(),
     };
 
     Ok(QueryEvidence {
@@ -449,6 +512,8 @@ fn missing_selected_field(
         let missing = match field {
             QueryField::SettleCurrency => instrument.settle_currency.is_none(),
             QueryField::Last => ticker.last.is_none(),
+            QueryField::BestBid => ticker.best_bid.is_none(),
+            QueryField::BestAsk => ticker.best_ask.is_none(),
             QueryField::Open24h => ticker.open_24h.is_none(),
             QueryField::Volume24h => ticker.volume_24h.is_none(),
             QueryField::VolumeCurrency24h => ticker.volume_currency_24h.is_none(),
@@ -458,6 +523,8 @@ fn missing_selected_field(
             return Some(match field {
                 QueryField::SettleCurrency => "missing_settle_currency",
                 QueryField::Last => "missing_last",
+                QueryField::BestBid => "missing_best_bid",
+                QueryField::BestAsk => "missing_best_ask",
                 QueryField::Open24h => "missing_open_24h",
                 QueryField::Volume24h => "missing_volume_24h",
                 QueryField::VolumeCurrency24h => "missing_volume_currency_24h",
@@ -504,6 +571,26 @@ fn project_row(candidate: Candidate, fields: &[QueryField]) -> QueryEvidenceRow 
                         .expect("selected field validated"),
                 );
             }
+            QueryField::BestBid => {
+                values.insert(
+                    "best_bid",
+                    candidate
+                        .ticker
+                        .best_bid
+                        .clone()
+                        .expect("selected field validated"),
+                );
+            }
+            QueryField::BestAsk => {
+                values.insert(
+                    "best_ask",
+                    candidate
+                        .ticker
+                        .best_ask
+                        .clone()
+                        .expect("selected field validated"),
+                );
+            }
             QueryField::Open24h => {
                 values.insert(
                     "open_24h",
@@ -545,6 +632,16 @@ fn project_row(candidate: Candidate, fields: &[QueryField]) -> QueryEvidenceRow 
                     "return_24h_pct",
                     candidate
                         .return_24h_pct
+                        .as_ref()
+                        .expect("selected metric validated")
+                        .value_text(),
+                );
+            }
+            QueryField::SpreadBps => {
+                values.insert(
+                    "spread_bps",
+                    candidate
+                        .spread_bps
                         .as_ref()
                         .expect("selected metric validated")
                         .value_text(),
