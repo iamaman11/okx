@@ -34,20 +34,19 @@ Canonical execution order inside Stage 1:
 2. **P0.2 exchange clock discipline** — ACCEPTED.
 3. **Venue/instrument-state execution gate** — ACCEPTED.
 4. **Account + ledger truth** — ACCEPTED.
-5. **P0.3 named rate/backpressure domains** — CURRENT.
-6. **Stage-1 final T1–T5 acceptance**.
+5. **P0.3 named rate/backpressure domains** — ACCEPTED.
+6. **Stage-1 final T1–T5 acceptance** — CURRENT.
 
 The P0/P1 labels are capability groups, not a competing execution order.
 
-Current P0.3 named rate/backpressure slice must prove:
-- rate/backpressure is modeled by the named OKX domains that actually exist, not one global requests-per-second counter;
-- public REST/IP, private REST/User ID, WS connection/login/subscription, order-management, instrument/family and sub-account aggregate scopes remain distinguishable where OKX defines them;
-- typed throttle evidence carries exchange code/domain (including 50011 and 50061 where applicable), operation class, relevant account/instrument/family scope, attempt count and the bounded local defer/backoff decision;
-- the runtime never invents a server Retry-After value when OKX does not provide one;
-- read-only account-rate-limit/fill-ratio evidence is ingested as current exchange evidence where the credential/tier exposes it;
-- no tight retry loop or blind mutation retry is introduced; uncertain-result/idempotency rules remain authoritative;
-- expensive research/history work yields to heartbeat/control and mutation reconciliation, while existing bounded concurrency/response-size limits are preserved;
-- ownership stays inside the existing runtime/API boundary: no generic limiter service, second scheduler, daemon or new state authority.
+Current Stage-1 final acceptance status:
+- T1/T2 evidence is assembled from the accepted Stage-1 capability slices on the same product architecture;
+- the final tested #173 head is content-identical to current main (0 changed files across the merge commit);
+- the final Windows artifact exists and passed the required CI gates;
+- strict T3 remains OPEN until that exact-tree artifact is installed and its provenance terminalizes through CONTROL;
+- primary Cloudflare product surfaces remain live/fresh on the accepted P0.3 runtime;
+- current blocker is CONTROL-path liveness, not a product/runtime correctness gap;
+- Stage 2 must not start until the final T1–T5 record closes.
 
 ## Repository Guard v1
 
