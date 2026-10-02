@@ -23,6 +23,9 @@ struct AccountSummaryResult {
 struct PortfolioRiskCoherence {
     account_snapshot_source_received_at: String,
     account_generation: String,
+    reference_generation: Option<String>,
+    reference_source_received_at: Option<String>,
+    reference_instruments: Vec<String>,
     ledger_source_received_at: String,
     oracle_timestamp_ms: String,
     private_ws_generation: Option<u64>,
@@ -311,6 +314,50 @@ pub(super) async fn dispatch(
                 ));
             };
 
+            let mut reference_instruments = mandate.allowed_instruments.clone();
+            reference_instruments.extend(policy.allowed_instruments.iter().cloned());
+            reference_instruments.extend(
+                assembled
+                    .snapshot
+                    .positions
+                    .iter()
+                    .filter(|position| position.position != "0")
+                    .map(|position| position.instrument_id.clone()),
+            );
+            if let Some(candidate) = candidate.as_ref() {
+                reference_instruments.push(candidate.instrument.clone());
+            }
+            reference_instruments.sort();
+            reference_instruments.dedup();
+
+            let mut reference_generation: Option<String> = None;
+            let mut reference_source_received_at: Option<String> = None;
+            for instrument in &reference_instruments {
+                let Some(rules) = resolve_instrument_rules(context, instrument).await else {
+                    return Ok(reference_not_found(request, generated_at, instrument));
+                };
+                if let Some(existing) = reference_generation.as_deref()
+                    && existing != rules.reference_generation
+                {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
+                        format!(
+                            "portfolio risk reference generations differ inside one evaluation: expected {existing}, observed {} for {instrument}",
+                            rules.reference_generation
+                        ),
+                        false,
+                    ));
+                }
+                reference_generation = Some(rules.reference_generation.clone());
+                reference_source_received_at = match reference_source_received_at {
+                    Some(existing) if existing <= rules.source_received_at => Some(existing),
+                    _ => Some(rules.source_received_at.clone()),
+                };
+            }
+
             let read_cursor = match context.private_ws {
                 Some(private_ws) => private_ws.convergence_cursor().await.ok(),
                 None => None,
@@ -342,6 +389,9 @@ pub(super) async fn dispatch(
             let mut coherence = PortfolioRiskCoherence {
                 account_snapshot_source_received_at: assembled.snapshot.source_received_at.clone(),
                 account_generation: assembled.snapshot.account_generation.clone(),
+                reference_generation,
+                reference_source_received_at,
+                reference_instruments,
                 ledger_source_received_at: facts.summary.source_received_at.clone(),
                 oracle_timestamp_ms: oracle.ts.clone(),
                 private_ws_generation: assembled.snapshot.private_ws_generation,
@@ -491,26 +541,45 @@ pub(super) async fn dispatch(
                 );
             }
 
+            let rejected = analysis.policy_decision == okx_analysis::RiskPolicyDecision::Rejected;
+            let violation_codes = analysis
+                .violations
+                .iter()
+                .map(|violation| violation.code)
+                .collect::<Vec<_>>();
+            let result = serde_json::to_value(PortfolioRiskResult {
+                schema: PORTFOLIO_RISK_SCHEMA_V2,
+                as_of: generated_at.to_owned(),
+                observed_evidence_label: "OBSERVED",
+                modelled_evidence_label: "MODELLED",
+                analysis_schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2,
+                mandate_schema: TRADING_MANDATE_SCHEMA_V1,
+                policy_schema: HARD_RISK_POLICY_SCHEMA_V1,
+                coherence,
+                analysis,
+                exchange_oracle: oracle_comparison,
+            })?;
+
             Ok(AgentResponse {
                 schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
                 request_id: request.request_id.clone(),
-                status: AgentResponseStatus::Completed,
+                status: if rejected {
+                    AgentResponseStatus::Rejected
+                } else {
+                    AgentResponseStatus::Completed
+                },
                 generated_at: generated_at.to_owned(),
                 quality,
                 result_schema: Some(PORTFOLIO_RISK_SCHEMA_V2.to_owned()),
-                result: Some(serde_json::to_value(PortfolioRiskResult {
-                    schema: PORTFOLIO_RISK_SCHEMA_V2,
-                    as_of: generated_at.to_owned(),
-                    observed_evidence_label: "OBSERVED",
-                    modelled_evidence_label: "MODELLED",
-                    analysis_schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2,
-                    mandate_schema: TRADING_MANDATE_SCHEMA_V1,
-                    policy_schema: HARD_RISK_POLICY_SCHEMA_V1,
-                    coherence,
-                    analysis,
-                    exchange_oracle: oracle_comparison,
-                })?),
-                failure: None,
+                result: Some(result),
+                failure: rejected.then(|| AgentFailure {
+                    code: PORTFOLIO_RISK_POLICY_REJECTED_CODE.to_owned(),
+                    message: format!(
+                        "portfolio hard-risk policy rejected the evaluated state/candidate: {}",
+                        violation_codes.join(",")
+                    ),
+                    retryable: false,
+                }),
                 warnings,
             })
         }
