@@ -310,7 +310,6 @@ mod tests {
 
     fn rules() -> InstrumentRulesSnapshot {
         InstrumentRulesSnapshot {
-            schema: "okx.instrument-rules/v1".to_owned(),
             reference_generation: "ref-1".to_owned(),
             source_received_at: "2026-10-02T14:00:00Z".to_owned(),
             instrument: InstrumentSpec {
