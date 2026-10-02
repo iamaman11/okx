@@ -150,6 +150,20 @@ pub struct RiskPolicyViolation {
     pub limit: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RiskOracleComparison {
+    pub schema: &'static str,
+    pub oracle_source: &'static str,
+    pub oracle_timestamp_ms: String,
+    pub local_gross_notional_usd: String,
+    pub oracle_gross_notional_usd: String,
+    pub gross_notional_residual_usd: String,
+    pub local_adjusted_equity_usd: Option<String>,
+    pub oracle_adjusted_equity_usd: Option<String>,
+    pub adjusted_equity_residual_usd: Option<String>,
+    pub consistent: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskPolicyDecision {
@@ -563,6 +577,58 @@ pub fn analyze_portfolio_risk(
         candidate: candidate_projection,
         policy_decision,
         violations,
+    })
+}
+
+pub fn compare_account_position_risk_oracle(
+    local: &PortfolioRiskAnalysis,
+    oracle_timestamp_ms: &str,
+    oracle_adjusted_equity_usd: Option<&str>,
+    oracle_position_notionals_usd: &[&str],
+) -> Result<RiskOracleComparison, AnalysisError> {
+    let local_gross = decimal(
+        "local_gross_notional_usd",
+        &local.account.gross_position_notional_usd,
+    )?;
+    let oracle_gross = oracle_position_notionals_usd.iter().try_fold(
+        Decimal::ZERO,
+        |acc, value| -> Result<Decimal, AnalysisError> {
+            if value.trim().is_empty() {
+                return Ok(acc);
+            }
+            Ok(acc + decimal("oracle_position_notional_usd", value)?.abs())
+        },
+    )?;
+    let gross_residual = local_gross - oracle_gross;
+
+    let local_adjusted = local
+        .account
+        .adjusted_equity_usd
+        .as_deref()
+        .map(|value| decimal("local_adjusted_equity_usd", value))
+        .transpose()?;
+    let oracle_adjusted = oracle_adjusted_equity_usd
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| decimal("oracle_adjusted_equity_usd", value))
+        .transpose()?;
+    let adjusted_residual = match (local_adjusted, oracle_adjusted) {
+        (Some(local_value), Some(oracle_value)) => Some(local_value - oracle_value),
+        _ => None,
+    };
+    let consistent = gross_residual.is_zero()
+        && adjusted_residual.map(|value| value.is_zero()).unwrap_or(true);
+
+    Ok(RiskOracleComparison {
+        schema: "okx.risk-oracle-comparison/v1",
+        oracle_source: "GET /api/v5/account/account-position-risk",
+        oracle_timestamp_ms: oracle_timestamp_ms.to_owned(),
+        local_gross_notional_usd: local_gross.normalize().to_string(),
+        oracle_gross_notional_usd: oracle_gross.normalize().to_string(),
+        gross_notional_residual_usd: gross_residual.normalize().to_string(),
+        local_adjusted_equity_usd: local_adjusted.map(|value| value.normalize().to_string()),
+        oracle_adjusted_equity_usd: oracle_adjusted.map(|value| value.normalize().to_string()),
+        adjusted_equity_residual_usd: adjusted_residual.map(|value| value.normalize().to_string()),
+        consistent,
     })
 }
 
