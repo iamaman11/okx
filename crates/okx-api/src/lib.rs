@@ -30,8 +30,8 @@ pub use ledger::{
     AccountBill, AccountHistoryApi, BoundedHistory, FillHistory, HistoricalOrder, PositionHistory,
 };
 pub use market_data::{
-    MarketDataApi, PublicCandle, PublicFundingRate, PublicIndexTicker, PublicMarkPrice,
-    PublicOpenInterest, PublicTicker,
+    MarketDataApi, PublicCandle, PublicFundingHistory, PublicFundingRate, PublicIndexTicker,
+    PublicMarkPrice, PublicOpenInterest, PublicTicker, PublicTrade,
 };
 pub use public_data::{
     PublicDataApi, PublicInstrument, PublicPriceLimit, SystemStatus, UpcomingParameterChange,
