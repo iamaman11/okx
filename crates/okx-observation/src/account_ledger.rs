@@ -414,7 +414,8 @@ impl AccountLedgerFacts {
                 realized_pnl_basis: "positions-history.realizedPnl; exact OKX identity checked per row",
                 realized_pnl: finish_aggregates(realized),
                 daily_realized_pnl_utc_basis: "positions-history.realizedPnl filtered by uTime into [UTC day start, next UTC day); rebuilt from exchange history after restart",
-                daily_realized_pnl_utc_day_start_ms: utc_day_bounds.map(|(start, _)| start.to_string()),
+                daily_realized_pnl_utc_day_start_ms: utc_day_bounds
+                    .map(|(start, _)| start.to_string()),
                 daily_realized_pnl_utc_day_end_ms: utc_day_bounds.map(|(_, end)| end.to_string()),
                 daily_realized_pnl_utc: finish_aggregates(daily_realized),
                 trade_fee_basis: "fills-history.fee; deduplicated by instId+tradeId",
