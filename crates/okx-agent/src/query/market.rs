@@ -99,7 +99,6 @@ struct MarketResearchCurrent {
 #[derive(serde::Serialize)]
 struct MarketResearchFeatures {
     history_samples: usize,
-    trade_samples: usize,
     close_return_ratio: String,
     max_drawdown_ratio: String,
     realized_volatility_ratio: String,
@@ -125,7 +124,7 @@ struct MarketResearchWindows {
     #[serde(skip_serializing_if = "Option::is_none")]
     funding: Option<[String; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    open_interest: Option<[String; 2]>,
+    oi: Option<[String; 2]>,
 }
 
 #[derive(Clone)]
@@ -165,9 +164,9 @@ struct EvidenceStamp {
 
 #[derive(serde::Serialize)]
 struct MarketResearchCoherence {
-    source_receive_skew_ms: u64,
+    receive_skew_ms: u64,
     effective_as_of_ms: u64,
-    effective_time_skew_ms: u64,
+    effective_skew_ms: u64,
 }
 
 fn market_intelligence_coherence(
@@ -267,7 +266,7 @@ fn research_diagnostics(
         _ => {}
     }
     if !history_warnings.is_empty() {
-        diagnostics.push("UNCONFIRMED_LAST_CANDLE");
+        diagnostics.push("UNCONFIRMED_CANDLE");
     }
     diagnostics
 }
@@ -451,9 +450,9 @@ fn market_research_coherence(
         .effective_ms;
 
     Ok(MarketResearchCoherence {
-        source_receive_skew_ms: receive_max.saturating_sub(receive_min),
+        receive_skew_ms: receive_max.saturating_sub(receive_min),
         effective_as_of_ms: effective_max,
-        effective_time_skew_ms: effective_max.saturating_sub(effective_min),
+        effective_skew_ms: effective_max.saturating_sub(effective_min),
     })
 }
 
@@ -1136,7 +1135,6 @@ pub(super) async fn dispatch(
                     },
                     features: MarketResearchFeatures {
                         history_samples: history_behavior.confirmed_candle_count,
-                        trade_samples: trade_flow.trade_count,
                         close_return_ratio: history_behavior.total_close_return_ratio.clone(),
                         max_drawdown_ratio: history_behavior.max_close_drawdown_ratio.clone(),
                         realized_volatility_ratio: history_behavior
@@ -1175,7 +1173,7 @@ pub(super) async fn dispatch(
                                 .zip(value.newest_funding_time_ms.clone())
                                 .map(|(start, end)| [start, end])
                         }),
-                        open_interest: open_interest_change.as_ref().and_then(|value| {
+                        oi: open_interest_change.as_ref().and_then(|value| {
                             value
                                 .oldest_timestamp_ms
                                 .clone()
@@ -1211,13 +1209,13 @@ pub(super) async fn dispatch(
                 derived_evidence_label: "MODELLED",
                 feature_versions: MarketResearchFeatureVersions {
                     realized_volatility: "realized_volatility/simple_return_rss/v1",
-                    volume_change: "volume_change/confirmed_candle_contract_volume/v1",
+                    volume_change: "volume_change/confirmed_volume/v1",
                     trade_flow: okx_analysis::TRADE_FLOW_ANALYSIS_SCHEMA_V1,
                     funding_regime: okx_analysis::FUNDING_REGIME_ANALYSIS_SCHEMA_V1,
                     open_interest_change: okx_analysis::OPEN_INTEREST_CHANGE_ANALYSIS_SCHEMA_V1,
                     dated_future_basis: DATED_FUTURE_BASIS_SCHEMA_V1,
-                    cross_contract_basis: "cross_contract_basis/dated_minus_perpetual_bps/v1",
-                    term_structure: "term_structure/dated_futures/v1",
+                    cross_contract_basis: "cross_contract_basis/v1",
+                    term_structure: "term_structure/v1",
                 },
                 reference_generation: shared_reference
                     .expect("MarketResearch validation requires at least two instruments"),
@@ -1377,7 +1375,6 @@ mod tests {
             },
             features: MarketResearchFeatures {
                 history_samples: 100,
-                trade_samples: 100,
                 close_return_ratio: "0.123456789012345678901234567890".to_owned(),
                 max_drawdown_ratio: "0.078901234567890123456789012345".to_owned(),
                 realized_volatility_ratio: "0.098765432109876543210987654321".to_owned(),
@@ -1393,7 +1390,7 @@ mod tests {
                 history: ["1790000000000".to_owned(), "1790553600000".to_owned()],
                 trades: Some(["1790550000000".to_owned(), "1790553600000".to_owned()]),
                 funding: Some(["1790000000000".to_owned(), "1790553600000".to_owned()]),
-                open_interest: Some([
+                oi: Some([
                     "1790000000000".to_owned(),
                     "1790553600000".to_owned(),
                 ]),
@@ -1404,12 +1401,12 @@ mod tests {
                         .to_owned(),
             },
             coherence: MarketResearchCoherence {
-                source_receive_skew_ms: 300,
+                receive_skew_ms: 300,
                 effective_as_of_ms: 1_790_553_600_000,
-                effective_time_skew_ms: 3_600_000,
+                effective_skew_ms: 3_600_000,
             },
             quality: DataQuality::Degraded,
-            diagnostics: vec!["REST_FALLBACK", "UNCONFIRMED_LAST_CANDLE"],
+            diagnostics: vec!["REST_FALLBACK", "UNCONFIRMED_CANDLE"],
         }
     }
 
@@ -1439,13 +1436,13 @@ mod tests {
             derived_evidence_label: "MODELLED",
             feature_versions: MarketResearchFeatureVersions {
                 realized_volatility: "realized_volatility/simple_return_rss/v1",
-                volume_change: "volume_change/confirmed_candle_contract_volume/v1",
+                volume_change: "volume_change/confirmed_volume/v1",
                 trade_flow: okx_analysis::TRADE_FLOW_ANALYSIS_SCHEMA_V1,
                 funding_regime: okx_analysis::FUNDING_REGIME_ANALYSIS_SCHEMA_V1,
                 open_interest_change: okx_analysis::OPEN_INTEREST_CHANGE_ANALYSIS_SCHEMA_V1,
                 dated_future_basis: DATED_FUTURE_BASIS_SCHEMA_V1,
-                cross_contract_basis: "cross_contract_basis/dated_minus_perpetual_bps/v1",
-                term_structure: "term_structure/dated_futures/v1",
+                cross_contract_basis: "cross_contract_basis/v1",
+                term_structure: "term_structure/v1",
             },
             reference_generation:
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1682,7 +1679,7 @@ mod tests {
         let diagnostics = research_diagnostics("rest_fallback", &[String::from("detail")]);
         assert_eq!(
             diagnostics,
-            vec!["REST_FALLBACK", "UNCONFIRMED_LAST_CANDLE"]
+            vec!["REST_FALLBACK", "UNCONFIRMED_CANDLE"]
         );
     }
 }
