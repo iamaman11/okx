@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::*;
 
 #[derive(serde::Serialize)]
@@ -42,10 +44,21 @@ struct MarketIntelligenceSourceTimestamps {
 struct MarketResearchResult {
     schema: String,
     assembled_at: String,
+    as_of_ms: u64,
     bar: String,
     history_limit: u16,
+    feature_versions: MarketResearchFeatureVersions,
     reference: MarketResearchReferenceProvenance,
     instruments: Vec<MarketResearchInstrumentResult>,
+    term_structure: Vec<MarketResearchTermStructure>,
+}
+
+#[derive(serde::Serialize)]
+struct MarketResearchFeatureVersions {
+    realized_volatility: &'static str,
+    volume_change: &'static str,
+    dated_future_basis: &'static str,
+    term_structure: &'static str,
 }
 
 #[derive(serde::Serialize, PartialEq, Eq)]
@@ -59,6 +72,7 @@ struct MarketResearchInstrumentResult {
     mechanics: MarketResearchMechanics,
     market: MarketResearchMarket,
     behavior: MarketResearchBehavior,
+    dated_basis: Option<MarketResearchDatedBasis>,
     provenance: MarketResearchProvenance,
     quality: MarketResearchQuality,
     diagnostics: Vec<MarketResearchDiagnostic>,
@@ -67,6 +81,7 @@ struct MarketResearchInstrumentResult {
 #[derive(serde::Serialize)]
 struct MarketResearchMechanics {
     instrument_type: okx_api::InstrumentType,
+    underlying: String,
     contract_value: Option<String>,
     contract_value_currency: Option<String>,
     settle_currency: Option<String>,
@@ -94,6 +109,33 @@ struct MarketResearchBehavior {
     mean_absolute_close_return_ratio: String,
     max_absolute_close_return_ratio: String,
     max_close_drawdown_ratio: String,
+    realized_volatility_ratio: String,
+    first_confirmed_volume: String,
+    last_confirmed_volume: String,
+    volume_change_ratio: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct MarketResearchDatedBasis {
+    expiry_time_ms: u64,
+    time_to_expiry_ms: u64,
+    basis_bps: String,
+    annualized_basis_bps: String,
+}
+
+#[derive(serde::Serialize)]
+struct MarketResearchTermStructure {
+    underlying: String,
+    cross_contract: bool,
+    points: Vec<MarketResearchTermPoint>,
+}
+
+#[derive(serde::Serialize)]
+struct MarketResearchTermPoint {
+    instrument_id: String,
+    expiry_time_ms: u64,
+    basis_bps: String,
+    annualized_basis_bps: String,
 }
 
 #[derive(serde::Serialize)]
@@ -587,9 +629,11 @@ pub(super) async fn dispatch(
             limit,
         } => {
             let history_limit = limit.unwrap_or(100);
+            let research_as_of_ms = utc_now_ms();
             let mut results = Vec::with_capacity(instruments.len());
             let mut response_quality = DataQuality::Fresh;
             let mut shared_reference = None;
+            let mut term_points = BTreeMap::<String, Vec<MarketResearchTermPoint>>::new();
 
             for instrument in instruments {
                 let current =
@@ -663,10 +707,57 @@ pub(super) async fn dispatch(
                     response_quality = DataQuality::Degraded;
                 }
                 let diagnostics = research_diagnostics(current.source, &history.warnings);
+                let ordinary_dated_future =
+                    current.rules.instrument.instrument_type == okx_api::InstrumentType::Futures
+                        && current.rules.instrument.funding_requirement
+                            == okx_observation::FundingRequirement::NotApplicable;
+                let dated_basis = if ordinary_dated_future {
+                    match current.rules.instrument.expiry_time_ms.as_deref() {
+                        Some(expiry_time_ms) => {
+                            let analysis = match analyze_dated_future_basis(
+                                &current.snapshot.mark_price.price,
+                                &current.snapshot.index_price.price,
+                                research_as_of_ms,
+                                expiry_time_ms,
+                            ) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    return Ok(analysis_failure(
+                                        request,
+                                        generated_at,
+                                        AgentResponseStatus::Failed,
+                                        error,
+                                    ));
+                                }
+                            };
+                            let compact = MarketResearchDatedBasis {
+                                expiry_time_ms: analysis.expiry_time_ms,
+                                time_to_expiry_ms: analysis.time_to_expiry_ms,
+                                basis_bps: analysis.basis_bps.clone(),
+                                annualized_basis_bps: analysis.annualized_basis_bps.clone(),
+                            };
+                            term_points
+                                .entry(current.rules.instrument.underlying.clone())
+                                .or_default()
+                                .push(MarketResearchTermPoint {
+                                    instrument_id: instrument.clone(),
+                                    expiry_time_ms: analysis.expiry_time_ms,
+                                    basis_bps: analysis.basis_bps,
+                                    annualized_basis_bps: analysis.annualized_basis_bps,
+                                });
+                            Some(compact)
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+
                 results.push(MarketResearchInstrumentResult {
                     instrument_id: instrument.clone(),
                     mechanics: MarketResearchMechanics {
                         instrument_type: current.rules.instrument.instrument_type,
+                        underlying: current.rules.instrument.underlying.clone(),
                         contract_value: current.rules.instrument.contract_value.clone(),
                         contract_value_currency: current
                             .rules
@@ -703,7 +794,14 @@ pub(super) async fn dispatch(
                             .max_absolute_close_return_ratio
                             .clone(),
                         max_close_drawdown_ratio: history_behavior.max_close_drawdown_ratio.clone(),
+                        realized_volatility_ratio: history_behavior
+                            .realized_volatility_ratio
+                            .clone(),
+                        first_confirmed_volume: history_behavior.first_confirmed_volume.clone(),
+                        last_confirmed_volume: history_behavior.last_confirmed_volume.clone(),
+                        volume_change_ratio: history_behavior.volume_change_ratio.clone(),
                     },
+                    dated_basis,
                     provenance: MarketResearchProvenance {
                         market_generation: current.snapshot.market_generation.clone(),
                         market_received_at: current.snapshot.source_received_at.clone(),
@@ -724,14 +822,35 @@ pub(super) async fn dispatch(
                 });
             }
 
+            let mut term_structure = term_points
+                .into_iter()
+                .map(|(underlying, mut points)| {
+                    points.sort_by_key(|point| point.expiry_time_ms);
+                    MarketResearchTermStructure {
+                        underlying,
+                        cross_contract: points.len() >= 2,
+                        points,
+                    }
+                })
+                .collect::<Vec<_>>();
+            term_structure.sort_by(|left, right| left.underlying.cmp(&right.underlying));
+
             let result = MarketResearchResult {
-                schema: MARKET_RESEARCH_SCHEMA_V2.to_owned(),
+                schema: MARKET_RESEARCH_SCHEMA_V3.to_owned(),
                 assembled_at: generated_at.to_owned(),
+                as_of_ms: research_as_of_ms,
                 bar: bar.clone(),
                 history_limit,
+                feature_versions: MarketResearchFeatureVersions {
+                    realized_volatility: "realized_volatility/simple_return_rss/v1",
+                    volume_change: "volume_change/confirmed_candle_contract_volume/v1",
+                    dated_future_basis: DATED_FUTURE_BASIS_SCHEMA_V1,
+                    term_structure: "term_structure/dated_futures/v1",
+                },
                 reference: shared_reference
                     .expect("MarketResearch validation requires at least two instruments"),
                 instruments: results,
+                term_structure,
             };
             Ok(AgentResponse {
                 schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
@@ -739,7 +858,7 @@ pub(super) async fn dispatch(
                 status: AgentResponseStatus::Completed,
                 generated_at: generated_at.to_owned(),
                 quality: response_quality,
-                result_schema: Some(MARKET_RESEARCH_SCHEMA_V2.to_owned()),
+                result_schema: Some(MARKET_RESEARCH_SCHEMA_V3.to_owned()),
                 result: Some(serde_json::to_value(result)?),
                 failure: None,
                 warnings: Vec::new(),
@@ -877,6 +996,7 @@ mod tests {
             instrument_id,
             mechanics: MarketResearchMechanics {
                 instrument_type: okx_api::InstrumentType::Swap,
+                underlying: "ASSET-USDT".to_owned(),
                 contract_value: Some("0.00000001".to_owned()),
                 contract_value_currency: Some("ASSET".to_owned()),
                 settle_currency: Some("USDT".to_owned()),
@@ -899,7 +1019,12 @@ mod tests {
                 mean_absolute_close_return_ratio: "0.012345678901234567890123456789".to_owned(),
                 max_absolute_close_return_ratio: "0.045678901234567890123456789012".to_owned(),
                 max_close_drawdown_ratio: "0.078901234567890123456789012345".to_owned(),
+                realized_volatility_ratio: "0.098765432109876543210987654321".to_owned(),
+                first_confirmed_volume: "123456789012345".to_owned(),
+                last_confirmed_volume: "223456789012345".to_owned(),
+                volume_change_ratio: Some("0.810000000000000000000000000000".to_owned()),
             },
+            dated_basis: None,
             provenance: MarketResearchProvenance {
                 market_generation:
                     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -931,16 +1056,24 @@ mod tests {
 
     fn projected_size(instrument_count: usize) -> usize {
         let result = MarketResearchResult {
-            schema: MARKET_RESEARCH_SCHEMA_V2.to_owned(),
+            schema: MARKET_RESEARCH_SCHEMA_V3.to_owned(),
             assembled_at: "2026-09-28T00:00:02.000Z".to_owned(),
+            as_of_ms: 1_790_553_602_000,
             bar: "1H".to_owned(),
             history_limit: 100,
+            feature_versions: MarketResearchFeatureVersions {
+                realized_volatility: "realized_volatility/simple_return_rss/v1",
+                volume_change: "volume_change/confirmed_candle_contract_volume/v1",
+                dated_future_basis: DATED_FUTURE_BASIS_SCHEMA_V1,
+                term_structure: "term_structure/dated_futures/v1",
+            },
             reference: MarketResearchReferenceProvenance {
                 generation:
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_owned(),
             },
             instruments: (0..instrument_count).map(fixture).collect(),
+            term_structure: Vec::new(),
         };
         let response = AgentResponse {
             schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
@@ -1013,6 +1146,8 @@ mod tests {
                 mid_price: long_decimal.clone(),
                 spread_price: long_decimal.clone(),
                 spread_bps: long_decimal.clone(),
+                microprice: long_decimal.clone(),
+                depth_imbalance_ratio: long_decimal.clone(),
                 bid_depth_contracts: long_decimal.clone(),
                 ask_depth_contracts: long_decimal.clone(),
                 buy_sweep: sweep.clone(),
