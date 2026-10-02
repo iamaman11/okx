@@ -822,7 +822,7 @@ pub(super) async fn dispatch(
                                 annualized_basis_bps: analysis.annualized_basis_bps.clone(),
                             };
                             term_points
-                                .entry(current.rules.instrument.underlying.clone())
+                                .entry(current.snapshot.underlying.clone())
                                 .or_default()
                                 .push(MarketResearchTermPoint {
                                     instrument_id: instrument.clone(),
@@ -842,7 +842,7 @@ pub(super) async fn dispatch(
                     instrument_id: instrument.clone(),
                     mechanics: MarketResearchMechanics {
                         instrument_type: current.rules.instrument.instrument_type,
-                        underlying: current.rules.instrument.underlying.clone(),
+                        underlying: current.snapshot.underlying.clone(),
                         contract_value: current.rules.instrument.contract_value.clone(),
                         contract_value_currency: current
                             .rules
