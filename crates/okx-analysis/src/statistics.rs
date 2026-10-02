@@ -391,4 +391,141 @@ mod tests {
             Err(AnalysisError::StatisticalSeriesLengthMismatch)
         ));
     }
+
+
+    fn history(instrument: &str, closes: &[&str]) -> MarketHistorySnapshot {
+        MarketHistorySnapshot {
+            schema: "okx.market-history/v1".to_owned(),
+            instrument_id: instrument.to_owned(),
+            bar: "1H".to_owned(),
+            requested_limit: closes.len() as u16,
+            reference_generation: "ref".to_owned(),
+            source: "fixture".to_owned(),
+            source_received_at: "2026-10-03T00:00:00Z".to_owned(),
+            history_generation: format!("history-{instrument}"),
+            all_confirmed: true,
+            oldest_open_time_ms: "1".to_owned(),
+            newest_open_time_ms: closes.len().to_string(),
+            candles: closes
+                .iter()
+                .enumerate()
+                .map(|(index, close)| okx_observation::HistoryCandle {
+                    open_time_ms: (index + 1).to_string(),
+                    open: (*close).to_owned(),
+                    high: (*close).to_owned(),
+                    low: (*close).to_owned(),
+                    close: (*close).to_owned(),
+                    volume: "1".to_owned(),
+                    volume_currency: "1".to_owned(),
+                    volume_quote: None,
+                    confirmed: true,
+                })
+                .collect(),
+        }
+    }
+
+    fn exposure(instrument: &str, signed_notional: &str) -> StatisticalExposure {
+        StatisticalExposure {
+            instrument_id: instrument.to_owned(),
+            signed_notional_usd: signed_notional.to_owned(),
+        }
+    }
+
+    #[test]
+    fn flat_portfolio_is_explicitly_not_applicable() {
+        let result = analyze_portfolio_statistics(&[], &[], Some("-0.1")).expect("analysis");
+        assert_eq!(result.status, PortfolioStatisticsStatus::NotApplicable);
+        assert_eq!(result.return_sample_count, 0);
+        assert_eq!(result.expected_shortfall, None);
+        assert!(result.historical_stress.is_none());
+    }
+
+    #[test]
+    fn identical_series_have_unit_cross_correlation_and_parallel_scenario_is_signed() {
+        let exposures = vec![
+            exposure("BTC-USDT-SWAP", "100"),
+            exposure("ETH-USDT-SWAP", "50"),
+        ];
+        let histories = vec![
+            history("BTC-USDT-SWAP", &["100", "110", "99", "108.9"]),
+            history("ETH-USDT-SWAP", &["200", "220", "198", "217.8"]),
+        ];
+        let result =
+            analyze_portfolio_statistics(&exposures, &histories, Some("-0.1")).expect("analysis");
+        let cross = result
+            .covariance
+            .iter()
+            .find(|cell| {
+                cell.left_instrument == "BTC-USDT-SWAP"
+                    && cell.right_instrument == "ETH-USDT-SWAP"
+            })
+            .expect("cross correlation");
+        assert_eq!(cross.correlation.as_deref(), Some("1"));
+        assert_eq!(
+            result
+                .parallel_scenario
+                .as_ref()
+                .expect("scenario")
+                .portfolio_pnl_usd,
+            "-15"
+        );
+        assert_eq!(
+            result.expected_shortfall_status,
+            "not_computed_without_declared_tail_sample_contract"
+        );
+    }
+
+    #[test]
+    fn opposite_signed_exposure_can_reduce_portfolio_volatility() {
+        let histories = vec![
+            history("BTC-USDT-SWAP", &["100", "110", "99", "108.9"]),
+            history("ETH-USDT-SWAP", &["200", "220", "198", "217.8"]),
+        ];
+        let same_side = analyze_portfolio_statistics(
+            &[
+                exposure("BTC-USDT-SWAP", "100"),
+                exposure("ETH-USDT-SWAP", "50"),
+            ],
+            &histories,
+            None,
+        )
+        .expect("same side");
+        let hedge = analyze_portfolio_statistics(
+            &[
+                exposure("BTC-USDT-SWAP", "100"),
+                exposure("ETH-USDT-SWAP", "-50"),
+            ],
+            &histories,
+            None,
+        )
+        .expect("hedge");
+        let same = d(
+            same_side
+                .portfolio_volatility_usd
+                .as_deref()
+                .expect("same volatility"),
+        );
+        let hedged = d(
+            hedge
+                .portfolio_volatility_usd
+                .as_deref()
+                .expect("hedged volatility"),
+        );
+        assert!(hedged < same);
+    }
+
+    #[test]
+    fn unaligned_confirmed_timestamps_fail_closed() {
+        let exposures = vec![
+            exposure("BTC-USDT-SWAP", "100"),
+            exposure("ETH-USDT-SWAP", "50"),
+        ];
+        let btc = history("BTC-USDT-SWAP", &["100", "101", "102"]);
+        let mut eth = history("ETH-USDT-SWAP", &["100", "101", "102"]);
+        eth.candles[1].open_time_ms = "99".to_owned();
+        assert!(matches!(
+            analyze_portfolio_statistics(&exposures, &[btc, eth], None),
+            Err(AnalysisError::StatisticalHistoryNotAligned)
+        ));
+    }
 }
