@@ -298,8 +298,7 @@ fn funding_semantics(requirement: okx_observation::FundingRequirement) -> &'stat
 fn open_interest_history_period(bar: &str) -> Option<&str> {
     matches!(
         bar,
-        "5m"
-            | "15m"
+        "5m" | "15m"
             | "30m"
             | "1H"
             | "2H"
@@ -1029,16 +1028,12 @@ pub(super) async fn dispatch(
                         funding_received_at: funding_history
                             .as_ref()
                             .map(|funding| funding.snapshot.source_received_at.clone()),
-                        open_interest_generation: open_interest_history
-                            .as_ref()
-                            .map(|open_interest| {
-                                open_interest.snapshot.open_interest_generation.clone()
-                            }),
+                        open_interest_generation: open_interest_history.as_ref().map(
+                            |open_interest| open_interest.snapshot.open_interest_generation.clone(),
+                        ),
                         open_interest_received_at: open_interest_history
                             .as_ref()
-                            .map(|open_interest| {
-                                open_interest.snapshot.source_received_at.clone()
-                            }),
+                            .map(|open_interest| open_interest.snapshot.source_received_at.clone()),
                         market_source: current.source,
                     },
                     quality: MarketResearchQuality {
