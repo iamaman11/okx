@@ -83,14 +83,17 @@ pub fn analyze_trade_flow(
 
     let total_size = buy_size + sell_size;
     let total_notional = buy_notional + sell_notional;
-    let imbalance = (total_size > Decimal::ZERO)
-        .then(|| ((buy_size - sell_size) / total_size).normalize().to_string());
-    let vwap = (total_size > Decimal::ZERO)
-        .then(|| (total_notional / total_size).normalize().to_string());
-    let buy_vwap = (buy_size > Decimal::ZERO)
-        .then(|| (buy_notional / buy_size).normalize().to_string());
-    let sell_vwap = (sell_size > Decimal::ZERO)
-        .then(|| (sell_notional / sell_size).normalize().to_string());
+    let imbalance = (total_size > Decimal::ZERO).then(|| {
+        ((buy_size - sell_size) / total_size)
+            .normalize()
+            .to_string()
+    });
+    let vwap =
+        (total_size > Decimal::ZERO).then(|| (total_notional / total_size).normalize().to_string());
+    let buy_vwap =
+        (buy_size > Decimal::ZERO).then(|| (buy_notional / buy_size).normalize().to_string());
+    let sell_vwap =
+        (sell_size > Decimal::ZERO).then(|| (sell_notional / sell_size).normalize().to_string());
 
     Ok(TradeFlowAnalysis {
         schema: TRADE_FLOW_ANALYSIS_SCHEMA_V1.to_owned(),
@@ -307,9 +310,15 @@ mod tests {
 
         assert_eq!(analysis.buy_contracts, "3");
         assert_eq!(analysis.sell_contracts, "1");
-        assert_eq!(analysis.signed_taker_imbalance_ratio.as_deref(), Some("0.5"));
+        assert_eq!(
+            analysis.signed_taker_imbalance_ratio.as_deref(),
+            Some("0.5")
+        );
         assert_eq!(analysis.vwap.as_deref(), Some("100.25"));
-        assert_eq!(analysis.buy_vwap.as_deref(), Some("100.66666666666666666666666667"));
+        assert_eq!(
+            analysis.buy_vwap.as_deref(),
+            Some("100.66666666666666666666666667")
+        );
         assert_eq!(analysis.sell_vwap.as_deref(), Some("99"));
     }
 
