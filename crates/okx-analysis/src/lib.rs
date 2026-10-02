@@ -13,7 +13,7 @@ pub use market_query::{
     analyze_return_24h_pct,
 };
 pub use microstructure::{
-    MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1, BookSweepAnalysis, MarketIntelligenceAnalysis,
+    BookSweepAnalysis, MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1, MarketIntelligenceAnalysis,
     SPREAD_BPS_METRIC_ID, SPREAD_BPS_METRIC_VERSION_V1, SPREAD_BPS_UNIT, SpreadBps,
     analyze_market_intelligence, analyze_spread_bps,
 };
