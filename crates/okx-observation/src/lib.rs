@@ -1,3 +1,5 @@
+pub use okx_api::InstrumentType;
+
 pub mod account;
 pub mod account_ledger;
 pub mod capabilities;
