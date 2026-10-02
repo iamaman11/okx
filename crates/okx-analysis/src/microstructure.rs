@@ -8,8 +8,7 @@ use serde::Serialize;
 
 use crate::AnalysisError;
 
-pub const MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1: &str =
-    "okx.market-intelligence-analysis/v1";
+pub const MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1: &str = "okx.market-intelligence-analysis/v1";
 pub const SPREAD_BPS_METRIC_ID: &str = "spread_bps";
 pub const SPREAD_BPS_METRIC_VERSION_V1: &str = "spread_bps/v1";
 pub const SPREAD_BPS_UNIT: &str = "basis_points";
@@ -108,7 +107,9 @@ pub fn analyze_market_intelligence(
     if order_book.status != OrderBookStatus::Contiguous {
         return Err(AnalysisError::OrderBookNotContiguous);
     }
-    let seq_id = order_book.seq_id.ok_or(AnalysisError::OrderBookMissingSequence)?;
+    let seq_id = order_book
+        .seq_id
+        .ok_or(AnalysisError::OrderBookMissingSequence)?;
     let exchange_timestamp_ms = order_book
         .exchange_timestamp_ms
         .as_deref()
@@ -121,8 +122,14 @@ pub fn analyze_market_intelligence(
     let requested = positive_decimal("impact_contracts", impact_contracts)?;
     let asks = normalized_side(&order_book.asks, depth_levels, true)?;
     let bids = normalized_side(&order_book.bids, depth_levels, false)?;
-    let (best_ask, _) = asks.first().copied().ok_or(AnalysisError::OrderBookEmptyAsk)?;
-    let (best_bid, _) = bids.first().copied().ok_or(AnalysisError::OrderBookEmptyBid)?;
+    let (best_ask, _) = asks
+        .first()
+        .copied()
+        .ok_or(AnalysisError::OrderBookEmptyAsk)?;
+    let (best_bid, _) = bids
+        .first()
+        .copied()
+        .ok_or(AnalysisError::OrderBookEmptyBid)?;
     if best_ask <= best_bid {
         return Err(AnalysisError::CrossedOrderBook {
             best_bid: best_bid.normalize().to_string(),
