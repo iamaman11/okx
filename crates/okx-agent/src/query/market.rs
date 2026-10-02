@@ -168,6 +168,7 @@ struct MarketResearchTermPoint {
 
 #[derive(serde::Serialize)]
 struct MarketResearchProvenance {
+    source_generation: String,
     market_generation: String,
     history_generation: String,
     trades_generation: String,
@@ -1101,6 +1102,30 @@ pub(super) async fn dispatch(
                         ));
                     }
                 };
+                let source_generation = match market_research_source_generation(
+                    &current.rules.reference_generation,
+                    &current.snapshot.market_generation,
+                    &history.snapshot.history_generation,
+                    &trades.snapshot.trades_generation,
+                    funding_history
+                        .as_ref()
+                        .map(|value| value.snapshot.funding_generation.as_str()),
+                    open_interest_history
+                        .as_ref()
+                        .map(|value| value.snapshot.open_interest_generation.as_str()),
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            MARKET_RESEARCH_INCONSISTENT_CODE,
+                            error.to_string(),
+                            false,
+                        ));
+                    }
+                };
                 let mark_index_basis_bps = match analyze_mark_index_basis_bps(
                     &current.snapshot.mark_price.price,
                     &current.snapshot.index_price.price,
@@ -1174,6 +1199,7 @@ pub(super) async fn dispatch(
                     }),
                     dated_basis,
                     provenance: MarketResearchProvenance {
+                        source_generation,
                         market_generation: current.snapshot.market_generation.clone(),
                         history_generation: history_behavior.history_generation.clone(),
                         trades_generation: trades.snapshot.trades_generation.clone(),
@@ -1411,6 +1437,9 @@ mod tests {
             }),
             dated_basis: None,
             provenance: MarketResearchProvenance {
+                source_generation:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
                 market_generation:
                     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         .to_owned(),
