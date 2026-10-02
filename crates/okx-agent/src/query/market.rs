@@ -1237,7 +1237,7 @@ mod tests {
             status: AgentResponseStatus::Completed,
             generated_at: "2026-09-28T00:00:02.000Z".to_owned(),
             quality: DataQuality::Degraded,
-            result_schema: Some(MARKET_RESEARCH_SCHEMA_V2.to_owned()),
+            result_schema: Some(MARKET_RESEARCH_SCHEMA_V3.to_owned()),
             result: Some(serde_json::to_value(result).expect("serialize result")),
             failure: None,
             warnings: Vec::new(),
