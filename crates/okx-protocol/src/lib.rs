@@ -1078,10 +1078,7 @@ fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
-fn validate_positive_decimal_text(
-    value: &str,
-    field: &'static str,
-) -> Result<(), ProtocolError> {
+fn validate_positive_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
     if value.is_empty() || value.len() > 64 {
         return Err(ProtocolError::InvalidDecimalInput(field));
     }
@@ -1098,11 +1095,7 @@ fn validate_positive_decimal_text(
                     non_zero_digits += 1;
                 }
             }
-            b'.'
-                if dots == 0
-                    && index > 0
-                    && index + 1 < bytes.len() =>
-            {
+            b'.' if dots == 0 && index > 0 && index + 1 < bytes.len() => {
                 dots += 1;
             }
             _ => return Err(ProtocolError::InvalidDecimalInput(field)),
