@@ -26,7 +26,7 @@ explicit optional live activation gate
 
 The final live activation gate is not a sixth development stage. Production live trading remains fail-closed until separately authorized after Stages 1–5 pass.
 
-## Current Stage-1 cursor
+## Accepted Stage 1 and current Stage 2 cursor
 
 Canonical execution order inside Stage 1:
 
@@ -50,17 +50,27 @@ Stage 1 final acceptance is **ACCEPTED/CLOSED** on the exact tested/deployed tre
 - independent encrypted GitHub DATA fallback parity passed on the same binary;
 - exact-tree restart advanced direct transport generation and market/account state reconverged to FRESH.
 
+Stage-1 acceptance scope is the authenticated production execution account and the factual surfaces available through its least-privilege observer credential. Full main+subaccounts treasury inventory remains an explicit external/deferred capability and must continue to report `multi_account_inventory_complete=false` until a separate master read credential exists.
+
 **Current roadmap cursor: Stage 2 — INTELLIGENCE + RISK.**
 
-Stage 2.1 — **bounded universal analytical query** is **ACCEPTED/CLOSED**:
-- universal MCP read surface is exactly `query_capabilities` + `query`;
-- whole SWAP+FUTURES universe scan is bounded to at most two bulk REST requests and 25 returned rows;
-- versioned `return_24h_pct/v1`, stable top/bottom-K, explicit missing/excluded/truncation/coherence/provenance evidence are accepted;
-- primary Cloudflare black-box acceptance passed before encrypted GitHub DATA fallback parity;
-- the production black-box exposed and closed the digit-containing serde contract defect without adding a new owner/path;
-- structural delta remains zero for crates/tasks/state owners/stores/schedulers/transports/mutation authorities/dependencies.
+Stage 2 progress:
 
-**Next Stage-2 cursor: market intelligence / microstructure**, then portfolio deterministic risk and the remaining Stage-2 mandate/hard-policy acceptance. New analytical capability must extend the same universal factual/metric path rather than reintroduce endpoint-per-question growth.
+- **bounded universal analytical query — ACCEPTED/CLOSED**: `query_capabilities` + `query`, bounded whole-derivatives scan, stable top/bottom-K, explicit missing/excluded/truncation/coherence/provenance;
+- **live microstructure core — ACCEPTED**: spread/depth/impact and sequence-contiguous live evidence through the existing bounded public-WS owner;
+- **derivatives + history intelligence — ACCEPTED**: recent trades, realized-volatility/volume/OI change, funding history/regime, basis/term-structure evidence, plus production fixes for live OKX wire/rate-domain behavior;
+- **portfolio risk mandate/hard-policy primary T4 — ACCEPTED**: PR #184 is on main `fe67d3495479e72a56c20c08fc5c231ed0670225`; exact tested head `74e14e5b1ff09c4fe27b1e7579eee9e905c2d843`; CI `37073209534` PASS; artifact `11256197440` deployed; Worker contract `okx.mcp.tools/2026-10-03.1`. After refreshing the connected tool schema, primary Cloudflare allow + intentional reject cases both passed with FRESH coherent evidence, typed policy rejection, non-null BTC reference generation in the reject case, and zero-residual OKX account-position-risk oracle comparison. GitHub fallback was not used as a substitute.
+
+Canonical Stage-2 closure order:
+
+1. **DONE** — primary `portfolio_risk` allow + intentional reject cases passed through the connected Cloudflare MCP surface;
+2. **CURRENT** — close portfolio-risk correctness edges: end-of-evaluation reference-generation recheck, bounded source-skew/oracle admission, versioned oracle tolerance/semantic exceptions, fail-closed unsupported-currency daily-loss behavior, and explicit mandate-field semantics;
+3. add covariance/correlation + volatility contribution + deterministic scenario/historical stress evidence; ES/tail only when the sample contract is valid;
+4. bind the same versioned hard policy into the existing execution authority for fresh pre-mutation revalidation, without a second risk daemon/state owner/store/scheduler;
+5. obtain safe representative non-zero portfolio/oracle proof through supported read-only virtual evidence or Demo Trading rather than enabling production live trading;
+6. issue one final Stage-2 T1–T5 acceptance record over one traceable accepted tree/artifact.
+
+Do not start Stage 3 until this closure sequence is complete. New analytical capability must continue to extend existing factual/analysis owners rather than reintroduce endpoint-per-question growth.
 
 ## Repository Guard v1
 
@@ -160,7 +170,7 @@ Important proof includes:
 - named rate domains/backpressure;
 - direct Cloudflare MCP plus independent GitHub fallback.
 
-Exit: factual market/account/reference truth is coherent, fresh/provenanced and black-box accepted.
+Exit: factual market/account/reference truth for the authenticated production execution account is coherent, fresh/provenanced and black-box accepted. Treasury-wide main+subaccounts aggregation remains a separate external/deferred capability until a master read credential exists.
 
 ### Stage 2 — INTELLIGENCE + RISK
 
@@ -172,9 +182,14 @@ Important proof includes:
 - depth/spread/impact/basis/carry;
 - exact sizing/margin/risk boundaries;
 - exchange-oracle differential checks against supported account-position-risk / max-size / position-builder evidence;
-- no duplicate venue/reference owner.
+- end-of-evaluation reference-generation and bounded multi-source skew admission;
+- hard daily-loss policy never silently disappears when currency conversion evidence is unavailable;
+- mandate fields are either active constraints/derived evidence or explicitly context-only;
+- the same hard policy is revalidated on fresh accepted evidence immediately before future mutation inside the existing execution owner;
+- representative non-zero risk/oracle proof without enabling production live trading;
+- no duplicate venue/reference/risk owner.
 
-Exit: professional decision evidence is calculated locally in Rust and ChatGPT does not become the financial calculator or safety authority.
+Exit: professional decision evidence is calculated locally in Rust, the same hard policy is enforceable at the mutation boundary, and ChatGPT does not become the financial calculator or safety authority.
 
 ### Stage 3 — SCIENTIFIC RESEARCH + REPLAY
 
