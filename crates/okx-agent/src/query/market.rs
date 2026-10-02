@@ -129,7 +129,6 @@ struct MarketResearchWindows {
 
 #[derive(Clone)]
 struct MarketResearchDatedBasis {
-    expiry_time_ms: u64,
     basis_bps: String,
     annualized_basis_bps: String,
 }
@@ -241,14 +240,6 @@ fn market_intelligence_coherence(
             order_book,
         },
     })
-}
-
-fn funding_semantics(requirement: okx_observation::FundingRequirement) -> &'static str {
-    match requirement {
-        okx_observation::FundingRequirement::Required => "required",
-        okx_observation::FundingRequirement::NotApplicable => "not_applicable",
-        okx_observation::FundingRequirement::Unknown => "unknown",
-    }
 }
 
 fn open_interest_history_period(bar: &str) -> Option<&str> {
@@ -1007,7 +998,6 @@ pub(super) async fn dispatch(
                                 }
                             };
                             let compact = MarketResearchDatedBasis {
-                                expiry_time_ms: analysis.expiry_time_ms,
                                 basis_bps: analysis.basis_bps.clone(),
                                 annualized_basis_bps: analysis.annualized_basis_bps.clone(),
                             };
@@ -1047,30 +1037,6 @@ pub(super) async fn dispatch(
                         ));
                     }
                 };
-                let source_generation = match market_research_source_generation(
-                    &current.rules.reference_generation,
-                    &current.snapshot.market_generation,
-                    &history.snapshot.history_generation,
-                    &trades.snapshot.trades_generation,
-                    funding_history
-                        .as_ref()
-                        .map(|value| value.snapshot.funding_generation.as_str()),
-                    open_interest_history
-                        .as_ref()
-                        .map(|value| value.snapshot.open_interest_generation.as_str()),
-                ) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        return Ok(failure_response(
-                            request,
-                            generated_at,
-                            AgentResponseStatus::Failed,
-                            MARKET_RESEARCH_INCONSISTENT_CODE,
-                            error.to_string(),
-                            false,
-                        ));
-                    }
-                };
                 let mark_index_basis_bps = match analyze_mark_index_basis_bps(
                     &current.snapshot.mark_price.price,
                     &current.snapshot.index_price.price,
@@ -1091,7 +1057,7 @@ pub(super) async fn dispatch(
                         .or_insert_with(|| (instrument.clone(), mark_index_basis_bps));
                 }
 
-                let source_generation = match okx_observation::market_research_source_generation(
+                let source_generation = match market_research_source_generation(
                     &current.rules.reference_generation,
                     &current.snapshot.market_generation,
                     &history_behavior.history_generation,
