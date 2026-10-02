@@ -584,10 +584,8 @@ mod tests {
     #[test]
     fn documented_bulk_tickers_budget_is_bounded() {
         let budget = RateBudget::new();
-        let plan = budget.public_rest_plan(
-            "/api/v5/market/tickers",
-            &[("instType", "SWAP".to_owned())],
-        );
+        let plan =
+            budget.public_rest_plan("/api/v5/market/tickers", &[("instType", "SWAP".to_owned())]);
         assert_eq!(plan.domains[0].key.kind, RateDomainKind::PublicRestIp);
         assert_eq!(plan.domains[0].max_requests, 20);
         assert_eq!(plan.domains[0].window_ms, 2_000);
