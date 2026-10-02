@@ -23,6 +23,19 @@ const VALID_BARS = new Set([
 ]);
 
 const CODE_PATTERN = "^[A-Za-z0-9_-]+$";
+const QUERY_CATALOG_PATTERN = /^[A-Za-z0-9._\/-]{1,64}$/;
+const QUERY_FIELDS = new Set([
+  "instrument_id",
+  "instrument_type",
+  "settle_currency",
+  "state",
+  "last",
+  "open_24h",
+  "volume_24h",
+  "volume_currency_24h",
+  "exchange_timestamp_ms",
+  "return_24h_pct",
+]);
 
 function contractStatus(value: unknown): Json {
   if (!isObject(value)) return transportFailure("INVALID_RUNTIME_STATUS", false);
@@ -130,6 +143,64 @@ export const mcpApi = {
             },
           },
           {
+            name: "query_capabilities",
+            description: "Get the versioned bounded analytical query catalog, supported fields/metrics/operators, and hard limits.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+          {
+            name: "query",
+            description: "Execute one bounded read-only market analytical plan through the Windows runtime. This is not SQL, code execution, or a raw OKX RPC.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                plan: {
+                  type: "object",
+                  properties: {
+                    catalog_version: { type: "string", minLength: 1, maxLength: 64 },
+                    universe: {
+                      type: "object",
+                      properties: {
+                        instrument_types: {
+                          type: "array",
+                          minItems: 1,
+                          maxItems: 2,
+                          uniqueItems: true,
+                          items: { type: "string", enum: ["SWAP", "FUTURES"] },
+                        },
+                        settle_currency: { type: "string", minLength: 2, maxLength: 16, pattern: CODE_PATTERN },
+                        state: { type: "string", enum: ["live"] },
+                      },
+                      required: ["instrument_types"],
+                      additionalProperties: false,
+                    },
+                    select: {
+                      type: "array",
+                      minItems: 1,
+                      maxItems: 10,
+                      uniqueItems: true,
+                      items: { type: "string", enum: [...QUERY_FIELDS] },
+                    },
+                    metric: { type: "string", enum: ["return_24h_pct"] },
+                    sort: {
+                      type: "object",
+                      properties: {
+                        key: { type: "string", enum: ["return_24h_pct"] },
+                        direction: { type: "string", enum: ["asc", "desc"] },
+                      },
+                      required: ["key", "direction"],
+                      additionalProperties: false,
+                    },
+                    limit: { type: "integer", minimum: 1, maximum: 25 },
+                  },
+                  required: ["catalog_version", "universe", "select", "limit"],
+                  additionalProperties: false,
+                },
+              },
+              required: ["plan"],
+              additionalProperties: false,
+            },
+          },
+          {
             name: "account_summary",
             description: "Get a bounded read-only OKX account and ledger truth summary, including history coverage and durable execution-ledger reconciliation.",
             inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -228,6 +299,106 @@ export const mcpApi = {
             instruments: normalizedInstruments,
             bar: args.bar,
             limit: args.limit ?? null,
+          },
+        };
+        return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+      }
+      if (name === "query_capabilities") {
+        const agentRequest = {
+          schema: "okx.agent.request/v1",
+          request_id: requestId(),
+          operation: { type: "query_capabilities" },
+        };
+        return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+      }
+      if (name === "query") {
+        if (!isObject(args.plan)) {
+          return jsonRpcError(id, -32602, "invalid query plan");
+        }
+        const plan = args.plan;
+        if (typeof plan.catalog_version !== "string" || !QUERY_CATALOG_PATTERN.test(plan.catalog_version)) {
+          return jsonRpcError(id, -32602, "invalid catalog_version");
+        }
+        if (!isObject(plan.universe)) {
+          return jsonRpcError(id, -32602, "invalid universe");
+        }
+        const universe = plan.universe;
+        if (
+          !Array.isArray(universe.instrument_types) ||
+          universe.instrument_types.length < 1 ||
+          universe.instrument_types.length > 2
+        ) {
+          return jsonRpcError(id, -32602, "invalid instrument_types");
+        }
+        const instrumentTypes = universe.instrument_types.map((value) => String(value).toUpperCase());
+        if (
+          instrumentTypes.some((value) => !["SWAP", "FUTURES"].includes(value)) ||
+          new Set(instrumentTypes).size !== instrumentTypes.length
+        ) {
+          return jsonRpcError(id, -32602, "invalid instrument_types");
+        }
+        const settleCurrency = universe.settle_currency === undefined
+          ? null
+          : normalizeCode(universe.settle_currency, 2, 16);
+        if (universe.settle_currency !== undefined && !settleCurrency) {
+          return jsonRpcError(id, -32602, "invalid settle_currency");
+        }
+        const state = universe.state === undefined ? null : String(universe.state).toLowerCase();
+        if (state !== null && state !== "live") {
+          return jsonRpcError(id, -32602, "invalid state");
+        }
+        if (
+          !Array.isArray(plan.select) ||
+          plan.select.length < 1 ||
+          plan.select.length > 10 ||
+          plan.select.some((field) => typeof field !== "string" || !QUERY_FIELDS.has(field)) ||
+          new Set(plan.select).size !== plan.select.length
+        ) {
+          return jsonRpcError(id, -32602, "invalid select");
+        }
+        const metric = plan.metric === undefined ? null : String(plan.metric);
+        if (metric !== null && metric !== "return_24h_pct") {
+          return jsonRpcError(id, -32602, "invalid metric");
+        }
+        let sort: { key: string; direction: string } | null = null;
+        if (plan.sort !== undefined) {
+          if (!isObject(plan.sort)) {
+            return jsonRpcError(id, -32602, "invalid sort");
+          }
+          const key = String(plan.sort.key);
+          const direction = String(plan.sort.direction);
+          if (key !== "return_24h_pct" || !["asc", "desc"].includes(direction)) {
+            return jsonRpcError(id, -32602, "invalid sort");
+          }
+          sort = { key, direction };
+        }
+        if (!Number.isInteger(plan.limit) || Number(plan.limit) < 1 || Number(plan.limit) > 25) {
+          return jsonRpcError(id, -32602, "invalid limit");
+        }
+        if (
+          ((plan.select as unknown[]).includes("return_24h_pct") || sort !== null) &&
+          metric !== "return_24h_pct"
+        ) {
+          return jsonRpcError(id, -32602, "return_24h_pct metric must be declared");
+        }
+
+        const agentRequest = {
+          schema: "okx.agent.request/v1",
+          request_id: requestId(),
+          operation: {
+            type: "query",
+            plan: {
+              catalog_version: plan.catalog_version,
+              universe: {
+                instrument_types: instrumentTypes,
+                settle_currency: settleCurrency,
+                state,
+              },
+              select: plan.select,
+              metric,
+              sort,
+              limit: plan.limit,
+            },
           },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
