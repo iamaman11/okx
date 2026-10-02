@@ -309,7 +309,8 @@ fn positive_decimal(field: &'static str, value: &str) -> Result<Decimal, Analysi
 mod tests {
     use super::*;
     use okx_observation::{
-        BookLevel, FundingState, IndexPriceState, MarkPriceState, OpenInterestState, TickerState,
+        BookLevel, FundingState, IndexPriceState, InstrumentType, MarkPriceState,
+        OpenInterestState, TickerState,
     };
 
     fn market() -> MarketSnapshot {
@@ -442,7 +443,14 @@ mod tests {
         let mut invalid = book();
         invalid.status = OrderBookStatus::Invalid;
         assert!(matches!(
-            analyze_market_intelligence(&rules(), &market(), &invalid, "1", 2),
+            analyze_market_intelligence(
+                "AAA-USDT-SWAP",
+                "ref-1",
+                &market(),
+                &invalid,
+                "1",
+                2
+            ),
             Err(AnalysisError::OrderBookNotContiguous)
         ));
     }
