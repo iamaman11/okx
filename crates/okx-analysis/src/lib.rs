@@ -211,6 +211,21 @@ pub enum AnalysisError {
     InsufficientStatisticalSamples(usize),
     #[error("statistical series lengths do not match")]
     StatisticalSeriesLengthMismatch,
+    #[error("statistical portfolio universe exceeds hard limit: {0}")]
+    StatisticalUniverseTooLarge(usize),
+    #[error("statistical portfolio histories do not match the exposure universe")]
+    StatisticalHistoryMismatch,
+    #[error("statistical portfolio histories use different bars")]
+    StatisticalBarMismatch,
+    #[error("statistical portfolio confirmed candle timestamps are not aligned")]
+    StatisticalHistoryNotAligned,
+    #[error(
+        "statistical portfolio history for '{instrument}' requires at least three confirmed closes, found {confirmed}"
+    )]
+    InsufficientConfirmedStatisticalHistory {
+        instrument: String,
+        confirmed: usize,
+    },
     #[error("crossed or locked order book: best_bid={best_bid}, best_ask={best_ask}")]
     CrossedOrderBook { best_bid: String, best_ask: String },
 }
