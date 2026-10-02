@@ -45,7 +45,12 @@ pub use scenario::{
     ScenarioPriceSource, analyze_history_behavior, analyze_position_scenario,
 };
 pub use statistics::{
-    SAMPLE_COVARIANCE_FORMULA_V1, covariance_correlation, decimal_sqrt, sample_covariance_matrix,
+    HISTORICAL_STRESS_FORMULA_V1, PARALLEL_SCENARIO_FORMULA_V1,
+    PORTFOLIO_STATISTICS_SCHEMA_V1, PORTFOLIO_VOLATILITY_FORMULA_V1,
+    SAMPLE_COVARIANCE_FORMULA_V1, CovarianceCell, HistoricalStressResult,
+    ParallelScenarioResult, PortfolioStatisticsAnalysis, PortfolioStatisticsStatus,
+    StatisticalExposure, VolatilityContribution, analyze_portfolio_statistics,
+    covariance_correlation, decimal_sqrt, sample_covariance_matrix,
 };
 
 use std::str::FromStr;
