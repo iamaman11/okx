@@ -39,8 +39,7 @@ pub fn analyze_dated_future_basis(
     }
 
     let time_to_expiry_ms = expiry_time_ms - as_of_ms;
-    let basis_bps =
-        ((mark - index) / index) * Decimal::from(BASIS_POINTS);
+    let basis_bps = ((mark - index) / index) * Decimal::from(BASIS_POINTS);
     let annualized_basis_bps =
         basis_bps * Decimal::from(MILLIS_PER_YEAR) / Decimal::from(time_to_expiry_ms);
 
@@ -62,13 +61,9 @@ mod tests {
 
     #[test]
     fn one_year_basis_preserves_basis_bps() {
-        let analysis = analyze_dated_future_basis(
-            "101",
-            "100",
-            1_000,
-            &(1_000 + MILLIS_PER_YEAR).to_string(),
-        )
-        .expect("basis");
+        let analysis =
+            analyze_dated_future_basis("101", "100", 1_000, &(1_000 + MILLIS_PER_YEAR).to_string())
+                .expect("basis");
 
         assert_eq!(analysis.basis_bps, "100");
         assert_eq!(analysis.annualized_basis_bps, "100");
@@ -78,13 +73,9 @@ mod tests {
     #[test]
     fn half_year_basis_annualizes_to_twice_the_basis() {
         let half_year = MILLIS_PER_YEAR / 2;
-        let analysis = analyze_dated_future_basis(
-            "101",
-            "100",
-            5_000,
-            &(5_000 + half_year).to_string(),
-        )
-        .expect("basis");
+        let analysis =
+            analyze_dated_future_basis("101", "100", 5_000, &(5_000 + half_year).to_string())
+                .expect("basis");
 
         assert_eq!(analysis.basis_bps, "100");
         assert_eq!(analysis.annualized_basis_bps, "200");
