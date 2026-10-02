@@ -689,30 +689,28 @@ pub(super) async fn dispatch(
                         Ok(None) => return Ok(unavailable(request, generated_at)),
                         Err(error) => return Ok(market_failure(request, generated_at, error)),
                     };
-                let trades =
-                    match assemble_recent_trades(context, instrument, history_limit).await {
-                        Ok(Some(value)) => value,
+                let trades = match assemble_recent_trades(context, instrument, history_limit).await
+                {
+                    Ok(Some(value)) => value,
+                    Ok(None) => return Ok(unavailable(request, generated_at)),
+                    Err(error) => return Ok(market_failure(request, generated_at, error)),
+                };
+                let funding_history = if current.rules.instrument.funding_requirement
+                    == okx_observation::FundingRequirement::Required
+                {
+                    match assemble_funding_history(context, instrument, history_limit).await {
+                        Ok(Some(value)) => Some(value),
                         Ok(None) => return Ok(unavailable(request, generated_at)),
                         Err(error) => return Ok(market_failure(request, generated_at, error)),
-                    };
-                let funding_history =
-                    if current.rules.instrument.funding_requirement
-                        == okx_observation::FundingRequirement::Required
-                    {
-                        match assemble_funding_history(context, instrument, history_limit).await {
-                            Ok(Some(value)) => Some(value),
-                            Ok(None) => return Ok(unavailable(request, generated_at)),
-                            Err(error) => return Ok(market_failure(request, generated_at, error)),
-                        }
-                    } else {
-                        None
-                    };
+                    }
+                } else {
+                    None
+                };
 
                 if current.rules.reference_generation != history.snapshot.reference_generation
                     || current.snapshot.reference_generation
                         != history.snapshot.reference_generation
-                    || trades.snapshot.reference_generation
-                        != history.snapshot.reference_generation
+                    || trades.snapshot.reference_generation != history.snapshot.reference_generation
                     || funding_history.as_ref().is_some_and(|funding| {
                         funding.snapshot.reference_generation
                             != history.snapshot.reference_generation
@@ -773,17 +771,19 @@ pub(super) async fn dispatch(
                     }
                 };
                 let funding_regime = match funding_history.as_ref() {
-                    Some(funding) => match okx_analysis::analyze_funding_regime(&funding.snapshot) {
-                        Ok(value) => Some(value),
-                        Err(error) => {
-                            return Ok(analysis_failure(
-                                request,
-                                generated_at,
-                                AgentResponseStatus::Failed,
-                                error,
-                            ));
+                    Some(funding) => {
+                        match okx_analysis::analyze_funding_regime(&funding.snapshot) {
+                            Ok(value) => Some(value),
+                            Err(error) => {
+                                return Ok(analysis_failure(
+                                    request,
+                                    generated_at,
+                                    AgentResponseStatus::Failed,
+                                    error,
+                                ));
+                            }
                         }
-                    },
+                    }
                     None => None,
                 };
 
@@ -792,10 +792,10 @@ pub(super) async fn dispatch(
                     response_quality = DataQuality::Degraded;
                 }
                 let diagnostics = research_diagnostics(current.source, &history.warnings);
-                let ordinary_dated_future =
-                    current.rules.instrument.instrument_type == okx_api::InstrumentType::Futures
-                        && current.rules.instrument.funding_requirement
-                            == okx_observation::FundingRequirement::NotApplicable;
+                let ordinary_dated_future = current.rules.instrument.instrument_type
+                    == okx_api::InstrumentType::Futures
+                    && current.rules.instrument.funding_requirement
+                        == okx_observation::FundingRequirement::NotApplicable;
                 let dated_basis = if ordinary_dated_future {
                     match current.rules.instrument.expiry_time_ms.as_deref() {
                         Some(expiry_time_ms) => {
@@ -1151,9 +1151,7 @@ mod tests {
                 newest_exchange_timestamp_ms: Some("1790553600000".to_owned()),
                 buy_contracts: "1234567890123456789".to_owned(),
                 sell_contracts: "987654321098765432".to_owned(),
-                signed_taker_imbalance_ratio: Some(
-                    "0.123456789012345678901234567890".to_owned(),
-                ),
+                signed_taker_imbalance_ratio: Some("0.123456789012345678901234567890".to_owned()),
                 vwap: Some("12345.123456789012345678901234567890".to_owned()),
             },
             funding_regime: Some(MarketResearchFundingRegime {
