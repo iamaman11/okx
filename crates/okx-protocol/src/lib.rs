@@ -226,8 +226,7 @@ impl AnalyticalQueryPlan {
         if self.catalog_version.is_empty()
             || self.catalog_version.len() > 64
             || self.catalog_version.bytes().any(|byte| {
-                !(byte.is_ascii_alphanumeric()
-                    || matches!(byte, b'.' | b'/' | b'-' | b'_'))
+                !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'/' | b'-' | b'_'))
             })
         {
             return Err(ProtocolError::InvalidAnalyticalQuery("catalog_version"));
@@ -247,7 +246,9 @@ impl AnalyticalQueryPlan {
         }
         for (index, field) in self.select.iter().enumerate() {
             if self.select[..index].contains(field) {
-                return Err(ProtocolError::InvalidAnalyticalQuery("duplicate select field"));
+                return Err(ProtocolError::InvalidAnalyticalQuery(
+                    "duplicate select field",
+                ));
             }
         }
         if !(1..=25).contains(&self.limit) {
@@ -1108,7 +1109,9 @@ mod tests {
         duplicate.select.push(QueryField::Last);
         assert!(matches!(
             duplicate.validate(),
-            Err(ProtocolError::InvalidAnalyticalQuery("duplicate select field"))
+            Err(ProtocolError::InvalidAnalyticalQuery(
+                "duplicate select field"
+            ))
         ));
 
         let mut unbounded = plan.clone();
