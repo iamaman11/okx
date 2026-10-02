@@ -1179,7 +1179,7 @@ mod tests {
         assert!(matches!(
             undeclared_metric.validate(),
             Err(ProtocolError::InvalidAnalyticalQuery(
-                "return_24h_pct metric must be declared"
+                "declared metric must exactly match the derived field/sort key"
             ))
         ));
     }
@@ -1192,7 +1192,7 @@ mod tests {
             "operation":{
                 "type":"query",
                 "plan":{
-                    "catalog_version":"okx.query.catalog/2026-10-02.1",
+                    "catalog_version":"okx.query.catalog/2026-10-02.2",
                     "universe":{
                         "instrument_types":["SWAP","FUTURES"],
                         "settle_currency":null,
@@ -1225,6 +1225,58 @@ mod tests {
         assert!(encoded.contains(r#""return_24h_pct""#));
         assert!(!encoded.contains(r#""open24h""#));
         assert!(!encoded.contains(r#""return24h_pct""#));
+    }
+
+    #[test]
+    fn spread_query_and_market_intelligence_contracts_are_strict_and_read_only() {
+        let spread = AnalyticalQueryPlan {
+            catalog_version: ANALYTICAL_QUERY_CATALOG_VERSION_V1.to_owned(),
+            universe: MarketQueryUniverse {
+                instrument_types: vec![InstrumentTypeFilter::Swap],
+                settle_currency: Some("USDT".to_owned()),
+                state: Some(QueryInstrumentState::Live),
+            },
+            select: vec![
+                QueryField::InstrumentId,
+                QueryField::BestBid,
+                QueryField::BestAsk,
+                QueryField::SpreadBps,
+            ],
+            metric: Some(QueryMetric::SpreadBps),
+            sort: Some(QuerySort {
+                key: QuerySortKey::SpreadBps,
+                direction: QuerySortDirection::Asc,
+            }),
+            limit: 10,
+        };
+        spread.validate().expect("valid spread plan");
+
+        let mut mixed = spread.clone();
+        mixed.select.push(QueryField::Return24hPct);
+        assert!(matches!(
+            mixed.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery(
+                "one derived metric per query plan"
+            ))
+        ));
+
+        let operation = AgentOperation::MarketIntelligence {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            impact_contracts: "10".to_owned(),
+            depth_levels: 20,
+        };
+        operation.validate().expect("market intelligence contract");
+        assert!(operation.direct_transport_read_only());
+
+        let too_deep = AgentOperation::MarketIntelligence {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            impact_contracts: "10".to_owned(),
+            depth_levels: 51,
+        };
+        assert!(matches!(
+            too_deep.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery("depth_levels"))
+        ));
     }
 
     #[test]
