@@ -576,7 +576,9 @@ mod tests {
 
     #[test]
     fn open_interest_history_periods_match_current_okx_contract() {
-        for period in ["5m", "4H", "6H", "1D", "5D", "1W", "3M", "6Hutc", "1Dutc", "3Mutc"] {
+        for period in [
+            "5m", "4H", "6H", "1D", "5D", "1W", "3M", "6Hutc", "1Dutc", "3Mutc",
+        ] {
             assert!(is_open_interest_history_period(period), "{period}");
         }
         for period in ["1m", "8H", "1Y", "bad"] {
