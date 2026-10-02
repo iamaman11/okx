@@ -13,7 +13,7 @@ pub const KDF_LABEL_CLIENT_TO_AGENT_V1: &str = "okx-mailbox-v1/client-to-agent";
 pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
 pub const DIRECT_TRANSPORT_FRAME_SCHEMA_V1: &str = "okx.direct-transport.frame/v1";
 pub const DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
-pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.1";
+pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.2";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -163,6 +163,8 @@ pub enum QueryField {
     SettleCurrency,
     State,
     Last,
+    BestBid,
+    BestAsk,
     #[serde(rename = "open_24h")]
     Open24h,
     #[serde(rename = "volume_24h")]
@@ -172,6 +174,7 @@ pub enum QueryField {
     ExchangeTimestampMs,
     #[serde(rename = "return_24h_pct")]
     Return24hPct,
+    SpreadBps,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +182,7 @@ pub enum QueryField {
 pub enum QueryMetric {
     #[serde(rename = "return_24h_pct")]
     Return24hPct,
+    SpreadBps,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +190,7 @@ pub enum QueryMetric {
 pub enum QuerySortKey {
     #[serde(rename = "return_24h_pct")]
     Return24hPct,
+    SpreadBps,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,10 +265,35 @@ impl AnalyticalQueryPlan {
         if !(1..=25).contains(&self.limit) {
             return Err(ProtocolError::InvalidAnalyticalQuery("limit"));
         }
-        let needs_return = self.select.contains(&QueryField::Return24hPct) || self.sort.is_some();
-        if needs_return && self.metric != Some(QueryMetric::Return24hPct) {
+        let selected_metric = match (
+            self.select.contains(&QueryField::Return24hPct),
+            self.select.contains(&QueryField::SpreadBps),
+        ) {
+            (true, true) => {
+                return Err(ProtocolError::InvalidAnalyticalQuery(
+                    "one derived metric per query plan",
+                ));
+            }
+            (true, false) => Some(QueryMetric::Return24hPct),
+            (false, true) => Some(QueryMetric::SpreadBps),
+            (false, false) => None,
+        };
+        let sort_metric = self.sort.as_ref().map(|sort| match sort.key {
+            QuerySortKey::Return24hPct => QueryMetric::Return24hPct,
+            QuerySortKey::SpreadBps => QueryMetric::SpreadBps,
+        });
+        let required_metric = match (selected_metric, sort_metric) {
+            (Some(selected), Some(sorted)) if selected != sorted => {
+                return Err(ProtocolError::InvalidAnalyticalQuery(
+                    "selected and sorted metrics must match",
+                ));
+            }
+            (Some(metric), _) | (_, Some(metric)) => Some(metric),
+            (None, None) => None,
+        };
+        if self.metric != required_metric {
             return Err(ProtocolError::InvalidAnalyticalQuery(
-                "return_24h_pct metric must be declared",
+                "declared metric must exactly match the derived field/sort key",
             ));
         }
         Ok(())
@@ -309,6 +339,11 @@ pub enum AgentOperation {
     },
     MarketOverview {
         instrument: String,
+    },
+    MarketIntelligence {
+        instrument: String,
+        impact_contracts: String,
+        depth_levels: u16,
     },
     MarketResearch {
         instruments: Vec<String>,
@@ -415,6 +450,18 @@ impl AgentOperation {
             | Self::InstrumentRules { instrument }
             | Self::MarketOverview { instrument }
             | Self::SnapshotQuality { instrument } => validate_instrument(instrument),
+            Self::MarketIntelligence {
+                instrument,
+                impact_contracts,
+                depth_levels,
+            } => {
+                validate_instrument(instrument)?;
+                validate_decimal_text(impact_contracts, "impact_contracts")?;
+                if !(1..=50).contains(depth_levels) {
+                    return Err(ProtocolError::InvalidAnalyticalQuery("depth_levels"));
+                }
+                Ok(())
+            }
             Self::FindInstruments {
                 asset,
                 settle_currency,
