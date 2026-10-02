@@ -4,7 +4,7 @@ use okx_analysis::{
     CandidateOrderAssumptions, CorrelatedClusterLimit, DATED_FUTURE_BASIS_SCHEMA_V1,
     HARD_RISK_POLICY_SCHEMA_V1, HISTORY_BEHAVIOR_SCHEMA_V1, HardRiskPolicy,
     LiquidityRole as AnalysisLiquidityRole, MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
-    PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2, POSITION_SCENARIO_SCHEMA_V1, PortfolioCandidate,
+    PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3, POSITION_SCENARIO_SCHEMA_V1, PortfolioCandidate,
     PositionDirection, PositionScenarioAssumptions, RiskDegradedMode as AnalysisRiskDegradedMode,
     RiskMinimumQuality as AnalysisRiskMinimumQuality, ScenarioExitAssumption,
     TRADING_MANDATE_SCHEMA_V1, TradingMandate, analyze_basis_difference_bps,
@@ -74,6 +74,9 @@ pub const PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE: &str =
 pub const PORTFOLIO_RISK_POLICY_REJECTED_CODE: &str = "PORTFOLIO_RISK_POLICY_REJECTED";
 pub const ACCOUNT_SUMMARY_SCHEMA_V1: &str = "okx.account-summary/v1";
 pub const PORTFOLIO_RISK_SCHEMA_V2: &str = "okx.portfolio-risk/v2";
+pub const PORTFOLIO_RISK_SCHEMA_V3: &str = "okx.portfolio-risk/v3";
+pub const PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT_CODE: &str =
+    "PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT";
 pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT";
 pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
