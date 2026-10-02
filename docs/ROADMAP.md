@@ -59,12 +59,12 @@ Stage 2 progress:
 - **bounded universal analytical query — ACCEPTED/CLOSED**: `query_capabilities` + `query`, bounded whole-derivatives scan, stable top/bottom-K, explicit missing/excluded/truncation/coherence/provenance;
 - **live microstructure core — ACCEPTED**: spread/depth/impact and sequence-contiguous live evidence through the existing bounded public-WS owner;
 - **derivatives + history intelligence — ACCEPTED**: recent trades, realized-volatility/volume/OI change, funding history/regime, basis/term-structure evidence, plus production fixes for live OKX wire/rate-domain behavior;
-- **portfolio risk mandate/hard-policy implementation — MERGED + DEPLOYED, PRIMARY T4 OPEN**: PR #184 is on main `fe67d3495479e72a56c20c08fc5c231ed0670225`; exact tested head `74e14e5b1ff09c4fe27b1e7579eee9e905c2d843`; CI `37073209534` PASS; artifact `11256197440` deployed; Worker advertises `okx.mcp.tools/2026-10-03.1`. The connected ChatGPT callable schema still lacks `portfolio_risk`, therefore no primary capability acceptance is claimed and GitHub fallback is not used as a substitute.
+- **portfolio risk mandate/hard-policy primary T4 — ACCEPTED**: PR #184 is on main `fe67d3495479e72a56c20c08fc5c231ed0670225`; exact tested head `74e14e5b1ff09c4fe27b1e7579eee9e905c2d843`; CI `37073209534` PASS; artifact `11256197440` deployed; Worker contract `okx.mcp.tools/2026-10-03.1`. After refreshing the connected tool schema, primary Cloudflare allow + intentional reject cases both passed with FRESH coherent evidence, typed policy rejection, non-null BTC reference generation in the reject case, and zero-residual OKX account-position-risk oracle comparison. GitHub fallback was not used as a substitute.
 
 Canonical Stage-2 closure order:
 
-1. refresh the connected `okx-cloudflare-mcp` tool schema and run primary `portfolio_risk` allow + intentional reject cases;
-2. close portfolio-risk correctness edges: end-of-evaluation reference-generation recheck, bounded source-skew/oracle admission, versioned oracle tolerance/semantic exceptions, fail-closed unsupported-currency daily-loss behavior, and explicit mandate-field semantics;
+1. **DONE** — primary `portfolio_risk` allow + intentional reject cases passed through the connected Cloudflare MCP surface;
+2. **CURRENT** — close portfolio-risk correctness edges: end-of-evaluation reference-generation recheck, bounded source-skew/oracle admission, versioned oracle tolerance/semantic exceptions, fail-closed unsupported-currency daily-loss behavior, and explicit mandate-field semantics;
 3. add covariance/correlation + volatility contribution + deterministic scenario/historical stress evidence; ES/tail only when the sample contract is valid;
 4. bind the same versioned hard policy into the existing execution authority for fresh pre-mutation revalidation, without a second risk daemon/state owner/store/scheduler;
 5. obtain safe representative non-zero portfolio/oracle proof through supported read-only virtual evidence or Demo Trading rather than enabling production live trading;
