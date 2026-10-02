@@ -244,6 +244,50 @@ pub struct Position {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AccountPositionRiskBalance {
+    #[serde(default)]
+    pub ccy: String,
+    #[serde(default)]
+    pub eq: String,
+    #[serde(rename = "disEq", default)]
+    pub discounted_equity_usd: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AccountPositionRiskPosition {
+    #[serde(rename = "instType", default)]
+    pub instrument_type: String,
+    #[serde(rename = "mgnMode", default)]
+    pub margin_mode: String,
+    #[serde(rename = "posId", default)]
+    pub position_id: String,
+    #[serde(rename = "instId", default)]
+    pub instrument_id: String,
+    #[serde(default)]
+    pub pos: String,
+    #[serde(rename = "posSide", default)]
+    pub position_side: String,
+    #[serde(default)]
+    pub ccy: String,
+    #[serde(rename = "notionalCcy", default)]
+    pub notional_currency: String,
+    #[serde(rename = "notionalUsd", default)]
+    pub notional_usd: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AccountPositionRiskSnapshot {
+    #[serde(rename = "adjEq", default)]
+    pub adjusted_equity_usd: String,
+    #[serde(rename = "balData", default)]
+    pub balances: Vec<AccountPositionRiskBalance>,
+    #[serde(rename = "posData", default)]
+    pub positions: Vec<AccountPositionRiskPosition>,
+    #[serde(default)]
+    pub ts: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PendingOrder {
     #[serde(rename = "instType", default)]
     pub instrument_type: String,
@@ -458,6 +502,20 @@ impl AccountApi {
         self.client
             .private_get("/api/v5/account/positions", &[])
             .await
+    }
+
+    pub async fn account_position_risk(&self) -> Result<AccountPositionRiskSnapshot, OkxError> {
+        let rows: Vec<AccountPositionRiskSnapshot> = self
+            .client
+            .private_get("/api/v5/account/account-position-risk", &[])
+            .await?;
+        let [row] = rows.as_slice() else {
+            return Err(OkxError::Response(format!(
+                "expected exactly one account-position-risk row, found {}",
+                rows.len()
+            )));
+        };
+        Ok(row.clone())
     }
 
     pub async fn pending_orders(&self) -> Result<Vec<PendingOrder>, OkxError> {
