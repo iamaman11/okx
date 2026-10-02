@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use okx_observation::{AccountLedgerSummary, AccountPositionState, AccountSnapshot, CurrencyAggregate};
+use okx_observation::{
+    AccountLedgerSummary, AccountPositionState, AccountSnapshot, CurrencyAggregate,
+};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -368,9 +370,11 @@ pub fn analyze_portfolio_risk(
     let total_equity = decimal("total_equity_usd", &account_risk.total_equity_usd)?;
     let capital_base = positive_decimal("capital_base_usd", &mandate.capital_base_usd)?;
     let margin_utilization = match account_risk.initial_margin_requirement_usd.as_deref() {
-        Some(imr) if total_equity > Decimal::ZERO => {
-            Some((decimal("initial_margin_requirement_usd", imr)? / total_equity).normalize().to_string())
-        }
+        Some(imr) if total_equity > Decimal::ZERO => Some(
+            (decimal("initial_margin_requirement_usd", imr)? / total_equity)
+                .normalize()
+                .to_string(),
+        )
         _ => None,
     };
     let drawdown = if total_equity < capital_base {
@@ -384,15 +388,23 @@ pub fn analyze_portfolio_risk(
     for position in &account_risk.positions {
         let gross = positive_decimal("position_notional_usd", &position.position_notional_usd)?;
         let signed = decimal("signed_notional_usd", &position.signed_notional_usd)?;
-        let entry = instrument.entry(position.instrument_id.clone()).or_default();
+        let entry = instrument
+            .entry(position.instrument_id.clone())
+            .or_default();
         entry.0 += gross;
         entry.1 += signed;
 
         let source = account.positions.iter().find(|row| {
             row.instrument_id == position.instrument_id
                 && match position.direction {
-                    PositionDirection::Long => row.position_side == "long" || (row.position_side == "net" && !row.position.starts_with('-')),
-                    PositionDirection::Short => row.position_side == "short" || (row.position_side == "net" && row.position.starts_with('-')),
+                    PositionDirection::Long => {
+                        row.position_side == "long"
+                            || (row.position_side == "net" && !row.position.starts_with('-'))
+                    }
+                    PositionDirection::Short => {
+                        row.position_side == "short"
+                            || (row.position_side == "net" && row.position.starts_with('-'))
+                    }
                 }
         });
         let settle = source
@@ -442,12 +454,33 @@ pub fn analyze_portfolio_risk(
         });
     }
 
-    let gross = decimal("gross_position_notional_usd", &account_risk.gross_position_notional_usd)?;
-    compare_limit(&mut violations, "MAX_ACCOUNT_GROSS_NOTIONAL", "account", gross, &policy.max_account_gross_notional_usd)?;
+    let gross = decimal(
+        "gross_position_notional_usd",
+        &account_risk.gross_position_notional_usd,
+    )?;
+    compare_limit(
+        &mut violations,
+        "MAX_ACCOUNT_GROSS_NOTIONAL",
+        "account",
+        gross,
+        &policy.max_account_gross_notional_usd,
+    )?;
     if let Some(utilization) = margin_utilization.as_deref() {
-        compare_limit(&mut violations, "MAX_MARGIN_UTILIZATION", "account", decimal("margin_utilization_ratio", utilization)?, &policy.max_margin_utilization_ratio)?;
+        compare_limit(
+            &mut violations,
+            "MAX_MARGIN_UTILIZATION",
+            "account",
+            decimal("margin_utilization_ratio", utilization)?,
+            &policy.max_margin_utilization_ratio,
+        )?;
     }
-    compare_limit(&mut violations, "MAX_DRAWDOWN", "capital_base", drawdown, &policy.max_drawdown_ratio)?;
+    compare_limit(
+        &mut violations,
+        "MAX_DRAWDOWN",
+        "capital_base",
+        drawdown,
+        &policy.max_drawdown_ratio,
+    )?;
     if let Some(loss) = daily_loss {
         compare_limit(&mut violations, "MAX_DAILY_REALIZED_LOSS", "utc_day", loss, &policy.max_daily_realized_loss_usd)?;
     }
@@ -460,7 +493,8 @@ pub fn analyze_portfolio_risk(
             decimal("instrument_gross", &row.gross_notional_usd)?,
             &policy.max_instrument_gross_notional_usd,
         )?;
-        if !policy.allowed_instruments.is_empty() && !policy.allowed_instruments.contains(&row.key) {
+        if !policy.allowed_instruments.is_empty() && !policy.allowed_instruments.contains(&row.key)
+        {
             violations.push(RiskPolicyViolation {
                 code: "INSTRUMENT_NOT_ALLOWED",
                 scope: row.key.clone(),
@@ -491,7 +525,9 @@ pub fn analyze_portfolio_risk(
     }
 
     let candidate_projection = if let Some(candidate) = candidate {
-        if !mandate.allowed_instruments.is_empty() && !mandate.allowed_instruments.contains(&candidate.instrument) {
+        if !mandate.allowed_instruments.is_empty()
+            && !mandate.allowed_instruments.contains(&candidate.instrument)
+        {
             violations.push(RiskPolicyViolation {
                 code: "MANDATE_INSTRUMENT_NOT_ALLOWED",
                 scope: candidate.instrument.clone(),
@@ -499,7 +535,9 @@ pub fn analyze_portfolio_risk(
                 limit: "mandate.allowed_instruments".to_owned(),
             });
         }
-        if !policy.allowed_instruments.is_empty() && !policy.allowed_instruments.contains(&candidate.instrument) {
+        if !policy.allowed_instruments.is_empty()
+            && !policy.allowed_instruments.contains(&candidate.instrument)
+        {
             violations.push(RiskPolicyViolation {
                 code: "INSTRUMENT_NOT_ALLOWED",
                 scope: candidate.instrument.clone(),
@@ -508,11 +546,33 @@ pub fn analyze_portfolio_risk(
             });
         }
         let notional = positive_decimal("candidate_notional_usd", &candidate.notional_usd)?;
-        let candidate_loss = decimal("candidate_worst_case_loss_usd", &candidate.worst_case_loss_usd)?.abs();
+        let candidate_loss = decimal(
+            "candidate_worst_case_loss_usd",
+            &candidate.worst_case_loss_usd,
+        )?
+        .abs();
         let leverage = positive_decimal("candidate_leverage", &candidate.leverage)?;
-        compare_limit(&mut violations, "MAX_LOSS_PER_TRADE", &candidate.instrument, candidate_loss, &policy.max_loss_per_trade_usd)?;
-        compare_limit(&mut violations, "MAX_LEVERAGE", &candidate.instrument, leverage, &policy.max_leverage)?;
-        compare_limit(&mut violations, "MANDATE_LEVERAGE_CEILING", &candidate.instrument, leverage, &mandate.leverage_ceiling)?;
+        compare_limit(
+            &mut violations,
+            "MAX_LOSS_PER_TRADE",
+            &candidate.instrument,
+            candidate_loss,
+            &policy.max_loss_per_trade_usd,
+        )?;
+        compare_limit(
+            &mut violations,
+            "MAX_LEVERAGE",
+            &candidate.instrument,
+            leverage,
+            &policy.max_leverage,
+        )?;
+        compare_limit(
+            &mut violations,
+            "MANDATE_LEVERAGE_CEILING",
+            &candidate.instrument,
+            leverage,
+            &mandate.leverage_ceiling,
+        )?;
 
         let current_instrument = instrument_exposure.iter()
             .find(|row| row.key == candidate.instrument)
@@ -521,20 +581,44 @@ pub fn analyze_portfolio_risk(
             .unwrap_or(Decimal::ZERO);
         let projected_gross = gross + notional;
         let projected_instrument = current_instrument + notional;
-        compare_limit(&mut violations, "MAX_ACCOUNT_GROSS_NOTIONAL_PROJECTED", "account", projected_gross, &policy.max_account_gross_notional_usd)?;
-        compare_limit(&mut violations, "MAX_INSTRUMENT_GROSS_NOTIONAL_PROJECTED", &candidate.instrument, projected_instrument, &policy.max_instrument_gross_notional_usd)?;
+        compare_limit(
+            &mut violations,
+            "MAX_ACCOUNT_GROSS_NOTIONAL_PROJECTED",
+            "account",
+            projected_gross,
+            &policy.max_account_gross_notional_usd,
+        )?;
+        compare_limit(
+            &mut violations,
+            "MAX_INSTRUMENT_GROSS_NOTIONAL_PROJECTED",
+            &candidate.instrument,
+            projected_instrument,
+            &policy.max_instrument_gross_notional_usd,
+        )?;
 
         let projected_margin = if total_equity > Decimal::ZERO {
-            let current_imr = account_risk.initial_margin_requirement_usd.as_deref()
+            let current_imr = account_risk
+                .initial_margin_requirement_usd
+                .as_deref()
                 .map(|value| decimal("initial_margin_requirement_usd", value))
                 .transpose()?
                 .unwrap_or(Decimal::ZERO);
-            Some(((current_imr + notional / leverage) / total_equity).normalize().to_string())
+            Some(
+                ((current_imr + notional / leverage) / total_equity)
+                    .normalize()
+                    .to_string(),
+            )
         } else {
             None
         };
         if let Some(value) = projected_margin.as_deref() {
-            compare_limit(&mut violations, "MAX_MARGIN_UTILIZATION_PROJECTED", "account", decimal("projected_margin_utilization", value)?, &policy.max_margin_utilization_ratio)?;
+            compare_limit(
+                &mut violations,
+                "MAX_MARGIN_UTILIZATION_PROJECTED",
+                "account",
+                decimal("projected_margin_utilization", value)?,
+                &policy.max_margin_utilization_ratio,
+            )?;
         }
 
         Some(CandidateProjection {
