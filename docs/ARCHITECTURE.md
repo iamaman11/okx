@@ -533,8 +533,11 @@ Stage 1 status:
 - venue/instrument-state execution gate: ACCEPTED;
 - account + ledger truth: ACCEPTED;
 - P0.3 named rate/backpressure: ACCEPTED;
-- Stage-1 final T1–T5 acceptance: CURRENT;
-- exact final artifact exists and passed CI, but strict final T3 deployment is currently blocked by CONTROL-path liveness; product/runtime logic is not the blocker.
+- Stage-1 final T1–T5 acceptance: ACCEPTED/CLOSED;
+- exact final #173 artifact is installed with verified provenance;
+- Cloudflare-primary and encrypted GitHub fallback parity passed on the exact binary;
+- exact-tree restart/recovery reconverged account and public market evidence to FRESH;
+- current forward cursor is Stage 2 — INTELLIGENCE + RISK.
 
 Primary Cloudflare MCP is live and the refreshed ChatGPT tool surface can call `account_summary` under tool contract `okx.mcp.tools/2026-10-01.2`; GitHub DATA remains fallback/parity only.
 
