@@ -246,6 +246,10 @@ fn open_interest_history_period(bar: &str) -> Option<&str> {
     matches!(bar, "5m" | "15m" | "30m" | "1H" | "2H" | "4H").then_some(bar)
 }
 
+fn provides_perpetual_basis(requirement: okx_observation::FundingRequirement) -> bool {
+    matches!(requirement, okx_observation::FundingRequirement::Required)
+}
+
 fn research_diagnostics(
     market_source: &'static str,
     history_warnings: &[String],
@@ -1051,7 +1055,7 @@ pub(super) async fn dispatch(
                         ));
                     }
                 };
-                if current.rules.instrument.instrument_type == okx_api::InstrumentType::Swap {
+                if provides_perpetual_basis(current.rules.instrument.funding_requirement) {
                     perpetual_basis
                         .entry(current.snapshot.underlying.clone())
                         .or_insert_with(|| (instrument.clone(), mark_index_basis_bps));
@@ -1419,6 +1423,16 @@ mod tests {
             warnings: Vec::new(),
         };
         serde_json::to_vec(&response).expect("serialize").len()
+    }
+
+    #[test]
+    fn funding_required_contracts_supply_perpetual_basis_including_xperp() {
+        assert!(provides_perpetual_basis(
+            okx_observation::FundingRequirement::Required
+        ));
+        assert!(!provides_perpetual_basis(
+            okx_observation::FundingRequirement::NotApplicable
+        ));
     }
 
     #[test]
