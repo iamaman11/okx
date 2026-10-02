@@ -5,6 +5,7 @@ mod market_query;
 mod microstructure;
 mod risk;
 mod scenario;
+mod statistics;
 
 pub use candidate::{
     CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderAssumptions,
@@ -42,6 +43,10 @@ pub use scenario::{
     HISTORY_BEHAVIOR_SCHEMA_V1, HistoryBehaviorAnalysis, POSITION_SCENARIO_SCHEMA_V1,
     PositionScenarioAnalysis, PositionScenarioAssumptions, ScenarioExitAssumption,
     ScenarioPriceSource, analyze_history_behavior, analyze_position_scenario,
+};
+pub use statistics::{
+    SAMPLE_COVARIANCE_FORMULA_V1, covariance_correlation, decimal_sqrt,
+    sample_covariance_matrix,
 };
 
 use std::str::FromStr;
@@ -203,6 +208,10 @@ pub enum AnalysisError {
     OrderBookEmptyBid,
     #[error("order book levels are not strictly sorted")]
     OrderBookNotStrictlySorted,
+    #[error("statistical analysis requires at least two samples, found {0}")]
+    InsufficientStatisticalSamples(usize),
+    #[error("statistical series lengths do not match")]
+    StatisticalSeriesLengthMismatch,
     #[error("crossed or locked order book: best_bid={best_bid}, best_ask={best_ask}")]
     CrossedOrderBook { best_bid: String, best_ask: String },
 }
