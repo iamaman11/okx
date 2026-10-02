@@ -224,6 +224,12 @@ pub enum AnalysisError {
     StatisticalBarMismatch,
     #[error("statistical portfolio confirmed candle timestamps are not aligned")]
     StatisticalHistoryNotAligned,
+    #[error("statistical portfolio history contains a gap for instrument '{0}'")]
+    StatisticalHistoryGap(String),
+    #[error("statistical portfolio histories use different reference generations")]
+    StatisticalReferenceMismatch,
+    #[error("statistical portfolio bar '{0}' has no fixed interval contract")]
+    UnsupportedStatisticalBar(String),
     #[error(
         "statistical portfolio history for '{instrument}' requires at least three confirmed closes, found {confirmed}"
     )]
