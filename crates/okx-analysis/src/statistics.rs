@@ -4,7 +4,9 @@ use crate::AnalysisError;
 
 pub const SAMPLE_COVARIANCE_FORMULA_V1: &str = "sample-covariance/v1";
 
-pub fn sample_covariance_matrix(series: &[Vec<Decimal>]) -> Result<Vec<Vec<Decimal>>, AnalysisError> {
+pub fn sample_covariance_matrix(
+    series: &[Vec<Decimal>],
+) -> Result<Vec<Vec<Decimal>>, AnalysisError> {
     if series.is_empty() {
         return Ok(Vec::new());
     }
@@ -28,8 +30,7 @@ pub fn sample_covariance_matrix(series: &[Vec<Decimal>]) -> Result<Vec<Vec<Decim
     for left in 0..count {
         for right in 0..count {
             let sum = (0..samples).fold(Decimal::ZERO, |acc, index| {
-                acc + (series[left][index] - means[left])
-                    * (series[right][index] - means[right])
+                acc + (series[left][index] - means[left]) * (series[right][index] - means[right])
             });
             matrix[left][right] = sum / denominator;
         }
