@@ -258,7 +258,6 @@ impl MarketHistorySnapshot {
     }
 }
 
-
 impl MarketTradesSnapshot {
     pub fn from_public(
         reference: &ReferenceRegistry,
@@ -402,12 +401,8 @@ impl FundingHistorySnapshot {
             source: FUNDING_HISTORY_SOURCE_V1.to_owned(),
             source_received_at,
             funding_generation: String::new(),
-            oldest_funding_time_ms: events
-                .first()
-                .map(|event| event.funding_time_ms.clone()),
-            newest_funding_time_ms: events
-                .last()
-                .map(|event| event.funding_time_ms.clone()),
+            oldest_funding_time_ms: events.first().map(|event| event.funding_time_ms.clone()),
+            newest_funding_time_ms: events.last().map(|event| event.funding_time_ms.clone()),
             events,
         };
         snapshot.funding_generation = funding_generation_for(&snapshot)?;
@@ -455,9 +450,7 @@ fn trades_generation_for(snapshot: &MarketTradesSnapshot) -> Result<String, Mark
     Ok(format!("sha256:{digest:x}"))
 }
 
-fn funding_generation_for(
-    snapshot: &FundingHistorySnapshot,
-) -> Result<String, MarketHistoryError> {
+fn funding_generation_for(snapshot: &FundingHistorySnapshot) -> Result<String, MarketHistoryError> {
     let encoded = serde_json::to_vec(&(
         FUNDING_HISTORY_SCHEMA_V1,
         &snapshot.instrument_id,
@@ -647,7 +640,10 @@ mod tests {
 
         assert_eq!(snapshot.events[0].funding_time_ms, "1790467200000");
         assert_eq!(snapshot.events[0].realized_rate.as_deref(), Some("0.00011"));
-        assert_eq!(snapshot.events[1].realized_rate.as_deref(), Some("-0.00019"));
+        assert_eq!(
+            snapshot.events[1].realized_rate.as_deref(),
+            Some("-0.00019")
+        );
     }
 
     #[test]
