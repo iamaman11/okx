@@ -657,6 +657,130 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn stale_catalog_is_rejected_before_any_data_acquisition() {
+        let mut stale_plan = plan(10, QuerySortDirection::Desc);
+        stale_plan.catalog_version = "okx.query.catalog/2026-09-01.1".to_owned();
+        let request = AgentRequest {
+            schema: okx_protocol::AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "req_query_stale_catalog_0001".to_owned(),
+            operation: AgentOperation::Query { plan: stale_plan },
+        };
+        request.validate().expect("stale catalog remains structurally valid");
+
+        let response = dispatch(
+            &request,
+            ObservationQueryContext::unavailable(),
+            "2026-10-02T10:00:01.000Z",
+        )
+        .await
+        .expect("typed response");
+
+        assert_eq!(response.status, AgentResponseStatus::Rejected);
+        let failure = response.failure.expect("typed failure");
+        assert_eq!(failure.code, QUERY_CATALOG_STALE_CODE);
+        assert!(!failure.retryable);
+    }
+
+    #[test]
+    fn maximum_bounded_evidence_stays_inside_github_fallback_plaintext_budget() {
+        let mut public_instruments = Vec::new();
+        let mut tickers = Vec::new();
+
+        for index in 0..75 {
+            let asset = format!("ASSET{index:02}");
+            let id = format!(
+                "ASSET{index:02}-LONG-BOUNDED-DERIVATIVE-IDENTIFIER-USDT-SWAP"
+            );
+            public_instruments.push(instrument(&id, &asset, "USDT"));
+            if index < 25 {
+                tickers.push(MarketUniverseTicker {
+                    instrument_id: id,
+                    instrument_type: InstrumentType::Swap,
+                    last: Some("1234567890.1234567890123456".to_owned()),
+                    open_24h: Some("1234567880.1234567890123456".to_owned()),
+                    volume_24h: Some("9876543210.1234567890123456".to_owned()),
+                    volume_currency_24h: Some("8765432109.1234567890123456".to_owned()),
+                    exchange_timestamp_ms: format!("1790935200{index:03}"),
+                });
+            } else if index < 50 {
+                tickers.push(MarketUniverseTicker {
+                    instrument_id: id,
+                    instrument_type: InstrumentType::Swap,
+                    last: None,
+                    open_24h: Some("1234567880.1234567890123456".to_owned()),
+                    volume_24h: Some("9876543210.1234567890123456".to_owned()),
+                    volume_currency_24h: Some("8765432109.1234567890123456".to_owned()),
+                    exchange_timestamp_ms: format!("1790935200{index:03}"),
+                });
+            }
+        }
+
+        let reference = ReferenceRegistry::from_public(
+            "2026-10-02T10:00:00.000Z",
+            public_instruments,
+        )
+        .expect("reference");
+
+        let plan = AnalyticalQueryPlan {
+            catalog_version: ANALYTICAL_QUERY_CATALOG_VERSION_V1.to_owned(),
+            universe: okx_protocol::MarketQueryUniverse {
+                instrument_types: vec![InstrumentTypeFilter::Swap],
+                settle_currency: Some("USDT".to_owned()),
+                state: Some(QueryInstrumentState::Live),
+            },
+            select: vec![
+                QueryField::InstrumentId,
+                QueryField::InstrumentType,
+                QueryField::SettleCurrency,
+                QueryField::State,
+                QueryField::Last,
+                QueryField::Open24h,
+                QueryField::Volume24h,
+                QueryField::VolumeCurrency24h,
+                QueryField::ExchangeTimestampMs,
+                QueryField::Return24hPct,
+            ],
+            metric: Some(QueryMetric::Return24hPct),
+            sort: Some(okx_protocol::QuerySort {
+                key: okx_protocol::QuerySortKey::Return24hPct,
+                direction: QuerySortDirection::Desc,
+            }),
+            limit: 25,
+        };
+
+        let result = evaluate_market_query(
+            &reference,
+            tickers,
+            &plan,
+            "2026-10-02T10:00:01.000Z",
+        )
+        .expect("bounded result");
+        assert_eq!(result.rows_returned, 25);
+        assert_eq!(result.missing_count, 25);
+        assert_eq!(result.excluded_count, 25);
+
+        let response = AgentResponse {
+            schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+            request_id: "req_query_size_budget_0001".to_owned(),
+            status: AgentResponseStatus::Completed,
+            generated_at: "2026-10-02T10:00:01.000Z".to_owned(),
+            quality: result.quality,
+            result_schema: Some(QUERY_EVIDENCE_SCHEMA_V1.to_owned()),
+            result: Some(serde_json::to_value(&result).expect("result JSON")),
+            failure: None,
+            warnings: vec![
+                "whole-universe query uses bounded bulk REST snapshots and does not subscribe the full universe on WebSocket".to_owned(),
+            ],
+        };
+        let encoded = serde_json::to_vec(&response).expect("response JSON");
+        assert!(
+            encoded.len() <= 32 * 1024,
+            "max bounded query response is {} bytes",
+            encoded.len()
+        );
+    }
+
     #[test]
     fn ranking_is_numeric_stable_and_ties_use_instrument_id() {
         let result = evaluate_market_query(
