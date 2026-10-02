@@ -666,7 +666,9 @@ mod tests {
             request_id: "req_query_stale_catalog_0001".to_owned(),
             operation: AgentOperation::Query { plan: stale_plan },
         };
-        request.validate().expect("stale catalog remains structurally valid");
+        request
+            .validate()
+            .expect("stale catalog remains structurally valid");
 
         let response = dispatch(
             &request,
@@ -689,9 +691,7 @@ mod tests {
 
         for index in 0..75 {
             let asset = format!("ASSET{index:02}");
-            let id = format!(
-                "ASSET{index:02}-LONG-BOUNDED-DERIVATIVE-IDENTIFIER-USDT-SWAP"
-            );
+            let id = format!("ASSET{index:02}-LONG-BOUNDED-DERIVATIVE-IDENTIFIER-USDT-SWAP");
             public_instruments.push(instrument(&id, &asset, "USDT"));
             if index < 25 {
                 tickers.push(MarketUniverseTicker {
@@ -716,11 +716,9 @@ mod tests {
             }
         }
 
-        let reference = ReferenceRegistry::from_public(
-            "2026-10-02T10:00:00.000Z",
-            public_instruments,
-        )
-        .expect("reference");
+        let reference =
+            ReferenceRegistry::from_public("2026-10-02T10:00:00.000Z", public_instruments)
+                .expect("reference");
 
         let plan = AnalyticalQueryPlan {
             catalog_version: ANALYTICAL_QUERY_CATALOG_VERSION_V1.to_owned(),
@@ -749,13 +747,8 @@ mod tests {
             limit: 25,
         };
 
-        let result = evaluate_market_query(
-            &reference,
-            tickers,
-            &plan,
-            "2026-10-02T10:00:01.000Z",
-        )
-        .expect("bounded result");
+        let result = evaluate_market_query(&reference, tickers, &plan, "2026-10-02T10:00:01.000Z")
+            .expect("bounded result");
         assert_eq!(result.rows_returned, 25);
         assert_eq!(result.missing_count, 25);
         assert_eq!(result.excluded_count, 25);
