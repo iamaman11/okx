@@ -1,5 +1,6 @@
 mod candidate;
 mod market_query;
+mod microstructure;
 mod risk;
 mod scenario;
 
@@ -10,6 +11,11 @@ pub use candidate::{
 pub use market_query::{
     RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT, Return24hPct,
     analyze_return_24h_pct,
+};
+pub use microstructure::{
+    MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1, BookSweepAnalysis, MarketIntelligenceAnalysis,
+    SPREAD_BPS_METRIC_ID, SPREAD_BPS_METRIC_VERSION_V1, SPREAD_BPS_UNIT, SpreadBps,
+    analyze_market_intelligence, analyze_spread_bps,
 };
 pub use risk::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, PositionRiskAnalysis,
@@ -162,6 +168,22 @@ pub enum AnalysisError {
     HistoryNotChronological,
     #[error("history candle '{0}' has inconsistent OHLC values")]
     InvalidHistoryCandle(String),
+    #[error("order book is not sequence-contiguous")]
+    OrderBookNotContiguous,
+    #[error("order book is missing sequence id")]
+    OrderBookMissingSequence,
+    #[error("order book is missing exchange timestamp")]
+    OrderBookMissingTimestamp,
+    #[error("order book depth must be between 1 and 50, got {0}")]
+    InvalidOrderBookDepth(u16),
+    #[error("order book ask side is empty")]
+    OrderBookEmptyAsk,
+    #[error("order book bid side is empty")]
+    OrderBookEmptyBid,
+    #[error("order book levels are not strictly sorted")]
+    OrderBookNotStrictlySorted,
+    #[error("crossed or locked order book: best_bid={best_bid}, best_ask={best_ask}")]
+    CrossedOrderBook { best_bid: String, best_ask: String },
 }
 
 pub fn analyze_cost(
