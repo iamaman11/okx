@@ -672,21 +672,6 @@ fn observation_skew_ms(source_received_at: &str, oracle_timestamp_ms: &str) -> R
     Ok(source_ms.abs_diff(oracle_ms))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn portfolio_observation_skew_is_explicit_and_bounded_in_milliseconds() {
-        assert_eq!(
-            observation_skew_ms("2026-10-03T00:00:05.000Z", "1790985600000").expect("skew"),
-            5_000
-        );
-        assert!(observation_skew_ms("not-a-timestamp", "1790985600000").is_err());
-        assert!(observation_skew_ms("2026-10-03T00:00:00.000Z", "not-millis").is_err());
-    }
-}
-
 fn account_ledger_failure(
     request: &AgentRequest,
     generated_at: &str,
@@ -717,5 +702,20 @@ fn account_ledger_failure(
             error.to_string(),
             false,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portfolio_observation_skew_is_explicit_and_bounded_in_milliseconds() {
+        assert_eq!(
+            observation_skew_ms("2026-10-03T00:00:05.000Z", "1790985600000").expect("skew"),
+            5_000
+        );
+        assert!(observation_skew_ms("not-a-timestamp", "1790985600000").is_err());
+        assert!(observation_skew_ms("2026-10-03T00:00:00.000Z", "not-millis").is_err());
     }
 }
