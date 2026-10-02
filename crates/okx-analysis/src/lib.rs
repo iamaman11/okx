@@ -1,4 +1,5 @@
 mod candidate;
+mod derivatives;
 mod market_query;
 mod microstructure;
 mod risk;
@@ -7,6 +8,9 @@ mod scenario;
 pub use candidate::{
     CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderAssumptions,
     SizingConstraint, analyze_candidate_order,
+};
+pub use derivatives::{
+    DATED_FUTURE_BASIS_SCHEMA_V1, DatedFutureBasisAnalysis, analyze_dated_future_basis,
 };
 pub use market_query::{
     RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT, Return24hPct,
@@ -164,6 +168,10 @@ pub enum AnalysisError {
     InsufficientConfirmedHistory { confirmed: usize },
     #[error("history candle timestamp '{0}' is invalid")]
     InvalidHistoryTimestamp(String),
+    #[error("expiry timestamp '{0}' is invalid")]
+    InvalidExpiryTimestamp(String),
+    #[error("instrument expiry {expiry_ms} is not after as-of {as_of_ms}")]
+    ExpiryNotFuture { expiry_ms: u64, as_of_ms: u64 },
     #[error("confirmed history candles are not strictly chronological")]
     HistoryNotChronological,
     #[error("history candle '{0}' has inconsistent OHLC values")]
