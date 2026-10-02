@@ -445,14 +445,7 @@ mod tests {
         let mut invalid = book();
         invalid.status = OrderBookStatus::Invalid;
         assert!(matches!(
-            analyze_market_intelligence(
-                "AAA-USDT-SWAP",
-                "ref-1",
-                &market(),
-                &invalid,
-                "1",
-                2
-            ),
+            analyze_market_intelligence("AAA-USDT-SWAP", "ref-1", &market(), &invalid, "1", 2),
             Err(AnalysisError::OrderBookNotContiguous)
         ));
     }
