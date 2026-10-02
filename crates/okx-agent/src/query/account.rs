@@ -305,7 +305,8 @@ pub(super) async fn dispatch(
                     generated_at,
                     AgentResponseStatus::Rejected,
                     ACCOUNT_OBSERVER_CREDENTIAL_UNAVAILABLE_CODE,
-                    "OKX observer credential is not provisioned in native secret storage".to_owned(),
+                    "OKX observer credential is not provisioned in native secret storage"
+                        .to_owned(),
                     false,
                 ));
             };
