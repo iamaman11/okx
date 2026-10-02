@@ -17,6 +17,7 @@ struct MarketIntelligenceResult {
 struct MarketIntelligenceCoherence {
     freshness_budget_ms: u64,
     connection_generation: u64,
+    readiness_reason: String,
     reference_source_received_at: String,
     oldest_required_receive_ms: u64,
     oldest_required_age_ms: u64,
@@ -164,13 +165,21 @@ fn market_intelligence_coherence(
     let oldest_required_receive_ms = quality
         .oldest_required_receive_ms
         .ok_or_else(|| "FRESH market intelligence is missing receive-age evidence".to_owned())?;
+    let oldest_required_age_ms = now_ms.saturating_sub(oldest_required_receive_ms);
+    if oldest_required_age_ms > MARKET_INTELLIGENCE_MAX_AGE_MS {
+        return Err(format!(
+            "FRESH market intelligence exceeded receive-age budget: age={oldest_required_age_ms}ms budget={}ms",
+            MARKET_INTELLIGENCE_MAX_AGE_MS
+        ));
+    }
 
     Ok(MarketIntelligenceCoherence {
         freshness_budget_ms: MARKET_INTELLIGENCE_MAX_AGE_MS,
         connection_generation: quality.connection_generation,
+        readiness_reason: quality.reason.clone(),
         reference_source_received_at: quality.reference_source_received_at.clone(),
         oldest_required_receive_ms,
-        oldest_required_age_ms: now_ms.saturating_sub(oldest_required_receive_ms),
+        oldest_required_age_ms,
         exchange_as_of_ms: max,
         exchange_timestamp_min_ms: min,
         exchange_timestamp_max_ms: max,
@@ -972,6 +981,7 @@ mod tests {
             coherence: MarketIntelligenceCoherence {
                 freshness_budget_ms: MARKET_INTELLIGENCE_MAX_AGE_MS,
                 connection_generation: u64::MAX,
+                readiness_reason: "WS_CURRENT_GENERATION_COMPLETE".to_owned(),
                 reference_source_received_at: "2026-10-02T16:49:00.000Z".to_owned(),
                 oldest_required_receive_ms: 1_790_959_759_363,
                 oldest_required_age_ms: MARKET_INTELLIGENCE_MAX_AGE_MS,
