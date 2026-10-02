@@ -1,7 +1,7 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
-    AccountApi, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate,
-    InstrumentType, MarginMode, OkxError, OkxRestClient,
+    AccountApi, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate, InstrumentType,
+    MarginMode, OkxError, OkxRestClient,
 };
 use okx_observation::{
     AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, FeeScheduleError,
