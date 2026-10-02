@@ -130,6 +130,35 @@ pub struct PublicOpenInterestHistory {
     pub ts: String,
 }
 
+pub fn is_open_interest_history_period(value: &str) -> bool {
+    matches!(
+        value,
+        "5m" | "15m"
+            | "30m"
+            | "1H"
+            | "2H"
+            | "4H"
+            | "6H"
+            | "12H"
+            | "1D"
+            | "2D"
+            | "3D"
+            | "5D"
+            | "1W"
+            | "1M"
+            | "3M"
+            | "6Hutc"
+            | "12Hutc"
+            | "1Dutc"
+            | "2Dutc"
+            | "3Dutc"
+            | "5Dutc"
+            | "1Wutc"
+            | "1Mutc"
+            | "3Mutc"
+    )
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum PublicOpenInterestHistoryWire {
@@ -386,7 +415,7 @@ impl MarketDataApi {
                 "open interest history limit must be between 1 and 100".to_owned(),
             ));
         }
-        if !matches!(period, "5m" | "15m" | "30m" | "1H" | "2H" | "4H") {
+        if !is_open_interest_history_period(period) {
             return Err(OkxError::Response(format!(
                 "unsupported open interest history period '{period}'"
             )));
@@ -543,6 +572,18 @@ mod tests {
         assert_eq!(funding.funding_rate, "0.00001234");
         assert_eq!(funding.premium, "0.00000001");
         assert_eq!(funding.max_funding_rate, "0.003");
+    }
+
+    #[test]
+    fn open_interest_history_periods_match_current_okx_contract() {
+        for period in [
+            "5m", "4H", "6H", "1D", "5D", "1W", "3M", "6Hutc", "1Dutc", "3Mutc",
+        ] {
+            assert!(is_open_interest_history_period(period), "{period}");
+        }
+        for period in ["1m", "8H", "1Y", "bad"] {
+            assert!(!is_open_interest_history_period(period), "{period}");
+        }
     }
 
     #[test]

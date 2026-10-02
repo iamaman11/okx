@@ -243,7 +243,7 @@ fn market_intelligence_coherence(
 }
 
 fn open_interest_history_period(bar: &str) -> Option<&str> {
-    matches!(bar, "5m" | "15m" | "30m" | "1H" | "2H" | "4H").then_some(bar)
+    okx_api::is_open_interest_history_period(bar).then_some(bar)
 }
 
 fn provides_perpetual_basis(requirement: okx_observation::FundingRequirement) -> bool {

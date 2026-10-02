@@ -488,22 +488,32 @@ fn exchange_defer_ms(
         .clamp(1, MAX_LOCAL_DEFER_MS)
 }
 
-fn public_rest_policy(path: &str, _params: &[(&str, String)]) -> (u32, u64, Option<String>) {
+fn public_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Option<String>) {
     let (max_requests, window_ms) = match path {
         "/api/v5/public/time" => (5, 2_000),
         "/api/v5/public/instruments" => (10, 2_000),
         "/api/v5/market/ticker" => (10, 2_000),
         "/api/v5/market/tickers" => (20, 2_000),
+        "/api/v5/market/trades" => (100, 2_000),
         "/api/v5/public/mark-price" => (10, 2_000),
         "/api/v5/market/index-tickers" => (10, 2_000),
         "/api/v5/public/funding-rate" => (10, 2_000),
+        "/api/v5/public/funding-rate-history" => (10, 2_000),
         "/api/v5/public/open-interest" => (10, 2_000),
+        "/api/v5/rubik/stat/contracts/open-interest-history" => (10, 2_000),
         "/api/v5/market/history-candles" => (10, 2_000),
         "/api/v5/public/price-limit" => (10, 2_000),
         "/api/v5/system/status" => (1, 1_000),
         _ => (LOCAL_FALLBACK_LIMIT, LOCAL_FALLBACK_WINDOW_MS),
     };
-    (max_requests, window_ms, Some("public_ip".to_owned()))
+    let scope = match path {
+        "/api/v5/public/funding-rate-history"
+        | "/api/v5/rubik/stat/contracts/open-interest-history" => param(params, "instId")
+            .map(|value| format!("public_ip+instrument:{value}"))
+            .or_else(|| Some("public_ip".to_owned())),
+        _ => Some("public_ip".to_owned()),
+    };
+    (max_requests, window_ms, scope)
 }
 
 fn private_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Option<String>) {
@@ -579,6 +589,62 @@ mod tests {
         );
         assert!(fills.domains.iter().all(|domain| domain.window_ms == 2_000));
         assert!(bills.domains.iter().all(|domain| domain.window_ms == 2_000));
+    }
+
+    #[test]
+    fn stage2_research_endpoints_use_documented_rate_domains() {
+        let budget = RateBudget::new();
+        let trades = budget.public_rest_plan(
+            "/api/v5/market/trades",
+            &[("instId", "BTC-USDT-SWAP".to_owned())],
+        );
+        assert_eq!(trades.domains[0].max_requests, 100);
+        assert_eq!(trades.domains[0].window_ms, 2_000);
+        assert_eq!(trades.domains[0].key.scope.as_deref(), Some("public_ip"));
+
+        let funding_btc = budget.public_rest_plan(
+            "/api/v5/public/funding-rate-history",
+            &[("instId", "BTC-USDT-SWAP".to_owned())],
+        );
+        let funding_eth = budget.public_rest_plan(
+            "/api/v5/public/funding-rate-history",
+            &[("instId", "ETH-USDT-SWAP".to_owned())],
+        );
+        assert_eq!(funding_btc.domains[0].max_requests, 10);
+        assert_eq!(funding_btc.domains[0].window_ms, 2_000);
+        assert_ne!(funding_btc.domains[0].key, funding_eth.domains[0].key);
+
+        let oi_btc = budget.public_rest_plan(
+            "/api/v5/rubik/stat/contracts/open-interest-history",
+            &[("instId", "BTC-USDT-SWAP".to_owned())],
+        );
+        let oi_eth = budget.public_rest_plan(
+            "/api/v5/rubik/stat/contracts/open-interest-history",
+            &[("instId", "ETH-USDT-SWAP".to_owned())],
+        );
+        assert_eq!(oi_btc.domains[0].max_requests, 10);
+        assert_eq!(oi_btc.domains[0].window_ms, 2_000);
+        assert_ne!(oi_btc.domains[0].key, oi_eth.domains[0].key);
+    }
+
+    #[test]
+    fn distinct_instrument_oi_history_requests_do_not_share_one_request_fallback_budget() {
+        let budget = RateBudget::new();
+        let now = Instant::now();
+        for instrument in [
+            "BTC-USD_UM_XPERP-310404",
+            "BTC-USD_UM-261030",
+            "BTC-USD_UM-261127",
+            "BTC-USD_UM-261225",
+        ] {
+            let plan = budget.public_rest_plan(
+                "/api/v5/rubik/stat/contracts/open-interest-history",
+                &[("instId", instrument.to_owned())],
+            );
+            budget
+                .admit_at(&plan, now)
+                .expect("documented IP+instrument budget admits distinct instruments");
+        }
     }
 
     #[test]
