@@ -124,6 +124,16 @@ pub struct PublicOpenInterest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PublicOpenInterestHistory {
+    #[serde(default)]
+    pub oi: String,
+    #[serde(rename = "oiCcy", default)]
+    pub oi_currency: String,
+    #[serde(default)]
+    pub ts: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PublicTrade {
     #[serde(rename = "instId", default)]
     pub instrument_id: String,
@@ -324,6 +334,61 @@ impl MarketDataApi {
         )
     }
 
+    pub async fn open_interest_history(
+        &self,
+        instrument_id: &str,
+        period: &str,
+        limit: u16,
+    ) -> Result<Vec<PublicOpenInterestHistory>, OkxError> {
+        if !(1..=100).contains(&limit) {
+            return Err(OkxError::Response(
+                "open interest history limit must be between 1 and 100".to_owned(),
+            ));
+        }
+        if !matches!(
+            period,
+            "5m"
+                | "15m"
+                | "30m"
+                | "1H"
+                | "2H"
+                | "4H"
+                | "6H"
+                | "12H"
+                | "1D"
+                | "2D"
+                | "3D"
+                | "5D"
+                | "1W"
+                | "1M"
+                | "3M"
+                | "6Hutc"
+                | "12Hutc"
+                | "1Dutc"
+                | "2Dutc"
+                | "3Dutc"
+                | "5Dutc"
+                | "1Wutc"
+                | "1Mutc"
+                | "3Mutc"
+        ) {
+            return Err(OkxError::Response(format!(
+                "unsupported open interest history period '{period}'"
+            )));
+        }
+
+        self.client
+            .public_get(
+                "/api/v5/rubik/stat/contracts/open-interest-history",
+                &[
+                    ("instId", instrument_id.to_owned()),
+                    ("period", period.to_owned()),
+                    ("limit", limit.to_string()),
+                ],
+            )
+            .await
+    }
+
     pub async fn trades(
         &self,
         instrument_id: &str,
@@ -463,6 +528,22 @@ mod tests {
         assert_eq!(funding.funding_rate, "0.00001234");
         assert_eq!(funding.premium, "0.00000001");
         assert_eq!(funding.max_funding_rate, "0.003");
+    }
+
+    #[test]
+    fn open_interest_history_preserves_contract_and_currency_units() {
+        let row: PublicOpenInterestHistory = serde_json::from_str(
+            r#"{
+                "ts":"1609459200000",
+                "oi":"100000",
+                "oiCcy":"10"
+            }"#,
+        )
+        .expect("open interest history");
+
+        assert_eq!(row.ts, "1609459200000");
+        assert_eq!(row.oi, "100000");
+        assert_eq!(row.oi_currency, "10");
     }
 
     #[test]
