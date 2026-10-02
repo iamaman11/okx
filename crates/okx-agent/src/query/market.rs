@@ -815,8 +815,7 @@ pub(super) async fn dispatch(
             let mut response_quality = DataQuality::Fresh;
             let mut shared_reference = None;
             let mut term_points = BTreeMap::<String, Vec<MarketResearchTermPoint>>::new();
-            let mut perpetual_basis =
-                BTreeMap::<String, (String, String)>::new();
+            let mut perpetual_basis = BTreeMap::<String, (String, String)>::new();
 
             for instrument in instruments {
                 let current =
@@ -1149,9 +1148,7 @@ pub(super) async fn dispatch(
                         oi_change_ratio: open_interest_change
                             .as_ref()
                             .and_then(|value| value.change_ratio.clone()),
-                        dated_basis_bps: dated_basis
-                            .as_ref()
-                            .map(|value| value.basis_bps.clone()),
+                        dated_basis_bps: dated_basis.as_ref().map(|value| value.basis_bps.clone()),
                         annualized_basis_bps: dated_basis
                             .as_ref()
                             .map(|value| value.annualized_basis_bps.clone()),
@@ -1390,10 +1387,7 @@ mod tests {
                 history: ["1790000000000".to_owned(), "1790553600000".to_owned()],
                 trades: Some(["1790550000000".to_owned(), "1790553600000".to_owned()]),
                 funding: Some(["1790000000000".to_owned(), "1790553600000".to_owned()]),
-                oi: Some([
-                    "1790000000000".to_owned(),
-                    "1790553600000".to_owned(),
-                ]),
+                oi: Some(["1790000000000".to_owned(), "1790553600000".to_owned()]),
             },
             provenance: MarketResearchProvenance {
                 source_generation:
@@ -1420,9 +1414,7 @@ mod tests {
                     instrument_id: format!("ASSET{index:02}-USDT-261225"),
                     expiry_time_ms: 1_800_000_000_000 + index as u64,
                     basis_bps: "100.123456789012345678901234567890".to_owned(),
-                    vs_perpetual_basis_bps: Some(
-                        "75.123456789012345678901234567890".to_owned(),
-                    ),
+                    vs_perpetual_basis_bps: Some("75.123456789012345678901234567890".to_owned()),
                 })
                 .collect(),
         });
@@ -1445,8 +1437,7 @@ mod tests {
                 term_structure: "term_structure/v1",
             },
             reference_generation:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .to_owned(),
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             instruments: (0..instrument_count).map(fixture).collect(),
             term_structure: term_structure.into_iter().collect(),
         };
@@ -1526,11 +1517,7 @@ mod tests {
     #[test]
     fn research_quality_is_worst_of_all_required_inputs() {
         assert_eq!(
-            research_quality(&[
-                DataQuality::Fresh,
-                DataQuality::Fresh,
-                DataQuality::Fresh,
-            ]),
+            research_quality(&[DataQuality::Fresh, DataQuality::Fresh, DataQuality::Fresh,]),
             DataQuality::Fresh
         );
         assert_eq!(
@@ -1542,11 +1529,7 @@ mod tests {
             DataQuality::Degraded
         );
         assert_eq!(
-            research_quality(&[
-                DataQuality::Fresh,
-                DataQuality::Stale,
-                DataQuality::Fresh,
-            ]),
+            research_quality(&[DataQuality::Fresh, DataQuality::Stale, DataQuality::Fresh,]),
             DataQuality::Degraded
         );
     }
