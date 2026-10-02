@@ -561,11 +561,18 @@ impl AgentOperation {
             | Self::MailboxTelemetry
             | Self::AccountSnapshot
             | Self::AccountSummary => Ok(()),
-            Self::PortfolioRisk { mandate, policy, candidate } => {
+            Self::PortfolioRisk {
+                mandate,
+                policy,
+                candidate,
+            } => {
                 validate_version(&mandate.version)?;
                 validate_positive_decimal_text(&mandate.capital_base_usd, "capital_base_usd")?;
-                if mandate.decision_horizon_hours == 0 || mandate.decision_horizon_hours > 24 * 365 {
-                    return Err(ProtocolError::InvalidAnalyticalQuery("decision_horizon_hours"));
+                if mandate.decision_horizon_hours == 0 || mandate.decision_horizon_hours > 24 * 365
+                {
+                    return Err(ProtocolError::InvalidAnalyticalQuery(
+                        "decision_horizon_hours",
+                    ));
                 }
                 validate_non_negative_decimal_text(
                     &mandate.max_drawdown_ratio,
@@ -598,7 +605,10 @@ impl AgentOperation {
                         &policy.max_margin_utilization_ratio,
                         "policy.max_margin_utilization_ratio",
                     ),
-                    (&policy.max_loss_per_trade_usd, "policy.max_loss_per_trade_usd"),
+                    (
+                        &policy.max_loss_per_trade_usd,
+                        "policy.max_loss_per_trade_usd",
+                    ),
                     (
                         &policy.max_daily_realized_loss_usd,
                         "policy.max_daily_realized_loss_usd",
@@ -622,7 +632,10 @@ impl AgentOperation {
                 }
                 if let Some(candidate) = candidate {
                     validate_instrument(&candidate.instrument)?;
-                    validate_positive_decimal_text(&candidate.notional_usd, "candidate.notional_usd")?;
+                    validate_positive_decimal_text(
+                        &candidate.notional_usd,
+                        "candidate.notional_usd",
+                    )?;
                     validate_non_negative_decimal_text(
                         &candidate.worst_case_loss_usd,
                         "candidate.worst_case_loss_usd",
@@ -630,7 +643,7 @@ impl AgentOperation {
                     validate_positive_decimal_text(&candidate.leverage, "candidate.leverage")?;
                 }
                 Ok(())
-            },
+            }
             Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
             Self::PrepareOpenExecution {
                 intent_id,
@@ -1096,7 +1109,9 @@ fn validate_instrument_list(values: &[String], max: usize) -> Result<(), Protoco
     for (index, value) in values.iter().enumerate() {
         validate_instrument(value)?;
         if values[..index].contains(value) {
-            return Err(ProtocolError::InvalidAnalyticalQuery("duplicate instrument"));
+            return Err(ProtocolError::InvalidAnalyticalQuery(
+                "duplicate instrument",
+            ));
         }
     }
     Ok(())
