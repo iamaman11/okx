@@ -532,8 +532,9 @@ Stage 1 status:
 - P0.2 exchange clock discipline: ACCEPTED;
 - venue/instrument-state execution gate: ACCEPTED;
 - account + ledger truth: ACCEPTED;
-- P0.3 named rate/backpressure implementation: merged; physical/canonical acceptance remains the current cursor;
-- Stage-1 final T1–T5 acceptance follows P0.3.
+- P0.3 named rate/backpressure: ACCEPTED;
+- Stage-1 final T1–T5 acceptance: CURRENT;
+- exact final artifact exists and passed CI, but strict final T3 deployment is currently blocked by CONTROL-path liveness; product/runtime logic is not the blocker.
 
 Primary Cloudflare MCP is live and the refreshed ChatGPT tool surface can call `account_summary` under tool contract `okx.mcp.tools/2026-10-01.2`; GitHub DATA remains fallback/parity only.
 
