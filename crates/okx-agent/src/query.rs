@@ -13,9 +13,9 @@ use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountError, AccountSnapshot,
     INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
-    FUNDING_HISTORY_SCHEMA_V1, FundingHistorySnapshot, MARKET_HISTORY_SCHEMA_V1,
-    MARKET_SNAPSHOT_SCHEMA_V1, MARKET_TRADES_SCHEMA_V1, MarketError, MarketHistoryError,
-    MarketHistorySnapshot, MarketReadiness, MarketSnapshot, MarketTradesSnapshot,
+    FundingHistorySnapshot, MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError,
+    MarketHistoryError, MarketHistorySnapshot, MarketReadiness, MarketSnapshot,
+    MarketTradesSnapshot,
     ReferenceRegistry,
     SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport, TRADING_CAPABILITIES_SCHEMA_V1,
 };
