@@ -88,6 +88,7 @@ The executable dependency DAG lives in `scripts/check_architecture.py`. The curr
 Professional outputs are decision-grade evidence, not raw API dumps.
 
 Required principles:
+- CONTROL `request_id` values are immutable single-publication identities: before any issue #12 POST, exact-search the candidate id in comments and abort if #12 already contains the request or terminal; controller deduplication remains defense in depth, not a retry mechanism;
 - multi-source facts carry explicit `as_of`, provenance/generation and coherence/skew diagnostics;
 - older/out-of-order REST evidence cannot regress newer accepted state;
 - evidence distinguishes **OBSERVED**, **MODELLED** and **COUNTERFACTUAL** values;
