@@ -34,20 +34,23 @@ Canonical execution order inside Stage 1:
 2. **P0.2 exchange clock discipline** — ACCEPTED.
 3. **Venue/instrument-state execution gate** — ACCEPTED.
 4. **Account + ledger truth** — ACCEPTED.
-5. **P0.3 named rate/backpressure domains** — CURRENT.
-6. **Stage-1 final T1–T5 acceptance**.
+5. **P0.3 named rate/backpressure domains** — ACCEPTED.
+6. **Stage-1 final T1–T5 acceptance** — ACCEPTED.
 
 The P0/P1 labels are capability groups, not a competing execution order.
 
-Current P0.3 named rate/backpressure slice must prove:
-- rate/backpressure is modeled by the named OKX domains that actually exist, not one global requests-per-second counter;
-- public REST/IP, private REST/User ID, WS connection/login/subscription, order-management, instrument/family and sub-account aggregate scopes remain distinguishable where OKX defines them;
-- typed throttle evidence carries exchange code/domain (including 50011 and 50061 where applicable), operation class, relevant account/instrument/family scope, attempt count and the bounded local defer/backoff decision;
-- the runtime never invents a server Retry-After value when OKX does not provide one;
-- read-only account-rate-limit/fill-ratio evidence is ingested as current exchange evidence where the credential/tier exposes it;
-- no tight retry loop or blind mutation retry is introduced; uncertain-result/idempotency rules remain authoritative;
-- expensive research/history work yields to heartbeat/control and mutation reconciliation, while existing bounded concurrency/response-size limits are preserved;
-- ownership stays inside the existing runtime/API boundary: no generic limiter service, second scheduler, daemon or new state authority.
+Stage 1 final acceptance is **ACCEPTED/CLOSED** on the exact tested/deployed tree:
+- final tested head: `ec4359d388b8a71fba90fe360b986974f1d4fe96`;
+- current merged main at acceptance: `6b7519e158207943d1cedce92d302e3c2d7d3c42`;
+- compare tested head -> merged main: 0 changed files;
+- final source tree: `481a9f2b4a9e4cf97b921dbe55c7e8be1f32924b`;
+- final Windows artifact: `11200168727` from CI run `36941520981`;
+- exact artifact installed and provenance verified through CONTROL;
+- Cloudflare-primary market/account/capability paths physically passed on the installed binary;
+- independent encrypted GitHub DATA fallback parity passed on the same binary;
+- exact-tree restart advanced direct transport generation and market/account state reconverged to FRESH.
+
+**Current roadmap cursor: Stage 2 — INTELLIGENCE + RISK.** The first implementation slice should follow the accepted bounded universal-query architecture rather than adding endpoint-per-question methods.
 
 ## Repository Guard v1
 
