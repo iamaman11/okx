@@ -31,10 +31,7 @@ impl PartialOrd for Return24hPct {
     }
 }
 
-pub fn analyze_return_24h_pct(
-    last: &str,
-    open_24h: &str,
-) -> Result<Return24hPct, AnalysisError> {
+pub fn analyze_return_24h_pct(last: &str, open_24h: &str) -> Result<Return24hPct, AnalysisError> {
     let last = positive_decimal("last", last)?;
     let open = positive_decimal("open_24h", open_24h)?;
     let value = ((last - open) / open) * Decimal::from(100_u32);
