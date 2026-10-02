@@ -347,8 +347,7 @@ impl MarketDataApi {
         }
         if !matches!(
             period,
-            "5m"
-                | "15m"
+            "5m" | "15m"
                 | "30m"
                 | "1H"
                 | "2H"
