@@ -38,6 +38,7 @@ mod account;
 mod analysis;
 mod execution;
 mod market;
+mod universal;
 
 pub const P1_NOT_AVAILABLE_CODE: &str = "P1_OPERATION_NOT_AVAILABLE";
 pub const REFERENCE_INSTRUMENT_NOT_FOUND_CODE: &str = "REFERENCE_INSTRUMENT_NOT_FOUND";
@@ -198,6 +199,9 @@ pub(crate) async fn dispatch(
         | AgentOperation::HistoryBehavior { .. }
         | AgentOperation::SnapshotQuality { .. } => {
             market::dispatch(request, context, generated_at).await
+        }
+        AgentOperation::QueryCapabilities | AgentOperation::Query { .. } => {
+            universal::dispatch(request, context, generated_at).await
         }
         AgentOperation::AccountSnapshot
         | AgentOperation::AccountSummary
