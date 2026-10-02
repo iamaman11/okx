@@ -1,12 +1,9 @@
-use std::str::FromStr;
-
 use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::{AnalysisError, positive_decimal};
 
 pub const DATED_FUTURE_BASIS_SCHEMA_V1: &str = "okx.dated-future-basis/v1";
-pub const CROSS_CONTRACT_BASIS_SCHEMA_V1: &str = "okx.cross-contract-basis/v1";
 
 const BASIS_POINTS: u64 = 10_000;
 const MILLIS_PER_YEAR: u64 = 31_557_600_000;
