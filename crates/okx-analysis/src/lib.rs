@@ -1,5 +1,6 @@
 mod candidate;
 mod derivatives;
+mod history_features;
 mod market_query;
 mod microstructure;
 mod risk;
@@ -11,6 +12,10 @@ pub use candidate::{
 };
 pub use derivatives::{
     DATED_FUTURE_BASIS_SCHEMA_V1, DatedFutureBasisAnalysis, analyze_dated_future_basis,
+};
+pub use history_features::{
+    FUNDING_REGIME_ANALYSIS_SCHEMA_V1, FundingRegime, FundingRegimeAnalysis,
+    TRADE_FLOW_ANALYSIS_SCHEMA_V1, TradeFlowAnalysis, analyze_funding_regime, analyze_trade_flow,
 };
 pub use market_query::{
     RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT, Return24hPct,
