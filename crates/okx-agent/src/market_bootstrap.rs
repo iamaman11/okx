@@ -3,7 +3,7 @@ use okx_api::{InstrumentType, MarketDataApi, OkxPublicClient};
 use okx_observation::{
     FundingHistorySnapshot, FundingRequirement, MarketBootstrap, MarketError, MarketHistoryError,
     MarketHistorySnapshot, MarketSnapshot, MarketTradesSnapshot, MarketUniverseTicker,
-    ReferenceRegistry,
+    OpenInterestHistorySnapshot, ReferenceRegistry,
 };
 use thiserror::Error;
 
@@ -113,6 +113,35 @@ impl MarketBootstrapper {
             .map(MarketUniverseTicker::try_from)
             .collect::<Result<Vec<_>, _>>()
             .map_err(MarketBootstrapError::from)
+    }
+
+    pub async fn open_interest_history(
+        &self,
+        reference: &ReferenceRegistry,
+        instrument_id: &str,
+        period: &str,
+        limit: u16,
+    ) -> Result<OpenInterestHistorySnapshot, MarketBootstrapError> {
+        let instrument = reference.get(instrument_id).ok_or_else(|| {
+            MarketBootstrapError::ReferenceInstrumentNotFound(instrument_id.to_owned())
+        })?;
+        if instrument.state != "live" {
+            return Err(MarketHistoryError::InstrumentNotLive(instrument_id.to_owned()).into());
+        }
+
+        let rows = self
+            .api
+            .open_interest_history(instrument_id, period, limit)
+            .await?;
+        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        Ok(OpenInterestHistorySnapshot::from_public(
+            reference,
+            instrument_id,
+            period,
+            limit,
+            source_received_at,
+            rows,
+        )?)
     }
 
     pub async fn recent_trades(
