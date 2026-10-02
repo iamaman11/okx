@@ -368,23 +368,24 @@ fn evaluate_market_query(
     }
 
     let eligible_rows = candidates.len();
+    let mut min_ts: Option<u64> = None;
+    let mut max_ts: Option<u64> = None;
+    for candidate in &candidates {
+        let timestamp = candidate
+            .ticker
+            .exchange_timestamp_ms
+            .parse::<u64>()
+            .expect("validated timestamp");
+        min_ts = Some(min_ts.map_or(timestamp, |current| current.min(timestamp)));
+        max_ts = Some(max_ts.map_or(timestamp, |current| current.max(timestamp)));
+    }
+
     let result_truncated = eligible_rows > usize::from(plan.limit);
     candidates.truncate(usize::from(plan.limit));
 
-    let mut min_ts: Option<u64> = None;
-    let mut max_ts: Option<u64> = None;
     let rows = candidates
         .into_iter()
-        .map(|candidate| {
-            let timestamp = candidate
-                .ticker
-                .exchange_timestamp_ms
-                .parse::<u64>()
-                .expect("validated timestamp");
-            min_ts = Some(min_ts.map_or(timestamp, |current| current.min(timestamp)));
-            max_ts = Some(max_ts.map_or(timestamp, |current| current.max(timestamp)));
-            project_row(candidate, &plan.select)
-        })
+        .map(|candidate| project_row(candidate, &plan.select))
         .collect::<Vec<_>>();
 
     let metric_versions = if plan.metric == Some(QueryMetric::Return24hPct) {
@@ -694,6 +695,9 @@ mod tests {
         assert_eq!(result.eligible_rows, 3);
         assert_eq!(result.rows_returned, 2);
         assert!(result.result_truncated);
+        assert_eq!(result.coherence.exchange_timestamp_min_ms, Some(1001));
+        assert_eq!(result.coherence.exchange_timestamp_max_ms, Some(1003));
+        assert_eq!(result.coherence.exchange_timestamp_skew_ms, Some(2));
     }
 
     #[test]
