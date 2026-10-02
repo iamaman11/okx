@@ -1165,8 +1165,11 @@ mod tests {
             }
         }"#;
 
-        let request: AgentRequest = serde_json::from_str(json).expect("MCP query contract must deserialize");
-        request.validate().expect("MCP query contract must validate");
+        let request: AgentRequest =
+            serde_json::from_str(json).expect("MCP query contract must deserialize");
+        request
+            .validate()
+            .expect("MCP query contract must validate");
 
         let encoded = serde_json::to_string(&request).expect("serialize query contract");
         assert!(encoded.contains(r#""open_24h""#));
