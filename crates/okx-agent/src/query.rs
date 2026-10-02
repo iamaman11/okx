@@ -7,11 +7,10 @@ use okx_analysis::{
     PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2, POSITION_SCENARIO_SCHEMA_V1, PortfolioCandidate,
     PositionDirection, PositionScenarioAssumptions, RiskDegradedMode as AnalysisRiskDegradedMode,
     RiskMinimumQuality as AnalysisRiskMinimumQuality, ScenarioExitAssumption,
-    TRADING_MANDATE_SCHEMA_V1, TradingMandate,
-    analyze_basis_difference_bps, analyze_candidate_order, analyze_cost,
-    analyze_dated_future_basis, analyze_history_behavior, analyze_mark_index_basis_bps,
-    analyze_market_intelligence, analyze_portfolio_risk, analyze_position_scenario,
-    compare_account_position_risk_oracle,
+    TRADING_MANDATE_SCHEMA_V1, TradingMandate, analyze_basis_difference_bps,
+    analyze_candidate_order, analyze_cost, analyze_dated_future_basis, analyze_history_behavior,
+    analyze_mark_index_basis_bps, analyze_market_intelligence, analyze_portfolio_risk,
+    analyze_position_scenario, compare_account_position_risk_oracle,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
