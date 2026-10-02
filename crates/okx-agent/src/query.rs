@@ -11,7 +11,7 @@ use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountError, AccountSnapshot,
     INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
     MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
-    MarketHistorySnapshot, MarketReadiness, MarketSnapshot, ReferenceRegistry,
+    MarketHistorySnapshot, MarketReadiness, MarketSnapshot, OrderBookSnapshot, ReferenceRegistry,
     SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport, TRADING_CAPABILITIES_SCHEMA_V1,
 };
 use okx_protocol::{
@@ -61,7 +61,7 @@ pub const ACCOUNT_SUMMARY_SCHEMA_V1: &str = "okx.account-summary/v1";
 pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT";
 pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
-pub const MARKET_RESEARCH_SCHEMA_V2: &str = "okx.market-research/v2";
+pub const MARKET_RESEARCH_SCHEMA_V3: &str = "okx.market-research/v3";
 
 const REFERENCE_BOOTSTRAP_WARNING: &str =
     "reference data is REST-bootstrap only; live instruments continuity is not connected until M3";
@@ -243,6 +243,7 @@ pub(crate) async fn dispatch(
 struct AssembledCurrentMarket {
     rules: InstrumentRulesSnapshot,
     snapshot: MarketSnapshot,
+    order_book: Option<OrderBookSnapshot>,
     source: &'static str,
     quality: DataQuality,
     warnings: Vec<String>,
@@ -286,6 +287,7 @@ async fn assemble_current_market(
                 AssembledCurrentMarket {
                     rules,
                     snapshot: live.market,
+                    order_book: Some(live.order_book),
                     source: "websocket",
                     quality: DataQuality::Fresh,
                     warnings: Vec::new(),
@@ -312,6 +314,7 @@ async fn assemble_current_market(
                 AssembledCurrentMarket {
                     rules,
                     snapshot,
+                    order_book: None,
                     source: "rest_fallback",
                     quality: DataQuality::Degraded,
                     warnings: vec![format!(
@@ -343,6 +346,7 @@ async fn assemble_current_market(
             AssembledCurrentMarket {
                 rules,
                 snapshot,
+                order_book: None,
                 source: "rest_bootstrap",
                 quality: DataQuality::Degraded,
                 warnings: vec![MARKET_REST_BOOTSTRAP_WARNING.to_owned()],
