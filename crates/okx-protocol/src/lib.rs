@@ -1075,6 +1075,82 @@ mod tests {
         assert!(!submit.direct_transport_read_only());
     }
 
+    #[test]
+    fn analytical_query_plan_is_bounded_and_strict() {
+        let plan = AnalyticalQueryPlan {
+            catalog_version: ANALYTICAL_QUERY_CATALOG_VERSION_V1.to_owned(),
+            universe: MarketQueryUniverse {
+                instrument_types: vec![InstrumentTypeFilter::Swap, InstrumentTypeFilter::Futures],
+                settle_currency: Some("USDT".to_owned()),
+                state: Some(QueryInstrumentState::Live),
+            },
+            select: vec![
+                QueryField::InstrumentId,
+                QueryField::Last,
+                QueryField::Return24hPct,
+            ],
+            metric: Some(QueryMetric::Return24hPct),
+            sort: Some(QuerySort {
+                key: QuerySortKey::Return24hPct,
+                direction: QuerySortDirection::Desc,
+            }),
+            limit: 10,
+        };
+        plan.validate().expect("valid bounded query plan");
+
+        let mut stale = plan.clone();
+        stale.catalog_version = "okx.query.catalog/2026-09-01.1".to_owned();
+        stale
+            .validate()
+            .expect("stale catalog is a product-level rejection, not malformed transport input");
+
+        let mut duplicate = plan.clone();
+        duplicate.select.push(QueryField::Last);
+        assert!(matches!(
+            duplicate.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery("duplicate select field"))
+        ));
+
+        let mut unbounded = plan.clone();
+        unbounded.limit = 26;
+        assert!(matches!(
+            unbounded.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery("limit"))
+        ));
+
+        let mut undeclared_metric = plan;
+        undeclared_metric.metric = None;
+        assert!(matches!(
+            undeclared_metric.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery(
+                "return_24h_pct metric must be declared"
+            ))
+        ));
+    }
+
+    #[test]
+    fn analytical_query_operations_remain_read_only_on_direct_transport() {
+        let capabilities = AgentOperation::QueryCapabilities;
+        assert!(capabilities.direct_transport_read_only());
+
+        let query = AgentOperation::Query {
+            plan: AnalyticalQueryPlan {
+                catalog_version: ANALYTICAL_QUERY_CATALOG_VERSION_V1.to_owned(),
+                universe: MarketQueryUniverse {
+                    instrument_types: vec![InstrumentTypeFilter::Swap],
+                    settle_currency: None,
+                    state: Some(QueryInstrumentState::Live),
+                },
+                select: vec![QueryField::InstrumentId],
+                metric: None,
+                sort: None,
+                limit: 5,
+            },
+        };
+        assert!(query.direct_transport_read_only());
+        query.validate().expect("valid query operation");
+    }
+
     fn request_id() -> String {
         "req_0123456789abcdef".to_owned()
     }
