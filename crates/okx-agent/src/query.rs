@@ -2,12 +2,16 @@ use chrono::Utc;
 use okx_analysis::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
     COST_ANALYSIS_SCHEMA_V1, CandidateOrderAssumptions, DATED_FUTURE_BASIS_SCHEMA_V1,
-    HISTORY_BEHAVIOR_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
-    MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1, POSITION_SCENARIO_SCHEMA_V1, PositionDirection,
-    PositionScenarioAssumptions, ScenarioExitAssumption, analyze_account_risk,
+    HARD_RISK_POLICY_SCHEMA_V1, HISTORY_BEHAVIOR_SCHEMA_V1,
+    LiquidityRole as AnalysisLiquidityRole, MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
+    PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2, POSITION_SCENARIO_SCHEMA_V1, PositionDirection,
+    PositionScenarioAssumptions, RiskDegradedMode as AnalysisRiskDegradedMode,
+    RiskMinimumQuality as AnalysisRiskMinimumQuality, ScenarioExitAssumption, TradingMandate,
+    HardRiskPolicy, CorrelatedClusterLimit, PortfolioCandidate, analyze_account_risk,
     analyze_basis_difference_bps, analyze_candidate_order, analyze_cost,
     analyze_dated_future_basis, analyze_history_behavior, analyze_mark_index_basis_bps,
-    analyze_market_intelligence, analyze_position_scenario,
+    analyze_market_intelligence, analyze_portfolio_risk, analyze_position_scenario,
+    compare_account_position_risk_oracle,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
@@ -22,7 +26,8 @@ use okx_observation::{
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
     AgentResponseStatus, DataQuality, InstrumentTypeFilter, LiquidityRole as ProtocolLiquidityRole,
-    PositionSide,
+    PositionSide, RiskDegradedMode as ProtocolRiskDegradedMode,
+    RiskMinimumQuality as ProtocolRiskMinimumQuality,
 };
 use okx_runtime::{
     PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PrivateConvergenceError, PrivateWsHandle,
@@ -65,6 +70,7 @@ pub const ACCOUNT_TRADING_CAPABILITIES_INCONSISTENT_CODE: &str =
     "ACCOUNT_TRADING_CAPABILITIES_INCONSISTENT";
 pub const ACCOUNT_LEDGER_INCONSISTENT_CODE: &str = "ACCOUNT_LEDGER_INCONSISTENT";
 pub const ACCOUNT_SUMMARY_SCHEMA_V1: &str = "okx.account-summary/v1";
+pub const PORTFOLIO_RISK_SCHEMA_V2: &str = "okx.portfolio-risk/v2";
 pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT";
 pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
