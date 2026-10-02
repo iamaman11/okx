@@ -34,8 +34,9 @@ pub use risk::{
     PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2, TRADING_MANDATE_SCHEMA_V1, AccountRiskAnalysis,
     CandidateProjection, ClusterExposure, CorrelatedClusterLimit, ExposureAggregate,
     HardRiskPolicy, PortfolioCandidate, PortfolioRiskAnalysis, PositionRiskAnalysis,
-    RiskDegradedMode, RiskMinimumQuality, RiskPolicyDecision, RiskPolicyViolation,
-    TradingMandate, analyze_account_risk, analyze_portfolio_risk,
+    RiskDegradedMode, RiskMinimumQuality, RiskOracleComparison, RiskPolicyDecision,
+    RiskPolicyViolation, TradingMandate, analyze_account_risk, analyze_portfolio_risk,
+    compare_account_position_risk_oracle,
 };
 pub use scenario::{
     HISTORY_BEHAVIOR_SCHEMA_V1, HistoryBehaviorAnalysis, POSITION_SCENARIO_SCHEMA_V1,
