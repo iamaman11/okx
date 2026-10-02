@@ -374,7 +374,7 @@ pub fn analyze_portfolio_risk(
             (decimal("initial_margin_requirement_usd", imr)? / total_equity)
                 .normalize()
                 .to_string(),
-        )
+        ),
         _ => None,
     };
     let drawdown = if total_equity < capital_base {
