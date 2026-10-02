@@ -19,6 +19,8 @@ struct AccountSummaryResult {
     coherence: AccountSummaryCoherence,
 }
 
+const PORTFOLIO_RISK_MAX_OBSERVATION_SKEW_MS: u64 = 30_000;
+
 #[derive(serde::Serialize)]
 struct PortfolioRiskCoherence {
     account_snapshot_source_received_at: String,
@@ -28,6 +30,9 @@ struct PortfolioRiskCoherence {
     reference_instruments: Vec<String>,
     ledger_source_received_at: String,
     oracle_timestamp_ms: String,
+    account_oracle_observation_skew_ms: u64,
+    ledger_oracle_observation_skew_ms: u64,
+    max_observation_skew_ms: u64,
     private_ws_generation: Option<u64>,
     events_during_read: Option<usize>,
     coherent: bool,
@@ -371,8 +376,49 @@ pub(super) async fn dispatch(
                 Err(error) => return Ok(account_failure(request, generated_at, error)),
             };
 
+            let account_oracle_observation_skew_ms =
+                match observation_skew_ms(&assembled.snapshot.source_received_at, &oracle.ts) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT_CODE,
+                            error,
+                            false,
+                        ));
+                    }
+                };
+            let ledger_oracle_observation_skew_ms =
+                match observation_skew_ms(&facts.summary.source_received_at, &oracle.ts) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT_CODE,
+                            error,
+                            false,
+                        ));
+                    }
+                };
+            let observation_skew_within_bound = account_oracle_observation_skew_ms
+                <= PORTFOLIO_RISK_MAX_OBSERVATION_SKEW_MS
+                && ledger_oracle_observation_skew_ms <= PORTFOLIO_RISK_MAX_OBSERVATION_SKEW_MS;
+
             let mut quality = assembled.quality;
             let mut warnings = assembled.warnings;
+            if !observation_skew_within_bound {
+                quality = DataQuality::Degraded;
+                warnings.push(format!(
+                    "portfolio account/oracle observation skew exceeded {} ms: account_oracle={} ms, ledger_oracle={} ms",
+                    PORTFOLIO_RISK_MAX_OBSERVATION_SKEW_MS,
+                    account_oracle_observation_skew_ms,
+                    ledger_oracle_observation_skew_ms
+                ));
+            }
             if facts
                 .summary
                 .history_coverage
@@ -394,9 +440,12 @@ pub(super) async fn dispatch(
                 reference_instruments,
                 ledger_source_received_at: facts.summary.source_received_at.clone(),
                 oracle_timestamp_ms: oracle.ts.clone(),
+                account_oracle_observation_skew_ms,
+                ledger_oracle_observation_skew_ms,
+                max_observation_skew_ms: PORTFOLIO_RISK_MAX_OBSERVATION_SKEW_MS,
                 private_ws_generation: assembled.snapshot.private_ws_generation,
                 events_during_read: None,
-                coherent: assembled.quality == DataQuality::Fresh,
+                coherent: assembled.quality == DataQuality::Fresh && observation_skew_within_bound,
             };
             if let (Some(private_ws), Some(cursor)) = (context.private_ws, read_cursor) {
                 match private_ws.convergence_window(cursor).await {
@@ -417,6 +466,28 @@ pub(super) async fn dispatch(
                         quality = DataQuality::Degraded;
                         warnings.push(format!(
                             "private account coherence changed while portfolio risk evidence was read: {error}"
+                        ));
+                    }
+                }
+            }
+
+            if let Some(expected_generation) = coherence.reference_generation.clone() {
+                let instruments = coherence.reference_instruments.clone();
+                for instrument in instruments {
+                    let Some(rules) = resolve_instrument_rules(context, &instrument).await else {
+                        return Ok(reference_not_found(request, generated_at, &instrument));
+                    };
+                    if rules.reference_generation != expected_generation {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
+                            format!(
+                                "portfolio risk reference generation changed during evaluation: expected {expected_generation}, observed {} for {instrument}",
+                                rules.reference_generation
+                            ),
+                            false,
                         ));
                     }
                 }
@@ -548,11 +619,11 @@ pub(super) async fn dispatch(
                 .map(|violation| violation.code)
                 .collect::<Vec<_>>();
             let result = serde_json::to_value(PortfolioRiskResult {
-                schema: PORTFOLIO_RISK_SCHEMA_V2,
+                schema: PORTFOLIO_RISK_SCHEMA_V3,
                 as_of: generated_at.to_owned(),
                 observed_evidence_label: "OBSERVED",
                 modelled_evidence_label: "MODELLED",
-                analysis_schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2,
+                analysis_schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3,
                 mandate_schema: TRADING_MANDATE_SCHEMA_V1,
                 policy_schema: HARD_RISK_POLICY_SCHEMA_V1,
                 coherence,
@@ -570,7 +641,7 @@ pub(super) async fn dispatch(
                 },
                 generated_at: generated_at.to_owned(),
                 quality,
-                result_schema: Some(PORTFOLIO_RISK_SCHEMA_V2.to_owned()),
+                result_schema: Some(PORTFOLIO_RISK_SCHEMA_V3.to_owned()),
                 result: Some(result),
                 failure: rejected.then(|| AgentFailure {
                     code: PORTFOLIO_RISK_POLICY_REJECTED_CODE.to_owned(),
@@ -585,6 +656,20 @@ pub(super) async fn dispatch(
         }
         _ => unreachable!("query domain dispatcher received unsupported operation"),
     }
+}
+
+fn observation_skew_ms(source_received_at: &str, oracle_timestamp_ms: &str) -> Result<u64, String> {
+    let source_ms = chrono::DateTime::parse_from_rfc3339(source_received_at)
+        .map_err(|error| {
+            format!(
+                "invalid portfolio source observation timestamp '{source_received_at}': {error}"
+            )
+        })?
+        .timestamp_millis();
+    let oracle_ms = oracle_timestamp_ms.parse::<i64>().map_err(|error| {
+        format!("invalid account-position-risk oracle timestamp '{oracle_timestamp_ms}': {error}")
+    })?;
+    Ok(source_ms.abs_diff(oracle_ms))
 }
 
 fn account_ledger_failure(
@@ -617,5 +702,20 @@ fn account_ledger_failure(
             error.to_string(),
             false,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portfolio_observation_skew_is_explicit_and_bounded_in_milliseconds() {
+        assert_eq!(
+            observation_skew_ms("2026-10-03T00:00:05.000Z", "1790985600000").expect("skew"),
+            5_000
+        );
+        assert!(observation_skew_ms("not-a-timestamp", "1790985600000").is_err());
+        assert!(observation_skew_ms("2026-10-03T00:00:00.000Z", "not-millis").is_err());
     }
 }
