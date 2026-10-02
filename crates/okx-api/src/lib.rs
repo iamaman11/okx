@@ -31,7 +31,7 @@ pub use ledger::{
 };
 pub use market_data::{
     MarketDataApi, PublicCandle, PublicFundingHistory, PublicFundingRate, PublicIndexTicker,
-    PublicMarkPrice, PublicOpenInterest, PublicTicker, PublicTrade,
+    PublicMarkPrice, PublicOpenInterest, PublicOpenInterestHistory, PublicTicker, PublicTrade,
 };
 pub use public_data::{
     PublicDataApi, PublicInstrument, PublicPriceLimit, SystemStatus, UpcomingParameterChange,
