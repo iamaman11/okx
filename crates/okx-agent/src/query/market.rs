@@ -281,31 +281,7 @@ fn funding_semantics(requirement: okx_observation::FundingRequirement) -> &'stat
 }
 
 fn open_interest_history_period(bar: &str) -> Option<&str> {
-    matches!(
-        bar,
-        "5m" | "15m"
-            | "30m"
-            | "1H"
-            | "2H"
-            | "4H"
-            | "6H"
-            | "12H"
-            | "1D"
-            | "2D"
-            | "3D"
-            | "1W"
-            | "1M"
-            | "3M"
-            | "6Hutc"
-            | "12Hutc"
-            | "1Dutc"
-            | "2Dutc"
-            | "3Dutc"
-            | "1Wutc"
-            | "1Mutc"
-            | "3Mutc"
-    )
-    .then_some(bar)
+    matches!(bar, "5m" | "15m" | "30m" | "1H" | "2H" | "4H").then_some(bar)
 }
 
 fn research_diagnostics(
