@@ -560,8 +560,7 @@ mod tests {
         let budget = RateBudget::new();
         let config = budget.private_rest_plan("/api/v5/account/config", &[]);
         let positions = budget.private_rest_plan("/api/v5/account/positions", &[]);
-        let position_risk =
-            budget.private_rest_plan("/api/v5/account/account-position-risk", &[]);
+        let position_risk = budget.private_rest_plan("/api/v5/account/account-position-risk", &[]);
         assert_ne!(config.domains[0].key, positions.domains[0].key);
         assert_eq!(position_risk.domains[0].max_requests, 10);
         assert_eq!(position_risk.domains[0].window_ms, 2_000);
