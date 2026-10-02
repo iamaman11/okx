@@ -221,7 +221,7 @@ pub(crate) async fn dispatch(
         }
         AgentOperation::AccountSnapshot
         | AgentOperation::AccountSummary
-        | AgentOperation::PortfolioRisk
+        | AgentOperation::PortfolioRisk { .. }
         | AgentOperation::TradingCapabilities { .. } => {
             account::dispatch(request, context, generated_at).await
         }
