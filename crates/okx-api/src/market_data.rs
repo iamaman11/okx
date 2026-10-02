@@ -345,32 +345,7 @@ impl MarketDataApi {
                 "open interest history limit must be between 1 and 100".to_owned(),
             ));
         }
-        if !matches!(
-            period,
-            "5m" | "15m"
-                | "30m"
-                | "1H"
-                | "2H"
-                | "4H"
-                | "6H"
-                | "12H"
-                | "1D"
-                | "2D"
-                | "3D"
-                | "5D"
-                | "1W"
-                | "1M"
-                | "3M"
-                | "6Hutc"
-                | "12Hutc"
-                | "1Dutc"
-                | "2Dutc"
-                | "3Dutc"
-                | "5Dutc"
-                | "1Wutc"
-                | "1Mutc"
-                | "3Mutc"
-        ) {
+        if !matches!(period, "5m" | "15m" | "30m" | "1H" | "2H" | "4H") {
             return Err(OkxError::Response(format!(
                 "unsupported open interest history period '{period}'"
             )));
