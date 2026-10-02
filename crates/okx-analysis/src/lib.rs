@@ -45,8 +45,7 @@ pub use scenario::{
     ScenarioPriceSource, analyze_history_behavior, analyze_position_scenario,
 };
 pub use statistics::{
-    SAMPLE_COVARIANCE_FORMULA_V1, covariance_correlation, decimal_sqrt,
-    sample_covariance_matrix,
+    SAMPLE_COVARIANCE_FORMULA_V1, covariance_correlation, decimal_sqrt, sample_covariance_matrix,
 };
 
 use std::str::FromStr;
