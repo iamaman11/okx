@@ -10,6 +10,9 @@ use super::{AnalysisError, PositionDirection, decimal, positive_decimal};
 
 pub const ACCOUNT_RISK_ANALYSIS_SCHEMA_V1: &str = "okx.account-risk-analysis/v1";
 pub const PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2: &str = "okx.portfolio-risk-analysis/v2";
+pub const PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3: &str = "okx.portfolio-risk-analysis/v3";
+pub const RISK_ORACLE_COMPARISON_SCHEMA_V2: &str = "okx.risk-oracle-comparison/v2";
+pub const RISK_ORACLE_CONSISTENCY_POLICY_V1: &str = "okx.risk-oracle-consistency/exact-usd-v1";
 pub const TRADING_MANDATE_SCHEMA_V1: &str = "okx.trading-mandate/v1";
 pub const HARD_RISK_POLICY_SCHEMA_V1: &str = "okx.hard-risk-policy/v1";
 
@@ -157,6 +160,10 @@ pub struct RiskOracleComparison {
     pub schema: &'static str,
     pub oracle_source: &'static str,
     pub oracle_timestamp_ms: String,
+    pub consistency_policy: &'static str,
+    pub gross_notional_tolerance_usd: &'static str,
+    pub adjusted_equity_tolerance_usd: &'static str,
+    pub semantic_exceptions: Vec<String>,
     pub local_gross_notional_usd: String,
     pub oracle_gross_notional_usd: String,
     pub gross_notional_residual_usd: String,
@@ -189,6 +196,8 @@ pub struct PortfolioRiskAnalysis {
     pub daily_realized_pnl_utc: Vec<CurrencyAggregate>,
     pub daily_realized_loss_usd_equivalent: Option<String>,
     pub mandate: TradingMandate,
+    pub mandate_enforced_fields: Vec<&'static str>,
+    pub mandate_context_only_fields: Vec<&'static str>,
     pub policy: HardRiskPolicy,
     pub candidate: Option<CandidateProjection>,
     pub policy_decision: RiskPolicyDecision,
@@ -434,8 +443,17 @@ pub fn analyze_portfolio_risk(
         });
     }
 
-    let daily_loss = usd_equivalent_daily_loss(&ledger.daily_realized_pnl_utc)?;
+    let (daily_loss, unsupported_daily_loss_currencies) =
+        usd_equivalent_daily_loss(&ledger.daily_realized_pnl_utc)?;
     let mut violations = Vec::new();
+    if !unsupported_daily_loss_currencies.is_empty() {
+        violations.push(RiskPolicyViolation {
+            code: "DAILY_REALIZED_LOSS_USD_EQUIVALENT_UNAVAILABLE",
+            scope: "utc_day".to_owned(),
+            observed: unsupported_daily_loss_currencies.join(","),
+            limit: "USD|USDT|USDC|USDG".to_owned(),
+        });
+    }
 
     if matches!(policy.minimum_quality, RiskMinimumQuality::Fresh) && !account_is_fresh {
         violations.push(RiskPolicyViolation {
@@ -481,6 +499,13 @@ pub fn analyze_portfolio_risk(
         drawdown,
         &policy.max_drawdown_ratio,
     )?;
+    compare_limit(
+        &mut violations,
+        "MANDATE_MAX_DRAWDOWN",
+        "capital_base",
+        drawdown,
+        &mandate.max_drawdown_ratio,
+    )?;
     if let Some(loss) = daily_loss {
         compare_limit(
             &mut violations,
@@ -508,6 +533,16 @@ pub fn analyze_portfolio_risk(
                 limit: "allowed_instruments".to_owned(),
             });
         }
+        if !mandate.allowed_instruments.is_empty()
+            && !mandate.allowed_instruments.contains(&row.key)
+        {
+            violations.push(RiskPolicyViolation {
+                code: "MANDATE_INSTRUMENT_NOT_ALLOWED",
+                scope: row.key.clone(),
+                observed: "present".to_owned(),
+                limit: "mandate.allowed_instruments".to_owned(),
+            });
+        }
     }
     for row in &cluster_exposure {
         compare_limit(
@@ -520,12 +555,20 @@ pub fn analyze_portfolio_risk(
     }
     for position in &account_risk.positions {
         if let Some(leverage) = position.configured_leverage.as_deref() {
+            let configured = decimal("configured_leverage", leverage)?;
             compare_limit(
                 &mut violations,
                 "MAX_LEVERAGE",
                 &position.instrument_id,
-                decimal("configured_leverage", leverage)?,
+                configured,
                 &policy.max_leverage,
+            )?;
+            compare_limit(
+                &mut violations,
+                "MANDATE_LEVERAGE_CEILING",
+                &position.instrument_id,
+                configured,
+                &mandate.leverage_ceiling,
             )?;
         }
     }
@@ -650,7 +693,7 @@ pub fn analyze_portfolio_risk(
     };
 
     Ok(PortfolioRiskAnalysis {
-        schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2,
+        schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3,
         valuation_basis: "exchange position notionalUsd / mark-price semantics; candidate notional is explicit USD input",
         account: account_risk,
         instrument_exposure,
@@ -664,6 +707,18 @@ pub fn analyze_portfolio_risk(
         daily_realized_pnl_utc: ledger.daily_realized_pnl_utc.clone(),
         daily_realized_loss_usd_equivalent: daily_loss.map(|value| value.normalize().to_string()),
         mandate,
+        mandate_enforced_fields: vec![
+            "capital_base_usd",
+            "allowed_instruments",
+            "max_drawdown_ratio",
+            "leverage_ceiling",
+        ],
+        mandate_context_only_fields: vec![
+            "decision_horizon_hours",
+            "benchmark",
+            "minimum_liquidity_notional_usd",
+            "max_turnover_ratio",
+        ],
         policy,
         candidate: candidate_projection,
         policy_decision,
@@ -702,19 +757,44 @@ pub fn compare_account_position_risk_oracle(
         .filter(|value| !value.trim().is_empty())
         .map(|value| decimal("oracle_adjusted_equity_usd", value))
         .transpose()?;
-    let adjusted_residual = match (local_adjusted, oracle_adjusted) {
-        (Some(local_value), Some(oracle_value)) => Some(local_value - oracle_value),
-        _ => None,
-    };
-    let consistent = gross_residual.is_zero()
-        && adjusted_residual
-            .map(|value| value.is_zero())
-            .unwrap_or(true);
+    let gross_tolerance = Decimal::ZERO;
+    let adjusted_equity_tolerance = Decimal::ZERO;
+    let (adjusted_residual, adjusted_consistent, semantic_exceptions) =
+        match (local_adjusted, oracle_adjusted) {
+            (Some(local_value), Some(oracle_value)) => {
+                let residual = local_value - oracle_value;
+                (
+                    Some(residual),
+                    residual.abs() <= adjusted_equity_tolerance,
+                    Vec::new(),
+                )
+            }
+            (None, None) => (
+                None,
+                true,
+                vec!["adjusted_equity_unavailable_both_sides".to_owned()],
+            ),
+            (Some(_), None) => (
+                None,
+                false,
+                vec!["oracle_adjusted_equity_unavailable".to_owned()],
+            ),
+            (None, Some(_)) => (
+                None,
+                false,
+                vec!["local_adjusted_equity_unavailable".to_owned()],
+            ),
+        };
+    let consistent = gross_residual.abs() <= gross_tolerance && adjusted_consistent;
 
     Ok(RiskOracleComparison {
-        schema: "okx.risk-oracle-comparison/v1",
+        schema: RISK_ORACLE_COMPARISON_SCHEMA_V2,
         oracle_source: "GET /api/v5/account/account-position-risk",
         oracle_timestamp_ms: oracle_timestamp_ms.to_owned(),
+        consistency_policy: RISK_ORACLE_CONSISTENCY_POLICY_V1,
+        gross_notional_tolerance_usd: "0",
+        adjusted_equity_tolerance_usd: "0",
+        semantic_exceptions,
         local_gross_notional_usd: local_gross.normalize().to_string(),
         oracle_gross_notional_usd: oracle_gross.normalize().to_string(),
         gross_notional_residual_usd: gross_residual.normalize().to_string(),
@@ -738,19 +818,27 @@ fn finish_exposure(values: BTreeMap<String, (Decimal, Decimal)>) -> Vec<Exposure
 
 fn usd_equivalent_daily_loss(
     values: &[CurrencyAggregate],
-) -> Result<Option<Decimal>, AnalysisError> {
+) -> Result<(Option<Decimal>, Vec<String>), AnalysisError> {
     let mut net = Decimal::ZERO;
+    let mut unsupported = BTreeSet::new();
     for row in values {
         if !matches!(row.currency.as_str(), "USD" | "USDT" | "USDC" | "USDG") {
-            return Ok(None);
+            unsupported.insert(row.currency.clone());
+            continue;
         }
         net += decimal("daily_realized_pnl", &row.amount)?;
     }
-    Ok(Some(if net < Decimal::ZERO {
-        -net
-    } else {
-        Decimal::ZERO
-    }))
+    if !unsupported.is_empty() {
+        return Ok((None, unsupported.into_iter().collect()));
+    }
+    Ok((
+        Some(if net < Decimal::ZERO {
+            -net
+        } else {
+            Decimal::ZERO
+        }),
+        Vec::new(),
+    ))
 }
 
 fn compare_limit(
@@ -1286,6 +1374,82 @@ mod tests {
     }
 
     #[test]
+    fn mandate_is_enforced_for_current_portfolio_and_declares_context_only_fields() {
+        let snapshot = account(
+            "long_short_mode",
+            vec![position(
+                "ETH-USDT-SWAP",
+                "SWAP",
+                "long",
+                "1",
+                Some("100"),
+                Some("100"),
+                Some("80"),
+            )],
+        );
+        let mut strict_mandate = mandate();
+        strict_mandate.capital_base_usd = "1000".to_owned();
+        strict_mandate.max_drawdown_ratio = "0.1".to_owned();
+        strict_mandate.leverage_ceiling = "2".to_owned();
+        strict_mandate.allowed_instruments = vec!["BTC-USDT-SWAP".to_owned()];
+
+        let result = analyze_portfolio_risk(
+            &snapshot,
+            &ledger("0"),
+            strict_mandate,
+            policy(),
+            None,
+            true,
+        )
+        .expect("portfolio risk");
+        let codes = result
+            .violations
+            .iter()
+            .map(|violation| violation.code)
+            .collect::<BTreeSet<_>>();
+
+        assert!(codes.contains("MANDATE_MAX_DRAWDOWN"));
+        assert!(codes.contains("MANDATE_INSTRUMENT_NOT_ALLOWED"));
+        assert!(codes.contains("MANDATE_LEVERAGE_CEILING"));
+        assert!(
+            result
+                .mandate_enforced_fields
+                .contains(&"max_drawdown_ratio")
+        );
+        assert!(
+            result
+                .mandate_context_only_fields
+                .contains(&"minimum_liquidity_notional_usd")
+        );
+        assert!(
+            result
+                .mandate_context_only_fields
+                .contains(&"max_turnover_ratio")
+        );
+    }
+
+    #[test]
+    fn unsupported_daily_realized_currency_rejects_instead_of_skipping_loss_policy() {
+        let snapshot = account("long_short_mode", Vec::new());
+        let mut ledger = ledger("0");
+        ledger.daily_realized_pnl_utc = vec![CurrencyAggregate {
+            currency: "BTC".to_owned(),
+            amount: "-0.1".to_owned(),
+            events: 1,
+        }];
+
+        let result = analyze_portfolio_risk(&snapshot, &ledger, mandate(), policy(), None, true)
+            .expect("portfolio risk");
+
+        assert_eq!(result.daily_realized_loss_usd_equivalent, None);
+        assert_eq!(result.policy_decision, RiskPolicyDecision::Rejected);
+        assert!(result.violations.iter().any(|violation| {
+            violation.code == "DAILY_REALIZED_LOSS_USD_EQUIVALENT_UNAVAILABLE"
+                && violation.observed == "BTC"
+        }));
+    }
+
+    #[test]
     fn account_position_risk_oracle_residual_is_explicit() {
         let snapshot = account(
             "long_short_mode",
@@ -1307,6 +1471,11 @@ mod tests {
             compare_account_position_risk_oracle(&local, "1790985600000", Some("480"), &["600"])
                 .expect("oracle");
         assert!(exact.consistent);
+        assert_eq!(exact.schema, RISK_ORACLE_COMPARISON_SCHEMA_V2);
+        assert_eq!(exact.consistency_policy, RISK_ORACLE_CONSISTENCY_POLICY_V1);
+        assert_eq!(exact.gross_notional_tolerance_usd, "0");
+        assert_eq!(exact.adjusted_equity_tolerance_usd, "0");
+        assert!(exact.semantic_exceptions.is_empty());
         assert_eq!(exact.gross_notional_residual_usd, "0");
 
         let mismatch =
@@ -1315,6 +1484,42 @@ mod tests {
         assert!(!mismatch.consistent);
         assert_eq!(mismatch.gross_notional_residual_usd, "10");
         assert_eq!(mismatch.adjusted_equity_residual_usd.as_deref(), Some("1"));
+
+        let mut local_without_adjusted = local.clone();
+        local_without_adjusted.account.adjusted_equity_usd = None;
+        let both_missing = compare_account_position_risk_oracle(
+            &local_without_adjusted,
+            "1790985600000",
+            None,
+            &["600"],
+        )
+        .expect("both adjusted equity values missing");
+        assert!(both_missing.consistent);
+        assert_eq!(
+            both_missing.semantic_exceptions,
+            vec!["adjusted_equity_unavailable_both_sides"]
+        );
+
+        let asymmetric_missing =
+            compare_account_position_risk_oracle(&local, "1790985600000", None, &["600"])
+                .expect("oracle adjusted equity missing");
+        let asymmetric_other_side = compare_account_position_risk_oracle(
+            &local_without_adjusted,
+            "1790985600000",
+            Some("480"),
+            &["600"],
+        )
+        .expect("local adjusted equity missing");
+        assert!(!asymmetric_other_side.consistent);
+        assert_eq!(
+            asymmetric_other_side.semantic_exceptions,
+            vec!["local_adjusted_equity_unavailable"]
+        );
+        assert!(!asymmetric_missing.consistent);
+        assert_eq!(
+            asymmetric_missing.semantic_exceptions,
+            vec!["oracle_adjusted_equity_unavailable"]
+        );
     }
 
     #[test]
