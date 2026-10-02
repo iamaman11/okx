@@ -150,8 +150,7 @@ pub fn analyze_market_intelligence(
     let total_depth = bid_depth + ask_depth;
     let depth_imbalance_ratio = (bid_depth - ask_depth) / total_depth;
     let top_size = best_bid_size + best_ask_size;
-    let microprice =
-        (best_ask * best_bid_size + best_bid * best_ask_size) / top_size;
+    let microprice = (best_ask * best_bid_size + best_bid * best_ask_size) / top_size;
     let buy_sweep = sweep_book(&asks, requested, mid, true);
     let sell_sweep = sweep_book(&bids, requested, mid, false);
 
