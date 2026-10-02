@@ -264,6 +264,93 @@ export const mcpApi = {
             inputSchema: { type: "object", properties: {}, additionalProperties: false },
           },
           {
+            name: "portfolio_risk",
+            description: "Evaluate coherent read-only portfolio risk against an explicit versioned mandate and hard-risk policy, with OKX account-position-risk oracle comparison.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                mandate: {
+                  type: "object",
+                  properties: {
+                    version: { type: "string", minLength: 1, maxLength: 64, pattern: VERSION_PATTERN },
+                    capital_base_usd: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    decision_horizon_hours: { type: "integer", minimum: 1, maximum: 8760 },
+                    benchmark: { type: "string", minLength: 1, maxLength: 64, pattern: VERSION_PATTERN },
+                    allowed_instruments: {
+                      type: "array", maxItems: 32, uniqueItems: true,
+                      items: { type: "string", minLength: 3, maxLength: 64, pattern: CODE_PATTERN },
+                    },
+                    max_drawdown_ratio: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    leverage_ceiling: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    minimum_liquidity_notional_usd: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    max_turnover_ratio: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                  },
+                  required: [
+                    "version","capital_base_usd","decision_horizon_hours","allowed_instruments",
+                    "max_drawdown_ratio","leverage_ceiling","minimum_liquidity_notional_usd","max_turnover_ratio",
+                  ],
+                  additionalProperties: false,
+                },
+                policy: {
+                  type: "object",
+                  properties: {
+                    version: { type: "string", minLength: 1, maxLength: 64, pattern: VERSION_PATTERN },
+                    max_account_gross_notional_usd: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    max_instrument_gross_notional_usd: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    max_margin_utilization_ratio: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    max_loss_per_trade_usd: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    max_daily_realized_loss_usd: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    max_drawdown_ratio: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    max_leverage: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    allowed_instruments: {
+                      type: "array", maxItems: 32, uniqueItems: true,
+                      items: { type: "string", minLength: 3, maxLength: 64, pattern: CODE_PATTERN },
+                    },
+                    minimum_quality: { type: "string", enum: ["fresh", "degraded"] },
+                    degraded_mode: { type: "string", enum: ["reject", "allow_read_only"] },
+                    correlated_clusters: {
+                      type: "array", maxItems: 16,
+                      items: {
+                        type: "object",
+                        properties: {
+                          id: { type: "string", minLength: 1, maxLength: 64, pattern: VERSION_PATTERN },
+                          instruments: {
+                            type: "array", maxItems: 16, uniqueItems: true,
+                            items: { type: "string", minLength: 3, maxLength: 64, pattern: CODE_PATTERN },
+                          },
+                          max_gross_notional_usd: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                        },
+                        required: ["id","instruments","max_gross_notional_usd"],
+                        additionalProperties: false,
+                      },
+                    },
+                  },
+                  required: [
+                    "version","max_account_gross_notional_usd","max_instrument_gross_notional_usd",
+                    "max_margin_utilization_ratio","max_loss_per_trade_usd","max_daily_realized_loss_usd",
+                    "max_drawdown_ratio","max_leverage","allowed_instruments","minimum_quality",
+                    "degraded_mode","correlated_clusters",
+                  ],
+                  additionalProperties: false,
+                },
+                candidate: {
+                  type: "object",
+                  properties: {
+                    instrument: { type: "string", minLength: 3, maxLength: 64, pattern: CODE_PATTERN },
+                    side: { type: "string", enum: ["long", "short"] },
+                    notional_usd: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    worst_case_loss_usd: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                    leverage: { type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN },
+                  },
+                  required: ["instrument","side","notional_usd","worst_case_loss_usd","leverage"],
+                  additionalProperties: false,
+                },
+              },
+              required: ["mandate","policy"],
+              additionalProperties: false,
+            },
+          },
+          {
             name: "trading_capabilities",
             description: "Get read-only authenticated OKX account and trading capabilities for one instrument through the Windows product runtime.",
             inputSchema: {
