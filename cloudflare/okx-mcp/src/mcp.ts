@@ -23,6 +23,8 @@ const VALID_BARS = new Set([
 ]);
 
 const CODE_PATTERN = "^[A-Za-z0-9_-]+$";
+const DECIMAL_PATTERN = "^[0-9]+(?:\\.[0-9]+)?$";
+const VERSION_PATTERN = "^[A-Za-z0-9._/-]+$";
 const QUERY_CATALOG_PATTERN = /^[A-Za-z0-9._\/-]{1,64}$/;
 const QUERY_FIELDS = new Set([
   "instrument_id",
@@ -43,6 +45,40 @@ const QUERY_FIELDS = new Set([
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   const allowedKeys = new Set(allowed);
   return Object.keys(value).every((key) => allowedKeys.has(key));
+}
+
+function decimalText(value: unknown, positive: boolean): string | null {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > 64 ||
+    !/^[0-9]+(?:\.[0-9]+)?$/.test(value)
+  ) {
+    return null;
+  }
+  if (positive && Number(value) <= 0) return null;
+  return value;
+}
+
+function versionText(value: unknown): string | null {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > 64 ||
+    !/^[A-Za-z0-9._\/-]+$/.test(value)
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function instrumentList(value: unknown, max: number): string[] | null {
+  if (!Array.isArray(value) || value.length > max) return null;
+  const normalized = value.map(normalizeInstrument);
+  if (normalized.some((item) => item === null) || new Set(normalized).size !== normalized.length) {
+    return null;
+  }
+  return normalized as string[];
 }
 
 function contractStatus(value: unknown): Json {
