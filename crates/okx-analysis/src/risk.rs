@@ -661,7 +661,7 @@ fn compare_limit(
     observed: Decimal,
     limit: &str,
 ) -> Result<(), AnalysisError> {
-    let limit_value = positive_decimal("risk_limit", limit)?;
+    let limit_value = non_negative_decimal("risk_limit", limit)?;
     if observed > limit_value {
         violations.push(RiskPolicyViolation {
             code,
@@ -739,6 +739,14 @@ fn optional_positive_decimal(
     value
         .map(|value| positive_decimal(field, value))
         .transpose()
+}
+
+fn non_negative_decimal(field: &'static str, value: &str) -> Result<Decimal, AnalysisError> {
+    let value = decimal(field, value)?;
+    if value < Decimal::ZERO {
+        return Err(AnalysisError::Negative(field));
+    }
+    Ok(value)
 }
 
 fn optional_non_negative_decimal(
