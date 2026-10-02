@@ -37,6 +37,11 @@ const QUERY_FIELDS = new Set([
   "return_24h_pct",
 ]);
 
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const allowedKeys = new Set(allowed);
+  return Object.keys(value).every((key) => allowedKeys.has(key));
+}
+
 function contractStatus(value: unknown): Json {
   if (!isObject(value)) return transportFailure("INVALID_RUNTIME_STATUS", false);
   return {
@@ -312,10 +317,13 @@ export const mcpApi = {
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }
       if (name === "query") {
-        if (!isObject(args.plan)) {
+        if (!hasOnlyKeys(args, ["plan"]) || !isObject(args.plan)) {
           return jsonRpcError(id, -32602, "invalid query plan");
         }
         const plan = args.plan;
+        if (!hasOnlyKeys(plan, ["catalog_version", "universe", "select", "metric", "sort", "limit"])) {
+          return jsonRpcError(id, -32602, "unsupported query plan field");
+        }
         if (typeof plan.catalog_version !== "string" || !QUERY_CATALOG_PATTERN.test(plan.catalog_version)) {
           return jsonRpcError(id, -32602, "invalid catalog_version");
         }
@@ -323,6 +331,9 @@ export const mcpApi = {
           return jsonRpcError(id, -32602, "invalid universe");
         }
         const universe = plan.universe;
+        if (!hasOnlyKeys(universe, ["instrument_types", "settle_currency", "state"])) {
+          return jsonRpcError(id, -32602, "unsupported universe field");
+        }
         if (
           !Array.isArray(universe.instrument_types) ||
           universe.instrument_types.length < 1 ||
@@ -362,7 +373,7 @@ export const mcpApi = {
         }
         let sort: { key: string; direction: string } | null = null;
         if (plan.sort !== undefined) {
-          if (!isObject(plan.sort)) {
+          if (!isObject(plan.sort) || !hasOnlyKeys(plan.sort, ["key", "direction"])) {
             return jsonRpcError(id, -32602, "invalid sort");
           }
           const key = String(plan.sort.key);
