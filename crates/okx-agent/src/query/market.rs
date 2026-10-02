@@ -950,6 +950,106 @@ mod tests {
         serde_json::to_vec(&response).expect("serialize").len()
     }
 
+    fn market_intelligence_response_size() -> usize {
+        let long_decimal = "12345678901234567890.123456789012345678901234567890".to_owned();
+        let sweep = okx_analysis::BookSweepAnalysis {
+            requested_contracts: long_decimal.clone(),
+            available_contracts: long_decimal.clone(),
+            filled_contracts: long_decimal.clone(),
+            complete: false,
+            vwap: Some(long_decimal.clone()),
+            worst_price: Some(long_decimal.clone()),
+            impact_bps_from_mid: Some(long_decimal.clone()),
+        };
+        let result = MarketIntelligenceResult {
+            schema: MARKET_INTELLIGENCE_SCHEMA_V1,
+            as_of: "2026-10-02T16:49:59.426Z".to_owned(),
+            market_source: "websocket",
+            observed_evidence_label: "OBSERVED",
+            impact_evidence_label: "MODELLED",
+            sequence_continuity_proven: true,
+            analysis_schema: MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
+            coherence: MarketIntelligenceCoherence {
+                freshness_budget_ms: MARKET_INTELLIGENCE_MAX_AGE_MS,
+                connection_generation: u64::MAX,
+                reference_source_received_at: "2026-10-02T16:49:00.000Z".to_owned(),
+                oldest_required_receive_ms: 1_790_959_759_363,
+                oldest_required_age_ms: MARKET_INTELLIGENCE_MAX_AGE_MS,
+                exchange_as_of_ms: 1_790_959_799_999,
+                exchange_timestamp_min_ms: 1_790_959_740_000,
+                exchange_timestamp_max_ms: 1_790_959_799_999,
+                exchange_timestamp_skew_ms: 59_999,
+                source_exchange_timestamps_ms: MarketIntelligenceSourceTimestamps {
+                    ticker: 1_790_959_799_990,
+                    mark: 1_790_959_799_991,
+                    index: 1_790_959_799_992,
+                    funding: Some(1_790_959_740_000),
+                    open_interest: 1_790_959_799_993,
+                    order_book: 1_790_959_799_999,
+                },
+            },
+            analysis: okx_analysis::MarketIntelligenceAnalysis {
+                schema: MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1.to_owned(),
+                instrument_id: "ASSET-LONG-INSTRUMENT-ID-USDT-SWAP".to_owned(),
+                reference_generation:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                market_generation:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_owned(),
+                order_book_generation: u64::MAX,
+                order_book_seq_id: i64::MAX,
+                order_book_exchange_timestamp_ms: "1790959799999".to_owned(),
+                depth_levels: 50,
+                best_bid: long_decimal.clone(),
+                best_ask: long_decimal.clone(),
+                mid_price: long_decimal.clone(),
+                spread_price: long_decimal.clone(),
+                spread_bps: long_decimal.clone(),
+                bid_depth_contracts: long_decimal.clone(),
+                ask_depth_contracts: long_decimal.clone(),
+                buy_sweep: sweep.clone(),
+                sell_sweep: sweep,
+                last_price: long_decimal.clone(),
+                mark_price: long_decimal.clone(),
+                index_price: long_decimal.clone(),
+                mark_index_basis_bps: long_decimal.clone(),
+                last_mark_deviation_bps: long_decimal.clone(),
+                funding_rate: Some(long_decimal.clone()),
+                next_funding_time_ms: Some("1791014400000".to_owned()),
+                open_interest_contracts: long_decimal.clone(),
+                open_interest_usd: Some(long_decimal),
+            },
+        };
+        let response = AgentResponse {
+            schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+            request_id: "req_market_intelligence_size_budget_20261002a".to_owned(),
+            status: AgentResponseStatus::Completed,
+            generated_at: "2026-10-02T16:49:59.426Z".to_owned(),
+            quality: DataQuality::Fresh,
+            result_schema: Some(MARKET_INTELLIGENCE_SCHEMA_V1.to_owned()),
+            result: Some(serde_json::to_value(result).expect("serialize result")),
+            failure: None,
+            warnings: vec![
+                "impact is a deterministic sweep over the current observed book and is MODELLED, not a promised or observed fill".to_owned(),
+            ],
+        };
+        serde_json::to_vec(&response).expect("serialize response").len()
+    }
+
+    #[test]
+    fn market_intelligence_stays_inside_standard_fallback_budget() {
+        let size = market_intelligence_response_size();
+        assert!(
+            size <= 16 * 1024,
+            "market-intelligence projection is {size} bytes"
+        );
+        assert!(
+            size <= 16 * 1024 - 1024,
+            "market-intelligence projection leaves less than 1 KiB headroom: {size} bytes"
+        );
+    }
+
     #[test]
     fn compact_projection_stays_within_h1_targets() {
         let three = projected_size(3);
