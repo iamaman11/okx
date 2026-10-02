@@ -60,7 +60,22 @@ Stage 2.1 — **bounded universal analytical query** is **ACCEPTED/CLOSED**:
 - the production black-box exposed and closed the digit-containing serde contract defect without adding a new owner/path;
 - structural delta remains zero for crates/tasks/state owners/stores/schedulers/transports/mutation authorities/dependencies.
 
-**Next Stage-2 cursor: market intelligence / microstructure**, then portfolio deterministic risk and the remaining Stage-2 mandate/hard-policy acceptance. New analytical capability must extend the same universal factual/metric path rather than reintroduce endpoint-per-question growth.
+Stage 2 live-microstructure core is **ACCEPTED**:
+- PR #179 merged as `073b72f1bbd16c1188c97036f7dfd199120d7e31`;
+- tested head `411104b3cc81d98aed0da1f12a3d904ded505b60` and merged main share exact tree `5d65c5d4f85c05671ff5e98e6cae87f23a93f375`;
+- CI run `37037513666` passed architecture / Cloudflare / Linux / Windows;
+- exact Windows artifact `11240907559` was installed and restarted through CONTROL with provenance verified;
+- production MCP contract is `okx.mcp.tools/2026-10-02.2`;
+- `spread_bps/v1` whole-universe query passed Cloudflare-primary with 757 eligible rows, two bulk REST requests and no full-universe WS subscription;
+- `market_intelligence` proved fail-closed NOT_READY -> FRESH recovery over the existing sequence-contiguous public-WS owner without a new collector;
+- result evidence includes a dedicated 60s freshness budget, receive-age and per-source exchange timestamp skew;
+- observed market/book evidence is labelled OBSERVED and deterministic sweep impact is labelled MODELLED;
+- independent encrypted GitHub DATA parity passed after the Cloudflare-primary proof;
+- structural delta remains zero for crates/tasks/state owners/stores/schedulers/transports/collectors/mutation authorities.
+
+This accepts only the live-microstructure core. The broader Stage-2 market-intelligence block remains OPEN.
+
+**Next Stage-2 cursor: derivatives/history intelligence** — trades, imbalance/microprice, realized volatility and volume/OI change, funding history/regime, annualized dated-futures basis and cross-contract/term-structure evidence. After that: portfolio deterministic risk, then the remaining Stage-2 mandate/hard-policy acceptance. New analytical capability must continue extending the same factual/metric owners rather than reintroduce endpoint-per-question growth.
 
 ## Repository Guard v1
 
