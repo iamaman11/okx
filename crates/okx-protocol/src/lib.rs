@@ -567,23 +567,47 @@ impl AgentOperation {
                 if mandate.decision_horizon_hours == 0 || mandate.decision_horizon_hours > 24 * 365 {
                     return Err(ProtocolError::InvalidAnalyticalQuery("decision_horizon_hours"));
                 }
-                validate_decimal_text(&mandate.max_drawdown_ratio, "mandate.max_drawdown_ratio")?;
-                validate_positive_decimal_text(&mandate.leverage_ceiling, "mandate.leverage_ceiling")?;
-                validate_decimal_text(&mandate.minimum_liquidity_notional_usd, "mandate.minimum_liquidity_notional_usd")?;
-                validate_decimal_text(&mandate.max_turnover_ratio, "mandate.max_turnover_ratio")?;
+                validate_non_negative_decimal_text(
+                    &mandate.max_drawdown_ratio,
+                    "mandate.max_drawdown_ratio",
+                )?;
+                validate_positive_decimal_text(
+                    &mandate.leverage_ceiling,
+                    "mandate.leverage_ceiling",
+                )?;
+                validate_non_negative_decimal_text(
+                    &mandate.minimum_liquidity_notional_usd,
+                    "mandate.minimum_liquidity_notional_usd",
+                )?;
+                validate_non_negative_decimal_text(
+                    &mandate.max_turnover_ratio,
+                    "mandate.max_turnover_ratio",
+                )?;
                 validate_instrument_list(&mandate.allowed_instruments, 32)?;
                 validate_version(&policy.version)?;
                 for (value, field) in [
-                    (&policy.max_account_gross_notional_usd, "policy.max_account_gross_notional_usd"),
-                    (&policy.max_instrument_gross_notional_usd, "policy.max_instrument_gross_notional_usd"),
-                    (&policy.max_margin_utilization_ratio, "policy.max_margin_utilization_ratio"),
+                    (
+                        &policy.max_account_gross_notional_usd,
+                        "policy.max_account_gross_notional_usd",
+                    ),
+                    (
+                        &policy.max_instrument_gross_notional_usd,
+                        "policy.max_instrument_gross_notional_usd",
+                    ),
+                    (
+                        &policy.max_margin_utilization_ratio,
+                        "policy.max_margin_utilization_ratio",
+                    ),
                     (&policy.max_loss_per_trade_usd, "policy.max_loss_per_trade_usd"),
-                    (&policy.max_daily_realized_loss_usd, "policy.max_daily_realized_loss_usd"),
+                    (
+                        &policy.max_daily_realized_loss_usd,
+                        "policy.max_daily_realized_loss_usd",
+                    ),
                     (&policy.max_drawdown_ratio, "policy.max_drawdown_ratio"),
-                    (&policy.max_leverage, "policy.max_leverage"),
                 ] {
-                    validate_positive_decimal_text(value, field)?;
+                    validate_non_negative_decimal_text(value, field)?;
                 }
+                validate_positive_decimal_text(&policy.max_leverage, "policy.max_leverage")?;
                 validate_instrument_list(&policy.allowed_instruments, 32)?;
                 if policy.correlated_clusters.len() > 16 {
                     return Err(ProtocolError::InvalidAnalyticalQuery("correlated_clusters"));
@@ -591,12 +615,18 @@ impl AgentOperation {
                 for cluster in &policy.correlated_clusters {
                     validate_version(&cluster.id)?;
                     validate_instrument_list(&cluster.instruments, 16)?;
-                    validate_positive_decimal_text(&cluster.max_gross_notional_usd, "cluster.max_gross_notional_usd")?;
+                    validate_non_negative_decimal_text(
+                        &cluster.max_gross_notional_usd,
+                        "cluster.max_gross_notional_usd",
+                    )?;
                 }
                 if let Some(candidate) = candidate {
                     validate_instrument(&candidate.instrument)?;
                     validate_positive_decimal_text(&candidate.notional_usd, "candidate.notional_usd")?;
-                    validate_decimal_text(&candidate.worst_case_loss_usd, "candidate.worst_case_loss_usd")?;
+                    validate_non_negative_decimal_text(
+                        &candidate.worst_case_loss_usd,
+                        "candidate.worst_case_loss_usd",
+                    )?;
                     validate_positive_decimal_text(&candidate.leverage, "candidate.leverage")?;
                 }
                 Ok(())
@@ -1208,6 +1238,29 @@ fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     } else {
         Err(ProtocolError::InvalidInstrument)
     }
+}
+
+fn validate_non_negative_decimal_text(
+    value: &str,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    if value.is_empty() || value.len() > 64 {
+        return Err(ProtocolError::InvalidDecimalInput(field));
+    }
+    let bytes = value.as_bytes();
+    let mut dots = 0usize;
+    let mut digits = 0usize;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match byte {
+            b'0'..=b'9' => digits += 1,
+            b'.' if dots == 0 && index > 0 && index + 1 < bytes.len() => dots += 1,
+            _ => return Err(ProtocolError::InvalidDecimalInput(field)),
+        }
+    }
+    if digits == 0 {
+        return Err(ProtocolError::InvalidDecimalInput(field));
+    }
+    Ok(())
 }
 
 fn validate_positive_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
