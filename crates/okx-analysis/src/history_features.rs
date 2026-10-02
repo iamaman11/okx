@@ -154,8 +154,8 @@ pub fn analyze_open_interest_change(
         return Err(AnalysisError::Negative("open_interest_history_oi"));
     }
     let change = last_oi - first_oi;
-    let change_ratio = (first_oi > Decimal::ZERO)
-        .then(|| (change / first_oi).normalize().to_string());
+    let change_ratio =
+        (first_oi > Decimal::ZERO).then(|| (change / first_oi).normalize().to_string());
 
     Ok(OpenInterestChangeAnalysis {
         schema: OPEN_INTEREST_CHANGE_ANALYSIS_SCHEMA_V1.to_owned(),
@@ -399,8 +399,14 @@ mod tests {
 
         let analysis = analyze_open_interest_change(&input).expect("oi change");
 
-        assert_eq!(analysis.first_open_interest_contracts.as_deref(), Some("100"));
-        assert_eq!(analysis.last_open_interest_contracts.as_deref(), Some("125"));
+        assert_eq!(
+            analysis.first_open_interest_contracts.as_deref(),
+            Some("100")
+        );
+        assert_eq!(
+            analysis.last_open_interest_contracts.as_deref(),
+            Some("125")
+        );
         assert_eq!(analysis.change_contracts.as_deref(), Some("25"));
         assert_eq!(analysis.change_ratio.as_deref(), Some("0.25"));
         assert_eq!(analysis.period, "1H");
