@@ -35,18 +35,22 @@ Canonical execution order inside Stage 1:
 3. **Venue/instrument-state execution gate** — ACCEPTED.
 4. **Account + ledger truth** — ACCEPTED.
 5. **P0.3 named rate/backpressure domains** — ACCEPTED.
-6. **Stage-1 final T1–T5 acceptance** — CURRENT.
+6. **Stage-1 final T1–T5 acceptance** — ACCEPTED.
 
 The P0/P1 labels are capability groups, not a competing execution order.
 
-Current Stage-1 final acceptance status:
-- T1/T2 evidence is assembled from the accepted Stage-1 capability slices on the same product architecture;
-- the final tested #173 head is content-identical to current main (0 changed files across the merge commit);
-- the final Windows artifact exists and passed the required CI gates;
-- strict T3 remains OPEN until that exact-tree artifact is installed and its provenance terminalizes through CONTROL;
-- primary Cloudflare product surfaces remain live/fresh on the accepted P0.3 runtime;
-- current blocker is CONTROL-path liveness, not a product/runtime correctness gap;
-- Stage 2 must not start until the final T1–T5 record closes.
+Stage 1 final acceptance is **ACCEPTED/CLOSED** on the exact tested/deployed tree:
+- final tested head: `ec4359d388b8a71fba90fe360b986974f1d4fe96`;
+- current merged main at acceptance: `6b7519e158207943d1cedce92d302e3c2d7d3c42`;
+- compare tested head -> merged main: 0 changed files;
+- final source tree: `481a9f2b4a9e4cf97b921dbe55c7e8be1f32924b`;
+- final Windows artifact: `11200168727` from CI run `36941520981`;
+- exact artifact installed and provenance verified through CONTROL;
+- Cloudflare-primary market/account/capability paths physically passed on the installed binary;
+- independent encrypted GitHub DATA fallback parity passed on the same binary;
+- exact-tree restart advanced direct transport generation and market/account state reconverged to FRESH.
+
+**Current roadmap cursor: Stage 2 — INTELLIGENCE + RISK.** The first implementation slice should follow the accepted bounded universal-query architecture rather than adding endpoint-per-question methods.
 
 ## Repository Guard v1
 
