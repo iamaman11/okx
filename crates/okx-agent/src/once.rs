@@ -168,6 +168,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         AgentOperation::MarketResearch { .. } => MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES,
         AgentOperation::MarketSnapshot { .. }
         | AgentOperation::MarketOverview { .. }
+        | AgentOperation::MarketIntelligence { .. }
         | AgentOperation::PrepareOpenExecution { .. }
         | AgentOperation::PrepareCloseExecution { .. }
         | AgentOperation::PortfolioRisk
