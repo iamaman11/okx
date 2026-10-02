@@ -334,14 +334,14 @@ mod tests {
                 contract_value: Some("1".to_owned()),
                 contract_value_currency: Some("AAA".to_owned()),
                 fee_group_id: Some("4".to_owned()),
-                leverage: Some("50".to_owned()),
+                max_leverage: Some("50".to_owned()),
                 list_time_ms: Some("1700000000000".to_owned()),
                 expiry_time_ms: None,
                 funding_requirement: FundingRequirement::Required,
                 initial_price_limit_pct: Some("0.05".to_owned()),
                 floating_price_limit_pct: Some("0.03".to_owned()),
                 maximum_price_limit_pct: Some("0.15".to_owned()),
-                upcoming_parameter_changes: Vec::new(),
+                upcoming_rule_changes: Vec::new(),
             },
         }
     }
