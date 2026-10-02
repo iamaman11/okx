@@ -123,6 +123,52 @@ pub struct PublicOpenInterest {
     pub ts: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PublicOpenInterestHistory {
+    #[serde(default)]
+    pub oi: String,
+    #[serde(rename = "oiCcy", default)]
+    pub oi_currency: String,
+    #[serde(default)]
+    pub ts: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PublicTrade {
+    #[serde(rename = "instId", default)]
+    pub instrument_id: String,
+    #[serde(rename = "tradeId", default)]
+    pub trade_id: String,
+    #[serde(rename = "px", default)]
+    pub price: String,
+    #[serde(rename = "sz", default)]
+    pub size: String,
+    #[serde(default)]
+    pub side: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(rename = "ts", default)]
+    pub timestamp_ms: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PublicFundingHistory {
+    #[serde(rename = "instType", default)]
+    pub instrument_type: String,
+    #[serde(rename = "instId", default)]
+    pub instrument_id: String,
+    #[serde(rename = "fundingRate", default)]
+    pub funding_rate: String,
+    #[serde(rename = "fundingTime", default)]
+    pub funding_time_ms: String,
+    #[serde(rename = "realizedRate", default)]
+    pub realized_rate: String,
+    #[serde(rename = "formulaType", default)]
+    pub formula_type: String,
+    #[serde(default)]
+    pub method: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PublicCandle {
     pub timestamp_ms: String,
@@ -288,6 +334,79 @@ impl MarketDataApi {
         )
     }
 
+    pub async fn open_interest_history(
+        &self,
+        instrument_id: &str,
+        period: &str,
+        limit: u16,
+    ) -> Result<Vec<PublicOpenInterestHistory>, OkxError> {
+        if !(1..=100).contains(&limit) {
+            return Err(OkxError::Response(
+                "open interest history limit must be between 1 and 100".to_owned(),
+            ));
+        }
+        if !matches!(period, "5m" | "15m" | "30m" | "1H" | "2H" | "4H") {
+            return Err(OkxError::Response(format!(
+                "unsupported open interest history period '{period}'"
+            )));
+        }
+
+        self.client
+            .public_get(
+                "/api/v5/rubik/stat/contracts/open-interest-history",
+                &[
+                    ("instId", instrument_id.to_owned()),
+                    ("period", period.to_owned()),
+                    ("limit", limit.to_string()),
+                ],
+            )
+            .await
+    }
+
+    pub async fn trades(
+        &self,
+        instrument_id: &str,
+        limit: u16,
+    ) -> Result<Vec<PublicTrade>, OkxError> {
+        if !(1..=100).contains(&limit) {
+            return Err(OkxError::Response(
+                "recent trades limit must be between 1 and 100".to_owned(),
+            ));
+        }
+
+        self.client
+            .public_get(
+                "/api/v5/market/trades",
+                &[
+                    ("instId", instrument_id.to_owned()),
+                    ("limit", limit.to_string()),
+                ],
+            )
+            .await
+    }
+
+    pub async fn funding_rate_history(
+        &self,
+        instrument_id: &str,
+        limit: u16,
+    ) -> Result<Vec<PublicFundingHistory>, OkxError> {
+        if !(1..=100).contains(&limit) {
+            return Err(OkxError::Response(
+                "funding history limit must be between 1 and 100".to_owned(),
+            ));
+        }
+
+        self.client
+            .public_get(
+                "/api/v5/public/funding-rate-history",
+                &[
+                    ("instId", instrument_id.to_owned()),
+                    ("limit", limit.to_string()),
+                ],
+            )
+            .await
+    }
+
     pub async fn history_candles(
         &self,
         instrument_id: &str,
@@ -383,6 +502,64 @@ mod tests {
         assert_eq!(funding.funding_rate, "0.00001234");
         assert_eq!(funding.premium, "0.00000001");
         assert_eq!(funding.max_funding_rate, "0.003");
+    }
+
+    #[test]
+    fn open_interest_history_preserves_contract_and_currency_units() {
+        let row: PublicOpenInterestHistory = serde_json::from_str(
+            r#"{
+                "ts":"1609459200000",
+                "oi":"100000",
+                "oiCcy":"10"
+            }"#,
+        )
+        .expect("open interest history");
+
+        assert_eq!(row.ts, "1609459200000");
+        assert_eq!(row.oi, "100000");
+        assert_eq!(row.oi_currency, "10");
+    }
+
+    #[test]
+    fn recent_trade_preserves_taker_side_and_exchange_identity() {
+        let trade: PublicTrade = serde_json::from_str(
+            r#"{
+                "instId":"DOGE-USDT-SWAP",
+                "tradeId":"242720720",
+                "px":"0.09455",
+                "sz":"17",
+                "side":"buy",
+                "source":"0",
+                "ts":"1790963452563"
+            }"#,
+        )
+        .expect("trade");
+
+        assert_eq!(trade.instrument_id, "DOGE-USDT-SWAP");
+        assert_eq!(trade.trade_id, "242720720");
+        assert_eq!(trade.side, "buy");
+        assert_eq!(trade.price, "0.09455");
+        assert_eq!(trade.size, "17");
+    }
+
+    #[test]
+    fn funding_history_preserves_realized_rate_and_mechanism() {
+        let funding: PublicFundingHistory = serde_json::from_str(
+            r#"{
+                "formulaType":"noRate",
+                "fundingRate":"0.0000746604960499",
+                "fundingTime":"1703059200000",
+                "instId":"DOGE-USDT-SWAP",
+                "instType":"SWAP",
+                "method":"next_period",
+                "realizedRate":"0.0000746572360545"
+            }"#,
+        )
+        .expect("funding");
+
+        assert_eq!(funding.realized_rate, "0.0000746572360545");
+        assert_eq!(funding.formula_type, "noRate");
+        assert_eq!(funding.method, "next_period");
     }
 
     #[test]

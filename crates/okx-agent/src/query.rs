@@ -1,19 +1,23 @@
 use chrono::Utc;
 use okx_analysis::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
-    COST_ANALYSIS_SCHEMA_V1, CandidateOrderAssumptions, HISTORY_BEHAVIOR_SCHEMA_V1,
-    LiquidityRole as AnalysisLiquidityRole, MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
-    POSITION_SCENARIO_SCHEMA_V1, PositionDirection, PositionScenarioAssumptions,
-    ScenarioExitAssumption, analyze_account_risk, analyze_candidate_order, analyze_cost,
-    analyze_history_behavior, analyze_market_intelligence, analyze_position_scenario,
+    COST_ANALYSIS_SCHEMA_V1, CandidateOrderAssumptions, DATED_FUTURE_BASIS_SCHEMA_V1,
+    HISTORY_BEHAVIOR_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
+    MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1, POSITION_SCENARIO_SCHEMA_V1, PositionDirection,
+    PositionScenarioAssumptions, ScenarioExitAssumption, analyze_account_risk,
+    analyze_basis_difference_bps, analyze_candidate_order, analyze_cost,
+    analyze_dated_future_basis, analyze_history_behavior, analyze_mark_index_basis_bps,
+    analyze_market_intelligence, analyze_position_scenario,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountError, AccountSnapshot,
-    INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
-    MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
-    MarketHistorySnapshot, MarketReadiness, MarketSnapshot, ReferenceRegistry,
+    FundingHistorySnapshot, INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1,
+    InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError,
+    MarketHistoryError, MarketHistorySnapshot, MarketReadiness, MarketSnapshot,
+    MarketTradesSnapshot, OpenInterestHistorySnapshot, ReferenceRegistry,
     SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport, TRADING_CAPABILITIES_SCHEMA_V1,
+    market_research_source_generation,
 };
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
@@ -65,7 +69,7 @@ pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT"
 pub const ANALYSIS_EXACT_FEE_UNAVAILABLE_CODE: &str = "ANALYSIS_EXACT_FEE_UNAVAILABLE";
 pub const MARKET_OVERVIEW_SCHEMA_V1: &str = "okx.market-overview/v1";
 pub const MARKET_INTELLIGENCE_SCHEMA_V1: &str = "okx.market-intelligence/v1";
-pub const MARKET_RESEARCH_SCHEMA_V2: &str = "okx.market-research/v2";
+pub const MARKET_RESEARCH_SCHEMA_V3: &str = "okx.market-research/v3";
 
 const REFERENCE_BOOTSTRAP_WARNING: &str =
     "reference data is REST-bootstrap only; live instruments continuity is not connected until M3";
@@ -401,6 +405,97 @@ async fn assemble_market_history(
         } else {
             vec![MARKET_HISTORY_UNCONFIRMED_WARNING.to_owned()]
         },
+    }))
+}
+
+struct AssembledOpenInterestHistory {
+    snapshot: OpenInterestHistorySnapshot,
+    quality: DataQuality,
+}
+
+async fn assemble_open_interest_history(
+    context: ObservationQueryContext<'_>,
+    instrument: &str,
+    period: &str,
+    requested_limit: u16,
+) -> Result<Option<AssembledOpenInterestHistory>, MarketBootstrapError> {
+    let Some(market) = context.market_fallback else {
+        return Ok(None);
+    };
+    let reference = if let Some(public_ws) = context.public_ws {
+        public_ws.reference_snapshot().await
+    } else if let Some(reference) = context.standalone_reference {
+        reference.clone()
+    } else {
+        return Ok(None);
+    };
+
+    let snapshot = market
+        .open_interest_history(&reference, instrument, period, requested_limit)
+        .await?;
+    Ok(Some(AssembledOpenInterestHistory {
+        snapshot,
+        quality: DataQuality::Fresh,
+    }))
+}
+
+struct AssembledMarketTrades {
+    snapshot: MarketTradesSnapshot,
+    quality: DataQuality,
+}
+
+async fn assemble_recent_trades(
+    context: ObservationQueryContext<'_>,
+    instrument: &str,
+    requested_limit: u16,
+) -> Result<Option<AssembledMarketTrades>, MarketBootstrapError> {
+    let Some(market) = context.market_fallback else {
+        return Ok(None);
+    };
+    let reference = if let Some(public_ws) = context.public_ws {
+        public_ws.reference_snapshot().await
+    } else if let Some(reference) = context.standalone_reference {
+        reference.clone()
+    } else {
+        return Ok(None);
+    };
+
+    let snapshot = market
+        .recent_trades(&reference, instrument, requested_limit)
+        .await?;
+    Ok(Some(AssembledMarketTrades {
+        snapshot,
+        quality: DataQuality::Fresh,
+    }))
+}
+
+struct AssembledFundingHistory {
+    snapshot: FundingHistorySnapshot,
+    quality: DataQuality,
+}
+
+async fn assemble_funding_history(
+    context: ObservationQueryContext<'_>,
+    instrument: &str,
+    requested_limit: u16,
+) -> Result<Option<AssembledFundingHistory>, MarketBootstrapError> {
+    let Some(market) = context.market_fallback else {
+        return Ok(None);
+    };
+    let reference = if let Some(public_ws) = context.public_ws {
+        public_ws.reference_snapshot().await
+    } else if let Some(reference) = context.standalone_reference {
+        reference.clone()
+    } else {
+        return Ok(None);
+    };
+
+    let snapshot = market
+        .funding_history(&reference, instrument, requested_limit)
+        .await?;
+    Ok(Some(AssembledFundingHistory {
+        snapshot,
+        quality: DataQuality::Fresh,
     }))
 }
 

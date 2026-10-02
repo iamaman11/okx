@@ -60,6 +60,8 @@ pub struct MarketIntelligenceAnalysis {
     pub mid_price: String,
     pub spread_price: String,
     pub spread_bps: String,
+    pub microprice: String,
+    pub depth_imbalance_ratio: String,
     pub bid_depth_contracts: String,
     pub ask_depth_contracts: String,
     pub buy_sweep: BookSweepAnalysis,
@@ -121,11 +123,11 @@ pub fn analyze_market_intelligence(
     let requested = positive_decimal("impact_contracts", impact_contracts)?;
     let asks = normalized_side(&order_book.asks, depth_levels, true)?;
     let bids = normalized_side(&order_book.bids, depth_levels, false)?;
-    let (best_ask, _) = asks
+    let (best_ask, best_ask_size) = asks
         .first()
         .copied()
         .ok_or(AnalysisError::OrderBookEmptyAsk)?;
-    let (best_bid, _) = bids
+    let (best_bid, best_bid_size) = bids
         .first()
         .copied()
         .ok_or(AnalysisError::OrderBookEmptyBid)?;
@@ -145,6 +147,10 @@ pub fn analyze_market_intelligence(
 
     let bid_depth = bids.iter().map(|(_, size)| *size).sum::<Decimal>();
     let ask_depth = asks.iter().map(|(_, size)| *size).sum::<Decimal>();
+    let total_depth = bid_depth + ask_depth;
+    let depth_imbalance_ratio = (bid_depth - ask_depth) / total_depth;
+    let top_size = best_bid_size + best_ask_size;
+    let microprice = (best_ask * best_bid_size + best_bid * best_ask_size) / top_size;
     let buy_sweep = sweep_book(&asks, requested, mid, true);
     let sell_sweep = sweep_book(&bids, requested, mid, false);
 
@@ -168,6 +174,8 @@ pub fn analyze_market_intelligence(
         mid_price: mid.normalize().to_string(),
         spread_price: spread_price.normalize().to_string(),
         spread_bps: spread_bps.value_text(),
+        microprice: microprice.normalize().to_string(),
+        depth_imbalance_ratio: depth_imbalance_ratio.normalize().to_string(),
         bid_depth_contracts: bid_depth.normalize().to_string(),
         ask_depth_contracts: ask_depth.normalize().to_string(),
         buy_sweep,
@@ -416,6 +424,11 @@ mod tests {
         assert_eq!(result.best_ask, "101");
         assert_eq!(result.bid_depth_contracts, "6");
         assert_eq!(result.ask_depth_contracts, "5");
+        assert_eq!(result.microprice, "100.5");
+        assert_eq!(
+            result.depth_imbalance_ratio,
+            "0.0909090909090909090909090909"
+        );
         assert!(result.buy_sweep.complete);
         assert!(result.sell_sweep.complete);
         assert_eq!(result.buy_sweep.filled_contracts, "3");
