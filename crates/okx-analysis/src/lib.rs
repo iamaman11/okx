@@ -11,7 +11,8 @@ pub use candidate::{
     SizingConstraint, analyze_candidate_order,
 };
 pub use derivatives::{
-    DATED_FUTURE_BASIS_SCHEMA_V1, DatedFutureBasisAnalysis, analyze_dated_future_basis,
+    DATED_FUTURE_BASIS_SCHEMA_V1, DatedFutureBasisAnalysis, analyze_basis_difference_bps,
+    analyze_dated_future_basis, analyze_mark_index_basis_bps,
 };
 pub use history_features::{
     FUNDING_REGIME_ANALYSIS_SCHEMA_V1, FundingRegime, FundingRegimeAnalysis,
