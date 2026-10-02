@@ -162,6 +162,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         | AgentOperation::HistoryBehavior { .. }
         | AgentOperation::SnapshotQuality { .. }
         | AgentOperation::MailboxTelemetry
+        | AgentOperation::QueryCapabilities
         | AgentOperation::CurrentCost { .. }
         | AgentOperation::PositionScenario { .. } => COMPACT_RESPONSE_PLAINTEXT_BYTES,
         AgentOperation::MarketResearch { .. } => MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES,
@@ -175,6 +176,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         | AgentOperation::AccountSummary => STANDARD_RESPONSE_PLAINTEXT_BYTES,
         AgentOperation::MarketHistory { .. }
         | AgentOperation::FindInstruments { .. }
+        | AgentOperation::Query { .. }
         | AgentOperation::AccountSnapshot => LARGE_RESPONSE_PLAINTEXT_BYTES,
     };
     debug_assert!(plaintext_bytes <= GLOBAL_RESPONSE_PLAINTEXT_BYTES);
