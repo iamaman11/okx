@@ -1,4 +1,5 @@
 mod candidate;
+mod market_intelligence;
 mod market_query;
 mod risk;
 mod scenario;
@@ -6,6 +7,11 @@ mod scenario;
 pub use candidate::{
     CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderAssumptions,
     SizingConstraint, analyze_candidate_order,
+};
+pub use market_intelligence::{
+    MARKET_MICROSTRUCTURE_FORMULA_V1, MARKET_MICROSTRUCTURE_SCHEMA_V1,
+    REALIZED_VOLATILITY_FORMULA_V1, TOP_DEPTH_LEVELS, MarketMicrostructureAnalysis,
+    RealizedVolatilityAnalysis, analyze_market_microstructure, analyze_realized_volatility,
 };
 pub use market_query::{
     RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT, Return24hPct,
@@ -162,6 +168,16 @@ pub enum AnalysisError {
     HistoryNotChronological,
     #[error("history candle '{0}' has inconsistent OHLC values")]
     InvalidHistoryCandle(String),
+    #[error("crossed top of book: bid '{bid}' exceeds ask '{ask}'")]
+    CrossedTopOfBook { bid: String, ask: String },
+    #[error("order book is not sequence-contiguous")]
+    OrderBookNotContiguous,
+    #[error("order book exchange timestamp is missing")]
+    OrderBookTimestampMissing,
+    #[error("market timestamp field '{field}' is invalid: '{value}'")]
+    InvalidMarketTimestamp { field: &'static str, value: String },
+    #[error("statistical input/result '{0}' is invalid")]
+    InvalidStatisticalValue(&'static str),
 }
 
 pub fn analyze_cost(
