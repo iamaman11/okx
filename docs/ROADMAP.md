@@ -50,7 +50,17 @@ Stage 1 final acceptance is **ACCEPTED/CLOSED** on the exact tested/deployed tre
 - independent encrypted GitHub DATA fallback parity passed on the same binary;
 - exact-tree restart advanced direct transport generation and market/account state reconverged to FRESH.
 
-**Current roadmap cursor: Stage 2 — INTELLIGENCE + RISK.** The first implementation slice should follow the accepted bounded universal-query architecture rather than adding endpoint-per-question methods.
+**Current roadmap cursor: Stage 2 — INTELLIGENCE + RISK.**
+
+Stage 2.1 — **bounded universal analytical query** is **ACCEPTED/CLOSED**:
+- universal MCP read surface is exactly `query_capabilities` + `query`;
+- whole SWAP+FUTURES universe scan is bounded to at most two bulk REST requests and 25 returned rows;
+- versioned `return_24h_pct/v1`, stable top/bottom-K, explicit missing/excluded/truncation/coherence/provenance evidence are accepted;
+- primary Cloudflare black-box acceptance passed before encrypted GitHub DATA fallback parity;
+- the production black-box exposed and closed the digit-containing serde contract defect without adding a new owner/path;
+- structural delta remains zero for crates/tasks/state owners/stores/schedulers/transports/mutation authorities/dependencies.
+
+**Next Stage-2 cursor: market intelligence / microstructure**, then portfolio deterministic risk and the remaining Stage-2 mandate/hard-policy acceptance. New analytical capability must extend the same universal factual/metric path rather than reintroduce endpoint-per-question growth.
 
 ## Repository Guard v1
 
