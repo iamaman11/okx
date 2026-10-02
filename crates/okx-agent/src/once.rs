@@ -168,6 +168,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         AgentOperation::MarketResearch { .. } => MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES,
         AgentOperation::MarketSnapshot { .. }
         | AgentOperation::MarketOverview { .. }
+        | AgentOperation::MarketIntelligence { .. }
         | AgentOperation::PrepareOpenExecution { .. }
         | AgentOperation::PrepareCloseExecution { .. }
         | AgentOperation::PortfolioRisk
@@ -572,6 +573,11 @@ mod tests {
         let standard = AgentOperation::MarketOverview {
             instrument: "DOGE-USDT-SWAP".to_owned(),
         };
+        let market_intelligence = AgentOperation::MarketIntelligence {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            impact_contracts: "10".to_owned(),
+            depth_levels: 50,
+        };
         let account_summary = AgentOperation::AccountSummary;
         let history = AgentOperation::MarketHistory {
             instrument: "DOGE-USDT-SWAP".to_owned(),
@@ -590,6 +596,10 @@ mod tests {
         );
         assert_eq!(
             response_budget(&standard).plaintext_bytes,
+            STANDARD_RESPONSE_PLAINTEXT_BYTES
+        );
+        assert_eq!(
+            response_budget(&market_intelligence).plaintext_bytes,
             STANDARD_RESPONSE_PLAINTEXT_BYTES
         );
         assert_eq!(

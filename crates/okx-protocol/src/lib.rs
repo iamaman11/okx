@@ -13,7 +13,7 @@ pub const KDF_LABEL_CLIENT_TO_AGENT_V1: &str = "okx-mailbox-v1/client-to-agent";
 pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
 pub const DIRECT_TRANSPORT_FRAME_SCHEMA_V1: &str = "okx.direct-transport.frame/v1";
 pub const DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
-pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.1";
+pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.2";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -163,6 +163,8 @@ pub enum QueryField {
     SettleCurrency,
     State,
     Last,
+    BestBid,
+    BestAsk,
     #[serde(rename = "open_24h")]
     Open24h,
     #[serde(rename = "volume_24h")]
@@ -172,6 +174,7 @@ pub enum QueryField {
     ExchangeTimestampMs,
     #[serde(rename = "return_24h_pct")]
     Return24hPct,
+    SpreadBps,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +182,7 @@ pub enum QueryField {
 pub enum QueryMetric {
     #[serde(rename = "return_24h_pct")]
     Return24hPct,
+    SpreadBps,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +190,7 @@ pub enum QueryMetric {
 pub enum QuerySortKey {
     #[serde(rename = "return_24h_pct")]
     Return24hPct,
+    SpreadBps,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,10 +265,35 @@ impl AnalyticalQueryPlan {
         if !(1..=25).contains(&self.limit) {
             return Err(ProtocolError::InvalidAnalyticalQuery("limit"));
         }
-        let needs_return = self.select.contains(&QueryField::Return24hPct) || self.sort.is_some();
-        if needs_return && self.metric != Some(QueryMetric::Return24hPct) {
+        let selected_metric = match (
+            self.select.contains(&QueryField::Return24hPct),
+            self.select.contains(&QueryField::SpreadBps),
+        ) {
+            (true, true) => {
+                return Err(ProtocolError::InvalidAnalyticalQuery(
+                    "one derived metric per query plan",
+                ));
+            }
+            (true, false) => Some(QueryMetric::Return24hPct),
+            (false, true) => Some(QueryMetric::SpreadBps),
+            (false, false) => None,
+        };
+        let sort_metric = self.sort.as_ref().map(|sort| match sort.key {
+            QuerySortKey::Return24hPct => QueryMetric::Return24hPct,
+            QuerySortKey::SpreadBps => QueryMetric::SpreadBps,
+        });
+        let required_metric = match (selected_metric, sort_metric) {
+            (Some(selected), Some(sorted)) if selected != sorted => {
+                return Err(ProtocolError::InvalidAnalyticalQuery(
+                    "selected and sorted metrics must match",
+                ));
+            }
+            (Some(metric), _) | (_, Some(metric)) => Some(metric),
+            (None, None) => None,
+        };
+        if self.metric != required_metric {
             return Err(ProtocolError::InvalidAnalyticalQuery(
-                "return_24h_pct metric must be declared",
+                "declared metric must exactly match the derived field/sort key",
             ));
         }
         Ok(())
@@ -309,6 +339,11 @@ pub enum AgentOperation {
     },
     MarketOverview {
         instrument: String,
+    },
+    MarketIntelligence {
+        instrument: String,
+        impact_contracts: String,
+        depth_levels: u16,
     },
     MarketResearch {
         instruments: Vec<String>,
@@ -415,6 +450,18 @@ impl AgentOperation {
             | Self::InstrumentRules { instrument }
             | Self::MarketOverview { instrument }
             | Self::SnapshotQuality { instrument } => validate_instrument(instrument),
+            Self::MarketIntelligence {
+                instrument,
+                impact_contracts,
+                depth_levels,
+            } => {
+                validate_instrument(instrument)?;
+                validate_positive_decimal_text(impact_contracts, "impact_contracts")?;
+                if !(1..=50).contains(depth_levels) {
+                    return Err(ProtocolError::InvalidAnalyticalQuery("depth_levels"));
+                }
+                Ok(())
+            }
             Self::FindInstruments {
                 asset,
                 settle_currency,
@@ -1031,6 +1078,37 @@ fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
+fn validate_positive_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
+    if value.is_empty() || value.len() > 64 {
+        return Err(ProtocolError::InvalidDecimalInput(field));
+    }
+
+    let mut dots = 0usize;
+    let mut digits = 0usize;
+    let mut non_zero_digits = 0usize;
+    let bytes = value.as_bytes();
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match byte {
+            b'0'..=b'9' => {
+                digits += 1;
+                if byte != b'0' {
+                    non_zero_digits += 1;
+                }
+            }
+            b'.' if dots == 0 && index > 0 && index + 1 < bytes.len() => {
+                dots += 1;
+            }
+            _ => return Err(ProtocolError::InvalidDecimalInput(field)),
+        }
+    }
+
+    if digits == 0 || non_zero_digits == 0 {
+        return Err(ProtocolError::InvalidDecimalInput(field));
+    }
+
+    Ok(())
+}
+
 fn validate_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
     if value.is_empty() || value.len() > 64 {
         return Err(ProtocolError::InvalidDecimalInput(field));
@@ -1132,7 +1210,7 @@ mod tests {
         assert!(matches!(
             undeclared_metric.validate(),
             Err(ProtocolError::InvalidAnalyticalQuery(
-                "return_24h_pct metric must be declared"
+                "declared metric must exactly match the derived field/sort key"
             ))
         ));
     }
@@ -1145,7 +1223,7 @@ mod tests {
             "operation":{
                 "type":"query",
                 "plan":{
-                    "catalog_version":"okx.query.catalog/2026-10-02.1",
+                    "catalog_version":"okx.query.catalog/2026-10-02.2",
                     "universe":{
                         "instrument_types":["SWAP","FUTURES"],
                         "settle_currency":null,
@@ -1178,6 +1256,70 @@ mod tests {
         assert!(encoded.contains(r#""return_24h_pct""#));
         assert!(!encoded.contains(r#""open24h""#));
         assert!(!encoded.contains(r#""return24h_pct""#));
+    }
+
+    #[test]
+    fn spread_query_and_market_intelligence_contracts_are_strict_and_read_only() {
+        let spread = AnalyticalQueryPlan {
+            catalog_version: ANALYTICAL_QUERY_CATALOG_VERSION_V1.to_owned(),
+            universe: MarketQueryUniverse {
+                instrument_types: vec![InstrumentTypeFilter::Swap],
+                settle_currency: Some("USDT".to_owned()),
+                state: Some(QueryInstrumentState::Live),
+            },
+            select: vec![
+                QueryField::InstrumentId,
+                QueryField::BestBid,
+                QueryField::BestAsk,
+                QueryField::SpreadBps,
+            ],
+            metric: Some(QueryMetric::SpreadBps),
+            sort: Some(QuerySort {
+                key: QuerySortKey::SpreadBps,
+                direction: QuerySortDirection::Asc,
+            }),
+            limit: 10,
+        };
+        spread.validate().expect("valid spread plan");
+
+        let mut mixed = spread.clone();
+        mixed.select.push(QueryField::Return24hPct);
+        assert!(matches!(
+            mixed.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery(
+                "one derived metric per query plan"
+            ))
+        ));
+
+        let operation = AgentOperation::MarketIntelligence {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            impact_contracts: "10".to_owned(),
+            depth_levels: 20,
+        };
+        operation.validate().expect("market intelligence contract");
+        assert!(operation.direct_transport_read_only());
+
+        let too_deep = AgentOperation::MarketIntelligence {
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            impact_contracts: "10".to_owned(),
+            depth_levels: 51,
+        };
+        assert!(matches!(
+            too_deep.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery("depth_levels"))
+        ));
+
+        for invalid_impact in ["0", "0.0", "-1", "+1", "1.", ".1"] {
+            let invalid = AgentOperation::MarketIntelligence {
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                impact_contracts: invalid_impact.to_owned(),
+                depth_levels: 20,
+            };
+            assert!(matches!(
+                invalid.validate(),
+                Err(ProtocolError::InvalidDecimalInput("impact_contracts"))
+            ));
+        }
     }
 
     #[test]

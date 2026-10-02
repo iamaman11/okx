@@ -30,11 +30,14 @@ const QUERY_FIELDS = new Set([
   "settle_currency",
   "state",
   "last",
+  "best_bid",
+  "best_ask",
   "open_24h",
   "volume_24h",
   "volume_currency_24h",
   "exchange_timestamp_ms",
   "return_24h_pct",
+  "spread_bps",
 ]);
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
@@ -128,6 +131,20 @@ export const mcpApi = {
             },
           },
           {
+            name: "market_intelligence",
+            description: "Get FRESH sequence-contiguous market microstructure and derivatives evidence for one instrument, including spread, depth, basis and modelled book-sweep impact.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                instrument: { type: "string", minLength: 3, maxLength: 64, pattern: CODE_PATTERN },
+                impact_contracts: { type: "string", minLength: 1, maxLength: 64, pattern: "^[0-9]+(?:\\.[0-9]+)?$" },
+                depth_levels: { type: "integer", minimum: 1, maximum: 50 },
+              },
+              required: ["instrument", "impact_contracts", "depth_levels"],
+              additionalProperties: false,
+            },
+          },
+          {
             name: "market_research",
             description: "Get one compact multi-instrument market research result computed by the Windows runtime for 2 to 8 instruments.",
             inputSchema: {
@@ -185,11 +202,11 @@ export const mcpApi = {
                       uniqueItems: true,
                       items: { type: "string", enum: [...QUERY_FIELDS] },
                     },
-                    metric: { type: "string", enum: ["return_24h_pct"] },
+                    metric: { type: "string", enum: ["return_24h_pct", "spread_bps"] },
                     sort: {
                       type: "object",
                       properties: {
-                        key: { type: "string", enum: ["return_24h_pct"] },
+                        key: { type: "string", enum: ["return_24h_pct", "spread_bps"] },
                         direction: { type: "string", enum: ["asc", "desc"] },
                       },
                       required: ["key", "direction"],
@@ -274,6 +291,34 @@ export const mcpApi = {
           schema: "okx.agent.request/v1",
           request_id: requestId(),
           operation: { type: "market_overview", instrument },
+        };
+        return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+      }
+      if (name === "market_intelligence") {
+        const instrument = normalizeInstrument(args.instrument);
+        if (!instrument) return jsonRpcError(id, -32602, "invalid instrument");
+        if (
+          typeof args.impact_contracts !== "string" ||
+          args.impact_contracts.length < 1 ||
+          args.impact_contracts.length > 64 ||
+          !/^[0-9]+(?:\.[0-9]+)?$/.test(args.impact_contracts) ||
+          Number(args.impact_contracts) <= 0
+        ) {
+          return jsonRpcError(id, -32602, "invalid impact_contracts");
+        }
+        if (!Number.isInteger(args.depth_levels) || Number(args.depth_levels) < 1 || Number(args.depth_levels) > 50) {
+          return jsonRpcError(id, -32602, "invalid depth_levels");
+        }
+
+        const agentRequest = {
+          schema: "okx.agent.request/v1",
+          request_id: requestId(),
+          operation: {
+            type: "market_intelligence",
+            instrument,
+            impact_contracts: args.impact_contracts,
+            depth_levels: args.depth_levels,
+          },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }
@@ -368,7 +413,7 @@ export const mcpApi = {
           return jsonRpcError(id, -32602, "invalid select");
         }
         const metric = plan.metric === undefined ? null : String(plan.metric);
-        if (metric !== null && metric !== "return_24h_pct") {
+        if (metric !== null && !["return_24h_pct", "spread_bps"].includes(metric)) {
           return jsonRpcError(id, -32602, "invalid metric");
         }
         let sort: { key: string; direction: string } | null = null;
@@ -378,7 +423,7 @@ export const mcpApi = {
           }
           const key = String(plan.sort.key);
           const direction = String(plan.sort.direction);
-          if (key !== "return_24h_pct" || !["asc", "desc"].includes(direction)) {
+          if (!["return_24h_pct", "spread_bps"].includes(key) || !["asc", "desc"].includes(direction)) {
             return jsonRpcError(id, -32602, "invalid sort");
           }
           sort = { key, direction };
@@ -386,11 +431,19 @@ export const mcpApi = {
         if (!Number.isInteger(plan.limit) || Number(plan.limit) < 1 || Number(plan.limit) > 25) {
           return jsonRpcError(id, -32602, "invalid limit");
         }
-        if (
-          ((plan.select as unknown[]).includes("return_24h_pct") || sort !== null) &&
-          metric !== "return_24h_pct"
-        ) {
-          return jsonRpcError(id, -32602, "return_24h_pct metric must be declared");
+        const selectedDerived = (plan.select as unknown[]).filter(
+          (field) => field === "return_24h_pct" || field === "spread_bps",
+        ) as string[];
+        if (selectedDerived.length > 1) {
+          return jsonRpcError(id, -32602, "one derived metric per query plan");
+        }
+        const sortMetric = sort?.key ?? null;
+        if (selectedDerived.length === 1 && sortMetric !== null && selectedDerived[0] !== sortMetric) {
+          return jsonRpcError(id, -32602, "selected and sorted metrics must match");
+        }
+        const requiredMetric = selectedDerived[0] ?? sortMetric;
+        if ((requiredMetric ?? null) !== metric) {
+          return jsonRpcError(id, -32602, "declared metric must exactly match derived field/sort key");
         }
 
         const agentRequest = {

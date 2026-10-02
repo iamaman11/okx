@@ -1,6 +1,44 @@
 use super::*;
 
 #[derive(serde::Serialize)]
+struct MarketIntelligenceResult {
+    schema: &'static str,
+    as_of: String,
+    market_source: &'static str,
+    observed_evidence_label: &'static str,
+    impact_evidence_label: &'static str,
+    sequence_continuity_proven: bool,
+    analysis_schema: &'static str,
+    coherence: MarketIntelligenceCoherence,
+    analysis: okx_analysis::MarketIntelligenceAnalysis,
+}
+
+#[derive(serde::Serialize)]
+struct MarketIntelligenceCoherence {
+    freshness_budget_ms: u64,
+    connection_generation: u64,
+    readiness_reason: String,
+    reference_source_received_at: String,
+    oldest_required_receive_ms: u64,
+    oldest_required_age_ms: u64,
+    exchange_as_of_ms: u64,
+    exchange_timestamp_min_ms: u64,
+    exchange_timestamp_max_ms: u64,
+    exchange_timestamp_skew_ms: u64,
+    source_exchange_timestamps_ms: MarketIntelligenceSourceTimestamps,
+}
+
+#[derive(serde::Serialize)]
+struct MarketIntelligenceSourceTimestamps {
+    ticker: u64,
+    mark: u64,
+    index: u64,
+    funding: Option<u64>,
+    open_interest: u64,
+    order_book: u64,
+}
+
+#[derive(serde::Serialize)]
 struct MarketResearchResult {
     schema: String,
     assembled_at: String,
@@ -78,6 +116,80 @@ struct MarketResearchQuality {
 struct MarketResearchDiagnostic {
     code: &'static str,
     component: &'static str,
+}
+
+fn market_intelligence_coherence(
+    quality: &PublicQualitySnapshot,
+    market: &MarketSnapshot,
+    order_book: &okx_observation::OrderBookSnapshot,
+    now_ms: u64,
+) -> Result<MarketIntelligenceCoherence, String> {
+    let parse = |name: &'static str, value: &str| {
+        value
+            .parse::<u64>()
+            .map_err(|_| format!("invalid {name} exchange timestamp"))
+    };
+
+    let ticker = parse("ticker", &market.ticker.exchange_timestamp_ms)?;
+    let mark = parse("mark", &market.mark_price.exchange_timestamp_ms)?;
+    let index = parse("index", &market.index_price.exchange_timestamp_ms)?;
+    let funding = market
+        .funding
+        .as_ref()
+        .map(|value| parse("funding", &value.exchange_timestamp_ms))
+        .transpose()?;
+    let open_interest = parse("open_interest", &market.open_interest.exchange_timestamp_ms)?;
+    let order_book = parse(
+        "order_book",
+        order_book
+            .exchange_timestamp_ms
+            .as_deref()
+            .ok_or_else(|| "missing order_book exchange timestamp".to_owned())?,
+    )?;
+
+    let mut timestamps = vec![ticker, mark, index, open_interest, order_book];
+    if let Some(funding) = funding {
+        timestamps.push(funding);
+    }
+    let min = *timestamps
+        .iter()
+        .min()
+        .ok_or_else(|| "missing exchange timestamps".to_owned())?;
+    let max = *timestamps
+        .iter()
+        .max()
+        .ok_or_else(|| "missing exchange timestamps".to_owned())?;
+    let oldest_required_receive_ms = quality
+        .oldest_required_receive_ms
+        .ok_or_else(|| "FRESH market intelligence is missing receive-age evidence".to_owned())?;
+    let oldest_required_age_ms = now_ms.saturating_sub(oldest_required_receive_ms);
+    if oldest_required_age_ms > MARKET_INTELLIGENCE_MAX_AGE_MS {
+        return Err(format!(
+            "FRESH market intelligence exceeded receive-age budget: age={oldest_required_age_ms}ms budget={}ms",
+            MARKET_INTELLIGENCE_MAX_AGE_MS
+        ));
+    }
+
+    Ok(MarketIntelligenceCoherence {
+        freshness_budget_ms: MARKET_INTELLIGENCE_MAX_AGE_MS,
+        connection_generation: quality.connection_generation,
+        readiness_reason: quality.reason.clone(),
+        reference_source_received_at: quality.reference_source_received_at.clone(),
+        oldest_required_receive_ms,
+        oldest_required_age_ms,
+        exchange_as_of_ms: max,
+        exchange_timestamp_min_ms: min,
+        exchange_timestamp_max_ms: max,
+        exchange_timestamp_skew_ms: max.saturating_sub(min),
+        source_exchange_timestamps_ms: MarketIntelligenceSourceTimestamps {
+            ticker,
+            mark,
+            index,
+            funding,
+            open_interest,
+            order_book,
+        },
+    })
 }
 
 fn funding_semantics(requirement: okx_observation::FundingRequirement) -> &'static str {
@@ -344,6 +456,130 @@ pub(super) async fn dispatch(
                 }
                 Err(error) => Ok(market_failure(request, generated_at, error)),
             }
+        }
+        AgentOperation::MarketIntelligence {
+            instrument,
+            impact_contracts,
+            depth_levels,
+        } => {
+            let Some(public_ws) = context.public_ws else {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    MARKET_INTELLIGENCE_NOT_READY_CODE,
+                    "market intelligence requires the live public WebSocket owner".to_owned(),
+                    true,
+                ));
+            };
+            let Some(rules) = public_ws.instrument_rules(instrument).await else {
+                return Ok(reference_not_found(request, generated_at, instrument));
+            };
+
+            public_ws.demand_instrument(instrument.clone()).await?;
+            let now_ms = utc_now_ms();
+            let quality = public_ws
+                .quality_snapshot(instrument, now_ms, MARKET_INTELLIGENCE_MAX_AGE_MS, false)
+                .await?;
+            if quality.quality != MarketReadiness::Fresh {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    MARKET_INTELLIGENCE_NOT_READY_CODE,
+                    format!(
+                        "sequence-contiguous FRESH WebSocket market intelligence is not ready: {}",
+                        quality.reason
+                    ),
+                    true,
+                ));
+            }
+
+            let live = public_ws
+                .fresh_snapshot(
+                    instrument,
+                    now_ms,
+                    MARKET_INTELLIGENCE_MAX_AGE_MS,
+                    generated_at.to_owned(),
+                )
+                .await?;
+            if rules.reference_generation != live.market.reference_generation
+                || quality.reference_generation != live.market.reference_generation
+                || live.order_book.generation != quality.connection_generation
+            {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    MARKET_INTELLIGENCE_INCONSISTENT_CODE,
+                    "reference/market/order-book generation changed while building market intelligence"
+                        .to_owned(),
+                    true,
+                ));
+            }
+
+            let coherence = match market_intelligence_coherence(
+                &quality,
+                &live.market,
+                &live.order_book,
+                now_ms,
+            ) {
+                Ok(value) => value,
+                Err(message) => {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        MARKET_INTELLIGENCE_INCONSISTENT_CODE,
+                        message,
+                        true,
+                    ));
+                }
+            };
+
+            let analysis = match analyze_market_intelligence(
+                &rules.instrument.instrument_id,
+                &rules.reference_generation,
+                &live.market,
+                &live.order_book,
+                impact_contracts,
+                *depth_levels,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(analysis_failure(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        error,
+                    ));
+                }
+            };
+
+            let result = MarketIntelligenceResult {
+                schema: MARKET_INTELLIGENCE_SCHEMA_V1,
+                as_of: generated_at.to_owned(),
+                market_source: "websocket",
+                observed_evidence_label: "OBSERVED",
+                impact_evidence_label: "MODELLED",
+                sequence_continuity_proven: quality.sequence_continuity_proven,
+                analysis_schema: MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
+                coherence,
+                analysis,
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality: DataQuality::Fresh,
+                result_schema: Some(MARKET_INTELLIGENCE_SCHEMA_V1.to_owned()),
+                result: Some(serde_json::to_value(result)?),
+                failure: None,
+                warnings: vec![
+                    "impact is a deterministic sweep over the current observed book and is MODELLED, not a promised or observed fill".to_owned(),
+                ],
+            })
         }
         AgentOperation::MarketResearch {
             instruments,
@@ -718,6 +954,109 @@ mod tests {
             warnings: Vec::new(),
         };
         serde_json::to_vec(&response).expect("serialize").len()
+    }
+
+    fn market_intelligence_response_size() -> usize {
+        let long_decimal = "12345678901234567890.123456789012345678901234567890".to_owned();
+        let sweep = okx_analysis::BookSweepAnalysis {
+            requested_contracts: long_decimal.clone(),
+            available_contracts: long_decimal.clone(),
+            filled_contracts: long_decimal.clone(),
+            complete: false,
+            vwap: Some(long_decimal.clone()),
+            worst_price: Some(long_decimal.clone()),
+            impact_bps_from_mid: Some(long_decimal.clone()),
+        };
+        let result = MarketIntelligenceResult {
+            schema: MARKET_INTELLIGENCE_SCHEMA_V1,
+            as_of: "2026-10-02T16:49:59.426Z".to_owned(),
+            market_source: "websocket",
+            observed_evidence_label: "OBSERVED",
+            impact_evidence_label: "MODELLED",
+            sequence_continuity_proven: true,
+            analysis_schema: MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
+            coherence: MarketIntelligenceCoherence {
+                freshness_budget_ms: MARKET_INTELLIGENCE_MAX_AGE_MS,
+                connection_generation: u64::MAX,
+                readiness_reason: "WS_CURRENT_GENERATION_COMPLETE".to_owned(),
+                reference_source_received_at: "2026-10-02T16:49:00.000Z".to_owned(),
+                oldest_required_receive_ms: 1_790_959_759_363,
+                oldest_required_age_ms: MARKET_INTELLIGENCE_MAX_AGE_MS,
+                exchange_as_of_ms: 1_790_959_799_999,
+                exchange_timestamp_min_ms: 1_790_959_740_000,
+                exchange_timestamp_max_ms: 1_790_959_799_999,
+                exchange_timestamp_skew_ms: 59_999,
+                source_exchange_timestamps_ms: MarketIntelligenceSourceTimestamps {
+                    ticker: 1_790_959_799_990,
+                    mark: 1_790_959_799_991,
+                    index: 1_790_959_799_992,
+                    funding: Some(1_790_959_740_000),
+                    open_interest: 1_790_959_799_993,
+                    order_book: 1_790_959_799_999,
+                },
+            },
+            analysis: okx_analysis::MarketIntelligenceAnalysis {
+                schema: MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1.to_owned(),
+                instrument_id: "ASSET-LONG-INSTRUMENT-ID-USDT-SWAP".to_owned(),
+                reference_generation:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                market_generation:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_owned(),
+                order_book_generation: u64::MAX,
+                order_book_seq_id: i64::MAX,
+                order_book_exchange_timestamp_ms: "1790959799999".to_owned(),
+                depth_levels: 50,
+                best_bid: long_decimal.clone(),
+                best_ask: long_decimal.clone(),
+                mid_price: long_decimal.clone(),
+                spread_price: long_decimal.clone(),
+                spread_bps: long_decimal.clone(),
+                bid_depth_contracts: long_decimal.clone(),
+                ask_depth_contracts: long_decimal.clone(),
+                buy_sweep: sweep.clone(),
+                sell_sweep: sweep,
+                last_price: long_decimal.clone(),
+                mark_price: long_decimal.clone(),
+                index_price: long_decimal.clone(),
+                mark_index_basis_bps: long_decimal.clone(),
+                last_mark_deviation_bps: long_decimal.clone(),
+                funding_rate: Some(long_decimal.clone()),
+                next_funding_time_ms: Some("1791014400000".to_owned()),
+                open_interest_contracts: long_decimal.clone(),
+                open_interest_usd: Some(long_decimal),
+            },
+        };
+        let response = AgentResponse {
+            schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+            request_id: "req_market_intelligence_size_budget_20261002a".to_owned(),
+            status: AgentResponseStatus::Completed,
+            generated_at: "2026-10-02T16:49:59.426Z".to_owned(),
+            quality: DataQuality::Fresh,
+            result_schema: Some(MARKET_INTELLIGENCE_SCHEMA_V1.to_owned()),
+            result: Some(serde_json::to_value(result).expect("serialize result")),
+            failure: None,
+            warnings: vec![
+                "impact is a deterministic sweep over the current observed book and is MODELLED, not a promised or observed fill".to_owned(),
+            ],
+        };
+        serde_json::to_vec(&response)
+            .expect("serialize response")
+            .len()
+    }
+
+    #[test]
+    fn market_intelligence_stays_inside_standard_fallback_budget() {
+        let size = market_intelligence_response_size();
+        assert!(
+            size <= 16 * 1024,
+            "market-intelligence projection is {size} bytes"
+        );
+        assert!(
+            size <= 16 * 1024 - 1024,
+            "market-intelligence projection leaves less than 1 KiB headroom: {size} bytes"
+        );
     }
 
     #[test]
