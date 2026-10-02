@@ -350,7 +350,11 @@ pub fn analyze_history_behavior(
     let first_volume = volumes[0];
     let last_volume = *volumes.last().expect("confirmed history is non-empty");
     let volume_change_ratio = if first_volume > Decimal::ZERO {
-        Some((last_volume / first_volume - Decimal::ONE).normalize().to_string())
+        Some(
+            (last_volume / first_volume - Decimal::ONE)
+                .normalize()
+                .to_string(),
+        )
     } else {
         None
     };
