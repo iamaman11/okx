@@ -13,8 +13,10 @@ use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountError, AccountSnapshot,
     INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
-    MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError, MarketHistoryError,
-    MarketHistorySnapshot, MarketReadiness, MarketSnapshot, ReferenceRegistry,
+    FUNDING_HISTORY_SCHEMA_V1, FundingHistorySnapshot, MARKET_HISTORY_SCHEMA_V1,
+    MARKET_SNAPSHOT_SCHEMA_V1, MARKET_TRADES_SCHEMA_V1, MarketError, MarketHistoryError,
+    MarketHistorySnapshot, MarketReadiness, MarketSnapshot, MarketTradesSnapshot,
+    ReferenceRegistry,
     SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport, TRADING_CAPABILITIES_SCHEMA_V1,
 };
 use okx_protocol::{
@@ -403,6 +405,67 @@ async fn assemble_market_history(
         } else {
             vec![MARKET_HISTORY_UNCONFIRMED_WARNING.to_owned()]
         },
+    }))
+}
+
+
+struct AssembledMarketTrades {
+    snapshot: MarketTradesSnapshot,
+    quality: DataQuality,
+}
+
+async fn assemble_recent_trades(
+    context: ObservationQueryContext<'_>,
+    instrument: &str,
+    requested_limit: u16,
+) -> Result<Option<AssembledMarketTrades>, MarketBootstrapError> {
+    let Some(market) = context.market_fallback else {
+        return Ok(None);
+    };
+    let reference = if let Some(public_ws) = context.public_ws {
+        public_ws.reference_snapshot().await
+    } else if let Some(reference) = context.standalone_reference {
+        reference.clone()
+    } else {
+        return Ok(None);
+    };
+
+    let snapshot = market
+        .recent_trades(&reference, instrument, requested_limit)
+        .await?;
+    Ok(Some(AssembledMarketTrades {
+        snapshot,
+        quality: DataQuality::Fresh,
+    }))
+}
+
+struct AssembledFundingHistory {
+    snapshot: FundingHistorySnapshot,
+    quality: DataQuality,
+}
+
+async fn assemble_funding_history(
+    context: ObservationQueryContext<'_>,
+    instrument: &str,
+    requested_limit: u16,
+) -> Result<Option<AssembledFundingHistory>, MarketBootstrapError> {
+    let Some(market) = context.market_fallback else {
+        return Ok(None);
+    };
+    let reference = if let Some(public_ws) = context.public_ws {
+        public_ws.reference_snapshot().await
+    } else if let Some(reference) = context.standalone_reference {
+        reference.clone()
+    } else {
+        return Ok(None);
+    };
+
+    let snapshot = market
+        .funding_history(&reference, instrument, requested_limit)
+        .await?;
+    Ok(Some(AssembledFundingHistory {
+        snapshot,
+        quality: DataQuality::Fresh,
     }))
 }
 
