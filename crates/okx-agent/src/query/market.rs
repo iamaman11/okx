@@ -62,6 +62,7 @@ struct MarketResearchFeatureVersions {
     funding_regime: &'static str,
     open_interest_change: &'static str,
     dated_future_basis: &'static str,
+    cross_contract_basis: &'static str,
     term_structure: &'static str,
 }
 
@@ -97,6 +98,7 @@ struct MarketResearchMechanics {
 struct MarketResearchMarket {
     mark: String,
     index: String,
+    mark_index_basis_bps: String,
     funding_rate: Option<String>,
     open_interest_contracts: String,
 }
@@ -150,15 +152,18 @@ struct MarketResearchDatedBasis {
 struct MarketResearchTermStructure {
     underlying: String,
     cross_contract: bool,
+    perpetual_instrument_id: Option<String>,
+    perpetual_basis_bps: Option<String>,
     points: Vec<MarketResearchTermPoint>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 struct MarketResearchTermPoint {
     instrument_id: String,
     expiry_time_ms: u64,
     basis_bps: String,
     annualized_basis_bps: String,
+    vs_perpetual_basis_bps: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -337,6 +342,48 @@ fn research_quality(qualities: &[DataQuality]) -> DataQuality {
     } else {
         DataQuality::Degraded
     }
+}
+
+fn build_term_structure(
+    mut term_points: BTreeMap<String, Vec<MarketResearchTermPoint>>,
+    results: &[MarketResearchInstrumentResult],
+) -> Result<Vec<MarketResearchTermStructure>, AnalysisError> {
+    let mut perpetual_by_underlying = BTreeMap::<String, (String, String)>::new();
+    for result in results {
+        if result.mechanics.instrument_type == okx_api::InstrumentType::Swap {
+            perpetual_by_underlying
+                .entry(result.mechanics.underlying.clone())
+                .or_insert_with(|| {
+                    (
+                        result.instrument_id.clone(),
+                        result.market.mark_index_basis_bps.clone(),
+                    )
+                });
+        }
+    }
+
+    let mut structures = Vec::with_capacity(term_points.len());
+    for (underlying, points) in &mut term_points {
+        points.sort_by_key(|point| point.expiry_time_ms);
+        let perpetual = perpetual_by_underlying.get(underlying);
+        if let Some((_, perpetual_basis_bps)) = perpetual {
+            for point in points.iter_mut() {
+                point.vs_perpetual_basis_bps = Some(analyze_basis_difference_bps(
+                    &point.basis_bps,
+                    perpetual_basis_bps,
+                )?);
+            }
+        }
+        structures.push(MarketResearchTermStructure {
+            underlying: underlying.clone(),
+            cross_contract: points.len() >= 2 || perpetual.is_some(),
+            perpetual_instrument_id: perpetual.map(|(instrument_id, _)| instrument_id.clone()),
+            perpetual_basis_bps: perpetual.map(|(_, basis)| basis.clone()),
+            points: points.clone(),
+        });
+    }
+    structures.sort_by(|left, right| left.underlying.cmp(&right.underlying));
+    Ok(structures)
 }
 
 fn parse_exchange_timestamp(name: &'static str, value: &str) -> Result<u64, String> {
@@ -1052,6 +1099,7 @@ pub(super) async fn dispatch(
                                     expiry_time_ms: analysis.expiry_time_ms,
                                     basis_bps: analysis.basis_bps,
                                     annualized_basis_bps: analysis.annualized_basis_bps,
+                                    vs_perpetual_basis_bps: None,
                                 });
                             Some(compact)
                         }
@@ -1080,6 +1128,20 @@ pub(super) async fn dispatch(
                         ));
                     }
                 };
+                let mark_index_basis_bps = match analyze_mark_index_basis_bps(
+                    &current.snapshot.mark_price.price,
+                    &current.snapshot.index_price.price,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(analysis_failure(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            error,
+                        ));
+                    }
+                };
 
                 results.push(MarketResearchInstrumentResult {
                     instrument_id: instrument.clone(),
@@ -1094,6 +1156,7 @@ pub(super) async fn dispatch(
                     market: MarketResearchMarket {
                         mark: current.snapshot.mark_price.price.clone(),
                         index: current.snapshot.index_price.price.clone(),
+                        mark_index_basis_bps,
                         funding_rate: current
                             .snapshot
                             .funding
@@ -1155,18 +1218,17 @@ pub(super) async fn dispatch(
                 });
             }
 
-            let mut term_structure = term_points
-                .into_iter()
-                .map(|(underlying, mut points)| {
-                    points.sort_by_key(|point| point.expiry_time_ms);
-                    MarketResearchTermStructure {
-                        underlying,
-                        cross_contract: points.len() >= 2,
-                        points,
-                    }
-                })
-                .collect::<Vec<_>>();
-            term_structure.sort_by(|left, right| left.underlying.cmp(&right.underlying));
+            let term_structure = match build_term_structure(term_points, &results) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(analysis_failure(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        error,
+                    ));
+                }
+            };
 
             let result = MarketResearchResult {
                 schema: MARKET_RESEARCH_SCHEMA_V3.to_owned(),
@@ -1182,6 +1244,7 @@ pub(super) async fn dispatch(
                     funding_regime: okx_analysis::FUNDING_REGIME_ANALYSIS_SCHEMA_V1,
                     open_interest_change: okx_analysis::OPEN_INTEREST_CHANGE_ANALYSIS_SCHEMA_V1,
                     dated_future_basis: DATED_FUTURE_BASIS_SCHEMA_V1,
+                    cross_contract_basis: "cross_contract_basis/dated_minus_perpetual_bps/v1",
                     term_structure: "term_structure/dated_futures/v1",
                 },
                 reference_generation: shared_reference
@@ -1340,6 +1403,7 @@ mod tests {
             market: MarketResearchMarket {
                 mark: "12345.12345678901233".to_owned(),
                 index: "12345.12345678901230".to_owned(),
+                mark_index_basis_bps: "0.000000000024301181174844".to_owned(),
                 funding_rate: Some("0.000123456789012345".to_owned()),
                 open_interest_contracts: "1234567890123456789".to_owned(),
             },
@@ -1430,6 +1494,7 @@ mod tests {
                 funding_regime: okx_analysis::FUNDING_REGIME_ANALYSIS_SCHEMA_V1,
                 open_interest_change: okx_analysis::OPEN_INTEREST_CHANGE_ANALYSIS_SCHEMA_V1,
                 dated_future_basis: DATED_FUTURE_BASIS_SCHEMA_V1,
+                cross_contract_basis: "cross_contract_basis/dated_minus_perpetual_bps/v1",
                 term_structure: "term_structure/dated_futures/v1",
             },
             reference_generation:
