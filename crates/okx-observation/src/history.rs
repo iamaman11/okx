@@ -944,5 +944,4 @@ mod tests {
         assert_ne!(first, changed);
         assert!(first.starts_with("sha256:"));
     }
-
 }
