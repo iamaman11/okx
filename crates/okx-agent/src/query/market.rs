@@ -1493,6 +1493,37 @@ mod tests {
     }
 
     #[test]
+    fn term_structure_links_perpetual_and_dated_future_basis_without_chat_math() {
+        let mut perpetual = fixture(0);
+        perpetual.market.mark_index_basis_bps = "25".to_owned();
+
+        let mut points = BTreeMap::new();
+        points.insert(
+            "ASSET-USDT".to_owned(),
+            vec![MarketResearchTermPoint {
+                instrument_id: "ASSET-USDT-261225".to_owned(),
+                expiry_time_ms: 1_800_000_000_000,
+                basis_bps: "100".to_owned(),
+                annualized_basis_bps: "200".to_owned(),
+                vs_perpetual_basis_bps: None,
+            }],
+        );
+
+        let structures = build_term_structure(points, &[perpetual]).expect("term structure");
+        assert_eq!(structures.len(), 1);
+        assert!(structures[0].cross_contract);
+        assert_eq!(
+            structures[0].perpetual_instrument_id.as_deref(),
+            Some("ASSET00-USDT-SWAP")
+        );
+        assert_eq!(structures[0].perpetual_basis_bps.as_deref(), Some("25"));
+        assert_eq!(
+            structures[0].points[0].vs_perpetual_basis_bps.as_deref(),
+            Some("75")
+        );
+    }
+
+    #[test]
     fn later_received_older_rest_evidence_cannot_regress_effective_as_of() {
         let accepted = EvidenceStamp {
             effective_ms: 200,
