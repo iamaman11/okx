@@ -9,7 +9,32 @@ struct MarketIntelligenceResult {
     impact_evidence_label: &'static str,
     sequence_continuity_proven: bool,
     analysis_schema: &'static str,
+    coherence: MarketIntelligenceCoherence,
     analysis: okx_analysis::MarketIntelligenceAnalysis,
+}
+
+#[derive(serde::Serialize)]
+struct MarketIntelligenceCoherence {
+    freshness_budget_ms: u64,
+    connection_generation: u64,
+    reference_source_received_at: String,
+    oldest_required_receive_ms: u64,
+    oldest_required_age_ms: u64,
+    exchange_as_of_ms: u64,
+    exchange_timestamp_min_ms: u64,
+    exchange_timestamp_max_ms: u64,
+    exchange_timestamp_skew_ms: u64,
+    source_exchange_timestamps_ms: MarketIntelligenceSourceTimestamps,
+}
+
+#[derive(serde::Serialize)]
+struct MarketIntelligenceSourceTimestamps {
+    ticker: u64,
+    mark: u64,
+    index: u64,
+    funding: Option<u64>,
+    open_interest: u64,
+    order_book: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -90,6 +115,75 @@ struct MarketResearchQuality {
 struct MarketResearchDiagnostic {
     code: &'static str,
     component: &'static str,
+}
+
+fn market_intelligence_coherence(
+    quality: &PublicQualitySnapshot,
+    market: &MarketSnapshot,
+    order_book: &okx_observation::OrderBookSnapshot,
+    now_ms: u64,
+) -> Result<MarketIntelligenceCoherence, String> {
+    let parse = |name: &'static str, value: &str| {
+        value
+            .parse::<u64>()
+            .map_err(|_| format!("invalid {name} exchange timestamp"))
+    };
+
+    let ticker = parse("ticker", &market.ticker.exchange_timestamp_ms)?;
+    let mark = parse("mark", &market.mark_price.exchange_timestamp_ms)?;
+    let index = parse("index", &market.index_price.exchange_timestamp_ms)?;
+    let funding = market
+        .funding
+        .as_ref()
+        .map(|value| parse("funding", &value.exchange_timestamp_ms))
+        .transpose()?;
+    let open_interest = parse(
+        "open_interest",
+        &market.open_interest.exchange_timestamp_ms,
+    )?;
+    let order_book = parse(
+        "order_book",
+        order_book
+            .exchange_timestamp_ms
+            .as_deref()
+            .ok_or_else(|| "missing order_book exchange timestamp".to_owned())?,
+    )?;
+
+    let mut timestamps = vec![ticker, mark, index, open_interest, order_book];
+    if let Some(funding) = funding {
+        timestamps.push(funding);
+    }
+    let min = *timestamps
+        .iter()
+        .min()
+        .ok_or_else(|| "missing exchange timestamps".to_owned())?;
+    let max = *timestamps
+        .iter()
+        .max()
+        .ok_or_else(|| "missing exchange timestamps".to_owned())?;
+    let oldest_required_receive_ms = quality
+        .oldest_required_receive_ms
+        .ok_or_else(|| "FRESH market intelligence is missing receive-age evidence".to_owned())?;
+
+    Ok(MarketIntelligenceCoherence {
+        freshness_budget_ms: MARKET_INTELLIGENCE_MAX_AGE_MS,
+        connection_generation: quality.connection_generation,
+        reference_source_received_at: quality.reference_source_received_at.clone(),
+        oldest_required_receive_ms,
+        oldest_required_age_ms: now_ms.saturating_sub(oldest_required_receive_ms),
+        exchange_as_of_ms: max,
+        exchange_timestamp_min_ms: min,
+        exchange_timestamp_max_ms: max,
+        exchange_timestamp_skew_ms: max.saturating_sub(min),
+        source_exchange_timestamps_ms: MarketIntelligenceSourceTimestamps {
+            ticker,
+            mark,
+            index,
+            funding,
+            open_interest,
+            order_book,
+        },
+    })
 }
 
 fn funding_semantics(requirement: okx_observation::FundingRequirement) -> &'static str {
@@ -379,7 +473,7 @@ pub(super) async fn dispatch(
             public_ws.demand_instrument(instrument.clone()).await?;
             let now_ms = utc_now_ms();
             let quality = public_ws
-                .quality_snapshot(instrument, now_ms, PUBLIC_MARKET_MAX_AGE_MS, false)
+                .quality_snapshot(instrument, now_ms, MARKET_INTELLIGENCE_MAX_AGE_MS, false)
                 .await?;
             if quality.quality != MarketReadiness::Fresh {
                 return Ok(failure_response(
@@ -399,7 +493,7 @@ pub(super) async fn dispatch(
                 .fresh_snapshot(
                     instrument,
                     now_ms,
-                    PUBLIC_MARKET_MAX_AGE_MS,
+                    MARKET_INTELLIGENCE_MAX_AGE_MS,
                     generated_at.to_owned(),
                 )
                 .await?;
@@ -417,6 +511,25 @@ pub(super) async fn dispatch(
                     true,
                 ));
             }
+
+            let coherence = match market_intelligence_coherence(
+                &quality,
+                &live.market,
+                &live.order_book,
+                now_ms,
+            ) {
+                Ok(value) => value,
+                Err(message) => {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        MARKET_INTELLIGENCE_INCONSISTENT_CODE,
+                        message,
+                        true,
+                    ));
+                }
+            };
 
             let analysis = match analyze_market_intelligence(
                 &rules.instrument.instrument_id,
@@ -445,6 +558,7 @@ pub(super) async fn dispatch(
                 impact_evidence_label: "MODELLED",
                 sequence_continuity_proven: quality.sequence_continuity_proven,
                 analysis_schema: MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
+                coherence,
                 analysis,
             };
             Ok(AgentResponse {
