@@ -57,6 +57,20 @@ pub struct ParallelScenarioResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StatisticalHistoryEvidence {
+    pub instrument_id: String,
+    pub reference_generation: String,
+    pub history_generation: String,
+    pub source: String,
+    pub source_received_at: String,
+    pub requested_limit: u16,
+    pub confirmed_close_count: usize,
+    pub excluded_unconfirmed_count: usize,
+    pub oldest_confirmed_open_time_ms: String,
+    pub newest_confirmed_open_time_ms: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PortfolioStatisticsAnalysis {
     pub schema: &'static str,
     pub status: PortfolioStatisticsStatus,
@@ -64,6 +78,8 @@ pub struct PortfolioStatisticsAnalysis {
     pub covariance_formula_version: &'static str,
     pub volatility_formula_version: &'static str,
     pub bar: Option<String>,
+    pub reference_generation: Option<String>,
+    pub history_evidence: Vec<StatisticalHistoryEvidence>,
     pub confirmed_aligned_close_count: usize,
     pub return_sample_count: usize,
     pub oldest_aligned_close_time_ms: Option<String>,
@@ -158,6 +174,10 @@ pub fn analyze_portfolio_statistics(
             covariance_formula_version: SAMPLE_COVARIANCE_FORMULA_V1,
             volatility_formula_version: PORTFOLIO_VOLATILITY_FORMULA_V1,
             bar: histories.first().map(|history| history.bar.clone()),
+            reference_generation: histories
+                .first()
+                .map(|history| history.reference_generation.clone()),
+            history_evidence: Vec::new(),
             confirmed_aligned_close_count: 0,
             return_sample_count: 0,
             oldest_aligned_close_time_ms: None,
@@ -187,11 +207,24 @@ pub fn analyze_portfolio_statistics(
     if histories.iter().any(|history| history.bar != bar) {
         return Err(AnalysisError::StatisticalBarMismatch);
     }
+    let interval_ms = fixed_bar_interval_ms(&bar)?;
+    let reference_generation = histories
+        .first()
+        .ok_or(AnalysisError::StatisticalHistoryMismatch)?
+        .reference_generation
+        .clone();
+    if histories
+        .iter()
+        .any(|history| history.reference_generation != reference_generation)
+    {
+        return Err(AnalysisError::StatisticalReferenceMismatch);
+    }
 
     let mut instruments = Vec::with_capacity(exposures.len());
     let mut signed_notionals = Vec::with_capacity(exposures.len());
     let mut aligned_timestamps: Option<Vec<String>> = None;
     let mut return_series = Vec::with_capacity(exposures.len());
+    let mut history_evidence = Vec::with_capacity(exposures.len());
 
     for exposure in exposures {
         let history = histories
@@ -213,6 +246,22 @@ pub fn analyze_portfolio_statistics(
             .iter()
             .map(|candle| candle.open_time_ms.clone())
             .collect::<Vec<_>>();
+        let parsed_timestamps = timestamps
+            .iter()
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|_| AnalysisError::InvalidHistoryTimestamp(value.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if parsed_timestamps
+            .windows(2)
+            .any(|pair| pair[1].saturating_sub(pair[0]) != interval_ms)
+        {
+            return Err(AnalysisError::StatisticalHistoryGap(
+                exposure.instrument_id.clone(),
+            ));
+        }
         if let Some(expected) = aligned_timestamps.as_ref() {
             if expected != &timestamps {
                 return Err(AnalysisError::StatisticalHistoryNotAligned);
@@ -230,6 +279,28 @@ pub fn analyze_portfolio_statistics(
             .map(|pair| pair[1] / pair[0] - Decimal::ONE)
             .collect::<Vec<_>>();
 
+        history_evidence.push(StatisticalHistoryEvidence {
+            instrument_id: exposure.instrument_id.clone(),
+            reference_generation: history.reference_generation.clone(),
+            history_generation: history.history_generation.clone(),
+            source: history.source.clone(),
+            source_received_at: history.source_received_at.clone(),
+            requested_limit: history.requested_limit,
+            confirmed_close_count: confirmed.len(),
+            excluded_unconfirmed_count: history
+                .candles
+                .iter()
+                .filter(|candle| !candle.confirmed)
+                .count(),
+            oldest_confirmed_open_time_ms: timestamps
+                .first()
+                .expect("confirmed history is non-empty")
+                .clone(),
+            newest_confirmed_open_time_ms: timestamps
+                .last()
+                .expect("confirmed history is non-empty")
+                .clone(),
+        });
         instruments.push(exposure.instrument_id.clone());
         signed_notionals.push(crate::decimal(
             "statistical_signed_notional_usd",
@@ -335,6 +406,8 @@ pub fn analyze_portfolio_statistics(
         covariance_formula_version: SAMPLE_COVARIANCE_FORMULA_V1,
         volatility_formula_version: PORTFOLIO_VOLATILITY_FORMULA_V1,
         bar: Some(bar),
+        reference_generation: Some(reference_generation),
+        history_evidence,
         confirmed_aligned_close_count: timestamps.len(),
         return_sample_count: sample_count,
         oldest_aligned_close_time_ms: timestamps.first().cloned(),
@@ -348,6 +421,27 @@ pub fn analyze_portfolio_statistics(
         expected_shortfall: None,
         expected_shortfall_status: "not_computed_without_declared_tail_sample_contract",
     })
+}
+
+fn fixed_bar_interval_ms(bar: &str) -> Result<u64, AnalysisError> {
+    let minutes = match bar {
+        "1m" => 1,
+        "3m" => 3,
+        "5m" => 5,
+        "15m" => 15,
+        "30m" => 30,
+        "1H" => 60,
+        "2H" => 120,
+        "4H" => 240,
+        "6H" | "6Hutc" => 360,
+        "12H" | "12Hutc" => 720,
+        "1D" | "1Dutc" => 1_440,
+        "2D" | "2Dutc" => 2_880,
+        "3D" | "3Dutc" => 4_320,
+        "1W" | "1Wutc" => 10_080,
+        other => return Err(AnalysisError::UnsupportedStatisticalBar(other.to_owned())),
+    };
+    Ok(minutes * 60 * 1_000)
 }
 
 #[cfg(test)]
