@@ -5,7 +5,8 @@ use okx_analysis::{
     HISTORY_BEHAVIOR_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
     MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1, POSITION_SCENARIO_SCHEMA_V1, PositionDirection,
     PositionScenarioAssumptions, ScenarioExitAssumption, analyze_account_risk,
-    analyze_candidate_order, analyze_cost, analyze_dated_future_basis, analyze_history_behavior,
+    analyze_basis_difference_bps, analyze_candidate_order, analyze_cost,
+    analyze_dated_future_basis, analyze_history_behavior, analyze_mark_index_basis_bps,
     analyze_market_intelligence, analyze_position_scenario,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
