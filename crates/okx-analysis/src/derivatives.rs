@@ -1,9 +1,12 @@
+use std::str::FromStr;
+
 use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::{AnalysisError, positive_decimal};
 
 pub const DATED_FUTURE_BASIS_SCHEMA_V1: &str = "okx.dated-future-basis/v1";
+pub const CROSS_CONTRACT_BASIS_SCHEMA_V1: &str = "okx.cross-contract-basis/v1";
 
 const BASIS_POINTS: u64 = 10_000;
 const MILLIS_PER_YEAR: u64 = 31_557_600_000;
@@ -18,6 +21,26 @@ pub struct DatedFutureBasisAnalysis {
     pub time_to_expiry_ms: u64,
     pub basis_bps: String,
     pub annualized_basis_bps: String,
+}
+
+pub fn analyze_mark_index_basis_bps(
+    mark_price: &str,
+    index_price: &str,
+) -> Result<String, AnalysisError> {
+    let mark = positive_decimal("mark_price", mark_price)?;
+    let index = positive_decimal("index_price", index_price)?;
+    Ok((((mark - index) / index) * Decimal::from(BASIS_POINTS))
+        .normalize()
+        .to_string())
+}
+
+pub fn analyze_basis_difference_bps(
+    left_basis_bps: &str,
+    right_basis_bps: &str,
+) -> Result<String, AnalysisError> {
+    let left = crate::decimal("left_basis_bps", left_basis_bps)?;
+    let right = crate::decimal("right_basis_bps", right_basis_bps)?;
+    Ok((left - right).normalize().to_string())
 }
 
 pub fn analyze_dated_future_basis(
@@ -58,6 +81,22 @@ pub fn analyze_dated_future_basis(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mark_index_basis_and_cross_contract_difference_are_exact() {
+        assert_eq!(
+            analyze_mark_index_basis_bps("101", "100").expect("perpetual basis"),
+            "100"
+        );
+        assert_eq!(
+            analyze_basis_difference_bps("200", "100").expect("basis spread"),
+            "100"
+        );
+        assert_eq!(
+            analyze_basis_difference_bps("-50", "25").expect("negative basis spread"),
+            "-75"
+        );
+    }
 
     #[test]
     fn one_year_basis_preserves_basis_bps() {
