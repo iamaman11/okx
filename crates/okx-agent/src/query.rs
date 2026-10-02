@@ -3,21 +3,19 @@ use okx_analysis::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1,
     COST_ANALYSIS_SCHEMA_V1, CandidateOrderAssumptions, DATED_FUTURE_BASIS_SCHEMA_V1,
     HISTORY_BEHAVIOR_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
-    MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1,
-    POSITION_SCENARIO_SCHEMA_V1, PositionDirection, PositionScenarioAssumptions,
-    ScenarioExitAssumption, analyze_account_risk, analyze_candidate_order, analyze_cost,
-    analyze_dated_future_basis, analyze_history_behavior, analyze_market_intelligence,
-    analyze_position_scenario,
+    MARKET_INTELLIGENCE_ANALYSIS_SCHEMA_V1, POSITION_SCENARIO_SCHEMA_V1, PositionDirection,
+    PositionScenarioAssumptions, ScenarioExitAssumption, analyze_account_risk,
+    analyze_candidate_order, analyze_cost, analyze_dated_future_basis, analyze_history_behavior,
+    analyze_market_intelligence, analyze_position_scenario,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
 use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V1, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountError, AccountSnapshot,
-    INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1, InstrumentRulesSnapshot,
-    FundingHistorySnapshot, MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError,
+    FundingHistorySnapshot, INSTRUMENT_RULES_SCHEMA_V1, INSTRUMENT_SEARCH_SCHEMA_V1,
+    InstrumentRulesSnapshot, MARKET_HISTORY_SCHEMA_V1, MARKET_SNAPSHOT_SCHEMA_V1, MarketError,
     MarketHistoryError, MarketHistorySnapshot, MarketReadiness, MarketSnapshot,
-    MarketTradesSnapshot,
-    ReferenceRegistry,
-    SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport, TRADING_CAPABILITIES_SCHEMA_V1,
+    MarketTradesSnapshot, ReferenceRegistry, SNAPSHOT_QUALITY_SCHEMA_V1, SnapshotQualityReport,
+    TRADING_CAPABILITIES_SCHEMA_V1,
 };
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
@@ -407,7 +405,6 @@ async fn assemble_market_history(
         },
     }))
 }
-
 
 struct AssembledMarketTrades {
     snapshot: MarketTradesSnapshot,
