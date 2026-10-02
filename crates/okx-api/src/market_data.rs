@@ -123,14 +123,55 @@ pub struct PublicOpenInterest {
     pub ts: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PublicOpenInterestHistory {
-    #[serde(default)]
     pub oi: String,
-    #[serde(rename = "oiCcy", default)]
     pub oi_currency: String,
-    #[serde(default)]
     pub ts: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PublicOpenInterestHistoryWire {
+    Object {
+        #[serde(default)]
+        oi: String,
+        #[serde(rename = "oiCcy", default)]
+        oi_currency: String,
+        #[serde(default)]
+        ts: String,
+    },
+    Row(Vec<String>),
+}
+
+impl<'de> Deserialize<'de> for PublicOpenInterestHistory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match PublicOpenInterestHistoryWire::deserialize(deserializer)? {
+            PublicOpenInterestHistoryWire::Object {
+                oi,
+                oi_currency,
+                ts,
+            } => Ok(Self {
+                oi,
+                oi_currency,
+                ts,
+            }),
+            PublicOpenInterestHistoryWire::Row(row) => match row.as_slice() {
+                [ts, oi, oi_currency] | [ts, oi, oi_currency, _] => Ok(Self {
+                    oi: oi.clone(),
+                    oi_currency: oi_currency.clone(),
+                    ts: ts.clone(),
+                }),
+                _ => Err(de::Error::custom(format!(
+                    "open interest history row has {} fields; expected 3 or 4",
+                    row.len()
+                ))),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -505,7 +546,18 @@ mod tests {
     }
 
     #[test]
-    fn open_interest_history_preserves_contract_and_currency_units() {
+    fn open_interest_history_accepts_live_four_field_row_shape() {
+        let row: PublicOpenInterestHistory =
+            serde_json::from_str(r#"["1609459200000","100000","10","5000000000"]"#)
+                .expect("open interest history");
+
+        assert_eq!(row.ts, "1609459200000");
+        assert_eq!(row.oi, "100000");
+        assert_eq!(row.oi_currency, "10");
+    }
+
+    #[test]
+    fn open_interest_history_accepts_legacy_object_shape() {
         let row: PublicOpenInterestHistory = serde_json::from_str(
             r#"{
                 "ts":"1609459200000",
@@ -518,6 +570,14 @@ mod tests {
         assert_eq!(row.ts, "1609459200000");
         assert_eq!(row.oi, "100000");
         assert_eq!(row.oi_currency, "10");
+    }
+
+    #[test]
+    fn open_interest_history_rejects_unknown_row_shape() {
+        let error =
+            serde_json::from_str::<PublicOpenInterestHistory>(r#"["1609459200000","100000"]"#)
+                .expect_err("invalid open interest history");
+        assert!(error.to_string().contains("expected 3 or 4"));
     }
 
     #[test]
