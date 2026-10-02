@@ -377,6 +377,14 @@ pub struct PortfolioCandidateRequest {
     pub leverage: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioStatisticsRequest {
+    pub bar: String,
+    pub limit: u16,
+    pub parallel_scenario_move_ratio: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionOrderType {
@@ -467,6 +475,7 @@ pub enum AgentOperation {
         mandate: Box<PortfolioMandateRequest>,
         policy: Box<HardRiskPolicyRequest>,
         candidate: Option<PortfolioCandidateRequest>,
+        statistics: Option<PortfolioStatisticsRequest>,
     },
     TradingCapabilities {
         instrument: String,
@@ -565,6 +574,7 @@ impl AgentOperation {
                 mandate,
                 policy,
                 candidate,
+                statistics,
             } => {
                 validate_version(&mandate.version)?;
                 validate_positive_decimal_text(&mandate.capital_base_usd, "capital_base_usd")?;
@@ -641,6 +651,15 @@ impl AgentOperation {
                         "candidate.worst_case_loss_usd",
                     )?;
                     validate_positive_decimal_text(&candidate.leverage, "candidate.leverage")?;
+                }
+                if let Some(statistics) = statistics {
+                    validate_history_bar(&statistics.bar)?;
+                    if !(3..=100).contains(&statistics.limit) {
+                        return Err(ProtocolError::InvalidHistoryLimit);
+                    }
+                    if let Some(move_ratio) = statistics.parallel_scenario_move_ratio.as_deref() {
+                        validate_decimal_text(move_ratio, "statistics.parallel_scenario_move_ratio")?;
+                    }
                 }
                 Ok(())
             }
@@ -1208,6 +1227,14 @@ fn validate_history_request(
     limit: Option<u16>,
 ) -> Result<(), ProtocolError> {
     validate_instrument(instrument)?;
+    validate_history_bar(bar)?;
+    if matches!(limit, Some(0 | 101..)) {
+        return Err(ProtocolError::InvalidHistoryLimit);
+    }
+    Ok(())
+}
+
+fn validate_history_bar(bar: &str) -> Result<(), ProtocolError> {
     if !matches!(
         bar,
         "1s" | "1m"
@@ -1236,9 +1263,6 @@ fn validate_history_request(
             | "3Mutc"
     ) {
         return Err(ProtocolError::InvalidHistoryBar);
-    }
-    if matches!(limit, Some(0 | 101..)) {
-        return Err(ProtocolError::InvalidHistoryLimit);
     }
     Ok(())
 }
