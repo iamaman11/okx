@@ -13,8 +13,9 @@ pub mod rate;
 pub mod trade;
 
 pub use account::{
-    AccountApi, AccountCapabilities, AccountConfig, BalanceDetail, BalanceSnapshot, FeeRate,
-    Instrument, LeverageInfo, MarginMode, MaxOrderSize, PendingOrder, Position,
+    AccountApi, AccountCapabilities, AccountConfig, AccountPositionRiskBalance,
+    AccountPositionRiskPosition, AccountPositionRiskSnapshot, BalanceDetail, BalanceSnapshot,
+    FeeRate, Instrument, LeverageInfo, MarginMode, MaxOrderSize, PendingOrder, Position,
     account_uid_fingerprint,
 };
 pub use asset::{AssetApi, FundingBalance};
