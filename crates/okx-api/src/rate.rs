@@ -532,6 +532,7 @@ fn private_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Opti
         "/api/v5/account/trade-fee" => (5, 2_000),
         "/api/v5/account/balance" => (10, 2_000),
         "/api/v5/account/positions" => (10, 2_000),
+        "/api/v5/account/account-position-risk" => (10, 2_000),
         "/api/v5/account/positions-history" => (10, 2_000),
         "/api/v5/trade/orders-pending" => (60, 2_000),
         "/api/v5/trade/orders-history-archive" => (20, 2_000),
@@ -559,7 +560,10 @@ mod tests {
         let budget = RateBudget::new();
         let config = budget.private_rest_plan("/api/v5/account/config", &[]);
         let positions = budget.private_rest_plan("/api/v5/account/positions", &[]);
+        let position_risk = budget.private_rest_plan("/api/v5/account/account-position-risk", &[]);
         assert_ne!(config.domains[0].key, positions.domains[0].key);
+        assert_eq!(position_risk.domains[0].max_requests, 10);
+        assert_eq!(position_risk.domains[0].window_ms, 2_000);
         assert_eq!(config.domains[0].key.kind, RateDomainKind::PrivateRestUser);
         assert_eq!(positions.domains[0].max_requests, 10);
     }

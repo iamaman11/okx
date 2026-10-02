@@ -30,8 +30,12 @@ pub use microstructure::{
     analyze_market_intelligence, analyze_spread_bps,
 };
 pub use risk::{
-    ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, PositionRiskAnalysis,
-    analyze_account_risk,
+    ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, CandidateProjection, ClusterExposure,
+    CorrelatedClusterLimit, ExposureAggregate, HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy,
+    PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2, PortfolioCandidate, PortfolioRiskAnalysis,
+    PositionRiskAnalysis, RiskDegradedMode, RiskMinimumQuality, RiskOracleComparison,
+    RiskPolicyDecision, RiskPolicyViolation, TRADING_MANDATE_SCHEMA_V1, TradingMandate,
+    analyze_account_risk, analyze_portfolio_risk, compare_account_position_risk_oracle,
 };
 pub use scenario::{
     HISTORY_BEHAVIOR_SCHEMA_V1, HistoryBehaviorAnalysis, POSITION_SCENARIO_SCHEMA_V1,

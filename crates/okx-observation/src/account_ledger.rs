@@ -75,6 +75,10 @@ pub struct AccountLedgerSummary {
     pub history_coverage: Vec<AccountHistoryCoverage>,
     pub realized_pnl_basis: &'static str,
     pub realized_pnl: Vec<CurrencyAggregate>,
+    pub daily_realized_pnl_utc_basis: &'static str,
+    pub daily_realized_pnl_utc_day_start_ms: Option<String>,
+    pub daily_realized_pnl_utc_day_end_ms: Option<String>,
+    pub daily_realized_pnl_utc: Vec<CurrencyAggregate>,
     pub trade_fee_basis: &'static str,
     pub trade_fees: Vec<CurrencyAggregate>,
     pub funding_basis: &'static str,
@@ -177,9 +181,19 @@ impl AccountLedgerFacts {
         let funding_balances = normalize_funding_balances(funding_balances)?;
         let current_account_as_of_ms = current_account_as_of(snapshot)?;
         let current_unrealized_pnl = aggregate_current_unrealized(snapshot)?;
+        let utc_day_bounds = current_account_as_of_ms
+            .as_deref()
+            .map(|value| timestamp_required("account.current_as_of", value))
+            .transpose()?
+            .map(|as_of| {
+                const UTC_DAY_MS: u64 = 86_400_000;
+                let start = (as_of / UTC_DAY_MS) * UTC_DAY_MS;
+                (start, start + UTC_DAY_MS)
+            });
 
         let mut coverage = Vec::new();
         let mut realized = BTreeMap::<String, Aggregate>::new();
+        let mut daily_realized = BTreeMap::<String, Aggregate>::new();
         let mut pnl_rows_checked = 0usize;
         let mut seen_position_rows = BTreeSet::new();
 
@@ -221,6 +235,12 @@ impl AccountLedgerFacts {
                 if !realized_value.is_zero() {
                     let currency = required("positions_history.ccy", &row.ccy)?;
                     add_aggregate(&mut realized, currency, realized_value);
+                    if let Some((day_start, day_end)) = utc_day_bounds
+                        && event_time >= day_start
+                        && event_time < day_end
+                    {
+                        add_aggregate(&mut daily_realized, currency, realized_value);
+                    }
                 }
             }
         }
@@ -393,6 +413,11 @@ impl AccountLedgerFacts {
                 history_coverage: coverage,
                 realized_pnl_basis: "positions-history.realizedPnl; exact OKX identity checked per row",
                 realized_pnl: finish_aggregates(realized),
+                daily_realized_pnl_utc_basis: "positions-history.realizedPnl filtered by uTime into [UTC day start, next UTC day); rebuilt from exchange history after restart",
+                daily_realized_pnl_utc_day_start_ms: utc_day_bounds
+                    .map(|(start, _)| start.to_string()),
+                daily_realized_pnl_utc_day_end_ms: utc_day_bounds.map(|(_, end)| end.to_string()),
+                daily_realized_pnl_utc: finish_aggregates(daily_realized),
                 trade_fee_basis: "fills-history.fee; deduplicated by instId+tradeId",
                 trade_fees: finish_aggregates(fees),
                 funding_basis: "bills-archive subType=173/174 pnl; deduplicated by billId",
@@ -880,6 +905,11 @@ mod tests {
         assert_eq!(facts.summary.funding_balances[0].balance, "5");
         assert_eq!(facts.summary.current_unrealized_pnl[0].amount, "1.5");
         assert_eq!(facts.summary.realized_pnl[0].amount, "1.05");
+        assert_eq!(facts.summary.daily_realized_pnl_utc[0].amount, "1.05");
+        assert_eq!(
+            facts.summary.daily_realized_pnl_utc_day_start_ms.as_deref(),
+            Some("1790812800000")
+        );
         assert_eq!(facts.summary.trade_fees[0].amount, "-0.1");
         assert_eq!(facts.summary.funding[0].amount, "-0.05");
         assert_eq!(facts.summary.position_pnl_identity_rows_checked, 1);
@@ -959,6 +989,7 @@ mod tests {
         assert_eq!(facts.summary.open_positions, 0);
         assert_eq!(facts.summary.pending_orders, 0);
         assert!(facts.summary.realized_pnl.is_empty());
+        assert!(facts.summary.daily_realized_pnl_utc.is_empty());
         assert!(facts.summary.trade_fees.is_empty());
         assert!(facts.summary.funding.is_empty());
     }

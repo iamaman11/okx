@@ -316,6 +316,69 @@ pub enum TradingMarginMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RiskMinimumQuality {
+    Fresh,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskDegradedMode {
+    Reject,
+    AllowReadOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioMandateRequest {
+    pub version: String,
+    pub capital_base_usd: String,
+    pub decision_horizon_hours: u32,
+    pub benchmark: Option<String>,
+    pub allowed_instruments: Vec<String>,
+    pub max_drawdown_ratio: String,
+    pub leverage_ceiling: String,
+    pub minimum_liquidity_notional_usd: String,
+    pub max_turnover_ratio: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorrelatedClusterLimitRequest {
+    pub id: String,
+    pub instruments: Vec<String>,
+    pub max_gross_notional_usd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HardRiskPolicyRequest {
+    pub version: String,
+    pub max_account_gross_notional_usd: String,
+    pub max_instrument_gross_notional_usd: String,
+    pub max_margin_utilization_ratio: String,
+    pub max_loss_per_trade_usd: String,
+    pub max_daily_realized_loss_usd: String,
+    pub max_drawdown_ratio: String,
+    pub max_leverage: String,
+    pub allowed_instruments: Vec<String>,
+    pub minimum_quality: RiskMinimumQuality,
+    pub degraded_mode: RiskDegradedMode,
+    pub correlated_clusters: Vec<CorrelatedClusterLimitRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioCandidateRequest {
+    pub instrument: String,
+    pub side: PositionSide,
+    pub notional_usd: String,
+    pub worst_case_loss_usd: String,
+    pub leverage: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExecutionOrderType {
     Limit,
     PostOnly,
@@ -400,7 +463,11 @@ pub enum AgentOperation {
     MailboxTelemetry,
     AccountSnapshot,
     AccountSummary,
-    PortfolioRisk,
+    PortfolioRisk {
+        mandate: Box<PortfolioMandateRequest>,
+        policy: Box<HardRiskPolicyRequest>,
+        candidate: Option<PortfolioCandidateRequest>,
+    },
     TradingCapabilities {
         instrument: String,
         margin_mode: TradingMarginMode,
@@ -493,8 +560,90 @@ impl AgentOperation {
             Self::ExecutorPreflight
             | Self::MailboxTelemetry
             | Self::AccountSnapshot
-            | Self::AccountSummary
-            | Self::PortfolioRisk => Ok(()),
+            | Self::AccountSummary => Ok(()),
+            Self::PortfolioRisk {
+                mandate,
+                policy,
+                candidate,
+            } => {
+                validate_version(&mandate.version)?;
+                validate_positive_decimal_text(&mandate.capital_base_usd, "capital_base_usd")?;
+                if mandate.decision_horizon_hours == 0 || mandate.decision_horizon_hours > 24 * 365
+                {
+                    return Err(ProtocolError::InvalidAnalyticalQuery(
+                        "decision_horizon_hours",
+                    ));
+                }
+                validate_non_negative_decimal_text(
+                    &mandate.max_drawdown_ratio,
+                    "mandate.max_drawdown_ratio",
+                )?;
+                validate_positive_decimal_text(
+                    &mandate.leverage_ceiling,
+                    "mandate.leverage_ceiling",
+                )?;
+                validate_non_negative_decimal_text(
+                    &mandate.minimum_liquidity_notional_usd,
+                    "mandate.minimum_liquidity_notional_usd",
+                )?;
+                validate_non_negative_decimal_text(
+                    &mandate.max_turnover_ratio,
+                    "mandate.max_turnover_ratio",
+                )?;
+                validate_instrument_list(&mandate.allowed_instruments, 32)?;
+                validate_version(&policy.version)?;
+                for (value, field) in [
+                    (
+                        &policy.max_account_gross_notional_usd,
+                        "policy.max_account_gross_notional_usd",
+                    ),
+                    (
+                        &policy.max_instrument_gross_notional_usd,
+                        "policy.max_instrument_gross_notional_usd",
+                    ),
+                    (
+                        &policy.max_margin_utilization_ratio,
+                        "policy.max_margin_utilization_ratio",
+                    ),
+                    (
+                        &policy.max_loss_per_trade_usd,
+                        "policy.max_loss_per_trade_usd",
+                    ),
+                    (
+                        &policy.max_daily_realized_loss_usd,
+                        "policy.max_daily_realized_loss_usd",
+                    ),
+                    (&policy.max_drawdown_ratio, "policy.max_drawdown_ratio"),
+                ] {
+                    validate_non_negative_decimal_text(value, field)?;
+                }
+                validate_positive_decimal_text(&policy.max_leverage, "policy.max_leverage")?;
+                validate_instrument_list(&policy.allowed_instruments, 32)?;
+                if policy.correlated_clusters.len() > 16 {
+                    return Err(ProtocolError::InvalidAnalyticalQuery("correlated_clusters"));
+                }
+                for cluster in &policy.correlated_clusters {
+                    validate_version(&cluster.id)?;
+                    validate_instrument_list(&cluster.instruments, 16)?;
+                    validate_non_negative_decimal_text(
+                        &cluster.max_gross_notional_usd,
+                        "cluster.max_gross_notional_usd",
+                    )?;
+                }
+                if let Some(candidate) = candidate {
+                    validate_instrument(&candidate.instrument)?;
+                    validate_positive_decimal_text(
+                        &candidate.notional_usd,
+                        "candidate.notional_usd",
+                    )?;
+                    validate_non_negative_decimal_text(
+                        &candidate.worst_case_loss_usd,
+                        "candidate.worst_case_loss_usd",
+                    )?;
+                    validate_positive_decimal_text(&candidate.leverage, "candidate.leverage")?;
+                }
+                Ok(())
+            }
             Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
             Self::PrepareOpenExecution {
                 intent_id,
@@ -940,6 +1089,34 @@ fn validate_direct_token(value: &str, min: usize, max: usize) -> Result<(), Prot
     }
 }
 
+fn validate_version(value: &str) -> Result<(), ProtocolError> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'/' | b'-' | b'_'))
+    {
+        Err(ProtocolError::InvalidAnalyticalQuery("version"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_instrument_list(values: &[String], max: usize) -> Result<(), ProtocolError> {
+    if values.len() > max {
+        return Err(ProtocolError::InvalidAnalyticalQuery("instrument_list"));
+    }
+    for (index, value) in values.iter().enumerate() {
+        validate_instrument(value)?;
+        if values[..index].contains(value) {
+            return Err(ProtocolError::InvalidAnalyticalQuery(
+                "duplicate instrument",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
     if (16..=128).contains(&value.len())
         && value
@@ -1076,6 +1253,29 @@ fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     } else {
         Err(ProtocolError::InvalidInstrument)
     }
+}
+
+fn validate_non_negative_decimal_text(
+    value: &str,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    if value.is_empty() || value.len() > 64 {
+        return Err(ProtocolError::InvalidDecimalInput(field));
+    }
+    let bytes = value.as_bytes();
+    let mut dots = 0usize;
+    let mut digits = 0usize;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match byte {
+            b'0'..=b'9' => digits += 1,
+            b'.' if dots == 0 && index > 0 && index + 1 < bytes.len() => dots += 1,
+            _ => return Err(ProtocolError::InvalidDecimalInput(field)),
+        }
+    }
+    if digits == 0 {
+        return Err(ProtocolError::InvalidDecimalInput(field));
+    }
+    Ok(())
 }
 
 fn validate_positive_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {

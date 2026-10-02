@@ -1,7 +1,7 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
-    AccountApi, AccountHistoryApi, AssetApi, FeeRate, InstrumentType, MarginMode, OkxError,
-    OkxRestClient,
+    AccountApi, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate, InstrumentType,
+    MarginMode, OkxError, OkxRestClient,
 };
 use okx_observation::{
     AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, FeeScheduleError,
@@ -187,6 +187,14 @@ impl AccountBootstrapper {
                 warnings,
             },
         )?)
+    }
+
+    pub async fn account_position_risk_oracle(
+        &self,
+    ) -> Result<AccountPositionRiskSnapshot, AccountBootstrapError> {
+        let config = self.api.config().await?;
+        strict_read_only_permissions(&config.perm)?;
+        Ok(self.api.account_position_risk().await?)
     }
 
     pub async fn ledger_facts(
