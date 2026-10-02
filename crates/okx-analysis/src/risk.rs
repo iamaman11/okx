@@ -1,10 +1,15 @@
-use okx_observation::{AccountPositionState, AccountSnapshot};
+use std::collections::{BTreeMap, BTreeSet};
+
+use okx_observation::{AccountLedgerSummary, AccountPositionState, AccountSnapshot, CurrencyAggregate};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
 use super::{AnalysisError, PositionDirection, decimal, positive_decimal};
 
 pub const ACCOUNT_RISK_ANALYSIS_SCHEMA_V1: &str = "okx.account-risk-analysis/v1";
+pub const PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2: &str = "okx.portfolio-risk-analysis/v2";
+pub const TRADING_MANDATE_SCHEMA_V1: &str = "okx.trading-mandate/v1";
+pub const HARD_RISK_POLICY_SCHEMA_V1: &str = "okx.hard-risk-policy/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PositionRiskAnalysis {
@@ -47,6 +52,131 @@ pub struct AccountRiskAnalysis {
     pub open_position_count: usize,
     pub pending_order_count: usize,
     pub positions: Vec<PositionRiskAnalysis>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TradingMandate {
+    pub schema: &'static str,
+    pub version: String,
+    pub capital_base_usd: String,
+    pub decision_horizon_hours: u32,
+    pub benchmark: Option<String>,
+    pub allowed_instruments: Vec<String>,
+    pub max_drawdown_ratio: String,
+    pub leverage_ceiling: String,
+    pub minimum_liquidity_notional_usd: String,
+    pub max_turnover_ratio: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CorrelatedClusterLimit {
+    pub id: String,
+    pub instruments: Vec<String>,
+    pub max_gross_notional_usd: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskMinimumQuality {
+    Fresh,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskDegradedMode {
+    Reject,
+    AllowReadOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HardRiskPolicy {
+    pub schema: &'static str,
+    pub version: String,
+    pub max_account_gross_notional_usd: String,
+    pub max_instrument_gross_notional_usd: String,
+    pub max_margin_utilization_ratio: String,
+    pub max_loss_per_trade_usd: String,
+    pub max_daily_realized_loss_usd: String,
+    pub max_drawdown_ratio: String,
+    pub max_leverage: String,
+    pub allowed_instruments: Vec<String>,
+    pub minimum_quality: RiskMinimumQuality,
+    pub degraded_mode: RiskDegradedMode,
+    pub correlated_clusters: Vec<CorrelatedClusterLimit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PortfolioCandidate {
+    pub instrument: String,
+    pub direction: PositionDirection,
+    pub notional_usd: String,
+    pub worst_case_loss_usd: String,
+    pub leverage: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExposureAggregate {
+    pub key: String,
+    pub gross_notional_usd: String,
+    pub signed_net_notional_usd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClusterExposure {
+    pub cluster_id: String,
+    pub gross_notional_usd: String,
+    pub max_gross_notional_usd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CandidateProjection {
+    pub instrument: String,
+    pub direction: PositionDirection,
+    pub additive_new_risk: bool,
+    pub notional_usd: String,
+    pub worst_case_loss_usd: String,
+    pub leverage: String,
+    pub projected_account_gross_notional_usd: String,
+    pub projected_instrument_gross_notional_usd: String,
+    pub projected_margin_utilization_ratio: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RiskPolicyViolation {
+    pub code: &'static str,
+    pub scope: String,
+    pub observed: String,
+    pub limit: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskPolicyDecision {
+    Accepted,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PortfolioRiskAnalysis {
+    pub schema: &'static str,
+    pub valuation_basis: &'static str,
+    pub account: AccountRiskAnalysis,
+    pub instrument_exposure: Vec<ExposureAggregate>,
+    pub settlement_exposure: Vec<ExposureAggregate>,
+    pub correlated_cluster_exposure: Vec<ClusterExposure>,
+    pub margin_utilization_ratio: Option<String>,
+    pub capital_base_drawdown_ratio: String,
+    pub daily_realized_pnl_utc_basis: &'static str,
+    pub daily_realized_pnl_utc_day_start_ms: Option<String>,
+    pub daily_realized_pnl_utc_day_end_ms: Option<String>,
+    pub daily_realized_pnl_utc: Vec<CurrencyAggregate>,
+    pub daily_realized_loss_usd_equivalent: Option<String>,
+    pub mandate: TradingMandate,
+    pub policy: HardRiskPolicy,
+    pub candidate: Option<CandidateProjection>,
+    pub policy_decision: RiskPolicyDecision,
+    pub violations: Vec<RiskPolicyViolation>,
 }
 
 struct PositionWork {
@@ -210,6 +340,271 @@ pub fn analyze_account_risk(
         pending_order_count: account.pending_orders.len(),
         positions,
     })
+}
+
+pub fn analyze_portfolio_risk(
+    account: &AccountSnapshot,
+    ledger: &AccountLedgerSummary,
+    mandate: TradingMandate,
+    policy: HardRiskPolicy,
+    candidate: Option<PortfolioCandidate>,
+    account_is_fresh: bool,
+) -> Result<PortfolioRiskAnalysis, AnalysisError> {
+    let account_risk = analyze_account_risk(account)?;
+    let total_equity = decimal("total_equity_usd", &account_risk.total_equity_usd)?;
+    let capital_base = positive_decimal("capital_base_usd", &mandate.capital_base_usd)?;
+    let margin_utilization = match account_risk.initial_margin_requirement_usd.as_deref() {
+        Some(imr) if total_equity > Decimal::ZERO => {
+            Some((decimal("initial_margin_requirement_usd", imr)? / total_equity).normalize().to_string())
+        }
+        _ => None,
+    };
+    let drawdown = if total_equity < capital_base {
+        ((capital_base - total_equity) / capital_base).normalize()
+    } else {
+        Decimal::ZERO
+    };
+
+    let mut instrument = BTreeMap::<String, (Decimal, Decimal)>::new();
+    let mut settlement = BTreeMap::<String, (Decimal, Decimal)>::new();
+    for position in &account_risk.positions {
+        let gross = positive_decimal("position_notional_usd", &position.position_notional_usd)?;
+        let signed = decimal("signed_notional_usd", &position.signed_notional_usd)?;
+        let entry = instrument.entry(position.instrument_id.clone()).or_default();
+        entry.0 += gross;
+        entry.1 += signed;
+
+        let source = account.positions.iter().find(|row| {
+            row.instrument_id == position.instrument_id
+                && match position.direction {
+                    PositionDirection::Long => row.position_side == "long" || (row.position_side == "net" && !row.position.starts_with('-')),
+                    PositionDirection::Short => row.position_side == "short" || (row.position_side == "net" && row.position.starts_with('-')),
+                }
+        });
+        let settle = source
+            .and_then(|row| row.margin_currency.clone())
+            .unwrap_or_else(|| "UNKNOWN".to_owned());
+        let entry = settlement.entry(settle).or_default();
+        entry.0 += gross;
+        entry.1 += signed;
+    }
+
+    let instrument_exposure = finish_exposure(instrument);
+    let settlement_exposure = finish_exposure(settlement);
+
+    let mut cluster_exposure = Vec::new();
+    for cluster in &policy.correlated_clusters {
+        let members = cluster.instruments.iter().collect::<BTreeSet<_>>();
+        let gross = instrument_exposure
+            .iter()
+            .filter(|row| members.contains(&row.key))
+            .try_fold(Decimal::ZERO, |acc, row| {
+                Ok::<_, AnalysisError>(acc + decimal("cluster_gross", &row.gross_notional_usd)?)
+            })?;
+        cluster_exposure.push(ClusterExposure {
+            cluster_id: cluster.id.clone(),
+            gross_notional_usd: gross.normalize().to_string(),
+            max_gross_notional_usd: cluster.max_gross_notional_usd.clone(),
+        });
+    }
+
+    let daily_loss = usd_equivalent_daily_loss(&ledger.daily_realized_pnl_utc)?;
+    let mut violations = Vec::new();
+
+    if matches!(policy.minimum_quality, RiskMinimumQuality::Fresh) && !account_is_fresh {
+        violations.push(RiskPolicyViolation {
+            code: "MINIMUM_DATA_QUALITY",
+            scope: "account".to_owned(),
+            observed: "degraded".to_owned(),
+            limit: "fresh".to_owned(),
+        });
+    }
+    if !account_is_fresh && matches!(policy.degraded_mode, RiskDegradedMode::Reject) {
+        violations.push(RiskPolicyViolation {
+            code: "DEGRADED_MODE_REJECT",
+            scope: "account".to_owned(),
+            observed: "degraded".to_owned(),
+            limit: "reject".to_owned(),
+        });
+    }
+
+    let gross = decimal("gross_position_notional_usd", &account_risk.gross_position_notional_usd)?;
+    compare_limit(&mut violations, "MAX_ACCOUNT_GROSS_NOTIONAL", "account", gross, &policy.max_account_gross_notional_usd)?;
+    if let Some(utilization) = margin_utilization.as_deref() {
+        compare_limit(&mut violations, "MAX_MARGIN_UTILIZATION", "account", decimal("margin_utilization_ratio", utilization)?, &policy.max_margin_utilization_ratio)?;
+    }
+    compare_limit(&mut violations, "MAX_DRAWDOWN", "capital_base", drawdown, &policy.max_drawdown_ratio)?;
+    if let Some(loss) = daily_loss {
+        compare_limit(&mut violations, "MAX_DAILY_REALIZED_LOSS", "utc_day", loss, &policy.max_daily_realized_loss_usd)?;
+    }
+
+    for row in &instrument_exposure {
+        compare_limit(
+            &mut violations,
+            "MAX_INSTRUMENT_GROSS_NOTIONAL",
+            &row.key,
+            decimal("instrument_gross", &row.gross_notional_usd)?,
+            &policy.max_instrument_gross_notional_usd,
+        )?;
+        if !policy.allowed_instruments.is_empty() && !policy.allowed_instruments.contains(&row.key) {
+            violations.push(RiskPolicyViolation {
+                code: "INSTRUMENT_NOT_ALLOWED",
+                scope: row.key.clone(),
+                observed: "present".to_owned(),
+                limit: "allowed_instruments".to_owned(),
+            });
+        }
+    }
+    for row in &cluster_exposure {
+        compare_limit(
+            &mut violations,
+            "MAX_CORRELATED_CLUSTER_GROSS_NOTIONAL",
+            &row.cluster_id,
+            decimal("cluster_gross", &row.gross_notional_usd)?,
+            &row.max_gross_notional_usd,
+        )?;
+    }
+    for position in &account_risk.positions {
+        if let Some(leverage) = position.configured_leverage.as_deref() {
+            compare_limit(
+                &mut violations,
+                "MAX_LEVERAGE",
+                &position.instrument_id,
+                decimal("configured_leverage", leverage)?,
+                &policy.max_leverage,
+            )?;
+        }
+    }
+
+    let candidate_projection = if let Some(candidate) = candidate {
+        if !mandate.allowed_instruments.is_empty() && !mandate.allowed_instruments.contains(&candidate.instrument) {
+            violations.push(RiskPolicyViolation {
+                code: "MANDATE_INSTRUMENT_NOT_ALLOWED",
+                scope: candidate.instrument.clone(),
+                observed: "candidate".to_owned(),
+                limit: "mandate.allowed_instruments".to_owned(),
+            });
+        }
+        if !policy.allowed_instruments.is_empty() && !policy.allowed_instruments.contains(&candidate.instrument) {
+            violations.push(RiskPolicyViolation {
+                code: "INSTRUMENT_NOT_ALLOWED",
+                scope: candidate.instrument.clone(),
+                observed: "candidate".to_owned(),
+                limit: "policy.allowed_instruments".to_owned(),
+            });
+        }
+        let notional = positive_decimal("candidate_notional_usd", &candidate.notional_usd)?;
+        let candidate_loss = decimal("candidate_worst_case_loss_usd", &candidate.worst_case_loss_usd)?.abs();
+        let leverage = positive_decimal("candidate_leverage", &candidate.leverage)?;
+        compare_limit(&mut violations, "MAX_LOSS_PER_TRADE", &candidate.instrument, candidate_loss, &policy.max_loss_per_trade_usd)?;
+        compare_limit(&mut violations, "MAX_LEVERAGE", &candidate.instrument, leverage, &policy.max_leverage)?;
+        compare_limit(&mut violations, "MANDATE_LEVERAGE_CEILING", &candidate.instrument, leverage, &mandate.leverage_ceiling)?;
+
+        let current_instrument = instrument_exposure.iter()
+            .find(|row| row.key == candidate.instrument)
+            .map(|row| decimal("instrument_gross", &row.gross_notional_usd))
+            .transpose()?
+            .unwrap_or(Decimal::ZERO);
+        let projected_gross = gross + notional;
+        let projected_instrument = current_instrument + notional;
+        compare_limit(&mut violations, "MAX_ACCOUNT_GROSS_NOTIONAL_PROJECTED", "account", projected_gross, &policy.max_account_gross_notional_usd)?;
+        compare_limit(&mut violations, "MAX_INSTRUMENT_GROSS_NOTIONAL_PROJECTED", &candidate.instrument, projected_instrument, &policy.max_instrument_gross_notional_usd)?;
+
+        let projected_margin = if total_equity > Decimal::ZERO {
+            let current_imr = account_risk.initial_margin_requirement_usd.as_deref()
+                .map(|value| decimal("initial_margin_requirement_usd", value))
+                .transpose()?
+                .unwrap_or(Decimal::ZERO);
+            Some(((current_imr + notional / leverage) / total_equity).normalize().to_string())
+        } else {
+            None
+        };
+        if let Some(value) = projected_margin.as_deref() {
+            compare_limit(&mut violations, "MAX_MARGIN_UTILIZATION_PROJECTED", "account", decimal("projected_margin_utilization", value)?, &policy.max_margin_utilization_ratio)?;
+        }
+
+        Some(CandidateProjection {
+            instrument: candidate.instrument,
+            direction: candidate.direction,
+            additive_new_risk: true,
+            notional_usd: notional.normalize().to_string(),
+            worst_case_loss_usd: candidate_loss.normalize().to_string(),
+            leverage: leverage.normalize().to_string(),
+            projected_account_gross_notional_usd: projected_gross.normalize().to_string(),
+            projected_instrument_gross_notional_usd: projected_instrument.normalize().to_string(),
+            projected_margin_utilization_ratio: projected_margin,
+        })
+    } else {
+        None
+    };
+
+    let policy_decision = if violations.is_empty() {
+        RiskPolicyDecision::Accepted
+    } else {
+        RiskPolicyDecision::Rejected
+    };
+
+    Ok(PortfolioRiskAnalysis {
+        schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2,
+        valuation_basis: "exchange position notionalUsd / mark-price semantics; candidate notional is explicit USD input",
+        account: account_risk,
+        instrument_exposure,
+        settlement_exposure,
+        correlated_cluster_exposure: cluster_exposure,
+        margin_utilization_ratio: margin_utilization,
+        capital_base_drawdown_ratio: drawdown.normalize().to_string(),
+        daily_realized_pnl_utc_basis: ledger.daily_realized_pnl_utc_basis,
+        daily_realized_pnl_utc_day_start_ms: ledger.daily_realized_pnl_utc_day_start_ms.clone(),
+        daily_realized_pnl_utc_day_end_ms: ledger.daily_realized_pnl_utc_day_end_ms.clone(),
+        daily_realized_pnl_utc: ledger.daily_realized_pnl_utc.clone(),
+        daily_realized_loss_usd_equivalent: daily_loss.map(|value| value.normalize().to_string()),
+        mandate,
+        policy,
+        candidate: candidate_projection,
+        policy_decision,
+        violations,
+    })
+}
+
+fn finish_exposure(values: BTreeMap<String, (Decimal, Decimal)>) -> Vec<ExposureAggregate> {
+    values
+        .into_iter()
+        .map(|(key, (gross, net))| ExposureAggregate {
+            key,
+            gross_notional_usd: gross.normalize().to_string(),
+            signed_net_notional_usd: net.normalize().to_string(),
+        })
+        .collect()
+}
+
+fn usd_equivalent_daily_loss(values: &[CurrencyAggregate]) -> Result<Option<Decimal>, AnalysisError> {
+    let mut net = Decimal::ZERO;
+    for row in values {
+        if !matches!(row.currency.as_str(), "USD" | "USDT" | "USDC" | "USDG") {
+            return Ok(None);
+        }
+        net += decimal("daily_realized_pnl", &row.amount)?;
+    }
+    Ok(Some(if net < Decimal::ZERO { -net } else { Decimal::ZERO }))
+}
+
+fn compare_limit(
+    violations: &mut Vec<RiskPolicyViolation>,
+    code: &'static str,
+    scope: &str,
+    observed: Decimal,
+    limit: &str,
+) -> Result<(), AnalysisError> {
+    let limit_value = positive_decimal("risk_limit", limit)?;
+    if observed > limit_value {
+        violations.push(RiskPolicyViolation {
+            code,
+            scope: scope.to_owned(),
+            observed: observed.normalize().to_string(),
+            limit: limit_value.normalize().to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn direction_for(
