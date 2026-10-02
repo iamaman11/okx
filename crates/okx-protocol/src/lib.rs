@@ -464,8 +464,8 @@ pub enum AgentOperation {
     AccountSnapshot,
     AccountSummary,
     PortfolioRisk {
-        mandate: PortfolioMandateRequest,
-        policy: HardRiskPolicyRequest,
+        mandate: Box<PortfolioMandateRequest>,
+        policy: Box<HardRiskPolicyRequest>,
         candidate: Option<PortfolioCandidateRequest>,
     },
     TradingCapabilities {
