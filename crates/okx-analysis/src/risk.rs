@@ -700,7 +700,9 @@ pub fn compare_account_position_risk_oracle(
         _ => None,
     };
     let consistent = gross_residual.is_zero()
-        && adjusted_residual.map(|value| value.is_zero()).unwrap_or(true);
+        && adjusted_residual
+            .map(|value| value.is_zero())
+            .unwrap_or(true);
 
     Ok(RiskOracleComparison {
         schema: "okx.risk-oracle-comparison/v1",
@@ -727,7 +729,9 @@ fn finish_exposure(values: BTreeMap<String, (Decimal, Decimal)>) -> Vec<Exposure
         .collect()
 }
 
-fn usd_equivalent_daily_loss(values: &[CurrencyAggregate]) -> Result<Option<Decimal>, AnalysisError> {
+fn usd_equivalent_daily_loss(
+    values: &[CurrencyAggregate],
+) -> Result<Option<Decimal>, AnalysisError> {
     let mut net = Decimal::ZERO;
     for row in values {
         if !matches!(row.currency.as_str(), "USD" | "USDT" | "USDC" | "USDG") {
@@ -735,7 +739,11 @@ fn usd_equivalent_daily_loss(values: &[CurrencyAggregate]) -> Result<Option<Deci
         }
         net += decimal("daily_realized_pnl", &row.amount)?;
     }
-    Ok(Some(if net < Decimal::ZERO { -net } else { Decimal::ZERO }))
+    Ok(Some(if net < Decimal::ZERO {
+        -net
+    } else {
+        Decimal::ZERO
+    }))
 }
 
 fn compare_limit(
@@ -1100,10 +1108,7 @@ mod tests {
             capital_base_usd: "500".to_owned(),
             decision_horizon_hours: 24,
             benchmark: None,
-            allowed_instruments: vec![
-                "BTC-USDT-SWAP".to_owned(),
-                "ETH-USDT-SWAP".to_owned(),
-            ],
+            allowed_instruments: vec!["BTC-USDT-SWAP".to_owned(), "ETH-USDT-SWAP".to_owned()],
             max_drawdown_ratio: "0.5".to_owned(),
             leverage_ceiling: "10".to_owned(),
             minimum_liquidity_notional_usd: "0".to_owned(),
@@ -1130,10 +1135,7 @@ mod tests {
             degraded_mode: RiskDegradedMode::Reject,
             correlated_clusters: vec![CorrelatedClusterLimit {
                 id: "majors".to_owned(),
-                instruments: vec![
-                    "BTC-USDT-SWAP".to_owned(),
-                    "ETH-USDT-SWAP".to_owned(),
-                ],
+                instruments: vec!["BTC-USDT-SWAP".to_owned(), "ETH-USDT-SWAP".to_owned()],
                 max_gross_notional_usd: "1500".to_owned(),
             }],
         }
@@ -1164,15 +1166,9 @@ mod tests {
                 ),
             ],
         );
-        let result = analyze_portfolio_risk(
-            &snapshot,
-            &ledger("0"),
-            mandate(),
-            policy(),
-            None,
-            true,
-        )
-        .expect("portfolio risk");
+        let result =
+            analyze_portfolio_risk(&snapshot, &ledger("0"), mandate(), policy(), None, true)
+                .expect("portfolio risk");
 
         assert_eq!(result.account.gross_position_notional_usd, "1000");
         assert_eq!(result.account.directional_net_position_notional_usd, "200");
@@ -1227,15 +1223,9 @@ mod tests {
     #[test]
     fn degraded_account_is_rejected_when_policy_requires_fresh() {
         let snapshot = account("long_short_mode", Vec::new());
-        let result = analyze_portfolio_risk(
-            &snapshot,
-            &ledger("0"),
-            mandate(),
-            policy(),
-            None,
-            false,
-        )
-        .expect("portfolio risk");
+        let result =
+            analyze_portfolio_risk(&snapshot, &ledger("0"), mandate(), policy(), None, false)
+                .expect("portfolio risk");
 
         assert_eq!(result.policy_decision, RiskPolicyDecision::Rejected);
         assert!(
@@ -1281,22 +1271,14 @@ mod tests {
         bounded.max_account_gross_notional_usd = "2000".to_owned();
         bounded.correlated_clusters[0].max_gross_notional_usd = "1500".to_owned();
 
-        let result = analyze_portfolio_risk(
-            &snapshot,
-            &ledger("0"),
-            mandate(),
-            bounded,
-            None,
-            true,
-        )
-        .expect("portfolio risk");
+        let result =
+            analyze_portfolio_risk(&snapshot, &ledger("0"), mandate(), bounded, None, true)
+                .expect("portfolio risk");
 
-        assert!(
-            result.violations.iter().any(|violation| {
-                violation.code == "MAX_CORRELATED_CLUSTER_GROSS_NOTIONAL"
-                    && violation.observed == "1600"
-            })
-        );
+        assert!(result.violations.iter().any(|violation| {
+            violation.code == "MAX_CORRELATED_CLUSTER_GROSS_NOTIONAL"
+                && violation.observed == "1600"
+        }));
     }
 
     #[test]
@@ -1313,33 +1295,19 @@ mod tests {
                 Some("80"),
             )],
         );
-        let local = analyze_portfolio_risk(
-            &snapshot,
-            &ledger("0"),
-            mandate(),
-            policy(),
-            None,
-            true,
-        )
-        .expect("local");
+        let local =
+            analyze_portfolio_risk(&snapshot, &ledger("0"), mandate(), policy(), None, true)
+                .expect("local");
 
-        let exact = compare_account_position_risk_oracle(
-            &local,
-            "1790985600000",
-            Some("480"),
-            &["600"],
-        )
-        .expect("oracle");
+        let exact =
+            compare_account_position_risk_oracle(&local, "1790985600000", Some("480"), &["600"])
+                .expect("oracle");
         assert!(exact.consistent);
         assert_eq!(exact.gross_notional_residual_usd, "0");
 
-        let mismatch = compare_account_position_risk_oracle(
-            &local,
-            "1790985600000",
-            Some("479"),
-            &["590"],
-        )
-        .expect("oracle mismatch");
+        let mismatch =
+            compare_account_position_risk_oracle(&local, "1790985600000", Some("479"), &["590"])
+                .expect("oracle mismatch");
         assert!(!mismatch.consistent);
         assert_eq!(mismatch.gross_notional_residual_usd, "10");
         assert_eq!(mismatch.adjusted_equity_residual_usd.as_deref(), Some("1"));
