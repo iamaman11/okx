@@ -1,10 +1,15 @@
 mod candidate;
+mod market_query;
 mod risk;
 mod scenario;
 
 pub use candidate::{
     CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderAssumptions,
     SizingConstraint, analyze_candidate_order,
+};
+pub use market_query::{
+    RETURN_24H_PCT_METRIC_ID, RETURN_24H_PCT_METRIC_VERSION_V1, RETURN_24H_PCT_UNIT, Return24hPct,
+    analyze_return_24h_pct,
 };
 pub use risk::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, PositionRiskAnalysis,

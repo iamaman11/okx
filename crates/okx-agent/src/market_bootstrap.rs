@@ -1,8 +1,8 @@
 use chrono::{SecondsFormat, Utc};
-use okx_api::{MarketDataApi, OkxPublicClient};
+use okx_api::{InstrumentType, MarketDataApi, OkxPublicClient};
 use okx_observation::{
     FundingRequirement, MarketBootstrap, MarketError, MarketHistoryError, MarketHistorySnapshot,
-    MarketSnapshot, ReferenceRegistry,
+    MarketSnapshot, MarketUniverseTicker, ReferenceRegistry,
 };
 use thiserror::Error;
 
@@ -99,6 +99,19 @@ impl MarketBootstrapper {
                 open_interest,
             },
         )?)
+    }
+
+    pub async fn universe_tickers(
+        &self,
+        instrument_type: InstrumentType,
+    ) -> Result<Vec<MarketUniverseTicker>, MarketBootstrapError> {
+        self.api
+            .tickers(instrument_type)
+            .await?
+            .into_iter()
+            .map(MarketUniverseTicker::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(MarketBootstrapError::from)
     }
 
     pub async fn history(

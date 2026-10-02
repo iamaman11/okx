@@ -493,6 +493,7 @@ fn public_rest_policy(path: &str, _params: &[(&str, String)]) -> (u32, u64, Opti
         "/api/v5/public/time" => (5, 2_000),
         "/api/v5/public/instruments" => (10, 2_000),
         "/api/v5/market/ticker" => (10, 2_000),
+        "/api/v5/market/tickers" => (20, 2_000),
         "/api/v5/public/mark-price" => (10, 2_000),
         "/api/v5/market/index-tickers" => (10, 2_000),
         "/api/v5/public/funding-rate" => (10, 2_000),
@@ -578,6 +579,16 @@ mod tests {
         );
         assert!(fills.domains.iter().all(|domain| domain.window_ms == 2_000));
         assert!(bills.domains.iter().all(|domain| domain.window_ms == 2_000));
+    }
+
+    #[test]
+    fn documented_bulk_tickers_budget_is_bounded() {
+        let budget = RateBudget::new();
+        let plan =
+            budget.public_rest_plan("/api/v5/market/tickers", &[("instType", "SWAP".to_owned())]);
+        assert_eq!(plan.domains[0].key.kind, RateDomainKind::PublicRestIp);
+        assert_eq!(plan.domains[0].max_requests, 20);
+        assert_eq!(plan.domains[0].window_ms, 2_000);
     }
 
     #[test]

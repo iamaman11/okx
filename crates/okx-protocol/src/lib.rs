@@ -13,6 +13,7 @@ pub const KDF_LABEL_CLIENT_TO_AGENT_V1: &str = "okx-mailbox-v1/client-to-agent";
 pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
 pub const DIRECT_TRANSPORT_FRAME_SCHEMA_V1: &str = "okx.direct-transport.frame/v1";
 pub const DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.1";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -42,6 +43,9 @@ pub enum ProtocolError {
 
     #[error("market research requires 2..=8 unique instruments")]
     InvalidMarketResearchInstruments,
+
+    #[error("invalid analytical query plan: {0}")]
+    InvalidAnalyticalQuery(&'static str),
 
     #[error("position scenario requires exactly one exit_price or entry_move_ratio")]
     InvalidPositionScenarioExit,
@@ -153,6 +157,115 @@ pub enum InstrumentTypeFilter {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum QueryField {
+    InstrumentId,
+    InstrumentType,
+    SettleCurrency,
+    State,
+    Last,
+    Open24h,
+    Volume24h,
+    VolumeCurrency24h,
+    ExchangeTimestampMs,
+    Return24hPct,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryMetric {
+    Return24hPct,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuerySortKey {
+    Return24hPct,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuerySortDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryInstrumentState {
+    Live,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuerySort {
+    pub key: QuerySortKey,
+    pub direction: QuerySortDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketQueryUniverse {
+    pub instrument_types: Vec<InstrumentTypeFilter>,
+    pub settle_currency: Option<String>,
+    pub state: Option<QueryInstrumentState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticalQueryPlan {
+    pub catalog_version: String,
+    pub universe: MarketQueryUniverse,
+    pub select: Vec<QueryField>,
+    pub metric: Option<QueryMetric>,
+    pub sort: Option<QuerySort>,
+    pub limit: u16,
+}
+
+impl AnalyticalQueryPlan {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.catalog_version.is_empty()
+            || self.catalog_version.len() > 64
+            || self.catalog_version.bytes().any(|byte| {
+                !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'/' | b'-' | b'_'))
+            })
+        {
+            return Err(ProtocolError::InvalidAnalyticalQuery("catalog_version"));
+        }
+        if self.universe.instrument_types.is_empty()
+            || self.universe.instrument_types.len() > 2
+            || (self.universe.instrument_types.len() == 2
+                && self.universe.instrument_types[0] == self.universe.instrument_types[1])
+        {
+            return Err(ProtocolError::InvalidAnalyticalQuery("instrument_types"));
+        }
+        if let Some(settle) = self.universe.settle_currency.as_deref() {
+            validate_asset_code(settle)?;
+        }
+        if self.select.is_empty() || self.select.len() > 10 {
+            return Err(ProtocolError::InvalidAnalyticalQuery("select"));
+        }
+        for (index, field) in self.select.iter().enumerate() {
+            if self.select[..index].contains(field) {
+                return Err(ProtocolError::InvalidAnalyticalQuery(
+                    "duplicate select field",
+                ));
+            }
+        }
+        if !(1..=25).contains(&self.limit) {
+            return Err(ProtocolError::InvalidAnalyticalQuery("limit"));
+        }
+        let needs_return = self.select.contains(&QueryField::Return24hPct) || self.sort.is_some();
+        if needs_return && self.metric != Some(QueryMetric::Return24hPct) {
+            return Err(ProtocolError::InvalidAnalyticalQuery(
+                "return_24h_pct metric must be declared",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExecutionTradeMode {
     Cross,
     Isolated,
@@ -195,6 +308,10 @@ pub enum AgentOperation {
         instruments: Vec<String>,
         bar: String,
         limit: Option<u16>,
+    },
+    QueryCapabilities,
+    Query {
+        plan: AnalyticalQueryPlan,
     },
     MarketHistory {
         instrument: String,
@@ -308,6 +425,8 @@ impl AgentOperation {
                 bar,
                 limit,
             } => validate_market_research(instruments, bar, *limit),
+            Self::QueryCapabilities => Ok(()),
+            Self::Query { plan } => plan.validate(),
             Self::MarketHistory {
                 instrument,
                 bar,
@@ -955,6 +1074,84 @@ mod tests {
             intent_id: "intent_0123456789abcdef".to_owned(),
         };
         assert!(!submit.direct_transport_read_only());
+    }
+
+    #[test]
+    fn analytical_query_plan_is_bounded_and_strict() {
+        let plan = AnalyticalQueryPlan {
+            catalog_version: ANALYTICAL_QUERY_CATALOG_VERSION_V1.to_owned(),
+            universe: MarketQueryUniverse {
+                instrument_types: vec![InstrumentTypeFilter::Swap, InstrumentTypeFilter::Futures],
+                settle_currency: Some("USDT".to_owned()),
+                state: Some(QueryInstrumentState::Live),
+            },
+            select: vec![
+                QueryField::InstrumentId,
+                QueryField::Last,
+                QueryField::Return24hPct,
+            ],
+            metric: Some(QueryMetric::Return24hPct),
+            sort: Some(QuerySort {
+                key: QuerySortKey::Return24hPct,
+                direction: QuerySortDirection::Desc,
+            }),
+            limit: 10,
+        };
+        plan.validate().expect("valid bounded query plan");
+
+        let mut stale = plan.clone();
+        stale.catalog_version = "okx.query.catalog/2026-09-01.1".to_owned();
+        stale
+            .validate()
+            .expect("stale catalog is a product-level rejection, not malformed transport input");
+
+        let mut duplicate = plan.clone();
+        duplicate.select.push(QueryField::Last);
+        assert!(matches!(
+            duplicate.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery(
+                "duplicate select field"
+            ))
+        ));
+
+        let mut unbounded = plan.clone();
+        unbounded.limit = 26;
+        assert!(matches!(
+            unbounded.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery("limit"))
+        ));
+
+        let mut undeclared_metric = plan;
+        undeclared_metric.metric = None;
+        assert!(matches!(
+            undeclared_metric.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery(
+                "return_24h_pct metric must be declared"
+            ))
+        ));
+    }
+
+    #[test]
+    fn analytical_query_operations_remain_read_only_on_direct_transport() {
+        let capabilities = AgentOperation::QueryCapabilities;
+        assert!(capabilities.direct_transport_read_only());
+
+        let query = AgentOperation::Query {
+            plan: AnalyticalQueryPlan {
+                catalog_version: ANALYTICAL_QUERY_CATALOG_VERSION_V1.to_owned(),
+                universe: MarketQueryUniverse {
+                    instrument_types: vec![InstrumentTypeFilter::Swap],
+                    settle_currency: None,
+                    state: Some(QueryInstrumentState::Live),
+                },
+                select: vec![QueryField::InstrumentId],
+                metric: None,
+                sort: None,
+                limit: 5,
+            },
+        };
+        assert!(query.direct_transport_read_only());
+        query.validate().expect("valid query operation");
     }
 
     fn request_id() -> String {
