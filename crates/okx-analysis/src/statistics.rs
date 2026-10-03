@@ -159,7 +159,6 @@ pub fn decimal_sqrt(value: Decimal) -> Decimal {
     estimate.normalize()
 }
 
-
 pub fn analyze_portfolio_statistics(
     exposures: &[StatisticalExposure],
     histories: &[MarketHistorySnapshot],
@@ -169,8 +168,7 @@ pub fn analyze_portfolio_statistics(
         return Ok(PortfolioStatisticsAnalysis {
             schema: PORTFOLIO_STATISTICS_SCHEMA_V1,
             status: PortfolioStatisticsStatus::NotApplicable,
-            valuation_basis:
-                "current signed position notionalUsd multiplied by simple confirmed close-to-close returns",
+            valuation_basis: "current signed position notionalUsd multiplied by simple confirmed close-to-close returns",
             covariance_formula_version: SAMPLE_COVARIANCE_FORMULA_V1,
             volatility_formula_version: PORTFOLIO_VOLATILITY_FORMULA_V1,
             bar: histories.first().map(|history| history.bar.clone()),
@@ -401,8 +399,7 @@ pub fn analyze_portfolio_statistics(
     Ok(PortfolioStatisticsAnalysis {
         schema: PORTFOLIO_STATISTICS_SCHEMA_V1,
         status: PortfolioStatisticsStatus::Ready,
-        valuation_basis:
-            "current signed position notionalUsd multiplied by simple confirmed close-to-close returns",
+        valuation_basis: "current signed position notionalUsd multiplied by simple confirmed close-to-close returns",
         covariance_formula_version: SAMPLE_COVARIANCE_FORMULA_V1,
         volatility_formula_version: PORTFOLIO_VOLATILITY_FORMULA_V1,
         bar: Some(bar),
@@ -486,7 +483,6 @@ mod tests {
         ));
     }
 
-
     fn history(instrument: &str, closes: &[&str]) -> MarketHistorySnapshot {
         MarketHistorySnapshot {
             schema: "okx.market-history/v1".to_owned(),
@@ -550,8 +546,7 @@ mod tests {
             .covariance
             .iter()
             .find(|cell| {
-                cell.left_instrument == "BTC-USDT-SWAP"
-                    && cell.right_instrument == "ETH-USDT-SWAP"
+                cell.left_instrument == "BTC-USDT-SWAP" && cell.right_instrument == "ETH-USDT-SWAP"
             })
             .expect("cross correlation");
         assert_eq!(cross.correlation.as_deref(), Some("1"));
@@ -593,18 +588,14 @@ mod tests {
             None,
         )
         .expect("hedge");
-        let same = d(
-            same_side
-                .portfolio_volatility_usd
-                .as_deref()
-                .expect("same volatility"),
-        );
-        let hedged = d(
-            hedge
-                .portfolio_volatility_usd
-                .as_deref()
-                .expect("hedged volatility"),
-        );
+        let same = d(same_side
+            .portfolio_volatility_usd
+            .as_deref()
+            .expect("same volatility"));
+        let hedged = d(hedge
+            .portfolio_volatility_usd
+            .as_deref()
+            .expect("hedged volatility"));
         assert!(hedged < same);
     }
 
