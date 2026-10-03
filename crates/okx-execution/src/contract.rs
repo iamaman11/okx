@@ -117,8 +117,14 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use okx_analysis::{
+        HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy, RiskDegradedMode, RiskMinimumQuality,
+        TRADING_MANDATE_SCHEMA_V1, TradingMandate,
+    };
+
     use crate::{
-        EXECUTION_PLAN_SCHEMA_V1, ExecutionRecord, ExecutionTransitionError, derive_client_order_id,
+        EXECUTION_PLAN_SCHEMA_V1, ExecutionRecord, ExecutionRiskBinding, ExecutionTransitionError,
+        derive_client_order_id,
     };
 
     fn plan(intent_id: &str) -> ExecutionPlan {
@@ -263,6 +269,50 @@ mod tests {
         let json = serde_json::to_string(&status).expect("json");
         assert!(!json.contains("exchange-order-id"));
         assert!(json.contains("DOGE-USDT-SWAP"));
+    }
+
+    fn risk_binding(policy_version: &str) -> ExecutionRiskBinding {
+        ExecutionRiskBinding {
+            mandate: TradingMandate {
+                schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
+                version: "mandate/v1".to_owned(),
+                capital_base_usd: "100".to_owned(),
+                decision_horizon_hours: 24,
+                benchmark: Some("none/v1".to_owned()),
+                allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
+                max_drawdown_ratio: "1".to_owned(),
+                leverage_ceiling: "5".to_owned(),
+                minimum_liquidity_notional_usd: "0".to_owned(),
+                max_turnover_ratio: "5".to_owned(),
+            },
+            policy: HardRiskPolicy {
+                schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
+                version: policy_version.to_owned(),
+                max_account_gross_notional_usd: "1000".to_owned(),
+                max_instrument_gross_notional_usd: "1000".to_owned(),
+                max_margin_utilization_ratio: "1".to_owned(),
+                max_loss_per_trade_usd: "100".to_owned(),
+                max_daily_realized_loss_usd: "100".to_owned(),
+                max_drawdown_ratio: "1".to_owned(),
+                max_leverage: "5".to_owned(),
+                allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
+                minimum_quality: RiskMinimumQuality::Fresh,
+                degraded_mode: RiskDegradedMode::Reject,
+                correlated_clusters: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn plan_fingerprint_binds_the_exact_risk_policy_version() {
+        let mut first = plan("intent_policy_fingerprint_01");
+        first.risk_binding = Some(risk_binding("policy/v1"));
+        let mut second = first.clone();
+        second.risk_binding = Some(risk_binding("policy/v2"));
+
+        let first = plan_fingerprint(&first).expect("first");
+        let second = plan_fingerprint(&second).expect("second");
+        assert_ne!(first, second);
     }
 
     #[test]
