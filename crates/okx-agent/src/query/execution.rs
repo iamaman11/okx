@@ -1,24 +1,20 @@
 use okx_analysis::{
-    CandidateOrderAssumptions, CorrelatedClusterLimit, HardRiskPolicy,
+    CandidateOrderAssumptions, CorrelatedClusterLimit, HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy,
     LiquidityRole as AnalysisLiquidityRole, PortfolioCandidate, PositionDirection,
-    RiskDegradedMode as AnalysisRiskDegradedMode,
-    RiskMinimumQuality as AnalysisRiskMinimumQuality, TradingMandate,
-    HARD_RISK_POLICY_SCHEMA_V1, TRADING_MANDATE_SCHEMA_V1, analyze_candidate_order,
-    analyze_portfolio_risk,
+    RiskDegradedMode as AnalysisRiskDegradedMode, RiskMinimumQuality as AnalysisRiskMinimumQuality,
+    TRADING_MANDATE_SCHEMA_V1, TradingMandate, analyze_candidate_order, analyze_portfolio_risk,
 };
 use okx_api::{MUTATION_REQUEST_TTL_MS, MarginMode};
 use okx_execution::{
     EXECUTION_STATUS_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionRiskBinding,
-    ExecutionTransitionError, OrderExecutorError, OrderType,
-    PositionSide as ExecutionPositionSide, PrepareFailure, PrepareOutcome, PrepareRejection,
-    TradeMode, prepare_execution, revalidate_execution_plan, revalidate_hard_risk_policy,
-    revalidate_venue_execution,
+    ExecutionTransitionError, OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide,
+    PrepareFailure, PrepareOutcome, PrepareRejection, TradeMode, prepare_execution,
+    revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
 };
 use okx_protocol::{
     ExecutionOrderType, ExecutionRiskBindingRequest, ExecutionTradeMode,
     LiquidityRole as ProtocolLiquidityRole, PositionSide as ProtocolPositionSide,
-    RiskDegradedMode as ProtocolRiskDegradedMode,
-    RiskMinimumQuality as ProtocolRiskMinimumQuality,
+    RiskDegradedMode as ProtocolRiskDegradedMode, RiskMinimumQuality as ProtocolRiskMinimumQuality,
 };
 
 use super::*;
@@ -43,10 +39,8 @@ pub const LIVE_TRADING_DISABLED_CODE: &str = "LIVE_TRADING_DISABLED";
 pub const EXECUTION_GATE_INVARIANT_CODE: &str = "EXECUTION_GATE_INVARIANT_VIOLATION";
 pub const EXECUTION_RISK_POLICY_REQUIRED_CODE: &str = "EXECUTION_RISK_POLICY_REQUIRED";
 pub const EXECUTION_RISK_POLICY_REJECTED_CODE: &str = "EXECUTION_RISK_POLICY_REJECTED";
-pub const EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE: &str =
-    "EXECUTION_RISK_EVIDENCE_UNAVAILABLE";
-pub const EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE: &str =
-    "EXECUTION_RISK_EVIDENCE_NOT_FRESH";
+pub const EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE: &str = "EXECUTION_RISK_EVIDENCE_UNAVAILABLE";
+pub const EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE: &str = "EXECUTION_RISK_EVIDENCE_NOT_FRESH";
 
 pub(super) async fn dispatch(
     request: &AgentRequest,
@@ -875,10 +869,7 @@ fn execution_risk_binding(value: &ExecutionRiskBindingRequest) -> ExecutionRiskB
             allowed_instruments: value.mandate.allowed_instruments.clone(),
             max_drawdown_ratio: value.mandate.max_drawdown_ratio.clone(),
             leverage_ceiling: value.mandate.leverage_ceiling.clone(),
-            minimum_liquidity_notional_usd: value
-                .mandate
-                .minimum_liquidity_notional_usd
-                .clone(),
+            minimum_liquidity_notional_usd: value.mandate.minimum_liquidity_notional_usd.clone(),
             max_turnover_ratio: value.mandate.max_turnover_ratio.clone(),
         },
         policy: HardRiskPolicy {
@@ -987,7 +978,7 @@ mod tests {
                 size: "0.05".to_owned(),
                 price: "0.09317".to_owned(),
                 open_risk: None,
-            risk_binding: None,
+                risk_binding: None,
             }),
             created_at_ms: 100,
             updated_at_ms: 100,
