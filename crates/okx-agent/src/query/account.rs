@@ -44,11 +44,15 @@ struct PortfolioRiskResult {
     as_of: String,
     observed_evidence_label: &'static str,
     modelled_evidence_label: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    counterfactual_evidence_label: Option<&'static str>,
     analysis_schema: &'static str,
     mandate_schema: &'static str,
     policy_schema: &'static str,
     coherence: PortfolioRiskCoherence,
     analysis: okx_analysis::PortfolioRiskAnalysis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    statistics: Option<PortfolioStatisticsAnalysis>,
     exchange_oracle: okx_analysis::RiskOracleComparison,
 }
 
@@ -302,6 +306,7 @@ pub(super) async fn dispatch(
             mandate,
             policy,
             candidate,
+            statistics,
         } => {
             let assembled = match assemble_account_snapshot(context).await {
                 Ok(value) => value,
@@ -566,6 +571,168 @@ pub(super) async fn dispatch(
                 }
             };
 
+            let statistics_analysis = if let Some(statistics_request) = statistics.as_ref() {
+                if !coherence.coherent {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT_CODE,
+                        "portfolio statistics require a coherent account/ledger/oracle read window"
+                            .to_owned(),
+                        true,
+                    ));
+                }
+
+                let exposures = analysis
+                    .instrument_exposure
+                    .iter()
+                    .map(|row| StatisticalExposure {
+                        instrument_id: row.key.clone(),
+                        signed_notional_usd: row.signed_net_notional_usd.clone(),
+                    })
+                    .collect::<Vec<_>>();
+
+                let value = if exposures.is_empty() {
+                    analyze_portfolio_statistics(
+                        &[],
+                        &[],
+                        statistics_request.parallel_scenario_move_ratio.as_deref(),
+                    )
+                } else if exposures.len() > 8 {
+                    analyze_portfolio_statistics(
+                        &exposures,
+                        &[],
+                        statistics_request.parallel_scenario_move_ratio.as_deref(),
+                    )
+                } else {
+                    let expected_reference = match coherence.reference_generation.as_deref() {
+                        Some(value) => value.to_owned(),
+                        None => {
+                            return Ok(failure_response(
+                                request,
+                                generated_at,
+                                AgentResponseStatus::Failed,
+                                PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
+                                "non-flat statistical portfolio is missing reference generation"
+                                    .to_owned(),
+                                false,
+                            ));
+                        }
+                    };
+
+                    let mut histories = Vec::with_capacity(exposures.len());
+                    for exposure in &exposures {
+                        let assembled_history = match assemble_market_history(
+                            context,
+                            &exposure.instrument_id,
+                            &statistics_request.bar,
+                            statistics_request.limit,
+                        )
+                        .await
+                        {
+                            Ok(Some(value)) => value,
+                            Ok(None) => return Ok(unavailable(request, generated_at)),
+                            Err(error) => {
+                                return Ok(market_failure(request, generated_at, error));
+                            }
+                        };
+                        if assembled_history.snapshot.reference_generation != expected_reference {
+                            return Ok(failure_response(
+                                request,
+                                generated_at,
+                                AgentResponseStatus::Failed,
+                                PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
+                                format!(
+                                    "portfolio statistics history for '{}' references generation {}, expected {}",
+                                    exposure.instrument_id,
+                                    assembled_history.snapshot.reference_generation,
+                                    expected_reference
+                                ),
+                                false,
+                            ));
+                        }
+                        histories.push(assembled_history.snapshot);
+                    }
+
+                    for exposure in &exposures {
+                        let Some(rules) =
+                            resolve_instrument_rules(context, &exposure.instrument_id).await
+                        else {
+                            return Ok(reference_not_found(
+                                request,
+                                generated_at,
+                                &exposure.instrument_id,
+                            ));
+                        };
+                        if rules.reference_generation != expected_reference {
+                            return Ok(failure_response(
+                                request,
+                                generated_at,
+                                AgentResponseStatus::Failed,
+                                PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
+                                format!(
+                                    "portfolio statistics reference generation changed during history acquisition: expected {expected_reference}, observed {} for {}",
+                                    rules.reference_generation, exposure.instrument_id
+                                ),
+                                false,
+                            ));
+                        }
+                    }
+
+                    if let (Some(private_ws), Some(cursor)) = (context.private_ws, read_cursor) {
+                        match private_ws.convergence_window(cursor).await {
+                            Ok(window) if window.events.is_empty() => {}
+                            Ok(window) => {
+                                return Ok(failure_response(
+                                    request,
+                                    generated_at,
+                                    AgentResponseStatus::Failed,
+                                    PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT_CODE,
+                                    format!(
+                                        "{} private account event(s) arrived before statistical history acquisition completed",
+                                        window.events.len()
+                                    ),
+                                    true,
+                                ));
+                            }
+                            Err(error) => {
+                                return Ok(failure_response(
+                                    request,
+                                    generated_at,
+                                    AgentResponseStatus::Failed,
+                                    PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT_CODE,
+                                    format!(
+                                        "private account coherence changed before statistical history acquisition completed: {error}"
+                                    ),
+                                    true,
+                                ));
+                            }
+                        }
+                    }
+
+                    analyze_portfolio_statistics(
+                        &exposures,
+                        &histories,
+                        statistics_request.parallel_scenario_move_ratio.as_deref(),
+                    )
+                };
+
+                match value {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        return Ok(analysis_failure(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            error,
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
+
             let oracle_notional = oracle
                 .positions
                 .iter()
@@ -618,16 +785,25 @@ pub(super) async fn dispatch(
                 .iter()
                 .map(|violation| violation.code)
                 .collect::<Vec<_>>();
+            let result_schema = if statistics_analysis.is_some() {
+                PORTFOLIO_RISK_SCHEMA_V4
+            } else {
+                PORTFOLIO_RISK_SCHEMA_V3
+            };
             let result = serde_json::to_value(PortfolioRiskResult {
-                schema: PORTFOLIO_RISK_SCHEMA_V3,
+                schema: result_schema,
                 as_of: generated_at.to_owned(),
                 observed_evidence_label: "OBSERVED",
                 modelled_evidence_label: "MODELLED",
+                counterfactual_evidence_label: statistics_analysis
+                    .as_ref()
+                    .map(|_| "COUNTERFACTUAL"),
                 analysis_schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3,
                 mandate_schema: TRADING_MANDATE_SCHEMA_V1,
                 policy_schema: HARD_RISK_POLICY_SCHEMA_V1,
                 coherence,
                 analysis,
+                statistics: statistics_analysis,
                 exchange_oracle: oracle_comparison,
             })?;
 
@@ -641,7 +817,7 @@ pub(super) async fn dispatch(
                 },
                 generated_at: generated_at.to_owned(),
                 quality,
-                result_schema: Some(PORTFOLIO_RISK_SCHEMA_V3.to_owned()),
+                result_schema: Some(result_schema.to_owned()),
                 result: Some(result),
                 failure: rejected.then(|| AgentFailure {
                     code: PORTFOLIO_RISK_POLICY_REJECTED_CODE.to_owned(),
