@@ -972,8 +972,30 @@ async fn build_virtual_portfolio_proof(
     generated_at: &str,
     input: VirtualPortfolioProofInput<'_>,
 ) -> Result<VirtualPortfolioProof, AgentResponse> {
+    match input.account_snapshot.account_level.as_str() {
+        "2" => build_futures_virtual_portfolio_proof(request, context, generated_at, input).await,
+        "3" | "4" => {
+            build_position_builder_virtual_portfolio_proof(request, context, generated_at, input)
+                .await
+        }
+        other => Err(analysis_failure(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            AnalysisError::UnsupportedAccountMode(other.to_owned()),
+        )),
+    }
+}
+
+async fn build_position_builder_virtual_portfolio_proof(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    input: VirtualPortfolioProofInput<'_>,
+) -> Result<VirtualPortfolioProof, AgentResponse> {
     let VirtualPortfolioProofInput {
         observer,
+        account_snapshot,
         request: virtual_request,
         statistics: statistics_request,
         ledger,
@@ -982,7 +1004,7 @@ async fn build_virtual_portfolio_proof(
         expected_reference,
     } = input;
     let builder_request = okx_api::PositionBuilderRequest {
-        account_level: "3".to_owned(),
+        account_level: account_snapshot.account_level.clone(),
         include_real_positions_and_equity: false,
         positions: virtual_request
             .positions
@@ -1257,7 +1279,7 @@ async fn build_virtual_portfolio_proof(
         private_ws_connection_fingerprint: None,
         private_ws_last_inbound_ms: None,
         private_ws_events_applied: None,
-        account_level: "3".to_owned(),
+        account_level: account_snapshot.account_level.clone(),
         position_mode: "net_mode".to_owned(),
         account_type: "counterfactual".to_owned(),
         account_uid_fingerprint: "counterfactual".to_owned(),
@@ -1404,15 +1426,24 @@ async fn build_virtual_portfolio_proof(
     };
 
     Ok(VirtualPortfolioProof {
-        schema: VIRTUAL_PORTFOLIO_PROOF_SCHEMA_V1,
+        schema: VIRTUAL_PORTFOLIO_PROOF_SCHEMA_V2,
         evidence_label: "COUNTERFACTUAL",
-        account_mode: "multi_currency_margin",
-        oracle_source_received_at,
+        account_mode: match account_snapshot.account_level.as_str() {
+            "3" => "multi_currency_margin",
+            "4" => "portfolio_margin",
+            _ => "unknown",
+        }
+        .to_owned(),
+        oracle_scope: "okx_position_builder",
+        exchange_virtual_portfolio_oracle_available: true,
+        exchange_virtual_portfolio_oracle_reason: None,
+        evidence_source_received_at: oracle_source_received_at,
         request: virtual_request.clone(),
         analysis,
         statistics,
-        exchange_oracle: oracle,
-        notional_oracle,
+        futures_constraints: Vec::new(),
+        exchange_oracle: Some(oracle),
+        notional_oracle: Some(notional_oracle),
     })
 }
 
