@@ -1410,22 +1410,22 @@ async fn build_futures_virtual_portfolio_proof(
             match assemble_current_market(request, context, generated_at, &requested.instrument)
                 .await
             {
-            Ok(CurrentMarketAssembly::Ready(value)) => *value,
-            Ok(CurrentMarketAssembly::Response(response)) => return Err(*response),
-            Ok(CurrentMarketAssembly::Unavailable) => {
-                return Err(unavailable(request, generated_at));
-            }
-            Err(error) => {
-                return Err(failure_response(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Failed,
-                    MARKET_PUBLIC_API_UNAVAILABLE_CODE,
-                    error.to_string(),
-                    true,
-                ));
-            }
-        };
+                Ok(CurrentMarketAssembly::Ready(value)) => *value,
+                Ok(CurrentMarketAssembly::Response(response)) => return Err(*response),
+                Ok(CurrentMarketAssembly::Unavailable) => {
+                    return Err(unavailable(request, generated_at));
+                }
+                Err(error) => {
+                    return Err(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        MARKET_PUBLIC_API_UNAVAILABLE_CODE,
+                        error.to_string(),
+                        true,
+                    ));
+                }
+            };
 
         if market.quality != DataQuality::Fresh {
             return Err(failure_response(
