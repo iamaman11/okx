@@ -1350,7 +1350,6 @@ async fn build_position_builder_virtual_portfolio_proof(
     )
     .await?;
 
-
     Ok(VirtualPortfolioProof {
         schema: VIRTUAL_PORTFOLIO_PROOF_SCHEMA_V2,
         evidence_label: "COUNTERFACTUAL",
@@ -1372,7 +1371,6 @@ async fn build_position_builder_virtual_portfolio_proof(
         notional_oracle: Some(notional_oracle),
     })
 }
-
 
 async fn build_futures_virtual_portfolio_proof(
     request: &AgentRequest,
@@ -1408,14 +1406,10 @@ async fn build_futures_virtual_portfolio_proof(
     let mut evidence_source_received_at = String::new();
 
     for requested in &virtual_request.positions {
-        let market = match assemble_current_market(
-            request,
-            context,
-            generated_at,
-            &requested.instrument,
-        )
-        .await
-        {
+        let market =
+            match assemble_current_market(request, context, generated_at, &requested.instrument)
+                .await
+            {
             Ok(CurrentMarketAssembly::Ready(value)) => *value,
             Ok(CurrentMarketAssembly::Response(response)) => return Err(*response),
             Ok(CurrentMarketAssembly::Unavailable) => {
@@ -1518,7 +1512,10 @@ async fn build_futures_virtual_portfolio_proof(
                 generated_at,
                 AgentResponseStatus::Failed,
                 VIRTUAL_PORTFOLIO_CONSTRAINT_REJECTED_CODE,
-                format!("reference maxLmtSz is missing for '{}'", requested.instrument),
+                format!(
+                    "reference maxLmtSz is missing for '{}'",
+                    requested.instrument
+                ),
                 false,
             ));
         };
@@ -1528,7 +1525,10 @@ async fn build_futures_virtual_portfolio_proof(
                 generated_at,
                 AgentResponseStatus::Failed,
                 VIRTUAL_PORTFOLIO_CONSTRAINT_REJECTED_CODE,
-                format!("reference max leverage is missing for '{}'", requested.instrument),
+                format!(
+                    "reference max leverage is missing for '{}'",
+                    requested.instrument
+                ),
                 false,
             ));
         };
@@ -1621,23 +1621,22 @@ async fn build_futures_virtual_portfolio_proof(
         });
     }
 
-    let initial_margin_requirement_usd =
-        match virtual_portfolio_initial_margin_usd(
-            &futures_constraints
-                .iter()
-                .map(|evidence| evidence.constraint.clone())
-                .collect::<Vec<_>>(),
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                return Err(analysis_failure(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Failed,
-                    error,
-                ));
-            }
-        };
+    let initial_margin_requirement_usd = match virtual_portfolio_initial_margin_usd(
+        &futures_constraints
+            .iter()
+            .map(|evidence| evidence.constraint.clone())
+            .collect::<Vec<_>>(),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(analysis_failure(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                error,
+            ));
+        }
+    };
 
     let virtual_snapshot = okx_observation::AccountSnapshot {
         schema: ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned(),
@@ -1822,14 +1821,7 @@ async fn build_virtual_portfolio_statistics(
         statistics_request.parallel_scenario_move_ratio.as_deref(),
     )
     .map(Some)
-    .map_err(|error| {
-        analysis_failure(
-            request,
-            generated_at,
-            AgentResponseStatus::Failed,
-            error,
-        )
-    })
+    .map_err(|error| analysis_failure(request, generated_at, AgentResponseStatus::Failed, error))
 }
 
 fn position_builder_account_unavailable(error: &AccountBootstrapError) -> Option<String> {
