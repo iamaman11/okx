@@ -551,6 +551,18 @@ mod tests {
             })
             .expect("cross correlation");
         assert_eq!(cross.correlation.as_deref(), Some("1"));
+        let contribution_sum = result
+            .volatility_contribution
+            .iter()
+            .map(|row| d(&row.component_volatility_usd))
+            .sum::<Decimal>();
+        assert_eq!(
+            contribution_sum.normalize().to_string(),
+            result
+                .portfolio_volatility_usd
+                .as_deref()
+                .expect("portfolio volatility")
+        );
         assert_eq!(
             result
                 .parallel_scenario
