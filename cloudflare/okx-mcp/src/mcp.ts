@@ -22,6 +22,11 @@ const VALID_BARS = new Set([
   "6Hutc","12Hutc","1Dutc","2Dutc","3Dutc","1Wutc","1Mutc","3Mutc",
 ]);
 
+const STATISTICAL_BARS = new Set([
+  "1m","3m","5m","15m","30m","1H","2H","4H","6H","12H","1D","2D","3D","1W",
+  "6Hutc","12Hutc","1Dutc","2Dutc","3Dutc","1Wutc",
+]);
+
 const CODE_PATTERN = "^[A-Za-z0-9_-]+$";
 const DECIMAL_PATTERN = "^[0-9]+(?:\\.[0-9]+)?$";
 const VERSION_PATTERN = "^[A-Za-z0-9._/-]+$";
@@ -360,7 +365,7 @@ export const mcpApi = {
                 statistics: {
                   type: "object",
                   properties: {
-                    bar: { type: "string", enum: [...VALID_BARS] },
+                    bar: { type: "string", enum: [...STATISTICAL_BARS] },
                     limit: { type: "integer", minimum: 3, maximum: 100 },
                     parallel_scenario_move_ratio: {
                       type: "string",
@@ -736,7 +741,7 @@ export const mcpApi = {
             ? null
             : signedDecimalText(args.statistics.parallel_scenario_move_ratio);
           if (
-            !VALID_BARS.has(bar) ||
+            !STATISTICAL_BARS.has(bar) ||
             !Number.isInteger(limit) ||
             limit < 3 ||
             limit > 100 ||
