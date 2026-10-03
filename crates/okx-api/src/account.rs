@@ -352,22 +352,20 @@ pub struct PositionBuilderPosition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PositionBuilderSnapshot {
-    #[serde(rename = "acctLv", default)]
-    pub account_level: String,
-    #[serde(rename = "totalEq", default)]
-    pub total_equity_usd: String,
-    #[serde(rename = "adjEq", default)]
-    pub adjusted_equity_usd: String,
-    #[serde(rename = "availEq", default)]
-    pub available_equity_usd: String,
-    #[serde(rename = "imr", default)]
+    #[serde(rename = "eq", default)]
+    pub equity_usd: String,
+    #[serde(rename = "totalImr", default)]
     pub initial_margin_requirement_usd: String,
-    #[serde(rename = "mmr", default)]
+    #[serde(rename = "totalMmr", default)]
     pub maintenance_margin_requirement_usd: String,
-    #[serde(rename = "mgnRatio", default)]
+    #[serde(rename = "marginRatio", default)]
     pub margin_ratio: String,
-    #[serde(rename = "notionalUsd", default)]
-    pub notional_usd: String,
+    #[serde(rename = "upl", default)]
+    pub unrealized_pnl_usd: String,
+    #[serde(rename = "acctLever", default)]
+    pub account_leverage: String,
+    #[serde(default)]
+    pub ts: String,
     #[serde(default)]
     pub positions: Vec<PositionBuilderPosition>,
 }
@@ -820,6 +818,49 @@ pub fn account_type_name(account_type: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{account_mode_name, account_type_name};
+
+    #[test]
+    fn position_builder_snapshot_matches_documented_multi_currency_shape() {
+        let snapshot: super::PositionBuilderSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "eq": "5000",
+                "totalImr": "371.25",
+                "totalMmr": "185.625",
+                "marginRatio": "26.936026936",
+                "upl": "12.5",
+                "acctLever": "0.223",
+                "ts": "1791030000000",
+                "positions": [
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "instType": "SWAP",
+                        "amt": "1",
+                        "posSide": "net",
+                        "avgPx": "84741.5",
+                        "markPx": "84800",
+                        "floatPnl": "0.585",
+                        "imr": "282.6666666667",
+                        "mgnRatio": "10",
+                        "lever": "3",
+                        "notionalUsd": "848",
+                        "isRealPos": false
+                    }
+                ]
+            }))
+            .expect("documented position-builder shape");
+
+        assert_eq!(snapshot.equity_usd, "5000");
+        assert_eq!(snapshot.initial_margin_requirement_usd, "371.25");
+        assert_eq!(snapshot.maintenance_margin_requirement_usd, "185.625");
+        assert_eq!(snapshot.margin_ratio, "26.936026936");
+        assert_eq!(snapshot.unrealized_pnl_usd, "12.5");
+        assert_eq!(snapshot.account_leverage, "0.223");
+        assert_eq!(snapshot.ts, "1791030000000");
+        assert_eq!(snapshot.positions.len(), 1);
+        assert_eq!(snapshot.positions[0].contracts, "1");
+        assert_eq!(snapshot.positions[0].notional_usd, "848");
+        assert!(!snapshot.positions[0].is_real_position);
+    }
 
     #[test]
     fn maps_documented_account_levels() {
