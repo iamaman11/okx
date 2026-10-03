@@ -623,6 +623,43 @@ pub(super) async fn dispatch(
 
                     let mut histories = Vec::with_capacity(exposures.len());
                     for exposure in &exposures {
+                        let Some(rules) =
+                            resolve_instrument_rules(context, &exposure.instrument_id).await
+                        else {
+                            return Ok(reference_not_found(
+                                request,
+                                generated_at,
+                                &exposure.instrument_id,
+                            ));
+                        };
+                        if rules.reference_generation != expected_reference {
+                            return Ok(failure_response(
+                                request,
+                                generated_at,
+                                AgentResponseStatus::Failed,
+                                PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
+                                format!(
+                                    "portfolio statistics reference generation changed before history acquisition: expected {expected_reference}, observed {} for {}",
+                                    rules.reference_generation, exposure.instrument_id
+                                ),
+                                false,
+                            ));
+                        }
+                        if rules.instrument.contract_type.as_deref() != Some("linear") {
+                            return Ok(analysis_failure(
+                                request,
+                                generated_at,
+                                AgentResponseStatus::Failed,
+                                AnalysisError::UnsupportedContractMechanics(
+                                    rules
+                                        .instrument
+                                        .contract_type
+                                        .clone()
+                                        .unwrap_or_else(|| "missing ctType".to_owned()),
+                                ),
+                            ));
+                        }
+
                         let assembled_history = match assemble_market_history(
                             context,
                             &exposure.instrument_id,
