@@ -265,7 +265,7 @@ pub fn analyze_portfolio_statistics(
                 return Err(AnalysisError::StatisticalHistoryNotAligned);
             }
         } else {
-            aligned_timestamps = Some(timestamps);
+            aligned_timestamps = Some(timestamps.clone());
         }
 
         let closes = confirmed
@@ -607,10 +607,25 @@ mod tests {
         ];
         let btc = history("BTC-USDT-SWAP", &["100", "101", "102"]);
         let mut eth = history("ETH-USDT-SWAP", &["100", "101", "102"]);
-        eth.candles[1].open_time_ms = "999".to_owned();
+        for candle in &mut eth.candles {
+            let timestamp = candle.open_time_ms.parse::<u64>().expect("timestamp");
+            candle.open_time_ms = (timestamp + 3_600_000).to_string();
+        }
         assert!(matches!(
             analyze_portfolio_statistics(&exposures, &[btc, eth], None),
             Err(AnalysisError::StatisticalHistoryNotAligned)
+        ));
+    }
+
+    #[test]
+    fn internal_history_gap_fails_closed() {
+        let exposures = vec![exposure("BTC-USDT-SWAP", "100")];
+        let mut btc = history("BTC-USDT-SWAP", &["100", "101", "102"]);
+        btc.candles[1].open_time_ms = "999".to_owned();
+        assert!(matches!(
+            analyze_portfolio_statistics(&exposures, &[btc], None),
+            Err(AnalysisError::StatisticalHistoryGap(instrument))
+                if instrument == "BTC-USDT-SWAP"
         ));
     }
 }
