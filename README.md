@@ -16,9 +16,11 @@ Accepted:
 - M6 bounded application/research query surface — PASS;
 - H1 GitHub transport/context hardening — PASS;
 - A2 reboot + real external network-loss recovery — PASS;
-- Phase 2 pre-enable execution boundary — PHYSICAL PASS with live writes hard-disabled.
+- Phase 2 pre-enable execution boundary — PHYSICAL PASS with live writes hard-disabled;
+- Stage 1 TRUTH — ACCEPTED/CLOSED;
+- Stage 2 INTELLIGENCE + RISK — ACCEPTED/CLOSED on account-mode-aware Futures risk evidence.
 
-Current canonical work cursor: **#113 Production Readiness Closure**.
+Current canonical roadmap: **#160**. Current development cursor: **Stage 3 — SCIENTIFIC RESEARCH + REPLAY**.
 
 Live trading is **not enabled**. Production construction of the executor remains disabled before SUBMITTING persistence and before any exchange mutation.
 
@@ -110,7 +112,7 @@ Production account target: standard sub-account `Succession`.
 
 A prepared execution plan is not a timeless permit. Any future live send must reacquire authoritative reference/account state and pass exact pre-send continuity checks.
 
-Live-write enablement is a separate future authorization after #113 closes.
+Live-write enablement is a separate future authorization only after Stages 1–5 pass and the explicit final live-activation gate is approved.
 
 ## Supply chain
 
@@ -144,7 +146,8 @@ Installed production binaries do not execute from the mutable source checkout.
 
 Canonical issues:
 
-- #113 current production-closure cursor;
+- #160 current industrial roadmap and acceptance authority;
+- #113 historical production-readiness closure baseline;
 - #5 product/domain architecture;
 - #7 Windows runtime/deployment;
 - #10 encrypted DATA transport;
