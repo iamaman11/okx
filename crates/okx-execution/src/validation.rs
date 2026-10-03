@@ -144,6 +144,15 @@ pub enum ExecutionValidationError {
 
     #[error("hard-risk policy rejected risk-increasing mutation: {0}")]
     HardRiskPolicyRejected(String),
+
+    #[error("portfolio risk analysis does not match the immutable execution risk binding")]
+    RiskBindingMismatch,
+
+    #[error("portfolio risk candidate does not match the immutable execution plan")]
+    RiskCandidateMismatch,
+
+    #[error("portfolio risk decision/violation set is internally inconsistent")]
+    RiskAnalysisInconsistent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,9 +223,31 @@ pub fn revalidate_hard_risk_policy(
     plan: &ExecutionPlan,
     analysis: &PortfolioRiskAnalysis,
 ) -> Result<PreMutationRiskDisposition, ExecutionValidationError> {
-    if plan.risk_binding.is_none() {
-        return Err(ExecutionValidationError::MissingRiskBinding);
+    let binding = plan
+        .risk_binding
+        .as_ref()
+        .ok_or(ExecutionValidationError::MissingRiskBinding)?;
+    if analysis.mandate != binding.mandate || analysis.policy != binding.policy {
+        return Err(ExecutionValidationError::RiskBindingMismatch);
     }
+
+    match (analysis.policy_decision, analysis.violations.is_empty()) {
+        (RiskPolicyDecision::Accepted, true) | (RiskPolicyDecision::Rejected, false) => {}
+        _ => return Err(ExecutionValidationError::RiskAnalysisInconsistent),
+    }
+
+    match (plan.action, analysis.candidate.as_ref()) {
+        (ExecutionAction::Open, Some(candidate))
+            if candidate.instrument == plan.instrument_id
+                && candidate.direction
+                    == match plan.position_side {
+                        PositionSide::Long => PositionDirection::Long,
+                        PositionSide::Short => PositionDirection::Short,
+                    } => {}
+        (ExecutionAction::Close, None) => {}
+        _ => return Err(ExecutionValidationError::RiskCandidateMismatch),
+    }
+
     let codes = analysis
         .violations
         .iter()
