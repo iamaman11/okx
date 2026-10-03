@@ -54,6 +54,21 @@ struct PortfolioRiskResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     statistics: Option<PortfolioStatisticsAnalysis>,
     exchange_oracle: okx_analysis::RiskOracleComparison,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    virtual_portfolio: Option<VirtualPortfolioProof>,
+}
+
+#[derive(serde::Serialize)]
+struct VirtualPortfolioProof {
+    schema: &'static str,
+    evidence_label: &'static str,
+    account_mode: &'static str,
+    request: VirtualPortfolioRequest,
+    analysis: okx_analysis::PortfolioRiskAnalysis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    statistics: Option<PortfolioStatisticsAnalysis>,
+    exchange_oracle: okx_api::PositionBuilderSnapshot,
+    notional_oracle: okx_analysis::VirtualNotionalOracleComparison,
 }
 
 pub(super) async fn dispatch(
@@ -307,6 +322,7 @@ pub(super) async fn dispatch(
             policy,
             candidate,
             statistics,
+            virtual_portfolio,
         } => {
             let assembled = match assemble_account_snapshot(context).await {
                 Ok(value) => value,
@@ -336,6 +352,14 @@ pub(super) async fn dispatch(
             );
             if let Some(candidate) = candidate.as_ref() {
                 reference_instruments.push(candidate.instrument.clone());
+            }
+            if let Some(virtual_portfolio) = virtual_portfolio.as_ref() {
+                reference_instruments.extend(
+                    virtual_portfolio
+                        .positions
+                        .iter()
+                        .map(|position| position.instrument.clone()),
+                );
             }
             reference_instruments.sort();
             reference_instruments.dedup();
@@ -514,8 +538,8 @@ pub(super) async fn dispatch(
             let analysis = match analyze_portfolio_risk(
                 &assembled.snapshot,
                 &facts.summary,
-                analysis_mandate,
-                analysis_policy,
+                analysis_mandate.clone(),
+                analysis_policy.clone(),
                 analysis_candidate,
                 coherence.coherent && quality == DataQuality::Fresh,
             ) {
@@ -775,13 +799,50 @@ pub(super) async fn dispatch(
                 );
             }
 
+            let virtual_portfolio_proof = if let Some(virtual_request) = virtual_portfolio.as_ref() {
+                let expected_reference = match coherence.reference_generation.as_deref() {
+                    Some(value) => value,
+                    None => {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
+                            "virtual portfolio proof is missing a reference generation".to_owned(),
+                            false,
+                        ));
+                    }
+                };
+                match build_virtual_portfolio_proof(
+                    request,
+                    context,
+                    generated_at,
+                    account,
+                    virtual_request,
+                    statistics.as_ref(),
+                    &facts.summary,
+                    &analysis_mandate,
+                    &analysis_policy,
+                    expected_reference,
+                )
+                .await
+                {
+                    Ok(value) => Some(value),
+                    Err(response) => return Ok(response),
+                }
+            } else {
+                None
+            };
+
             let rejected = analysis.policy_decision == okx_analysis::RiskPolicyDecision::Rejected;
             let violation_codes = analysis
                 .violations
                 .iter()
                 .map(|violation| violation.code)
                 .collect::<Vec<_>>();
-            let result_schema = if statistics_analysis.is_some() {
+            let result_schema = if virtual_portfolio_proof.is_some() {
+                PORTFOLIO_RISK_SCHEMA_V5
+            } else if statistics_analysis.is_some() {
                 PORTFOLIO_RISK_SCHEMA_V4
             } else {
                 PORTFOLIO_RISK_SCHEMA_V3
@@ -791,14 +852,16 @@ pub(super) async fn dispatch(
                 as_of: generated_at.to_owned(),
                 observed_evidence_label: "OBSERVED",
                 modelled_evidence_label: "MODELLED",
-                counterfactual_evidence_label: statistics_analysis.as_ref().and_then(
-                    |statistics| {
-                        statistics
-                            .parallel_scenario
-                            .as_ref()
-                            .map(|_| "COUNTERFACTUAL")
-                    },
-                ),
+                counterfactual_evidence_label: if virtual_portfolio_proof.is_some()
+                    || statistics_analysis
+                        .as_ref()
+                        .and_then(|statistics| statistics.parallel_scenario.as_ref())
+                        .is_some()
+                {
+                    Some("COUNTERFACTUAL")
+                } else {
+                    None
+                },
                 analysis_schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3,
                 mandate_schema: TRADING_MANDATE_SCHEMA_V1,
                 policy_schema: HARD_RISK_POLICY_SCHEMA_V1,
@@ -806,6 +869,7 @@ pub(super) async fn dispatch(
                 analysis,
                 statistics: statistics_analysis,
                 exchange_oracle: oracle_comparison,
+                virtual_portfolio: virtual_portfolio_proof,
             })?;
 
             Ok(AgentResponse {
