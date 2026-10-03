@@ -114,8 +114,7 @@ pub struct HardRiskPolicy {
     pub correlated_clusters: Vec<CorrelatedClusterLimit>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PortfolioCandidate {
     pub instrument: String,
     pub direction: PositionDirection,
