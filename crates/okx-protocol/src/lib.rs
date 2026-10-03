@@ -2175,6 +2175,7 @@ mod tests {
             }),
             candidate: None,
             statistics,
+            virtual_portfolio: None,
         }
     }
 
