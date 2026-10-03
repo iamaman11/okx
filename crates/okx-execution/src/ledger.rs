@@ -586,9 +586,7 @@ mod tests {
         assert_eq!(ledger.len(), 1);
 
         let reopened = DurableExecutionLedger::open(store, 102).expect("reopen");
-        let reopened_entry = reopened
-            .get("intent_0123456789abcdef")
-            .expect("entry");
+        let reopened_entry = reopened.get("intent_0123456789abcdef").expect("entry");
         assert_eq!(reopened_entry.record.state, ExecutionState::Prepared);
         assert!(
             reopened_entry.record.plan.risk_binding.is_none(),
