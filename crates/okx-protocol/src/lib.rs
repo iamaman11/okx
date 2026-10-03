@@ -1449,10 +1449,7 @@ fn validate_positive_decimal_text(value: &str, field: &'static str) -> Result<()
     Ok(())
 }
 
-fn validate_non_zero_decimal_text(
-    value: &str,
-    field: &'static str,
-) -> Result<(), ProtocolError> {
+fn validate_non_zero_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
     validate_decimal_text(value, field)?;
     if value.bytes().any(|byte| matches!(byte, b'1'..=b'9')) {
         Ok(())
