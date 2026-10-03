@@ -1,8 +1,8 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
     AccountApi, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate, InstrumentType,
-    LeverageInfo, MarginMode, OkxError, OkxRestClient, PositionBuilderRequest,
-    PositionBuilderSnapshot,
+    LeverageEstimate, LeverageInfo, MarginMode, MaxOrderSize, OkxError, OkxRestClient,
+    PositionBuilderRequest, PositionBuilderSnapshot,
 };
 use okx_observation::{
     AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, FeeScheduleError,
@@ -238,6 +238,37 @@ impl AccountBootstrapper {
         let config = self.api.config().await?;
         strict_read_only_permissions(&config.perm)?;
         Ok(self.api.position_builder(request).await?)
+    }
+
+    pub async fn futures_capacity_oracle(
+        &self,
+        instrument_type: InstrumentType,
+        instrument_id: &str,
+        mark_price: &str,
+        leverage: &str,
+        settle_currency: &str,
+        position_side: &str,
+    ) -> Result<(MaxOrderSize, LeverageEstimate), AccountBootstrapError> {
+        let config = self.api.config().await?;
+        strict_read_only_permissions(&config.perm)?;
+
+        let (max_order_size, leverage_estimate) = tokio::try_join!(
+            self.api.max_order_size_with_leverage(
+                instrument_id,
+                MarginMode::Cross,
+                mark_price,
+                leverage,
+            ),
+            self.api.leverage_estimate(
+                instrument_type,
+                instrument_id,
+                MarginMode::Cross,
+                leverage,
+                settle_currency,
+                position_side,
+            ),
+        )?;
+        Ok((max_order_size, leverage_estimate))
     }
 
     pub async fn account_position_risk_oracle(
