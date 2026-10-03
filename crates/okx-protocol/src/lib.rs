@@ -1211,10 +1211,7 @@ fn validate_portfolio_mandate(
             "mandate.decision_horizon_hours",
         ));
     }
-    validate_non_negative_decimal_text(
-        &mandate.max_drawdown_ratio,
-        "mandate.max_drawdown_ratio",
-    )?;
+    validate_non_negative_decimal_text(&mandate.max_drawdown_ratio, "mandate.max_drawdown_ratio")?;
     validate_positive_decimal_text(&mandate.leverage_ceiling, "mandate.leverage_ceiling")?;
     validate_non_negative_decimal_text(
         &mandate.minimum_liquidity_notional_usd,
