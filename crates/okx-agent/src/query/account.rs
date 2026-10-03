@@ -832,12 +832,14 @@ pub(super) async fn dispatch(
                 as_of: generated_at.to_owned(),
                 observed_evidence_label: "OBSERVED",
                 modelled_evidence_label: "MODELLED",
-                counterfactual_evidence_label: statistics_analysis.as_ref().and_then(|statistics| {
-                    statistics
-                        .parallel_scenario
-                        .as_ref()
-                        .map(|_| "COUNTERFACTUAL")
-                }),
+                counterfactual_evidence_label: statistics_analysis.as_ref().and_then(
+                    |statistics| {
+                        statistics
+                            .parallel_scenario
+                            .as_ref()
+                            .map(|_| "COUNTERFACTUAL")
+                    },
+                ),
                 analysis_schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3,
                 mandate_schema: TRADING_MANDATE_SCHEMA_V1,
                 policy_schema: HARD_RISK_POLICY_SCHEMA_V1,
