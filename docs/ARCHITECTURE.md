@@ -514,7 +514,10 @@ Rules:
 - corruption/I/O/invariant failures fail closed;
 - network uncertainty after a send never causes blind retry;
 - UNKNOWN_SUBMISSION is reconciled by exact client-order/exchange evidence;
-- observation and analysis never send orders.
+- observation and analysis never send orders;
+- the exact mandate/hard-policy used for mutation admission is immutable plan evidence, not a submit-time caller override;
+- risk-increasing OPEN requires the current analysis to match the plan binding, current account generation, immutable candidate notional/loss and current exact configured leverage;
+- a validated CLOSE may remain risk-reducing even when the account is already beyond an open-risk policy threshold; ordinary close-capacity, account/reference/venue/clock checks still apply.
 
 Phase 2 pre-enable is physically accepted:
 
@@ -548,10 +551,14 @@ Stage 2 status:
 - live microstructure core: ACCEPTED;
 - derivatives/history intelligence: ACCEPTED;
 - portfolio mandate/hard-policy primary T4: ACCEPTED through the connected Cloudflare MCP surface with one permissive FRESH/coherent/oracle-consistent case and one intentional typed policy rejection; GitHub fallback was not used as a substitute;
-- current cursor: close identified risk correctness edges, then covariance/correlation + scenario/stress, then bind the same versioned hard policy into fresh pre-mutation revalidation inside the existing execution owner;
-- production live trading remains disabled.
+- portfolio-risk correctness closure: ACCEPTED;
+- statistical portfolio risk: ACCEPTED (#187);
+- pre-mutation hard-policy ownership: ACCEPTED for implementation/fail-closed mutation-boundary scope (#188). The immutable prepared plan binds the same versioned mandate/policy; submit reacquires fresh account/reference/ledger evidence plus exact side-specific configured leverage for risk-increasing opens, re-runs the existing pure portfolio-risk implementation, verifies the resulting analysis belongs to the same binding/current account/candidate, and rechecks private/reference continuity after venue/clock I/O before the existing executor boundary;
+- #188 exact tested/deployed tree: `9eafeaca84c3080edfcae813901c9b7b38d4eaaa`; CI `37087545928`; artifact `11261092800`; installed agent SHA-256 `adad85df474987ed5971d74b6593246ca2287d2742de1abab163478fab13fc93`; deploy/restart PASS;
+- current cursor: safe representative non-zero portfolio/oracle proof, then final Stage-2 T1–T5 acceptance;
+- production live trading remains disabled; the pre-mutation acceptance above does not claim a production-live mutation.
 
-Primary Cloudflare MCP is currently healthy on Worker contract `okx.mcp.tools/2026-10-03.1`; `account_summary` and `portfolio_risk` are callable. PortfolioRisk primary T4 is accepted; GitHub DATA remains fallback/parity only.
+Primary Cloudflare MCP is currently healthy on Worker contract `okx.mcp.tools/2026-10-03.2`; `account_summary` and `portfolio_risk` are callable. Post-#188 primary `portfolio_risk/v3` regression remained FRESH/coherent/oracle-consistent. GitHub DATA remains fallback/parity only.
 
 ## Non-goals
 
