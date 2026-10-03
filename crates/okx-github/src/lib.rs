@@ -163,7 +163,7 @@ pub enum GitHubError {
 }
 
 impl GitHubError {
-    pub const fn failure_class(&self) -> GitHubFailureClass {
+    pub fn failure_class(&self) -> GitHubFailureClass {
         match self {
             Self::Http(error) => classify_http_failure(error.is_timeout()),
             Self::Response(error) => error.class,
