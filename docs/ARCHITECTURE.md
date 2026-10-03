@@ -554,11 +554,14 @@ Stage 2 status:
 - portfolio-risk correctness closure: ACCEPTED;
 - statistical portfolio risk: ACCEPTED (#187);
 - pre-mutation hard-policy ownership: ACCEPTED for implementation/fail-closed mutation-boundary scope (#188). The immutable prepared plan binds the same versioned mandate/policy; submit reacquires fresh account/reference/ledger evidence plus exact side-specific configured leverage for risk-increasing opens, re-runs the existing pure portfolio-risk implementation, verifies the resulting analysis belongs to the same binding/current account/candidate, and rechecks private/reference continuity after venue/clock I/O before the existing executor boundary;
-- #188 exact tested/deployed tree: `9eafeaca84c3080edfcae813901c9b7b38d4eaaa`; CI `37087545928`; artifact `11261092800`; installed agent SHA-256 `adad85df474987ed5971d74b6593246ca2287d2742de1abab163478fab13fc93`; deploy/restart PASS;
-- current cursor: safe representative non-zero portfolio/oracle proof, then final Stage-2 T1–T5 acceptance;
-- production live trading remains disabled; the pre-mutation acceptance above does not claim a production-live mutation.
+- representative non-zero proof implementation: MERGED / DEPLOYED (#190/#191). The existing `portfolio_risk` capability owns one bounded read-only COUNTERFACTUAL `virtual_portfolio` input and OKX Position Builder oracle; no new tool/runtime owner was created;
+- representative non-zero positive T4: **BLOCKED_EXTERNAL**. The currently provisioned read-only standard-subaccount context reaches OKX Position Builder but receives typed non-retryable `POSITION_BUILDER_ACCOUNT_UNAVAILABLE` / OKX `50008 User doesn't exist`. There is no provisioned master-read/secondary-observer account context. Do not create a second credential model, Demo subsystem, oracle service or production mutation solely for acceptance;
+- CONTROL HTTP reliability hardening: ACCEPTED (#193). Existing `okx-github` owns 10s connect / 60s whole-request timeouts and typed Timeout/Decode failure classes. Exact controller activation through the immutable launcher plus `acceptance_crash_controller` proved durable terminal before exit, automatic Scheduler/launcher recovery, unchanged hardened controller provenance and no replay;
+- #193 exact tested/merged tree: `b16c3d56438b01402f09a051b8092a43a3d22145`; CI `37125627129`; controller artifact `11274982057`; controller SHA-256 `10784b32ba24dc65058ff3b7c7c03783b28c1ae6e3726b2c85eeecdfc1d0004f`;
+- current cursor: Stage 2 item 5 remains BLOCKED_EXTERNAL; final Stage-2 T1–T5 PASS is blocked by that item. Stage 3 must not start yet;
+- production live trading remains disabled.
 
-Primary Cloudflare MCP is currently healthy on Worker contract `okx.mcp.tools/2026-10-03.2`; `account_summary` and `portfolio_risk` are callable. Post-#188 primary `portfolio_risk/v3` regression remained FRESH/coherent/oracle-consistent. GitHub DATA remains fallback/parity only.
+Primary Cloudflare MCP is healthy on Worker contract `okx.mcp.tools/2026-10-03.3`; `account_summary` and `portfolio_risk` are callable. After controller T5 recovery the direct runtime reconverged PASS/FRESH at generation 107, and account summary remained FRESH/coherent with zero positions/pending orders and consistent ledger reconciliation. GitHub DATA remains fallback/parity only.
 
 ## Non-goals
 

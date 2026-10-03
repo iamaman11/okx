@@ -68,12 +68,26 @@ Canonical Stage-2 closure order:
 
 1. **DONE** — primary `portfolio_risk` allow + intentional reject cases passed through the connected Cloudflare MCP surface;
 2. **DONE** — portfolio-risk correctness closure: final reference-generation recheck, bounded source-skew/oracle admission, versioned oracle semantics, fail-closed unsupported daily-loss currencies, and explicit mandate enforced/context-only fields;
-3. **DONE** — statistical portfolio risk: covariance/correlation with explicit sample/window, volatility contribution, deterministic scenarios/historical stress; Expected Shortfall remains explicitly NOT_COMPUTED until a declared valid tail-sample contract exists (#187);
-4. **DONE** — pre-mutation hard-policy ownership (#188): the exact immutable mandate/policy is re-evaluated on fresh account/reference/ledger/leverage evidence inside the existing execution authority immediately before its mutation boundary. Exact tested/deployed tree `9eafeaca84c3080edfcae813901c9b7b38d4eaaa`, CI `37087545928`, artifact `11261092800`, agent SHA-256 `adad85df474987ed5971d74b6593246ca2287d2742de1abab163478fab13fc93`; deploy/restart PASS and primary runtime reconverged PASS/FRESH. Production live trading remains disabled and no production mutation T4 is claimed;
-5. **CURRENT** — obtain safe representative non-zero portfolio/oracle proof through supported read-only virtual evidence or OKX Demo Trading rather than enabling production live trading;
-6. **PENDING** — issue one final Stage-2 T1–T5 acceptance record over one traceable accepted tree/artifact.
+3. **DONE** — statistical portfolio risk (#187): covariance/correlation with explicit sample/window, volatility contribution, deterministic scenarios/historical stress. Expected Shortfall remains explicitly NOT_COMPUTED until a declared valid tail-sample contract exists;
+4. **DONE** — pre-mutation hard-policy ownership (#188): the exact immutable mandate/policy is re-evaluated on fresh account/reference/ledger/leverage evidence inside the existing execution authority immediately before its mutation boundary. Exact tested/deployed tree `9eafeaca84c3080edfcae813901c9b7b38d4eaaa`, CI `37087545928`, artifact `11261092800`, deploy/restart PASS. Production live trading remains disabled;
+5. **BLOCKED_EXTERNAL** — representative non-zero portfolio/oracle proof. #190 implemented and deployed the bounded read-only `virtual_portfolio` / Position Builder path; #191 corrected the live OKX response contract and classifies the observed `50008 User doesn't exist` as `POSITION_BUILDER_ACCOUNT_UNAVAILABLE`, retryable=false. Primary Cloudflare reaches the exact Position Builder boundary, but the currently provisioned read-only standard-subaccount context is not eligible for a positive Position Builder proof. No second master-read/secondary-observer context is provisioned. Do not add a new credential model, Demo subsystem, oracle service, tool or production mutation solely to satisfy acceptance. Unblock only by provisioning a supported least-privilege Read-only OKX account context and rerunning the existing v5 path unchanged;
+6. **BLOCKED_BY_ITEM_5** — final Stage-2 T1–T5 acceptance. Do not issue Stage-2 PASS while item 5 remains externally blocked.
 
-Do not start Stage 3 until this closure sequence is complete. New analytical capability must continue to extend existing factual/analysis owners rather than reintroduce endpoint-per-question growth.
+Cross-cutting CONTROL reliability debt discovered during item 5 is **DONE / ACCEPTED** in #193:
+- merged main `239232ad9ef6308893c86c4afa1fbcf9fc6b6690`;
+- exact tested head `053cb0213f4367113dd32aada83e9704e0a9b1cd`, tested/merged tree `b16c3d56438b01402f09a051b8092a43a3d22145`;
+- CI #832 / run `37125627129` PASS;
+- controller artifact `11274982057`, controller SHA-256 `10784b32ba24dc65058ff3b7c7c03783b28c1ae6e3726b2c85eeecdfc1d0004f`;
+- existing `okx-github` now owns bounded 10s connect / 60s whole-request timeouts plus typed Timeout/Decode classification; no new owner/task/transport was introduced;
+- controller stage/handoff committed through the immutable launcher, and `acceptance_crash_controller` physically proved durable-terminal-before-exit, automatic Scheduler/launcher recovery, no replay and post-recovery PASS/FRESH runtime;
+- post-recovery production account remained FRESH/coherent with 0 positions, 0 pending orders and consistent ledger reconciliation.
+
+Current operational baseline:
+- Worker contract `okx.mcp.tools/2026-10-03.3`;
+- direct runtime PASS / connected / session_fresh after recovery, generation 107;
+- production live trading remains disabled.
+
+**Do not start Stage 3 while Stage 2 item 5 is BLOCKED_EXTERNAL.** A new analytical capability must continue to extend existing factual/analysis owners rather than reintroduce endpoint-per-question growth.
 
 ## Repository Guard v1
 
