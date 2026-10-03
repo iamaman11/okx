@@ -1003,6 +1003,32 @@ async fn build_virtual_portfolio_proof(
                 false,
             ));
         }
+        if !virtual_position_matches_request(requested, position) {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                VIRTUAL_PORTFOLIO_ORACLE_MISMATCH_CODE,
+                format!(
+                    "position-builder virtual position does not match requested contracts/direction for '{}'",
+                    requested.instrument
+                ),
+                false,
+            ));
+        }
+        if position.leverage.trim().is_empty() {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                VIRTUAL_PORTFOLIO_ORACLE_MISMATCH_CODE,
+                format!(
+                    "position-builder leverage is unavailable for '{}'",
+                    requested.instrument
+                ),
+                false,
+            ));
+        }
 
         let Some(rules) = resolve_instrument_rules(context, &requested.instrument).await else {
             return Err(reference_not_found(
@@ -1071,7 +1097,7 @@ async fn build_virtual_portfolio_proof(
         };
         notional_inputs.push(VirtualNotionalOracleInput {
             instrument_id: requested.instrument.clone(),
-            contracts: position.contracts.clone(),
+            contracts: requested.contracts.clone(),
             contract_value: contract_value.to_owned(),
             mark_price: position.mark_price.clone(),
             oracle_notional_usd: position.notional_usd.clone(),
@@ -1121,7 +1147,13 @@ async fn build_virtual_portfolio_proof(
             okx_observation::AccountPositionState {
                 instrument_type: position.instrument_type.clone(),
                 instrument_id: position.instrument_id.clone(),
-                position: position.contracts.clone(),
+                position: virtual_request
+                    .positions
+                    .iter()
+                    .find(|requested| requested.instrument == position.instrument_id)
+                    .expect("validated requested virtual position")
+                    .contracts
+                    .clone(),
                 position_side: "net".to_owned(),
                 margin_mode: "cross".to_owned(),
                 average_price: non_empty_option(&position.average_price),
@@ -1314,6 +1346,30 @@ async fn build_virtual_portfolio_proof(
         exchange_oracle: oracle,
         notional_oracle,
     })
+}
+
+fn virtual_position_matches_request(
+    requested: &okx_protocol::VirtualPortfolioPositionRequest,
+    observed: &okx_api::PositionBuilderPosition,
+) -> bool {
+    let Ok(requested_contracts) = requested.contracts.parse::<rust_decimal::Decimal>() else {
+        return false;
+    };
+    let Ok(observed_contracts) = observed.contracts.parse::<rust_decimal::Decimal>() else {
+        return false;
+    };
+    match observed.position_side.as_str() {
+        "net" => observed_contracts == requested_contracts,
+        "long" => {
+            requested_contracts > rust_decimal::Decimal::ZERO
+                && observed_contracts.abs() == requested_contracts.abs()
+        }
+        "short" => {
+            requested_contracts < rust_decimal::Decimal::ZERO
+                && observed_contracts.abs() == requested_contracts.abs()
+        }
+        _ => false,
+    }
 }
 
 fn non_empty_option(value: &str) -> Option<String> {
