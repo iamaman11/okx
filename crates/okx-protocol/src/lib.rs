@@ -1273,10 +1273,7 @@ fn validate_execution_risk_binding(
         &mandate.max_drawdown_ratio,
         "risk.mandate.max_drawdown_ratio",
     )?;
-    validate_positive_decimal_text(
-        &mandate.leverage_ceiling,
-        "risk.mandate.leverage_ceiling",
-    )?;
+    validate_positive_decimal_text(&mandate.leverage_ceiling, "risk.mandate.leverage_ceiling")?;
     validate_non_negative_decimal_text(
         &mandate.minimum_liquidity_notional_usd,
         "risk.mandate.minimum_liquidity_notional_usd",
