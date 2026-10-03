@@ -1398,9 +1398,7 @@ async fn build_virtual_portfolio_proof(
 
 fn position_builder_account_unavailable(error: &AccountBootstrapError) -> Option<String> {
     match error {
-        AccountBootstrapError::Api(okx_api::OkxError::Api { code, message })
-            if code == "50008" =>
-        {
+        AccountBootstrapError::Api(okx_api::OkxError::Api { code, message }) if code == "50008" => {
             Some(format!(
                 "OKX Position Builder is unavailable for the authenticated account: API {code}: {message}"
             ))
@@ -1502,7 +1500,6 @@ mod tests {
         assert!(observation_skew_ms("2026-10-03T00:00:00.000Z", "not-millis").is_err());
     }
 }
-
 
 #[cfg(test)]
 mod position_builder_contract_tests {
