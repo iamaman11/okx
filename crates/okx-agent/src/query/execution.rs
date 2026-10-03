@@ -623,6 +623,53 @@ async fn submit_prepared(
     if let Err(error) = revalidate_venue_execution(&plan, &rules, &venue, timing.exp_time_ms()) {
         return Ok(validation_failure(request, generated_at, error));
     }
+
+    // Risk evidence must still be current after all pre-mutation venue/clock I/O.
+    match private_ws.convergence_window(risk_cursor).await {
+        Ok(window) if window.events.is_empty() => {}
+        Ok(window) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!(
+                    "{} private account event(s) arrived after risk evaluation and before mutation",
+                    window.events.len()
+                ),
+                true,
+            ));
+        }
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!(
+                    "private account coherence changed after risk evaluation and before mutation: {error}"
+                ),
+                true,
+            ));
+        }
+    }
+    let Some(final_rules) = current_rules(context, &plan.instrument_id).await else {
+        return Ok(reference_not_fresh(request, generated_at));
+    };
+    if final_rules.reference_generation != rules.reference_generation {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_REFERENCE_NOT_FRESH_CODE,
+            format!(
+                "reference generation changed after risk evaluation and before mutation: expected {}, observed {}",
+                rules.reference_generation, final_rules.reference_generation
+            ),
+            true,
+        ));
+    }
+
     let observed_at_ms = timing.request_time_ms();
     match execution
         .submit_prepared(intent_id, timing, observed_at_ms)
