@@ -16,7 +16,7 @@ use std::{
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat};
 use reqwest::{Client, RequestBuilder, Response, header::HeaderMap};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -29,6 +29,8 @@ const COMMENTS_PER_PAGE: u32 = 100;
 const MAX_COMMENT_PAGES: u32 = 10;
 pub const MAX_COMMENT_BODY_BYTES: usize = 64 * 1024;
 pub const ISSUE_CURSOR_SCHEMA_V1: &str = "okx.github.issue-cursor/v1";
+pub const GITHUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -39,6 +41,8 @@ pub enum GitHubFailureClass {
     PermissionOrResource,
     TransientServer,
     Network,
+    Timeout,
+    Decode,
     UnexpectedResponse,
 }
 
@@ -115,6 +119,9 @@ pub enum GitHubError {
     #[error("GitHub response rejected: {0}")]
     Response(GitHubResponseError),
 
+    #[error("GitHub response JSON decode error: {0}")]
+    Decode(serde_json::Error),
+
     #[error("GitHub repository identity mismatch")]
     RepositoryIdentityMismatch,
 
@@ -158,8 +165,9 @@ pub enum GitHubError {
 impl GitHubError {
     pub const fn failure_class(&self) -> GitHubFailureClass {
         match self {
-            Self::Http(_) => GitHubFailureClass::Network,
+            Self::Http(error) => classify_http_failure(error.is_timeout()),
             Self::Response(error) => error.class,
+            Self::Decode(_) => GitHubFailureClass::Decode,
             Self::RepositoryIdentityMismatch => GitHubFailureClass::UnexpectedResponse,
             Self::InvalidIssueNumber
             | Self::HistoryLimitExceeded
@@ -398,7 +406,11 @@ pub struct GitHubClient {
 
 impl GitHubClient {
     pub fn new(token: Zeroizing<String>, user_agent: &str) -> Result<Self, GitHubError> {
-        let http = Client::builder().user_agent(user_agent).build()?;
+        let http = Client::builder()
+            .user_agent(user_agent)
+            .connect_timeout(GITHUB_CONNECT_TIMEOUT)
+            .timeout(GITHUB_REQUEST_TIMEOUT)
+            .build()?;
         Ok(Self {
             http,
             token,
@@ -416,16 +428,15 @@ impl GitHubClient {
 
     pub async fn verify_repository_identity(&self) -> Result<(), GitHubError> {
         let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}");
-        let repository: RepositoryIdentity = self
+        let response = self
             .send_checked(
                 self.http
                     .get(url)
                     .bearer_auth(self.token.as_str())
                     .header("Accept", "application/vnd.github+json"),
             )
-            .await?
-            .json()
             .await?;
+        let repository: RepositoryIdentity = decode_json_response(response).await?;
 
         if repository.id != REPOSITORY_ID
             || repository.owner.id != OWNER_USER_ID
@@ -451,16 +462,15 @@ impl GitHubClient {
         validate_issue_number(issue_number)?;
 
         let metadata_url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/issues/{issue_number}");
-        let metadata: RawIssueMetadata = self
+        let response = self
             .send_checked(
                 self.http
                     .get(metadata_url)
                     .bearer_auth(self.token.as_str())
                     .header("Accept", "application/vnd.github+json"),
             )
-            .await?
-            .json()
             .await?;
+        let metadata: RawIssueMetadata = decode_json_response(response).await?;
 
         if metadata.comments == 0 {
             return Ok(Vec::new());
@@ -619,7 +629,7 @@ impl GitHubClient {
         }
         self.record_comment_ok();
         let etag = header_text(response.headers(), "etag");
-        let comments = response.json().await?;
+        let comments = decode_json_response(response).await?;
         Ok(CommentPageFetch::Modified { comments, etag })
     }
 
@@ -655,16 +665,15 @@ impl GitHubClient {
 
     pub async fn workflow_run(&self, run_id: u64) -> Result<WorkflowRun, GitHubError> {
         let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/runs/{run_id}");
-        let run: RawWorkflowRun = self
+        let response = self
             .send_checked(
                 self.http
                     .get(url)
                     .bearer_auth(self.token.as_str())
                     .header("Accept", "application/vnd.github+json"),
             )
-            .await?
-            .json()
             .await?;
+        let run: RawWorkflowRun = decode_json_response(response).await?;
 
         if run.id != run_id {
             return Err(GitHubError::UntrustedWorkflowRun);
@@ -688,16 +697,15 @@ impl GitHubClient {
         let url = format!(
             "{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/runs/{run_id}/artifacts?per_page=100"
         );
-        let response: RawArtifactsResponse = self
+        let response = self
             .send_checked(
                 self.http
                     .get(url)
                     .bearer_auth(self.token.as_str())
                     .header("Accept", "application/vnd.github+json"),
             )
-            .await?
-            .json()
             .await?;
+        let response: RawArtifactsResponse = decode_json_response(response).await?;
 
         let artifact = response
             .artifacts
@@ -724,7 +732,8 @@ impl GitHubClient {
             )
             .await?
             .bytes()
-            .await?;
+            .await
+            .map_err(GitHubError::Http)?;
 
         Ok(bytes.to_vec())
     }
@@ -751,6 +760,23 @@ impl GitHubClient {
         .await?;
 
         Ok(())
+    }
+}
+
+async fn decode_json_response<T: DeserializeOwned>(response: Response) -> Result<T, GitHubError> {
+    let bytes = response.bytes().await.map_err(GitHubError::Http)?;
+    decode_json_bytes(&bytes)
+}
+
+fn decode_json_bytes<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, GitHubError> {
+    serde_json::from_slice(bytes).map_err(GitHubError::Decode)
+}
+
+const fn classify_http_failure(is_timeout: bool) -> GitHubFailureClass {
+    if is_timeout {
+        GitHubFailureClass::Timeout
+    } else {
+        GitHubFailureClass::Network
     }
 }
 
@@ -823,10 +849,13 @@ fn retry_delay_for(error: &GitHubError, attempt: u32, now_epoch_seconds: u64) ->
         GitHubFailureClass::SecondaryRateLimit
         | GitHubFailureClass::Authentication
         | GitHubFailureClass::PermissionOrResource
+        | GitHubFailureClass::Decode
         | GitHubFailureClass::UnexpectedResponse => {
             Duration::from_secs(SLOW[attempt.min((SLOW.len() - 1) as u32) as usize])
         }
-        GitHubFailureClass::TransientServer | GitHubFailureClass::Network => {
+        GitHubFailureClass::TransientServer
+        | GitHubFailureClass::Network
+        | GitHubFailureClass::Timeout => {
             Duration::from_secs(TRANSIENT[attempt.min((TRANSIENT.len() - 1) as u32) as usize])
         }
     }
@@ -949,6 +978,22 @@ mod tests {
     }
 
     #[test]
+    fn request_timeouts_are_bounded_and_classified_transient() {
+        assert_eq!(GITHUB_CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(GITHUB_REQUEST_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(classify_http_failure(true), GitHubFailureClass::Timeout);
+        assert_eq!(classify_http_failure(false), GitHubFailureClass::Network);
+    }
+
+    #[test]
+    fn malformed_json_is_typed_decode_failure_and_uses_slow_backoff() {
+        let error = decode_json_bytes::<RawIssueMetadata>(br#"{"comments":"#)
+            .expect_err("malformed JSON must fail");
+        assert_eq!(error.failure_class(), GitHubFailureClass::Decode);
+        assert_eq!(retry_delay_for(&error, 0, 1_000), Duration::from_secs(60));
+    }
+
+    #[test]
     fn classifies_auth_permission_and_rate_limit_responses() {
         assert_eq!(
             response_error(401, Some(100), None, None).failure_class(),
@@ -1000,6 +1045,7 @@ mod tests {
         );
 
         let server = response_error(503, Some(100), None, None);
+        assert_eq!(server.failure_class(), GitHubFailureClass::TransientServer);
         assert_eq!(retry_delay_for(&server, 0, 1_000), Duration::from_secs(1));
         assert_eq!(retry_delay_for(&server, 99, 1_000), Duration::from_secs(60));
     }
