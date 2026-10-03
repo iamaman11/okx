@@ -2213,6 +2213,90 @@ mod tests {
     }
 
     #[test]
+    fn virtual_portfolio_proof_is_bounded_unique_and_mutually_exclusive_with_candidate() {
+        let mut virtual_proof = portfolio_risk_operation(None);
+        if let AgentOperation::PortfolioRisk {
+            virtual_portfolio, ..
+        } = &mut virtual_proof
+        {
+            *virtual_portfolio = Some(VirtualPortfolioRequest {
+                collateral_usdt: "10000".to_owned(),
+                positions: vec![
+                    VirtualPortfolioPositionRequest {
+                        instrument: "BTC-USDT-SWAP".to_owned(),
+                        contracts: "2".to_owned(),
+                        average_price: "100000".to_owned(),
+                        leverage: "3".to_owned(),
+                    },
+                    VirtualPortfolioPositionRequest {
+                        instrument: "ETH-USDT-SWAP".to_owned(),
+                        contracts: "-3".to_owned(),
+                        average_price: "4000".to_owned(),
+                        leverage: "3".to_owned(),
+                    },
+                ],
+            });
+        }
+        virtual_proof.validate().expect("valid virtual portfolio");
+        assert!(virtual_proof.direct_transport_read_only());
+        let json = serde_json::to_string(&virtual_proof).expect("serialize");
+        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, virtual_proof);
+
+        let mut duplicate = virtual_proof.clone();
+        if let AgentOperation::PortfolioRisk {
+            virtual_portfolio: Some(value),
+            ..
+        } = &mut duplicate
+        {
+            value.positions[1].instrument = value.positions[0].instrument.clone();
+        }
+        assert_eq!(
+            duplicate.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery(
+                "duplicate virtual portfolio instrument"
+            ))
+        );
+
+        let mut zero = virtual_proof.clone();
+        if let AgentOperation::PortfolioRisk {
+            virtual_portfolio: Some(value),
+            ..
+        } = &mut zero
+        {
+            value.positions[0].contracts = "0".to_owned();
+        }
+        assert_eq!(
+            zero.validate(),
+            Err(ProtocolError::InvalidDecimalInput(
+                "virtual_portfolio.positions.contracts"
+            ))
+        );
+
+        let mut ambiguous = virtual_proof;
+        if let AgentOperation::PortfolioRisk {
+            candidate,
+            virtual_portfolio: Some(_),
+            ..
+        } = &mut ambiguous
+        {
+            *candidate = Some(PortfolioCandidateRequest {
+                instrument: "BTC-USDT-SWAP".to_owned(),
+                side: PositionSide::Long,
+                notional_usd: "100".to_owned(),
+                worst_case_loss_usd: "10".to_owned(),
+                leverage: "3".to_owned(),
+            });
+        }
+        assert_eq!(
+            ambiguous.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery(
+                "candidate and virtual_portfolio are mutually exclusive"
+            ))
+        );
+    }
+
+    #[test]
     fn current_cost_is_typed_and_keeps_decimal_contracts_as_text() {
         let request = AgentOperation::CurrentCost {
             instrument: "DOGE-USDT-SWAP".to_owned(),
