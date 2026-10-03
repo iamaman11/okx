@@ -8,10 +8,10 @@ use okx_analysis::{
     PortfolioStatisticsAnalysis, PositionDirection, PositionScenarioAssumptions,
     RiskDegradedMode as AnalysisRiskDegradedMode, RiskMinimumQuality as AnalysisRiskMinimumQuality,
     ScenarioExitAssumption, StatisticalExposure, TRADING_MANDATE_SCHEMA_V1, TradingMandate,
-    VirtualNotionalOracleInput, analyze_basis_difference_bps, analyze_candidate_order, analyze_cost,
-    analyze_dated_future_basis, analyze_history_behavior, analyze_mark_index_basis_bps,
-    analyze_market_intelligence, analyze_portfolio_risk, analyze_portfolio_statistics,
-    analyze_position_scenario, compare_account_position_risk_oracle,
+    VirtualNotionalOracleInput, analyze_basis_difference_bps, analyze_candidate_order,
+    analyze_cost, analyze_dated_future_basis, analyze_history_behavior,
+    analyze_mark_index_basis_bps, analyze_market_intelligence, analyze_portfolio_risk,
+    analyze_portfolio_statistics, analyze_position_scenario, compare_account_position_risk_oracle,
     compare_virtual_position_builder_notional,
 };
 use okx_github::{ISSUE_POLL_TELEMETRY_SCHEMA_V1, IssuePollTelemetryStatus};
@@ -80,8 +80,7 @@ pub const PORTFOLIO_RISK_SCHEMA_V3: &str = "okx.portfolio-risk/v3";
 pub const PORTFOLIO_RISK_SCHEMA_V4: &str = "okx.portfolio-risk/v4";
 pub const PORTFOLIO_RISK_SCHEMA_V5: &str = "okx.portfolio-risk/v5";
 pub const VIRTUAL_PORTFOLIO_PROOF_SCHEMA_V1: &str = "okx.virtual-portfolio-proof/v1";
-pub const VIRTUAL_PORTFOLIO_ORACLE_MISMATCH_CODE: &str =
-    "VIRTUAL_PORTFOLIO_ORACLE_MISMATCH";
+pub const VIRTUAL_PORTFOLIO_ORACLE_MISMATCH_CODE: &str = "VIRTUAL_PORTFOLIO_ORACLE_MISMATCH";
 pub const PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT_CODE: &str =
     "PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT";
 pub const ANALYSIS_INPUT_INCONSISTENT_CODE: &str = "ANALYSIS_INPUT_INCONSISTENT";
