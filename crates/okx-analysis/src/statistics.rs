@@ -10,6 +10,8 @@ pub const PORTFOLIO_STATISTICS_SCHEMA_V1: &str = "okx.portfolio-statistics/v1";
 pub const PORTFOLIO_VOLATILITY_FORMULA_V1: &str = "signed-notional-covariance-volatility/v1";
 pub const HISTORICAL_STRESS_FORMULA_V1: &str = "aligned-one-bar-return-replay/v1";
 pub const PARALLEL_SCENARIO_FORMULA_V1: &str = "parallel-price-move-signed-notional/v1";
+pub const VOLATILITY_CONTRIBUTION_RECONCILIATION_TOLERANCE_USD: &str =
+    "0.000000000000000000000001";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatisticalExposure {
@@ -88,6 +90,8 @@ pub struct PortfolioStatisticsAnalysis {
     pub covariance: Vec<CovarianceCell>,
     pub portfolio_volatility_usd: Option<String>,
     pub volatility_contribution: Vec<VolatilityContribution>,
+    pub volatility_contribution_reconciliation_residual_usd: Option<String>,
+    pub volatility_contribution_reconciliation_tolerance_usd: &'static str,
     pub historical_stress: Option<HistoricalStressResult>,
     pub parallel_scenario: Option<ParallelScenarioResult>,
     pub expected_shortfall: Option<String>,
@@ -184,6 +188,9 @@ pub fn analyze_portfolio_statistics(
             covariance: Vec::new(),
             portfolio_volatility_usd: None,
             volatility_contribution: Vec::new(),
+            volatility_contribution_reconciliation_residual_usd: None,
+            volatility_contribution_reconciliation_tolerance_usd:
+                VOLATILITY_CONTRIBUTION_RECONCILIATION_TOLERANCE_USD,
             historical_stress: None,
             parallel_scenario: None,
             expected_shortfall: None,
@@ -362,6 +369,21 @@ pub fn analyze_portfolio_statistics(
         })
         .collect::<Vec<_>>();
 
+    let contribution_sum = volatility_contribution
+        .iter()
+        .map(|row| crate::decimal("component_volatility_usd", &row.component_volatility_usd))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .sum::<Decimal>();
+    let contribution_residual = portfolio_volatility - contribution_sum;
+    let reconciliation_tolerance = Decimal::new(1, 24);
+    if contribution_residual.abs() > reconciliation_tolerance {
+        return Err(AnalysisError::StatisticalVolatilityReconciliationExceeded {
+            residual: contribution_residual.normalize().to_string(),
+            tolerance: VOLATILITY_CONTRIBUTION_RECONCILIATION_TOLERANCE_USD.to_owned(),
+        });
+    }
+
     let mut historical_pnl = vec![Decimal::ZERO; sample_count];
     for (notional, returns) in signed_notionals.iter().zip(&return_series) {
         for (pnl, return_value) in historical_pnl.iter_mut().zip(returns) {
@@ -414,6 +436,11 @@ pub fn analyze_portfolio_statistics(
         covariance,
         portfolio_volatility_usd: Some(portfolio_volatility.normalize().to_string()),
         volatility_contribution,
+        volatility_contribution_reconciliation_residual_usd: Some(
+            contribution_residual.normalize().to_string(),
+        ),
+        volatility_contribution_reconciliation_tolerance_usd:
+            VOLATILITY_CONTRIBUTION_RECONCILIATION_TOLERANCE_USD,
         historical_stress: Some(historical_stress),
         parallel_scenario,
         expected_shortfall: None,
@@ -556,12 +583,27 @@ mod tests {
             .iter()
             .map(|row| d(&row.component_volatility_usd))
             .sum::<Decimal>();
-        assert_eq!(
-            contribution_sum.normalize().to_string(),
+        let portfolio_volatility = d(
             result
                 .portfolio_volatility_usd
                 .as_deref()
-                .expect("portfolio volatility")
+                .expect("portfolio volatility"),
+        );
+        let residual = portfolio_volatility - contribution_sum;
+        assert_eq!(
+            residual.normalize().to_string(),
+            result
+                .volatility_contribution_reconciliation_residual_usd
+                .as_deref()
+                .expect("reconciliation residual")
+        );
+        assert!(
+            residual.abs() <= Decimal::new(1, 24),
+            "component contribution residual must stay within the declared tolerance"
+        );
+        assert_eq!(
+            result.volatility_contribution_reconciliation_tolerance_usd,
+            VOLATILITY_CONTRIBUTION_RECONCILIATION_TOLERANCE_USD
         );
         assert_eq!(
             result
