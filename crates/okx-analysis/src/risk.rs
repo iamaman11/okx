@@ -4,7 +4,7 @@ use okx_observation::{
     AccountLedgerSummary, AccountPositionState, AccountSnapshot, CurrencyAggregate,
 };
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{AnalysisError, PositionDirection, decimal, positive_decimal};
 
@@ -59,9 +59,10 @@ pub struct AccountRiskAnalysis {
     pub positions: Vec<PositionRiskAnalysis>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradingMandate {
-    pub schema: &'static str,
+    pub schema: String,
     pub version: String,
     pub capital_base_usd: String,
     pub decision_horizon_hours: u32,
@@ -73,30 +74,32 @@ pub struct TradingMandate {
     pub max_turnover_ratio: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CorrelatedClusterLimit {
     pub id: String,
     pub instruments: Vec<String>,
     pub max_gross_notional_usd: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskMinimumQuality {
     Fresh,
     Degraded,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskDegradedMode {
     Reject,
     AllowReadOnly,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HardRiskPolicy {
-    pub schema: &'static str,
+    pub schema: String,
     pub version: String,
     pub max_account_gross_notional_usd: String,
     pub max_instrument_gross_notional_usd: String,
@@ -111,7 +114,8 @@ pub struct HardRiskPolicy {
     pub correlated_clusters: Vec<CorrelatedClusterLimit>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PortfolioCandidate {
     pub instrument: String,
     pub direction: PositionDirection,
@@ -1198,7 +1202,7 @@ mod tests {
 
     fn mandate() -> TradingMandate {
         TradingMandate {
-            schema: TRADING_MANDATE_SCHEMA_V1,
+            schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
             version: "test-mandate/v1".to_owned(),
             capital_base_usd: "500".to_owned(),
             decision_horizon_hours: 24,
@@ -1213,7 +1217,7 @@ mod tests {
 
     fn policy() -> HardRiskPolicy {
         HardRiskPolicy {
-            schema: HARD_RISK_POLICY_SCHEMA_V1,
+            schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
             version: "test-policy/v1".to_owned(),
             max_account_gross_notional_usd: "2000".to_owned(),
             max_instrument_gross_notional_usd: "1200".to_owned(),
