@@ -64,6 +64,30 @@ pub struct CandidateOrderAnalysis {
     pub funding_included: bool,
 }
 
+pub fn linear_contract_notional_usd(
+    contracts: &str,
+    contract_value: &str,
+    price: &str,
+) -> Result<String, AnalysisError> {
+    let contracts = decimal("contracts", contracts)?;
+    let contract_value = positive_decimal("contract_value", contract_value)?;
+    let price = positive_decimal("price", price)?;
+    let absolute_contracts = if contracts < Decimal::ZERO {
+        -contracts
+    } else {
+        contracts
+    };
+    if absolute_contracts == Decimal::ZERO {
+        return Err(AnalysisError::InvalidDecimal {
+            field: "contracts",
+            value: "0".to_owned(),
+        });
+    }
+    Ok((absolute_contracts * contract_value * price)
+        .normalize()
+        .to_string())
+}
+
 pub fn analyze_candidate_order(
     rules: &InstrumentRulesSnapshot,
     fees: &FeeScheduleSnapshot,
