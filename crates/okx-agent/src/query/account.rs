@@ -1386,22 +1386,26 @@ fn virtual_position_matches_request(
     requested: &okx_protocol::VirtualPortfolioPositionRequest,
     observed: &okx_api::PositionBuilderPosition,
 ) -> bool {
-    let Ok(requested_contracts) = requested.contracts.parse::<rust_decimal::Decimal>() else {
+    let Ok(requested_absolute) =
+        okx_analysis::linear_contract_notional_usd(&requested.contracts, "1", "1")
+    else {
         return false;
     };
-    let Ok(observed_contracts) = observed.contracts.parse::<rust_decimal::Decimal>() else {
+    let Ok(observed_absolute) =
+        okx_analysis::linear_contract_notional_usd(&observed.contracts, "1", "1")
+    else {
         return false;
     };
+    if requested_absolute != observed_absolute {
+        return false;
+    }
+
+    let requested_negative = requested.contracts.trim_start().starts_with('-');
+    let observed_negative = observed.contracts.trim_start().starts_with('-');
     match observed.position_side.as_str() {
-        "net" => observed_contracts == requested_contracts,
-        "long" => {
-            requested_contracts > rust_decimal::Decimal::ZERO
-                && observed_contracts.abs() == requested_contracts.abs()
-        }
-        "short" => {
-            requested_contracts < rust_decimal::Decimal::ZERO
-                && observed_contracts.abs() == requested_contracts.abs()
-        }
+        "net" => requested_negative == observed_negative,
+        "long" => !requested_negative,
+        "short" => requested_negative,
         _ => false,
     }
 }
