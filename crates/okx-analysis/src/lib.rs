@@ -9,7 +9,7 @@ mod statistics;
 
 pub use candidate::{
     CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderAssumptions,
-    SizingConstraint, analyze_candidate_order,
+    SizingConstraint, analyze_candidate_order, linear_contract_notional_usd,
 };
 pub use derivatives::{
     DATED_FUTURE_BASIS_SCHEMA_V1, DatedFutureBasisAnalysis, analyze_basis_difference_bps,
