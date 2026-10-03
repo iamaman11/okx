@@ -58,6 +58,16 @@ struct PortfolioRiskResult {
     virtual_portfolio: Option<VirtualPortfolioProof>,
 }
 
+struct VirtualPortfolioProofInput<'a> {
+    observer: &'a AccountBootstrapper,
+    request: &'a VirtualPortfolioRequest,
+    statistics: Option<&'a PortfolioStatisticsRequest>,
+    ledger: &'a okx_observation::AccountLedgerSummary,
+    mandate: &'a TradingMandate,
+    policy: &'a HardRiskPolicy,
+    expected_reference: &'a str,
+}
+
 #[derive(serde::Serialize)]
 struct VirtualPortfolioProof {
     schema: &'static str,
@@ -819,13 +829,15 @@ pub(super) async fn dispatch(
                     request,
                     context,
                     generated_at,
-                    account,
-                    virtual_request,
-                    statistics.as_ref(),
-                    &facts.summary,
-                    &analysis_mandate,
-                    &analysis_policy,
-                    expected_reference,
+                    VirtualPortfolioProofInput {
+                        observer: account,
+                        request: virtual_request,
+                        statistics: statistics.as_ref(),
+                        ledger: &facts.summary,
+                        mandate: &analysis_mandate,
+                        policy: &analysis_policy,
+                        expected_reference,
+                    },
                 )
                 .await
                 {
@@ -938,14 +950,17 @@ async fn build_virtual_portfolio_proof(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
     generated_at: &str,
-    observer: &AccountBootstrapper,
-    virtual_request: &VirtualPortfolioRequest,
-    statistics_request: Option<&PortfolioStatisticsRequest>,
-    ledger: &okx_observation::AccountLedgerSummary,
-    mandate: &TradingMandate,
-    policy: &HardRiskPolicy,
-    expected_reference: &str,
+    input: VirtualPortfolioProofInput<'_>,
 ) -> Result<VirtualPortfolioProof, AgentResponse> {
+    let VirtualPortfolioProofInput {
+        observer,
+        request: virtual_request,
+        statistics: statistics_request,
+        ledger,
+        mandate,
+        policy,
+        expected_reference,
+    } = input;
     let builder_request = okx_api::PositionBuilderRequest {
         account_level: "3".to_owned(),
         include_real_positions_and_equity: false,
