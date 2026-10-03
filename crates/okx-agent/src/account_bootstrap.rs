@@ -1,7 +1,8 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
     AccountApi, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate, InstrumentType,
-    LeverageInfo, MarginMode, OkxError, OkxRestClient,
+    LeverageInfo, MarginMode, OkxError, OkxRestClient, PositionBuilderRequest,
+    PositionBuilderSnapshot,
 };
 use okx_observation::{
     AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, FeeScheduleError,
@@ -228,6 +229,15 @@ impl AccountBootstrapper {
             &margin_mode.to_string(),
             position_side,
         )
+    }
+
+    pub async fn position_builder_oracle(
+        &self,
+        request: &PositionBuilderRequest,
+    ) -> Result<PositionBuilderSnapshot, AccountBootstrapError> {
+        let config = self.api.config().await?;
+        strict_read_only_permissions(&config.perm)?;
+        Ok(self.api.position_builder(request).await?)
     }
 
     pub async fn account_position_risk_oracle(
