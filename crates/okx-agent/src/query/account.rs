@@ -981,23 +981,22 @@ async fn build_virtual_portfolio_proof(
     };
     let oracle = match observer.position_builder_oracle(&builder_request).await {
         Ok(value) => value,
-        Err(error) => return Err(account_failure(request, generated_at, error)),
+        Err(error) => {
+            if let Some(message) = position_builder_account_unavailable(&error) {
+                return Err(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    POSITION_BUILDER_ACCOUNT_UNAVAILABLE_CODE,
+                    message,
+                    false,
+                ));
+            }
+            return Err(account_failure(request, generated_at, error));
+        }
     };
     let oracle_source_received_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-    if !oracle.account_level.trim().is_empty() && oracle.account_level != "3" {
-        return Err(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Failed,
-            VIRTUAL_PORTFOLIO_ORACLE_MISMATCH_CODE,
-            format!(
-                "position-builder returned account level '{}', expected multi-currency level 3",
-                oracle.account_level
-            ),
-            false,
-        ));
-    }
     if oracle.positions.len() != virtual_request.positions.len()
         || oracle
             .positions
@@ -1244,8 +1243,8 @@ async fn build_virtual_portfolio_proof(
         account_uid_fingerprint: "counterfactual".to_owned(),
         api_key_permissions: vec!["read_only".to_owned()],
         balance: okx_observation::AccountBalanceState {
-            total_equity_usd: oracle.total_equity_usd.clone(),
-            adjusted_equity_usd: non_empty_option(&oracle.adjusted_equity_usd),
+            total_equity_usd: oracle.equity_usd.clone(),
+            adjusted_equity_usd: non_empty_option(&oracle.equity_usd),
             isolated_equity_usd: None,
             initial_margin_requirement_usd: non_empty_option(
                 &oracle.initial_margin_requirement_usd,
@@ -1255,7 +1254,7 @@ async fn build_virtual_portfolio_proof(
             ),
             margin_ratio: non_empty_option(&oracle.margin_ratio),
             notional_usd: Some(notional_oracle.local_gross_notional_usd.clone()),
-            update_time_ms: None,
+            update_time_ms: non_empty_option(&oracle.ts),
             details: Vec::new(),
         },
         positions,
@@ -1397,6 +1396,17 @@ async fn build_virtual_portfolio_proof(
     })
 }
 
+fn position_builder_account_unavailable(error: &AccountBootstrapError) -> Option<String> {
+    match error {
+        AccountBootstrapError::Api(okx_api::OkxError::Api { code, message }) if code == "50008" => {
+            Some(format!(
+                "OKX Position Builder is unavailable for the authenticated account: API {code}: {message}"
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn virtual_position_matches_request(
     requested: &okx_protocol::VirtualPortfolioPositionRequest,
     observed: &okx_api::PositionBuilderPosition,
@@ -1488,5 +1498,30 @@ mod tests {
         );
         assert!(observation_skew_ms("not-a-timestamp", "1790985600000").is_err());
         assert!(observation_skew_ms("2026-10-03T00:00:00.000Z", "not-millis").is_err());
+    }
+}
+
+#[cfg(test)]
+mod position_builder_contract_tests {
+    use super::*;
+
+    #[test]
+    fn position_builder_50008_is_typed_non_retryable_eligibility() {
+        let error = AccountBootstrapError::Api(okx_api::OkxError::Api {
+            code: "50008".to_owned(),
+            message: "User doesn't exist.".to_owned(),
+        });
+        assert_eq!(
+            position_builder_account_unavailable(&error).as_deref(),
+            Some(
+                "OKX Position Builder is unavailable for the authenticated account: API 50008: User doesn't exist."
+            )
+        );
+
+        let transient = AccountBootstrapError::Api(okx_api::OkxError::Api {
+            code: "50011".to_owned(),
+            message: "Rate limit reached".to_owned(),
+        });
+        assert!(position_builder_account_unavailable(&transient).is_none());
     }
 }
