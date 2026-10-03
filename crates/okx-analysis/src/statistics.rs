@@ -498,13 +498,13 @@ mod tests {
             source_received_at: "2026-10-03T00:00:00Z".to_owned(),
             history_generation: format!("history-{instrument}"),
             all_confirmed: true,
-            oldest_open_time_ms: "1".to_owned(),
-            newest_open_time_ms: closes.len().to_string(),
+            oldest_open_time_ms: "3600000".to_owned(),
+            newest_open_time_ms: (closes.len() as u64 * 3_600_000).to_string(),
             candles: closes
                 .iter()
                 .enumerate()
                 .map(|(index, close)| okx_observation::HistoryCandle {
-                    open_time_ms: (index + 1).to_string(),
+                    open_time_ms: ((index as u64 + 1) * 3_600_000).to_string(),
                     open: (*close).to_owned(),
                     high: (*close).to_owned(),
                     low: (*close).to_owned(),
@@ -616,7 +616,7 @@ mod tests {
         ];
         let btc = history("BTC-USDT-SWAP", &["100", "101", "102"]);
         let mut eth = history("ETH-USDT-SWAP", &["100", "101", "102"]);
-        eth.candles[1].open_time_ms = "99".to_owned();
+        eth.candles[1].open_time_ms = "999".to_owned();
         assert!(matches!(
             analyze_portfolio_statistics(&exposures, &[btc, eth], None),
             Err(AnalysisError::StatisticalHistoryNotAligned)
