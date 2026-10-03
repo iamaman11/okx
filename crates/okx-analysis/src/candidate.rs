@@ -513,6 +513,25 @@ mod tests {
     }
 
     #[test]
+    fn linear_contract_notional_uses_absolute_contracts_and_exact_decimal_math() {
+        assert_eq!(
+            linear_contract_notional_usd("2", "1000", "0.25").expect("long notional"),
+            "500"
+        );
+        assert_eq!(
+            linear_contract_notional_usd("-2", "1000", "0.25").expect("short notional"),
+            "500"
+        );
+        assert!(matches!(
+            linear_contract_notional_usd("0", "1000", "0.25"),
+            Err(AnalysisError::InvalidDecimal {
+                field: "contracts",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn long_candidate_is_risk_sized_and_fee_aware() {
         let rules = rules_for_test();
         let result = analyze_test(&rules, &assumptions(PositionDirection::Long, "0.09000"))
