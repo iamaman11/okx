@@ -213,8 +213,12 @@ GitHub transport primitives only:
 
 - pinned repository/user identity;
 - bounded issue retrieval;
+- bounded HTTP connect/request deadlines;
+- typed transport timeout, response-status and JSON-decode failure classification;
 - persisted cursors/terminal replay metadata;
-- failure classification/backoff.
+- bounded retry/backoff owned by the existing caller loop.
+
+A failed/timeout/decode GitHub request never creates a second mutation owner and never authorizes blind replay. CONTROL terminal request IDs remain durable replay suppression; an uncertain mutation publication/outcome must be reconciled before any new mutation identity is used.
 
 GitHub is transport/evidence, not market/account state authority.
 
@@ -409,6 +413,7 @@ Verified account invariants:
 - observer/executor fingerprints target the same intended account;
 - executor IP binding may be present or absent and is diagnostic only;
 - raw API key, secret, passphrase and raw UID are never returned through DATA/CONTROL/logs.
+- the currently provisioned observer authority is the Succession subaccount only; a separate least-privilege master/secondary read context is an external prerequisite when an OKX endpoint or treasury-wide proof requires authority not available to that subaccount. It must not be synthesized by broadening the observer or executor credential.
 
 GitHub Environment variables are not a live-trading enable authority. Runtime correctness depends on the production executor boundary, whose accepted constructor remains disabled.
 
