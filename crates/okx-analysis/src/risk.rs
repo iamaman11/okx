@@ -1120,6 +1120,46 @@ mod tests {
     }
 
     #[test]
+    fn virtual_notional_oracle_requires_exact_per_position_and_gross_match() {
+        let exact = compare_virtual_position_builder_notional(&[
+            VirtualNotionalOracleInput {
+                instrument_id: "BTC-USDT-SWAP".to_owned(),
+                contracts: "2".to_owned(),
+                contract_value: "0.01".to_owned(),
+                mark_price: "100000".to_owned(),
+                oracle_notional_usd: "2000".to_owned(),
+            },
+            VirtualNotionalOracleInput {
+                instrument_id: "ETH-USDT-SWAP".to_owned(),
+                contracts: "-3".to_owned(),
+                contract_value: "0.1".to_owned(),
+                mark_price: "4000".to_owned(),
+                oracle_notional_usd: "1200".to_owned(),
+            },
+        ])
+        .expect("exact virtual oracle");
+
+        assert!(exact.consistent);
+        assert_eq!(exact.local_gross_notional_usd, "3200");
+        assert_eq!(exact.oracle_gross_notional_usd, "3200");
+        assert_eq!(exact.gross_notional_residual_usd, "0");
+        assert!(exact.positions.iter().all(|row| row.residual_usd == "0"));
+
+        let mismatch = compare_virtual_position_builder_notional(&[
+            VirtualNotionalOracleInput {
+                instrument_id: "BTC-USDT-SWAP".to_owned(),
+                contracts: "2".to_owned(),
+                contract_value: "0.01".to_owned(),
+                mark_price: "100000".to_owned(),
+                oracle_notional_usd: "1999.99".to_owned(),
+            },
+        ])
+        .expect("mismatched virtual oracle");
+        assert!(!mismatch.consistent);
+        assert_eq!(mismatch.gross_notional_residual_usd, "0.01");
+    }
+
+    #[test]
     fn long_short_mode_aggregates_gross_net_concentration_and_liquidation_distance() {
         let snapshot = account(
             "long_short_mode",
