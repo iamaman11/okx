@@ -1,8 +1,7 @@
 use okx_analysis::{
-    CandidateOrderAssumptions, CorrelatedClusterLimit, HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy,
+    CandidateOrderAssumptions, HARD_RISK_POLICY_SCHEMA_V1,
     LiquidityRole as AnalysisLiquidityRole, PortfolioCandidate, PositionDirection,
-    RiskDegradedMode as AnalysisRiskDegradedMode, RiskMinimumQuality as AnalysisRiskMinimumQuality,
-    TRADING_MANDATE_SCHEMA_V1, TradingMandate, analyze_candidate_order, analyze_portfolio_risk,
+    TRADING_MANDATE_SCHEMA_V1, analyze_candidate_order, analyze_portfolio_risk,
 };
 use okx_api::{MUTATION_REQUEST_TTL_MS, MarginMode};
 use okx_execution::{
@@ -14,7 +13,6 @@ use okx_execution::{
 use okx_protocol::{
     ExecutionOrderType, ExecutionRiskBindingRequest, ExecutionTradeMode,
     LiquidityRole as ProtocolLiquidityRole, PositionSide as ProtocolPositionSide,
-    RiskDegradedMode as ProtocolRiskDegradedMode, RiskMinimumQuality as ProtocolRiskMinimumQuality,
 };
 
 use super::*;
@@ -907,51 +905,8 @@ async fn execution_status_response(
 
 fn execution_risk_binding(value: &ExecutionRiskBindingRequest) -> ExecutionRiskBinding {
     ExecutionRiskBinding {
-        mandate: TradingMandate {
-            schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
-            version: value.mandate.version.clone(),
-            capital_base_usd: value.mandate.capital_base_usd.clone(),
-            decision_horizon_hours: value.mandate.decision_horizon_hours,
-            benchmark: value.mandate.benchmark.clone(),
-            allowed_instruments: value.mandate.allowed_instruments.clone(),
-            max_drawdown_ratio: value.mandate.max_drawdown_ratio.clone(),
-            leverage_ceiling: value.mandate.leverage_ceiling.clone(),
-            minimum_liquidity_notional_usd: value.mandate.minimum_liquidity_notional_usd.clone(),
-            max_turnover_ratio: value.mandate.max_turnover_ratio.clone(),
-        },
-        policy: HardRiskPolicy {
-            schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
-            version: value.policy.version.clone(),
-            max_account_gross_notional_usd: value.policy.max_account_gross_notional_usd.clone(),
-            max_instrument_gross_notional_usd: value
-                .policy
-                .max_instrument_gross_notional_usd
-                .clone(),
-            max_margin_utilization_ratio: value.policy.max_margin_utilization_ratio.clone(),
-            max_loss_per_trade_usd: value.policy.max_loss_per_trade_usd.clone(),
-            max_daily_realized_loss_usd: value.policy.max_daily_realized_loss_usd.clone(),
-            max_drawdown_ratio: value.policy.max_drawdown_ratio.clone(),
-            max_leverage: value.policy.max_leverage.clone(),
-            allowed_instruments: value.policy.allowed_instruments.clone(),
-            minimum_quality: match value.policy.minimum_quality {
-                ProtocolRiskMinimumQuality::Fresh => AnalysisRiskMinimumQuality::Fresh,
-                ProtocolRiskMinimumQuality::Degraded => AnalysisRiskMinimumQuality::Degraded,
-            },
-            degraded_mode: match value.policy.degraded_mode {
-                ProtocolRiskDegradedMode::Reject => AnalysisRiskDegradedMode::Reject,
-                ProtocolRiskDegradedMode::AllowReadOnly => AnalysisRiskDegradedMode::AllowReadOnly,
-            },
-            correlated_clusters: value
-                .policy
-                .correlated_clusters
-                .iter()
-                .map(|cluster| CorrelatedClusterLimit {
-                    id: cluster.id.clone(),
-                    instruments: cluster.instruments.clone(),
-                    max_gross_notional_usd: cluster.max_gross_notional_usd.clone(),
-                })
-                .collect(),
-        },
+        mandate: trading_mandate(&value.mandate),
+        policy: hard_risk_policy(&value.policy),
     }
 }
 
