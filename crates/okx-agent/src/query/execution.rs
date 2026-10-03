@@ -1,7 +1,7 @@
 use okx_analysis::{
-    CandidateOrderAssumptions, HARD_RISK_POLICY_SCHEMA_V1,
-    LiquidityRole as AnalysisLiquidityRole, PortfolioCandidate, PositionDirection,
-    TRADING_MANDATE_SCHEMA_V1, analyze_candidate_order, analyze_portfolio_risk,
+    CandidateOrderAssumptions, HARD_RISK_POLICY_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
+    PortfolioCandidate, PositionDirection, TRADING_MANDATE_SCHEMA_V1, analyze_candidate_order,
+    analyze_portfolio_risk,
 };
 use okx_api::{MUTATION_REQUEST_TTL_MS, MarginMode};
 use okx_execution::{
