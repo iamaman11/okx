@@ -148,8 +148,11 @@ pub enum ExecutionValidationError {
     #[error("portfolio risk analysis does not match the immutable execution risk binding")]
     RiskBindingMismatch,
 
-    #[error("portfolio risk candidate does not match the immutable execution plan")]
+    #[error("portfolio risk candidate does not match the immutable execution plan/current leverage")]
     RiskCandidateMismatch,
+
+    #[error("portfolio risk analysis does not match the current account generation")]
+    RiskAccountGenerationMismatch,
 
     #[error("portfolio risk decision/violation set is internally inconsistent")]
     RiskAnalysisInconsistent,
@@ -222,6 +225,8 @@ pub fn prepare_execution(
 pub fn revalidate_hard_risk_policy(
     plan: &ExecutionPlan,
     analysis: &PortfolioRiskAnalysis,
+    current_account_generation: &str,
+    current_configured_leverage: Option<&str>,
 ) -> Result<PreMutationRiskDisposition, ExecutionValidationError> {
     let binding = plan
         .risk_binding
@@ -230,6 +235,9 @@ pub fn revalidate_hard_risk_policy(
     if analysis.mandate != binding.mandate || analysis.policy != binding.policy {
         return Err(ExecutionValidationError::RiskBindingMismatch);
     }
+    if analysis.account.account_generation != current_account_generation {
+        return Err(ExecutionValidationError::RiskAccountGenerationMismatch);
+    }
 
     match (analysis.policy_decision, analysis.violations.is_empty()) {
         (RiskPolicyDecision::Accepted, true) | (RiskPolicyDecision::Rejected, false) => {}
@@ -237,13 +245,36 @@ pub fn revalidate_hard_risk_policy(
     }
 
     match (plan.action, analysis.candidate.as_ref()) {
-        (ExecutionAction::Open, Some(candidate))
-            if candidate.instrument == plan.instrument_id
-                && candidate.direction
-                    == match plan.position_side {
-                        PositionSide::Long => PositionDirection::Long,
-                        PositionSide::Short => PositionDirection::Short,
-                    } => {}
+        (ExecutionAction::Open, Some(candidate)) => {
+            let open_risk = plan
+                .open_risk
+                .as_ref()
+                .ok_or(ExecutionValidationError::MissingOpenRiskEvidence)?;
+            let current_leverage = current_configured_leverage
+                .filter(|value| !value.trim().is_empty())
+                .ok_or(ExecutionValidationError::RiskCandidateMismatch)?;
+            let expected_direction = match plan.position_side {
+                PositionSide::Long => PositionDirection::Long,
+                PositionSide::Short => PositionDirection::Short,
+            };
+            if candidate.instrument != plan.instrument_id
+                || candidate.direction != expected_direction
+                || !candidate.additive_new_risk
+                || decimal("risk_candidate.notional_usd", &candidate.notional_usd)?
+                    != decimal(
+                        "open_risk.entry_settle_notional",
+                        &open_risk.entry_settle_notional,
+                    )?
+                || decimal(
+                    "risk_candidate.worst_case_loss_usd",
+                    &candidate.worst_case_loss_usd,
+                )? != decimal("open_risk.stop_loss_settle", &open_risk.stop_loss_settle)?
+                || decimal("risk_candidate.leverage", &candidate.leverage)?
+                    != decimal("current_configured_leverage", current_leverage)?
+            {
+                return Err(ExecutionValidationError::RiskCandidateMismatch);
+            }
+        }
         (ExecutionAction::Close, None) => {}
         _ => return Err(ExecutionValidationError::RiskCandidateMismatch),
     }
@@ -820,14 +851,25 @@ mod tests {
         .expect("portfolio risk");
 
         assert_eq!(
-            revalidate_hard_risk_policy(&plan, &analysis).expect("matching analysis"),
+            revalidate_hard_risk_policy(
+                &plan,
+                &analysis,
+                &account.account_generation,
+                Some("5"),
+            )
+            .expect("matching analysis"),
             PreMutationRiskDisposition::Accepted
         );
 
         let mut wrong_binding = analysis.clone();
         wrong_binding.policy.version = "execution-policy/v2".to_owned();
         assert_eq!(
-            revalidate_hard_risk_policy(&plan, &wrong_binding),
+            revalidate_hard_risk_policy(
+                &plan,
+                &wrong_binding,
+                &account.account_generation,
+                Some("5"),
+            ),
             Err(ExecutionValidationError::RiskBindingMismatch)
         );
 
@@ -838,14 +880,24 @@ mod tests {
             .expect("candidate")
             .direction = PositionDirection::Short;
         assert_eq!(
-            revalidate_hard_risk_policy(&plan, &wrong_candidate),
+            revalidate_hard_risk_policy(
+                &plan,
+                &wrong_candidate,
+                &account.account_generation,
+                Some("5"),
+            ),
             Err(ExecutionValidationError::RiskCandidateMismatch)
         );
 
         let mut inconsistent = analysis;
         inconsistent.policy_decision = RiskPolicyDecision::Rejected;
         assert_eq!(
-            revalidate_hard_risk_policy(&plan, &inconsistent),
+            revalidate_hard_risk_policy(
+                &plan,
+                &inconsistent,
+                &account.account_generation,
+                Some("5"),
+            ),
             Err(ExecutionValidationError::RiskAnalysisInconsistent)
         );
     }
