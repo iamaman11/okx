@@ -583,12 +583,10 @@ mod tests {
             .iter()
             .map(|row| d(&row.component_volatility_usd))
             .sum::<Decimal>();
-        let portfolio_volatility = d(
-            result
-                .portfolio_volatility_usd
-                .as_deref()
-                .expect("portfolio volatility"),
-        );
+        let portfolio_volatility = d(result
+            .portfolio_volatility_usd
+            .as_deref()
+            .expect("portfolio volatility"));
         let residual = portfolio_volatility - contribution_sum;
         assert_eq!(
             residual.normalize().to_string(),
