@@ -10,8 +10,7 @@ pub const PORTFOLIO_STATISTICS_SCHEMA_V1: &str = "okx.portfolio-statistics/v1";
 pub const PORTFOLIO_VOLATILITY_FORMULA_V1: &str = "signed-notional-covariance-volatility/v1";
 pub const HISTORICAL_STRESS_FORMULA_V1: &str = "aligned-one-bar-return-replay/v1";
 pub const PARALLEL_SCENARIO_FORMULA_V1: &str = "parallel-price-move-signed-notional/v1";
-pub const VOLATILITY_CONTRIBUTION_RECONCILIATION_TOLERANCE_USD: &str =
-    "0.000000000000000000000001";
+pub const VOLATILITY_CONTRIBUTION_RECONCILIATION_TOLERANCE_USD: &str = "0.000000000000000000000001";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatisticalExposure {
