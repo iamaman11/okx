@@ -122,30 +122,6 @@ pub struct LeverageInfo {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LeverageEstimate {
-    #[serde(rename = "estAvailQuoteTrans", default)]
-    pub estimated_available_quote_transfer: String,
-    #[serde(rename = "estAvailTrans", default)]
-    pub estimated_available_transfer: String,
-    #[serde(rename = "estLiqPx", default)]
-    pub estimated_liquidation_price: String,
-    #[serde(rename = "estMaxAmt", default)]
-    pub estimated_max_contracts: String,
-    #[serde(rename = "estMgn", default)]
-    pub estimated_margin: String,
-    #[serde(rename = "estQuoteMaxAmt", default)]
-    pub estimated_quote_max_amount: String,
-    #[serde(rename = "estQuoteMgn", default)]
-    pub estimated_quote_margin: String,
-    #[serde(rename = "existOrd", default)]
-    pub existing_orders: bool,
-    #[serde(rename = "maxLever", default)]
-    pub max_leverage: String,
-    #[serde(rename = "minLever", default)]
-    pub min_leverage: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FeeGroup {
     #[serde(rename = "groupId", default)]
     pub group_id: String,
@@ -320,8 +296,8 @@ pub struct PositionBuilderSimPosition {
     pub contracts: String,
     #[serde(rename = "avgPx")]
     pub average_price: String,
-    #[serde(rename = "lever", skip_serializing_if = "Option::is_none")]
-    pub leverage: Option<String>,
+    #[serde(rename = "lever")]
+    pub leverage: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -543,66 +519,6 @@ impl AccountApi {
         let [row] = rows.as_slice() else {
             return Err(OkxError::Response(format!(
                 "expected exactly one max-size row for {instrument_id}, found {}",
-                rows.len()
-            )));
-        };
-        Ok(row.clone())
-    }
-
-    pub async fn max_order_size_with_leverage(
-        &self,
-        instrument_id: &str,
-        margin_mode: MarginMode,
-        price: &str,
-        leverage: &str,
-    ) -> Result<MaxOrderSize, OkxError> {
-        let rows: Vec<MaxOrderSize> = self
-            .client
-            .private_get(
-                "/api/v5/account/max-size",
-                &[
-                    ("instId", instrument_id.to_owned()),
-                    ("tdMode", margin_mode.to_string()),
-                    ("px", price.to_owned()),
-                    ("leverage", leverage.to_owned()),
-                ],
-            )
-            .await?;
-        let [row] = rows.as_slice() else {
-            return Err(OkxError::Response(format!(
-                "expected exactly one leverage-aware max-size row for {instrument_id}, found {}",
-                rows.len()
-            )));
-        };
-        Ok(row.clone())
-    }
-
-    pub async fn leverage_estimate(
-        &self,
-        instrument_type: InstrumentType,
-        instrument_id: &str,
-        margin_mode: MarginMode,
-        leverage: &str,
-        currency: &str,
-        position_side: &str,
-    ) -> Result<LeverageEstimate, OkxError> {
-        let rows: Vec<LeverageEstimate> = self
-            .client
-            .private_get(
-                "/api/v5/account/adjust-leverage-info",
-                &[
-                    ("instType", instrument_type.to_string()),
-                    ("mgnMode", margin_mode.to_string()),
-                    ("lever", leverage.to_owned()),
-                    ("instId", instrument_id.to_owned()),
-                    ("ccy", currency.to_owned()),
-                    ("posSide", position_side.to_owned()),
-                ],
-            )
-            .await?;
-        let [row] = rows.as_slice() else {
-            return Err(OkxError::Response(format!(
-                "expected exactly one adjust-leverage-info row for {instrument_id}, found {}",
                 rows.len()
             )));
         };
@@ -943,29 +859,6 @@ mod tests {
         assert_eq!(snapshot.positions[0].contracts, "1");
         assert_eq!(snapshot.positions[0].notional_usd, "848");
         assert!(!snapshot.positions[0].is_real_position);
-    }
-
-    #[test]
-    fn leverage_estimate_matches_documented_shape() {
-        let estimate: super::LeverageEstimate = serde_json::from_value(serde_json::json!({
-            "estAvailQuoteTrans": "",
-            "estAvailTrans": "1.1398040558348279",
-            "estLiqPx": "",
-            "estMaxAmt": "10.6095865868904898",
-            "estMgn": "0.0701959441651721",
-            "estQuoteMaxAmt": "176889.6871254563042714",
-            "estQuoteMgn": "",
-            "existOrd": false,
-            "maxLever": "10",
-            "minLever": "0.01"
-        }))
-        .expect("documented adjust-leverage-info shape");
-
-        assert_eq!(estimate.estimated_max_contracts, "10.6095865868904898");
-        assert_eq!(estimate.estimated_margin, "0.0701959441651721");
-        assert_eq!(estimate.max_leverage, "10");
-        assert_eq!(estimate.min_leverage, "0.01");
-        assert!(!estimate.existing_orders);
     }
 
     #[test]
