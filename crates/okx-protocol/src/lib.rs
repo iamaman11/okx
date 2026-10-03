@@ -2016,6 +2016,70 @@ mod tests {
         );
     }
 
+    fn portfolio_risk_operation(
+        statistics: Option<PortfolioStatisticsRequest>,
+    ) -> AgentOperation {
+        AgentOperation::PortfolioRisk {
+            mandate: Box::new(PortfolioMandateRequest {
+                version: "mandate/v1".to_owned(),
+                capital_base_usd: "100".to_owned(),
+                decision_horizon_hours: 24,
+                benchmark: None,
+                allowed_instruments: Vec::new(),
+                max_drawdown_ratio: "1".to_owned(),
+                leverage_ceiling: "5".to_owned(),
+                minimum_liquidity_notional_usd: "0".to_owned(),
+                max_turnover_ratio: "5".to_owned(),
+            }),
+            policy: Box::new(HardRiskPolicyRequest {
+                version: "policy/v1".to_owned(),
+                max_account_gross_notional_usd: "1000".to_owned(),
+                max_instrument_gross_notional_usd: "1000".to_owned(),
+                max_margin_utilization_ratio: "1".to_owned(),
+                max_loss_per_trade_usd: "100".to_owned(),
+                max_daily_realized_loss_usd: "100".to_owned(),
+                max_drawdown_ratio: "1".to_owned(),
+                max_leverage: "5".to_owned(),
+                allowed_instruments: Vec::new(),
+                minimum_quality: RiskMinimumQuality::Fresh,
+                degraded_mode: RiskDegradedMode::Reject,
+                correlated_clusters: Vec::new(),
+            }),
+            candidate: None,
+            statistics,
+        }
+    }
+
+    #[test]
+    fn portfolio_statistics_request_is_optional_bounded_and_fixed_interval() {
+        let legacy = portfolio_risk_operation(None);
+        assert!(legacy.validate().is_ok());
+
+        let statistical = portfolio_risk_operation(Some(PortfolioStatisticsRequest {
+            bar: "1H".to_owned(),
+            limit: 24,
+            parallel_scenario_move_ratio: Some("-0.1".to_owned()),
+        }));
+        assert!(statistical.validate().is_ok());
+        let json = serde_json::to_string(&statistical).expect("serialize");
+        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, statistical);
+
+        let monthly = portfolio_risk_operation(Some(PortfolioStatisticsRequest {
+            bar: "1M".to_owned(),
+            limit: 24,
+            parallel_scenario_move_ratio: None,
+        }));
+        assert_eq!(monthly.validate(), Err(ProtocolError::InvalidHistoryBar));
+
+        let too_short = portfolio_risk_operation(Some(PortfolioStatisticsRequest {
+            bar: "1H".to_owned(),
+            limit: 2,
+            parallel_scenario_move_ratio: None,
+        }));
+        assert_eq!(too_short.validate(), Err(ProtocolError::InvalidHistoryLimit));
+    }
+
     #[test]
     fn current_cost_is_typed_and_keeps_decimal_contracts_as_text() {
         let request = AgentOperation::CurrentCost {
