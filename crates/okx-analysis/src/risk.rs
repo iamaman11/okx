@@ -1145,15 +1145,13 @@ mod tests {
         assert_eq!(exact.gross_notional_residual_usd, "0");
         assert!(exact.positions.iter().all(|row| row.residual_usd == "0"));
 
-        let mismatch = compare_virtual_position_builder_notional(&[
-            VirtualNotionalOracleInput {
-                instrument_id: "BTC-USDT-SWAP".to_owned(),
-                contracts: "2".to_owned(),
-                contract_value: "0.01".to_owned(),
-                mark_price: "100000".to_owned(),
-                oracle_notional_usd: "1999.99".to_owned(),
-            },
-        ])
+        let mismatch = compare_virtual_position_builder_notional(&[VirtualNotionalOracleInput {
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            contracts: "2".to_owned(),
+            contract_value: "0.01".to_owned(),
+            mark_price: "100000".to_owned(),
+            oracle_notional_usd: "1999.99".to_owned(),
+        }])
         .expect("mismatched virtual oracle");
         assert!(!mismatch.consistent);
         assert_eq!(mismatch.gross_notional_residual_usd, "0.01");
