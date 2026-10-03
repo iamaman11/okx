@@ -6,7 +6,9 @@ use okx_observation::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::{AnalysisError, PositionDirection, decimal, positive_decimal};
+use super::{
+    AnalysisError, PositionDirection, decimal, linear_contract_notional_usd, positive_decimal,
+};
 
 pub const ACCOUNT_RISK_ANALYSIS_SCHEMA_V1: &str = "okx.account-risk-analysis/v1";
 pub const PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2: &str = "okx.portfolio-risk-analysis/v2";
@@ -15,6 +17,42 @@ pub const RISK_ORACLE_COMPARISON_SCHEMA_V2: &str = "okx.risk-oracle-comparison/v
 pub const RISK_ORACLE_CONSISTENCY_POLICY_V1: &str = "okx.risk-oracle-consistency/exact-usd-v1";
 pub const TRADING_MANDATE_SCHEMA_V1: &str = "okx.trading-mandate/v1";
 pub const HARD_RISK_POLICY_SCHEMA_V1: &str = "okx.hard-risk-policy/v1";
+
+pub const VIRTUAL_NOTIONAL_ORACLE_COMPARISON_SCHEMA_V1: &str =
+    "okx.virtual-notional-oracle-comparison/v1";
+pub const VIRTUAL_NOTIONAL_ORACLE_CONSISTENCY_POLICY_V1: &str =
+    "okx.virtual-notional-oracle-consistency/exact-usd-v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualNotionalOracleInput {
+    pub instrument_id: String,
+    pub contracts: String,
+    pub contract_value: String,
+    pub mark_price: String,
+    pub oracle_notional_usd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VirtualNotionalOraclePositionComparison {
+    pub instrument_id: String,
+    pub contracts: String,
+    pub contract_value: String,
+    pub mark_price: String,
+    pub local_notional_usd: String,
+    pub oracle_notional_usd: String,
+    pub residual_usd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VirtualNotionalOracleComparison {
+    pub schema: &'static str,
+    pub consistency_policy: &'static str,
+    pub local_gross_notional_usd: String,
+    pub oracle_gross_notional_usd: String,
+    pub gross_notional_residual_usd: String,
+    pub positions: Vec<VirtualNotionalOraclePositionComparison>,
+    pub consistent: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PositionRiskAnalysis {
@@ -210,6 +248,55 @@ pub struct PortfolioRiskAnalysis {
 struct PositionWork {
     output: PositionRiskAnalysis,
     notional: Decimal,
+}
+
+pub fn compare_virtual_position_builder_notional(
+    inputs: &[VirtualNotionalOracleInput],
+) -> Result<VirtualNotionalOracleComparison, AnalysisError> {
+    let mut local_gross = Decimal::ZERO;
+    let mut oracle_gross = Decimal::ZERO;
+    let mut positions = Vec::with_capacity(inputs.len());
+    let mut consistent = true;
+
+    for input in inputs {
+        let local_text = linear_contract_notional_usd(
+            &input.contracts,
+            &input.contract_value,
+            &input.mark_price,
+        )?;
+        let local = positive_decimal("local_virtual_notional_usd", &local_text)?;
+        let oracle = positive_decimal("oracle_virtual_notional_usd", &input.oracle_notional_usd)?;
+        let residual = local - oracle;
+        if residual != Decimal::ZERO {
+            consistent = false;
+        }
+        local_gross += local;
+        oracle_gross += oracle;
+        positions.push(VirtualNotionalOraclePositionComparison {
+            instrument_id: input.instrument_id.clone(),
+            contracts: input.contracts.clone(),
+            contract_value: input.contract_value.clone(),
+            mark_price: input.mark_price.clone(),
+            local_notional_usd: local.normalize().to_string(),
+            oracle_notional_usd: oracle.normalize().to_string(),
+            residual_usd: residual.normalize().to_string(),
+        });
+    }
+
+    let gross_residual = local_gross - oracle_gross;
+    if gross_residual != Decimal::ZERO {
+        consistent = false;
+    }
+
+    Ok(VirtualNotionalOracleComparison {
+        schema: VIRTUAL_NOTIONAL_ORACLE_COMPARISON_SCHEMA_V1,
+        consistency_policy: VIRTUAL_NOTIONAL_ORACLE_CONSISTENCY_POLICY_V1,
+        local_gross_notional_usd: local_gross.normalize().to_string(),
+        oracle_gross_notional_usd: oracle_gross.normalize().to_string(),
+        gross_notional_residual_usd: gross_residual.normalize().to_string(),
+        positions,
+        consistent,
+    })
 }
 
 pub fn analyze_account_risk(
