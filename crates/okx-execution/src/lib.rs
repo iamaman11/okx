@@ -18,8 +18,9 @@ pub use ledger::{
     ExecutionLedgerStore, MAX_EXECUTION_LEDGER_RECORDS, PrepareDisposition,
 };
 pub use model::{
-    EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionPlan, OpenRiskEvidence,
-    OrderSide, OrderType, PositionSide, TradeMode, derive_client_order_id,
+    EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionPlan,
+    ExecutionRiskBinding, OpenRiskEvidence, OrderSide, OrderType, PositionSide, TradeMode,
+    derive_client_order_id,
 };
 pub use reconciliation::{
     ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1, AccountLedgerReconciliation,
@@ -30,6 +31,6 @@ pub use state::{
     ExecutionTransitionError, require_live_trading_enabled,
 };
 pub use validation::{
-    ExecutionValidationError, prepare_execution, revalidate_execution_plan,
-    revalidate_venue_execution,
+    ExecutionValidationError, PreMutationRiskDisposition, prepare_execution,
+    revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
 };

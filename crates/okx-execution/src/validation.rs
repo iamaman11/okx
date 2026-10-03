@@ -1,6 +1,8 @@
 use std::str::FromStr;
 
-use okx_analysis::{CandidateOrderAnalysis, PositionDirection};
+use okx_analysis::{
+    CandidateOrderAnalysis, PortfolioRiskAnalysis, PositionDirection, RiskPolicyDecision,
+};
 use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
 };
@@ -136,6 +138,32 @@ pub enum ExecutionValidationError {
         requested: String,
         available: String,
     },
+
+    #[error("prepared execution is missing an immutable hard-risk policy binding")]
+    MissingRiskBinding,
+
+    #[error("hard-risk policy rejected risk-increasing mutation: {0}")]
+    HardRiskPolicyRejected(String),
+
+    #[error("portfolio risk analysis does not match the immutable execution risk binding")]
+    RiskBindingMismatch,
+
+    #[error(
+        "portfolio risk candidate does not match the immutable execution plan/current leverage"
+    )]
+    RiskCandidateMismatch,
+
+    #[error("portfolio risk analysis does not match the current account generation")]
+    RiskAccountGenerationMismatch,
+
+    #[error("portfolio risk decision/violation set is internally inconsistent")]
+    RiskAnalysisInconsistent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreMutationRiskDisposition {
+    Accepted,
+    AcceptedRiskReducingClose,
 }
 
 pub fn prepare_execution(
@@ -192,7 +220,88 @@ pub fn prepare_execution(
         size: normalized(size),
         price: normalized(price),
         open_risk,
+        risk_binding: None,
     })
+}
+
+pub fn revalidate_hard_risk_policy(
+    plan: &ExecutionPlan,
+    analysis: &PortfolioRiskAnalysis,
+    current_account_generation: &str,
+    current_configured_leverage: Option<&str>,
+) -> Result<PreMutationRiskDisposition, ExecutionValidationError> {
+    let binding = plan
+        .risk_binding
+        .as_ref()
+        .ok_or(ExecutionValidationError::MissingRiskBinding)?;
+    if analysis.mandate != binding.mandate || analysis.policy != binding.policy {
+        return Err(ExecutionValidationError::RiskBindingMismatch);
+    }
+    if analysis.account.account_generation != current_account_generation {
+        return Err(ExecutionValidationError::RiskAccountGenerationMismatch);
+    }
+
+    match (analysis.policy_decision, analysis.violations.is_empty()) {
+        (RiskPolicyDecision::Accepted, true) | (RiskPolicyDecision::Rejected, false) => {}
+        _ => return Err(ExecutionValidationError::RiskAnalysisInconsistent),
+    }
+
+    match (plan.action, analysis.candidate.as_ref()) {
+        (ExecutionAction::Open, Some(candidate)) => {
+            let open_risk = plan
+                .open_risk
+                .as_ref()
+                .ok_or(ExecutionValidationError::MissingOpenRiskEvidence)?;
+            let current_leverage = current_configured_leverage
+                .filter(|value| !value.trim().is_empty())
+                .ok_or(ExecutionValidationError::RiskCandidateMismatch)?;
+            let expected_direction = match plan.position_side {
+                PositionSide::Long => PositionDirection::Long,
+                PositionSide::Short => PositionDirection::Short,
+            };
+            if candidate.instrument != plan.instrument_id
+                || candidate.direction != expected_direction
+                || !candidate.additive_new_risk
+                || decimal("risk_candidate.notional_usd", &candidate.notional_usd)?
+                    != decimal(
+                        "open_risk.entry_settle_notional",
+                        &open_risk.entry_settle_notional,
+                    )?
+                || decimal(
+                    "risk_candidate.worst_case_loss_usd",
+                    &candidate.worst_case_loss_usd,
+                )? != decimal("open_risk.stop_loss_settle", &open_risk.stop_loss_settle)?
+                || decimal("risk_candidate.leverage", &candidate.leverage)?
+                    != decimal("current_configured_leverage", current_leverage)?
+            {
+                return Err(ExecutionValidationError::RiskCandidateMismatch);
+            }
+        }
+        (ExecutionAction::Close, None) => {}
+        _ => return Err(ExecutionValidationError::RiskCandidateMismatch),
+    }
+
+    let codes = analysis
+        .violations
+        .iter()
+        .map(|violation| violation.code)
+        .collect::<Vec<_>>()
+        .join(",");
+    hard_risk_disposition(plan.action, analysis.policy_decision, codes)
+}
+
+fn hard_risk_disposition(
+    action: ExecutionAction,
+    decision: RiskPolicyDecision,
+    violation_codes: String,
+) -> Result<PreMutationRiskDisposition, ExecutionValidationError> {
+    match action {
+        ExecutionAction::Open if decision == RiskPolicyDecision::Rejected => Err(
+            ExecutionValidationError::HardRiskPolicyRejected(violation_codes),
+        ),
+        ExecutionAction::Open => Ok(PreMutationRiskDisposition::Accepted),
+        ExecutionAction::Close => Ok(PreMutationRiskDisposition::AcceptedRiskReducingClose),
+    }
 }
 
 pub fn revalidate_execution_plan(
@@ -588,19 +697,207 @@ fn normalized(value: Decimal) -> String {
 #[cfg(test)]
 mod tests {
     use okx_analysis::{
-        CandidateOrderAssumptions, LiquidityRole, PositionDirection, analyze_candidate_order,
+        CandidateOrderAssumptions, HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy, LiquidityRole,
+        PortfolioCandidate, RiskDegradedMode, RiskMinimumQuality, TRADING_MANDATE_SCHEMA_V1,
+        TradingMandate, analyze_candidate_order, analyze_portfolio_risk,
     };
     use okx_api::InstrumentType;
     use okx_observation::{
-        ACCOUNT_CONVERGED_SOURCE_V2, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountBalanceState,
-        AccountInstrumentExecutionLimits, AccountPositionState, FeeScheduleInput,
-        FeeScheduleSnapshot, InstrumentSpec, M4_REST_WS_CONVERGED_REASON, MaxOrderSizeEvidence,
-        PendingOrderState, PriceLimitEvidence, SystemStatusEvidence,
-        VENUE_EXECUTION_EVIDENCE_SCHEMA_V1, VenueExecutionEvidence,
+        ACCOUNT_CONVERGED_SOURCE_V2, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountAuthorityEvidence,
+        AccountBalanceState, AccountInstrumentExecutionLimits, AccountLedgerSummary,
+        AccountPositionState, FeeScheduleInput, FeeScheduleSnapshot, InstrumentSpec,
+        M4_REST_WS_CONVERGED_REASON, MaxOrderSizeEvidence, PendingOrderState, PriceLimitEvidence,
+        SystemStatusEvidence, VENUE_EXECUTION_EVIDENCE_SCHEMA_V1, VenueExecutionEvidence,
     };
 
     use super::*;
     use crate::{ExecutionAction, OrderType, PositionSide, TradeMode};
+
+    #[test]
+    fn hard_risk_gate_blocks_rejected_open_but_never_traps_risk_reducing_close() {
+        assert!(matches!(
+            hard_risk_disposition(
+                ExecutionAction::Open,
+                RiskPolicyDecision::Rejected,
+                "MAX_DRAWDOWN".to_owned(),
+            ),
+            Err(ExecutionValidationError::HardRiskPolicyRejected(codes))
+                if codes == "MAX_DRAWDOWN"
+        ));
+        assert_eq!(
+            hard_risk_disposition(
+                ExecutionAction::Open,
+                RiskPolicyDecision::Accepted,
+                String::new(),
+            )
+            .expect("accepted open"),
+            PreMutationRiskDisposition::Accepted
+        );
+        assert_eq!(
+            hard_risk_disposition(
+                ExecutionAction::Close,
+                RiskPolicyDecision::Rejected,
+                "MAX_DAILY_REALIZED_LOSS".to_owned(),
+            )
+            .expect("risk-reducing close"),
+            PreMutationRiskDisposition::AcceptedRiskReducingClose
+        );
+    }
+
+    fn execution_risk_binding() -> crate::ExecutionRiskBinding {
+        crate::ExecutionRiskBinding {
+            mandate: TradingMandate {
+                schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
+                version: "execution-mandate/v1".to_owned(),
+                capital_base_usd: "10000".to_owned(),
+                decision_horizon_hours: 24,
+                benchmark: Some("none/v1".to_owned()),
+                allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
+                max_drawdown_ratio: "1".to_owned(),
+                leverage_ceiling: "10".to_owned(),
+                minimum_liquidity_notional_usd: "0".to_owned(),
+                max_turnover_ratio: "10".to_owned(),
+            },
+            policy: HardRiskPolicy {
+                schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
+                version: "execution-policy/v1".to_owned(),
+                max_account_gross_notional_usd: "100000".to_owned(),
+                max_instrument_gross_notional_usd: "100000".to_owned(),
+                max_margin_utilization_ratio: "1".to_owned(),
+                max_loss_per_trade_usd: "1000".to_owned(),
+                max_daily_realized_loss_usd: "1000".to_owned(),
+                max_drawdown_ratio: "1".to_owned(),
+                max_leverage: "10".to_owned(),
+                allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
+                minimum_quality: RiskMinimumQuality::Fresh,
+                degraded_mode: RiskDegradedMode::Reject,
+                correlated_clusters: Vec::new(),
+            },
+        }
+    }
+
+    fn risk_ledger(account: &AccountSnapshot) -> AccountLedgerSummary {
+        AccountLedgerSummary {
+            schema: "okx.account-ledger-summary/v1",
+            source_received_at: "2026-10-03T00:00:01Z".to_owned(),
+            current_account_as_of_ms: Some("1790985600000".to_owned()),
+            account_generation: account.account_generation.clone(),
+            authority: AccountAuthorityEvidence {
+                scope: "authenticated_account_only",
+                account_type: account.account_type.clone(),
+                is_subaccount: true,
+                account_uid_fingerprint: account.account_uid_fingerprint.clone(),
+                main_account_uid_fingerprint: Some("main".to_owned()),
+                api_key_permissions: vec!["read_only".to_owned()],
+                multi_account_inventory_complete: false,
+            },
+            total_equity_usd: account.balance.total_equity_usd.clone(),
+            trading_equity_detail_usd_sum: account.balance.total_equity_usd.clone(),
+            trading_equity_residual_usd: "0".to_owned(),
+            funding_balances: Vec::new(),
+            open_positions: account.positions.len(),
+            pending_orders: account.pending_orders.len(),
+            current_unrealized_pnl: Vec::new(),
+            history_coverage: Vec::new(),
+            realized_pnl_basis: "positions-history.realizedPnl",
+            realized_pnl: Vec::new(),
+            daily_realized_pnl_utc_basis: "positions-history.realizedPnl filtered by UTC day",
+            daily_realized_pnl_utc_day_start_ms: Some("1790985600000".to_owned()),
+            daily_realized_pnl_utc_day_end_ms: Some("1791072000000".to_owned()),
+            daily_realized_pnl_utc: Vec::new(),
+            trade_fee_basis: "fills-history.fee",
+            trade_fees: Vec::new(),
+            funding_basis: "bills-archive funding",
+            funding: Vec::new(),
+            position_pnl_identity_rows_checked: 0,
+            fill_order_links_checked: 0,
+            fill_order_links_unresolved_due_to_truncation: 0,
+        }
+    }
+
+    #[test]
+    fn hard_risk_revalidation_rejects_analysis_from_another_binding_or_candidate() {
+        let rules = rules();
+        let account = account();
+        let candidate = open_candidate(&rules, PositionDirection::Long);
+        let intent = open_intent(&rules, &account, &candidate, PositionSide::Long);
+        let mut plan =
+            prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("execution plan");
+        let binding = execution_risk_binding();
+        plan.risk_binding = Some(binding.clone());
+
+        let analysis = analyze_portfolio_risk(
+            &account,
+            &risk_ledger(&account),
+            binding.mandate.clone(),
+            binding.policy.clone(),
+            Some(PortfolioCandidate {
+                instrument: plan.instrument_id.clone(),
+                direction: PositionDirection::Long,
+                notional_usd: plan
+                    .open_risk
+                    .as_ref()
+                    .expect("open risk")
+                    .entry_settle_notional
+                    .clone(),
+                worst_case_loss_usd: plan
+                    .open_risk
+                    .as_ref()
+                    .expect("open risk")
+                    .stop_loss_settle
+                    .clone(),
+                leverage: "5".to_owned(),
+            }),
+            true,
+        )
+        .expect("portfolio risk");
+
+        assert_eq!(
+            revalidate_hard_risk_policy(&plan, &analysis, &account.account_generation, Some("5"),)
+                .expect("matching analysis"),
+            PreMutationRiskDisposition::Accepted
+        );
+
+        let mut wrong_binding = analysis.clone();
+        wrong_binding.policy.version = "execution-policy/v2".to_owned();
+        assert_eq!(
+            revalidate_hard_risk_policy(
+                &plan,
+                &wrong_binding,
+                &account.account_generation,
+                Some("5"),
+            ),
+            Err(ExecutionValidationError::RiskBindingMismatch)
+        );
+
+        let mut wrong_candidate = analysis.clone();
+        wrong_candidate
+            .candidate
+            .as_mut()
+            .expect("candidate")
+            .direction = PositionDirection::Short;
+        assert_eq!(
+            revalidate_hard_risk_policy(
+                &plan,
+                &wrong_candidate,
+                &account.account_generation,
+                Some("5"),
+            ),
+            Err(ExecutionValidationError::RiskCandidateMismatch)
+        );
+
+        let mut inconsistent = analysis;
+        inconsistent.policy_decision = RiskPolicyDecision::Rejected;
+        assert_eq!(
+            revalidate_hard_risk_policy(
+                &plan,
+                &inconsistent,
+                &account.account_generation,
+                Some("5"),
+            ),
+            Err(ExecutionValidationError::RiskAnalysisInconsistent)
+        );
+    }
 
     fn rules() -> InstrumentRulesSnapshot {
         InstrumentRulesSnapshot {

@@ -498,49 +498,8 @@ pub(super) async fn dispatch(
                 }
             }
 
-            let analysis_mandate = TradingMandate {
-                schema: TRADING_MANDATE_SCHEMA_V1,
-                version: mandate.version.clone(),
-                capital_base_usd: mandate.capital_base_usd.clone(),
-                decision_horizon_hours: mandate.decision_horizon_hours,
-                benchmark: mandate.benchmark.clone(),
-                allowed_instruments: mandate.allowed_instruments.clone(),
-                max_drawdown_ratio: mandate.max_drawdown_ratio.clone(),
-                leverage_ceiling: mandate.leverage_ceiling.clone(),
-                minimum_liquidity_notional_usd: mandate.minimum_liquidity_notional_usd.clone(),
-                max_turnover_ratio: mandate.max_turnover_ratio.clone(),
-            };
-            let analysis_policy = HardRiskPolicy {
-                schema: HARD_RISK_POLICY_SCHEMA_V1,
-                version: policy.version.clone(),
-                max_account_gross_notional_usd: policy.max_account_gross_notional_usd.clone(),
-                max_instrument_gross_notional_usd: policy.max_instrument_gross_notional_usd.clone(),
-                max_margin_utilization_ratio: policy.max_margin_utilization_ratio.clone(),
-                max_loss_per_trade_usd: policy.max_loss_per_trade_usd.clone(),
-                max_daily_realized_loss_usd: policy.max_daily_realized_loss_usd.clone(),
-                max_drawdown_ratio: policy.max_drawdown_ratio.clone(),
-                max_leverage: policy.max_leverage.clone(),
-                allowed_instruments: policy.allowed_instruments.clone(),
-                minimum_quality: match policy.minimum_quality {
-                    ProtocolRiskMinimumQuality::Fresh => AnalysisRiskMinimumQuality::Fresh,
-                    ProtocolRiskMinimumQuality::Degraded => AnalysisRiskMinimumQuality::Degraded,
-                },
-                degraded_mode: match policy.degraded_mode {
-                    ProtocolRiskDegradedMode::Reject => AnalysisRiskDegradedMode::Reject,
-                    ProtocolRiskDegradedMode::AllowReadOnly => {
-                        AnalysisRiskDegradedMode::AllowReadOnly
-                    }
-                },
-                correlated_clusters: policy
-                    .correlated_clusters
-                    .iter()
-                    .map(|cluster| CorrelatedClusterLimit {
-                        id: cluster.id.clone(),
-                        instruments: cluster.instruments.clone(),
-                        max_gross_notional_usd: cluster.max_gross_notional_usd.clone(),
-                    })
-                    .collect(),
-            };
+            let analysis_mandate = trading_mandate(mandate);
+            let analysis_policy = hard_risk_policy(policy);
             let analysis_candidate = candidate.as_ref().map(|candidate| PortfolioCandidate {
                 instrument: candidate.instrument.clone(),
                 direction: match candidate.side {

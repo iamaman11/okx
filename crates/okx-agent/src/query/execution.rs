@@ -1,17 +1,18 @@
 use okx_analysis::{
-    CandidateOrderAssumptions, LiquidityRole as AnalysisLiquidityRole, PositionDirection,
-    analyze_candidate_order,
+    CandidateOrderAssumptions, HARD_RISK_POLICY_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
+    PortfolioCandidate, PositionDirection, TRADING_MANDATE_SCHEMA_V1, analyze_candidate_order,
+    analyze_portfolio_risk,
 };
-use okx_api::MUTATION_REQUEST_TTL_MS;
+use okx_api::{MUTATION_REQUEST_TTL_MS, MarginMode};
 use okx_execution::{
-    EXECUTION_STATUS_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionTransitionError,
-    OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide, PrepareFailure,
-    PrepareOutcome, PrepareRejection, TradeMode, prepare_execution, revalidate_execution_plan,
-    revalidate_venue_execution,
+    EXECUTION_STATUS_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionRiskBinding,
+    ExecutionTransitionError, OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide,
+    PrepareFailure, PrepareOutcome, PrepareRejection, TradeMode, prepare_execution,
+    revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
 };
 use okx_protocol::{
-    ExecutionOrderType, ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
-    PositionSide as ProtocolPositionSide,
+    ExecutionOrderType, ExecutionRiskBindingRequest, ExecutionTradeMode,
+    LiquidityRole as ProtocolLiquidityRole, PositionSide as ProtocolPositionSide,
 };
 
 use super::*;
@@ -34,6 +35,10 @@ pub const EXECUTION_IDEMPOTENCY_COLLISION_CODE: &str = "EXECUTION_IDEMPOTENCY_CO
 pub const EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE: &str = "EXECUTION_LEDGER_CAPACITY_EXHAUSTED";
 pub const LIVE_TRADING_DISABLED_CODE: &str = "LIVE_TRADING_DISABLED";
 pub const EXECUTION_GATE_INVARIANT_CODE: &str = "EXECUTION_GATE_INVARIANT_VIOLATION";
+pub const EXECUTION_RISK_POLICY_REQUIRED_CODE: &str = "EXECUTION_RISK_POLICY_REQUIRED";
+pub const EXECUTION_RISK_POLICY_REJECTED_CODE: &str = "EXECUTION_RISK_POLICY_REJECTED";
+pub const EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE: &str = "EXECUTION_RISK_EVIDENCE_UNAVAILABLE";
+pub const EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE: &str = "EXECUTION_RISK_EVIDENCE_NOT_FRESH";
 
 pub(super) async fn dispatch(
     request: &AgentRequest,
@@ -57,6 +62,7 @@ pub(super) async fn dispatch(
             target_rr,
             entry_liquidity_role,
             exit_liquidity_role,
+            risk,
         } => {
             let Some(execution) = context.execution else {
                 return Ok(execution_unavailable(request, generated_at));
@@ -124,10 +130,11 @@ pub(super) async fn dispatch(
                 size: candidate.contracts.clone(),
                 price: candidate.entry_price.clone(),
             };
-            let plan = match prepare_execution(&intent, &rules, &account, Some(&candidate)) {
+            let mut plan = match prepare_execution(&intent, &rules, &account, Some(&candidate)) {
                 Ok(value) => value,
                 Err(error) => return Ok(validation_failure(request, generated_at, error)),
             };
+            plan.risk_binding = risk.as_deref().map(execution_risk_binding);
             let outcome = execution.prepare(plan, utc_now_ms()).await?;
             prepare_outcome_response(request, generated_at, outcome)
         }
@@ -139,6 +146,7 @@ pub(super) async fn dispatch(
             order_type,
             size,
             price,
+            risk,
         } => {
             let Some(execution) = context.execution else {
                 return Ok(execution_unavailable(request, generated_at));
@@ -170,10 +178,11 @@ pub(super) async fn dispatch(
                 size: size.clone(),
                 price: price.clone(),
             };
-            let plan = match prepare_execution(&intent, &rules, &account, None) {
+            let mut plan = match prepare_execution(&intent, &rules, &account, None) {
                 Ok(value) => value,
                 Err(error) => return Ok(validation_failure(request, generated_at, error)),
             };
+            plan.risk_binding = risk.as_deref().map(execution_risk_binding);
             let outcome = execution.prepare(plan, utc_now_ms()).await?;
             prepare_outcome_response(request, generated_at, outcome)
         }
@@ -332,6 +341,225 @@ async fn submit_prepared(
         return Ok(validation_failure(request, generated_at, error));
     }
 
+    let Some(risk_binding) = plan.risk_binding.as_ref() else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RISK_POLICY_REQUIRED_CODE,
+            "prepared execution is missing the immutable mandate/hard-risk policy binding"
+                .to_owned(),
+            false,
+        ));
+    };
+    if risk_binding.mandate.schema != TRADING_MANDATE_SCHEMA_V1
+        || risk_binding.policy.schema != HARD_RISK_POLICY_SCHEMA_V1
+    {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RISK_POLICY_REQUIRED_CODE,
+            "prepared execution carries an unsupported mandate/hard-risk policy schema".to_owned(),
+            false,
+        ));
+    }
+    let Some(observer) = context.account_fallback else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    let Some(private_ws) = context.private_ws else {
+        return Ok(account_not_fresh(request, generated_at));
+    };
+    let risk_cursor = match private_ws.convergence_cursor().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!("private account convergence cursor unavailable before risk read: {error}"),
+                true,
+            ));
+        }
+    };
+    let risk_facts = match observer.ledger_facts(&account).await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+    if risk_facts
+        .summary
+        .history_coverage
+        .iter()
+        .any(|coverage| !coverage.complete_within_bound)
+    {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+            "bounded account-history coverage is incomplete for pre-mutation risk".to_owned(),
+            true,
+        ));
+    }
+
+    let configured_leverage = if plan.action == ExecutionAction::Open {
+        let margin_mode = match plan.trade_mode {
+            TradeMode::Cross => MarginMode::Cross,
+            TradeMode::Isolated => MarginMode::Isolated,
+        };
+        match observer
+            .configured_leverage(
+                &plan.instrument_id,
+                margin_mode,
+                plan.position_side.as_str(),
+            )
+            .await
+        {
+            Ok(value) => Some(value),
+            Err(error) => {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
+                    format!("configured leverage is not uniquely available: {error}"),
+                    true,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    match private_ws.convergence_window(risk_cursor).await {
+        Ok(window) if window.events.is_empty() => {}
+        Ok(window) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!(
+                    "{} private account event(s) arrived while pre-mutation risk evidence was read",
+                    window.events.len()
+                ),
+                true,
+            ));
+        }
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!("private account coherence changed during pre-mutation risk read: {error}"),
+                true,
+            ));
+        }
+    }
+
+    let Some(rules_after_risk) = current_rules(context, &plan.instrument_id).await else {
+        return Ok(reference_not_fresh(request, generated_at));
+    };
+    if rules_after_risk.reference_generation != rules.reference_generation {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_REFERENCE_NOT_FRESH_CODE,
+            format!(
+                "reference generation changed during pre-mutation risk read: expected {}, observed {}",
+                rules.reference_generation, rules_after_risk.reference_generation
+            ),
+            true,
+        ));
+    }
+
+    let risk_candidate = if plan.action == ExecutionAction::Open {
+        let Some(open_risk) = plan.open_risk.as_ref() else {
+            return Ok(validation_failure(
+                request,
+                generated_at,
+                okx_execution::ExecutionValidationError::MissingOpenRiskEvidence,
+            ));
+        };
+        let settle_currency = rules
+            .instrument
+            .settle_currency
+            .as_deref()
+            .unwrap_or_default();
+        if !matches!(settle_currency, "USD" | "USDT" | "USDC" | "USDG") {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
+                format!(
+                    "pre-mutation candidate USD equivalence is unsupported for settlement currency '{settle_currency}'"
+                ),
+                false,
+            ));
+        }
+        Some(PortfolioCandidate {
+            instrument: plan.instrument_id.clone(),
+            direction: match plan.position_side {
+                ExecutionPositionSide::Long => PositionDirection::Long,
+                ExecutionPositionSide::Short => PositionDirection::Short,
+            },
+            notional_usd: open_risk.entry_settle_notional.clone(),
+            worst_case_loss_usd: open_risk.stop_loss_settle.clone(),
+            leverage: configured_leverage
+                .clone()
+                .expect("open execution acquired configured leverage"),
+        })
+    } else {
+        None
+    };
+
+    let risk_analysis = match analyze_portfolio_risk(
+        &account,
+        &risk_facts.summary,
+        risk_binding.mandate.clone(),
+        risk_binding.policy.clone(),
+        risk_candidate,
+        true,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(analysis_failure(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                error,
+            ));
+        }
+    };
+    if let Err(error) = revalidate_hard_risk_policy(
+        &plan,
+        &risk_analysis,
+        &account.account_generation,
+        configured_leverage.as_deref(),
+    ) {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RISK_POLICY_REJECTED_CODE,
+            error.to_string(),
+            false,
+        ));
+    }
+
     let Some(public_ws) = context.public_ws else {
         return Ok(reference_not_fresh(request, generated_at));
     };
@@ -398,6 +626,53 @@ async fn submit_prepared(
     if let Err(error) = revalidate_venue_execution(&plan, &rules, &venue, timing.exp_time_ms()) {
         return Ok(validation_failure(request, generated_at, error));
     }
+
+    // Risk evidence must still be current after all pre-mutation venue/clock I/O.
+    match private_ws.convergence_window(risk_cursor).await {
+        Ok(window) if window.events.is_empty() => {}
+        Ok(window) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!(
+                    "{} private account event(s) arrived after risk evaluation and before mutation",
+                    window.events.len()
+                ),
+                true,
+            ));
+        }
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!(
+                    "private account coherence changed after risk evaluation and before mutation: {error}"
+                ),
+                true,
+            ));
+        }
+    }
+    let Some(final_rules) = current_rules(context, &plan.instrument_id).await else {
+        return Ok(reference_not_fresh(request, generated_at));
+    };
+    if final_rules.reference_generation != rules.reference_generation {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_REFERENCE_NOT_FRESH_CODE,
+            format!(
+                "reference generation changed after risk evaluation and before mutation: expected {}, observed {}",
+                rules.reference_generation, final_rules.reference_generation
+            ),
+            true,
+        ));
+    }
+
     let observed_at_ms = timing.request_time_ms();
     match execution
         .submit_prepared(intent_id, timing, observed_at_ms)
@@ -633,6 +908,13 @@ async fn execution_status_response(
     ))
 }
 
+fn execution_risk_binding(value: &ExecutionRiskBindingRequest) -> ExecutionRiskBinding {
+    ExecutionRiskBinding {
+        mandate: trading_mandate(&value.mandate),
+        policy: hard_risk_policy(&value.policy),
+    }
+}
+
 const fn execution_trade_mode(value: ExecutionTradeMode) -> TradeMode {
     match value {
         ExecutionTradeMode::Cross => TradeMode::Cross,
@@ -703,6 +985,7 @@ mod tests {
                 size: "0.05".to_owned(),
                 price: "0.09317".to_owned(),
                 open_risk: None,
+                risk_binding: None,
             }),
             created_at_ms: 100,
             updated_at_ms: 100,

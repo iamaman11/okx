@@ -369,6 +369,13 @@ pub struct HardRiskPolicyRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ExecutionRiskBindingRequest {
+    pub mandate: Box<PortfolioMandateRequest>,
+    pub policy: Box<HardRiskPolicyRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PortfolioCandidateRequest {
     pub instrument: String,
     pub side: PositionSide,
@@ -452,6 +459,7 @@ pub enum AgentOperation {
         target_rr: String,
         entry_liquidity_role: LiquidityRole,
         exit_liquidity_role: LiquidityRole,
+        risk: Option<Box<ExecutionRiskBindingRequest>>,
     },
     PrepareCloseExecution {
         intent_id: String,
@@ -461,6 +469,7 @@ pub enum AgentOperation {
         order_type: ExecutionOrderType,
         size: String,
         price: String,
+        risk: Option<Box<ExecutionRiskBindingRequest>>,
     },
     SubmitPreparedExecution {
         intent_id: String,
@@ -576,70 +585,8 @@ impl AgentOperation {
                 candidate,
                 statistics,
             } => {
-                validate_version(&mandate.version)?;
-                validate_positive_decimal_text(&mandate.capital_base_usd, "capital_base_usd")?;
-                if mandate.decision_horizon_hours == 0 || mandate.decision_horizon_hours > 24 * 365
-                {
-                    return Err(ProtocolError::InvalidAnalyticalQuery(
-                        "decision_horizon_hours",
-                    ));
-                }
-                validate_non_negative_decimal_text(
-                    &mandate.max_drawdown_ratio,
-                    "mandate.max_drawdown_ratio",
-                )?;
-                validate_positive_decimal_text(
-                    &mandate.leverage_ceiling,
-                    "mandate.leverage_ceiling",
-                )?;
-                validate_non_negative_decimal_text(
-                    &mandate.minimum_liquidity_notional_usd,
-                    "mandate.minimum_liquidity_notional_usd",
-                )?;
-                validate_non_negative_decimal_text(
-                    &mandate.max_turnover_ratio,
-                    "mandate.max_turnover_ratio",
-                )?;
-                validate_instrument_list(&mandate.allowed_instruments, 32)?;
-                validate_version(&policy.version)?;
-                for (value, field) in [
-                    (
-                        &policy.max_account_gross_notional_usd,
-                        "policy.max_account_gross_notional_usd",
-                    ),
-                    (
-                        &policy.max_instrument_gross_notional_usd,
-                        "policy.max_instrument_gross_notional_usd",
-                    ),
-                    (
-                        &policy.max_margin_utilization_ratio,
-                        "policy.max_margin_utilization_ratio",
-                    ),
-                    (
-                        &policy.max_loss_per_trade_usd,
-                        "policy.max_loss_per_trade_usd",
-                    ),
-                    (
-                        &policy.max_daily_realized_loss_usd,
-                        "policy.max_daily_realized_loss_usd",
-                    ),
-                    (&policy.max_drawdown_ratio, "policy.max_drawdown_ratio"),
-                ] {
-                    validate_non_negative_decimal_text(value, field)?;
-                }
-                validate_positive_decimal_text(&policy.max_leverage, "policy.max_leverage")?;
-                validate_instrument_list(&policy.allowed_instruments, 32)?;
-                if policy.correlated_clusters.len() > 16 {
-                    return Err(ProtocolError::InvalidAnalyticalQuery("correlated_clusters"));
-                }
-                for cluster in &policy.correlated_clusters {
-                    validate_version(&cluster.id)?;
-                    validate_instrument_list(&cluster.instruments, 16)?;
-                    validate_non_negative_decimal_text(
-                        &cluster.max_gross_notional_usd,
-                        "cluster.max_gross_notional_usd",
-                    )?;
-                }
+                validate_portfolio_mandate(mandate)?;
+                validate_hard_risk_policy(policy)?;
                 if let Some(candidate) = candidate {
                     validate_instrument(&candidate.instrument)?;
                     validate_positive_decimal_text(
@@ -675,6 +622,7 @@ impl AgentOperation {
                 max_settle_notional,
                 max_loss_settle,
                 target_rr,
+                risk,
                 ..
             } => {
                 validate_request_id(intent_id)?;
@@ -683,19 +631,28 @@ impl AgentOperation {
                 validate_decimal_text(stop_price, "stop_price")?;
                 validate_decimal_text(max_settle_notional, "max_settle_notional")?;
                 validate_decimal_text(max_loss_settle, "max_loss_settle")?;
-                validate_decimal_text(target_rr, "target_rr")
+                validate_decimal_text(target_rr, "target_rr")?;
+                if let Some(risk) = risk {
+                    validate_execution_risk_binding(risk)?;
+                }
+                Ok(())
             }
             Self::PrepareCloseExecution {
                 intent_id,
                 instrument,
                 size,
                 price,
+                risk,
                 ..
             } => {
                 validate_request_id(intent_id)?;
                 validate_instrument(instrument)?;
                 validate_decimal_text(size, "size")?;
-                validate_decimal_text(price, "price")
+                validate_decimal_text(price, "price")?;
+                if let Some(risk) = risk {
+                    validate_execution_risk_binding(risk)?;
+                }
+                Ok(())
             }
             Self::SubmitPreparedExecution { intent_id } | Self::ExecutionStatus { intent_id } => {
                 validate_request_id(intent_id)
@@ -1237,6 +1194,76 @@ fn validate_history_request(
     Ok(())
 }
 
+fn validate_execution_risk_binding(
+    risk: &ExecutionRiskBindingRequest,
+) -> Result<(), ProtocolError> {
+    validate_portfolio_mandate(&risk.mandate)?;
+    validate_hard_risk_policy(&risk.policy)
+}
+
+fn validate_portfolio_mandate(mandate: &PortfolioMandateRequest) -> Result<(), ProtocolError> {
+    validate_version(&mandate.version)?;
+    validate_positive_decimal_text(&mandate.capital_base_usd, "mandate.capital_base_usd")?;
+    if mandate.decision_horizon_hours == 0 || mandate.decision_horizon_hours > 24 * 365 {
+        return Err(ProtocolError::InvalidAnalyticalQuery(
+            "mandate.decision_horizon_hours",
+        ));
+    }
+    validate_non_negative_decimal_text(&mandate.max_drawdown_ratio, "mandate.max_drawdown_ratio")?;
+    validate_positive_decimal_text(&mandate.leverage_ceiling, "mandate.leverage_ceiling")?;
+    validate_non_negative_decimal_text(
+        &mandate.minimum_liquidity_notional_usd,
+        "mandate.minimum_liquidity_notional_usd",
+    )?;
+    validate_non_negative_decimal_text(&mandate.max_turnover_ratio, "mandate.max_turnover_ratio")?;
+    validate_instrument_list(&mandate.allowed_instruments, 32)
+}
+
+fn validate_hard_risk_policy(policy: &HardRiskPolicyRequest) -> Result<(), ProtocolError> {
+    validate_version(&policy.version)?;
+    for (value, field) in [
+        (
+            &policy.max_account_gross_notional_usd,
+            "policy.max_account_gross_notional_usd",
+        ),
+        (
+            &policy.max_instrument_gross_notional_usd,
+            "policy.max_instrument_gross_notional_usd",
+        ),
+        (
+            &policy.max_margin_utilization_ratio,
+            "policy.max_margin_utilization_ratio",
+        ),
+        (
+            &policy.max_loss_per_trade_usd,
+            "policy.max_loss_per_trade_usd",
+        ),
+        (
+            &policy.max_daily_realized_loss_usd,
+            "policy.max_daily_realized_loss_usd",
+        ),
+        (&policy.max_drawdown_ratio, "policy.max_drawdown_ratio"),
+    ] {
+        validate_non_negative_decimal_text(value, field)?;
+    }
+    validate_positive_decimal_text(&policy.max_leverage, "policy.max_leverage")?;
+    validate_instrument_list(&policy.allowed_instruments, 32)?;
+    if policy.correlated_clusters.len() > 16 {
+        return Err(ProtocolError::InvalidAnalyticalQuery(
+            "policy.correlated_clusters",
+        ));
+    }
+    for cluster in &policy.correlated_clusters {
+        validate_version(&cluster.id)?;
+        validate_instrument_list(&cluster.instruments, 16)?;
+        validate_non_negative_decimal_text(
+            &cluster.max_gross_notional_usd,
+            "policy.cluster.max_gross_notional_usd",
+        )?;
+    }
+    Ok(())
+}
+
 fn validate_statistics_bar(bar: &str) -> Result<(), ProtocolError> {
     if matches!(
         bar,
@@ -1392,6 +1419,36 @@ fn validate_decimal_text(value: &str, field: &'static str) -> Result<(), Protoco
 mod tests {
     use super::*;
 
+    fn execution_risk_request() -> ExecutionRiskBindingRequest {
+        ExecutionRiskBindingRequest {
+            mandate: Box::new(PortfolioMandateRequest {
+                version: "mandate/v1".to_owned(),
+                capital_base_usd: "100".to_owned(),
+                decision_horizon_hours: 24,
+                benchmark: Some("none/v1".to_owned()),
+                allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
+                max_drawdown_ratio: "1".to_owned(),
+                leverage_ceiling: "5".to_owned(),
+                minimum_liquidity_notional_usd: "0".to_owned(),
+                max_turnover_ratio: "5".to_owned(),
+            }),
+            policy: Box::new(HardRiskPolicyRequest {
+                version: "policy/v1".to_owned(),
+                max_account_gross_notional_usd: "1000".to_owned(),
+                max_instrument_gross_notional_usd: "1000".to_owned(),
+                max_margin_utilization_ratio: "1".to_owned(),
+                max_loss_per_trade_usd: "100".to_owned(),
+                max_daily_realized_loss_usd: "100".to_owned(),
+                max_drawdown_ratio: "1".to_owned(),
+                max_leverage: "5".to_owned(),
+                allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
+                minimum_quality: RiskMinimumQuality::Fresh,
+                degraded_mode: RiskDegradedMode::Reject,
+                correlated_clusters: Vec::new(),
+            }),
+        }
+    }
+
     #[test]
     fn direct_transport_read_only_gate_rejects_execution_mutations() {
         let read = AgentOperation::MarketOverview {
@@ -1407,6 +1464,7 @@ mod tests {
             order_type: ExecutionOrderType::Limit,
             size: "1".to_owned(),
             price: "0.1".to_owned(),
+            risk: None,
         };
         assert!(!prepare.direct_transport_read_only());
 
@@ -1653,6 +1711,7 @@ mod tests {
                 target_rr: "2".to_owned(),
                 entry_liquidity_role: LiquidityRole::Taker,
                 exit_liquidity_role: LiquidityRole::Taker,
+                risk: Some(Box::new(execution_risk_request())),
             },
         };
         open.validate().expect("valid open execution request");
@@ -1668,6 +1727,7 @@ mod tests {
                 order_type: ExecutionOrderType::Limit,
                 size: "1".to_owned(),
                 price: "0.1".to_owned(),
+                risk: None,
             },
         };
         close.validate().expect("valid close execution request");
@@ -1701,6 +1761,7 @@ mod tests {
                 order_type: ExecutionOrderType::Limit,
                 size: "1".to_owned(),
                 price: "0.1".to_owned(),
+                risk: None,
             },
         };
         assert!(invalid.validate().is_err());

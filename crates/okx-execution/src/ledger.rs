@@ -565,6 +565,7 @@ mod tests {
             size: "1".to_owned(),
             price: "0.1".to_owned(),
             open_risk: None,
+            risk_binding: None,
         }
     }
 
@@ -585,13 +586,11 @@ mod tests {
         assert_eq!(ledger.len(), 1);
 
         let reopened = DurableExecutionLedger::open(store, 102).expect("reopen");
-        assert_eq!(
-            reopened
-                .get("intent_0123456789abcdef")
-                .expect("entry")
-                .record
-                .state,
-            ExecutionState::Prepared
+        let reopened_entry = reopened.get("intent_0123456789abcdef").expect("entry");
+        assert_eq!(reopened_entry.record.state, ExecutionState::Prepared);
+        assert!(
+            reopened_entry.record.plan.risk_binding.is_none(),
+            "legacy plan without serialized risk_binding must remain readable"
         );
 
         let _ = fs::remove_dir_all(root);

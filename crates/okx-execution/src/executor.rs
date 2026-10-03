@@ -615,6 +615,7 @@ mod tests {
             size: "1".to_owned(),
             price: "0.1".to_owned(),
             open_risk: None,
+            risk_binding: None,
         }
     }
 

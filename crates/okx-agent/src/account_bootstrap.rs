@@ -1,7 +1,7 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
     AccountApi, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate, InstrumentType,
-    MarginMode, OkxError, OkxRestClient,
+    LeverageInfo, MarginMode, OkxError, OkxRestClient,
 };
 use okx_observation::{
     AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, FeeScheduleError,
@@ -32,6 +32,28 @@ pub enum AccountLedgerBootstrapError {
 
     #[error("account ledger normalization error: {0}")]
     Normalize(#[from] AccountLedgerError),
+}
+
+#[derive(Debug, Error)]
+pub enum ConfiguredLeverageBootstrapError {
+    #[error("OKX observer API key is not strictly read-only")]
+    PermissionRejected,
+
+    #[error("OKX private API error: {0}")]
+    Api(#[from] OkxError),
+
+    #[error(
+        "expected exactly one configured leverage row for {instrument}/{margin_mode}/{position_side}, found {found}"
+    )]
+    Ambiguous {
+        instrument: String,
+        margin_mode: String,
+        position_side: String,
+        found: usize,
+    },
+
+    #[error("configured leverage is empty")]
+    Empty,
 }
 
 #[derive(Debug, Error)]
@@ -189,6 +211,25 @@ impl AccountBootstrapper {
         )?)
     }
 
+    pub async fn configured_leverage(
+        &self,
+        instrument_id: &str,
+        margin_mode: MarginMode,
+        position_side: &str,
+    ) -> Result<String, ConfiguredLeverageBootstrapError> {
+        let config = self.api.config().await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| ConfiguredLeverageBootstrapError::PermissionRejected)?;
+
+        let rows = self.api.leverage(instrument_id, margin_mode).await?;
+        select_configured_leverage(
+            &rows,
+            instrument_id,
+            &margin_mode.to_string(),
+            position_side,
+        )
+    }
+
     pub async fn account_position_risk_oracle(
         &self,
     ) -> Result<AccountPositionRiskSnapshot, AccountBootstrapError> {
@@ -314,6 +355,35 @@ fn normalize_fee_schedule(
         taker_rate: group.taker,
         exact_for_instrument: true,
     })?)
+}
+
+fn select_configured_leverage(
+    rows: &[LeverageInfo],
+    instrument_id: &str,
+    margin_mode: &str,
+    position_side: &str,
+) -> Result<String, ConfiguredLeverageBootstrapError> {
+    let matching = rows
+        .iter()
+        .filter(|row| {
+            row.instrument_id == instrument_id
+                && row.margin_mode.eq_ignore_ascii_case(margin_mode)
+                && row.position_side.eq_ignore_ascii_case(position_side)
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(ConfiguredLeverageBootstrapError::Ambiguous {
+            instrument: instrument_id.to_owned(),
+            margin_mode: margin_mode.to_owned(),
+            position_side: position_side.to_owned(),
+            found: matching.len(),
+        });
+    }
+    let leverage = matching[0].lever.trim();
+    if leverage.is_empty() {
+        return Err(ConfiguredLeverageBootstrapError::Empty);
+    }
+    Ok(leverage.to_owned())
 }
 
 fn strict_read_only_permissions(value: &str) -> Result<Vec<String>, AccountBootstrapError> {
@@ -457,6 +527,62 @@ mod tests {
         assert!(matches!(
             missing_timestamp,
             Err(FeeScheduleBootstrapError::ResponseInconsistent(_))
+        ));
+    }
+
+    fn leverage_row(
+        instrument_id: &str,
+        margin_mode: &str,
+        position_side: &str,
+        leverage: &str,
+    ) -> LeverageInfo {
+        LeverageInfo {
+            instrument_id: instrument_id.to_owned(),
+            margin_mode: margin_mode.to_owned(),
+            position_side: position_side.to_owned(),
+            lever: leverage.to_owned(),
+        }
+    }
+
+    #[test]
+    fn configured_leverage_requires_exact_instrument_mode_and_position_side() {
+        let rows = vec![
+            leverage_row("DOGE-USDT-SWAP", "cross", "long", "5"),
+            leverage_row("DOGE-USDT-SWAP", "cross", "short", "3"),
+        ];
+        assert_eq!(
+            select_configured_leverage(&rows, "DOGE-USDT-SWAP", "cross", "long")
+                .expect("long leverage"),
+            "5"
+        );
+        assert_eq!(
+            select_configured_leverage(&rows, "DOGE-USDT-SWAP", "cross", "short")
+                .expect("short leverage"),
+            "3"
+        );
+    }
+
+    #[test]
+    fn configured_leverage_missing_or_duplicate_side_fails_closed() {
+        let missing = vec![leverage_row("DOGE-USDT-SWAP", "cross", "long", "5")];
+        assert!(matches!(
+            select_configured_leverage(&missing, "DOGE-USDT-SWAP", "cross", "short"),
+            Err(ConfiguredLeverageBootstrapError::Ambiguous { found: 0, .. })
+        ));
+
+        let duplicate = vec![
+            leverage_row("DOGE-USDT-SWAP", "cross", "long", "5"),
+            leverage_row("DOGE-USDT-SWAP", "cross", "long", "10"),
+        ];
+        assert!(matches!(
+            select_configured_leverage(&duplicate, "DOGE-USDT-SWAP", "cross", "long"),
+            Err(ConfiguredLeverageBootstrapError::Ambiguous { found: 2, .. })
+        ));
+
+        let empty = vec![leverage_row("DOGE-USDT-SWAP", "cross", "long", "")];
+        assert!(matches!(
+            select_configured_leverage(&empty, "DOGE-USDT-SWAP", "cross", "long"),
+            Err(ConfiguredLeverageBootstrapError::Empty)
         ));
     }
 
