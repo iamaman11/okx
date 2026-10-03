@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use okx_analysis::{CandidateOrderAnalysis, PositionDirection};
+use okx_analysis::{CandidateOrderAnalysis, PortfolioRiskAnalysis, PositionDirection, RiskPolicyDecision};
 use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
 };
@@ -136,6 +136,18 @@ pub enum ExecutionValidationError {
         requested: String,
         available: String,
     },
+
+    #[error("prepared execution is missing an immutable hard-risk policy binding")]
+    MissingRiskBinding,
+
+    #[error("hard-risk policy rejected risk-increasing mutation: {0}")]
+    HardRiskPolicyRejected(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreMutationRiskDisposition {
+    Accepted,
+    AcceptedRiskReducingClose,
 }
 
 pub fn prepare_execution(
@@ -194,6 +206,30 @@ pub fn prepare_execution(
         open_risk,
         risk_binding: None,
     })
+}
+
+pub fn revalidate_hard_risk_policy(
+    plan: &ExecutionPlan,
+    analysis: &PortfolioRiskAnalysis,
+) -> Result<PreMutationRiskDisposition, ExecutionValidationError> {
+    if plan.risk_binding.is_none() {
+        return Err(ExecutionValidationError::MissingRiskBinding);
+    }
+    match plan.action {
+        ExecutionAction::Open => {
+            if analysis.policy_decision == RiskPolicyDecision::Rejected {
+                let codes = analysis
+                    .violations
+                    .iter()
+                    .map(|violation| violation.code)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                return Err(ExecutionValidationError::HardRiskPolicyRejected(codes));
+            }
+            Ok(PreMutationRiskDisposition::Accepted)
+        }
+        ExecutionAction::Close => Ok(PreMutationRiskDisposition::AcceptedRiskReducingClose),
+    }
 }
 
 pub fn revalidate_execution_plan(
