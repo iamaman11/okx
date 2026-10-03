@@ -60,15 +60,18 @@ Stage 2 progress:
 - **live microstructure core — ACCEPTED**: spread/depth/impact and sequence-contiguous live evidence through the existing bounded public-WS owner;
 - **derivatives + history intelligence — ACCEPTED**: recent trades, realized-volatility/volume/OI change, funding history/regime, basis/term-structure evidence, plus production fixes for live OKX wire/rate-domain behavior;
 - **portfolio risk mandate/hard-policy primary T4 — ACCEPTED**: PR #184 is on main `fe67d3495479e72a56c20c08fc5c231ed0670225`; exact tested head `74e14e5b1ff09c4fe27b1e7579eee9e905c2d843`; CI `37073209534` PASS; artifact `11256197440` deployed; Worker contract `okx.mcp.tools/2026-10-03.1`. After refreshing the connected tool schema, primary Cloudflare allow + intentional reject cases both passed with FRESH coherent evidence, typed policy rejection, non-null BTC reference generation in the reject case, and zero-residual OKX account-position-risk oracle comparison. GitHub fallback was not used as a substitute.
+- **portfolio-risk correctness — ACCEPTED**: end-of-evaluation generation/coherence admission, explicit source-skew/oracle semantics, fail-closed unsupported daily-loss currencies and explicit mandate field semantics are merged/deployed;
+- **statistical portfolio risk — ACCEPTED**: #187 adds explicit-sample covariance/correlation, volatility contribution, deterministic scenario/historical stress; Expected Shortfall remains explicitly NOT_COMPUTED until a declared valid tail-sample contract exists;
+- **pre-mutation hard-policy ownership — ACCEPTED for implementation/fail-closed boundary**: #188 merged as main `1e7b37a7705d1925d9979e4c20cb63fdff4ae903`; tested head `093f489b07b894ada932b0f393c6f9ae1f2bf583`; tested/merged tree `9eafeaca84c3080edfcae813901c9b7b38d4eaaa`; CI `37087545928` PASS; artifact `11261092800` deployed/restarted with provenance; primary runtime and `portfolio_risk/v3` regression remained PASS/FRESH. This does not claim a live production mutation.
 
 Canonical Stage-2 closure order:
 
 1. **DONE** — primary `portfolio_risk` allow + intentional reject cases passed through the connected Cloudflare MCP surface;
-2. **CURRENT** — close portfolio-risk correctness edges: end-of-evaluation reference-generation recheck, bounded source-skew/oracle admission, versioned oracle tolerance/semantic exceptions, fail-closed unsupported-currency daily-loss behavior, and explicit mandate-field semantics;
-3. add covariance/correlation + volatility contribution + deterministic scenario/historical stress evidence; ES/tail only when the sample contract is valid;
-4. bind the same versioned hard policy into the existing execution authority for fresh pre-mutation revalidation, without a second risk daemon/state owner/store/scheduler;
-5. obtain safe representative non-zero portfolio/oracle proof through supported read-only virtual evidence or Demo Trading rather than enabling production live trading;
-6. issue one final Stage-2 T1–T5 acceptance record over one traceable accepted tree/artifact.
+2. **DONE** — portfolio-risk correctness closure: final reference-generation recheck, bounded source-skew/oracle admission, versioned oracle semantics, fail-closed unsupported daily-loss currencies, and explicit mandate enforced/context-only fields;
+3. **DONE** — statistical portfolio risk: covariance/correlation with explicit sample/window, volatility contribution, deterministic scenarios/historical stress; Expected Shortfall remains explicitly NOT_COMPUTED until a declared valid tail-sample contract exists (#187);
+4. **DONE** — pre-mutation hard-policy ownership (#188): the exact immutable mandate/policy is re-evaluated on fresh account/reference/ledger/leverage evidence inside the existing execution authority immediately before its mutation boundary. Exact tested/deployed tree `9eafeaca84c3080edfcae813901c9b7b38d4eaaa`, CI `37087545928`, artifact `11261092800`, agent SHA-256 `adad85df474987ed5971d74b6593246ca2287d2742de1abab163478fab13fc93`; deploy/restart PASS and primary runtime reconverged PASS/FRESH. Production live trading remains disabled and no production mutation T4 is claimed;
+5. **CURRENT** — obtain safe representative non-zero portfolio/oracle proof through supported read-only virtual evidence or OKX Demo Trading rather than enabling production live trading;
+6. **PENDING** — issue one final Stage-2 T1–T5 acceptance record over one traceable accepted tree/artifact.
 
 Do not start Stage 3 until this closure sequence is complete. New analytical capability must continue to extend existing factual/analysis owners rather than reintroduce endpoint-per-question growth.
 
