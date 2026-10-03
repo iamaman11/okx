@@ -5,6 +5,7 @@ mod market_query;
 mod microstructure;
 mod risk;
 mod scenario;
+mod statistics;
 
 pub use candidate::{
     CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderAssumptions,
@@ -42,6 +43,14 @@ pub use scenario::{
     HISTORY_BEHAVIOR_SCHEMA_V1, HistoryBehaviorAnalysis, POSITION_SCENARIO_SCHEMA_V1,
     PositionScenarioAnalysis, PositionScenarioAssumptions, ScenarioExitAssumption,
     ScenarioPriceSource, analyze_history_behavior, analyze_position_scenario,
+};
+pub use statistics::{
+    CovarianceCell, HISTORICAL_STRESS_FORMULA_V1, HistoricalStressResult,
+    PARALLEL_SCENARIO_FORMULA_V1, PORTFOLIO_STATISTICS_SCHEMA_V1, PORTFOLIO_VOLATILITY_FORMULA_V1,
+    ParallelScenarioResult, PortfolioStatisticsAnalysis, PortfolioStatisticsStatus,
+    SAMPLE_COVARIANCE_FORMULA_V1, StatisticalExposure, StatisticalHistoryEvidence,
+    VolatilityContribution, analyze_portfolio_statistics, covariance_correlation, decimal_sqrt,
+    sample_covariance_matrix,
 };
 
 use std::str::FromStr;
@@ -203,6 +212,35 @@ pub enum AnalysisError {
     OrderBookEmptyBid,
     #[error("order book levels are not strictly sorted")]
     OrderBookNotStrictlySorted,
+    #[error("statistical analysis requires at least two samples, found {0}")]
+    InsufficientStatisticalSamples(usize),
+    #[error("statistical series lengths do not match")]
+    StatisticalSeriesLengthMismatch,
+    #[error("statistical portfolio universe exceeds hard limit: {0}")]
+    StatisticalUniverseTooLarge(usize),
+    #[error("statistical portfolio histories do not match the exposure universe")]
+    StatisticalHistoryMismatch,
+    #[error("statistical portfolio histories use different bars")]
+    StatisticalBarMismatch,
+    #[error("statistical portfolio confirmed candle timestamps are not aligned")]
+    StatisticalHistoryNotAligned,
+    #[error("statistical portfolio history contains a gap for instrument '{0}'")]
+    StatisticalHistoryGap(String),
+    #[error("statistical portfolio histories use different reference generations")]
+    StatisticalReferenceMismatch,
+    #[error("statistical portfolio bar '{0}' has no fixed interval contract")]
+    UnsupportedStatisticalBar(String),
+    #[error(
+        "statistical volatility contribution reconciliation residual '{residual}' exceeds tolerance '{tolerance}'"
+    )]
+    StatisticalVolatilityReconciliationExceeded { residual: String, tolerance: String },
+    #[error(
+        "statistical portfolio history for '{instrument}' requires at least three confirmed closes, found {confirmed}"
+    )]
+    InsufficientConfirmedStatisticalHistory {
+        instrument: String,
+        confirmed: usize,
+    },
     #[error("crossed or locked order book: best_bid={best_bid}, best_ask={best_ask}")]
     CrossedOrderBook { best_bid: String, best_ask: String },
 }

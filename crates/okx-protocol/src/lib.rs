@@ -377,6 +377,14 @@ pub struct PortfolioCandidateRequest {
     pub leverage: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioStatisticsRequest {
+    pub bar: String,
+    pub limit: u16,
+    pub parallel_scenario_move_ratio: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionOrderType {
@@ -467,6 +475,7 @@ pub enum AgentOperation {
         mandate: Box<PortfolioMandateRequest>,
         policy: Box<HardRiskPolicyRequest>,
         candidate: Option<PortfolioCandidateRequest>,
+        statistics: Option<PortfolioStatisticsRequest>,
     },
     TradingCapabilities {
         instrument: String,
@@ -565,6 +574,7 @@ impl AgentOperation {
                 mandate,
                 policy,
                 candidate,
+                statistics,
             } => {
                 validate_version(&mandate.version)?;
                 validate_positive_decimal_text(&mandate.capital_base_usd, "capital_base_usd")?;
@@ -641,6 +651,18 @@ impl AgentOperation {
                         "candidate.worst_case_loss_usd",
                     )?;
                     validate_positive_decimal_text(&candidate.leverage, "candidate.leverage")?;
+                }
+                if let Some(statistics) = statistics {
+                    validate_statistics_bar(&statistics.bar)?;
+                    if !(3..=100).contains(&statistics.limit) {
+                        return Err(ProtocolError::InvalidHistoryLimit);
+                    }
+                    if let Some(move_ratio) = statistics.parallel_scenario_move_ratio.as_deref() {
+                        validate_decimal_text(
+                            move_ratio,
+                            "statistics.parallel_scenario_move_ratio",
+                        )?;
+                    }
                 }
                 Ok(())
             }
@@ -1208,6 +1230,43 @@ fn validate_history_request(
     limit: Option<u16>,
 ) -> Result<(), ProtocolError> {
     validate_instrument(instrument)?;
+    validate_history_bar(bar)?;
+    if matches!(limit, Some(0 | 101..)) {
+        return Err(ProtocolError::InvalidHistoryLimit);
+    }
+    Ok(())
+}
+
+fn validate_statistics_bar(bar: &str) -> Result<(), ProtocolError> {
+    if matches!(
+        bar,
+        "1m" | "3m"
+            | "5m"
+            | "15m"
+            | "30m"
+            | "1H"
+            | "2H"
+            | "4H"
+            | "6H"
+            | "12H"
+            | "1D"
+            | "2D"
+            | "3D"
+            | "1W"
+            | "6Hutc"
+            | "12Hutc"
+            | "1Dutc"
+            | "2Dutc"
+            | "3Dutc"
+            | "1Wutc"
+    ) {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidHistoryBar)
+    }
+}
+
+fn validate_history_bar(bar: &str) -> Result<(), ProtocolError> {
     if !matches!(
         bar,
         "1s" | "1m"
@@ -1236,9 +1295,6 @@ fn validate_history_request(
             | "3Mutc"
     ) {
         return Err(ProtocolError::InvalidHistoryBar);
-    }
-    if matches!(limit, Some(0 | 101..)) {
-        return Err(ProtocolError::InvalidHistoryLimit);
     }
     Ok(())
 }
@@ -1957,6 +2013,71 @@ mod tests {
         assert_eq!(
             duplicate.validate(),
             Err(ProtocolError::InvalidMarketResearchInstruments)
+        );
+    }
+
+    fn portfolio_risk_operation(statistics: Option<PortfolioStatisticsRequest>) -> AgentOperation {
+        AgentOperation::PortfolioRisk {
+            mandate: Box::new(PortfolioMandateRequest {
+                version: "mandate/v1".to_owned(),
+                capital_base_usd: "100".to_owned(),
+                decision_horizon_hours: 24,
+                benchmark: None,
+                allowed_instruments: Vec::new(),
+                max_drawdown_ratio: "1".to_owned(),
+                leverage_ceiling: "5".to_owned(),
+                minimum_liquidity_notional_usd: "0".to_owned(),
+                max_turnover_ratio: "5".to_owned(),
+            }),
+            policy: Box::new(HardRiskPolicyRequest {
+                version: "policy/v1".to_owned(),
+                max_account_gross_notional_usd: "1000".to_owned(),
+                max_instrument_gross_notional_usd: "1000".to_owned(),
+                max_margin_utilization_ratio: "1".to_owned(),
+                max_loss_per_trade_usd: "100".to_owned(),
+                max_daily_realized_loss_usd: "100".to_owned(),
+                max_drawdown_ratio: "1".to_owned(),
+                max_leverage: "5".to_owned(),
+                allowed_instruments: Vec::new(),
+                minimum_quality: RiskMinimumQuality::Fresh,
+                degraded_mode: RiskDegradedMode::Reject,
+                correlated_clusters: Vec::new(),
+            }),
+            candidate: None,
+            statistics,
+        }
+    }
+
+    #[test]
+    fn portfolio_statistics_request_is_optional_bounded_and_fixed_interval() {
+        let legacy = portfolio_risk_operation(None);
+        assert!(legacy.validate().is_ok());
+
+        let statistical = portfolio_risk_operation(Some(PortfolioStatisticsRequest {
+            bar: "1H".to_owned(),
+            limit: 24,
+            parallel_scenario_move_ratio: Some("-0.1".to_owned()),
+        }));
+        assert!(statistical.validate().is_ok());
+        let json = serde_json::to_string(&statistical).expect("serialize");
+        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, statistical);
+
+        let monthly = portfolio_risk_operation(Some(PortfolioStatisticsRequest {
+            bar: "1M".to_owned(),
+            limit: 24,
+            parallel_scenario_move_ratio: None,
+        }));
+        assert_eq!(monthly.validate(), Err(ProtocolError::InvalidHistoryBar));
+
+        let too_short = portfolio_risk_operation(Some(PortfolioStatisticsRequest {
+            bar: "1H".to_owned(),
+            limit: 2,
+            parallel_scenario_move_ratio: None,
+        }));
+        assert_eq!(
+            too_short.validate(),
+            Err(ProtocolError::InvalidHistoryLimit)
         );
     }
 

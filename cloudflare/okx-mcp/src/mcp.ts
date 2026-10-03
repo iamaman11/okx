@@ -22,6 +22,11 @@ const VALID_BARS = new Set([
   "6Hutc","12Hutc","1Dutc","2Dutc","3Dutc","1Wutc","1Mutc","3Mutc",
 ]);
 
+const STATISTICAL_BARS = new Set([
+  "1m","3m","5m","15m","30m","1H","2H","4H","6H","12H","1D","2D","3D","1W",
+  "6Hutc","12Hutc","1Dutc","2Dutc","3Dutc","1Wutc",
+]);
+
 const CODE_PATTERN = "^[A-Za-z0-9_-]+$";
 const DECIMAL_PATTERN = "^[0-9]+(?:\\.[0-9]+)?$";
 const VERSION_PATTERN = "^[A-Za-z0-9._/-]+$";
@@ -57,6 +62,18 @@ function decimalText(value: unknown, positive: boolean): string | null {
     return null;
   }
   if (positive && Number(value) <= 0) return null;
+  return value;
+}
+
+function signedDecimalText(value: unknown): string | null {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > 64 ||
+    !/^-?[0-9]+(?:\.[0-9]+)?$/.test(value)
+  ) {
+    return null;
+  }
   return value;
 }
 
@@ -345,6 +362,21 @@ export const mcpApi = {
                   required: ["instrument","side","notional_usd","worst_case_loss_usd","leverage"],
                   additionalProperties: false,
                 },
+                statistics: {
+                  type: "object",
+                  properties: {
+                    bar: { type: "string", enum: [...STATISTICAL_BARS] },
+                    limit: { type: "integer", minimum: 3, maximum: 100 },
+                    parallel_scenario_move_ratio: {
+                      type: "string",
+                      minLength: 1,
+                      maxLength: 64,
+                      pattern: "^-?[0-9]+(?:\\.[0-9]+)?$",
+                    },
+                  },
+                  required: ["bar","limit"],
+                  additionalProperties: false,
+                },
               },
               required: ["mandate","policy"],
               additionalProperties: false,
@@ -599,7 +631,7 @@ export const mcpApi = {
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }
       if (name === "portfolio_risk") {
-        if (!hasOnlyKeys(args, ["mandate", "policy", "candidate"]) || !isObject(args.mandate) || !isObject(args.policy)) {
+        if (!hasOnlyKeys(args, ["mandate", "policy", "candidate", "statistics"]) || !isObject(args.mandate) || !isObject(args.policy)) {
           return jsonRpcError(id, -32602, "invalid portfolio_risk request");
         }
         const mandate = args.mandate;
@@ -696,6 +728,35 @@ export const mcpApi = {
           };
         }
 
+        let statistics: Record<string, unknown> | null = null;
+        if (args.statistics !== undefined) {
+          if (!isObject(args.statistics) || !hasOnlyKeys(args.statistics, [
+            "bar","limit","parallel_scenario_move_ratio",
+          ])) {
+            return jsonRpcError(id, -32602, "invalid statistics");
+          }
+          const bar = String(args.statistics.bar);
+          const limit = Number(args.statistics.limit);
+          const moveRatio = args.statistics.parallel_scenario_move_ratio === undefined
+            ? null
+            : signedDecimalText(args.statistics.parallel_scenario_move_ratio);
+          if (
+            !STATISTICAL_BARS.has(bar) ||
+            !Number.isInteger(limit) ||
+            limit < 3 ||
+            limit > 100 ||
+            (args.statistics.parallel_scenario_move_ratio !== undefined && moveRatio === null) ||
+            (moveRatio !== null && Number(moveRatio) <= -1)
+          ) {
+            return jsonRpcError(id, -32602, "invalid statistics");
+          }
+          statistics = {
+            bar,
+            limit,
+            parallel_scenario_move_ratio: moveRatio,
+          };
+        }
+
         const agentRequest = {
           schema: "okx.agent.request/v1",
           request_id: requestId(),
@@ -727,6 +788,7 @@ export const mcpApi = {
               correlated_clusters: clusters,
             },
             candidate,
+            statistics,
           },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
