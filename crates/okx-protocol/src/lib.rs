@@ -2016,9 +2016,7 @@ mod tests {
         );
     }
 
-    fn portfolio_risk_operation(
-        statistics: Option<PortfolioStatisticsRequest>,
-    ) -> AgentOperation {
+    fn portfolio_risk_operation(statistics: Option<PortfolioStatisticsRequest>) -> AgentOperation {
         AgentOperation::PortfolioRisk {
             mandate: Box::new(PortfolioMandateRequest {
                 version: "mandate/v1".to_owned(),
@@ -2077,7 +2075,10 @@ mod tests {
             limit: 2,
             parallel_scenario_move_ratio: None,
         }));
-        assert_eq!(too_short.validate(), Err(ProtocolError::InvalidHistoryLimit));
+        assert_eq!(
+            too_short.validate(),
+            Err(ProtocolError::InvalidHistoryLimit)
+        );
     }
 
     #[test]
