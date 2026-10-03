@@ -9,7 +9,7 @@ mod statistics;
 
 pub use candidate::{
     CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderAssumptions,
-    SizingConstraint, analyze_candidate_order,
+    SizingConstraint, analyze_candidate_order, linear_contract_notional_usd,
 };
 pub use derivatives::{
     DATED_FUTURE_BASIS_SCHEMA_V1, DatedFutureBasisAnalysis, analyze_basis_difference_bps,
@@ -37,7 +37,10 @@ pub use risk::{
     PortfolioRiskAnalysis, PositionRiskAnalysis, RISK_ORACLE_COMPARISON_SCHEMA_V2,
     RISK_ORACLE_CONSISTENCY_POLICY_V1, RiskDegradedMode, RiskMinimumQuality, RiskOracleComparison,
     RiskPolicyDecision, RiskPolicyViolation, TRADING_MANDATE_SCHEMA_V1, TradingMandate,
-    analyze_account_risk, analyze_portfolio_risk, compare_account_position_risk_oracle,
+    VIRTUAL_NOTIONAL_ORACLE_COMPARISON_SCHEMA_V1, VIRTUAL_NOTIONAL_ORACLE_CONSISTENCY_POLICY_V1,
+    VirtualNotionalOracleComparison, VirtualNotionalOracleInput,
+    VirtualNotionalOraclePositionComparison, analyze_account_risk, analyze_portfolio_risk,
+    compare_account_position_risk_oracle, compare_virtual_position_builder_notional,
 };
 pub use scenario::{
     HISTORY_BEHAVIOR_SCHEMA_V1, HistoryBehaviorAnalysis, POSITION_SCENARIO_SCHEMA_V1,

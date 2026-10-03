@@ -392,6 +392,22 @@ pub struct PortfolioStatisticsRequest {
     pub parallel_scenario_move_ratio: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualPortfolioPositionRequest {
+    pub instrument: String,
+    pub contracts: String,
+    pub average_price: String,
+    pub leverage: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualPortfolioRequest {
+    pub collateral_usdt: String,
+    pub positions: Vec<VirtualPortfolioPositionRequest>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionOrderType {
@@ -485,6 +501,7 @@ pub enum AgentOperation {
         policy: Box<HardRiskPolicyRequest>,
         candidate: Option<PortfolioCandidateRequest>,
         statistics: Option<PortfolioStatisticsRequest>,
+        virtual_portfolio: Option<VirtualPortfolioRequest>,
     },
     TradingCapabilities {
         instrument: String,
@@ -584,6 +601,7 @@ impl AgentOperation {
                 policy,
                 candidate,
                 statistics,
+                virtual_portfolio,
             } => {
                 validate_portfolio_mandate(mandate)?;
                 validate_hard_risk_policy(policy)?;
@@ -608,6 +626,45 @@ impl AgentOperation {
                         validate_decimal_text(
                             move_ratio,
                             "statistics.parallel_scenario_move_ratio",
+                        )?;
+                    }
+                }
+                if candidate.is_some() && virtual_portfolio.is_some() {
+                    return Err(ProtocolError::InvalidAnalyticalQuery(
+                        "candidate and virtual_portfolio are mutually exclusive",
+                    ));
+                }
+                if let Some(virtual_portfolio) = virtual_portfolio {
+                    validate_positive_decimal_text(
+                        &virtual_portfolio.collateral_usdt,
+                        "virtual_portfolio.collateral_usdt",
+                    )?;
+                    if !(2..=8).contains(&virtual_portfolio.positions.len()) {
+                        return Err(ProtocolError::InvalidAnalyticalQuery(
+                            "virtual_portfolio.positions",
+                        ));
+                    }
+                    for (index, position) in virtual_portfolio.positions.iter().enumerate() {
+                        validate_instrument(&position.instrument)?;
+                        if virtual_portfolio.positions[..index]
+                            .iter()
+                            .any(|existing| existing.instrument == position.instrument)
+                        {
+                            return Err(ProtocolError::InvalidAnalyticalQuery(
+                                "duplicate virtual portfolio instrument",
+                            ));
+                        }
+                        validate_non_zero_decimal_text(
+                            &position.contracts,
+                            "virtual_portfolio.positions.contracts",
+                        )?;
+                        validate_positive_decimal_text(
+                            &position.average_price,
+                            "virtual_portfolio.positions.average_price",
+                        )?;
+                        validate_positive_decimal_text(
+                            &position.leverage,
+                            "virtual_portfolio.positions.leverage",
                         )?;
                     }
                 }
@@ -1392,6 +1449,15 @@ fn validate_positive_decimal_text(value: &str, field: &'static str) -> Result<()
     Ok(())
 }
 
+fn validate_non_zero_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
+    validate_decimal_text(value, field)?;
+    if value.bytes().any(|byte| matches!(byte, b'1'..=b'9')) {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidDecimalInput(field))
+    }
+}
+
 fn validate_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
     if value.is_empty() || value.len() > 64 {
         return Err(ProtocolError::InvalidDecimalInput(field));
@@ -2106,6 +2172,7 @@ mod tests {
             }),
             candidate: None,
             statistics,
+            virtual_portfolio: None,
         }
     }
 
@@ -2139,6 +2206,90 @@ mod tests {
         assert_eq!(
             too_short.validate(),
             Err(ProtocolError::InvalidHistoryLimit)
+        );
+    }
+
+    #[test]
+    fn virtual_portfolio_proof_is_bounded_unique_and_mutually_exclusive_with_candidate() {
+        let mut virtual_proof = portfolio_risk_operation(None);
+        if let AgentOperation::PortfolioRisk {
+            virtual_portfolio, ..
+        } = &mut virtual_proof
+        {
+            *virtual_portfolio = Some(VirtualPortfolioRequest {
+                collateral_usdt: "10000".to_owned(),
+                positions: vec![
+                    VirtualPortfolioPositionRequest {
+                        instrument: "BTC-USDT-SWAP".to_owned(),
+                        contracts: "2".to_owned(),
+                        average_price: "100000".to_owned(),
+                        leverage: "3".to_owned(),
+                    },
+                    VirtualPortfolioPositionRequest {
+                        instrument: "ETH-USDT-SWAP".to_owned(),
+                        contracts: "-3".to_owned(),
+                        average_price: "4000".to_owned(),
+                        leverage: "3".to_owned(),
+                    },
+                ],
+            });
+        }
+        virtual_proof.validate().expect("valid virtual portfolio");
+        assert!(virtual_proof.direct_transport_read_only());
+        let json = serde_json::to_string(&virtual_proof).expect("serialize");
+        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, virtual_proof);
+
+        let mut duplicate = virtual_proof.clone();
+        if let AgentOperation::PortfolioRisk {
+            virtual_portfolio: Some(value),
+            ..
+        } = &mut duplicate
+        {
+            value.positions[1].instrument = value.positions[0].instrument.clone();
+        }
+        assert_eq!(
+            duplicate.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery(
+                "duplicate virtual portfolio instrument"
+            ))
+        );
+
+        let mut zero = virtual_proof.clone();
+        if let AgentOperation::PortfolioRisk {
+            virtual_portfolio: Some(value),
+            ..
+        } = &mut zero
+        {
+            value.positions[0].contracts = "0".to_owned();
+        }
+        assert_eq!(
+            zero.validate(),
+            Err(ProtocolError::InvalidDecimalInput(
+                "virtual_portfolio.positions.contracts"
+            ))
+        );
+
+        let mut ambiguous = virtual_proof;
+        if let AgentOperation::PortfolioRisk {
+            candidate,
+            virtual_portfolio: Some(_),
+            ..
+        } = &mut ambiguous
+        {
+            *candidate = Some(PortfolioCandidateRequest {
+                instrument: "BTC-USDT-SWAP".to_owned(),
+                side: PositionSide::Long,
+                notional_usd: "100".to_owned(),
+                worst_case_loss_usd: "10".to_owned(),
+                leverage: "3".to_owned(),
+            });
+        }
+        assert_eq!(
+            ambiguous.validate(),
+            Err(ProtocolError::InvalidAnalyticalQuery(
+                "candidate and virtual_portfolio are mutually exclusive"
+            ))
         );
     }
 

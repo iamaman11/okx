@@ -179,6 +179,34 @@ impl OkxRestClient {
         decode(request.send().await?, &self.rate_budget, &plan).await
     }
 
+    pub(crate) async fn private_read_post<T, B>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<Vec<T>, OkxError>
+    where
+        T: DeserializeOwned,
+        B: Serialize + ?Sized,
+    {
+        if path != "/api/v5/account/position-builder" {
+            return Err(OkxError::Config(format!(
+                "private read-only POST path is not allowlisted: {path}"
+            )));
+        }
+        let rate_plan = self.rate_budget.private_rest_plan(path, &[]);
+        let timestamp = timestamp_now();
+        let envelope = self
+            .private_post(path, body, &timestamp, None, &rate_plan)
+            .await?;
+        if envelope.code != "0" {
+            return Err(OkxError::Api {
+                code: envelope.code,
+                message: envelope.msg,
+            });
+        }
+        Ok(envelope.data)
+    }
+
     pub(crate) async fn private_post<T, B>(
         &self,
         path: &str,

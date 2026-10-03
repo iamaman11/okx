@@ -377,6 +377,36 @@ export const mcpApi = {
                   required: ["bar","limit"],
                   additionalProperties: false,
                 },
+                virtual_portfolio: {
+                  type: "object",
+                  properties: {
+                    collateral_usdt: {
+                      type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN,
+                    },
+                    positions: {
+                      type: "array", minItems: 2, maxItems: 8,
+                      items: {
+                        type: "object",
+                        properties: {
+                          instrument: { type: "string", minLength: 3, maxLength: 64, pattern: CODE_PATTERN },
+                          contracts: {
+                            type: "string", minLength: 1, maxLength: 64, pattern: "^-?[0-9]+(?:\\.[0-9]+)?$",
+                          },
+                          average_price: {
+                            type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN,
+                          },
+                          leverage: {
+                            type: "string", minLength: 1, maxLength: 64, pattern: DECIMAL_PATTERN,
+                          },
+                        },
+                        required: ["instrument","contracts","average_price","leverage"],
+                        additionalProperties: false,
+                      },
+                    },
+                  },
+                  required: ["collateral_usdt","positions"],
+                  additionalProperties: false,
+                },
               },
               required: ["mandate","policy"],
               additionalProperties: false,
@@ -631,7 +661,7 @@ export const mcpApi = {
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }
       if (name === "portfolio_risk") {
-        if (!hasOnlyKeys(args, ["mandate", "policy", "candidate", "statistics"]) || !isObject(args.mandate) || !isObject(args.policy)) {
+        if (!hasOnlyKeys(args, ["mandate", "policy", "candidate", "statistics", "virtual_portfolio"]) || !isObject(args.mandate) || !isObject(args.policy)) {
           return jsonRpcError(id, -32602, "invalid portfolio_risk request");
         }
         const mandate = args.mandate;
@@ -757,6 +787,56 @@ export const mcpApi = {
           };
         }
 
+        let virtualPortfolio: Record<string, unknown> | null = null;
+        if (args.virtual_portfolio !== undefined) {
+          if (
+            candidate !== null ||
+            !isObject(args.virtual_portfolio) ||
+            !hasOnlyKeys(args.virtual_portfolio, ["collateral_usdt","positions"])
+          ) {
+            return jsonRpcError(id, -32602, "invalid virtual_portfolio");
+          }
+          const collateral = decimalText(args.virtual_portfolio.collateral_usdt, true);
+          if (
+            !collateral ||
+            !Array.isArray(args.virtual_portfolio.positions) ||
+            args.virtual_portfolio.positions.length < 2 ||
+            args.virtual_portfolio.positions.length > 8
+          ) {
+            return jsonRpcError(id, -32602, "invalid virtual_portfolio");
+          }
+          const positions: Array<Record<string, string>> = [];
+          const seen = new Set<string>();
+          for (const rawPosition of args.virtual_portfolio.positions) {
+            if (!isObject(rawPosition) || !hasOnlyKeys(rawPosition, [
+              "instrument","contracts","average_price","leverage",
+            ])) {
+              return jsonRpcError(id, -32602, "invalid virtual portfolio position");
+            }
+            const instrument = normalizeInstrument(rawPosition.instrument);
+            const contracts = signedDecimalText(rawPosition.contracts);
+            const averagePrice = decimalText(rawPosition.average_price, true);
+            const leverage = decimalText(rawPosition.leverage, true);
+            if (
+              !instrument || !contracts || Number(contracts) === 0 || !averagePrice || !leverage ||
+              seen.has(instrument)
+            ) {
+              return jsonRpcError(id, -32602, "invalid virtual portfolio position");
+            }
+            seen.add(instrument);
+            positions.push({
+              instrument,
+              contracts,
+              average_price: averagePrice,
+              leverage,
+            });
+          }
+          virtualPortfolio = {
+            collateral_usdt: collateral,
+            positions,
+          };
+        }
+
         const agentRequest = {
           schema: "okx.agent.request/v1",
           request_id: requestId(),
@@ -789,6 +869,7 @@ export const mcpApi = {
             },
             candidate,
             statistics,
+            virtual_portfolio: virtualPortfolio,
           },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));

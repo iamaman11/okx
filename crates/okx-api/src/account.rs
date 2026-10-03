@@ -287,6 +287,91 @@ pub struct AccountPositionRiskSnapshot {
     pub ts: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PositionBuilderSimPosition {
+    #[serde(rename = "instId")]
+    pub instrument_id: String,
+    #[serde(rename = "pos")]
+    pub contracts: String,
+    #[serde(rename = "avgPx")]
+    pub average_price: String,
+    #[serde(rename = "lever")]
+    pub leverage: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PositionBuilderSimAsset {
+    #[serde(rename = "ccy")]
+    pub currency: String,
+    #[serde(rename = "amt")]
+    pub amount: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PositionBuilderRequest {
+    #[serde(rename = "acctLv")]
+    pub account_level: String,
+    #[serde(rename = "inclRealPosAndEq")]
+    pub include_real_positions_and_equity: bool,
+    #[serde(rename = "simPos")]
+    pub positions: Vec<PositionBuilderSimPosition>,
+    #[serde(rename = "simAsset")]
+    pub assets: Vec<PositionBuilderSimAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PositionBuilderPosition {
+    #[serde(rename = "instId", default)]
+    pub instrument_id: String,
+    #[serde(rename = "instType", default)]
+    pub instrument_type: String,
+    #[serde(rename = "amt", default)]
+    pub contracts: String,
+    #[serde(rename = "posSide", default)]
+    pub position_side: String,
+    #[serde(rename = "avgPx", default)]
+    pub average_price: String,
+    #[serde(rename = "markPx", default)]
+    pub mark_price: String,
+    #[serde(rename = "floatPnl", default)]
+    pub floating_pnl: String,
+    #[serde(rename = "imr", default)]
+    pub initial_margin_requirement_usd: String,
+    #[serde(rename = "mgnRatio", default)]
+    pub margin_ratio: String,
+    #[serde(rename = "lever", default)]
+    pub leverage: String,
+    #[serde(rename = "notionalUsd", default)]
+    pub notional_usd: String,
+    #[serde(rename = "isRealPos", default)]
+    pub is_real_position: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PositionBuilderSnapshot {
+    #[serde(rename = "acctLv", default)]
+    pub account_level: String,
+    #[serde(rename = "totalEq", default)]
+    pub total_equity_usd: String,
+    #[serde(rename = "adjEq", default)]
+    pub adjusted_equity_usd: String,
+    #[serde(rename = "availEq", default)]
+    pub available_equity_usd: String,
+    #[serde(rename = "imr", default)]
+    pub initial_margin_requirement_usd: String,
+    #[serde(rename = "mmr", default)]
+    pub maintenance_margin_requirement_usd: String,
+    #[serde(rename = "mgnRatio", default)]
+    pub margin_ratio: String,
+    #[serde(rename = "notionalUsd", default)]
+    pub notional_usd: String,
+    #[serde(default)]
+    pub positions: Vec<PositionBuilderPosition>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PendingOrder {
     #[serde(rename = "instType", default)]
@@ -512,6 +597,23 @@ impl AccountApi {
         let [row] = rows.as_slice() else {
             return Err(OkxError::Response(format!(
                 "expected exactly one account-position-risk row, found {}",
+                rows.len()
+            )));
+        };
+        Ok(row.clone())
+    }
+
+    pub async fn position_builder(
+        &self,
+        request: &PositionBuilderRequest,
+    ) -> Result<PositionBuilderSnapshot, OkxError> {
+        let rows: Vec<PositionBuilderSnapshot> = self
+            .client
+            .private_read_post("/api/v5/account/position-builder", request)
+            .await?;
+        let [row] = rows.as_slice() else {
+            return Err(OkxError::Response(format!(
+                "expected exactly one position-builder row, found {}",
                 rows.len()
             )));
         };

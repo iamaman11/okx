@@ -64,6 +64,30 @@ pub struct CandidateOrderAnalysis {
     pub funding_included: bool,
 }
 
+pub fn linear_contract_notional_usd(
+    contracts: &str,
+    contract_value: &str,
+    price: &str,
+) -> Result<String, AnalysisError> {
+    let contracts = decimal("contracts", contracts)?;
+    let contract_value = positive_decimal("contract_value", contract_value)?;
+    let price = positive_decimal("price", price)?;
+    let absolute_contracts = if contracts < Decimal::ZERO {
+        -contracts
+    } else {
+        contracts
+    };
+    if absolute_contracts == Decimal::ZERO {
+        return Err(AnalysisError::InvalidDecimal {
+            field: "contracts",
+            value: "0".to_owned(),
+        });
+    }
+    Ok((absolute_contracts * contract_value * price)
+        .normalize()
+        .to_string())
+}
+
 pub fn analyze_candidate_order(
     rules: &InstrumentRulesSnapshot,
     fees: &FeeScheduleSnapshot,
@@ -486,6 +510,25 @@ mod tests {
             Decimal::new(-5, 4),
             assumptions,
         )
+    }
+
+    #[test]
+    fn linear_contract_notional_uses_absolute_contracts_and_exact_decimal_math() {
+        assert_eq!(
+            linear_contract_notional_usd("2", "1000", "0.25").expect("long notional"),
+            "500"
+        );
+        assert_eq!(
+            linear_contract_notional_usd("-2", "1000", "0.25").expect("short notional"),
+            "500"
+        );
+        assert!(matches!(
+            linear_contract_notional_usd("0", "1000", "0.25"),
+            Err(AnalysisError::InvalidDecimal {
+                field: "contracts",
+                ..
+            })
+        ));
     }
 
     #[test]
