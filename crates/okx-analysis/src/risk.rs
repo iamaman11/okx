@@ -23,6 +23,44 @@ pub const VIRTUAL_NOTIONAL_ORACLE_COMPARISON_SCHEMA_V1: &str =
 pub const VIRTUAL_NOTIONAL_ORACLE_CONSISTENCY_POLICY_V1: &str =
     "okx.virtual-notional-oracle-consistency/exact-usd-v1";
 
+pub const VIRTUAL_POSITION_CONSTRAINT_SCHEMA_V1: &str =
+    "okx.virtual-position-constraint/v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualPositionConstraintInput {
+    pub instrument_id: String,
+    pub contracts: String,
+    pub contract_value: String,
+    pub mark_price: String,
+    pub lot_size: String,
+    pub min_size: String,
+    pub max_size: String,
+    pub leverage: String,
+    pub max_leverage: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VirtualPositionConstraintEvidence {
+    pub schema: &'static str,
+    pub instrument_id: String,
+    pub signed_contracts: String,
+    pub absolute_contracts: String,
+    pub contract_value: String,
+    pub mark_price: String,
+    pub local_notional_usd: String,
+    pub initial_margin_usd: String,
+    pub lot_size: String,
+    pub min_size: String,
+    pub max_size: String,
+    pub requested_leverage: String,
+    pub max_leverage: String,
+    pub lot_aligned: bool,
+    pub minimum_size_satisfied: bool,
+    pub maximum_size_satisfied: bool,
+    pub leverage_satisfied: bool,
+    pub constraints_satisfied: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualNotionalOracleInput {
     pub instrument_id: String,
@@ -248,6 +286,71 @@ pub struct PortfolioRiskAnalysis {
 struct PositionWork {
     output: PositionRiskAnalysis,
     notional: Decimal,
+}
+
+pub fn validate_virtual_linear_position(
+    input: &VirtualPositionConstraintInput,
+) -> Result<VirtualPositionConstraintEvidence, AnalysisError> {
+    let signed_contracts = decimal("virtual_position_contracts", &input.contracts)?;
+    let absolute_contracts = signed_contracts.abs();
+    if absolute_contracts == Decimal::ZERO {
+        return Err(AnalysisError::NonPositive("virtual_position_contracts"));
+    }
+
+    let lot_size = positive_decimal("virtual_lot_size", &input.lot_size)?;
+    let min_size = positive_decimal("virtual_min_size", &input.min_size)?;
+    let max_size = positive_decimal("virtual_max_size", &input.max_size)?;
+    let leverage = positive_decimal("virtual_leverage", &input.leverage)?;
+    let max_leverage = positive_decimal("virtual_max_leverage", &input.max_leverage)?;
+
+    let lot_aligned = absolute_contracts % lot_size == Decimal::ZERO;
+    let minimum_size_satisfied = absolute_contracts >= min_size;
+    let maximum_size_satisfied = absolute_contracts <= max_size;
+    let leverage_satisfied = leverage <= max_leverage;
+    let constraints_satisfied =
+        lot_aligned && minimum_size_satisfied && maximum_size_satisfied && leverage_satisfied;
+
+    let local_notional_usd = linear_contract_notional_usd(
+        &absolute_contracts.normalize().to_string(),
+        &input.contract_value,
+        &input.mark_price,
+    )?;
+    let initial_margin_usd =
+        (positive_decimal("virtual_notional_usd", &local_notional_usd)? / leverage)
+            .normalize()
+            .to_string();
+
+    Ok(VirtualPositionConstraintEvidence {
+        schema: VIRTUAL_POSITION_CONSTRAINT_SCHEMA_V1,
+        instrument_id: input.instrument_id.clone(),
+        signed_contracts: signed_contracts.normalize().to_string(),
+        absolute_contracts: absolute_contracts.normalize().to_string(),
+        contract_value: input.contract_value.clone(),
+        mark_price: input.mark_price.clone(),
+        local_notional_usd,
+        initial_margin_usd,
+        lot_size: lot_size.normalize().to_string(),
+        min_size: min_size.normalize().to_string(),
+        max_size: max_size.normalize().to_string(),
+        requested_leverage: leverage.normalize().to_string(),
+        max_leverage: max_leverage.normalize().to_string(),
+        lot_aligned,
+        minimum_size_satisfied,
+        maximum_size_satisfied,
+        leverage_satisfied,
+        constraints_satisfied,
+    })
+}
+
+pub fn virtual_portfolio_initial_margin_usd(
+    positions: &[VirtualPositionConstraintEvidence],
+) -> Result<String, AnalysisError> {
+    positions
+        .iter()
+        .try_fold(Decimal::ZERO, |sum, position| {
+            Ok(sum + positive_decimal("virtual_initial_margin_usd", &position.initial_margin_usd)?)
+        })
+        .map(|value| value.normalize().to_string())
 }
 
 pub fn compare_virtual_position_builder_notional(
