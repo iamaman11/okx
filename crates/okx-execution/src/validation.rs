@@ -851,13 +851,8 @@ mod tests {
         .expect("portfolio risk");
 
         assert_eq!(
-            revalidate_hard_risk_policy(
-                &plan,
-                &analysis,
-                &account.account_generation,
-                Some("5"),
-            )
-            .expect("matching analysis"),
+            revalidate_hard_risk_policy(&plan, &analysis, &account.account_generation, Some("5"),)
+                .expect("matching analysis"),
             PreMutationRiskDisposition::Accepted
         );
 
