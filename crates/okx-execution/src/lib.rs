@@ -18,8 +18,8 @@ pub use ledger::{
     ExecutionLedgerStore, MAX_EXECUTION_LEDGER_RECORDS, PrepareDisposition,
 };
 pub use model::{
-    EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionPlan, OpenRiskEvidence,
-    OrderSide, OrderType, PositionSide, TradeMode, derive_client_order_id,
+    EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionPlan, ExecutionRiskBinding,
+    OpenRiskEvidence, OrderSide, OrderType, PositionSide, TradeMode, derive_client_order_id,
 };
 pub use reconciliation::{
     ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1, AccountLedgerReconciliation,
