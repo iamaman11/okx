@@ -231,6 +231,13 @@ pub enum AnalysisError {
     #[error("statistical portfolio bar '{0}' has no fixed interval contract")]
     UnsupportedStatisticalBar(String),
     #[error(
+        "statistical volatility contribution reconciliation residual '{residual}' exceeds tolerance '{tolerance}'"
+    )]
+    StatisticalVolatilityReconciliationExceeded {
+        residual: String,
+        tolerance: String,
+    },
+    #[error(
         "statistical portfolio history for '{instrument}' requires at least three confirmed closes, found {confirmed}"
     )]
     InsufficientConfirmedStatisticalHistory {
