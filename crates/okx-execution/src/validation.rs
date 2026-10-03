@@ -192,6 +192,7 @@ pub fn prepare_execution(
         size: normalized(size),
         price: normalized(price),
         open_risk,
+        risk_binding: None,
     })
 }
 
