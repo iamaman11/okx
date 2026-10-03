@@ -499,7 +499,7 @@ pub(super) async fn dispatch(
             }
 
             let analysis_mandate = TradingMandate {
-                schema: TRADING_MANDATE_SCHEMA_V1,
+                schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
                 version: mandate.version.clone(),
                 capital_base_usd: mandate.capital_base_usd.clone(),
                 decision_horizon_hours: mandate.decision_horizon_hours,
@@ -511,7 +511,7 @@ pub(super) async fn dispatch(
                 max_turnover_ratio: mandate.max_turnover_ratio.clone(),
             };
             let analysis_policy = HardRiskPolicy {
-                schema: HARD_RISK_POLICY_SCHEMA_V1,
+                schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
                 version: policy.version.clone(),
                 max_account_gross_notional_usd: policy.max_account_gross_notional_usd.clone(),
                 max_instrument_gross_notional_usd: policy.max_instrument_gross_notional_usd.clone(),
@@ -841,8 +841,8 @@ pub(super) async fn dispatch(
                     },
                 ),
                 analysis_schema: PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3,
-                mandate_schema: TRADING_MANDATE_SCHEMA_V1,
-                policy_schema: HARD_RISK_POLICY_SCHEMA_V1,
+                mandate_schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
+                policy_schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
                 coherence,
                 analysis,
                 statistics: statistics_analysis,
