@@ -362,17 +362,18 @@ pub fn analyze_portfolio_statistics(
         })
         .collect::<Vec<_>>();
 
-    let mut worst = None::<(usize, Decimal)>;
-    for sample in 0..sample_count {
-        let pnl = (0..count).fold(Decimal::ZERO, |acc, index| {
-            acc + signed_notionals[index] * return_series[index][sample]
-        });
-        match worst {
-            Some((_, current)) if current <= pnl => {}
-            _ => worst = Some((sample, pnl)),
+    let mut historical_pnl = vec![Decimal::ZERO; sample_count];
+    for (notional, returns) in signed_notionals.iter().zip(&return_series) {
+        for (pnl, return_value) in historical_pnl.iter_mut().zip(returns) {
+            *pnl += *notional * *return_value;
         }
     }
-    let (worst_sample, worst_pnl) = worst.expect("sample covariance requires non-empty samples");
+    let (worst_sample, worst_pnl) = historical_pnl
+        .iter()
+        .copied()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| left.cmp(right))
+        .expect("sample covariance requires non-empty samples");
     let historical_stress = HistoricalStressResult {
         formula_version: HISTORICAL_STRESS_FORMULA_V1,
         worst_return_endpoint_ms: timestamps[worst_sample + 1].clone(),
