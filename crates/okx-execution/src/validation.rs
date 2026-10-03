@@ -1,6 +1,8 @@
 use std::str::FromStr;
 
-use okx_analysis::{CandidateOrderAnalysis, PortfolioRiskAnalysis, PositionDirection, RiskPolicyDecision};
+use okx_analysis::{
+    CandidateOrderAnalysis, PortfolioRiskAnalysis, PositionDirection, RiskPolicyDecision,
+};
 use okx_observation::{
     ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
 };
