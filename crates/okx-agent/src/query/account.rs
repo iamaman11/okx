@@ -1322,108 +1322,16 @@ async fn build_position_builder_virtual_portfolio_proof(
         }
     };
 
-    let statistics = if let Some(statistics_request) = statistics_request {
-        let exposures = analysis
-            .instrument_exposure
-            .iter()
-            .map(|row| StatisticalExposure {
-                instrument_id: row.key.clone(),
-                signed_notional_usd: row.signed_net_notional_usd.clone(),
-            })
-            .collect::<Vec<_>>();
-        let mut histories = Vec::with_capacity(exposures.len());
-        for exposure in &exposures {
-            let Some(rules) = resolve_instrument_rules(context, &exposure.instrument_id).await
-            else {
-                return Err(reference_not_found(
-                    request,
-                    generated_at,
-                    &exposure.instrument_id,
-                ));
-            };
-            if rules.reference_generation != expected_reference {
-                return Err(failure_response(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Failed,
-                    PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
-                    format!(
-                        "virtual statistical reference generation changed before history acquisition: expected {expected_reference}, observed {} for {}",
-                        rules.reference_generation, exposure.instrument_id
-                    ),
-                    false,
-                ));
-            }
-            let assembled_history = match assemble_market_history(
-                context,
-                &exposure.instrument_id,
-                &statistics_request.bar,
-                statistics_request.limit,
-            )
-            .await
-            {
-                Ok(Some(value)) => value,
-                Ok(None) => return Err(unavailable(request, generated_at)),
-                Err(error) => return Err(market_failure(request, generated_at, error)),
-            };
-            if assembled_history.snapshot.reference_generation != expected_reference {
-                return Err(failure_response(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Failed,
-                    PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
-                    format!(
-                        "virtual statistical history for '{}' references generation {}, expected {}",
-                        exposure.instrument_id,
-                        assembled_history.snapshot.reference_generation,
-                        expected_reference
-                    ),
-                    false,
-                ));
-            }
-            histories.push(assembled_history.snapshot);
-        }
-        for exposure in &exposures {
-            let Some(rules) = resolve_instrument_rules(context, &exposure.instrument_id).await
-            else {
-                return Err(reference_not_found(
-                    request,
-                    generated_at,
-                    &exposure.instrument_id,
-                ));
-            };
-            if rules.reference_generation != expected_reference {
-                return Err(failure_response(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Failed,
-                    PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
-                    format!(
-                        "virtual statistical reference generation changed during history acquisition: expected {expected_reference}, observed {} for {}",
-                        rules.reference_generation, exposure.instrument_id
-                    ),
-                    false,
-                ));
-            }
-        }
-        match analyze_portfolio_statistics(
-            &exposures,
-            &histories,
-            statistics_request.parallel_scenario_move_ratio.as_deref(),
-        ) {
-            Ok(value) => Some(value),
-            Err(error) => {
-                return Err(analysis_failure(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Failed,
-                    error,
-                ));
-            }
-        }
-    } else {
-        None
-    };
+    let statistics = build_virtual_portfolio_statistics(
+        request,
+        context,
+        generated_at,
+        &analysis,
+        statistics_request,
+        expected_reference,
+    )
+    .await?;
+
 
     Ok(VirtualPortfolioProof {
         schema: VIRTUAL_PORTFOLIO_PROOF_SCHEMA_V2,
@@ -1444,6 +1352,465 @@ async fn build_position_builder_virtual_portfolio_proof(
         futures_constraints: Vec::new(),
         exchange_oracle: Some(oracle),
         notional_oracle: Some(notional_oracle),
+    })
+}
+
+
+async fn build_futures_virtual_portfolio_proof(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    input: VirtualPortfolioProofInput<'_>,
+) -> Result<VirtualPortfolioProof, AgentResponse> {
+    let VirtualPortfolioProofInput {
+        observer: _,
+        account_snapshot,
+        request: virtual_request,
+        statistics: statistics_request,
+        ledger,
+        mandate,
+        policy,
+        expected_reference,
+    } = input;
+
+    if !matches!(
+        account_snapshot.position_mode.as_str(),
+        "net_mode" | "long_short_mode"
+    ) {
+        return Err(analysis_failure(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            AnalysisError::UnsupportedPositionMode(account_snapshot.position_mode.clone()),
+        ));
+    }
+
+    let mut positions = Vec::with_capacity(virtual_request.positions.len());
+    let mut futures_constraints = Vec::with_capacity(virtual_request.positions.len());
+    let mut evidence_source_received_at = String::new();
+
+    for requested in &virtual_request.positions {
+        let market = match assemble_current_market(
+            request,
+            context,
+            generated_at,
+            &requested.instrument,
+        )
+        .await
+        {
+            Ok(CurrentMarketAssembly::Ready(value)) => *value,
+            Ok(CurrentMarketAssembly::Response(response)) => return Err(*response),
+            Ok(CurrentMarketAssembly::Unavailable) => {
+                return Err(unavailable(request, generated_at));
+            }
+            Err(error) => {
+                return Err(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    MARKET_PUBLIC_API_UNAVAILABLE_CODE,
+                    error.to_string(),
+                    true,
+                ));
+            }
+        };
+
+        if market.quality != DataQuality::Fresh {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                VIRTUAL_PORTFOLIO_MARKET_NOT_FRESH_CODE,
+                format!(
+                    "Futures-mode counterfactual requires FRESH mark/reference evidence for '{}', observed {:?}",
+                    requested.instrument, market.quality
+                ),
+                true,
+            ));
+        }
+        if market.rules.reference_generation != expected_reference
+            || market.snapshot.reference_generation != expected_reference
+        {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
+                format!(
+                    "Futures-mode virtual portfolio reference generation changed: expected {expected_reference}, rules={}, market={} for {}",
+                    market.rules.reference_generation,
+                    market.snapshot.reference_generation,
+                    requested.instrument
+                ),
+                false,
+            ));
+        }
+        if market.rules.instrument.contract_type.as_deref() != Some("linear") {
+            return Err(analysis_failure(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                AnalysisError::UnsupportedContractMechanics(
+                    market
+                        .rules
+                        .instrument
+                        .contract_type
+                        .clone()
+                        .unwrap_or_else(|| "missing ctType".to_owned()),
+                ),
+            ));
+        }
+
+        let settle_currency = market
+            .rules
+            .instrument
+            .settle_currency
+            .as_deref()
+            .unwrap_or_default();
+        if !matches!(settle_currency, "USD" | "USDT" | "USDC" | "USDG") {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                VIRTUAL_PORTFOLIO_CONSTRAINT_REJECTED_CODE,
+                format!(
+                    "Futures-mode virtual portfolio requires USD-family settlement, observed '{settle_currency}' for {}",
+                    requested.instrument
+                ),
+                false,
+            ));
+        }
+
+        let Some(contract_value) = market.rules.instrument.contract_value.as_deref() else {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                VIRTUAL_PORTFOLIO_CONSTRAINT_REJECTED_CODE,
+                format!(
+                    "reference contract value is missing for '{}'",
+                    requested.instrument
+                ),
+                false,
+            ));
+        };
+        let Some(max_size) = market.rules.instrument.max_limit_size.as_deref() else {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                VIRTUAL_PORTFOLIO_CONSTRAINT_REJECTED_CODE,
+                format!("reference maxLmtSz is missing for '{}'", requested.instrument),
+                false,
+            ));
+        };
+        let Some(max_leverage) = market.rules.instrument.max_leverage.as_deref() else {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                VIRTUAL_PORTFOLIO_CONSTRAINT_REJECTED_CODE,
+                format!("reference max leverage is missing for '{}'", requested.instrument),
+                false,
+            ));
+        };
+
+        let constraint = match validate_virtual_linear_position(&VirtualPositionConstraintInput {
+            instrument_id: requested.instrument.clone(),
+            contracts: requested.contracts.clone(),
+            contract_value: contract_value.to_owned(),
+            mark_price: market.snapshot.mark_price.price.clone(),
+            lot_size: market.rules.instrument.lot_size.clone(),
+            min_size: market.rules.instrument.min_size.clone(),
+            max_size: max_size.to_owned(),
+            leverage: requested.leverage.clone(),
+            max_leverage: max_leverage.to_owned(),
+        }) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(analysis_failure(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    error,
+                ));
+            }
+        };
+
+        if !constraint.constraints_satisfied {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                VIRTUAL_PORTFOLIO_CONSTRAINT_REJECTED_CODE,
+                format!(
+                    "virtual position '{}' violates exchange-published Futures constraints: lot_aligned={}, min_size={}, max_size={}, leverage={}",
+                    requested.instrument,
+                    constraint.lot_aligned,
+                    constraint.minimum_size_satisfied,
+                    constraint.maximum_size_satisfied,
+                    constraint.leverage_satisfied
+                ),
+                false,
+            ));
+        }
+
+        let (position, position_side) = match account_snapshot.position_mode.as_str() {
+            "net_mode" => (constraint.signed_contracts.clone(), "net".to_owned()),
+            "long_short_mode" => (
+                constraint.absolute_contracts.clone(),
+                if constraint.signed_contracts.starts_with('-') {
+                    "short".to_owned()
+                } else {
+                    "long".to_owned()
+                },
+            ),
+            _ => unreachable!("position mode validated"),
+        };
+
+        if evidence_source_received_at < market.snapshot.source_received_at {
+            evidence_source_received_at = market.snapshot.source_received_at.clone();
+        }
+
+        positions.push(okx_observation::AccountPositionState {
+            instrument_type: market.rules.instrument.instrument_type.to_string(),
+            instrument_id: requested.instrument.clone(),
+            position,
+            position_side,
+            margin_mode: "cross".to_owned(),
+            average_price: Some(requested.average_price.clone()),
+            mark_price: Some(market.snapshot.mark_price.price.clone()),
+            liquidation_price: None,
+            unrealized_pnl: None,
+            unrealized_pnl_ratio: None,
+            leverage: Some(constraint.requested_leverage.clone()),
+            margin: None,
+            initial_margin_requirement: Some(constraint.initial_margin_usd.clone()),
+            maintenance_margin_requirement: None,
+            margin_ratio: None,
+            notional_usd: Some(constraint.local_notional_usd.clone()),
+            margin_currency: market.rules.instrument.settle_currency.clone(),
+            creation_time_ms: None,
+            update_time_ms: Some(market.snapshot.mark_price.exchange_timestamp_ms.clone()),
+        });
+        futures_constraints.push(FuturesVirtualPositionEvidence {
+            constraint,
+            reference_generation: market.rules.reference_generation,
+            market_generation: market.snapshot.market_generation,
+            market_source: market.source,
+            market_source_received_at: market.snapshot.source_received_at,
+            mark_exchange_timestamp_ms: market.snapshot.mark_price.exchange_timestamp_ms,
+        });
+    }
+
+    let initial_margin_requirement_usd =
+        match virtual_portfolio_initial_margin_usd(
+            &futures_constraints
+                .iter()
+                .map(|evidence| evidence.constraint.clone())
+                .collect::<Vec<_>>(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(analysis_failure(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    error,
+                ));
+            }
+        };
+
+    let virtual_snapshot = okx_observation::AccountSnapshot {
+        schema: ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned(),
+        source: "okx_futures_counterfactual_local_model".to_owned(),
+        source_received_at: generated_at.to_owned(),
+        account_generation: format!("counterfactual/futures-v1/{expected_reference}"),
+        quality_reason: "COUNTERFACTUAL_FUTURES_FRESH_MARK_REFERENCE".to_owned(),
+        private_ws_connected: false,
+        private_ws_generation: None,
+        private_ws_connection_fingerprint: None,
+        private_ws_last_inbound_ms: None,
+        private_ws_events_applied: None,
+        account_level: account_snapshot.account_level.clone(),
+        position_mode: account_snapshot.position_mode.clone(),
+        account_type: "counterfactual".to_owned(),
+        account_uid_fingerprint: "counterfactual".to_owned(),
+        api_key_permissions: vec!["read_only".to_owned()],
+        balance: okx_observation::AccountBalanceState {
+            total_equity_usd: virtual_request.collateral_usdt.clone(),
+            adjusted_equity_usd: Some(virtual_request.collateral_usdt.clone()),
+            isolated_equity_usd: None,
+            initial_margin_requirement_usd: Some(initial_margin_requirement_usd),
+            maintenance_margin_requirement_usd: None,
+            margin_ratio: None,
+            notional_usd: None,
+            update_time_ms: None,
+            details: Vec::new(),
+        },
+        positions,
+        pending_orders: Vec::new(),
+    };
+
+    let analysis = match analyze_portfolio_risk(
+        &virtual_snapshot,
+        ledger,
+        mandate.clone(),
+        policy.clone(),
+        None,
+        true,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(analysis_failure(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                error,
+            ));
+        }
+    };
+
+    let statistics = build_virtual_portfolio_statistics(
+        request,
+        context,
+        generated_at,
+        &analysis,
+        statistics_request,
+        expected_reference,
+    )
+    .await?;
+
+    Ok(VirtualPortfolioProof {
+        schema: VIRTUAL_PORTFOLIO_PROOF_SCHEMA_V2,
+        evidence_label: "COUNTERFACTUAL",
+        account_mode: "futures".to_owned(),
+        oracle_scope: "okx_fresh_mark_reference_and_contract_constraints",
+        exchange_virtual_portfolio_oracle_available: false,
+        exchange_virtual_portfolio_oracle_reason: Some(
+            "OKX Position Builder models Multi-currency/Portfolio margin (acctLv 3/4); no documented read-only Futures-mode endpoint simulates arbitrary synthetic collateral plus multi-instrument positions. Futures counterfactual therefore remains a local deterministic model over fresh OKX mark/reference facts while observed account risk is independently checked against account-position-risk."
+                .to_owned(),
+        ),
+        evidence_source_received_at,
+        request: virtual_request.clone(),
+        analysis,
+        statistics,
+        futures_constraints,
+        exchange_oracle: None,
+        notional_oracle: None,
+    })
+}
+
+async fn build_virtual_portfolio_statistics(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    analysis: &okx_analysis::PortfolioRiskAnalysis,
+    statistics_request: Option<&PortfolioStatisticsRequest>,
+    expected_reference: &str,
+) -> Result<Option<PortfolioStatisticsAnalysis>, AgentResponse> {
+    let Some(statistics_request) = statistics_request else {
+        return Ok(None);
+    };
+
+    let exposures = analysis
+        .instrument_exposure
+        .iter()
+        .map(|row| StatisticalExposure {
+            instrument_id: row.key.clone(),
+            signed_notional_usd: row.signed_net_notional_usd.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut histories = Vec::with_capacity(exposures.len());
+
+    for exposure in &exposures {
+        let Some(rules) = resolve_instrument_rules(context, &exposure.instrument_id).await else {
+            return Err(reference_not_found(
+                request,
+                generated_at,
+                &exposure.instrument_id,
+            ));
+        };
+        if rules.reference_generation != expected_reference {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
+                format!(
+                    "virtual statistical reference generation changed before history acquisition: expected {expected_reference}, observed {} for {}",
+                    rules.reference_generation, exposure.instrument_id
+                ),
+                false,
+            ));
+        }
+
+        let assembled_history = match assemble_market_history(
+            context,
+            &exposure.instrument_id,
+            &statistics_request.bar,
+            statistics_request.limit,
+        )
+        .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => return Err(unavailable(request, generated_at)),
+            Err(error) => return Err(market_failure(request, generated_at, error)),
+        };
+        if assembled_history.snapshot.reference_generation != expected_reference {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
+                format!(
+                    "virtual statistical history for '{}' references generation {}, expected {}",
+                    exposure.instrument_id,
+                    assembled_history.snapshot.reference_generation,
+                    expected_reference
+                ),
+                false,
+            ));
+        }
+        histories.push(assembled_history.snapshot);
+    }
+
+    for exposure in &exposures {
+        let Some(rules) = resolve_instrument_rules(context, &exposure.instrument_id).await else {
+            return Err(reference_not_found(
+                request,
+                generated_at,
+                &exposure.instrument_id,
+            ));
+        };
+        if rules.reference_generation != expected_reference {
+            return Err(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                PORTFOLIO_RISK_REFERENCE_INCONSISTENT_CODE,
+                format!(
+                    "virtual statistical reference generation changed during history acquisition: expected {expected_reference}, observed {} for {}",
+                    rules.reference_generation, exposure.instrument_id
+                ),
+                false,
+            ));
+        }
+    }
+
+    analyze_portfolio_statistics(
+        &exposures,
+        &histories,
+        statistics_request.parallel_scenario_move_ratio.as_deref(),
+    )
+    .map(Some)
+    .map_err(|error| {
+        analysis_failure(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            error,
+        )
     })
 }
 
