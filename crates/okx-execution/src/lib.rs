@@ -30,6 +30,6 @@ pub use state::{
     ExecutionTransitionError, require_live_trading_enabled,
 };
 pub use validation::{
-    ExecutionValidationError, prepare_execution, revalidate_execution_plan,
-    revalidate_venue_execution,
+    ExecutionValidationError, PreMutationRiskDisposition, prepare_execution,
+    revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
 };
