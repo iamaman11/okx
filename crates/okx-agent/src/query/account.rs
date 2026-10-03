@@ -101,6 +101,22 @@ struct VirtualPortfolioProof {
     notional_oracle: Option<okx_analysis::VirtualNotionalOracleComparison>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VirtualPortfolioOracleRoute {
+    FuturesLocalModel,
+    PositionBuilder,
+}
+
+fn virtual_portfolio_oracle_route(
+    account_level: &str,
+) -> Result<VirtualPortfolioOracleRoute, AnalysisError> {
+    match account_level {
+        "2" => Ok(VirtualPortfolioOracleRoute::FuturesLocalModel),
+        "3" | "4" => Ok(VirtualPortfolioOracleRoute::PositionBuilder),
+        other => Err(AnalysisError::UnsupportedAccountMode(other.to_owned())),
+    }
+}
+
 pub(super) async fn dispatch(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
@@ -972,17 +988,19 @@ async fn build_virtual_portfolio_proof(
     generated_at: &str,
     input: VirtualPortfolioProofInput<'_>,
 ) -> Result<VirtualPortfolioProof, AgentResponse> {
-    match input.account_snapshot.account_level.as_str() {
-        "2" => build_futures_virtual_portfolio_proof(request, context, generated_at, input).await,
-        "3" | "4" => {
+    match virtual_portfolio_oracle_route(&input.account_snapshot.account_level) {
+        Ok(VirtualPortfolioOracleRoute::FuturesLocalModel) => {
+            build_futures_virtual_portfolio_proof(request, context, generated_at, input).await
+        }
+        Ok(VirtualPortfolioOracleRoute::PositionBuilder) => {
             build_position_builder_virtual_portfolio_proof(request, context, generated_at, input)
                 .await
         }
-        other => Err(analysis_failure(
+        Err(error) => Err(analysis_failure(
             request,
             generated_at,
             AgentResponseStatus::Rejected,
-            AnalysisError::UnsupportedAccountMode(other.to_owned()),
+            error,
         )),
     }
 }
@@ -1922,6 +1940,26 @@ mod tests {
 #[cfg(test)]
 mod position_builder_contract_tests {
     use super::*;
+
+    #[test]
+    fn virtual_portfolio_oracle_route_follows_authenticated_account_mode() {
+        assert_eq!(
+            virtual_portfolio_oracle_route("2").expect("futures"),
+            VirtualPortfolioOracleRoute::FuturesLocalModel
+        );
+        assert_eq!(
+            virtual_portfolio_oracle_route("3").expect("multi currency"),
+            VirtualPortfolioOracleRoute::PositionBuilder
+        );
+        assert_eq!(
+            virtual_portfolio_oracle_route("4").expect("portfolio margin"),
+            VirtualPortfolioOracleRoute::PositionBuilder
+        );
+        assert!(matches!(
+            virtual_portfolio_oracle_route("1"),
+            Err(AnalysisError::UnsupportedAccountMode(mode)) if mode == "1"
+        ));
+    }
 
     #[test]
     fn position_builder_50008_is_typed_non_retryable_eligibility() {
