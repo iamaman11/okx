@@ -392,6 +392,22 @@ pub struct PortfolioStatisticsRequest {
     pub parallel_scenario_move_ratio: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualPortfolioPositionRequest {
+    pub instrument: String,
+    pub contracts: String,
+    pub average_price: String,
+    pub leverage: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualPortfolioRequest {
+    pub collateral_usdt: String,
+    pub positions: Vec<VirtualPortfolioPositionRequest>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionOrderType {
@@ -485,6 +501,7 @@ pub enum AgentOperation {
         policy: Box<HardRiskPolicyRequest>,
         candidate: Option<PortfolioCandidateRequest>,
         statistics: Option<PortfolioStatisticsRequest>,
+        virtual_portfolio: Option<VirtualPortfolioRequest>,
     },
     TradingCapabilities {
         instrument: String,
@@ -584,6 +601,7 @@ impl AgentOperation {
                 policy,
                 candidate,
                 statistics,
+                virtual_portfolio,
             } => {
                 validate_portfolio_mandate(mandate)?;
                 validate_hard_risk_policy(policy)?;
@@ -608,6 +626,45 @@ impl AgentOperation {
                         validate_decimal_text(
                             move_ratio,
                             "statistics.parallel_scenario_move_ratio",
+                        )?;
+                    }
+                }
+                if candidate.is_some() && virtual_portfolio.is_some() {
+                    return Err(ProtocolError::InvalidAnalyticalQuery(
+                        "candidate and virtual_portfolio are mutually exclusive",
+                    ));
+                }
+                if let Some(virtual_portfolio) = virtual_portfolio {
+                    validate_positive_decimal_text(
+                        &virtual_portfolio.collateral_usdt,
+                        "virtual_portfolio.collateral_usdt",
+                    )?;
+                    if !(2..=8).contains(&virtual_portfolio.positions.len()) {
+                        return Err(ProtocolError::InvalidAnalyticalQuery(
+                            "virtual_portfolio.positions",
+                        ));
+                    }
+                    for (index, position) in virtual_portfolio.positions.iter().enumerate() {
+                        validate_instrument(&position.instrument)?;
+                        if virtual_portfolio.positions[..index]
+                            .iter()
+                            .any(|existing| existing.instrument == position.instrument)
+                        {
+                            return Err(ProtocolError::InvalidAnalyticalQuery(
+                                "duplicate virtual portfolio instrument",
+                            ));
+                        }
+                        validate_non_zero_decimal_text(
+                            &position.contracts,
+                            "virtual_portfolio.positions.contracts",
+                        )?;
+                        validate_positive_decimal_text(
+                            &position.average_price,
+                            "virtual_portfolio.positions.average_price",
+                        )?;
+                        validate_positive_decimal_text(
+                            &position.leverage,
+                            "virtual_portfolio.positions.leverage",
                         )?;
                     }
                 }
@@ -1390,6 +1447,18 @@ fn validate_positive_decimal_text(value: &str, field: &'static str) -> Result<()
     }
 
     Ok(())
+}
+
+fn validate_non_zero_decimal_text(
+    value: &str,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    validate_decimal_text(value, field)?;
+    if value.bytes().any(|byte| matches!(byte, b'1'..=b'9')) {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidDecimalInput(field))
+    }
 }
 
 fn validate_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
