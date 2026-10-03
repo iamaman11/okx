@@ -658,7 +658,10 @@ impl AgentOperation {
                         return Err(ProtocolError::InvalidHistoryLimit);
                     }
                     if let Some(move_ratio) = statistics.parallel_scenario_move_ratio.as_deref() {
-                        validate_decimal_text(move_ratio, "statistics.parallel_scenario_move_ratio")?;
+                        validate_decimal_text(
+                            move_ratio,
+                            "statistics.parallel_scenario_move_ratio",
+                        )?;
                     }
                 }
                 Ok(())
@@ -1237,8 +1240,7 @@ fn validate_history_request(
 fn validate_statistics_bar(bar: &str) -> Result<(), ProtocolError> {
     if matches!(
         bar,
-        "1m"
-            | "3m"
+        "1m" | "3m"
             | "5m"
             | "15m"
             | "30m"
