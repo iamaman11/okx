@@ -99,7 +99,7 @@ Cross-cutting CONTROL reliability debt discovered during item 5 is **DONE / ACCE
 - post-recovery production account remained FRESH/coherent with 0 positions, 0 pending orders and consistent ledger reconciliation.
 
 Current operational baseline:
-- canonical main `f1028e97f984e313f9c0b702010ebeca4518a088`;
+- canonical main `36c42c7cc7022f0c2ccaab2631ca4ce4b7609b4f`;
 - Worker contract `okx.mcp.tools/2026-10-03.3`;
 - direct runtime PASS / connected / session_fresh, generation 114;
 - Stage 2 PASS/CLOSED;
@@ -228,17 +228,103 @@ Exit: professional decision evidence is calculated locally in Rust, the same har
 
 ### Stage 3 — SCIENTIFIC RESEARCH + REPLAY
 
-Falsifiable hypotheses, immutable experiment lineage, point-in-time datasets, availability-time-safe replay, OOS/walk-forward research, cost-aware simulation and paper/shadow lifecycle.
+Current development cursor. Stage 3 turns accepted Stage-1/2 truth/risk into a reproducible research system without creating a second platform.
 
-Important proof includes:
-- immutable dataset/archive manifests and gap evidence;
-- no look-ahead/survivorship/reference-data leakage;
-- purging/embargo where overlapping horizons require it;
-- multiple-testing evidence and negative-trial retention;
-- the same deterministic feature/strategy implementation across replay/paper/live where semantics should match;
-- immutable promotion bundles with declared promotion and demotion criteria.
+Core architecture:
+- one admitted new domain crate at most: `okx-research`;
+- `okx-observation` remains the current factual owner;
+- `okx-analysis` remains the deterministic feature/statistics/risk/strategy-formula owner;
+- `okx-research` may own immutable datasets, replay, experiment lineage, validation and promotion artifacts only;
+- no second Tokio runtime, daemon, scheduler/poll loop, operational database, transport or exchange mutation authority;
+- no research-only duplicate implementation of a strategy intended for paper/live;
+- a local content-addressed immutable artifact repository is permitted and is not a mutable live-status database.
 
-Exit: strategies are scientifically testable without live money or hidden future data.
+Historical-data rule:
+- prefer official OKX historical data/query sources where they provide the required facts;
+- Tier A = candles/funding + explicit modelled execution costs;
+- Tier B = provenance-locked trades/order-book/reference events;
+- never claim historical L2 execution from Tier A;
+- unavailable required event/reference history => `INSUFFICIENT_DATA`;
+- historical replay must carry point-in-time universe/reference facts and availability-time semantics; the current `ReferenceRegistry` must not be used as a shortcut for historical eligibility/rules.
+
+ChatGPT/product rule:
+- ChatGPT formulates hypotheses and interprets compact evidence; Rust owns data/replay/statistics/risk;
+- raw candles/trades/L2 do not traverse MCP for chat-side calculation;
+- preserve current direct-transport limits (64 KiB frames, 20 s response deadline, existing bounded inflight);
+- normal research summary target <= 12,288 bytes;
+- long acquisition/replay uses deterministic bounded steps + immutable continuation/artifact ids, not a background job queue/poller;
+- a fresh chat must be able to inspect/resume by experiment/artifact id;
+- external research surface should remain at most `research_capabilities` + `research` unless a concrete typed-authority boundary proves another tool necessary.
+
+Canonical Stage-3 execution order — exactly four large slices:
+
+1. **3A Research Data Foundation**
+   - official-source historical acquisition/chunking;
+   - immutable dataset/chunk hashes, gap/duplicate/out-of-order evidence;
+   - Tier A/Tier B classification;
+   - event-time + availability-time semantics;
+   - point-in-time universe/reference timeline;
+   - deterministic bounded resume/cursor semantics.
+   - **T1:** parser/hash/gap/current-reference-poison/chunk-boundary fixtures.
+   - **T2:** identical source -> identical dataset hash; restart/resume equivalence; no second live owner; existing rate/backpressure preserved.
+   - **T3:** exact build provenance + dataset binding to parser/normalization/source versions.
+   - **T4:** primary MCP acquires/inspects one bounded real Tier-A dataset and, where available, one bounded Tier-B sample without bulk payload.
+   - **T5:** corrupt hash/gap/unsupported source/stale transport fail closed; resume remains idempotent.
+   - Exit: the application can prove exactly what historical data exists, provenance, availability and gaps.
+
+2. **3B Deterministic Replay Kernel**
+   - one `okx-research` replay owner;
+   - versioned hypothesis + experiment spec;
+   - deterministic event ordering/no-lookahead;
+   - versioned fee/funding/spread/slippage/capacity model;
+   - same `okx-analysis` features/strategy/risk semantics intended for shadow/live;
+   - deterministic experiment hash/result.
+   - **T1:** feature golden vectors, poisoned-future isolation, ordering, fees/funding/quantization/cost monotonicity, repeatability.
+   - **T2:** captured-live replay parity where semantics match; no out-of-split reads; restart/resume same terminal hash; Stage-2 risk remains authoritative.
+   - **T3:** experiment binds exact source/dataset/algorithm/mandate/risk/cost versions.
+   - **T4:** primary MCP runs one real bounded Tier-A experiment end-to-end; Tier-B claims require Tier-B data.
+   - **T5:** future poison/gaps/unsupported Tier-B return typed failure or `INSUFFICIENT_DATA`; exchange mutations = 0.
+   - Exit: one strategy can be replayed reproducibly without hidden future data or duplicate production formulas.
+
+3. **3C Scientific Validation & Promotion**
+   - chronological train/validation/untouched final OOS;
+   - walk-forward;
+   - purge/embargo only where overlapping horizons require it;
+   - final-holdout consumption lineage;
+   - cost/parameter sensitivity and regime breakdown;
+   - immutable negative-trial retention;
+   - DSR by default where applicable; PBO/CSCV only where candidate-family/sample assumptions are satisfied;
+   - immutable promotion + demotion/invalidation criteria and `PromotionBundle`.
+   - **T1:** split/walk-forward/purge/embargo/DSR/PBO/overfit/holdout-reuse fixtures.
+   - **T2:** same immutable experiment family -> same validation decision; negative trials stay queryable; prior lineage cannot be rewritten.
+   - **T3:** promotion bundle binds all exact hashes/versions/criteria.
+   - **T4:** primary MCP returns one compact `REJECT | BACKTESTED | INSUFFICIENT_DATA` decision with OOS/walk-forward/cost/anti-overfit evidence.
+   - **T5:** deliberate overfit/corruption/missing applicable anti-overfit evidence blocks promotion.
+   - Exit: `BACKTESTED` requires predeclared reproducible scientific evidence.
+
+4. **3D Paper/Shadow + Product UX + final Stage-3 acceptance**
+   - states `RESEARCH -> BACKTESTED -> PAPER -> SHADOW`;
+   - one bounded event-driven research-session component inside the existing agent/runtime chain;
+   - consumes existing accepted live observation; no second WS collector/full-market subscription/polling loop;
+   - same feature/strategy/risk functions as replay;
+   - append-only/content-addressed shadow evidence + compact status;
+   - bounded/resumable MCP research UX, safe across transport loss and independent of chat history.
+   - **T1:** state transitions, replay/live-decision parity, <=12,288-byte normal summary, continuation idempotency.
+   - **T2:** live observation feeds shadow without starving heartbeat/control/reconciliation; restart restores lineage; no exchange mutation path.
+   - **T3:** exact Windows artifact/deploy provenance when agent changes; artifacts bind exact source/strategy/dataset versions.
+   - **T4:** primary Cloudflare capabilities/run/resume/inspect-by-id + one real paper/shadow session; GitHub DATA parity only, never primary substitute.
+   - **T5:** SESSION_STALE/reconnect, lost response, payload/time budget overrun, absent event history and corrupt artifact all fail/resume safely; production account unchanged.
+   - Exit: one strategy lineage is traceable from falsifiable hypothesis through immutable data/replay/OOS/anti-overfit evidence to live paper/shadow with zero exchange mutation.
+
+Stage-3 final acceptance must emit one bounded `okx.stage-acceptance/v1` over one exact accepted tree and include a simplicity review proving:
+- <=1 new research crate;
+- no new runtime/daemon/scheduler/operational DB/transport/mutation authority;
+- no duplicate market/reference/formula/risk owner;
+- direct transport limits were not enlarged;
+- compact MCP evidence remains the chat boundary;
+- production live trading remains disabled.
+
+Exit: strategies are scientifically testable/reproducible and can progress through BACKTESTED/PAPER/SHADOW without live money or chat-history dependence.
 
 ### Stage 4 — EXECUTION + TCA
 
