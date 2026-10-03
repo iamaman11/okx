@@ -215,19 +215,25 @@ pub fn revalidate_hard_risk_policy(
     if plan.risk_binding.is_none() {
         return Err(ExecutionValidationError::MissingRiskBinding);
     }
-    match plan.action {
-        ExecutionAction::Open => {
-            if analysis.policy_decision == RiskPolicyDecision::Rejected {
-                let codes = analysis
-                    .violations
-                    .iter()
-                    .map(|violation| violation.code)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                return Err(ExecutionValidationError::HardRiskPolicyRejected(codes));
-            }
-            Ok(PreMutationRiskDisposition::Accepted)
-        }
+    let codes = analysis
+        .violations
+        .iter()
+        .map(|violation| violation.code)
+        .collect::<Vec<_>>()
+        .join(",");
+    hard_risk_disposition(plan.action, analysis.policy_decision, codes)
+}
+
+fn hard_risk_disposition(
+    action: ExecutionAction,
+    decision: RiskPolicyDecision,
+    violation_codes: String,
+) -> Result<PreMutationRiskDisposition, ExecutionValidationError> {
+    match action {
+        ExecutionAction::Open if decision == RiskPolicyDecision::Rejected => Err(
+            ExecutionValidationError::HardRiskPolicyRejected(violation_codes),
+        ),
+        ExecutionAction::Open => Ok(PreMutationRiskDisposition::Accepted),
         ExecutionAction::Close => Ok(PreMutationRiskDisposition::AcceptedRiskReducingClose),
     }
 }
@@ -638,6 +644,37 @@ mod tests {
 
     use super::*;
     use crate::{ExecutionAction, OrderType, PositionSide, TradeMode};
+
+    #[test]
+    fn hard_risk_gate_blocks_rejected_open_but_never_traps_risk_reducing_close() {
+        assert!(matches!(
+            hard_risk_disposition(
+                ExecutionAction::Open,
+                RiskPolicyDecision::Rejected,
+                "MAX_DRAWDOWN".to_owned(),
+            ),
+            Err(ExecutionValidationError::HardRiskPolicyRejected(codes))
+                if codes == "MAX_DRAWDOWN"
+        ));
+        assert_eq!(
+            hard_risk_disposition(
+                ExecutionAction::Open,
+                RiskPolicyDecision::Accepted,
+                String::new(),
+            )
+            .expect("accepted open"),
+            PreMutationRiskDisposition::Accepted
+        );
+        assert_eq!(
+            hard_risk_disposition(
+                ExecutionAction::Close,
+                RiskPolicyDecision::Rejected,
+                "MAX_DAILY_REALIZED_LOSS".to_owned(),
+            )
+            .expect("risk-reducing close"),
+            PreMutationRiskDisposition::AcceptedRiskReducingClose
+        );
+    }
 
     fn rules() -> InstrumentRulesSnapshot {
         InstrumentRulesSnapshot {
