@@ -1,17 +1,22 @@
 use okx_analysis::{
-    CandidateOrderAssumptions, LiquidityRole as AnalysisLiquidityRole, PositionDirection,
-    analyze_candidate_order,
+    CandidateOrderAssumptions, CorrelatedClusterLimit, HardRiskPolicy,
+    LiquidityRole as AnalysisLiquidityRole, PositionDirection,
+    RiskDegradedMode as AnalysisRiskDegradedMode,
+    RiskMinimumQuality as AnalysisRiskMinimumQuality, TradingMandate,
+    HARD_RISK_POLICY_SCHEMA_V1, TRADING_MANDATE_SCHEMA_V1, analyze_candidate_order,
 };
 use okx_api::MUTATION_REQUEST_TTL_MS;
 use okx_execution::{
-    EXECUTION_STATUS_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionTransitionError,
-    OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide, PrepareFailure,
-    PrepareOutcome, PrepareRejection, TradeMode, prepare_execution, revalidate_execution_plan,
-    revalidate_venue_execution,
+    EXECUTION_STATUS_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionRiskBinding,
+    ExecutionTransitionError, OrderExecutorError, OrderType,
+    PositionSide as ExecutionPositionSide, PrepareFailure, PrepareOutcome, PrepareRejection,
+    TradeMode, prepare_execution, revalidate_execution_plan, revalidate_venue_execution,
 };
 use okx_protocol::{
-    ExecutionOrderType, ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
-    PositionSide as ProtocolPositionSide,
+    ExecutionOrderType, ExecutionRiskBindingRequest, ExecutionTradeMode,
+    LiquidityRole as ProtocolLiquidityRole, PositionSide as ProtocolPositionSide,
+    RiskDegradedMode as ProtocolRiskDegradedMode,
+    RiskMinimumQuality as ProtocolRiskMinimumQuality,
 };
 
 use super::*;
@@ -57,6 +62,7 @@ pub(super) async fn dispatch(
             target_rr,
             entry_liquidity_role,
             exit_liquidity_role,
+            risk,
         } => {
             let Some(execution) = context.execution else {
                 return Ok(execution_unavailable(request, generated_at));
@@ -124,10 +130,11 @@ pub(super) async fn dispatch(
                 size: candidate.contracts.clone(),
                 price: candidate.entry_price.clone(),
             };
-            let plan = match prepare_execution(&intent, &rules, &account, Some(&candidate)) {
+            let mut plan = match prepare_execution(&intent, &rules, &account, Some(&candidate)) {
                 Ok(value) => value,
                 Err(error) => return Ok(validation_failure(request, generated_at, error)),
             };
+            plan.risk_binding = risk.as_deref().map(execution_risk_binding);
             let outcome = execution.prepare(plan, utc_now_ms()).await?;
             prepare_outcome_response(request, generated_at, outcome)
         }
@@ -139,6 +146,7 @@ pub(super) async fn dispatch(
             order_type,
             size,
             price,
+            risk,
         } => {
             let Some(execution) = context.execution else {
                 return Ok(execution_unavailable(request, generated_at));
@@ -170,10 +178,11 @@ pub(super) async fn dispatch(
                 size: size.clone(),
                 price: price.clone(),
             };
-            let plan = match prepare_execution(&intent, &rules, &account, None) {
+            let mut plan = match prepare_execution(&intent, &rules, &account, None) {
                 Ok(value) => value,
                 Err(error) => return Ok(validation_failure(request, generated_at, error)),
             };
+            plan.risk_binding = risk.as_deref().map(execution_risk_binding);
             let outcome = execution.prepare(plan, utc_now_ms()).await?;
             prepare_outcome_response(request, generated_at, outcome)
         }
@@ -631,6 +640,59 @@ async fn execution_status_response(
         EXECUTION_STATUS_SCHEMA_V1,
         serde_json::to_value(status)?,
     ))
+}
+
+fn execution_risk_binding(value: &ExecutionRiskBindingRequest) -> ExecutionRiskBinding {
+    ExecutionRiskBinding {
+        mandate: TradingMandate {
+            schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
+            version: value.mandate.version.clone(),
+            capital_base_usd: value.mandate.capital_base_usd.clone(),
+            decision_horizon_hours: value.mandate.decision_horizon_hours,
+            benchmark: value.mandate.benchmark.clone(),
+            allowed_instruments: value.mandate.allowed_instruments.clone(),
+            max_drawdown_ratio: value.mandate.max_drawdown_ratio.clone(),
+            leverage_ceiling: value.mandate.leverage_ceiling.clone(),
+            minimum_liquidity_notional_usd: value
+                .mandate
+                .minimum_liquidity_notional_usd
+                .clone(),
+            max_turnover_ratio: value.mandate.max_turnover_ratio.clone(),
+        },
+        policy: HardRiskPolicy {
+            schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
+            version: value.policy.version.clone(),
+            max_account_gross_notional_usd: value.policy.max_account_gross_notional_usd.clone(),
+            max_instrument_gross_notional_usd: value
+                .policy
+                .max_instrument_gross_notional_usd
+                .clone(),
+            max_margin_utilization_ratio: value.policy.max_margin_utilization_ratio.clone(),
+            max_loss_per_trade_usd: value.policy.max_loss_per_trade_usd.clone(),
+            max_daily_realized_loss_usd: value.policy.max_daily_realized_loss_usd.clone(),
+            max_drawdown_ratio: value.policy.max_drawdown_ratio.clone(),
+            max_leverage: value.policy.max_leverage.clone(),
+            allowed_instruments: value.policy.allowed_instruments.clone(),
+            minimum_quality: match value.policy.minimum_quality {
+                ProtocolRiskMinimumQuality::Fresh => AnalysisRiskMinimumQuality::Fresh,
+                ProtocolRiskMinimumQuality::Degraded => AnalysisRiskMinimumQuality::Degraded,
+            },
+            degraded_mode: match value.policy.degraded_mode {
+                ProtocolRiskDegradedMode::Reject => AnalysisRiskDegradedMode::Reject,
+                ProtocolRiskDegradedMode::AllowReadOnly => AnalysisRiskDegradedMode::AllowReadOnly,
+            },
+            correlated_clusters: value
+                .policy
+                .correlated_clusters
+                .iter()
+                .map(|cluster| CorrelatedClusterLimit {
+                    id: cluster.id.clone(),
+                    instruments: cluster.instruments.clone(),
+                    max_gross_notional_usd: cluster.max_gross_notional_usd.clone(),
+                })
+                .collect(),
+        },
+    }
 }
 
 const fn execution_trade_mode(value: ExecutionTradeMode) -> TradeMode {
