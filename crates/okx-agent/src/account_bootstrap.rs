@@ -35,6 +35,28 @@ pub enum AccountLedgerBootstrapError {
 }
 
 #[derive(Debug, Error)]
+pub enum ConfiguredLeverageBootstrapError {
+    #[error("OKX observer API key is not strictly read-only")]
+    PermissionRejected,
+
+    #[error("OKX private API error: {0}")]
+    Api(#[from] OkxError),
+
+    #[error(
+        "expected exactly one configured leverage row for {instrument}/{margin_mode}/{position_side}, found {found}"
+    )]
+    Ambiguous {
+        instrument: String,
+        margin_mode: String,
+        position_side: String,
+        found: usize,
+    },
+
+    #[error("configured leverage is empty")]
+    Empty,
+}
+
+#[derive(Debug, Error)]
 pub enum TradingCapabilitiesBootstrapError {
     #[error("OKX observer API key is not strictly read-only")]
     PermissionRejected,
@@ -187,6 +209,48 @@ impl AccountBootstrapper {
                 warnings,
             },
         )?)
+    }
+
+    pub async fn configured_leverage(
+        &self,
+        instrument_id: &str,
+        margin_mode: MarginMode,
+        position_side: &str,
+    ) -> Result<String, ConfiguredLeverageBootstrapError> {
+        let config = self.api.config().await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| ConfiguredLeverageBootstrapError::PermissionRejected)?;
+
+        let margin_mode_text = margin_mode.to_string();
+        let mut matching = self
+            .api
+            .leverage(instrument_id, margin_mode)
+            .await?
+            .into_iter()
+            .filter(|row| {
+                row.instrument_id == instrument_id
+                    && row.margin_mode.eq_ignore_ascii_case(&margin_mode_text)
+                    && row.position_side.eq_ignore_ascii_case(position_side)
+            })
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            return Err(ConfiguredLeverageBootstrapError::Ambiguous {
+                instrument: instrument_id.to_owned(),
+                margin_mode: margin_mode_text,
+                position_side: position_side.to_owned(),
+                found: matching.len(),
+            });
+        }
+        let leverage = matching
+            .pop()
+            .expect("length checked")
+            .lever
+            .trim()
+            .to_owned();
+        if leverage.is_empty() {
+            return Err(ConfiguredLeverageBootstrapError::Empty);
+        }
+        Ok(leverage)
     }
 
     pub async fn account_position_risk_oracle(
