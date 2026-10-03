@@ -835,6 +835,39 @@ pub(super) async fn dispatch(
                 None
             };
 
+            if virtual_portfolio_proof.is_some()
+                && let (Some(private_ws), Some(cursor)) = (context.private_ws, read_cursor)
+            {
+                match private_ws.convergence_window(cursor).await {
+                    Ok(window) if window.events.is_empty() => {}
+                    Ok(window) => {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT_CODE,
+                            format!(
+                                "{} private account event(s) arrived before virtual portfolio proof completed",
+                                window.events.len()
+                            ),
+                            true,
+                        ));
+                    }
+                    Err(error) => {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT_CODE,
+                            format!(
+                                "private account coherence changed before virtual portfolio proof completed: {error}"
+                            ),
+                            true,
+                        ));
+                    }
+                }
+            }
+
             let rejected = analysis.policy_decision == okx_analysis::RiskPolicyDecision::Rejected;
             let violation_codes = analysis
                 .violations
