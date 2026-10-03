@@ -1483,6 +1483,36 @@ fn validate_decimal_text(value: &str, field: &'static str) -> Result<(), Protoco
 mod tests {
     use super::*;
 
+    fn execution_risk_request() -> ExecutionRiskBindingRequest {
+        ExecutionRiskBindingRequest {
+            mandate: Box::new(PortfolioMandateRequest {
+                version: "mandate/v1".to_owned(),
+                capital_base_usd: "100".to_owned(),
+                decision_horizon_hours: 24,
+                benchmark: Some("none/v1".to_owned()),
+                allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
+                max_drawdown_ratio: "1".to_owned(),
+                leverage_ceiling: "5".to_owned(),
+                minimum_liquidity_notional_usd: "0".to_owned(),
+                max_turnover_ratio: "5".to_owned(),
+            }),
+            policy: Box::new(HardRiskPolicyRequest {
+                version: "policy/v1".to_owned(),
+                max_account_gross_notional_usd: "1000".to_owned(),
+                max_instrument_gross_notional_usd: "1000".to_owned(),
+                max_margin_utilization_ratio: "1".to_owned(),
+                max_loss_per_trade_usd: "100".to_owned(),
+                max_daily_realized_loss_usd: "100".to_owned(),
+                max_drawdown_ratio: "1".to_owned(),
+                max_leverage: "5".to_owned(),
+                allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
+                minimum_quality: RiskMinimumQuality::Fresh,
+                degraded_mode: RiskDegradedMode::Reject,
+                correlated_clusters: Vec::new(),
+            }),
+        }
+    }
+
     #[test]
     fn direct_transport_read_only_gate_rejects_execution_mutations() {
         let read = AgentOperation::MarketOverview {
@@ -1498,6 +1528,7 @@ mod tests {
             order_type: ExecutionOrderType::Limit,
             size: "1".to_owned(),
             price: "0.1".to_owned(),
+            risk: None,
         };
         assert!(!prepare.direct_transport_read_only());
 
@@ -1744,6 +1775,7 @@ mod tests {
                 target_rr: "2".to_owned(),
                 entry_liquidity_role: LiquidityRole::Taker,
                 exit_liquidity_role: LiquidityRole::Taker,
+                risk: Some(Box::new(execution_risk_request())),
             },
         };
         open.validate().expect("valid open execution request");
@@ -1759,6 +1791,7 @@ mod tests {
                 order_type: ExecutionOrderType::Limit,
                 size: "1".to_owned(),
                 price: "0.1".to_owned(),
+                risk: None,
             },
         };
         close.validate().expect("valid close execution request");
@@ -1792,6 +1825,7 @@ mod tests {
                 order_type: ExecutionOrderType::Limit,
                 size: "1".to_owned(),
                 price: "0.1".to_owned(),
+                risk: None,
             },
         };
         assert!(invalid.validate().is_err());
