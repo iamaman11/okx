@@ -67,17 +67,19 @@ ChatGPT
         v
 ONE okx-agent / ONE Tokio runtime
         |
-        +----------------------+--------------------+
-        |                      |                    |
-        v                      v                    v
- Observation             Pure Analysis       ONE OrderExecutor
- Reference/Market        Decimal math         durable ledger
- Account/Orders          scenario/risk        mutation authority
- reconciliation          no state owner       hard-disabled prod
- readiness
-        |
-        v
- immutable normalized facts/evidence
+        +----------------------+----------------------+--------------------+
+        |                      |                      |                    |
+        v                      v                      v                    v
+ Observation             Pure Analysis        Research boundary     ONE OrderExecutor
+ Reference/Market        Decimal math          replay/lineage        durable ledger
+ Account/Orders          features/risk         immutable artifacts   mutation authority
+ reconciliation          strategy formulas    no exchange owner      hard-disabled prod
+ readiness              no state owner        no second runtime
+        |                      |                      ^
+        +----------------------+----------------------+
+                               |
+                               v
+                    immutable normalized/research evidence
 
                    FALLBACK / LIFECYCLE PLANES
 GitHub encrypted DATA #10 -> okx-agent        (fallback/parity only)
@@ -157,6 +159,37 @@ Pure deterministic analysis:
 - position scenarios.
 
 Inputs are immutable accepted snapshots. Portfolio mandate/hard-policy arithmetic, covariance/correlation, scenario/stress and future statistical risk calculations belong here as pure deterministic/statistical functions. No collector, transport, lifecycle or mutation ownership lives here.
+
+### `okx-research` (Stage-3 admitted boundary; not yet implemented)
+
+One new research-domain crate is explicitly admitted for Stage 3 if its implementation matches #160.
+
+It may own:
+- immutable dataset/archive manifests and content hashes;
+- point-in-time/availability-time research views;
+- deterministic replay orchestration over normalized historical facts;
+- hypothesis / experiment / validation lineage;
+- walk-forward/OOS/anti-overfit orchestration;
+- immutable promotion bundles;
+- compact paper/shadow research evidence.
+
+It must consume normalized facts and deterministic `okx-analysis` functions. It does **not** become a second formula/risk owner.
+
+It must not own:
+- OKX credentials or raw authenticated exchange authority;
+- HTTP/WebSocket connectivity;
+- current live Reference/Market/Account state;
+- a second Tokio runtime;
+- a daemon/service/watchdog;
+- a scheduler or polling loop;
+- SQL/general query execution;
+- an operational mutable status database;
+- exchange order mutation;
+- Cloudflare/GitHub transport.
+
+The research artifact repository is content-addressed/immutable evidence, not live state. The same artifact bytes/config map to the same identity; accepted artifacts are never silently rewritten.
+
+A separate `okx-strategy` crate is not admitted for Stage 3 v1. Production-intended feature/strategy logic belongs as deterministic modules under `okx-analysis` until a reproduced ownership/dependency problem justifies another boundary.
 
 ### `okx-execution`
 
@@ -568,13 +601,158 @@ Stage 2 status: **ACCEPTED/CLOSED**.
 
 Primary Cloudflare MCP is healthy on Worker contract `okx.mcp.tools/2026-10-03.3`; `account_summary` and `portfolio_risk` are callable. After the Stage-2 exact-artifact deployment the direct runtime is PASS/connected/session_fresh at generation 114, and account summary is FRESH/coherent with zero positions/pending orders and consistent ledger reconciliation. GitHub DATA remains fallback/parity only.
 
+## Stage-3 research ownership and product boundary
+
+The canonical Stage-3 contract is issue #160. This section records the architectural constraints that must remain true while implementing it.
+
+### Historical truth
+
+The existing Stage-2 bounded history adapters are **recent-analysis inputs**, not a complete replay store. Stage-3 replay must not infer historical eligibility/reference parameters from only the current `ReferenceRegistry`.
+
+Historical research evidence must carry:
+- point-in-time universe membership/listing/expiry/state;
+- contract/reference parameters applicable at that time;
+- event time and availability time;
+- source/chunk/parser/normalization identity;
+- explicit gaps, duplicates and out-of-order evidence;
+- Tier-A or Tier-B capability classification.
+
+The current `ReferenceRegistry` remains the only owner of **current** reference truth. Historical research manifests are immutable evidence, not a competing live registry.
+
+Official OKX historical data/query sources are preferred where available, but external availability never substitutes for local manifest/hash/gap validation.
+
+### Replay tiers
+
+```text
+Tier A
+candles + funding + point-in-time reference
++ explicit fee/spread/slippage model
+=> MODELLED_EXECUTION
+
+Tier B
+provenance-locked trades/order-book/reference events
++ event/availability ordering
+=> event replay
+```
+
+A Tier-A result must never be described as historical L2 execution. Missing required Tier-B data is `INSUFFICIENT_DATA`.
+
+### Research persistence
+
+Permitted persistence is a local content-addressed immutable artifact repository for:
+- datasets/chunks;
+- experiment specs/results;
+- promotion bundles;
+- paper/shadow evidence.
+
+It must use atomic verified publication and hash-addressed identity. It is not an operational database and cannot become authority for live market/account/execution state.
+
+Negative experiments remain part of lineage. A later version cannot rewrite an earlier experiment or promotion decision.
+
+### Scientific boundary
+
+Minimum accepted methodology:
+- chronological train/validation/final OOS;
+- walk-forward;
+- explicit final-holdout consumption;
+- purge/embargo only when overlapping outcome/holding windows require it;
+- versioned fee/funding/spread/slippage/capacity assumptions;
+- cost and parameter sensitivity;
+- regime diagnostics;
+- negative-trial retention;
+- DSR/PBO/CSCV only where their declared assumptions apply.
+
+Unsupported diagnostics are explicit `NOT_APPLICABLE`, not fabricated.
+
+### ChatGPT research UX
+
+ChatGPT is the research strategist and evidence consumer, not the bulk-history compute engine.
+
+```text
+user objective
+ -> ChatGPT typed hypothesis/experiment design
+ -> Windows Rust data/replay/statistics/risk
+ -> immutable research artifacts
+ -> compact MCP evidence
+ -> ChatGPT critique/interpretation/next version
+```
+
+Raw bulk candles/trades/L2 do not cross the chat transport for calculation.
+
+The Stage-3 MCP surface should stay at most:
+- `research_capabilities`;
+- `research`.
+
+New strategy variants are data/contracts, not new MCP methods.
+
+A normal research result targets <= 12,288 bytes. Detailed evidence is inspected by bounded artifact/experiment id.
+
+### Transport and long-running research
+
+Stage 3 preserves the accepted direct-transport limits instead of raising them:
+- 64 KiB direct frame limit;
+- 20-second response deadline;
+- existing bounded direct in-flight request count.
+
+Large acquisition/replay is expressed as deterministic bounded steps:
+- one call performs one bounded unit;
+- a nonterminal result returns a typed continuation plus immutable artifact/experiment identity;
+- the next call resumes from that identity;
+- completed steps are idempotent/content-addressed;
+- response loss can be retried without duplicating exchange actions or rewriting evidence.
+
+This is resumable request/response work, **not** a background daemon, job queue, polling scheduler or second runtime.
+
+A new chat must be able to inspect/resume an experiment by immutable id. Conversation memory is convenience only, never research state.
+
+### Paper/shadow
+
+Stage-3 paper/shadow consumes the accepted existing live observation path. It may add one bounded event-driven research-session component inside the existing agent/runtime ownership chain if required by the accepted slice.
+
+It must not:
+- create another market WebSocket owner;
+- permanently subscribe to the whole market;
+- add a timer/polling scheduler;
+- place/amend/cancel exchange orders;
+- bypass Stage-2 risk.
+
+Replay and live shadow must call the same versioned `okx-analysis` feature/strategy/risk logic wherever semantics are intended to match.
+
+Promotion sequence before Stage 4:
+
+```text
+RESEARCH -> BACKTESTED -> PAPER -> SHADOW
+```
+
+No Stage-3 state grants exchange mutation authority.
+
+### Stage-3 architecture budget
+
+Expected maximum structural delta for the whole stage:
+
+```text
+new Rust crates                <= 1 (okx-research)
+new Tokio runtimes              0
+new daemons/services            0
+new schedulers/poll loops       0
+new operational databases       0
+new live fact owners            0
+new exchange mutation owners    0
+new transports                  0
+new MCP tools                  <= 2
+new strategy-formula owners     0
+production exchange mutations   0
+```
+
+Any larger delta requires a reproduced product/ownership failure and explicit architecture review before code is merged.
+
 ## Non-goals
 
 - no withdrawal/transfer API;
 - no arbitrary shell/HTTP proxy;
 - no arbitrary SQL/string-expression/executable query language; only the bounded typed analytical plan described above;
 - no local LLM/SQL state layer;
-- no autonomous strategy engine before the roadmap creates a real strategy boundary;
+- no autonomous/self-modifying strategy engine; Stage-3 strategies are deterministic versioned functions plus immutable experiment/promotion evidence;
 - no additional access transport beyond the accepted Cloudflare-primary + GitHub-fallback/control topology without a reproduced need;
 - no second lifecycle supervisor;
 - no live order mutation until separately authorized and accepted.
