@@ -60,6 +60,7 @@ struct PortfolioRiskResult {
 
 struct VirtualPortfolioProofInput<'a> {
     observer: &'a AccountBootstrapper,
+    account_snapshot: &'a okx_observation::AccountSnapshot,
     request: &'a VirtualPortfolioRequest,
     statistics: Option<&'a PortfolioStatisticsRequest>,
     ledger: &'a okx_observation::AccountLedgerSummary,
@@ -69,17 +70,35 @@ struct VirtualPortfolioProofInput<'a> {
 }
 
 #[derive(serde::Serialize)]
+struct FuturesVirtualPositionEvidence {
+    constraint: VirtualPositionConstraintEvidence,
+    reference_generation: String,
+    market_generation: String,
+    market_source: &'static str,
+    market_source_received_at: String,
+    mark_exchange_timestamp_ms: String,
+}
+
+#[derive(serde::Serialize)]
 struct VirtualPortfolioProof {
     schema: &'static str,
     evidence_label: &'static str,
-    account_mode: &'static str,
-    oracle_source_received_at: String,
+    account_mode: String,
+    oracle_scope: &'static str,
+    exchange_virtual_portfolio_oracle_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exchange_virtual_portfolio_oracle_reason: Option<String>,
+    evidence_source_received_at: String,
     request: VirtualPortfolioRequest,
     analysis: okx_analysis::PortfolioRiskAnalysis,
     #[serde(skip_serializing_if = "Option::is_none")]
     statistics: Option<PortfolioStatisticsAnalysis>,
-    exchange_oracle: okx_api::PositionBuilderSnapshot,
-    notional_oracle: okx_analysis::VirtualNotionalOracleComparison,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    futures_constraints: Vec<FuturesVirtualPositionEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exchange_oracle: Option<okx_api::PositionBuilderSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notional_oracle: Option<okx_analysis::VirtualNotionalOracleComparison>,
 }
 
 pub(super) async fn dispatch(
@@ -831,6 +850,7 @@ pub(super) async fn dispatch(
                     generated_at,
                     VirtualPortfolioProofInput {
                         observer: account,
+                        account_snapshot: &assembled.snapshot,
                         request: virtual_request,
                         statistics: statistics.as_ref(),
                         ledger: &facts.summary,
@@ -888,7 +908,7 @@ pub(super) async fn dispatch(
                 .map(|violation| violation.code)
                 .collect::<Vec<_>>();
             let result_schema = if virtual_portfolio_proof.is_some() {
-                PORTFOLIO_RISK_SCHEMA_V5
+                PORTFOLIO_RISK_SCHEMA_V6
             } else if statistics_analysis.is_some() {
                 PORTFOLIO_RISK_SCHEMA_V4
             } else {
