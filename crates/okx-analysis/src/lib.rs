@@ -233,10 +233,7 @@ pub enum AnalysisError {
     #[error(
         "statistical volatility contribution reconciliation residual '{residual}' exceeds tolerance '{tolerance}'"
     )]
-    StatisticalVolatilityReconciliationExceeded {
-        residual: String,
-        tolerance: String,
-    },
+    StatisticalVolatilityReconciliationExceeded { residual: String, tolerance: String },
     #[error(
         "statistical portfolio history for '{instrument}' requires at least three confirmed closes, found {confirmed}"
     )]
