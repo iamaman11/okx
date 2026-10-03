@@ -1775,3 +1775,68 @@ mod tests {
         assert!(risk.positions.is_empty());
     }
 }
+
+
+#[cfg(test)]
+mod virtual_position_constraint_tests {
+    use super::*;
+
+    fn input(contracts: &str, leverage: &str) -> VirtualPositionConstraintInput {
+        VirtualPositionConstraintInput {
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            contracts: contracts.to_owned(),
+            contract_value: "0.01".to_owned(),
+            mark_price: "85000".to_owned(),
+            lot_size: "0.01".to_owned(),
+            min_size: "0.01".to_owned(),
+            max_size: "1000".to_owned(),
+            leverage: leverage.to_owned(),
+            max_leverage: "100".to_owned(),
+        }
+    }
+
+    #[test]
+    fn futures_virtual_position_constraints_produce_non_zero_notional_and_margin() {
+        let evidence =
+            validate_virtual_linear_position(&input("-0.01", "5")).expect("constraint evidence");
+        assert_eq!(evidence.absolute_contracts, "0.01");
+        assert_eq!(evidence.local_notional_usd, "8.5");
+        assert_eq!(evidence.initial_margin_usd, "1.7");
+        assert!(evidence.constraints_satisfied);
+        assert!(evidence.lot_aligned);
+        assert!(evidence.leverage_satisfied);
+    }
+
+    #[test]
+    fn futures_virtual_position_constraints_fail_closed_on_exchange_limits() {
+        let mut too_large = input("1000.01", "101");
+        too_large.max_size = "1000".to_owned();
+        let evidence =
+            validate_virtual_linear_position(&too_large).expect("constraint evidence");
+        assert!(!evidence.maximum_size_satisfied);
+        assert!(!evidence.leverage_satisfied);
+        assert!(!evidence.constraints_satisfied);
+
+        let misaligned =
+            validate_virtual_linear_position(&input("0.015", "5")).expect("constraint evidence");
+        assert!(!misaligned.lot_aligned);
+        assert!(!misaligned.constraints_satisfied);
+    }
+
+    #[test]
+    fn futures_virtual_portfolio_initial_margin_is_exact_decimal_sum() {
+        let first =
+            validate_virtual_linear_position(&input("0.01", "5")).expect("first evidence");
+        let mut second_input = input("0.02", "10");
+        second_input.instrument_id = "ETH-USDT-SWAP".to_owned();
+        second_input.contract_value = "0.1".to_owned();
+        second_input.mark_price = "2500".to_owned();
+        let second =
+            validate_virtual_linear_position(&second_input).expect("second evidence");
+
+        assert_eq!(
+            virtual_portfolio_initial_margin_usd(&[first, second]).expect("margin"),
+            "2.2"
+        );
+    }
+}
