@@ -544,7 +544,12 @@ async fn submit_prepared(
             ));
         }
     };
-    if let Err(error) = revalidate_hard_risk_policy(&plan, &risk_analysis) {
+    if let Err(error) = revalidate_hard_risk_policy(
+        &plan,
+        &risk_analysis,
+        &account.account_generation,
+        configured_leverage.as_deref(),
+    ) {
         return Ok(failure_response(
             request,
             generated_at,
