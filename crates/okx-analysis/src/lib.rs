@@ -38,9 +38,12 @@ pub use risk::{
     RISK_ORACLE_CONSISTENCY_POLICY_V1, RiskDegradedMode, RiskMinimumQuality, RiskOracleComparison,
     RiskPolicyDecision, RiskPolicyViolation, TRADING_MANDATE_SCHEMA_V1, TradingMandate,
     VIRTUAL_NOTIONAL_ORACLE_COMPARISON_SCHEMA_V1, VIRTUAL_NOTIONAL_ORACLE_CONSISTENCY_POLICY_V1,
-    VirtualNotionalOracleComparison, VirtualNotionalOracleInput,
-    VirtualNotionalOraclePositionComparison, analyze_account_risk, analyze_portfolio_risk,
-    compare_account_position_risk_oracle, compare_virtual_position_builder_notional,
+    VIRTUAL_POSITION_CONSTRAINT_SCHEMA_V1, VirtualNotionalOracleComparison,
+    VirtualNotionalOracleInput, VirtualNotionalOraclePositionComparison,
+    VirtualPositionConstraintEvidence, VirtualPositionConstraintInput, analyze_account_risk,
+    analyze_portfolio_risk, compare_account_position_risk_oracle,
+    compare_virtual_position_builder_notional, validate_virtual_linear_position,
+    virtual_portfolio_initial_margin_usd,
 };
 pub use scenario::{
     HISTORY_BEHAVIOR_SCHEMA_V1, HistoryBehaviorAnalysis, POSITION_SCENARIO_SCHEMA_V1,
