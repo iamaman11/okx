@@ -188,6 +188,11 @@ impl OkxRestClient {
         T: DeserializeOwned,
         B: Serialize + ?Sized,
     {
+        if path != "/api/v5/account/position-builder" {
+            return Err(OkxError::Config(format!(
+                "private read-only POST path is not allowlisted: {path}"
+            )));
+        }
         let rate_plan = self.rate_budget.private_rest_plan(path, &[]);
         let timestamp = timestamp_now();
         let envelope = self
