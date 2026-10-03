@@ -800,7 +800,8 @@ pub(super) async fn dispatch(
                 );
             }
 
-            let virtual_portfolio_proof = if let Some(virtual_request) = virtual_portfolio.as_ref() {
+            let virtual_portfolio_proof = if let Some(virtual_request) = virtual_portfolio.as_ref()
+            {
                 let expected_reference = match coherence.reference_generation.as_deref() {
                     Some(value) => value,
                     None => {
@@ -967,8 +968,7 @@ async fn build_virtual_portfolio_proof(
         Ok(value) => value,
         Err(error) => return Err(account_failure(request, generated_at, error)),
     };
-    let oracle_source_received_at =
-        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let oracle_source_received_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
     if !oracle.account_level.trim().is_empty() && oracle.account_level != "3" {
         return Err(failure_response(
@@ -984,7 +984,10 @@ async fn build_virtual_portfolio_proof(
         ));
     }
     if oracle.positions.len() != virtual_request.positions.len()
-        || oracle.positions.iter().any(|position| position.is_real_position)
+        || oracle
+            .positions
+            .iter()
+            .any(|position| position.is_real_position)
     {
         return Err(failure_response(
             request,
@@ -1213,9 +1216,7 @@ async fn build_virtual_portfolio_proof(
         schema: ACCOUNT_SNAPSHOT_SCHEMA_V2.to_owned(),
         source: "okx_position_builder_counterfactual".to_owned(),
         source_received_at: oracle_source_received_at.clone(),
-        account_generation: format!(
-            "counterfactual/position-builder-v1/{expected_reference}"
-        ),
+        account_generation: format!("counterfactual/position-builder-v1/{expected_reference}"),
         quality_reason: "COUNTERFACTUAL_POSITION_BUILDER_READ_ORACLE".to_owned(),
         private_ws_connected: false,
         private_ws_generation: None,
