@@ -672,10 +672,9 @@ mod tests {
     use okx_observation::{
         ACCOUNT_CONVERGED_SOURCE_V2, ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountAuthorityEvidence,
         AccountBalanceState, AccountInstrumentExecutionLimits, AccountLedgerSummary,
-        AccountPositionState, FeeScheduleInput,
-        FeeScheduleSnapshot, InstrumentSpec, M4_REST_WS_CONVERGED_REASON, MaxOrderSizeEvidence,
-        PendingOrderState, PriceLimitEvidence, SystemStatusEvidence,
-        VENUE_EXECUTION_EVIDENCE_SCHEMA_V1, VenueExecutionEvidence,
+        AccountPositionState, FeeScheduleInput, FeeScheduleSnapshot, InstrumentSpec,
+        M4_REST_WS_CONVERGED_REASON, MaxOrderSizeEvidence, PendingOrderState, PriceLimitEvidence,
+        SystemStatusEvidence, VENUE_EXECUTION_EVIDENCE_SCHEMA_V1, VenueExecutionEvidence,
     };
 
     use super::*;
