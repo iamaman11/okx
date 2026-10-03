@@ -8,11 +8,11 @@ use okx_analysis::{
     PortfolioStatisticsAnalysis, PositionDirection, PositionScenarioAssumptions,
     RiskDegradedMode as AnalysisRiskDegradedMode, RiskMinimumQuality as AnalysisRiskMinimumQuality,
     ScenarioExitAssumption, StatisticalExposure, TRADING_MANDATE_SCHEMA_V1, TradingMandate,
-    VirtualNotionalOracleInput, VirtualPositionConstraintEvidence,
-    VirtualPositionConstraintInput, analyze_basis_difference_bps, analyze_candidate_order,
-    analyze_cost, analyze_dated_future_basis, analyze_history_behavior,
-    analyze_mark_index_basis_bps, analyze_market_intelligence, analyze_portfolio_risk,
-    analyze_portfolio_statistics, analyze_position_scenario, compare_account_position_risk_oracle,
+    VirtualNotionalOracleInput, VirtualPositionConstraintEvidence, VirtualPositionConstraintInput,
+    analyze_basis_difference_bps, analyze_candidate_order, analyze_cost,
+    analyze_dated_future_basis, analyze_history_behavior, analyze_mark_index_basis_bps,
+    analyze_market_intelligence, analyze_portfolio_risk, analyze_portfolio_statistics,
+    analyze_position_scenario, compare_account_position_risk_oracle,
     compare_virtual_position_builder_notional, validate_virtual_linear_position,
     virtual_portfolio_initial_margin_usd,
 };
@@ -87,8 +87,7 @@ pub const VIRTUAL_PORTFOLIO_PROOF_SCHEMA_V2: &str = "okx.virtual-portfolio-proof
 pub const VIRTUAL_PORTFOLIO_ORACLE_MISMATCH_CODE: &str = "VIRTUAL_PORTFOLIO_ORACLE_MISMATCH";
 pub const VIRTUAL_PORTFOLIO_CONSTRAINT_REJECTED_CODE: &str =
     "VIRTUAL_PORTFOLIO_CONSTRAINT_REJECTED";
-pub const VIRTUAL_PORTFOLIO_MARKET_NOT_FRESH_CODE: &str =
-    "VIRTUAL_PORTFOLIO_MARKET_NOT_FRESH";
+pub const VIRTUAL_PORTFOLIO_MARKET_NOT_FRESH_CODE: &str = "VIRTUAL_PORTFOLIO_MARKET_NOT_FRESH";
 pub const POSITION_BUILDER_ACCOUNT_UNAVAILABLE_CODE: &str = "POSITION_BUILDER_ACCOUNT_UNAVAILABLE";
 pub const PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT_CODE: &str =
     "PORTFOLIO_RISK_SOURCE_TIME_INCONSISTENT";
