@@ -1,3 +1,4 @@
+use okx_analysis::{HardRiskPolicy, TradingMandate};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -111,6 +112,13 @@ pub struct OpenRiskEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ExecutionRiskBinding {
+    pub mandate: TradingMandate,
+    pub policy: HardRiskPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionPlan {
     pub schema: String,
     pub intent_id: String,
@@ -127,6 +135,8 @@ pub struct ExecutionPlan {
     pub size: String,
     pub price: String,
     pub open_risk: Option<OpenRiskEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_binding: Option<ExecutionRiskBinding>,
 }
 
 pub(crate) fn valid_intent_id(value: &str) -> bool {
