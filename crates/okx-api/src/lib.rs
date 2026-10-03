@@ -16,7 +16,8 @@ pub use account::{
     AccountApi, AccountCapabilities, AccountConfig, AccountPositionRiskBalance,
     AccountPositionRiskPosition, AccountPositionRiskSnapshot, BalanceDetail, BalanceSnapshot,
     FeeRate, Instrument, LeverageInfo, MarginMode, MaxOrderSize, PendingOrder, Position,
-    account_uid_fingerprint,
+    PositionBuilderPosition, PositionBuilderRequest, PositionBuilderSimAsset,
+    PositionBuilderSimPosition, PositionBuilderSnapshot, account_uid_fingerprint,
 };
 pub use asset::{AssetApi, FundingBalance};
 pub use client::{OkxPublicClient, OkxRestClient};
