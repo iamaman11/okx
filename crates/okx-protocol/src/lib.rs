@@ -369,6 +369,13 @@ pub struct HardRiskPolicyRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ExecutionRiskBindingRequest {
+    pub mandate: Box<PortfolioMandateRequest>,
+    pub policy: Box<HardRiskPolicyRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PortfolioCandidateRequest {
     pub instrument: String,
     pub side: PositionSide,
@@ -452,6 +459,7 @@ pub enum AgentOperation {
         target_rr: String,
         entry_liquidity_role: LiquidityRole,
         exit_liquidity_role: LiquidityRole,
+        risk: Option<Box<ExecutionRiskBindingRequest>>,
     },
     PrepareCloseExecution {
         intent_id: String,
@@ -461,6 +469,7 @@ pub enum AgentOperation {
         order_type: ExecutionOrderType,
         size: String,
         price: String,
+        risk: Option<Box<ExecutionRiskBindingRequest>>,
     },
     SubmitPreparedExecution {
         intent_id: String,
@@ -675,6 +684,7 @@ impl AgentOperation {
                 max_settle_notional,
                 max_loss_settle,
                 target_rr,
+                risk,
                 ..
             } => {
                 validate_request_id(intent_id)?;
@@ -683,19 +693,28 @@ impl AgentOperation {
                 validate_decimal_text(stop_price, "stop_price")?;
                 validate_decimal_text(max_settle_notional, "max_settle_notional")?;
                 validate_decimal_text(max_loss_settle, "max_loss_settle")?;
-                validate_decimal_text(target_rr, "target_rr")
+                validate_decimal_text(target_rr, "target_rr")?;
+                if let Some(risk) = risk {
+                    validate_execution_risk_binding(risk)?;
+                }
+                Ok(())
             }
             Self::PrepareCloseExecution {
                 intent_id,
                 instrument,
                 size,
                 price,
+                risk,
                 ..
             } => {
                 validate_request_id(intent_id)?;
                 validate_instrument(instrument)?;
                 validate_decimal_text(size, "size")?;
-                validate_decimal_text(price, "price")
+                validate_decimal_text(price, "price")?;
+                if let Some(risk) = risk {
+                    validate_execution_risk_binding(risk)?;
+                }
+                Ok(())
             }
             Self::SubmitPreparedExecution { intent_id } | Self::ExecutionStatus { intent_id } => {
                 validate_request_id(intent_id)
@@ -1233,6 +1252,81 @@ fn validate_history_request(
     validate_history_bar(bar)?;
     if matches!(limit, Some(0 | 101..)) {
         return Err(ProtocolError::InvalidHistoryLimit);
+    }
+    Ok(())
+}
+
+fn validate_execution_risk_binding(
+    risk: &ExecutionRiskBindingRequest,
+) -> Result<(), ProtocolError> {
+    let mandate = risk.mandate.as_ref();
+    let policy = risk.policy.as_ref();
+
+    validate_version(&mandate.version)?;
+    validate_positive_decimal_text(&mandate.capital_base_usd, "risk.mandate.capital_base_usd")?;
+    if mandate.decision_horizon_hours == 0 || mandate.decision_horizon_hours > 24 * 365 {
+        return Err(ProtocolError::InvalidAnalyticalQuery(
+            "risk.mandate.decision_horizon_hours",
+        ));
+    }
+    validate_non_negative_decimal_text(
+        &mandate.max_drawdown_ratio,
+        "risk.mandate.max_drawdown_ratio",
+    )?;
+    validate_positive_decimal_text(
+        &mandate.leverage_ceiling,
+        "risk.mandate.leverage_ceiling",
+    )?;
+    validate_non_negative_decimal_text(
+        &mandate.minimum_liquidity_notional_usd,
+        "risk.mandate.minimum_liquidity_notional_usd",
+    )?;
+    validate_non_negative_decimal_text(
+        &mandate.max_turnover_ratio,
+        "risk.mandate.max_turnover_ratio",
+    )?;
+    validate_instrument_list(&mandate.allowed_instruments, 32)?;
+
+    validate_version(&policy.version)?;
+    for (value, field) in [
+        (
+            &policy.max_account_gross_notional_usd,
+            "risk.policy.max_account_gross_notional_usd",
+        ),
+        (
+            &policy.max_instrument_gross_notional_usd,
+            "risk.policy.max_instrument_gross_notional_usd",
+        ),
+        (
+            &policy.max_margin_utilization_ratio,
+            "risk.policy.max_margin_utilization_ratio",
+        ),
+        (
+            &policy.max_loss_per_trade_usd,
+            "risk.policy.max_loss_per_trade_usd",
+        ),
+        (
+            &policy.max_daily_realized_loss_usd,
+            "risk.policy.max_daily_realized_loss_usd",
+        ),
+        (&policy.max_drawdown_ratio, "risk.policy.max_drawdown_ratio"),
+    ] {
+        validate_non_negative_decimal_text(value, field)?;
+    }
+    validate_positive_decimal_text(&policy.max_leverage, "risk.policy.max_leverage")?;
+    validate_instrument_list(&policy.allowed_instruments, 32)?;
+    if policy.correlated_clusters.len() > 16 {
+        return Err(ProtocolError::InvalidAnalyticalQuery(
+            "risk.policy.correlated_clusters",
+        ));
+    }
+    for cluster in &policy.correlated_clusters {
+        validate_version(&cluster.id)?;
+        validate_instrument_list(&cluster.instruments, 16)?;
+        validate_non_negative_decimal_text(
+            &cluster.max_gross_notional_usd,
+            "risk.policy.cluster.max_gross_notional_usd",
+        )?;
     }
     Ok(())
 }
