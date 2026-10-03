@@ -653,7 +653,7 @@ impl AgentOperation {
                     validate_positive_decimal_text(&candidate.leverage, "candidate.leverage")?;
                 }
                 if let Some(statistics) = statistics {
-                    validate_history_bar(&statistics.bar)?;
+                    validate_statistics_bar(&statistics.bar)?;
                     if !(3..=100).contains(&statistics.limit) {
                         return Err(ProtocolError::InvalidHistoryLimit);
                     }
@@ -1232,6 +1232,36 @@ fn validate_history_request(
         return Err(ProtocolError::InvalidHistoryLimit);
     }
     Ok(())
+}
+
+fn validate_statistics_bar(bar: &str) -> Result<(), ProtocolError> {
+    if matches!(
+        bar,
+        "1m"
+            | "3m"
+            | "5m"
+            | "15m"
+            | "30m"
+            | "1H"
+            | "2H"
+            | "4H"
+            | "6H"
+            | "12H"
+            | "1D"
+            | "2D"
+            | "3D"
+            | "1W"
+            | "6Hutc"
+            | "12Hutc"
+            | "1Dutc"
+            | "2Dutc"
+            | "3Dutc"
+            | "1Wutc"
+    ) {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidHistoryBar)
+    }
 }
 
 fn validate_history_bar(bar: &str) -> Result<(), ProtocolError> {
