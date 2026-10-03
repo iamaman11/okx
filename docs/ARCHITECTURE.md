@@ -541,30 +541,32 @@ Stage 1 status:
 - account + ledger truth for the authenticated production execution account: ACCEPTED;
 - P0.3 named rate/backpressure: ACCEPTED;
 - Stage-1 final T1–T5 acceptance: ACCEPTED/CLOSED for that scope;
-- full main+subaccounts treasury inventory remains external/deferred until a separate master read credential exists;
+- a separate Main-account Read-only credential exists and authenticates but is intentionally not production-connected; treasury-wide aggregation remains deferred until deliberately integrated and accepted;
 - exact final #173 artifact is installed with verified provenance;
 - Cloudflare-primary and encrypted GitHub fallback parity passed on the exact binary;
 - exact-tree restart/recovery reconverged account and public market evidence to FRESH.
 
-Stage 2 status:
+Stage 2 status: **ACCEPTED/CLOSED**.
 - bounded universal analytical query: ACCEPTED;
 - live microstructure core: ACCEPTED;
 - derivatives/history intelligence: ACCEPTED;
-- portfolio mandate/hard-policy primary T4: ACCEPTED through the connected Cloudflare MCP surface with one permissive FRESH/coherent/oracle-consistent case and one intentional typed policy rejection; GitHub fallback was not used as a substitute;
+- portfolio mandate/hard-policy primary T4: ACCEPTED through connected Cloudflare MCP with permissive FRESH/coherent evidence and intentional typed policy rejection;
 - portfolio-risk correctness closure: ACCEPTED;
-- statistical portfolio risk: ACCEPTED (#187);
-- pre-mutation hard-policy ownership: ACCEPTED for implementation/fail-closed mutation-boundary scope (#188). The immutable prepared plan binds the same versioned mandate/policy; submit reacquires fresh account/reference/ledger evidence plus exact side-specific configured leverage for risk-increasing opens, re-runs the existing pure portfolio-risk implementation, verifies the resulting analysis belongs to the same binding/current account/candidate, and rechecks private/reference continuity after venue/clock I/O before the existing executor boundary;
-- #190/#191 Position Builder implementation: MERGED / DEPLOYED as an exchange capability experiment inside the existing `portfolio_risk` path, with no new tool/runtime owner;
-- subsequent account-context verification changed the interpretation: production `Succession` is Futures mode (`acctLv=2`), and an independently validated Main-account Read-only key also authenticates as `acctLv=2`; both return OKX `50008 User doesn't exist` from Position Builder. The failure is therefore not treated as an unprovisioned-credential blocker;
-- OKX documents Position Builder for `acctLv=3` Multi-currency margin and `acctLv=4` Portfolio margin. The current Stage-2 design defect is that `portfolio_risk/v5` hard-codes `acctLv=3` as a mandatory oracle while the production account is `acctLv=2`;
-- current cursor: **OPEN_INTERNAL — account-mode-aware exchange-oracle correction**. Futures mode must retain deterministic multi-instrument counterfactual risk in `okx-analysis` and reconcile only against documented Futures-mode-supported exchange evidence (current account-position-risk, leverage/capacity, existing `max-size`, and read-only `adjust-leverage-info` where applicable). Position Builder remains an optional independent oracle only for `acctLv=3/4`;
-- no account-mode change, advanced-margin funding, additional subaccount, Demo subsystem, second observer runtime, fallback calculator, new transport or new MCP tool may be introduced to manufacture Stage-2 acceptance;
-- expected structural delta for the correction: zero new crates, long-lived tasks, mutable state owners, stores, schedulers, transports, mutation authorities and MCP tools; only the smallest missing typed OKX factual primitive(s) may be added to the existing `okx-api`/observation path;
-- Stage 2 remains OPEN and Stage 3 must not start until the corrected account-mode-aware oracle path is tested, deployed and physically accepted through primary Cloudflare MCP;
-- CONTROL HTTP reliability hardening remains ACCEPTED (#193), with the existing `okx-github` timeout/failure ownership and immutable-launcher recovery evidence unchanged;
-- production live trading remains disabled.
+- statistical portfolio risk: ACCEPTED;
+- pre-mutation hard-policy ownership: ACCEPTED inside the existing execution authority;
+- account-mode-aware virtual risk: ACCEPTED in PR #197. Authenticated Futures mode (`acctLv=2`) uses deterministic local COUNTERFACTUAL portfolio risk over FRESH OKX mark/reference facts and exchange-published contract/lot/min/max/leverage constraints. The real observed account remains independently checked against `account-position-risk`;
+- Position Builder remains a typed independent virtual-portfolio oracle only for `acctLv=3/4`; it is no longer a mandatory gate for Futures mode;
+- final exact tested/deployed tree: `b63f98d57df6e9e1e1b6fb1c24c949d580717603`; tested head `efa6f8dec36c3abde0d9abc69f749d4b75c0b05c`; merged main `f1028e97f984e313f9c0b702010ebeca4518a088`;
+- CI #843 / run `37160080767`: all jobs PASS; Windows artifact `11287008643` deployed with persisted source/hash provenance; installed agent SHA-256 `1bdba04deb1f9a93761f7521279341d32dfaca883046df49da378aa9ac2b02d6`;
+- primary Cloudflare `portfolio_risk/v6` representative non-zero Futures proof: PASS/FRESH; BTC+ETH gross notional `11.16057 USD`, exact initial margin `2.232114 USD`, statistical evidence READY, current observed-account oracle consistent;
+- negative proof: hard-policy `MAX_LOSS_PER_TRADE` rejection PASS and Futures exchange-constraint leverage rejection PASS;
+- post-proof account remains FRESH/coherent, zero positions/pending orders, consistent reconciliation; exchange mutations = 0;
+- structural corrective delta: zero new crates/tasks/state owners/stores/schedulers/transports/mutation authorities/MCP tools/credential models/dependencies;
+- CONTROL HTTP reliability hardening remains ACCEPTED (#193);
+- production live trading remains disabled;
+- current roadmap cursor: **Stage 3 — SCIENTIFIC RESEARCH + REPLAY**.
 
-Primary Cloudflare MCP is healthy on Worker contract `okx.mcp.tools/2026-10-03.3`; `account_summary` and `portfolio_risk` are callable. After controller T5 recovery the direct runtime reconverged PASS/FRESH at generation 107, and account summary remained FRESH/coherent with zero positions/pending orders and consistent ledger reconciliation. GitHub DATA remains fallback/parity only.
+Primary Cloudflare MCP is healthy on Worker contract `okx.mcp.tools/2026-10-03.3`; `account_summary` and `portfolio_risk` are callable. After the Stage-2 exact-artifact deployment the direct runtime is PASS/connected/session_fresh at generation 114, and account summary is FRESH/coherent with zero positions/pending orders and consistent ledger reconciliation. GitHub DATA remains fallback/parity only.
 
 ## Non-goals
 
