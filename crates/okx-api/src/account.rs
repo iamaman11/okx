@@ -821,33 +821,32 @@ mod tests {
 
     #[test]
     fn position_builder_snapshot_matches_documented_multi_currency_shape() {
-        let snapshot: super::PositionBuilderSnapshot =
-            serde_json::from_value(serde_json::json!({
-                "eq": "5000",
-                "totalImr": "371.25",
-                "totalMmr": "185.625",
-                "marginRatio": "26.936026936",
-                "upl": "12.5",
-                "acctLever": "0.223",
-                "ts": "1791030000000",
-                "positions": [
-                    {
-                        "instId": "BTC-USDT-SWAP",
-                        "instType": "SWAP",
-                        "amt": "1",
-                        "posSide": "net",
-                        "avgPx": "84741.5",
-                        "markPx": "84800",
-                        "floatPnl": "0.585",
-                        "imr": "282.6666666667",
-                        "mgnRatio": "10",
-                        "lever": "3",
-                        "notionalUsd": "848",
-                        "isRealPos": false
-                    }
-                ]
-            }))
-            .expect("documented position-builder shape");
+        let snapshot: super::PositionBuilderSnapshot = serde_json::from_value(serde_json::json!({
+            "eq": "5000",
+            "totalImr": "371.25",
+            "totalMmr": "185.625",
+            "marginRatio": "26.936026936",
+            "upl": "12.5",
+            "acctLever": "0.223",
+            "ts": "1791030000000",
+            "positions": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "instType": "SWAP",
+                    "amt": "1",
+                    "posSide": "net",
+                    "avgPx": "84741.5",
+                    "markPx": "84800",
+                    "floatPnl": "0.585",
+                    "imr": "282.6666666667",
+                    "mgnRatio": "10",
+                    "lever": "3",
+                    "notionalUsd": "848",
+                    "isRealPos": false
+                }
+            ]
+        }))
+        .expect("documented position-builder shape");
 
         assert_eq!(snapshot.equity_usd, "5000");
         assert_eq!(snapshot.initial_margin_requirement_usd, "371.25");
