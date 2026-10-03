@@ -1201,9 +1201,7 @@ fn validate_execution_risk_binding(
     validate_hard_risk_policy(&risk.policy)
 }
 
-fn validate_portfolio_mandate(
-    mandate: &PortfolioMandateRequest,
-) -> Result<(), ProtocolError> {
+fn validate_portfolio_mandate(mandate: &PortfolioMandateRequest) -> Result<(), ProtocolError> {
     validate_version(&mandate.version)?;
     validate_positive_decimal_text(&mandate.capital_base_usd, "mandate.capital_base_usd")?;
     if mandate.decision_horizon_hours == 0 || mandate.decision_horizon_hours > 24 * 365 {
