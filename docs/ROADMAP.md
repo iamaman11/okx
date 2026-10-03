@@ -66,12 +66,32 @@ Stage 2 progress:
 
 Canonical Stage-2 closure order:
 
-1. **DONE** — primary `portfolio_risk` allow + intentional reject cases passed through the connected Cloudflare MCP surface;
-2. **DONE** — portfolio-risk correctness closure: final reference-generation recheck, bounded source-skew/oracle admission, versioned oracle semantics, fail-closed unsupported daily-loss currencies, and explicit mandate enforced/context-only fields;
-3. **DONE** — statistical portfolio risk (#187): covariance/correlation with explicit sample/window, volatility contribution, deterministic scenarios/historical stress. Expected Shortfall remains explicitly NOT_COMPUTED until a declared valid tail-sample contract exists;
-4. **DONE** — pre-mutation hard-policy ownership (#188): the exact immutable mandate/policy is re-evaluated on fresh account/reference/ledger/leverage evidence inside the existing execution authority immediately before its mutation boundary. Exact tested/deployed tree `9eafeaca84c3080edfcae813901c9b7b38d4eaaa`, CI `37087545928`, artifact `11261092800`, deploy/restart PASS. Production live trading remains disabled;
-5. **BLOCKED_EXTERNAL** — representative non-zero portfolio/oracle proof. #190 implemented and deployed the bounded read-only `virtual_portfolio` / Position Builder path; #191 corrected the live OKX response contract and classifies the observed `50008 User doesn't exist` as `POSITION_BUILDER_ACCOUNT_UNAVAILABLE`, retryable=false. Primary Cloudflare reaches the exact Position Builder boundary, but the currently provisioned read-only standard-subaccount context is not eligible for a positive Position Builder proof. No second master-read/secondary-observer context is provisioned. Do not add a new credential model, Demo subsystem, oracle service, tool or production mutation solely to satisfy acceptance. Unblock only by provisioning a supported least-privilege Read-only OKX account context and rerunning the existing v5 path unchanged;
-6. **BLOCKED_BY_ITEM_5** — final Stage-2 T1–T5 acceptance. Do not issue Stage-2 PASS while item 5 remains externally blocked.
+Items 1–4 are accepted. The former item 5 `BLOCKED_EXTERNAL` classification is superseded by a reproduced **account-mode/oracle mismatch** discovered after independently validating both the production Succession observer and the new Main-account read-only credential.
+
+1. **DONE** — primary `portfolio_risk` allow + intentional reject cases passed through the connected Cloudflare MCP surface.
+2. **DONE** — portfolio-risk correctness closure: final reference-generation recheck, bounded source-skew/oracle admission, versioned oracle semantics, fail-closed unsupported daily-loss currencies, and explicit mandate enforced/context-only fields.
+3. **DONE** — statistical portfolio risk (#187): covariance/correlation with explicit sample/window, volatility contribution, deterministic scenarios/historical stress. Expected Shortfall remains explicitly `NOT_COMPUTED` until a declared valid tail-sample contract exists.
+4. **DONE** — pre-mutation hard-policy ownership (#188): the exact immutable mandate/policy is re-evaluated on fresh account/reference/ledger/leverage evidence inside the existing execution authority immediately before its mutation boundary. Production live trading remains disabled.
+5. **OPEN_INTERNAL — account-mode-aware exchange-oracle correction.**
+   - Production `Succession` is a standard subaccount in Futures mode (`acctLv=2`). An independently created Main-account Read-only key also authenticates successfully and reports `acctLv=2`.
+   - Both contexts reach `POST /api/v5/account/position-builder` and receive OKX `50008 User doesn't exist`. This reproduces the failure independently of credential/account scope and removes “provision another supported read-only account context” as the Stage-2 unblock strategy.
+   - OKX documents Position Builder's `acctLv` request domain as Multi-currency margin (`3`) or Portfolio margin (`4`). Therefore the current `portfolio_risk/v5` requirement that hard-codes `acctLv=3` is not an appropriate mandatory oracle for the production Futures-mode (`acctLv=2`) account.
+   - Corrective implementation must be **account-mode-aware inside existing owners**, not a new service/credential model/tool. For `acctLv=2`, keep deterministic multi-instrument counterfactual portfolio math in `okx-analysis` and use only Futures-mode-supported OKX evidence as independent differential checks, including current account-position-risk, leverage/capacity evidence, existing `max-size`, and read-only `adjust-leverage-info` where its documented parameter contract applies.
+   - For `acctLv=3/4` only, Position Builder may remain an independent exchange oracle; it must not force a Futures-mode account to impersonate another account mode.
+   - Do not change account mode, fund an advanced-margin account, create more subaccounts, add Demo, add a second observer runtime, or add a fallback calculator merely to satisfy acceptance.
+   - Expected structural delta remains zero for crates, long-lived tasks, mutable state owners, stores, schedulers, transports, mutation authorities and MCP tools. Add only the smallest typed `okx-api` primitive(s) actually missing and reuse `portfolio_risk`.
+6. **BLOCKED_BY_ITEM_5** — final Stage-2 T1–T5 acceptance. Stage 2 stays OPEN until the account-mode-aware oracle correction is implemented, tested, deployed and physically accepted through the primary Cloudflare MCP path. This is now an **internal correctness item**, not an external credential blocker. Do not start Stage 3 before it passes.
+
+Item-5 acceptance contract:
+- `acctLv=2` is detected from authenticated account evidence and never routed through a mandatory Position Builder proof;
+- one representative non-zero Futures-mode counterfactual portfolio remains deterministic and labelled `COUNTERFACTUAL`;
+- observed account truth remains `OBSERVED` and unchanged by the read-only proof;
+- local per-instrument notional/margin/capacity calculations are differentially checked against documented exchange surfaces that support the current account mode; unsupported fields stay explicit rather than fabricated;
+- account/reference/source generation and bounded skew/coherence admission remain intact;
+- intentional policy rejection still fails closed at the same hard-policy owner;
+- primary Cloudflare MCP `portfolio_risk` black-box passes on the deployed exact artifact; GitHub DATA is parity/fallback only;
+- no order, account-mode change, leverage mutation or other exchange mutation occurs;
+- the Position Builder path remains covered for `acctLv=3/4` fixtures/capability without being required for current production `acctLv=2` acceptance.
 
 Cross-cutting CONTROL reliability debt discovered during item 5 is **DONE / ACCEPTED** in #193:
 - merged main `239232ad9ef6308893c86c4afa1fbcf9fc6b6690`;
