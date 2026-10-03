@@ -148,7 +148,9 @@ pub enum ExecutionValidationError {
     #[error("portfolio risk analysis does not match the immutable execution risk binding")]
     RiskBindingMismatch,
 
-    #[error("portfolio risk candidate does not match the immutable execution plan/current leverage")]
+    #[error(
+        "portfolio risk candidate does not match the immutable execution plan/current leverage"
+    )]
     RiskCandidateMismatch,
 
     #[error("portfolio risk analysis does not match the current account generation")]
