@@ -1502,3 +1502,29 @@ mod tests {
         assert!(observation_skew_ms("2026-10-03T00:00:00.000Z", "not-millis").is_err());
     }
 }
+
+
+#[cfg(test)]
+mod position_builder_contract_tests {
+    use super::*;
+
+    #[test]
+    fn position_builder_50008_is_typed_non_retryable_eligibility() {
+        let error = AccountBootstrapError::Api(okx_api::OkxError::Api {
+            code: "50008".to_owned(),
+            message: "User doesn't exist.".to_owned(),
+        });
+        assert_eq!(
+            position_builder_account_unavailable(&error).as_deref(),
+            Some(
+                "OKX Position Builder is unavailable for the authenticated account: API 50008: User doesn't exist."
+            )
+        );
+
+        let transient = AccountBootstrapError::Api(okx_api::OkxError::Api {
+            code: "50011".to_owned(),
+            message: "Rate limit reached".to_owned(),
+        });
+        assert!(position_builder_account_unavailable(&transient).is_none());
+    }
+}
