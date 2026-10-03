@@ -987,6 +987,7 @@ mod tests {
                 size: "0.05".to_owned(),
                 price: "0.09317".to_owned(),
                 open_risk: None,
+            risk_binding: None,
             }),
             created_at_ms: 100,
             updated_at_ms: 100,
