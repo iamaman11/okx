@@ -52,28 +52,30 @@ Stage 1 final acceptance is **ACCEPTED/CLOSED** on the exact tested/deployed tre
 
 Stage-1 acceptance scope is the authenticated production execution account and the factual surfaces available through its least-privilege observer credential. Full main+subaccounts treasury inventory remains an explicit external/deferred capability and must continue to report `multi_account_inventory_complete=false` until a separate master read credential exists.
 
-**Current roadmap cursor: Stage 2 — INTELLIGENCE + RISK.**
+**Current roadmap cursor: Stage 2 — INTELLIGENCE + RISK / OPEN / BLOCKED_EXTERNAL.**
 
-Stage 2 progress:
+Stage 2 internal engineering status:
 
 - **bounded universal analytical query — ACCEPTED/CLOSED**: `query_capabilities` + `query`, bounded whole-derivatives scan, stable top/bottom-K, explicit missing/excluded/truncation/coherence/provenance;
 - **live microstructure core — ACCEPTED**: spread/depth/impact and sequence-contiguous live evidence through the existing bounded public-WS owner;
 - **derivatives + history intelligence — ACCEPTED**: recent trades, realized-volatility/volume/OI change, funding history/regime, basis/term-structure evidence, plus production fixes for live OKX wire/rate-domain behavior;
-- **portfolio risk mandate/hard-policy primary T4 — ACCEPTED**: PR #184 is on main `fe67d3495479e72a56c20c08fc5c231ed0670225`; exact tested head `74e14e5b1ff09c4fe27b1e7579eee9e905c2d843`; CI `37073209534` PASS; artifact `11256197440` deployed; Worker contract `okx.mcp.tools/2026-10-03.1`. After refreshing the connected tool schema, primary Cloudflare allow + intentional reject cases both passed with FRESH coherent evidence, typed policy rejection, non-null BTC reference generation in the reject case, and zero-residual OKX account-position-risk oracle comparison. GitHub fallback was not used as a substitute.
-- **portfolio-risk correctness — ACCEPTED**: end-of-evaluation generation/coherence admission, explicit source-skew/oracle semantics, fail-closed unsupported daily-loss currencies and explicit mandate field semantics are merged/deployed;
-- **statistical portfolio risk — ACCEPTED**: #187 adds explicit-sample covariance/correlation, volatility contribution, deterministic scenario/historical stress; Expected Shortfall remains explicitly NOT_COMPUTED until a declared valid tail-sample contract exists;
-- **pre-mutation hard-policy ownership — ACCEPTED for implementation/fail-closed boundary**: #188 merged as main `1e7b37a7705d1925d9979e4c20cb63fdff4ae903`; tested head `093f489b07b894ada932b0f393c6f9ae1f2bf583`; tested/merged tree `9eafeaca84c3080edfcae813901c9b7b38d4eaaa`; CI `37087545928` PASS; artifact `11261092800` deployed/restarted with provenance; primary runtime and `portfolio_risk/v3` regression remained PASS/FRESH. This does not claim a live production mutation.
+- **portfolio risk mandate/hard-policy primary T4 — ACCEPTED**: primary Cloudflare allow + intentional reject paths passed on coherent FRESH evidence with OKX account-position-risk oracle comparison;
+- **portfolio-risk correctness — ACCEPTED**: end-of-evaluation reference-generation/coherence admission, bounded source skew, explicit oracle semantics, fail-closed unsupported daily-loss currency handling, and explicit mandate enforced/context-only semantics;
+- **statistical portfolio risk — ACCEPTED**: explicit-sample covariance/correlation, volatility contribution, deterministic historical/scenario stress; Expected Shortfall remains explicitly NOT_COMPUTED until a valid tail-sample contract exists;
+- **pre-mutation hard-policy ownership — ACCEPTED**: the immutable mandate/policy is re-evaluated on fresh account/reference/ledger/leverage evidence inside the existing execution authority immediately before its mutation boundary; production live trading remains disabled;
+- **representative non-zero virtual/oracle implementation — IMPLEMENTED / DEPLOYED / BLOCKED_EXTERNAL**: PR #190 + #191 expose one bounded read-only `virtual_portfolio` path through the existing `portfolio_risk` capability. Primary Cloudflare reached OKX Position Builder, but the currently provisioned read-only Succession subaccount returns typed non-retryable `POSITION_BUILDER_ACCOUNT_UNAVAILABLE` / OKX `50008 User doesn't exist`. No alternate supported read-only account context is provisioned. No fallback/fake oracle/Demo subsystem/live order is accepted as a substitute;
+- **CONTROL HTTP reliability hardening — ACCEPTED**: PR #193, exact tested head `053cb0213f4367113dd32aada83e9704e0a9b1cd`, tested/merged tree `b16c3d56438b01402f09a051b8092a43a3d22145`, CI `37125627129`, controller artifact `11274982057`, controller SHA-256 `10784b32ba24dc65058ff3b7c7c03783b28c1ae6e3726b2c85eeecdfc1d0004f`. Existing `okx-github` now has bounded connect/request deadlines, typed Timeout/Decode classification and existing bounded backoff; controller stage/handoff and crash/recovery T5 physically passed with no replayed CONTROL mutation.
 
 Canonical Stage-2 closure order:
 
-1. **DONE** — primary `portfolio_risk` allow + intentional reject cases passed through the connected Cloudflare MCP surface;
-2. **DONE** — portfolio-risk correctness closure: final reference-generation recheck, bounded source-skew/oracle admission, versioned oracle semantics, fail-closed unsupported daily-loss currencies, and explicit mandate enforced/context-only fields;
-3. **DONE** — statistical portfolio risk: covariance/correlation with explicit sample/window, volatility contribution, deterministic scenarios/historical stress; Expected Shortfall remains explicitly NOT_COMPUTED until a declared valid tail-sample contract exists (#187);
-4. **DONE** — pre-mutation hard-policy ownership (#188): the exact immutable mandate/policy is re-evaluated on fresh account/reference/ledger/leverage evidence inside the existing execution authority immediately before its mutation boundary. Exact tested/deployed tree `9eafeaca84c3080edfcae813901c9b7b38d4eaaa`, CI `37087545928`, artifact `11261092800`, agent SHA-256 `adad85df474987ed5971d74b6593246ca2287d2742de1abab163478fab13fc93`; deploy/restart PASS and primary runtime reconverged PASS/FRESH. Production live trading remains disabled and no production mutation T4 is claimed;
-5. **CURRENT** — obtain safe representative non-zero portfolio/oracle proof through supported read-only virtual evidence or OKX Demo Trading rather than enabling production live trading;
-6. **PENDING** — issue one final Stage-2 T1–T5 acceptance record over one traceable accepted tree/artifact.
+1. **DONE** — primary `portfolio_risk` allow + intentional reject through connected Cloudflare MCP;
+2. **DONE** — portfolio-risk correctness closure;
+3. **DONE** — statistical portfolio risk;
+4. **DONE** — pre-mutation hard-policy ownership;
+5. **BLOCKED_EXTERNAL** — positive representative non-zero exchange-oracle proof requires an independently supported least-privilege Read-only OKX account context for which Position Builder is available. The current authenticated Succession observer context is explicitly ineligible at the endpoint. Do not broaden credentials or add architecture solely to manufacture acceptance;
+6. **READY BUT NOT CLOSABLE** — final Stage-2 T1–T5 acceptance evidence can be assembled, but Stage 2 must remain OPEN while item 5 is externally blocked.
 
-Do not start Stage 3 until this closure sequence is complete. New analytical capability must continue to extend existing factual/analysis owners rather than reintroduce endpoint-per-question growth.
+Stage 3 is **BLOCKED** until item 5 receives a real positive proof through the existing `portfolio_risk/v5` path. All currently actionable internal engineering/reliability work for Stage 2 is complete. New analytical capability must continue to extend existing factual/analysis owners rather than reintroduce endpoint-per-question growth.
 
 ## Repository Guard v1
 
