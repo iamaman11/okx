@@ -1220,10 +1220,7 @@ fn validate_portfolio_mandate(
         &mandate.minimum_liquidity_notional_usd,
         "mandate.minimum_liquidity_notional_usd",
     )?;
-    validate_non_negative_decimal_text(
-        &mandate.max_turnover_ratio,
-        "mandate.max_turnover_ratio",
-    )?;
+    validate_non_negative_decimal_text(&mandate.max_turnover_ratio, "mandate.max_turnover_ratio")?;
     validate_instrument_list(&mandate.allowed_instruments, 32)
 }
 
