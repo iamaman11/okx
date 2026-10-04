@@ -815,8 +815,6 @@ fn required(field: &'static str, value: &str) -> Result<(), ResearchError> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use okx_analysis::{
         BASELINE_STRATEGY_VERSION_V1, HARD_RISK_POLICY_SCHEMA_V1, RiskDegradedMode,
         RiskMinimumQuality, TRADING_MANDATE_SCHEMA_V1,
