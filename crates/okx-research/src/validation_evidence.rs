@@ -87,6 +87,7 @@ pub struct PreHoldoutEvidence {
     pub research_family_id: String,
     pub research_family_artifact_id: String,
     pub hypothesis_id: String,
+    pub instrument_id: String,
     pub strategy: BaselineStrategyKind,
     pub strategy_version: String,
     pub policy: ValidationEvidencePolicy,
@@ -117,6 +118,7 @@ struct PreHoldoutEvidenceIdentity<'a> {
     research_family_id: &'a str,
     research_family_artifact_id: &'a str,
     hypothesis_id: &'a str,
+    instrument_id: &'a str,
     strategy: BaselineStrategyKind,
     strategy_version: &'a str,
     policy: &'a ValidationEvidencePolicy,
@@ -172,6 +174,12 @@ pub fn prepare_pre_holdout_evidence(
         store.read_evidence_json(validation_replay_dataset_artifact_id)?;
     train_dataset.validate()?;
     validation_dataset.validate()?;
+    if train_dataset.manifest.instrument_id != validation_dataset.manifest.instrument_id {
+        return Err(ResearchError::InstrumentMismatch {
+            expected: train_dataset.manifest.instrument_id.clone(),
+            actual: validation_dataset.manifest.instrument_id.clone(),
+        });
+    }
 
     validate_slice(&spec, ValidationPartitionRole::Train, &train_dataset)?;
     validate_slice(
@@ -317,6 +325,7 @@ pub fn prepare_pre_holdout_evidence(
         research_family_id: &family.research_family_id,
         research_family_artifact_id: &family_artifact_id,
         hypothesis_id: &train_result.hypothesis_id,
+        instrument_id: &train_dataset.manifest.instrument_id,
         strategy: spec.strategy,
         strategy_version: &spec.strategy_version,
         policy: &policy,
@@ -339,6 +348,7 @@ pub fn prepare_pre_holdout_evidence(
         research_family_id: family.research_family_id.clone(),
         research_family_artifact_id: family_artifact_id.clone(),
         hypothesis_id: train_result.hypothesis_id,
+        instrument_id: train_dataset.manifest.instrument_id,
         strategy: spec.strategy,
         strategy_version: spec.strategy_version,
         policy,
