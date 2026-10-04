@@ -163,9 +163,12 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         | AgentOperation::SnapshotQuality { .. }
         | AgentOperation::MailboxTelemetry
         | AgentOperation::QueryCapabilities
+        | AgentOperation::ResearchCapabilities
         | AgentOperation::CurrentCost { .. }
         | AgentOperation::PositionScenario { .. } => COMPACT_RESPONSE_PLAINTEXT_BYTES,
-        AgentOperation::MarketResearch { .. } => MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES,
+        AgentOperation::MarketResearch { .. } | AgentOperation::Research { .. } => {
+            MARKET_RESEARCH_RESPONSE_PLAINTEXT_BYTES
+        }
         AgentOperation::MarketSnapshot { .. }
         | AgentOperation::MarketOverview { .. }
         | AgentOperation::MarketIntelligence { .. }
