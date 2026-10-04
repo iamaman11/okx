@@ -69,8 +69,7 @@ pub fn analyze_validation_pnl_samples(
         .sum::<Decimal>()
         / Decimal::from((values.len() - 1) as u64);
     let stddev = decimal_sqrt(variance);
-    let mean_to_sample_stddev_ratio =
-        (stddev > Decimal::ZERO).then(|| normalized(mean / stddev));
+    let mean_to_sample_stddev_ratio = (stddev > Decimal::ZERO).then(|| normalized(mean / stddev));
 
     let mut win_count = 0usize;
     let mut loss_count = 0usize;
@@ -135,11 +134,7 @@ pub fn analyze_validation_cost_stress(
         return Err(AnalysisError::Negative("validation_trading_cost_quote"));
     }
 
-    let multipliers = [
-        Decimal::ONE,
-        Decimal::new(15, 1),
-        Decimal::from(2_u32),
-    ];
+    let multipliers = [Decimal::ONE, Decimal::new(15, 1), Decimal::from(2_u32)];
     let mut previous = None::<Decimal>;
     let mut monotonic_nonincreasing = true;
     let points = multipliers
