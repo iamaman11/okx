@@ -2,13 +2,21 @@ use std::collections::BTreeMap;
 
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponse, AgentResponseStatus,
-    DataQuality, RESEARCH_CATALOG_VERSION_V1, ResearchRequest,
+    DataQuality, RESEARCH_CATALOG_VERSION_V1, ResearchReplayMechanicsProvenance,
+    ResearchReplayStrategy, ResearchRequest,
 };
 use okx_research::{
-    BUILD_SOURCE_TREE, DatasetManifest, ReferenceCoverageStatus, ResearchArtifactStore,
-    ResearchRange, ResearchSourceKind, ResearchTier, SourceRequest, build_candle_chunk,
-    build_funding_chunk, build_reference_chunk, build_tier_b_trade_chunk,
-    detect_fixed_interval_gaps,
+    BUILD_SOURCE_TREE, DatasetManifest, ExperimentSpec, Hypothesis, ReferenceCoverageStatus,
+    ReplayDatasetArtifact, ReplayEvidenceClass, ReplayExecutionModel, ReplayMechanicsProvenance,
+    ReplayStatus, ResearchArtifactStore, ResearchRange, ResearchSourceKind, ResearchTier,
+    SourceRequest, build_candle_chunk, build_funding_chunk, build_reference_chunk,
+    build_tier_b_trade_chunk, detect_fixed_interval_gaps, replay_experiment,
+    REPLAY_EXECUTION_MODEL_VERSION_V1,
+};
+use okx_analysis::{
+    BASELINE_STRATEGY_VERSION_V1, HARD_RISK_POLICY_SCHEMA_V1, CandidateRiskContext,
+    HardRiskPolicy, LiquidityRole, PositionScenarioMechanics, RiskDegradedMode,
+    RiskMinimumQuality, TRADING_MANDATE_SCHEMA_V1, TradingMandate, BaselineStrategyKind,
 };
 use serde::Serialize;
 
@@ -21,6 +29,7 @@ use crate::{AgentResult, market_bootstrap::MarketBootstrapError};
 pub const RESEARCH_CAPABILITIES_SCHEMA_V1: &str = "okx.research-capabilities/v1";
 pub const RESEARCH_DATA_INSPECTION_SCHEMA_V1: &str = "okx.research-data-inspection/v1";
 pub const RESEARCH_TIER_B_INSPECTION_SCHEMA_V1: &str = "okx.research-tier-b-inspection/v1";
+pub const RESEARCH_REPLAY_RESULT_SCHEMA_V1: &str = "okx.research-replay-summary/v1";
 pub const RESEARCH_ARTIFACT_FAILURE_CODE: &str = "RESEARCH_ARTIFACT_FAILURE";
 pub const INSUFFICIENT_REFERENCE_HISTORY_CODE: &str = "INSUFFICIENT_REFERENCE_HISTORY";
 const PARSER_VERSION_V1: &str = "okx.public-history-parser/v1";
@@ -72,6 +81,7 @@ struct ResearchDataInspectionResult {
     bar: String,
     dataset_id: String,
     dataset_artifact_id: String,
+    replay_dataset_artifact_id: String,
     range: ResearchRange,
     reference_coverage: ReferenceCoverageStatus,
     strategy_ready: bool,
@@ -102,6 +112,40 @@ struct ResearchTierBInspectionResult {
     evidence_store: &'static str,
     source_cache: &'static str,
     evidence_label: &'static str,
+}
+
+#[derive(Serialize)]
+struct ResearchReplaySummary {
+    schema: &'static str,
+    catalog_version: &'static str,
+    stage: &'static str,
+    instrument: String,
+    replay_dataset_artifact_id: String,
+    dataset_id: String,
+    hypothesis_id: String,
+    hypothesis_artifact_id: String,
+    experiment_spec_id: String,
+    experiment_spec_artifact_id: String,
+    experiment_id: String,
+    experiment_result_artifact_id: String,
+    strategy: BaselineStrategyKind,
+    mechanics_provenance: ReplayMechanicsProvenance,
+    status: ReplayStatus,
+    evidence_class: ReplayEvidenceClass,
+    blocker: Option<&'static str>,
+    signal_price_role: &'static str,
+    execution_price_role: &'static str,
+    candles_processed: usize,
+    decision_count: usize,
+    trade_count: usize,
+    rejected_candidate_count: usize,
+    gross_pnl_quote: String,
+    trading_cost_quote: String,
+    funding_cost_quote: String,
+    net_pnl_quote: String,
+    bulk_events_returned: bool,
+    source_tree: String,
+    exchange_mutation_authority: bool,
 }
 
 pub(crate) async fn dispatch(
@@ -140,6 +184,25 @@ pub(crate) async fn dispatch(
                     trade_limit,
                 },
         } => inspect_tier_b(request, context, generated_at, instrument, *trade_limit).await,
+        AgentOperation::Research {
+            request:
+                ResearchRequest::RunReplay {
+                    catalog_version: _,
+                    instrument,
+                    replay_dataset_artifact_id,
+                    strategy,
+                    mechanics_provenance,
+                },
+        } => run_replay(
+            request,
+            context,
+            generated_at,
+            instrument,
+            replay_dataset_artifact_id,
+            *strategy,
+            *mechanics_provenance,
+        )
+        .await,
         _ => Ok(unavailable(request, generated_at)),
     }
 }
@@ -148,7 +211,7 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
     let result = ResearchCapabilitiesResult {
         schema: RESEARCH_CAPABILITIES_SCHEMA_V1,
         catalog_version: RESEARCH_CATALOG_VERSION_V1,
-        stage: "3A_V1",
+        stage: "3B_V1",
         tier_a_instruments: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
         tier_a_bars: ["1H"],
         tier_b_instruments: ["BTC-USDT-SWAP"],
@@ -424,6 +487,16 @@ async fn inspect_tier_a(
         Err(error) => return Ok(research_failure(request, generated_at, error)),
     };
 
+    let replay_dataset = match ReplayDatasetArtifact::build(
+        manifest.clone(),
+        candle_chunk.rows.clone(),
+        funding_chunk.rows.clone(),
+        reference_chunk.rows.first().cloned(),
+    ) {
+        Ok(value) => value,
+        Err(error) => return Ok(research_failure(request, generated_at, error)),
+    };
+
     let store = ResearchArtifactStore::at(research_root.join("research"));
     let persisted = (|| {
         let raw_sources = [
@@ -461,9 +534,14 @@ async fn inspect_tier_a(
             });
         }
         let (dataset_artifact_id, _) = store.publish_evidence(&manifest)?;
-        Ok::<_, okx_research::ResearchError>((dataset_artifact_id, chunks))
+        let (replay_dataset_artifact_id, _) = store.publish_evidence(&replay_dataset)?;
+        Ok::<_, okx_research::ResearchError>((
+            dataset_artifact_id,
+            replay_dataset_artifact_id,
+            chunks,
+        ))
     })();
-    let (dataset_artifact_id, chunks) = match persisted {
+    let (dataset_artifact_id, replay_dataset_artifact_id, chunks) = match persisted {
         Ok(value) => value,
         Err(error) => return Ok(research_failure(request, generated_at, error)),
     };
@@ -499,6 +577,7 @@ async fn inspect_tier_a(
         bar: bar.to_owned(),
         dataset_id: manifest.dataset_id.clone(),
         dataset_artifact_id,
+        replay_dataset_artifact_id,
         range,
         reference_coverage: manifest.reference_coverage,
         strategy_ready,
@@ -518,6 +597,289 @@ async fn inspect_tier_a(
         quality,
         result_schema: Some(RESEARCH_DATA_INSPECTION_SCHEMA_V1.to_owned()),
         result: Some(serde_json::to_value(result)?),
+        failure: None,
+        warnings,
+    })
+}
+
+async fn run_replay(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    instrument: &str,
+    replay_dataset_artifact_id: &str,
+    strategy: ResearchReplayStrategy,
+    mechanics_provenance: ResearchReplayMechanicsProvenance,
+) -> AgentResult<AgentResponse> {
+    let Some(research_root) = context.research_root else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            RESEARCH_ARTIFACT_FAILURE_CODE,
+            "research artifact root is unavailable".to_owned(),
+            false,
+        ));
+    };
+    if BUILD_SOURCE_TREE == "UNAVAILABLE" {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            RESEARCH_ARTIFACT_FAILURE_CODE,
+            "research source tree is not bound into this build".to_owned(),
+            false,
+        ));
+    }
+
+    let store = ResearchArtifactStore::at(research_root.join("research"));
+    let dataset: ReplayDatasetArtifact = match store.read_evidence_json(replay_dataset_artifact_id)
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(research_failure(request, generated_at, error)),
+    };
+    if dataset.manifest.instrument_id != instrument {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            RESEARCH_ARTIFACT_FAILURE_CODE,
+            "replay artifact instrument does not match request".to_owned(),
+            false,
+        ));
+    }
+    let Some(reference) = dataset.reference.as_ref() else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            INSUFFICIENT_REFERENCE_HISTORY_CODE,
+            "replay dataset has no instrument reference evidence".to_owned(),
+            false,
+        ));
+    };
+    let Some(contract_value) = reference.contract_value.as_deref() else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            RESEARCH_ARTIFACT_FAILURE_CODE,
+            "replay reference is missing contract value".to_owned(),
+            false,
+        ));
+    };
+    let Some(contract_value_currency) = reference.contract_value_currency.as_deref() else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            RESEARCH_ARTIFACT_FAILURE_CODE,
+            "replay reference is missing contract value currency".to_owned(),
+            false,
+        ));
+    };
+    let Some(settle_currency) = reference.settle_currency.as_deref() else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            RESEARCH_ARTIFACT_FAILURE_CODE,
+            "replay reference is missing settlement currency".to_owned(),
+            false,
+        ));
+    };
+
+    let strategy = match strategy {
+        ResearchReplayStrategy::NoTrade => BaselineStrategyKind::NoTrade,
+        ResearchReplayStrategy::CloseMomentum => BaselineStrategyKind::CloseMomentum,
+    };
+    let mechanics_provenance = match mechanics_provenance {
+        ResearchReplayMechanicsProvenance::DeclaredCounterfactual => {
+            ReplayMechanicsProvenance::DeclaredCounterfactual
+        }
+        ResearchReplayMechanicsProvenance::HistoricalObserved => {
+            ReplayMechanicsProvenance::HistoricalObserved
+        }
+    };
+    let hypothesis = match Hypothesis::build(
+        match strategy {
+            BaselineStrategyKind::NoTrade => "NO_TRADE null baseline",
+            BaselineStrategyKind::CloseMomentum => {
+                "1H completed-bar close momentum predicts the next one-hour price move"
+            }
+        },
+        match strategy {
+            BaselineStrategyKind::NoTrade => {
+                "any trade, fee, funding cashflow, or non-zero PnL falsifies the null accounting baseline"
+            }
+            BaselineStrategyKind::CloseMomentum => {
+                "replay records deterministic next-open decisions and net PnL without same-close execution"
+            }
+        },
+        strategy,
+        BASELINE_STRATEGY_VERSION_V1,
+    ) {
+        Ok(value) => value,
+        Err(error) => return Ok(research_failure(request, generated_at, error)),
+    };
+
+    let mandate = TradingMandate {
+        schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
+        version: "okx.research.baseline-mandate/2026-10-04.1".to_owned(),
+        capital_base_usd: "100".to_owned(),
+        decision_horizon_hours: 1,
+        benchmark: Some("NO_EXTERNAL_BENCHMARK".to_owned()),
+        allowed_instruments: vec![instrument.to_owned()],
+        max_drawdown_ratio: "0.5".to_owned(),
+        leverage_ceiling: "5".to_owned(),
+        minimum_liquidity_notional_usd: "0".to_owned(),
+        max_turnover_ratio: "100".to_owned(),
+    };
+    let policy = HardRiskPolicy {
+        schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
+        version: "okx.research.baseline-policy/2026-10-04.1".to_owned(),
+        max_account_gross_notional_usd: "1000".to_owned(),
+        max_instrument_gross_notional_usd: "1000".to_owned(),
+        max_margin_utilization_ratio: "0.9".to_owned(),
+        max_loss_per_trade_usd: "10".to_owned(),
+        max_daily_realized_loss_usd: "50".to_owned(),
+        max_drawdown_ratio: "0.5".to_owned(),
+        max_leverage: "5".to_owned(),
+        allowed_instruments: vec![instrument.to_owned()],
+        minimum_quality: RiskMinimumQuality::Fresh,
+        degraded_mode: RiskDegradedMode::Reject,
+        correlated_clusters: Vec::new(),
+    };
+    let risk_context = CandidateRiskContext {
+        total_equity_usd: "100".to_owned(),
+        account_gross_notional_usd: "0".to_owned(),
+        instrument_gross_notional_usd: "0".to_owned(),
+        account_initial_margin_usd: "0".to_owned(),
+        capital_base_drawdown_ratio: "0".to_owned(),
+        daily_realized_loss_usd: "0".to_owned(),
+        account_is_fresh: true,
+        correlated_cluster_gross_notional_usd: BTreeMap::new(),
+    };
+    let execution = ReplayExecutionModel {
+        version: REPLAY_EXECUTION_MODEL_VERSION_V1.to_owned(),
+        mechanics: PositionScenarioMechanics {
+            settle_currency: settle_currency.to_owned(),
+            contract_value_currency: contract_value_currency.to_owned(),
+            contract_value: contract_value.to_owned(),
+            tick_size: reference.tick_size.clone(),
+            entry_fee_rate: "-0.0005".to_owned(),
+            exit_fee_rate: "-0.0005".to_owned(),
+        },
+        mechanics_provenance,
+        fee_provenance: "DECLARED_COUNTERFACTUAL_TAKER_5_BPS_EACH_SIDE".to_owned(),
+        funding_provenance: "HISTORICAL_OBSERVED".to_owned(),
+        contracts: reference.min_size.clone(),
+        leverage: "2".to_owned(),
+        candidate_worst_case_loss_usd: "2".to_owned(),
+        entry_liquidity_role: LiquidityRole::Taker,
+        exit_liquidity_role: LiquidityRole::Taker,
+        funding_notional_basis: "ENTRY_NOTIONAL_COUNTERFACTUAL".to_owned(),
+    };
+    let spec = match ExperimentSpec::build(
+        &hypothesis,
+        dataset.manifest.dataset_id.clone(),
+        instrument,
+        "1H",
+        0,
+        execution,
+        mandate,
+        policy,
+        risk_context,
+    ) {
+        Ok(value) => value,
+        Err(error) => return Ok(research_failure(request, generated_at, error)),
+    };
+    let result = match replay_experiment(
+        &dataset.manifest,
+        &dataset.candles,
+        &dataset.funding,
+        &spec,
+    ) {
+        Ok(value) => value,
+        Err(error) => return Ok(research_failure(request, generated_at, error)),
+    };
+
+    let persisted = (|| {
+        let (hypothesis_artifact_id, _) = store.publish_evidence(&hypothesis)?;
+        let (experiment_spec_artifact_id, _) = store.publish_evidence(&spec)?;
+        let (experiment_result_artifact_id, _) = store.publish_evidence(&result)?;
+        Ok::<_, okx_research::ResearchError>((
+            hypothesis_artifact_id,
+            experiment_spec_artifact_id,
+            experiment_result_artifact_id,
+        ))
+    })();
+    let (
+        hypothesis_artifact_id,
+        experiment_spec_artifact_id,
+        experiment_result_artifact_id,
+    ) = match persisted {
+        Ok(value) => value,
+        Err(error) => return Ok(research_failure(request, generated_at, error)),
+    };
+
+    let quality = if result.status == ReplayStatus::Completed {
+        DataQuality::Fresh
+    } else {
+        DataQuality::Degraded
+    };
+    let mut warnings = Vec::new();
+    if result.evidence_class == ReplayEvidenceClass::CounterfactualMechanics {
+        warnings.push(
+            "COUNTERFACTUAL_MECHANICS: current instrument mechanics and declared 5 bps taker fees are replay assumptions, not historical reference/fee truth"
+                .to_owned(),
+        );
+    }
+    if let Some(blocker) = result.blocker {
+        warnings.push(blocker.to_owned());
+    }
+
+    let summary = ResearchReplaySummary {
+        schema: RESEARCH_REPLAY_RESULT_SCHEMA_V1,
+        catalog_version: RESEARCH_CATALOG_VERSION_V1,
+        stage: "3B_V1",
+        instrument: instrument.to_owned(),
+        replay_dataset_artifact_id: replay_dataset_artifact_id.to_owned(),
+        dataset_id: result.dataset_id.clone(),
+        hypothesis_id: result.hypothesis_id.clone(),
+        hypothesis_artifact_id,
+        experiment_spec_id: result.experiment_spec_id.clone(),
+        experiment_spec_artifact_id,
+        experiment_id: result.experiment_id.clone(),
+        experiment_result_artifact_id,
+        strategy,
+        mechanics_provenance,
+        status: result.status,
+        evidence_class: result.evidence_class,
+        blocker: result.blocker,
+        signal_price_role: result.signal_price_role,
+        execution_price_role: result.execution_price_role,
+        candles_processed: result.candles_processed,
+        decision_count: result.decision_count,
+        trade_count: result.trade_count,
+        rejected_candidate_count: result.rejected_candidate_count,
+        gross_pnl_quote: result.gross_pnl_quote,
+        trading_cost_quote: result.trading_cost_quote,
+        funding_cost_quote: result.funding_cost_quote,
+        net_pnl_quote: result.net_pnl_quote,
+        bulk_events_returned: false,
+        source_tree: result.source_tree,
+        exchange_mutation_authority: false,
+    };
+
+    Ok(AgentResponse {
+        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+        request_id: request.request_id.clone(),
+        status: AgentResponseStatus::Completed,
+        generated_at: generated_at.to_owned(),
+        quality,
+        result_schema: Some(RESEARCH_REPLAY_RESULT_SCHEMA_V1.to_owned()),
+        result: Some(serde_json::to_value(summary)?),
         failure: None,
         warnings,
     })
