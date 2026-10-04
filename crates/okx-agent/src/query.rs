@@ -939,6 +939,14 @@ fn market_failure(
             error.to_string(),
             true,
         ),
+        MarketBootstrapError::ReferenceNormalize(error) => failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            MARKET_BOOTSTRAP_INCONSISTENT_CODE,
+            error.to_string(),
+            false,
+        ),
     }
 }
 
