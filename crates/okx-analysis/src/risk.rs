@@ -261,8 +261,6 @@ pub struct CandidateRiskContext {
     pub capital_base_drawdown_ratio: String,
     pub daily_realized_loss_usd: String,
     pub account_is_fresh: bool,
-    #[serde(default)]
-    pub correlated_cluster_gross_notional_usd: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -582,34 +580,20 @@ pub fn analyze_account_risk(
     })
 }
 
-pub fn evaluate_candidate_risk(
+struct CandidateLimitEvaluation {
+    projection: CandidateProjection,
+    violations: Vec<RiskPolicyViolation>,
+}
+
+fn evaluate_candidate_limits(
     mandate: &TradingMandate,
     policy: &HardRiskPolicy,
     candidate: &PortfolioCandidate,
-    context: &CandidateRiskContext,
-) -> Result<CandidateRiskGate, AnalysisError> {
-    let total_equity = non_negative_decimal("risk_total_equity_usd", &context.total_equity_usd)?;
-    let account_gross = non_negative_decimal(
-        "risk_account_gross_notional_usd",
-        &context.account_gross_notional_usd,
-    )?;
-    let instrument_gross = non_negative_decimal(
-        "risk_instrument_gross_notional_usd",
-        &context.instrument_gross_notional_usd,
-    )?;
-    let current_imr = non_negative_decimal(
-        "risk_account_initial_margin_usd",
-        &context.account_initial_margin_usd,
-    )?;
-    let drawdown = non_negative_decimal(
-        "risk_capital_base_drawdown_ratio",
-        &context.capital_base_drawdown_ratio,
-    )?;
-    let daily_loss = non_negative_decimal(
-        "risk_daily_realized_loss_usd",
-        &context.daily_realized_loss_usd,
-    )?;
-
+    total_equity: Decimal,
+    account_gross: Decimal,
+    instrument_gross: Decimal,
+    current_imr: Decimal,
+) -> Result<CandidateLimitEvaluation, AnalysisError> {
     let notional = positive_decimal("candidate_notional_usd", &candidate.notional_usd)?;
     let candidate_loss = decimal(
         "candidate_worst_case_loss_usd",
@@ -619,22 +603,6 @@ pub fn evaluate_candidate_risk(
     let leverage = positive_decimal("candidate_leverage", &candidate.leverage)?;
 
     let mut violations = Vec::new();
-    if matches!(policy.minimum_quality, RiskMinimumQuality::Fresh) && !context.account_is_fresh {
-        violations.push(RiskPolicyViolation {
-            code: "MINIMUM_DATA_QUALITY",
-            scope: "account".to_owned(),
-            observed: "degraded".to_owned(),
-            limit: "fresh".to_owned(),
-        });
-    }
-    if !context.account_is_fresh && matches!(policy.degraded_mode, RiskDegradedMode::Reject) {
-        violations.push(RiskPolicyViolation {
-            code: "DEGRADED_MODE_REJECT",
-            scope: "account".to_owned(),
-            observed: "degraded".to_owned(),
-            limit: "reject".to_owned(),
-        });
-    }
     if !mandate.allowed_instruments.is_empty()
         && !mandate.allowed_instruments.contains(&candidate.instrument)
     {
@@ -677,27 +645,6 @@ pub fn evaluate_candidate_risk(
         leverage,
         &mandate.leverage_ceiling,
     )?;
-    compare_limit(
-        &mut violations,
-        "MAX_DRAWDOWN",
-        "capital_base",
-        drawdown,
-        &policy.max_drawdown_ratio,
-    )?;
-    compare_limit(
-        &mut violations,
-        "MANDATE_MAX_DRAWDOWN",
-        "capital_base",
-        drawdown,
-        &mandate.max_drawdown_ratio,
-    )?;
-    compare_limit(
-        &mut violations,
-        "MAX_DAILY_REALIZED_LOSS",
-        "utc_day",
-        daily_loss,
-        &policy.max_daily_realized_loss_usd,
-    )?;
 
     let projected_account = account_gross + notional;
     let projected_instrument = instrument_gross + notional;
@@ -731,24 +678,100 @@ pub fn evaluate_candidate_risk(
         )?;
     }
 
-    for cluster in &policy.correlated_clusters {
-        if !cluster.instruments.contains(&candidate.instrument) {
-            continue;
-        }
-        let current = context
-            .correlated_cluster_gross_notional_usd
-            .get(&cluster.id)
-            .map(|value| non_negative_decimal("risk_cluster_gross_notional_usd", value))
-            .transpose()?
-            .unwrap_or(Decimal::ZERO);
-        compare_limit(
-            &mut violations,
-            "MAX_CORRELATED_CLUSTER_GROSS_NOTIONAL",
-            &cluster.id,
-            current + notional,
-            &cluster.max_gross_notional_usd,
-        )?;
+    Ok(CandidateLimitEvaluation {
+        projection: CandidateProjection {
+            instrument: candidate.instrument.clone(),
+            direction: candidate.direction,
+            additive_new_risk: true,
+            notional_usd: notional.normalize().to_string(),
+            worst_case_loss_usd: candidate_loss.normalize().to_string(),
+            leverage: leverage.normalize().to_string(),
+            projected_account_gross_notional_usd: projected_account.normalize().to_string(),
+            projected_instrument_gross_notional_usd: projected_instrument.normalize().to_string(),
+            projected_margin_utilization_ratio: projected_margin
+                .map(|value| value.normalize().to_string()),
+        },
+        violations,
+    })
+}
+
+pub fn evaluate_candidate_risk(
+    mandate: &TradingMandate,
+    policy: &HardRiskPolicy,
+    candidate: &PortfolioCandidate,
+    context: &CandidateRiskContext,
+) -> Result<CandidateRiskGate, AnalysisError> {
+    let total_equity = non_negative_decimal("risk_total_equity_usd", &context.total_equity_usd)?;
+    let account_gross = non_negative_decimal(
+        "risk_account_gross_notional_usd",
+        &context.account_gross_notional_usd,
+    )?;
+    let instrument_gross = non_negative_decimal(
+        "risk_instrument_gross_notional_usd",
+        &context.instrument_gross_notional_usd,
+    )?;
+    let current_imr = non_negative_decimal(
+        "risk_account_initial_margin_usd",
+        &context.account_initial_margin_usd,
+    )?;
+    let drawdown = non_negative_decimal(
+        "risk_capital_base_drawdown_ratio",
+        &context.capital_base_drawdown_ratio,
+    )?;
+    let daily_loss = non_negative_decimal(
+        "risk_daily_realized_loss_usd",
+        &context.daily_realized_loss_usd,
+    )?;
+
+    let mut violations = Vec::new();
+    if matches!(policy.minimum_quality, RiskMinimumQuality::Fresh) && !context.account_is_fresh {
+        violations.push(RiskPolicyViolation {
+            code: "MINIMUM_DATA_QUALITY",
+            scope: "account".to_owned(),
+            observed: "degraded".to_owned(),
+            limit: "fresh".to_owned(),
+        });
     }
+    if !context.account_is_fresh && matches!(policy.degraded_mode, RiskDegradedMode::Reject) {
+        violations.push(RiskPolicyViolation {
+            code: "DEGRADED_MODE_REJECT",
+            scope: "account".to_owned(),
+            observed: "degraded".to_owned(),
+            limit: "reject".to_owned(),
+        });
+    }
+    compare_limit(
+        &mut violations,
+        "MAX_DRAWDOWN",
+        "capital_base",
+        drawdown,
+        &policy.max_drawdown_ratio,
+    )?;
+    compare_limit(
+        &mut violations,
+        "MANDATE_MAX_DRAWDOWN",
+        "capital_base",
+        drawdown,
+        &mandate.max_drawdown_ratio,
+    )?;
+    compare_limit(
+        &mut violations,
+        "MAX_DAILY_REALIZED_LOSS",
+        "utc_day",
+        daily_loss,
+        &policy.max_daily_realized_loss_usd,
+    )?;
+
+    let candidate_limits = evaluate_candidate_limits(
+        mandate,
+        policy,
+        candidate,
+        total_equity,
+        account_gross,
+        instrument_gross,
+        current_imr,
+    )?;
+    violations.extend(candidate_limits.violations);
 
     Ok(CandidateRiskGate {
         decision: if violations.is_empty() {
@@ -756,10 +779,15 @@ pub fn evaluate_candidate_risk(
         } else {
             RiskPolicyDecision::Rejected
         },
-        projected_account_gross_notional_usd: projected_account.normalize().to_string(),
-        projected_instrument_gross_notional_usd: projected_instrument.normalize().to_string(),
-        projected_margin_utilization_ratio: projected_margin
-            .map(|value| value.normalize().to_string()),
+        projected_account_gross_notional_usd: candidate_limits
+            .projection
+            .projected_account_gross_notional_usd,
+        projected_instrument_gross_notional_usd: candidate_limits
+            .projection
+            .projected_instrument_gross_notional_usd,
+        projected_margin_utilization_ratio: candidate_limits
+            .projection
+            .projected_margin_utilization_ratio,
         violations,
     })
 }
@@ -971,114 +999,29 @@ pub fn analyze_portfolio_risk(
     }
 
     let candidate_projection = if let Some(candidate) = candidate {
-        if !mandate.allowed_instruments.is_empty()
-            && !mandate.allowed_instruments.contains(&candidate.instrument)
-        {
-            violations.push(RiskPolicyViolation {
-                code: "MANDATE_INSTRUMENT_NOT_ALLOWED",
-                scope: candidate.instrument.clone(),
-                observed: "candidate".to_owned(),
-                limit: "mandate.allowed_instruments".to_owned(),
-            });
-        }
-        if !policy.allowed_instruments.is_empty()
-            && !policy.allowed_instruments.contains(&candidate.instrument)
-        {
-            violations.push(RiskPolicyViolation {
-                code: "INSTRUMENT_NOT_ALLOWED",
-                scope: candidate.instrument.clone(),
-                observed: "candidate".to_owned(),
-                limit: "policy.allowed_instruments".to_owned(),
-            });
-        }
-        let notional = positive_decimal("candidate_notional_usd", &candidate.notional_usd)?;
-        let candidate_loss = decimal(
-            "candidate_worst_case_loss_usd",
-            &candidate.worst_case_loss_usd,
-        )?
-        .abs();
-        let leverage = positive_decimal("candidate_leverage", &candidate.leverage)?;
-        compare_limit(
-            &mut violations,
-            "MAX_LOSS_PER_TRADE",
-            &candidate.instrument,
-            candidate_loss,
-            &policy.max_loss_per_trade_usd,
-        )?;
-        compare_limit(
-            &mut violations,
-            "MAX_LEVERAGE",
-            &candidate.instrument,
-            leverage,
-            &policy.max_leverage,
-        )?;
-        compare_limit(
-            &mut violations,
-            "MANDATE_LEVERAGE_CEILING",
-            &candidate.instrument,
-            leverage,
-            &mandate.leverage_ceiling,
-        )?;
-
         let current_instrument = instrument_exposure
             .iter()
             .find(|row| row.key == candidate.instrument)
             .map(|row| decimal("instrument_gross", &row.gross_notional_usd))
             .transpose()?
             .unwrap_or(Decimal::ZERO);
-        let projected_gross = gross + notional;
-        let projected_instrument = current_instrument + notional;
-        compare_limit(
-            &mut violations,
-            "MAX_ACCOUNT_GROSS_NOTIONAL_PROJECTED",
-            "account",
-            projected_gross,
-            &policy.max_account_gross_notional_usd,
+        let current_imr = account_risk
+            .initial_margin_requirement_usd
+            .as_deref()
+            .map(|value| decimal("initial_margin_requirement_usd", value))
+            .transpose()?
+            .unwrap_or(Decimal::ZERO);
+        let candidate_limits = evaluate_candidate_limits(
+            &mandate,
+            &policy,
+            &candidate,
+            total_equity,
+            gross,
+            current_instrument,
+            current_imr,
         )?;
-        compare_limit(
-            &mut violations,
-            "MAX_INSTRUMENT_GROSS_NOTIONAL_PROJECTED",
-            &candidate.instrument,
-            projected_instrument,
-            &policy.max_instrument_gross_notional_usd,
-        )?;
-
-        let projected_margin = if total_equity > Decimal::ZERO {
-            let current_imr = account_risk
-                .initial_margin_requirement_usd
-                .as_deref()
-                .map(|value| decimal("initial_margin_requirement_usd", value))
-                .transpose()?
-                .unwrap_or(Decimal::ZERO);
-            Some(
-                ((current_imr + notional / leverage) / total_equity)
-                    .normalize()
-                    .to_string(),
-            )
-        } else {
-            None
-        };
-        if let Some(value) = projected_margin.as_deref() {
-            compare_limit(
-                &mut violations,
-                "MAX_MARGIN_UTILIZATION_PROJECTED",
-                "account",
-                decimal("projected_margin_utilization", value)?,
-                &policy.max_margin_utilization_ratio,
-            )?;
-        }
-
-        Some(CandidateProjection {
-            instrument: candidate.instrument,
-            direction: candidate.direction,
-            additive_new_risk: true,
-            notional_usd: notional.normalize().to_string(),
-            worst_case_loss_usd: candidate_loss.normalize().to_string(),
-            leverage: leverage.normalize().to_string(),
-            projected_account_gross_notional_usd: projected_gross.normalize().to_string(),
-            projected_instrument_gross_notional_usd: projected_instrument.normalize().to_string(),
-            projected_margin_utilization_ratio: projected_margin,
-        })
+        violations.extend(candidate_limits.violations);
+        Some(candidate_limits.projection)
     } else {
         None
     };
@@ -1398,7 +1341,6 @@ mod tests {
             capital_base_drawdown_ratio: "0".to_owned(),
             daily_realized_loss_usd: "0".to_owned(),
             account_is_fresh: true,
-            correlated_cluster_gross_notional_usd: BTreeMap::new(),
         }
     }
 
