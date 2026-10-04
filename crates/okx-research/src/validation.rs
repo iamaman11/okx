@@ -680,6 +680,57 @@ mod tests {
     }
 
     #[test]
+    fn final_oos_poison_cannot_enter_train_or_validation_rows() {
+        let (left_root, left_store) = temp_store();
+        let (right_root, right_store) = temp_store();
+        let left_parent = parent_dataset(None);
+        let right_parent = parent_dataset(Some("999999"));
+        let (left_parent_id, _) = left_store
+            .publish_evidence(&left_parent)
+            .expect("left parent");
+        let (right_parent_id, _) = right_store
+            .publish_evidence(&right_parent)
+            .expect("right parent");
+
+        let left = prepare_baseline_validation_split(
+            &left_store,
+            &left_parent_id,
+            BaselineStrategyKind::CloseMomentum,
+        )
+        .expect("left split");
+        let right = prepare_baseline_validation_split(
+            &right_store,
+            &right_parent_id,
+            BaselineStrategyKind::CloseMomentum,
+        )
+        .expect("right split");
+
+        let left_train: ReplayDatasetArtifact = left_store
+            .read_evidence_json(&left.train.manifest.replay_dataset_artifact_id)
+            .expect("left train");
+        let right_train: ReplayDatasetArtifact = right_store
+            .read_evidence_json(&right.train.manifest.replay_dataset_artifact_id)
+            .expect("right train");
+        let left_validation: ReplayDatasetArtifact = left_store
+            .read_evidence_json(&left.validation.manifest.replay_dataset_artifact_id)
+            .expect("left validation");
+        let right_validation: ReplayDatasetArtifact = right_store
+            .read_evidence_json(&right.validation.manifest.replay_dataset_artifact_id)
+            .expect("right validation");
+
+        assert_eq!(left_train.candles, right_train.candles);
+        assert_eq!(left_validation.candles, right_validation.candles);
+        assert_ne!(left_parent_id, right_parent_id);
+        assert_ne!(
+            left.validation_spec.validation_spec_id,
+            right.validation_spec.validation_spec_id
+        );
+
+        let _ = std::fs::remove_dir_all(left_root);
+        let _ = std::fs::remove_dir_all(right_root);
+    }
+
+    #[test]
     fn validation_spec_is_frozen_and_strategy_metadata_drives_purge() {
         let spec = ValidationSpec::build(
             id('a'),
