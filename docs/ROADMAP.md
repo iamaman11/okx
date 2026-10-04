@@ -351,7 +351,25 @@ Stage-3 final acceptance must emit one bounded `okx.stage-acceptance/v1` over on
 
 Exit: strategies are scientifically testable/reproducible and can progress through BACKTESTED/PAPER/SHADOW without live money or chat-history dependence.
 
-**Planning freeze:** this is the final Stage-3 architecture pass before implementation. Current cursor is **3A v1 implementation**. New framework layers or methods require a reproduced source/runtime/test failure, not speculative completeness.
+**Stage 3A acceptance — PASS/CLOSED (2026-10-04).**
+
+Accepted evidence:
+- implementation PR #201; tested head `ab4ace3f3c46fdb414625660346587ae852fe912`;
+- accepted source tree `5d9a73e385022e10792d9fa75b1c5b70f6aecdb6`, identical in merged main `2c248b945494e6012e22b3dd2b313fd87dfab3d5`;
+- PR CI run `37206445119`: all required Linux, Windows, architecture and Cloudflare MCP jobs PASS;
+- exact Windows bundle artifact `11305160431` installed by the existing controller; provenance persisted; agent restart PASS;
+- production Cloudflare Worker deploy from merged main PASS; runtime remained PASS/connected/session-fresh on tool contract `okx.mcp.tools/2026-10-04.1`;
+- primary Cloudflare MCP black-box `research_capabilities` PASS/FRESH and bound to the accepted source tree;
+- primary Tier-A BTC/ETH/DOGE 1H inspections completed with immutable candle/funding/reference artifacts, zero explicit candle gaps, and the expected fail-closed `INSUFFICIENT_REFERENCE_HISTORY` verdict because a current instrument snapshot is not silently treated as historical point-in-time truth;
+- primary Tier-B BTC historical-trades probe PASS/FRESH with 20 observed events, exact raw and normalized hashes, separate capture/chunk identities, explicit availability/continuity semantics, and no bulk rows returned through MCP;
+- invalid Tier-B shape was rejected by the Worker and an out-of-range `trade_limit=101` was rejected by the connector schema;
+- post-acceptance runtime remained PASS/FRESH; account remained coherent/reconciled with zero open positions and zero pending orders; Stage 3A has no exchange mutation authority.
+
+Stage 3A exit is satisfied because the application can now prove what admitted historical data exists, its source/provenance/availability semantics, and where historical reference coverage is insufficient without inventing missing truth.
+
+**Current cursor: Stage 3B — Deterministic Replay Kernel.**
+
+The Stage-3 design freeze remains in force. New framework layers or methods require a reproduced source/runtime/test failure, not speculative completeness.
 
 ### Stage 4 — EXECUTION + TCA
 

@@ -836,7 +836,7 @@ The first implementation is deliberately narrow so the research truth layer can 
 - 1H Tier-A cadence;
 - candles + funding + point-in-time instrument/reference timeline;
 - historical mark/index evidence only when required by the admitted strategy/risk claim;
-- one bounded BTC-USDT-SWAP Tier-B archive sample for **schema/provenance/gap semantics proof**, not a generic L2 engine.
+- one bounded BTC-USDT-SWAP Tier-B historical-trades event sample for **schema/provenance/event-continuity semantics proof**, not a generic L2 engine. Stage 3A v1 uses the existing bounded OKX public REST owner and deliberately does not add an archive downloader.
 
 Stage 3A v1 explicitly does not attempt all OKX products, all cadences or full L2 history.
 
@@ -866,7 +866,19 @@ Any larger delta requires a reproduced product/ownership failure and explicit ar
 
 The accepted #160/ROADMAP contract plus these invariants is the final pre-implementation architecture pass.
 
-The next cursor is **Stage 3A v1 implementation**. Do not add framework layers, services, statistical methods or storage authorities for speculative completeness. Any non-planned structural delta requires a reproduced source/runtime/test contradiction and explicit architecture review.
+Stage 3A v1 is **PASS/CLOSED** on accepted source tree `5d9a73e385022e10792d9fa75b1c5b70f6aecdb6`.
+
+Accepted Stage-3A runtime shape:
+- exactly one new pure `okx-research` crate;
+- no new Tokio runtime, daemon, scheduler/poller, operational database, transport, live fact owner or exchange mutation authority;
+- historical acquisition remains in the existing OKX public REST/rate-budget owner;
+- `capture_id` binds exact raw response bytes while `chunk_id` binds canonical normalized evidence, so transport-envelope timing noise does not destroy normalized idempotency;
+- immutable content-addressed evidence/cache/checkpoint boundaries persist locally; bulk historical rows do not cross MCP;
+- Tier-A current-reference evidence is explicitly current-only and produces `INSUFFICIENT_REFERENCE_HISTORY` when historical point-in-time coverage cannot be proven;
+- the bounded Tier-B v1 proof uses BTC historical trade events through the existing public REST owner rather than introducing a separate archive acquisition subsystem;
+- the external research surface remains `research_capabilities` + `research`.
+
+The next cursor is **Stage 3B — Deterministic Replay Kernel**. Do not add framework layers, services, statistical methods or storage authorities for speculative completeness. Any non-planned structural delta requires a reproduced source/runtime/test contradiction and explicit architecture review.
 
 ## Non-goals
 
