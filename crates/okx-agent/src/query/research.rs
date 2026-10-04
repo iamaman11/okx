@@ -27,9 +27,9 @@ pub const RESEARCH_TIER_B_INSPECTION_SCHEMA_V1: &str = "okx.research-tier-b-insp
 pub const RESEARCH_REPLAY_RESULT_SCHEMA_V1: &str = "okx.research-replay-summary/v1";
 pub const RESEARCH_ARTIFACT_FAILURE_CODE: &str = "RESEARCH_ARTIFACT_FAILURE";
 pub const INSUFFICIENT_REFERENCE_HISTORY_CODE: &str = "INSUFFICIENT_REFERENCE_HISTORY";
-const PARSER_VERSION_V1: &str = "okx.public-history-parser/v1";
-const NORMALIZATION_VERSION_V1: &str = "okx.research-normalizer/v1";
-const ONE_HOUR_MS: u64 = 3_600_000;
+pub(super) const PARSER_VERSION_V1: &str = "okx.public-history-parser/v1";
+pub(super) const NORMALIZATION_VERSION_V1: &str = "okx.research-normalizer/v1";
+pub(super) const ONE_HOUR_MS: u64 = 3_600_000;
 const NORMAL_RESULT_TARGET_BYTES: u64 = 12_288;
 
 #[derive(Serialize)]
@@ -49,6 +49,11 @@ struct ResearchCapabilitiesResult {
     replay_mechanics_provenance: [&'static str; 2],
     replay_requires_artifact_id: bool,
     replay_bulk_events_over_mcp: bool,
+    validation_instruments: [&'static str; 1],
+    validation_target_candles_min: u16,
+    validation_target_candles_max: u16,
+    validation_pages_per_call: usize,
+    validation_checkpointed: bool,
     normal_result_target_bytes: u64,
     source_tree: &'static str,
     source_tree_bound: bool,
@@ -215,6 +220,27 @@ pub(crate) async fn dispatch(
             )
             .await
         }
+        AgentOperation::Research {
+            request:
+                ResearchRequest::PrepareValidationDataset {
+                    catalog_version: _,
+                    instrument,
+                    bar,
+                    target_candle_count,
+                    checkpoint_artifact_id,
+                },
+        } => {
+            super::research_validation::prepare_validation_dataset(
+                request,
+                context,
+                generated_at,
+                instrument,
+                bar,
+                *target_candle_count,
+                checkpoint_artifact_id.as_deref(),
+            )
+            .await
+        }
         _ => Ok(unavailable(request, generated_at)),
     }
 }
@@ -223,7 +249,7 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
     let result = ResearchCapabilitiesResult {
         schema: RESEARCH_CAPABILITIES_SCHEMA_V1,
         catalog_version: RESEARCH_CATALOG_VERSION_V1,
-        stage: "3B_V1",
+        stage: "3C_V1_FOUNDATION",
         tier_a_instruments: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
         tier_a_bars: ["1H"],
         tier_b_instruments: ["BTC-USDT-SWAP"],
@@ -236,6 +262,11 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
         replay_mechanics_provenance: ["declared_counterfactual", "historical_observed"],
         replay_requires_artifact_id: true,
         replay_bulk_events_over_mcp: false,
+        validation_instruments: ["BTC-USDT-SWAP"],
+        validation_target_candles_min: super::research_validation::VALIDATION_TARGET_CANDLES_MIN,
+        validation_target_candles_max: super::research_validation::VALIDATION_TARGET_CANDLES_MAX,
+        validation_pages_per_call: super::research_validation::VALIDATION_PAGES_PER_CALL,
+        validation_checkpointed: true,
         normal_result_target_bytes: NORMAL_RESULT_TARGET_BYTES,
         source_tree: BUILD_SOURCE_TREE,
         source_tree_bound: BUILD_SOURCE_TREE != "UNAVAILABLE",

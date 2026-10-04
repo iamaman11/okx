@@ -62,8 +62,9 @@ pub use statistics::{
     sample_covariance_matrix,
 };
 pub use strategy::{
-    BASELINE_STRATEGY_VERSION_V1, BarDecisionInput, BaselineStrategyKind, StrategyDecision,
-    evaluate_baseline_strategy,
+    BASELINE_STRATEGY_VERSION_V1, BarDecisionInput, BaselineStrategyKind,
+    STRATEGY_RESEARCH_METADATA_VERSION_V1, StrategyDecision, StrategyParameterSurface,
+    StrategyResearchMetadata, baseline_strategy_research_metadata, evaluate_baseline_strategy,
 };
 
 use std::str::FromStr;
