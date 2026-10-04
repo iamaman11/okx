@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use chrono::Utc;
 use okx_analysis::{
     AnalysisError, CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, COST_ANALYSIS_SCHEMA_V1,
@@ -52,6 +54,7 @@ mod account;
 mod analysis;
 mod execution;
 mod market;
+mod research;
 mod universal;
 
 pub const P1_NOT_AVAILABLE_CODE: &str = "P1_OPERATION_NOT_AVAILABLE";
@@ -127,6 +130,7 @@ pub struct ObservationQueryContext<'a> {
     account_fallback: Option<&'a AccountBootstrapper>,
     private_ws: Option<&'a PrivateWsHandle>,
     execution: Option<&'a ExecutionRuntime>,
+    research_root: Option<&'a Path>,
 }
 
 impl<'a> ObservationQueryContext<'a> {
@@ -139,6 +143,7 @@ impl<'a> ObservationQueryContext<'a> {
             account_fallback: None,
             private_ws: None,
             execution: None,
+            research_root: None,
         }
     }
 
@@ -162,6 +167,7 @@ impl<'a> ObservationQueryContext<'a> {
             account_fallback,
             private_ws: None,
             execution: None,
+            research_root: None,
         }
     }
 
@@ -205,6 +211,26 @@ impl<'a> ObservationQueryContext<'a> {
         private_ws: Option<&'a PrivateWsHandle>,
         execution: Option<&'a ExecutionRuntime>,
     ) -> Self {
+        Self::live_with_execution_and_research(
+            public_ws,
+            market_fallback,
+            mailbox_telemetry,
+            account_fallback,
+            private_ws,
+            execution,
+            None,
+        )
+    }
+
+    pub const fn live_with_execution_and_research(
+        public_ws: &'a PublicWsHandle,
+        market_fallback: &'a MarketBootstrapper,
+        mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
+        account_fallback: Option<&'a AccountBootstrapper>,
+        private_ws: Option<&'a PrivateWsHandle>,
+        execution: Option<&'a ExecutionRuntime>,
+        research_root: Option<&'a Path>,
+    ) -> Self {
         Self {
             standalone_reference: None,
             market_fallback: Some(market_fallback),
@@ -213,6 +239,7 @@ impl<'a> ObservationQueryContext<'a> {
             account_fallback,
             private_ws,
             execution,
+            research_root,
         }
     }
 }
@@ -283,6 +310,9 @@ pub(crate) async fn dispatch(
         }
         AgentOperation::QueryCapabilities | AgentOperation::Query { .. } => {
             universal::dispatch(request, context, generated_at).await
+        }
+        AgentOperation::ResearchCapabilities | AgentOperation::Research { .. } => {
+            research::dispatch(request, context, generated_at).await
         }
         AgentOperation::AccountSnapshot
         | AgentOperation::AccountSummary
