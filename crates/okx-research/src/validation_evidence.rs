@@ -10,8 +10,9 @@ use serde_json::Value;
 
 use crate::{
     BUILD_SOURCE_TREE, EXPERIMENT_RESULT_SCHEMA_V1, ReplayDatasetArtifact, ResearchArtifactStore,
-    ResearchError, ResearchFamily, ResearchTrialOutcome, ResearchTrialRef, ValidationPartitionRole,
-    ValidationSpec, VALIDATION_EVIDENCE_POLICY_V1, build_baseline_hypothesis, canonical_sha256,
+    ResearchError, ResearchFamily, ResearchTrialOutcome, ResearchTrialRef,
+    VALIDATION_EVIDENCE_POLICY_V1, ValidationPartitionRole, ValidationSpec,
+    build_baseline_hypothesis, canonical_sha256,
 };
 
 pub const PRE_HOLDOUT_EVIDENCE_SCHEMA_V1: &str = "okx.research.pre-holdout-evidence/v1";
@@ -429,10 +430,13 @@ fn replay_result_view(value: &Value) -> Result<ReplayResultView, ResearchError> 
     {
         return Err(ResearchError::ArtifactIdentityMismatch);
     }
-    let trades = value
-        .get("trades")
-        .and_then(Value::as_array)
-        .ok_or(ResearchError::ReplayMissingField("experiment_result.trades"))?;
+    let trades =
+        value
+            .get("trades")
+            .and_then(Value::as_array)
+            .ok_or(ResearchError::ReplayMissingField(
+                "experiment_result.trades",
+            ))?;
     let trade_count = usize_field(value, "trade_count")?;
     if trades.len() != trade_count {
         return Err(ResearchError::ArtifactIdentityMismatch);
@@ -613,8 +617,8 @@ mod tests {
     #[test]
     fn replay_result_view_reconciles_trade_totals() {
         let dataset_id = format!("sha256:{}", "d".repeat(64));
-        let view = replay_result_view(&result_json(&dataset_id, &["1", "-0.5", "0.25"]))
-            .expect("view");
+        let view =
+            replay_result_view(&result_json(&dataset_id, &["1", "-0.5", "0.25"])).expect("view");
         assert_eq!(view.dataset_id, dataset_id);
         assert_eq!(view.trade_count, 3);
         assert_eq!(view.net_pnl_quote, "0.75");
