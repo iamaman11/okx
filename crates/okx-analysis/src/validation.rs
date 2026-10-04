@@ -15,8 +15,8 @@ pub const VALIDATION_COST_STRESS_ALGORITHM_V1: &str =
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationSampleStatistics {
-    pub schema: &'static str,
-    pub algorithm_version: &'static str,
+    pub schema: String,
+    pub algorithm_version: String,
     pub sample_count: usize,
     pub total_net_pnl_quote: String,
     pub mean_net_pnl_quote: String,
@@ -41,8 +41,8 @@ pub struct ValidationCostStressPoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationCostStress {
-    pub schema: &'static str,
-    pub algorithm_version: &'static str,
+    pub schema: String,
+    pub algorithm_version: String,
     pub points: Vec<ValidationCostStressPoint>,
     pub monotonic_nonincreasing: bool,
 }
@@ -106,8 +106,8 @@ pub fn analyze_validation_pnl_samples(
         (gross_loss_abs > Decimal::ZERO).then(|| normalized(gross_profit / gross_loss_abs));
 
     Ok(ValidationSampleStatistics {
-        schema: VALIDATION_SAMPLE_STATISTICS_SCHEMA_V1,
-        algorithm_version: VALIDATION_STATISTICS_ALGORITHM_V1,
+        schema: VALIDATION_SAMPLE_STATISTICS_SCHEMA_V1.to_owned(),
+        algorithm_version: VALIDATION_STATISTICS_ALGORITHM_V1.to_owned(),
         sample_count: samples.len(),
         total_net_pnl_quote: normalized(total),
         mean_net_pnl_quote: normalized(mean),
@@ -158,8 +158,8 @@ pub fn analyze_validation_cost_stress(
         .collect();
 
     Ok(ValidationCostStress {
-        schema: VALIDATION_COST_STRESS_SCHEMA_V1,
-        algorithm_version: VALIDATION_COST_STRESS_ALGORITHM_V1,
+        schema: VALIDATION_COST_STRESS_SCHEMA_V1.to_owned(),
+        algorithm_version: VALIDATION_COST_STRESS_ALGORITHM_V1.to_owned(),
         points,
         monotonic_nonincreasing,
     })
