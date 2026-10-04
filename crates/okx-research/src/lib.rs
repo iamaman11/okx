@@ -962,12 +962,7 @@ pub fn build_tier_b_trade_chunk(
         left.event_time_ms
             .parse::<u64>()
             .unwrap_or_default()
-            .cmp(
-                &right
-                    .event_time_ms
-                    .parse::<u64>()
-                    .unwrap_or_default(),
-            )
+            .cmp(&right.event_time_ms.parse::<u64>().unwrap_or_default())
             .then_with(|| left.trade_id.cmp(&right.trade_id))
     });
 
@@ -1413,8 +1408,14 @@ mod tests {
         assert_eq!(chunk.rows.len(), 2);
         assert_eq!(chunk.rows[0].trade_id, "1001");
         assert_eq!(chunk.rows[0].available_time_ms, chunk.rows[0].event_time_ms);
-        assert_eq!(chunk.manifest.oldest_event_time_ms.as_deref(), Some("1700000000100"));
-        assert_eq!(chunk.manifest.newest_event_time_ms.as_deref(), Some("1700000000200"));
+        assert_eq!(
+            chunk.manifest.oldest_event_time_ms.as_deref(),
+            Some("1700000000100")
+        );
+        assert_eq!(
+            chunk.manifest.newest_event_time_ms.as_deref(),
+            Some("1700000000200")
+        );
 
         let mut duplicate = trades();
         duplicate[1].trade_id = duplicate[0].trade_id.clone();
