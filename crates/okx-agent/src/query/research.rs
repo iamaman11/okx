@@ -54,6 +54,9 @@ struct ResearchCapabilitiesResult {
     validation_target_candles_max: u16,
     validation_pages_per_call: usize,
     validation_checkpointed: bool,
+    validation_split_strategies: [&'static str; 2],
+    validation_final_oos_sealed: bool,
+    validation_final_oos_consumed_by_split: bool,
     normal_result_target_bytes: u64,
     source_tree: &'static str,
     source_tree_bound: bool,
@@ -241,6 +244,28 @@ pub(crate) async fn dispatch(
             )
             .await
         }
+        AgentOperation::Research {
+            request:
+                ResearchRequest::PrepareValidationSplit {
+                    catalog_version: _,
+                    instrument,
+                    parent_replay_dataset_artifact_id,
+                    strategy,
+                    train_candle_count,
+                    validation_candle_count,
+                    final_oos_candle_count,
+                },
+        } => super::research_validation_split::prepare_validation_split(
+            request,
+            context,
+            generated_at,
+            instrument,
+            parent_replay_dataset_artifact_id,
+            *strategy,
+            *train_candle_count,
+            *validation_candle_count,
+            *final_oos_candle_count,
+        ),
         _ => Ok(unavailable(request, generated_at)),
     }
 }
@@ -249,7 +274,7 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
     let result = ResearchCapabilitiesResult {
         schema: RESEARCH_CAPABILITIES_SCHEMA_V1,
         catalog_version: RESEARCH_CATALOG_VERSION_V1,
-        stage: "3C_V1_FOUNDATION",
+        stage: "3C_V1_SPLIT",
         tier_a_instruments: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
         tier_a_bars: ["1H"],
         tier_b_instruments: ["BTC-USDT-SWAP"],
@@ -267,6 +292,9 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
         validation_target_candles_max: super::research_validation::VALIDATION_TARGET_CANDLES_MAX,
         validation_pages_per_call: super::research_validation::VALIDATION_PAGES_PER_CALL,
         validation_checkpointed: true,
+        validation_split_strategies: ["no_trade", "close_momentum"],
+        validation_final_oos_sealed: true,
+        validation_final_oos_consumed_by_split: false,
         normal_result_target_bytes: NORMAL_RESULT_TARGET_BYTES,
         source_tree: BUILD_SOURCE_TREE,
         source_tree_bound: BUILD_SOURCE_TREE != "UNAVAILABLE",
