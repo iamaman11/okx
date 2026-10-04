@@ -311,14 +311,7 @@ pub(super) async fn prepare_validation_dataset(
                     Ok(value) => value,
                     Err(error) => return Ok(research_failure(request, generated_at, error)),
                 };
-                return checkpoint_response(
-                    request,
-                    generated_at,
-                    &store,
-                    next,
-                    state,
-                    Vec::new(),
-                );
+                return checkpoint_response(request, generated_at, &store, next, state, Vec::new());
             }
 
             let candles = match load_candles(&store, &checkpoint.completed_pages) {
