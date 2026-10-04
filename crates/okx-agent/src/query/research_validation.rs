@@ -5,10 +5,11 @@ use okx_protocol::{
     RESEARCH_CATALOG_VERSION_V1,
 };
 use okx_research::{
-    BUILD_SOURCE_TREE, DatasetManifest, ReferenceCoverageStatus, ReplayDatasetArtifact,
-    ResearchArtifactStore, ResearchCandle, ResearchCheckpoint, ResearchCheckpointPage,
-    ResearchCheckpointPhase, ResearchCheckpointTerminal, ResearchChunkArtifact,
-    ResearchFundingEvent, ResearchRange, ResearchSourceKind, ResearchTier, SourceRequest,
+    BUILD_SOURCE_TREE, DatasetManifest, REFERENCE_WINDOW_SCHEMA_V1, ReferenceCoverageStatus,
+    ReferenceCoverageWindow, ReplayDatasetArtifact, ResearchArtifactStore, ResearchCandle,
+    ResearchCheckpoint, ResearchCheckpointPage, ResearchCheckpointPhase,
+    ResearchCheckpointTerminal, ResearchChunkArtifact, ResearchFundingEvent,
+    ResearchInstrumentReference, ResearchRange, ResearchSourceKind, ResearchTier, SourceRequest,
     build_candle_chunk, build_chunk_artifact, build_funding_chunk, build_reference_chunk,
     detect_fixed_interval_gaps,
 };
@@ -323,6 +324,83 @@ pub(super) async fn prepare_validation_dataset(
                 Ok(value) => value,
                 Err(error) => return Ok(research_failure(request, generated_at, error)),
             };
+            let reference = match market.research_current_reference(instrument).await {
+                Ok(value) => value,
+                Err(error) => return Ok(source_failure(request, generated_at, error)),
+            };
+            let observed_ms = match reference.acquired_at_ms.parse::<u64>() {
+                Ok(value) => value,
+                Err(_) => {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        RESEARCH_ARTIFACT_FAILURE_CODE,
+                        "captured reference timestamp is invalid".to_owned(),
+                        false,
+                    ));
+                }
+            };
+            let Some(observed_through) = observed_ms.checked_add(1) else {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    RESEARCH_ARTIFACT_FAILURE_CODE,
+                    "captured reference timestamp overflowed u64".to_owned(),
+                    false,
+                ));
+            };
+            let reference_generation = reference.reference_generation.clone();
+            let reference_source = SourceRequest {
+                provider: "okx_public_rest".to_owned(),
+                resource: "/api/v5/public/instruments".to_owned(),
+                instrument_id: instrument.to_owned(),
+                bar: None,
+                range: ResearchRange::new(observed_ms.to_string(), observed_through.to_string())
+                    .expect("one millisecond reference capture range"),
+                parameters: BTreeMap::from([
+                    ("semantics".to_owned(), "current_snapshot_only".to_owned()),
+                    (
+                        "reference_generation".to_owned(),
+                        reference_generation.clone(),
+                    ),
+                    ("available_from_ms".to_owned(), observed_ms.to_string()),
+                ]),
+            };
+            let (reference_chunk, _) = match build_reference_chunk(
+                reference_source,
+                reference.acquired_at_ms,
+                &reference.raw_body,
+                &reference.instrument,
+                observed_ms.to_string(),
+                observed_through.to_string(),
+                observed_ms.to_string(),
+                reference_generation,
+                PARSER_VERSION_V1,
+                NORMALIZATION_VERSION_V1,
+                BUILD_SOURCE_TREE,
+            ) {
+                Ok(value) => value,
+                Err(error) => return Ok(research_failure(request, generated_at, error)),
+            };
+            if let Err(error) = store
+                .publish_source_bytes(&reference_chunk.manifest.raw_sha256, &reference.raw_body)
+            {
+                return Ok(research_failure(request, generated_at, error));
+            }
+            let reference_artifact = match build_chunk_artifact(&reference_chunk) {
+                Ok(value) => value,
+                Err(error) => return Ok(research_failure(request, generated_at, error)),
+            };
+            let (reference_artifact_id, _) = match store.publish_evidence(&reference_artifact) {
+                Ok(value) => value,
+                Err(error) => return Ok(research_failure(request, generated_at, error)),
+            };
+            checkpoint
+                .completed_pages
+                .push(page_ref(&reference_artifact, reference_artifact_id));
+
             let next = match ResearchCheckpoint::build(
                 parent_checkpoint_id,
                 instrument,
@@ -506,13 +584,11 @@ pub(super) async fn prepare_validation_dataset(
 
             finalize_dataset(
                 request,
-                context,
                 generated_at,
                 &store,
                 checkpoint,
                 parent_checkpoint_id,
             )
-            .await
         }
         ResearchCheckpointPhase::InsufficientData => checkpoint_response(
             request,
@@ -526,17 +602,14 @@ pub(super) async fn prepare_validation_dataset(
     }
 }
 
-async fn finalize_dataset(
+fn finalize_dataset(
     request: &AgentRequest,
-    context: ObservationQueryContext<'_>,
     generated_at: &str,
     store: &ResearchArtifactStore,
     checkpoint: ResearchCheckpoint,
     parent_checkpoint_id: Option<String>,
 ) -> AgentResult<AgentResponse> {
-    let Some(market) = context.market_fallback else {
-        return Ok(super::unavailable(request, generated_at));
-    };
+    let terminal_created_at_ms = checkpoint.created_at_ms.clone();
     let mut candles = match load_candles(store, &checkpoint.completed_pages) {
         Ok(value) => value,
         Err(error) => return Ok(research_failure(request, generated_at, error)),
@@ -571,77 +644,13 @@ async fn finalize_dataset(
         Err(error) => return Ok(research_failure(request, generated_at, error)),
     };
 
-    let reference = match market
-        .research_current_reference(&checkpoint.instrument_id)
-        .await
-    {
-        Ok(value) => value,
-        Err(error) => return Ok(source_failure(request, generated_at, error)),
-    };
-    let observed_ms = match reference.acquired_at_ms.parse::<u64>() {
-        Ok(value) => value,
-        Err(_) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Failed,
-                RESEARCH_ARTIFACT_FAILURE_CODE,
-                "captured reference timestamp is invalid".to_owned(),
-                false,
-            ));
-        }
-    };
-    let Some(observed_through) = observed_ms.checked_add(1) else {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Failed,
-            RESEARCH_ARTIFACT_FAILURE_CODE,
-            "captured reference timestamp overflowed u64".to_owned(),
-            false,
-        ));
-    };
-    let reference_source = SourceRequest {
-        provider: "okx_public_rest".to_owned(),
-        resource: "/api/v5/public/instruments".to_owned(),
-        instrument_id: checkpoint.instrument_id.clone(),
-        bar: None,
-        range: ResearchRange::new(observed_ms.to_string(), observed_through.to_string())
-            .expect("one millisecond reference capture range"),
-        parameters: BTreeMap::from([("semantics".to_owned(), "current_snapshot_only".to_owned())]),
-    };
-    let (reference_chunk, reference_window) = match build_reference_chunk(
-        reference_source,
-        reference.acquired_at_ms.clone(),
-        &reference.raw_body,
-        &reference.instrument,
-        observed_ms.to_string(),
-        observed_through.to_string(),
-        observed_ms.to_string(),
-        reference.reference_generation,
-        PARSER_VERSION_V1,
-        NORMALIZATION_VERSION_V1,
-        BUILD_SOURCE_TREE,
-    ) {
-        Ok(value) => value,
-        Err(error) => return Ok(research_failure(request, generated_at, error)),
-    };
-    if let Err(error) =
-        store.publish_source_bytes(&reference_chunk.manifest.raw_sha256, &reference.raw_body)
-    {
-        return Ok(research_failure(request, generated_at, error));
-    }
-    let reference_artifact = match build_chunk_artifact(&reference_chunk) {
-        Ok(value) => value,
-        Err(error) => return Ok(research_failure(request, generated_at, error)),
-    };
-    let (reference_artifact_id, _) = match store.publish_evidence(&reference_artifact) {
-        Ok(value) => value,
-        Err(error) => return Ok(research_failure(request, generated_at, error)),
-    };
+    let (reference_artifact, reference_window) =
+        match load_frozen_reference(store, &checkpoint.completed_pages) {
+            Ok(value) => value,
+            Err(error) => return Ok(research_failure(request, generated_at, error)),
+        };
 
-    let mut completed_pages = checkpoint.completed_pages;
-    completed_pages.push(page_ref(&reference_artifact, reference_artifact_id));
+    let completed_pages = checkpoint.completed_pages;
 
     let chunk_manifests = match load_chunk_manifests(store, &completed_pages) {
         Ok(value) => value,
@@ -658,7 +667,7 @@ async fn finalize_dataset(
         PARSER_VERSION_V1,
         NORMALIZATION_VERSION_V1,
         BUILD_SOURCE_TREE,
-        utc_now_ms().to_string(),
+        terminal_created_at_ms.clone(),
     ) {
         Ok(value) => value,
         Err(error) => return Ok(research_failure(request, generated_at, error)),
@@ -667,7 +676,7 @@ async fn finalize_dataset(
         manifest.clone(),
         candles.clone(),
         funding.clone(),
-        reference_chunk.rows.first().cloned(),
+        reference_artifact.rows.first().cloned(),
     ) {
         Ok(value) => value,
         Err(error) => return Ok(research_failure(request, generated_at, error)),
@@ -695,7 +704,7 @@ async fn finalize_dataset(
         Some(range.clone()),
         Some(terminal),
         BUILD_SOURCE_TREE,
-        utc_now_ms().to_string(),
+        terminal_created_at_ms,
     ) {
         Ok(value) => value,
         Err(error) => return Ok(research_failure(request, generated_at, error)),
@@ -960,6 +969,68 @@ fn load_funding(
     Ok(rows)
 }
 
+fn load_frozen_reference(
+    store: &ResearchArtifactStore,
+    pages: &[ResearchCheckpointPage],
+) -> Result<
+    (
+        ResearchChunkArtifact<ResearchInstrumentReference>,
+        ReferenceCoverageWindow,
+    ),
+    okx_research::ResearchError,
+> {
+    let mut references = pages
+        .iter()
+        .filter(|page| page.kind == ResearchSourceKind::Reference);
+    let page = references
+        .next()
+        .ok_or(okx_research::ResearchError::MissingField(
+            "validation.reference_page",
+        ))?;
+    if references.next().is_some() {
+        return Err(okx_research::ResearchError::ArtifactIdentityMismatch);
+    }
+
+    let artifact: ResearchChunkArtifact<ResearchInstrumentReference> =
+        store.read_evidence_json(&page.artifact_id)?;
+    artifact.validate()?;
+    if artifact.manifest.kind != ResearchSourceKind::Reference
+        || artifact.manifest.chunk_id != page.chunk_id
+        || artifact.rows.len() != 1
+    {
+        return Err(okx_research::ResearchError::ArtifactIdentityMismatch);
+    }
+    let reference_generation = artifact
+        .manifest
+        .source
+        .parameters
+        .get("reference_generation")
+        .cloned()
+        .ok_or(okx_research::ResearchError::MissingField(
+            "validation.reference_generation",
+        ))?;
+    let available_from_ms = artifact
+        .manifest
+        .source
+        .parameters
+        .get("available_from_ms")
+        .cloned()
+        .ok_or(okx_research::ResearchError::MissingField(
+            "validation.reference_available_from_ms",
+        ))?;
+
+    let window = ReferenceCoverageWindow {
+        schema: REFERENCE_WINDOW_SCHEMA_V1.to_owned(),
+        instrument_id: artifact.manifest.source.instrument_id.clone(),
+        observed_from_ms: artifact.manifest.source.range.begin_ms.clone(),
+        observed_through_ms: artifact.manifest.source.range.end_ms.clone(),
+        available_from_ms,
+        reference_generation,
+        reference_hash: artifact.manifest.normalized_sha256.clone(),
+    };
+    Ok((artifact, window))
+}
+
 fn load_chunk_manifests(
     store: &ResearchArtifactStore,
     pages: &[ResearchCheckpointPage],
@@ -1087,7 +1158,7 @@ fn research_failure(
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use okx_observation::HistoryCandle;
+    use okx_observation::{FundingRequirement, HistoryCandle, InstrumentSpec, InstrumentType};
     use okx_research::{ResearchChunkArtifact, ResearchError};
 
     use super::*;
@@ -1118,6 +1189,39 @@ mod tests {
             volume_currency: "1".to_owned(),
             volume_quote: Some("1".to_owned()),
             confirmed: true,
+        }
+    }
+
+    fn instrument_spec() -> InstrumentSpec {
+        InstrumentSpec {
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            instrument_type: InstrumentType::Swap,
+            instrument_family: Some("BTC-USDT".to_owned()),
+            underlying: Some("BTC-USDT".to_owned()),
+            state: "live".to_owned(),
+            rule_type: None,
+            funding_requirement: FundingRequirement::Required,
+            base_currency: Some("BTC".to_owned()),
+            quote_currency: Some("USDT".to_owned()),
+            settle_currency: Some("USDT".to_owned()),
+            tick_size: "0.1".to_owned(),
+            lot_size: "0.01".to_owned(),
+            min_size: "0.01".to_owned(),
+            max_limit_size: Some("100".to_owned()),
+            max_market_size: Some("100".to_owned()),
+            max_limit_amount: None,
+            max_market_amount: None,
+            contract_type: Some("linear".to_owned()),
+            contract_value: Some("0.01".to_owned()),
+            contract_value_currency: Some("BTC".to_owned()),
+            fee_group_id: None,
+            max_leverage: Some("100".to_owned()),
+            list_time_ms: Some("1600000000000".to_owned()),
+            expiry_time_ms: None,
+            initial_price_limit_pct: None,
+            floating_price_limit_pct: None,
+            maximum_price_limit_pct: None,
+            upcoming_rule_changes: Vec::new(),
         }
     }
 
@@ -1154,6 +1258,57 @@ mod tests {
             build_chunk_artifact(&chunk).expect("artifact");
         let (artifact_id, _) = store.publish_evidence(&artifact).expect("publish");
         page_ref(&artifact, artifact_id)
+    }
+
+    #[test]
+    fn frozen_reference_page_round_trips_exact_window_and_rejects_duplicates() {
+        let (root, store) = temp_store();
+        let observed_ms = "1700400000000";
+        let observed_through_ms = "1700400000001";
+        let generation = "reference-generation-1";
+        let source = SourceRequest {
+            provider: "okx_public_rest".to_owned(),
+            resource: "/api/v5/public/instruments".to_owned(),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            bar: None,
+            range: ResearchRange::new(observed_ms, observed_through_ms).expect("range"),
+            parameters: BTreeMap::from([
+                ("semantics".to_owned(), "current_snapshot_only".to_owned()),
+                ("reference_generation".to_owned(), generation.to_owned()),
+                ("available_from_ms".to_owned(), observed_ms.to_owned()),
+            ]),
+        };
+        let (chunk, expected_window) = build_reference_chunk(
+            source,
+            observed_ms,
+            b"reference-raw",
+            &instrument_spec(),
+            observed_ms,
+            observed_through_ms,
+            observed_ms,
+            generation,
+            PARSER_VERSION_V1,
+            NORMALIZATION_VERSION_V1,
+            "0123456789abcdef",
+        )
+        .expect("reference chunk");
+        let artifact = build_chunk_artifact(&chunk).expect("reference artifact");
+        let (artifact_id, _) = store.publish_evidence(&artifact).expect("publish");
+        let page = page_ref(&artifact, artifact_id);
+
+        let (loaded, window) =
+            load_frozen_reference(&store, std::slice::from_ref(&page)).expect("load frozen");
+        assert_eq!(loaded.rows, artifact.rows);
+        assert_eq!(window, expected_window);
+        assert!(matches!(
+            load_frozen_reference(&store, &[]),
+            Err(ResearchError::MissingField("validation.reference_page"))
+        ));
+        assert!(matches!(
+            load_frozen_reference(&store, &[page.clone(), page]),
+            Err(ResearchError::ArtifactIdentityMismatch)
+        ));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
