@@ -653,10 +653,8 @@ async fn inspect_tier_b(
             oldest_event_time_ms: chunk.manifest.oldest_event_time_ms,
             newest_event_time_ms: chunk.manifest.newest_event_time_ms,
         },
-        availability_semantics:
-            "exchange event time is a lower bound; retrospective research acquisition is recorded separately",
-        continuity_semantics:
-            "trade ids must be unique; this bounded page does not infer complete tick continuity outside returned events",
+        availability_semantics: "exchange event time is a lower bound; retrospective research acquisition is recorded separately",
+        continuity_semantics: "trade ids must be unique; this bounded page does not infer complete tick continuity outside returned events",
         bulk_rows_returned: false,
         source_tree: BUILD_SOURCE_TREE,
         evidence_store: "PINNED_CONTENT_ADDRESSED",
