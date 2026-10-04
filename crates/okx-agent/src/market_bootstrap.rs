@@ -5,8 +5,9 @@ use okx_api::{
 use okx_observation::{
     FundingHistoryEvent, FundingHistorySnapshot, FundingRequirement, HistoryCandle, InstrumentSpec,
     MarketBootstrap, MarketError, MarketHistoryError, MarketHistorySnapshot, MarketSnapshot,
-    MarketTradesSnapshot, MarketUniverseTicker, OpenInterestHistorySnapshot, ReferenceError,
-    ReferenceRegistry, normalize_research_candles, normalize_research_funding,
+    MarketTrade, MarketTradesSnapshot, MarketUniverseTicker, OpenInterestHistorySnapshot,
+    ReferenceError, ReferenceRegistry, normalize_research_candles, normalize_research_funding,
+    normalize_research_trades,
 };
 use thiserror::Error;
 
@@ -20,6 +21,13 @@ pub struct MarketBootstrapper {
 pub struct ResearchCandleCapture {
     pub raw_body: Vec<u8>,
     pub rows: Vec<HistoryCandle>,
+    pub acquired_at_ms: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResearchTradeCapture {
+    pub raw_body: Vec<u8>,
+    pub rows: Vec<MarketTrade>,
     pub acquired_at_ms: String,
 }
 
@@ -97,6 +105,26 @@ impl MarketBootstrapper {
         let acquired_at_ms = Utc::now().timestamp_millis().max(1).to_string();
         let rows = normalize_research_candles(captured.rows, limit as usize)?;
         Ok(ResearchCandleCapture {
+            raw_body: captured.raw_body,
+            rows,
+            acquired_at_ms,
+        })
+    }
+
+    pub async fn research_trades_page(
+        &self,
+        instrument_id: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<ResearchTradeCapture, MarketBootstrapError> {
+        let captured = self
+            .api
+            .history_trades_page_captured(instrument_id, after, before, limit)
+            .await?;
+        let acquired_at_ms = Utc::now().timestamp_millis().max(1).to_string();
+        let rows = normalize_research_trades(instrument_id, captured.rows, limit as usize)?;
+        Ok(ResearchTradeCapture {
             raw_body: captured.raw_body,
             rows,
             acquired_at_ms,
