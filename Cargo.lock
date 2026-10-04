@@ -1572,6 +1572,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "okx-research"
+version = "0.1.0"
+dependencies = [
+ "okx-observation",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+]
+
+[[package]]
 name = "okx-runtime"
 version = "0.1.0"
 dependencies = [
