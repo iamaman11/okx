@@ -620,6 +620,66 @@ mod tests {
     }
 
     #[test]
+    fn baseline_split_is_contiguous_deterministic_and_keeps_final_oos_sealed() {
+        let (root, store) = temp_store();
+        let parent = parent_dataset(None);
+        let (parent_id, _) = store.publish_evidence(&parent).expect("publish parent");
+
+        let first = prepare_baseline_validation_split(
+            &store,
+            &parent_id,
+            BaselineStrategyKind::CloseMomentum,
+        )
+        .expect("first split");
+        let retry = prepare_baseline_validation_split(
+            &store,
+            &parent_id,
+            BaselineStrategyKind::CloseMomentum,
+        )
+        .expect("retry split");
+
+        assert_eq!(first, retry);
+        assert_eq!(
+            first.split_policy_version,
+            BASELINE_VALIDATION_SPLIT_POLICY_V1
+        );
+        assert_eq!(first.train.manifest.range, range(0, 12 * HOUR_MS));
+        assert_eq!(
+            first.validation.manifest.range,
+            range(12 * HOUR_MS, 16 * HOUR_MS)
+        );
+        assert_eq!(
+            first.final_oos_range,
+            range(16 * HOUR_MS, 20 * HOUR_MS)
+        );
+        assert!(!first.final_oos_consumed);
+        assert_eq!(first.validation_spec.purge_bars, 2);
+        assert_eq!(first.validation_spec.embargo_bars, 0);
+
+        let train: ReplayDatasetArtifact = store
+            .read_evidence_json(&first.train.manifest.replay_dataset_artifact_id)
+            .expect("train");
+        let validation: ReplayDatasetArtifact = store
+            .read_evidence_json(&first.validation.manifest.replay_dataset_artifact_id)
+            .expect("validation");
+        assert_eq!(train.candles.len(), 12);
+        assert_eq!(validation.candles.len(), 4);
+        assert!(train.candles.iter().all(|row| {
+            row.open_time_ms.parse::<u64>().expect("ts") < 12 * HOUR_MS
+        }));
+        assert!(validation.candles.iter().all(|row| {
+            let ts = row.open_time_ms.parse::<u64>().expect("ts");
+            (12 * HOUR_MS..16 * HOUR_MS).contains(&ts)
+        }));
+
+        let evidence_files = std::fs::read_dir(store.evidence_dir())
+            .expect("evidence dir")
+            .count();
+        assert_eq!(evidence_files, 6);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn validation_spec_is_frozen_and_strategy_metadata_drives_purge() {
         let spec = ValidationSpec::build(
             id('a'),
