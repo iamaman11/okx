@@ -696,9 +696,7 @@ fn terminal_result(
     })
 }
 
-fn validate_replay_dataset_artifact(
-    artifact: &ReplayDatasetArtifact,
-) -> Result<(), ResearchError> {
+fn validate_replay_dataset_artifact(artifact: &ReplayDatasetArtifact) -> Result<(), ResearchError> {
     let begin = artifact.manifest.range.begin()?;
     let end = artifact.manifest.range.end()?;
     let mut previous = None::<u64>;
