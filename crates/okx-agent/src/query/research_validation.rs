@@ -609,6 +609,7 @@ fn finalize_dataset(
     checkpoint: ResearchCheckpoint,
     parent_checkpoint_id: Option<String>,
 ) -> AgentResult<AgentResponse> {
+    let terminal_created_at_ms = checkpoint.created_at_ms.clone();
     let mut candles = match load_candles(store, &checkpoint.completed_pages) {
         Ok(value) => value,
         Err(error) => return Ok(research_failure(request, generated_at, error)),
@@ -666,7 +667,7 @@ fn finalize_dataset(
         PARSER_VERSION_V1,
         NORMALIZATION_VERSION_V1,
         BUILD_SOURCE_TREE,
-        utc_now_ms().to_string(),
+        terminal_created_at_ms.clone(),
     ) {
         Ok(value) => value,
         Err(error) => return Ok(research_failure(request, generated_at, error)),
@@ -703,7 +704,7 @@ fn finalize_dataset(
         Some(range.clone()),
         Some(terminal),
         BUILD_SOURCE_TREE,
-        utc_now_ms().to_string(),
+        terminal_created_at_ms,
     ) {
         Ok(value) => value,
         Err(error) => return Ok(research_failure(request, generated_at, error)),
