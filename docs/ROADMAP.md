@@ -256,16 +256,36 @@ ChatGPT/product rule:
 - a fresh chat must be able to inspect/resume by experiment/artifact id;
 - external research surface should remain at most `research_capabilities` + `research` unless a concrete typed-authority boundary proves another tool necessary.
 
+Final pre-implementation invariants:
+- causal timing is explicit: event -> availability -> decision -> earliest execution;
+- Tier-A intrabar ambiguity is conservative/`AMBIGUOUS_FILL`/Tier-B, never guessed favorably;
+- signal/mark/index/execution prices are distinct roles;
+- funding is applied as historical events; fee/cost/capacity assumptions carry provenance;
+- every human/ChatGPT/sweep trial belongs to immutable research-family lineage;
+- final OOS is sealed before opening; descendants cannot reuse consumed holdout as pristine;
+- sample adequacy can produce `INSUFFICIENT_EVIDENCE`;
+- null/simple baselines prove replay accounting before alpha claims;
+- dataset identity records canonical raw + normalized hashes;
+- immutable pinned EvidenceStore is separate from quota-bounded evictable SourceCache;
+- archive ingestion is bounded/untrusted/allowlisted;
+- MCP freshness is separate from research-input freshness; ChatGPT/Cloudflare is never in local paper/shadow decision latency;
+- PAPER = live facts + simulated execution; SHADOW = production-intended decision/risk path stopping at `WOULD_SUBMIT`;
+- positive promotion to PAPER/SHADOW requires explicit operator authorization.
+
 Canonical Stage-3 execution order — exactly four large slices:
 
 1. **3A Research Data Foundation**
+   - **v1 scope:** USDT linear perpetuals; BTC/ETH/DOGE; Tier-A 1H candles + funding + point-in-time reference, mark/index history only where required; one bounded BTC Tier-B source-schema proof;
+   - explicitly not all OKX instruments/cadences/L2 in v1;
+   - unknown historical reference coverage -> `INSUFFICIENT_REFERENCE_HISTORY`;
    - official-source historical acquisition/chunking;
    - immutable dataset/chunk hashes, gap/duplicate/out-of-order evidence;
    - Tier A/Tier B classification;
    - event-time + availability-time semantics;
    - point-in-time universe/reference timeline;
-   - deterministic bounded resume/cursor semantics.
-   - **T1:** parser/hash/gap/current-reference-poison/chunk-boundary fixtures.
+   - deterministic bounded resume/checkpoint semantics;
+   - raw + normalized canonical hashes, pinned-vs-cache storage quotas and hardened archive ingestion.
+   - **T1:** parser/raw+normalized canonical hash/gap/current-reference-poison/chunk-boundary/storage-quota/hostile-archive fixtures.
    - **T2:** identical source -> identical dataset hash; restart/resume equivalence; no second live owner; existing rate/backpressure preserved.
    - **T3:** exact build provenance + dataset binding to parser/normalization/source versions.
    - **T4:** primary MCP acquires/inspects one bounded real Tier-A dataset and, where available, one bounded Tier-B sample without bulk payload.
@@ -275,14 +295,15 @@ Canonical Stage-3 execution order — exactly four large slices:
 2. **3B Deterministic Replay Kernel**
    - one `okx-research` replay owner;
    - versioned hypothesis + experiment spec;
-   - deterministic event ordering/no-lookahead;
-   - versioned fee/funding/spread/slippage/capacity model;
+   - deterministic event ordering/no-lookahead plus explicit event/availability/decision/earliest-fill causality;
+   - typed signal/mark/index/execution price roles and conservative Tier-A intrabar ambiguity;
+   - event-based funding and versioned fee/funding/spread/slippage/capacity model with provenance;
    - same `okx-analysis` features/strategy/risk semantics intended for shadow/live;
    - deterministic experiment hash/result.
-   - **T1:** feature golden vectors, poisoned-future isolation, ordering, fees/funding/quantization/cost monotonicity, repeatability.
+   - **T1:** feature golden vectors, poisoned-future/same-close isolation, ordering, intrabar ambiguity, price-role, variable-funding, fee provenance, quantization/cost/capacity monotonicity and repeatability.
    - **T2:** captured-live replay parity where semantics match; no out-of-split reads; restart/resume same terminal hash; Stage-2 risk remains authoritative.
    - **T3:** experiment binds exact source/dataset/algorithm/mandate/risk/cost versions.
-   - **T4:** primary MCP runs one real bounded Tier-A experiment end-to-end; Tier-B claims require Tier-B data.
+   - **T4:** primary MCP proves `NO_TRADE` + one manually auditable baseline before a real Tier-A experiment; Tier-B claims require inspected compatible Tier-B source semantics.
    - **T5:** future poison/gaps/unsupported Tier-B return typed failure or `INSUFFICIENT_DATA`; exchange mutations = 0.
    - Exit: one strategy can be replayed reproducibly without hidden future data or duplicate production formulas.
 
@@ -290,12 +311,14 @@ Canonical Stage-3 execution order — exactly four large slices:
    - chronological train/validation/untouched final OOS;
    - walk-forward;
    - purge/embargo only where overlapping horizons require it;
-   - final-holdout consumption lineage;
-   - cost/parameter sensitivity and regime breakdown;
+   - physically sealed final-holdout consumption lineage;
+   - immutable research-family lineage for human/ChatGPT/sweep trials;
+   - sample/evidence adequacy;
+   - cost/capacity/parameter sensitivity and regime breakdown;
    - immutable negative-trial retention;
    - DSR by default where applicable; PBO/CSCV only where candidate-family/sample assumptions are satisfied;
    - immutable promotion + demotion/invalidation criteria and `PromotionBundle`.
-   - **T1:** split/walk-forward/purge/embargo/DSR/PBO/overfit/holdout-reuse fixtures.
+   - **T1:** split/walk-forward/purge/embargo/DSR/PBO/overfit/all-trials/sample-adequacy/sealed-holdout fixtures.
    - **T2:** same immutable experiment family -> same validation decision; negative trials stay queryable; prior lineage cannot be rewritten.
    - **T3:** promotion bundle binds all exact hashes/versions/criteria.
    - **T4:** primary MCP returns one compact `REJECT | BACKTESTED | INSUFFICIENT_DATA` decision with OOS/walk-forward/cost/anti-overfit evidence.
@@ -303,12 +326,14 @@ Canonical Stage-3 execution order — exactly four large slices:
    - Exit: `BACKTESTED` requires predeclared reproducible scientific evidence.
 
 4. **3D Paper/Shadow + Product UX + final Stage-3 acceptance**
-   - states `RESEARCH -> BACKTESTED -> PAPER -> SHADOW`;
+   - states `RESEARCH -> BACKTESTED -> PAPER -> SHADOW`, with explicit operator authorization for positive promotion;
+   - PAPER = live facts + simulated execution/virtual PnL; SHADOW = production-intended candidate/risk/pre-execution path ending at `WOULD_SUBMIT`;
    - one bounded event-driven research-session component inside the existing agent/runtime chain;
    - consumes existing accepted live observation; no second WS collector/full-market subscription/polling loop;
    - same feature/strategy/risk functions as replay;
    - append-only/content-addressed shadow evidence + compact status;
-   - bounded/resumable MCP research UX, safe across transport loss and independent of chat history.
+   - bounded/resumable MCP research UX, safe across transport loss and independent of chat history;
+   - local paper/shadow remains outside MCP/ChatGPT latency and distinguishes transport freshness from research-input freshness.
    - **T1:** state transitions, replay/live-decision parity, <=12,288-byte normal summary, continuation idempotency.
    - **T2:** live observation feeds shadow without starving heartbeat/control/reconciliation; restart restores lineage; no exchange mutation path.
    - **T3:** exact Windows artifact/deploy provenance when agent changes; artifacts bind exact source/strategy/dataset versions.
@@ -325,6 +350,8 @@ Stage-3 final acceptance must emit one bounded `okx.stage-acceptance/v1` over on
 - production live trading remains disabled.
 
 Exit: strategies are scientifically testable/reproducible and can progress through BACKTESTED/PAPER/SHADOW without live money or chat-history dependence.
+
+**Planning freeze:** this is the final Stage-3 architecture pass before implementation. Current cursor is **3A v1 implementation**. New framework layers or methods require a reproduced source/runtime/test failure, not speculative completeness.
 
 ### Stage 4 — EXECUTION + TCA
 
