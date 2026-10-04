@@ -475,6 +475,80 @@ impl DatasetManifest {
             created_at_ms,
         })
     }
+
+    pub fn derive_slice(&self, range: ResearchRange) -> Result<Self, ResearchError> {
+        self.range.validate()?;
+        range.validate()?;
+        let parent_begin = self.range.begin()?;
+        let parent_end = self.range.end()?;
+        let slice_begin = range.begin()?;
+        let slice_end = range.end()?;
+        if slice_begin < parent_begin || slice_end > parent_end {
+            return Err(ResearchError::InvalidRange {
+                begin_ms: range.begin_ms,
+                end_ms: range.end_ms,
+            });
+        }
+
+        let mut gaps = Vec::new();
+        for gap in &self.gaps {
+            let gap_begin = parse_ms("gap.begin_ms", &gap.begin_ms)?;
+            let gap_end = parse_ms("gap.end_ms", &gap.end_ms)?;
+            let begin = gap_begin.max(slice_begin);
+            let end = gap_end.min(slice_end);
+            if begin < end {
+                gaps.push(DataGap {
+                    begin_ms: begin.to_string(),
+                    end_ms: end.to_string(),
+                    reason: gap.reason.clone(),
+                });
+            }
+        }
+        gaps.sort_by(|left, right| {
+            left.begin_ms
+                .cmp(&right.begin_ms)
+                .then_with(|| left.end_ms.cmp(&right.end_ms))
+                .then_with(|| left.reason.cmp(&right.reason))
+        });
+
+        let reference_coverage = match &self.reference_window {
+            Some(window) if window.covers(&self.instrument_id, &range)? => {
+                ReferenceCoverageStatus::Complete
+            }
+            _ => ReferenceCoverageStatus::InsufficientReferenceHistory,
+        };
+        let dataset_id = canonical_sha256(&DatasetIdentity {
+            schema: DATASET_MANIFEST_SCHEMA_V1,
+            tier: self.tier,
+            instrument_id: &self.instrument_id,
+            bar: &self.bar,
+            range: &range,
+            reference_coverage,
+            reference_window: &self.reference_window,
+            chunk_ids: &self.chunk_ids,
+            gaps: &gaps,
+            parser_version: &self.parser_version,
+            normalization_version: &self.normalization_version,
+            source_tree: &self.source_tree,
+        })?;
+
+        Ok(Self {
+            schema: DATASET_MANIFEST_SCHEMA_V1.to_owned(),
+            dataset_id,
+            tier: self.tier,
+            instrument_id: self.instrument_id.clone(),
+            bar: self.bar.clone(),
+            range,
+            reference_coverage,
+            reference_window: self.reference_window.clone(),
+            chunk_ids: self.chunk_ids.clone(),
+            gaps,
+            parser_version: self.parser_version.clone(),
+            normalization_version: self.normalization_version.clone(),
+            source_tree: self.source_tree.clone(),
+            created_at_ms: self.created_at_ms.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
