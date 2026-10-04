@@ -500,6 +500,13 @@ pub struct ResearchCheckpointPage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ResearchCheckpointTerminal {
+    pub dataset_artifact_id: String,
+    pub replay_dataset_artifact_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResearchCheckpoint {
     pub schema: String,
     pub checkpoint_id: String,
@@ -514,6 +521,8 @@ pub struct ResearchCheckpoint {
     pub remaining_cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dataset_range: Option<ResearchRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<ResearchCheckpointTerminal>,
     pub source_tree: String,
     pub created_at_ms: String,
 }
@@ -529,6 +538,7 @@ struct CheckpointIdentity<'a> {
     completed_pages: &'a [ResearchCheckpointPage],
     remaining_cursor: &'a Option<String>,
     dataset_range: &'a Option<ResearchRange>,
+    terminal: &'a Option<ResearchCheckpointTerminal>,
     source_tree: &'a str,
 }
 
@@ -543,6 +553,7 @@ impl ResearchCheckpoint {
         completed_pages: Vec<ResearchCheckpointPage>,
         remaining_cursor: Option<String>,
         dataset_range: Option<ResearchRange>,
+        terminal: Option<ResearchCheckpointTerminal>,
         source_tree: impl Into<String>,
         created_at_ms: impl Into<String>,
     ) -> Result<Self, ResearchError> {
@@ -567,8 +578,16 @@ impl ResearchCheckpoint {
         {
             return Err(ResearchError::MissingField("checkpoint.dataset_range"));
         }
-        if phase == ResearchCheckpointPhase::Complete && remaining_cursor.is_some() {
+        if phase == ResearchCheckpointPhase::Complete {
+            if remaining_cursor.is_some() || terminal.is_none() {
+                return Err(ResearchError::ArtifactIdentityMismatch);
+            }
+        } else if terminal.is_some() {
             return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+        if let Some(terminal) = &terminal {
+            validate_sha256_id(&terminal.dataset_artifact_id)?;
+            validate_sha256_id(&terminal.replay_dataset_artifact_id)?;
         }
 
         let mut chunk_ids = BTreeSet::new();
@@ -593,6 +612,7 @@ impl ResearchCheckpoint {
             completed_pages: &completed_pages,
             remaining_cursor: &remaining_cursor,
             dataset_range: &dataset_range,
+            terminal: &terminal,
             source_tree: &source_tree,
         })?;
         Ok(Self {
@@ -606,6 +626,7 @@ impl ResearchCheckpoint {
             completed_pages,
             remaining_cursor,
             dataset_range,
+            terminal,
             source_tree,
             created_at_ms,
         })
@@ -1845,6 +1866,7 @@ mod tests {
             vec![page.clone()],
             Some("1700000000000".to_owned()),
             None,
+            None,
             TREE,
             "1700011000000",
         )
@@ -1857,6 +1879,7 @@ mod tests {
             ResearchCheckpointPhase::Candles,
             vec![page.clone()],
             Some("1700000000000".to_owned()),
+            None,
             None,
             TREE,
             "1700012000000",
@@ -1873,6 +1896,7 @@ mod tests {
             vec![page],
             None,
             Some(ResearchRange::new("1700000000000", "1700360000000").expect("range")),
+            None,
             TREE,
             "1700013000000",
         )
