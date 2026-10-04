@@ -5,8 +5,7 @@ use okx_protocol::{
 };
 use okx_research::{
     BUILD_SOURCE_TREE, DerivedValidationSlice, ReplayDatasetArtifact, ResearchArtifactStore,
-    ValidationPartitionRole, ValidationSpec, build_validation_spec_from_counts,
-    derive_validation_slice,
+    ValidationPartitionRole, build_validation_spec_from_counts, derive_validation_slice,
 };
 use serde::Serialize;
 
