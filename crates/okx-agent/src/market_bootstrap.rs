@@ -1,5 +1,7 @@
 use chrono::{SecondsFormat, Utc};
-use okx_api::{InstrumentType, MarketDataApi, OkxPublicClient, PublicDataApi};
+use okx_api::{
+    InstrumentType, MarketDataApi, OkxPublicClient, PublicDataApi, PublicMarketDataHistory,
+};
 use okx_observation::{
     FundingHistoryEvent, FundingHistorySnapshot, FundingRequirement, HistoryCandle, InstrumentSpec,
     MarketBootstrap, MarketError, MarketHistoryError, MarketHistorySnapshot, MarketSnapshot,
@@ -25,6 +27,13 @@ pub struct ResearchCandleCapture {
 pub struct ResearchFundingCapture {
     pub raw_body: Vec<u8>,
     pub rows: Vec<FundingHistoryEvent>,
+    pub acquired_at_ms: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResearchTierBSourceCapture {
+    pub raw_body: Vec<u8>,
+    pub rows: Vec<PublicMarketDataHistory>,
     pub acquired_at_ms: String,
 }
 
@@ -111,6 +120,28 @@ impl MarketBootstrapper {
             raw_body: captured.raw_body,
             rows,
             acquired_at_ms,
+        })
+    }
+
+    pub async fn research_tier_b_source(
+        &self,
+        date_ms: &str,
+    ) -> Result<ResearchTierBSourceCapture, MarketBootstrapError> {
+        let captured = self
+            .public_data
+            .market_data_history_captured(
+                "6",
+                InstrumentType::Swap,
+                "daily",
+                date_ms,
+                date_ms,
+                "BTC-USDT",
+            )
+            .await?;
+        Ok(ResearchTierBSourceCapture {
+            raw_body: captured.raw_body,
+            rows: captured.rows,
+            acquired_at_ms: Utc::now().timestamp_millis().max(1).to_string(),
         })
     }
 
