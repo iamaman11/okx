@@ -1557,10 +1557,7 @@ fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
-fn validate_sha256_artifact_id(
-    value: &str,
-    field: &'static str,
-) -> Result<(), ProtocolError> {
+fn validate_sha256_artifact_id(value: &str, field: &'static str) -> Result<(), ProtocolError> {
     let Some(hex) = value.strip_prefix("sha256:") else {
         return Err(ProtocolError::InvalidResearchRequest(field));
     };
