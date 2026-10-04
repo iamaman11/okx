@@ -264,7 +264,7 @@ pub fn analyze_position_scenario_values(
         reference_generation: reference_generation.to_owned(),
         fee_generation: fee_generation.to_owned(),
         settle_currency: mechanics.settle_currency.clone(),
-        contract_value_currency: contract_value_currency.clone(),
+        contract_value_currency: mechanics.contract_value_currency.clone(),
         direction: assumptions.direction,
         contracts: contracts.normalize().to_string(),
         contract_value: contract_value.normalize().to_string(),
@@ -455,14 +455,14 @@ mod tests {
 
     use super::*;
 
-    fn mechanics() -> ScenarioMechanics {
-        ScenarioMechanics {
+    fn mechanics() -> PositionScenarioMechanics {
+        PositionScenarioMechanics {
             settle_currency: "USDT".to_owned(),
             contract_value_currency: "DOGE".to_owned(),
-            contract_value: Decimal::from(1000),
-            tick_size: Decimal::new(1, 5),
-            entry_fee_rate: Decimal::new(-5, 4),
-            exit_fee_rate: Decimal::new(-5, 4),
+            contract_value: "1000".to_owned(),
+            tick_size: "0.00001".to_owned(),
+            entry_fee_rate: "-0.0005".to_owned(),
+            exit_fee_rate: "-0.0005".to_owned(),
         }
     }
 
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn explicit_exit_price_reports_fee_aware_pnl_and_break_even() {
-        let result = analyze_position_values(
+        let result = analyze_position_scenario_values(
             "DOGE-USDT-SWAP",
             "sha256:reference",
             "sha256:fee",
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn signed_move_ratio_can_define_theoretical_scenario_price() {
-        let result = analyze_position_values(
+        let result = analyze_position_scenario_values(
             "DOGE-USDT-SWAP",
             "sha256:reference",
             "sha256:fee",
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn move_ratio_at_or_below_negative_one_fails_closed() {
-        let error = analyze_position_values(
+        let error = analyze_position_scenario_values(
             "DOGE-USDT-SWAP",
             "sha256:reference",
             "sha256:fee",
