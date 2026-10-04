@@ -33,8 +33,8 @@ pub use microstructure::{
 };
 pub use risk::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, CandidateProjection,
-    CandidateRiskContext, CandidateRiskGate, ClusterExposure,
-    CorrelatedClusterLimit, ExposureAggregate, HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy,
+    CandidateRiskContext, CandidateRiskGate, ClusterExposure, CorrelatedClusterLimit,
+    ExposureAggregate, HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy,
     PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2, PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3, PortfolioCandidate,
     PortfolioRiskAnalysis, PositionRiskAnalysis, RISK_ORACLE_COMPARISON_SCHEMA_V2,
     RISK_ORACLE_CONSISTENCY_POLICY_V1, RiskDegradedMode, RiskMinimumQuality, RiskOracleComparison,
@@ -44,18 +44,14 @@ pub use risk::{
     VirtualNotionalOracleInput, VirtualNotionalOraclePositionComparison,
     VirtualPositionConstraintEvidence, VirtualPositionConstraintInput, analyze_account_risk,
     analyze_portfolio_risk, compare_account_position_risk_oracle,
-    compare_virtual_position_builder_notional, validate_virtual_linear_position,
-    evaluate_candidate_risk, virtual_portfolio_initial_margin_usd,
+    compare_virtual_position_builder_notional, evaluate_candidate_risk,
+    validate_virtual_linear_position, virtual_portfolio_initial_margin_usd,
 };
 pub use scenario::{
     HISTORY_BEHAVIOR_SCHEMA_V1, HistoryBehaviorAnalysis, POSITION_SCENARIO_SCHEMA_V1,
     PositionScenarioAnalysis, PositionScenarioAssumptions, PositionScenarioMechanics,
     ScenarioExitAssumption, ScenarioPriceSource, analyze_history_behavior,
     analyze_position_scenario, analyze_position_scenario_values, funding_user_cost_quote,
-};
-pub use strategy::{
-    BASELINE_STRATEGY_VERSION_V1, BarDecisionInput, BaselineStrategyKind, StrategyDecision,
-    evaluate_baseline_strategy,
 };
 pub use statistics::{
     CovarianceCell, HISTORICAL_STRESS_FORMULA_V1, HistoricalStressResult,
@@ -64,6 +60,10 @@ pub use statistics::{
     SAMPLE_COVARIANCE_FORMULA_V1, StatisticalExposure, StatisticalHistoryEvidence,
     VolatilityContribution, analyze_portfolio_statistics, covariance_correlation, decimal_sqrt,
     sample_covariance_matrix,
+};
+pub use strategy::{
+    BASELINE_STRATEGY_VERSION_V1, BarDecisionInput, BaselineStrategyKind, StrategyDecision,
+    evaluate_baseline_strategy,
 };
 
 use std::str::FromStr;
