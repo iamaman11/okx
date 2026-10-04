@@ -263,12 +263,9 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
         replay_requires_artifact_id: true,
         replay_bulk_events_over_mcp: false,
         validation_instruments: ["BTC-USDT-SWAP"],
-        validation_target_candles_min:
-            super::research_validation::VALIDATION_TARGET_CANDLES_MIN,
-        validation_target_candles_max:
-            super::research_validation::VALIDATION_TARGET_CANDLES_MAX,
-        validation_pages_per_call:
-            super::research_validation::VALIDATION_PAGES_PER_CALL,
+        validation_target_candles_min: super::research_validation::VALIDATION_TARGET_CANDLES_MIN,
+        validation_target_candles_max: super::research_validation::VALIDATION_TARGET_CANDLES_MAX,
+        validation_pages_per_call: super::research_validation::VALIDATION_PAGES_PER_CALL,
         validation_checkpointed: true,
         normal_result_target_bytes: NORMAL_RESULT_TARGET_BYTES,
         source_tree: BUILD_SOURCE_TREE,
