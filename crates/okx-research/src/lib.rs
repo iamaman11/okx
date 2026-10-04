@@ -535,7 +535,7 @@ struct CheckpointIdentity<'a> {
     bar: &'a str,
     target_candle_count: u16,
     phase: ResearchCheckpointPhase,
-    completed_pages: &'a [ResearchCheckpointPage],
+    completed_chunk_ids: Vec<&'a str>,
     remaining_cursor: &'a Option<String>,
     dataset_range: &'a Option<ResearchRange>,
     terminal: &'a Option<ResearchCheckpointTerminal>,
@@ -609,7 +609,10 @@ impl ResearchCheckpoint {
             bar: &bar,
             target_candle_count,
             phase,
-            completed_pages: &completed_pages,
+            completed_chunk_ids: completed_pages
+                .iter()
+                .map(|page| page.chunk_id.as_str())
+                .collect(),
             remaining_cursor: &remaining_cursor,
             dataset_range: &dataset_range,
             terminal: &terminal,
