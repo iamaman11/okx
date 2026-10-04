@@ -361,7 +361,10 @@ pub(super) async fn prepare_validation_dataset(
                     .expect("one millisecond reference capture range"),
                 parameters: BTreeMap::from([
                     ("semantics".to_owned(), "current_snapshot_only".to_owned()),
-                    ("reference_generation".to_owned(), reference_generation.clone()),
+                    (
+                        "reference_generation".to_owned(),
+                        reference_generation.clone(),
+                    ),
                     ("available_from_ms".to_owned(), observed_ms.to_string()),
                 ]),
             };
@@ -381,8 +384,8 @@ pub(super) async fn prepare_validation_dataset(
                 Ok(value) => value,
                 Err(error) => return Ok(research_failure(request, generated_at, error)),
             };
-            if let Err(error) =
-                store.publish_source_bytes(&reference_chunk.manifest.raw_sha256, &reference.raw_body)
+            if let Err(error) = store
+                .publish_source_bytes(&reference_chunk.manifest.raw_sha256, &reference.raw_body)
             {
                 return Ok(research_failure(request, generated_at, error));
             }
