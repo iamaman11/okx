@@ -1,15 +1,21 @@
 use std::collections::BTreeSet;
 
 use okx_analysis::{
-    BaselineStrategyKind, StrategyParameterSurface, StrategyResearchMetadata,
-    baseline_strategy_research_metadata,
+    BASELINE_STRATEGY_VERSION_V1, BaselineStrategyKind, StrategyParameterSurface,
+    StrategyResearchMetadata, baseline_strategy_research_metadata,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{BUILD_SOURCE_TREE, ResearchError, ResearchRange, canonical_sha256};
+use crate::{
+    BUILD_SOURCE_TREE, ReplayDatasetArtifact, ResearchError, ResearchRange, canonical_sha256,
+};
 
 pub const VALIDATION_SPEC_SCHEMA_V1: &str = "okx.research.validation-spec/v1";
 pub const RESEARCH_FAMILY_SCHEMA_V1: &str = "okx.research.family/v1";
+pub const VALIDATION_SPLIT_SCHEMA_V1: &str = "okx.research.validation-split/v1";
+pub const VALIDATION_EVIDENCE_POLICY_V1: &str = "okx.research.validation-evidence/2026-10-05.1";
+pub const VALIDATION_PROMOTION_CRITERIA_V1: &str =
+    "okx.research.promotion-criteria/2026-10-05.1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -102,7 +108,7 @@ impl ValidationSpec {
         train.validate()?;
         validation.validate()?;
         final_oos.validate()?;
-        if train.end()? > validation.begin()? || validation.end()? > final_oos.begin()? {
+        if train.end()? != validation.begin()? || validation.end()? != final_oos.begin()? {
             return Err(ResearchError::InvalidRange {
                 begin_ms: train.begin_ms,
                 end_ms: final_oos.end_ms,
@@ -166,6 +172,169 @@ impl ValidationSpec {
     pub fn parameter_sensitivity_applicable(&self) -> bool {
         self.strategy_metadata.parameter_surface != StrategyParameterSurface::None
     }
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedValidationSlice {
+    pub role: ValidationPartitionRole,
+    pub declared_range: ResearchRange,
+    pub effective_range: ResearchRange,
+    pub replay_dataset: ReplayDatasetArtifact,
+}
+
+pub fn build_validation_spec_from_counts(
+    parent_replay_dataset_artifact_id: impl Into<String>,
+    parent: &ReplayDatasetArtifact,
+    strategy: BaselineStrategyKind,
+    train_candle_count: u16,
+    validation_candle_count: u16,
+    final_oos_candle_count: u16,
+) -> Result<ValidationSpec, ResearchError> {
+    parent.validate()?;
+    let parent_replay_dataset_artifact_id = parent_replay_dataset_artifact_id.into();
+    require_sha256(
+        "validation.parent_replay_dataset_artifact_id",
+        &parent_replay_dataset_artifact_id,
+    )?;
+    if parent.manifest.bar.as_deref() != Some("1H") {
+        return Err(ResearchError::ReplayUnsupportedBar(
+            parent.manifest.bar.clone().unwrap_or_default(),
+        ));
+    }
+
+    let counts = [
+        usize::from(train_candle_count),
+        usize::from(validation_candle_count),
+        usize::from(final_oos_candle_count),
+    ];
+    if counts.iter().any(|value| *value == 0)
+        || counts.iter().sum::<usize>() != parent.candles.len()
+    {
+        return Err(ResearchError::ReplayDatasetMismatch);
+    }
+
+    let train_end = counts[0];
+    let validation_end = train_end + counts[1];
+    let train = candle_slice_range(&parent.candles[..train_end])?;
+    let validation = candle_slice_range(&parent.candles[train_end..validation_end])?;
+    let final_oos = candle_slice_range(&parent.candles[validation_end..])?;
+
+    if train.begin()? != parent.manifest.range.begin()?
+        || final_oos.end()? != parent.manifest.range.end()?
+    {
+        return Err(ResearchError::ReplayDatasetMismatch);
+    }
+
+    ValidationSpec::build(
+        parent_replay_dataset_artifact_id,
+        parent.manifest.dataset_id.clone(),
+        strategy,
+        BASELINE_STRATEGY_VERSION_V1,
+        train,
+        validation,
+        final_oos,
+        VALIDATION_EVIDENCE_POLICY_V1,
+        VALIDATION_PROMOTION_CRITERIA_V1,
+    )
+}
+
+pub fn derive_validation_slice(
+    parent: &ReplayDatasetArtifact,
+    spec: &ValidationSpec,
+    role: ValidationPartitionRole,
+) -> Result<DerivedValidationSlice, ResearchError> {
+    parent.validate()?;
+    if spec.parent_dataset_id != parent.manifest.dataset_id
+        || spec.validation_source_tree != BUILD_SOURCE_TREE
+    {
+        return Err(ResearchError::ReplayDatasetMismatch);
+    }
+
+    let partition = spec
+        .partitions
+        .iter()
+        .find(|partition| partition.role == role)
+        .ok_or(ResearchError::MissingField("validation.partition"))?;
+    let begin = partition.range.begin()?;
+    let end = partition.range.end()?;
+    let mut candles = parent
+        .candles
+        .iter()
+        .filter(|row| {
+            row.open_time_ms
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|timestamp| timestamp >= begin && timestamp < end)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let embargo = if role == ValidationPartitionRole::Train {
+        0usize
+    } else {
+        usize::from(spec.embargo_bars)
+    };
+    let purge = if role == ValidationPartitionRole::FinalOos {
+        0usize
+    } else {
+        usize::from(spec.purge_bars)
+    };
+    if candles.len() <= embargo + purge {
+        return Err(ResearchError::ReplayMissingField(
+            "validation.effective_partition",
+        ));
+    }
+    if embargo > 0 {
+        candles.drain(0..embargo);
+    }
+    if purge > 0 {
+        candles.truncate(candles.len() - purge);
+    }
+
+    let effective_range = candle_slice_range(&candles)?;
+    let effective_begin = effective_range.begin()?;
+    let effective_end = effective_range.end()?;
+    let funding = parent
+        .funding
+        .iter()
+        .filter(|event| {
+            event
+                .funding_time_ms
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|timestamp| {
+                    timestamp >= effective_begin && timestamp < effective_end
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let manifest = parent.manifest.derive_slice(effective_range.clone())?;
+    let replay_dataset = ReplayDatasetArtifact::build(
+        manifest,
+        candles,
+        funding,
+        parent.reference.clone(),
+    )?;
+
+    Ok(DerivedValidationSlice {
+        role,
+        declared_range: partition.range.clone(),
+        effective_range,
+        replay_dataset,
+    })
+}
+
+fn candle_slice_range(
+    candles: &[crate::ResearchCandle],
+) -> Result<ResearchRange, ResearchError> {
+    let first = candles
+        .first()
+        .ok_or(ResearchError::ReplayMissingField("validation.candles"))?;
+    let last = candles
+        .last()
+        .ok_or(ResearchError::ReplayMissingField("validation.candles"))?;
+    ResearchRange::new(first.open_time_ms.clone(), last.available_time_ms.clone())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
