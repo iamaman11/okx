@@ -1520,6 +1520,29 @@ mod tests {
     }
 
     #[test]
+    fn normalized_chunk_artifact_binds_manifest_to_recoverable_rows() {
+        let chunk = build_candle_chunk(
+            source("history-candles"),
+            "1700010000000",
+            b"raw",
+            &candles(),
+            3_600_000,
+            PARSER,
+            NORMALIZER,
+            TREE,
+        )
+        .expect("chunk");
+        let mut artifact = build_chunk_artifact(&chunk).expect("artifact");
+        artifact.validate().expect("valid");
+
+        artifact.rows[0].close = "999".to_owned();
+        assert!(matches!(
+            artifact.validate(),
+            Err(ResearchError::ArtifactIdentityMismatch)
+        ));
+    }
+
+    #[test]
     fn changed_raw_bytes_change_chunk_identity_even_when_normalized_rows_match() {
         let a = build_candle_chunk(
             source("history-candles"),
@@ -1805,22 +1828,36 @@ mod tests {
 
     #[test]
     fn checkpoint_identity_is_idempotent_and_parent_linked() {
+        let page = ResearchCheckpointPage {
+            kind: ResearchSourceKind::Candle,
+            chunk_id: format!("sha256:{}", "a".repeat(64)),
+            artifact_id: format!("sha256:{}", "b".repeat(64)),
+            row_count: 100,
+            oldest_event_time_ms: Some("1700000000000".to_owned()),
+            newest_event_time_ms: Some("1700356400000".to_owned()),
+        };
         let first = ResearchCheckpoint::build(
             None,
-            vec!["chunk-b".to_owned(), "chunk-a".to_owned()],
-            Some("cursor-2".to_owned()),
+            "BTC-USDT-SWAP",
+            "1H",
+            200,
+            ResearchCheckpointPhase::Candles,
+            vec![page.clone()],
+            Some("1700000000000".to_owned()),
+            None,
             TREE,
             "1700011000000",
         )
         .expect("first");
         let retry = ResearchCheckpoint::build(
             None,
-            vec![
-                "chunk-a".to_owned(),
-                "chunk-b".to_owned(),
-                "chunk-a".to_owned(),
-            ],
-            Some("cursor-2".to_owned()),
+            "BTC-USDT-SWAP",
+            "1H",
+            200,
+            ResearchCheckpointPhase::Candles,
+            vec![page.clone()],
+            Some("1700000000000".to_owned()),
+            None,
             TREE,
             "1700012000000",
         )
@@ -1829,12 +1866,13 @@ mod tests {
 
         let next = ResearchCheckpoint::build(
             Some(first.checkpoint_id.clone()),
-            vec![
-                "chunk-a".to_owned(),
-                "chunk-b".to_owned(),
-                "chunk-c".to_owned(),
-            ],
+            "BTC-USDT-SWAP",
+            "1H",
+            200,
+            ResearchCheckpointPhase::Funding,
+            vec![page],
             None,
+            Some(ResearchRange::new("1700000000000", "1700360000000").expect("range")),
             TREE,
             "1700013000000",
         )
