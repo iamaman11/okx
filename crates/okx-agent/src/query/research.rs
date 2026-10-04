@@ -1,22 +1,22 @@
 use std::collections::BTreeMap;
 
+use okx_analysis::{
+    BASELINE_STRATEGY_VERSION_V1, BaselineStrategyKind, CandidateRiskContext,
+    HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy, LiquidityRole, PositionScenarioMechanics,
+    RiskDegradedMode, RiskMinimumQuality, TRADING_MANDATE_SCHEMA_V1, TradingMandate,
+};
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponse, AgentResponseStatus,
     DataQuality, RESEARCH_CATALOG_VERSION_V1, ResearchReplayMechanicsProvenance,
     ResearchReplayStrategy, ResearchRequest,
 };
 use okx_research::{
-    BUILD_SOURCE_TREE, DatasetManifest, ExperimentSpec, Hypothesis, ReferenceCoverageStatus,
-    ReplayDatasetArtifact, ReplayEvidenceClass, ReplayExecutionModel, ReplayMechanicsProvenance,
-    ReplayStatus, ResearchArtifactStore, ResearchRange, ResearchSourceKind, ResearchTier,
-    SourceRequest, build_candle_chunk, build_funding_chunk, build_reference_chunk,
-    build_tier_b_trade_chunk, detect_fixed_interval_gaps, replay_experiment,
-    REPLAY_EXECUTION_MODEL_VERSION_V1,
-};
-use okx_analysis::{
-    BASELINE_STRATEGY_VERSION_V1, HARD_RISK_POLICY_SCHEMA_V1, CandidateRiskContext,
-    HardRiskPolicy, LiquidityRole, PositionScenarioMechanics, RiskDegradedMode,
-    RiskMinimumQuality, TRADING_MANDATE_SCHEMA_V1, TradingMandate, BaselineStrategyKind,
+    BUILD_SOURCE_TREE, DatasetManifest, ExperimentSpec, Hypothesis,
+    REPLAY_EXECUTION_MODEL_VERSION_V1, ReferenceCoverageStatus, ReplayDatasetArtifact,
+    ReplayEvidenceClass, ReplayExecutionModel, ReplayMechanicsProvenance, ReplayStatus,
+    ResearchArtifactStore, ResearchRange, ResearchSourceKind, ResearchTier, SourceRequest,
+    build_candle_chunk, build_funding_chunk, build_reference_chunk, build_tier_b_trade_chunk,
+    detect_fixed_interval_gaps, replay_experiment,
 };
 use serde::Serialize;
 
@@ -193,16 +193,18 @@ pub(crate) async fn dispatch(
                     strategy,
                     mechanics_provenance,
                 },
-        } => run_replay(
-            request,
-            context,
-            generated_at,
-            instrument,
-            replay_dataset_artifact_id,
-            *strategy,
-            *mechanics_provenance,
-        )
-        .await,
+        } => {
+            run_replay(
+                request,
+                context,
+                generated_at,
+                instrument,
+                replay_dataset_artifact_id,
+                *strategy,
+                *mechanics_provenance,
+            )
+            .await
+        }
         _ => Ok(unavailable(request, generated_at)),
     }
 }
@@ -794,15 +796,11 @@ async fn run_replay(
         Ok(value) => value,
         Err(error) => return Ok(research_failure(request, generated_at, error)),
     };
-    let result = match replay_experiment(
-        &dataset.manifest,
-        &dataset.candles,
-        &dataset.funding,
-        &spec,
-    ) {
-        Ok(value) => value,
-        Err(error) => return Ok(research_failure(request, generated_at, error)),
-    };
+    let result =
+        match replay_experiment(&dataset.manifest, &dataset.candles, &dataset.funding, &spec) {
+            Ok(value) => value,
+            Err(error) => return Ok(research_failure(request, generated_at, error)),
+        };
 
     let persisted = (|| {
         let (hypothesis_artifact_id, _) = store.publish_evidence(&hypothesis)?;
@@ -814,14 +812,11 @@ async fn run_replay(
             experiment_result_artifact_id,
         ))
     })();
-    let (
-        hypothesis_artifact_id,
-        experiment_spec_artifact_id,
-        experiment_result_artifact_id,
-    ) = match persisted {
-        Ok(value) => value,
-        Err(error) => return Ok(research_failure(request, generated_at, error)),
-    };
+    let (hypothesis_artifact_id, experiment_spec_artifact_id, experiment_result_artifact_id) =
+        match persisted {
+            Ok(value) => value,
+            Err(error) => return Ok(research_failure(request, generated_at, error)),
+        };
 
     let quality = if result.status == ReplayStatus::Completed {
         DataQuality::Fresh
