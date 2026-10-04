@@ -206,8 +206,7 @@ pub fn build_validation_spec_from_counts(
         usize::from(validation_candle_count),
         usize::from(final_oos_candle_count),
     ];
-    if counts.iter().any(|value| *value == 0)
-        || counts.iter().sum::<usize>() != parent.candles.len()
+    if counts.contains(&0) || counts.iter().sum::<usize>() != parent.candles.len()
     {
         return Err(ResearchError::ReplayDatasetMismatch);
     }
