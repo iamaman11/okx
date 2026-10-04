@@ -843,14 +843,16 @@ pub fn build_candle_chunk(
     normalized.sort_by_key(|row| row.open_time_ms.parse::<u64>().unwrap_or_default());
 
     build_normalized_chunk(
-        ResearchSourceKind::Candle,
-        source,
-        acquired_at_ms,
-        raw_body,
+        ChunkBuildInput {
+            kind: ResearchSourceKind::Candle,
+            source,
+            acquired_at_ms,
+            raw_body,
+            parser_version: parser_version.into(),
+            normalization_version: normalization_version.into(),
+            source_tree: source_tree.into(),
+        },
         normalized,
-        parser_version.into(),
-        normalization_version.into(),
-        source_tree.into(),
         |row: &ResearchCandle| &row.open_time_ms,
     )
 }
@@ -891,14 +893,16 @@ pub fn build_funding_chunk(
     normalized.sort_by_key(|row| row.funding_time_ms.parse::<u64>().unwrap_or_default());
 
     build_normalized_chunk(
-        ResearchSourceKind::Funding,
-        source,
-        acquired_at_ms,
-        raw_body,
+        ChunkBuildInput {
+            kind: ResearchSourceKind::Funding,
+            source,
+            acquired_at_ms,
+            raw_body,
+            parser_version: parser_version.into(),
+            normalization_version: normalization_version.into(),
+            source_tree: source_tree.into(),
+        },
         normalized,
-        parser_version.into(),
-        normalization_version.into(),
-        source_tree.into(),
         |row: &ResearchFundingEvent| &row.funding_time_ms,
     )
 }
@@ -950,14 +954,16 @@ pub fn build_reference_chunk(
     let row = ResearchInstrumentReference::from(instrument);
     let rows = vec![row];
     let chunk = build_normalized_chunk(
-        ResearchSourceKind::Reference,
-        source,
-        acquired_at_ms,
-        raw_body,
+        ChunkBuildInput {
+            kind: ResearchSourceKind::Reference,
+            source,
+            acquired_at_ms,
+            raw_body,
+            parser_version: parser_version.into(),
+            normalization_version: normalization_version.into(),
+            source_tree: source_tree.into(),
+        },
         rows,
-        parser_version.into(),
-        normalization_version.into(),
-        source_tree.into(),
         |_row: &ResearchInstrumentReference| "",
     )?;
     let window = ReferenceCoverageWindow {
@@ -972,21 +978,34 @@ pub fn build_reference_chunk(
     Ok((chunk, window))
 }
 
-fn build_normalized_chunk<T, F>(
+struct ChunkBuildInput<'a> {
     kind: ResearchSourceKind,
     source: SourceRequest,
     acquired_at_ms: String,
-    raw_body: &[u8],
-    rows: Vec<T>,
+    raw_body: &'a [u8],
     parser_version: String,
     normalization_version: String,
     source_tree: String,
+}
+
+fn build_normalized_chunk<T, F>(
+    input: ChunkBuildInput<'_>,
+    rows: Vec<T>,
     event_time: F,
 ) -> Result<NormalizedChunk<T>, ResearchError>
 where
     T: Serialize,
     F: Fn(&T) -> &str,
 {
+    let ChunkBuildInput {
+        kind,
+        source,
+        acquired_at_ms,
+        raw_body,
+        parser_version,
+        normalization_version,
+        source_tree,
+    } = input;
     required("parser_version", &parser_version)?;
     required("normalization_version", &normalization_version)?;
     required("source_tree", &source_tree)?;
