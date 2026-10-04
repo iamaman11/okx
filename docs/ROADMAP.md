@@ -299,11 +299,13 @@ Canonical Stage-3 execution order — exactly four large slices:
    - typed signal/mark/index/execution price roles and conservative Tier-A intrabar ambiguity;
    - event-based funding and versioned fee/funding/spread/slippage/capacity model with provenance;
    - same `okx-analysis` features/strategy/risk semantics intended for shadow/live;
+   - baseline experiment/profile construction (declared assumptions, cost model values, mandate/policy values) is owned by `okx-research`, not `okx-agent`; `okx-analysis` remains the owner of policy/formula semantics;
+   - `okx-agent` remains composition-only: validate/load/invoke/project;
    - deterministic experiment hash/result.
    - **T1:** feature golden vectors, poisoned-future/same-close isolation, ordering, intrabar ambiguity, price-role, variable-funding, fee provenance, quantization/cost/capacity monotonicity and repeatability.
    - **T2:** captured-live replay parity where semantics match; no out-of-split reads; restart/resume same terminal hash; Stage-2 risk remains authoritative.
    - **T3:** experiment binds exact source/dataset/algorithm/mandate/risk/cost versions.
-   - **T4:** primary MCP proves `NO_TRADE` + one manually auditable baseline before a real Tier-A experiment; Tier-B claims require inspected compatible Tier-B source semantics.
+   - **T4:** primary MCP proves `NO_TRADE` + one manually auditable baseline before a real Tier-A experiment; Tier-B claims require inspected compatible Tier-B source semantics; the normal replay response is a self-contained <=12,288-byte decision packet and returns no bulk events/traces.
    - **T5:** future poison/gaps/unsupported Tier-B return typed failure or `INSUFFICIENT_DATA`; exchange mutations = 0.
    - Exit: one strategy can be replayed reproducibly without hidden future data or duplicate production formulas.
 
@@ -368,6 +370,8 @@ Accepted evidence:
 Stage 3A exit is satisfied because the application can now prove what admitted historical data exists, its source/provenance/availability semantics, and where historical reference coverage is insufficient without inventing missing truth.
 
 **Current cursor: Stage 3B — Deterministic Replay Kernel.**
+
+Stage-3B implementation rule (2026-10-04 refinement): experiment construction belongs with immutable research semantics, not in the composition root. `okx-agent` may map transport enums, validate/load an artifact, invoke the research function and project its compact response; it must not accumulate baseline mandate/risk/cost defaults. ChatGPT consumes compact decision-grade replay evidence and immutable ids, not raw replay events.
 
 The Stage-3 design freeze remains in force. New framework layers or methods require a reproduced source/runtime/test failure, not speculative completeness.
 

@@ -1,11 +1,12 @@
 use std::str::FromStr;
 
 use okx_analysis::{
-    BarDecisionInput, BaselineStrategyKind, CandidateRiskContext, HardRiskPolicy, LiquidityRole,
-    PortfolioCandidate, PositionDirection, PositionScenarioAssumptions, PositionScenarioMechanics,
-    RiskPolicyDecision, ScenarioExitAssumption, StrategyDecision, TradingMandate,
-    analyze_position_scenario_values, evaluate_baseline_strategy, evaluate_candidate_risk,
-    funding_user_cost_quote,
+    BASELINE_STRATEGY_VERSION_V1, BarDecisionInput, BaselineStrategyKind, CandidateRiskContext,
+    HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy, LiquidityRole, PortfolioCandidate,
+    PositionDirection, PositionScenarioAssumptions, PositionScenarioMechanics, RiskDegradedMode,
+    RiskMinimumQuality, RiskPolicyDecision, ScenarioExitAssumption, StrategyDecision,
+    TRADING_MANDATE_SCHEMA_V1, TradingMandate, analyze_position_scenario_values,
+    evaluate_baseline_strategy, evaluate_candidate_risk, funding_user_cost_quote,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -329,6 +330,124 @@ struct TerminalResultParts {
     gross_pnl: Decimal,
     trading_cost: Decimal,
     funding_cost: Decimal,
+}
+
+pub fn build_baseline_experiment(
+    dataset: &ReplayDatasetArtifact,
+    strategy: BaselineStrategyKind,
+    mechanics_provenance: ReplayMechanicsProvenance,
+) -> Result<(Hypothesis, ExperimentSpec), ResearchError> {
+    let reference = dataset
+        .reference
+        .as_ref()
+        .ok_or(ResearchError::ReplayMissingField("replay_dataset.reference"))?;
+    let contract_value = reference
+        .contract_value
+        .as_deref()
+        .ok_or(ResearchError::ReplayMissingField(
+            "replay_dataset.reference.contract_value",
+        ))?;
+    let contract_value_currency = reference
+        .contract_value_currency
+        .as_deref()
+        .ok_or(ResearchError::ReplayMissingField(
+            "replay_dataset.reference.contract_value_currency",
+        ))?;
+    let settle_currency = reference
+        .settle_currency
+        .as_deref()
+        .ok_or(ResearchError::ReplayMissingField(
+            "replay_dataset.reference.settle_currency",
+        ))?;
+
+    let hypothesis = Hypothesis::build(
+        match strategy {
+            BaselineStrategyKind::NoTrade => "NO_TRADE null baseline",
+            BaselineStrategyKind::CloseMomentum => {
+                "1H completed-bar close momentum predicts the next one-hour price move"
+            }
+        },
+        match strategy {
+            BaselineStrategyKind::NoTrade => {
+                "any trade, fee, funding cashflow, or non-zero PnL falsifies the null accounting baseline"
+            }
+            BaselineStrategyKind::CloseMomentum => {
+                "replay records deterministic next-open decisions and net PnL without same-close execution"
+            }
+        },
+        strategy,
+        BASELINE_STRATEGY_VERSION_V1,
+    )?;
+
+    let instrument = dataset.manifest.instrument_id.clone();
+    let mandate = TradingMandate {
+        schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
+        version: "okx.research.baseline-mandate/2026-10-04.1".to_owned(),
+        capital_base_usd: "100".to_owned(),
+        decision_horizon_hours: 1,
+        benchmark: Some("NO_EXTERNAL_BENCHMARK".to_owned()),
+        allowed_instruments: vec![instrument.clone()],
+        max_drawdown_ratio: "0.5".to_owned(),
+        leverage_ceiling: "5".to_owned(),
+        minimum_liquidity_notional_usd: "0".to_owned(),
+        max_turnover_ratio: "100".to_owned(),
+    };
+    let policy = HardRiskPolicy {
+        schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
+        version: "okx.research.baseline-policy/2026-10-04.1".to_owned(),
+        max_account_gross_notional_usd: "1000".to_owned(),
+        max_instrument_gross_notional_usd: "1000".to_owned(),
+        max_margin_utilization_ratio: "0.9".to_owned(),
+        max_loss_per_trade_usd: "10".to_owned(),
+        max_daily_realized_loss_usd: "50".to_owned(),
+        max_drawdown_ratio: "0.5".to_owned(),
+        max_leverage: "5".to_owned(),
+        allowed_instruments: vec![instrument.clone()],
+        minimum_quality: RiskMinimumQuality::Fresh,
+        degraded_mode: RiskDegradedMode::Reject,
+        correlated_clusters: Vec::new(),
+    };
+    let initial_risk_context = CandidateRiskContext {
+        total_equity_usd: "100".to_owned(),
+        account_gross_notional_usd: "0".to_owned(),
+        instrument_gross_notional_usd: "0".to_owned(),
+        account_initial_margin_usd: "0".to_owned(),
+        capital_base_drawdown_ratio: "0".to_owned(),
+        daily_realized_loss_usd: "0".to_owned(),
+        account_is_fresh: true,
+    };
+    let execution = ReplayExecutionModel {
+        version: REPLAY_EXECUTION_MODEL_VERSION_V1.to_owned(),
+        mechanics: PositionScenarioMechanics {
+            settle_currency: settle_currency.to_owned(),
+            contract_value_currency: contract_value_currency.to_owned(),
+            contract_value: contract_value.to_owned(),
+            tick_size: reference.tick_size.clone(),
+            entry_fee_rate: "-0.0005".to_owned(),
+            exit_fee_rate: "-0.0005".to_owned(),
+        },
+        mechanics_provenance,
+        fee_provenance: "DECLARED_COUNTERFACTUAL_TAKER_5_BPS_EACH_SIDE".to_owned(),
+        funding_provenance: "HISTORICAL_OBSERVED".to_owned(),
+        contracts: reference.min_size.clone(),
+        leverage: "2".to_owned(),
+        candidate_worst_case_loss_usd: "2".to_owned(),
+        entry_liquidity_role: LiquidityRole::Taker,
+        exit_liquidity_role: LiquidityRole::Taker,
+        funding_notional_basis: "ENTRY_NOTIONAL_COUNTERFACTUAL".to_owned(),
+    };
+    let spec = ExperimentSpec::build(
+        &hypothesis,
+        dataset.manifest.dataset_id.clone(),
+        instrument,
+        "1H",
+        0,
+        execution,
+        mandate,
+        policy,
+        initial_risk_context,
+    )?;
+    Ok((hypothesis, spec))
 }
 
 pub fn replay_experiment(

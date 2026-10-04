@@ -1,20 +1,15 @@
 use std::collections::BTreeMap;
 
-use okx_analysis::{
-    BASELINE_STRATEGY_VERSION_V1, BaselineStrategyKind, CandidateRiskContext,
-    HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy, LiquidityRole, PositionScenarioMechanics,
-    RiskDegradedMode, RiskMinimumQuality, TRADING_MANDATE_SCHEMA_V1, TradingMandate,
-};
+use okx_analysis::BaselineStrategyKind;
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponse, AgentResponseStatus,
     DataQuality, RESEARCH_CATALOG_VERSION_V1, ResearchReplayMechanicsProvenance,
     ResearchReplayStrategy, ResearchRequest,
 };
 use okx_research::{
-    BUILD_SOURCE_TREE, DatasetManifest, ExperimentSpec, Hypothesis,
-    REPLAY_EXECUTION_MODEL_VERSION_V1, ReferenceCoverageStatus, ReplayDatasetArtifact,
-    ReplayEvidenceClass, ReplayExecutionModel, ReplayMechanicsProvenance, ReplayStatus,
-    ResearchArtifactStore, ResearchRange, ResearchSourceKind, ResearchTier, SourceRequest,
+    BUILD_SOURCE_TREE, DatasetManifest, ReferenceCoverageStatus, ReplayDatasetArtifact,
+    ReplayEvidenceClass, ReplayMechanicsProvenance, ReplayStatus, ResearchArtifactStore,
+    ResearchRange, ResearchSourceKind, ResearchTier, SourceRequest, build_baseline_experiment,
     build_candle_chunk, build_funding_chunk, build_reference_chunk, build_tier_b_trade_chunk,
     detect_fixed_interval_gaps, replay_experiment,
 };
@@ -650,47 +645,6 @@ async fn run_replay(
             false,
         ));
     }
-    let Some(reference) = dataset.reference.as_ref() else {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Failed,
-            INSUFFICIENT_REFERENCE_HISTORY_CODE,
-            "replay dataset has no instrument reference evidence".to_owned(),
-            false,
-        ));
-    };
-    let Some(contract_value) = reference.contract_value.as_deref() else {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Failed,
-            RESEARCH_ARTIFACT_FAILURE_CODE,
-            "replay reference is missing contract value".to_owned(),
-            false,
-        ));
-    };
-    let Some(contract_value_currency) = reference.contract_value_currency.as_deref() else {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Failed,
-            RESEARCH_ARTIFACT_FAILURE_CODE,
-            "replay reference is missing contract value currency".to_owned(),
-            false,
-        ));
-    };
-    let Some(settle_currency) = reference.settle_currency.as_deref() else {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Failed,
-            RESEARCH_ARTIFACT_FAILURE_CODE,
-            "replay reference is missing settlement currency".to_owned(),
-            false,
-        ));
-    };
-
     let strategy = match strategy {
         ResearchReplayStrategy::NoTrade => BaselineStrategyKind::NoTrade,
         ResearchReplayStrategy::CloseMomentum => BaselineStrategyKind::CloseMomentum,
@@ -703,98 +657,12 @@ async fn run_replay(
             ReplayMechanicsProvenance::HistoricalObserved
         }
     };
-    let hypothesis = match Hypothesis::build(
-        match strategy {
-            BaselineStrategyKind::NoTrade => "NO_TRADE null baseline",
-            BaselineStrategyKind::CloseMomentum => {
-                "1H completed-bar close momentum predicts the next one-hour price move"
-            }
-        },
-        match strategy {
-            BaselineStrategyKind::NoTrade => {
-                "any trade, fee, funding cashflow, or non-zero PnL falsifies the null accounting baseline"
-            }
-            BaselineStrategyKind::CloseMomentum => {
-                "replay records deterministic next-open decisions and net PnL without same-close execution"
-            }
-        },
-        strategy,
-        BASELINE_STRATEGY_VERSION_V1,
-    ) {
-        Ok(value) => value,
-        Err(error) => return Ok(research_failure(request, generated_at, error)),
-    };
+    let (hypothesis, spec) =
+        match build_baseline_experiment(&dataset, strategy, mechanics_provenance) {
+            Ok(value) => value,
+            Err(error) => return Ok(research_failure(request, generated_at, error)),
+        };
 
-    let mandate = TradingMandate {
-        schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
-        version: "okx.research.baseline-mandate/2026-10-04.1".to_owned(),
-        capital_base_usd: "100".to_owned(),
-        decision_horizon_hours: 1,
-        benchmark: Some("NO_EXTERNAL_BENCHMARK".to_owned()),
-        allowed_instruments: vec![instrument.to_owned()],
-        max_drawdown_ratio: "0.5".to_owned(),
-        leverage_ceiling: "5".to_owned(),
-        minimum_liquidity_notional_usd: "0".to_owned(),
-        max_turnover_ratio: "100".to_owned(),
-    };
-    let policy = HardRiskPolicy {
-        schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
-        version: "okx.research.baseline-policy/2026-10-04.1".to_owned(),
-        max_account_gross_notional_usd: "1000".to_owned(),
-        max_instrument_gross_notional_usd: "1000".to_owned(),
-        max_margin_utilization_ratio: "0.9".to_owned(),
-        max_loss_per_trade_usd: "10".to_owned(),
-        max_daily_realized_loss_usd: "50".to_owned(),
-        max_drawdown_ratio: "0.5".to_owned(),
-        max_leverage: "5".to_owned(),
-        allowed_instruments: vec![instrument.to_owned()],
-        minimum_quality: RiskMinimumQuality::Fresh,
-        degraded_mode: RiskDegradedMode::Reject,
-        correlated_clusters: Vec::new(),
-    };
-    let risk_context = CandidateRiskContext {
-        total_equity_usd: "100".to_owned(),
-        account_gross_notional_usd: "0".to_owned(),
-        instrument_gross_notional_usd: "0".to_owned(),
-        account_initial_margin_usd: "0".to_owned(),
-        capital_base_drawdown_ratio: "0".to_owned(),
-        daily_realized_loss_usd: "0".to_owned(),
-        account_is_fresh: true,
-    };
-    let execution = ReplayExecutionModel {
-        version: REPLAY_EXECUTION_MODEL_VERSION_V1.to_owned(),
-        mechanics: PositionScenarioMechanics {
-            settle_currency: settle_currency.to_owned(),
-            contract_value_currency: contract_value_currency.to_owned(),
-            contract_value: contract_value.to_owned(),
-            tick_size: reference.tick_size.clone(),
-            entry_fee_rate: "-0.0005".to_owned(),
-            exit_fee_rate: "-0.0005".to_owned(),
-        },
-        mechanics_provenance,
-        fee_provenance: "DECLARED_COUNTERFACTUAL_TAKER_5_BPS_EACH_SIDE".to_owned(),
-        funding_provenance: "HISTORICAL_OBSERVED".to_owned(),
-        contracts: reference.min_size.clone(),
-        leverage: "2".to_owned(),
-        candidate_worst_case_loss_usd: "2".to_owned(),
-        entry_liquidity_role: LiquidityRole::Taker,
-        exit_liquidity_role: LiquidityRole::Taker,
-        funding_notional_basis: "ENTRY_NOTIONAL_COUNTERFACTUAL".to_owned(),
-    };
-    let spec = match ExperimentSpec::build(
-        &hypothesis,
-        dataset.manifest.dataset_id.clone(),
-        instrument,
-        "1H",
-        0,
-        execution,
-        mandate,
-        policy,
-        risk_context,
-    ) {
-        Ok(value) => value,
-        Err(error) => return Ok(research_failure(request, generated_at, error)),
-    };
     let result =
         match replay_experiment(&dataset.manifest, &dataset.candles, &dataset.funding, &spec) {
             Ok(value) => value,

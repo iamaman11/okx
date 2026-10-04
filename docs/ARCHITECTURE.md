@@ -160,15 +160,16 @@ Pure deterministic analysis:
 
 Inputs are immutable accepted snapshots. Portfolio mandate/hard-policy arithmetic, covariance/correlation, scenario/stress and future statistical risk calculations belong here as pure deterministic/statistical functions. No collector, transport, lifecycle or mutation ownership lives here.
 
-### `okx-research` (Stage-3 admitted boundary; not yet implemented)
+### `okx-research` (Stage-3 admitted boundary)
 
 One new research-domain crate is explicitly admitted for Stage 3 if its implementation matches #160.
 
-It may own:
+It owns the Stage-3 research boundary and may own:
 - immutable dataset/archive manifests and content hashes;
 - point-in-time/availability-time research views;
 - deterministic replay orchestration over normalized historical facts;
 - hypothesis / experiment / validation lineage;
+- versioned baseline experiment/profile construction for replay (assumptions, declared cost model, mandate and hard-policy values), while policy arithmetic remains in `okx-analysis`;
 - walk-forward/OOS/anti-overfit orchestration;
 - immutable promotion bundles;
 - compact paper/shadow research evidence.
@@ -217,7 +218,7 @@ Composition root and typed access adapter:
 - assembles bounded query dependencies;
 - projects compact typed results.
 
-It does not duplicate observation/runtime/execution state machines.
+It does not define research strategy/risk/cost policy defaults. For replay it validates the bounded request, loads immutable artifacts, invokes `okx-research`, and returns the compact result. It does not duplicate observation/runtime/execution state machines.
 
 ### `okx-protocol`
 
@@ -305,6 +306,10 @@ ChatGPT
 Acceptance rule: a new product capability is not T4-accepted until that capability itself is callable through the connected `okx-cloudflare-mcp` surface. A fresh Worker version or healthy transport status alone is insufficient. If ChatGPT has a stale tool schema, the tools must be refreshed and the primary call repeated.
 
 Cloudflare owns transport/auth/correlation only. Product calculations and exchange truth remain Windows/Rust-owned.
+
+Normal ChatGPT-facing analytical/research responses are **decision packets**, not data exports. The normal target is one coarse capability call producing <= 12,288 bytes with identity/provenance, quality/status, assumptions, diagnostics, risk/policy outcome, compact numerical evidence, invalidation/blocker information and artifact/continuation ids where relevant. Raw candles, trades, L2 events, ledger rows and replay event traces remain local forensic/artifact evidence and are not returned merely so ChatGPT can recompute Rust-owned math.
+
+A normal user question should usually require one coarse MCP operation after capability discovery is already known. Additional round-trips are evidence-driven (for example `NOT_READY`, `DEGRADED`, explicit forensic inspection or continuation), not a fixed chain of low-level reads.
 
 ### Fallback DATA #10
 
