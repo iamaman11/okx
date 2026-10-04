@@ -80,24 +80,15 @@ mod tests {
     #[test]
     fn close_momentum_is_deterministic_and_directional() {
         assert_eq!(
-            evaluate_baseline_strategy(
-                BaselineStrategyKind::CloseMomentum,
-                &input("100", "101")
-            ),
+            evaluate_baseline_strategy(BaselineStrategyKind::CloseMomentum, &input("100", "101")),
             Ok(StrategyDecision::EnterLong)
         );
         assert_eq!(
-            evaluate_baseline_strategy(
-                BaselineStrategyKind::CloseMomentum,
-                &input("101", "100")
-            ),
+            evaluate_baseline_strategy(BaselineStrategyKind::CloseMomentum, &input("101", "100")),
             Ok(StrategyDecision::EnterShort)
         );
         assert_eq!(
-            evaluate_baseline_strategy(
-                BaselineStrategyKind::CloseMomentum,
-                &input("100", "100")
-            ),
+            evaluate_baseline_strategy(BaselineStrategyKind::CloseMomentum, &input("100", "100")),
             Ok(StrategyDecision::Hold)
         );
     }
@@ -105,17 +96,11 @@ mod tests {
     #[test]
     fn baseline_rejects_nonpositive_prices() {
         assert!(matches!(
-            evaluate_baseline_strategy(
-                BaselineStrategyKind::CloseMomentum,
-                &input("0", "100")
-            ),
+            evaluate_baseline_strategy(BaselineStrategyKind::CloseMomentum, &input("0", "100")),
             Err(AnalysisError::NonPositive("strategy_previous_close"))
         ));
         assert!(matches!(
-            evaluate_baseline_strategy(
-                BaselineStrategyKind::CloseMomentum,
-                &input("100", "-1")
-            ),
+            evaluate_baseline_strategy(BaselineStrategyKind::CloseMomentum, &input("100", "-1")),
             Err(AnalysisError::NonPositive("strategy_signal_close"))
         ));
     }
