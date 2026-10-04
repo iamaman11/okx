@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use okx_analysis::{
-    BaselineStrategyKind, BarDecisionInput, CandidateRiskContext, HardRiskPolicy, LiquidityRole,
+    BarDecisionInput, BaselineStrategyKind, CandidateRiskContext, HardRiskPolicy, LiquidityRole,
     PortfolioCandidate, PositionDirection, PositionScenarioAssumptions, PositionScenarioMechanics,
     RiskPolicyDecision, ScenarioExitAssumption, StrategyDecision, TradingMandate,
     analyze_position_scenario_values, evaluate_baseline_strategy, evaluate_candidate_risk,
@@ -371,7 +371,10 @@ pub fn replay_experiment(
         );
     }
 
-    let initial_equity = decimal("initial_total_equity_usd", &spec.initial_risk_context.total_equity_usd)?;
+    let initial_equity = decimal(
+        "initial_total_equity_usd",
+        &spec.initial_risk_context.total_equity_usd,
+    )?;
     let capital_base = decimal("mandate_capital_base_usd", &spec.mandate.capital_base_usd)?;
     let mut equity = initial_equity;
     let mut daily_loss = decimal(
@@ -511,11 +514,7 @@ pub fn replay_experiment(
                 .unwrap_or(&event.funding_rate);
             funding_cost += decimal(
                 "funding_user_cost_quote",
-                &funding_user_cost_quote(
-                    &entry_notional.normalize().to_string(),
-                    rate,
-                    direction,
-                )?,
+                &funding_user_cost_quote(&entry_notional.normalize().to_string(), rate, direction)?,
             )?;
             funding_event_count += 1;
         }
@@ -768,7 +767,10 @@ mod tests {
             range: ResearchRange::new("0", (5 * ONE_HOUR_MS).to_string()).expect("range"),
             reference_coverage,
             reference_window: None,
-            chunk_ids: vec!["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()],
+            chunk_ids: vec![
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+            ],
             gaps: Vec::new(),
             parser_version: "parser/v1".to_owned(),
             normalization_version: "normalizer/v1".to_owned(),
@@ -902,7 +904,10 @@ mod tests {
         assert_eq!(result.status, ReplayStatus::Completed);
         assert!(!result.trades.is_empty());
         let first = &result.trades[0];
-        assert_eq!(first.signal_available_time_ms, (2 * ONE_HOUR_MS).to_string());
+        assert_eq!(
+            first.signal_available_time_ms,
+            (2 * ONE_HOUR_MS).to_string()
+        );
         assert_eq!(first.entry_time_ms, (2 * ONE_HOUR_MS).to_string());
         assert_eq!(first.entry_price, "111");
         assert_ne!(first.entry_price, "110");
@@ -1051,10 +1056,12 @@ mod tests {
         let result = replay_experiment(&data, &candles(), &[], &experiment).expect("replay");
         assert_eq!(result.trade_count, 0);
         assert!(result.rejected_candidate_count > 0);
-        assert!(result
-            .decisions
-            .iter()
-            .any(|row| row.risk_decision == Some(RiskPolicyDecision::Rejected)));
+        assert!(
+            result
+                .decisions
+                .iter()
+                .any(|row| row.risk_decision == Some(RiskPolicyDecision::Rejected))
+        );
     }
 
     #[test]
