@@ -290,7 +290,7 @@ export const mcpApi = {
                   type: "object",
                   properties: {
                     action: { type: "string", enum: ["inspect_tier_a", "inspect_tier_b", "run_replay"] },
-                    catalog_version: { type: "string", const: "okx.research.catalog/2026-10-04.1" },
+                    catalog_version: { type: "string", const: "okx.research.catalog/2026-10-04.2" },
                     instrument: {
                       type: "string",
                       enum: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
@@ -620,7 +620,7 @@ export const mcpApi = {
         if (!["inspect_tier_a", "inspect_tier_b", "run_replay"].includes(String(research.action))) {
           return jsonRpcError(id, -32602, "invalid research action");
         }
-        if (research.catalog_version !== "okx.research.catalog/2026-10-04.1") {
+        if (research.catalog_version !== "okx.research.catalog/2026-10-04.2") {
           return jsonRpcError(id, -32602, "invalid research catalog_version");
         }
         const instrument = normalizeInstrument(research.instrument);
