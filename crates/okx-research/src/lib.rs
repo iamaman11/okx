@@ -1744,5 +1744,4 @@ mod tests {
             Err(ResearchError::InvalidRange { .. })
         ));
     }
-
 }
