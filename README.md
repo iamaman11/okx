@@ -18,9 +18,11 @@ Accepted:
 - A2 reboot + real external network-loss recovery — PASS;
 - Phase 2 pre-enable execution boundary — PHYSICAL PASS with live writes hard-disabled;
 - Stage 1 TRUTH — ACCEPTED/CLOSED;
-- Stage 2 INTELLIGENCE + RISK — ACCEPTED/CLOSED on account-mode-aware Futures risk evidence.
+- Stage 2 INTELLIGENCE + RISK — ACCEPTED/CLOSED on account-mode-aware Futures risk evidence;
+- Stage 3A DATA FOUNDATION — ACCEPTED/CLOSED;
+- Stage 3B DETERMINISTIC REPLAY KERNEL — ACCEPTED/CLOSED on primary MCP replay + restart/determinism + fail-closed evidence.
 
-Current canonical roadmap: **#160**. Current development cursor: **Stage 3 — SCIENTIFIC RESEARCH + REPLAY**.
+Current canonical roadmap: **#160**. Current development cursor: **Stage 3C — SCIENTIFIC VALIDATION & PROMOTION**.
 
 Live trading is **not enabled**. Production construction of the executor remains disabled before SUBMITTING persistence and before any exchange mutation.
 
