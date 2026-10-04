@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::{
     BUILD_SOURCE_TREE, EXPERIMENT_RESULT_SCHEMA_V1, ReplayDatasetArtifact, ResearchArtifactStore,
     ResearchError, ResearchFamily, ResearchTrialOutcome, ResearchTrialRef, ValidationPartitionRole,
-    ValidationSpec, VALIDATION_EVIDENCE_POLICY_V1, canonical_sha256,
+    ValidationSpec, VALIDATION_EVIDENCE_POLICY_V1, build_baseline_hypothesis, canonical_sha256,
 };
 
 pub const PRE_HOLDOUT_EVIDENCE_SCHEMA_V1: &str = "okx.research.pre-holdout-evidence/v1";
@@ -203,6 +203,12 @@ pub fn prepare_pre_holdout_evidence(
     validate_result_against_dataset(&validation_result, &validation_dataset)?;
     if train_result.hypothesis_id != validation_result.hypothesis_id
         || train_result.replay_source_tree != validation_result.replay_source_tree
+    {
+        return Err(ResearchError::ArtifactIdentityMismatch);
+    }
+    let expected_hypothesis = build_baseline_hypothesis(spec.strategy)?;
+    if train_result.hypothesis_id != expected_hypothesis.hypothesis_id
+        || spec.strategy_version != expected_hypothesis.strategy_version
     {
         return Err(ResearchError::ArtifactIdentityMismatch);
     }
