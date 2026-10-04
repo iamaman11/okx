@@ -279,6 +279,19 @@ struct ExperimentResultIdentity<'a> {
     trades: &'a [ReplayTrade],
 }
 
+struct TerminalResultParts {
+    status: ReplayStatus,
+    evidence_class: ReplayEvidenceClass,
+    blocker: Option<&'static str>,
+    candles_processed: usize,
+    decisions: Vec<ReplayDecisionTrace>,
+    trades: Vec<ReplayTrade>,
+    rejected_candidate_count: usize,
+    gross_pnl: Decimal,
+    trading_cost: Decimal,
+    funding_cost: Decimal,
+}
+
 pub fn replay_experiment(
     dataset: &DatasetManifest,
     candles: &[ResearchCandle],
@@ -291,16 +304,18 @@ pub fn replay_experiment(
         return terminal_result(
             dataset,
             spec,
-            ReplayStatus::InsufficientData,
-            evidence_class(dataset, spec),
-            Some("INSUFFICIENT_DATA"),
-            candles.len(),
-            Vec::new(),
-            Vec::new(),
-            0,
-            Decimal::ZERO,
-            Decimal::ZERO,
-            Decimal::ZERO,
+            TerminalResultParts {
+                status: ReplayStatus::InsufficientData,
+                evidence_class: evidence_class(dataset, spec),
+                blocker: Some("INSUFFICIENT_DATA"),
+                candles_processed: candles.len(),
+                decisions: Vec::new(),
+                trades: Vec::new(),
+                rejected_candidate_count: 0,
+                gross_pnl: Decimal::ZERO,
+                trading_cost: Decimal::ZERO,
+                funding_cost: Decimal::ZERO,
+            },
         );
     }
 
@@ -311,16 +326,18 @@ pub fn replay_experiment(
         return terminal_result(
             dataset,
             spec,
-            ReplayStatus::InsufficientReferenceHistory,
-            ReplayEvidenceClass::HistoricalObserved,
-            Some("INSUFFICIENT_REFERENCE_HISTORY"),
-            candles.len(),
-            Vec::new(),
-            Vec::new(),
-            0,
-            Decimal::ZERO,
-            Decimal::ZERO,
-            Decimal::ZERO,
+            TerminalResultParts {
+                status: ReplayStatus::InsufficientReferenceHistory,
+                evidence_class: ReplayEvidenceClass::HistoricalObserved,
+                blocker: Some("INSUFFICIENT_REFERENCE_HISTORY"),
+                candles_processed: candles.len(),
+                decisions: Vec::new(),
+                trades: Vec::new(),
+                rejected_candidate_count: 0,
+                gross_pnl: Decimal::ZERO,
+                trading_cost: Decimal::ZERO,
+                funding_cost: Decimal::ZERO,
+            },
         );
     }
 
@@ -341,16 +358,18 @@ pub fn replay_experiment(
         return terminal_result(
             dataset,
             spec,
-            ReplayStatus::Completed,
-            ReplayEvidenceClass::DataOnly,
-            None,
-            candles.len(),
-            decisions,
-            Vec::new(),
-            0,
-            Decimal::ZERO,
-            Decimal::ZERO,
-            Decimal::ZERO,
+            TerminalResultParts {
+                status: ReplayStatus::Completed,
+                evidence_class: ReplayEvidenceClass::DataOnly,
+                blocker: None,
+                candles_processed: candles.len(),
+                decisions,
+                trades: Vec::new(),
+                rejected_candidate_count: 0,
+                gross_pnl: Decimal::ZERO,
+                trading_cost: Decimal::ZERO,
+                funding_cost: Decimal::ZERO,
+            },
         );
     }
 
@@ -358,16 +377,18 @@ pub fn replay_experiment(
         return terminal_result(
             dataset,
             spec,
-            ReplayStatus::InsufficientData,
-            evidence_class(dataset, spec),
-            Some("INSUFFICIENT_DATA"),
-            candles.len(),
-            Vec::new(),
-            Vec::new(),
-            0,
-            Decimal::ZERO,
-            Decimal::ZERO,
-            Decimal::ZERO,
+            TerminalResultParts {
+                status: ReplayStatus::InsufficientData,
+                evidence_class: evidence_class(dataset, spec),
+                blocker: Some("INSUFFICIENT_DATA"),
+                candles_processed: candles.len(),
+                decisions: Vec::new(),
+                trades: Vec::new(),
+                rejected_candidate_count: 0,
+                gross_pnl: Decimal::ZERO,
+                trading_cost: Decimal::ZERO,
+                funding_cost: Decimal::ZERO,
+            },
         );
     }
 
@@ -551,33 +572,38 @@ pub fn replay_experiment(
     terminal_result(
         dataset,
         spec,
-        ReplayStatus::Completed,
-        evidence_class(dataset, spec),
-        None,
-        candles.len(),
-        decisions,
-        trades,
-        rejected,
-        gross_total,
-        trading_cost_total,
-        funding_cost_total,
+        TerminalResultParts {
+            status: ReplayStatus::Completed,
+            evidence_class: evidence_class(dataset, spec),
+            blocker: None,
+            candles_processed: candles.len(),
+            decisions,
+            trades,
+            rejected_candidate_count: rejected,
+            gross_pnl: gross_total,
+            trading_cost: trading_cost_total,
+            funding_cost: funding_cost_total,
+        },
     )
 }
 
 fn terminal_result(
     dataset: &DatasetManifest,
     spec: &ExperimentSpec,
-    status: ReplayStatus,
-    evidence_class: ReplayEvidenceClass,
-    blocker: Option<&'static str>,
-    candles_processed: usize,
-    decisions: Vec<ReplayDecisionTrace>,
-    trades: Vec<ReplayTrade>,
-    rejected_candidate_count: usize,
-    gross_pnl: Decimal,
-    trading_cost: Decimal,
-    funding_cost: Decimal,
+    parts: TerminalResultParts,
 ) -> Result<ExperimentResult, ResearchError> {
+    let TerminalResultParts {
+        status,
+        evidence_class,
+        blocker,
+        candles_processed,
+        decisions,
+        trades,
+        rejected_candidate_count,
+        gross_pnl,
+        trading_cost,
+        funding_cost,
+    } = parts;
     let net_pnl = gross_pnl - trading_cost - funding_cost;
     let gross_pnl_quote = gross_pnl.normalize().to_string();
     let trading_cost_quote = trading_cost.normalize().to_string();
