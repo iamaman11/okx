@@ -526,7 +526,10 @@ impl ResearchRequest {
                         "Stage 3B v1 replay instrument scope",
                     ));
                 }
-                validate_sha256_artifact_id(replay_dataset_artifact_id)?;
+                validate_sha256_artifact_id(
+                    replay_dataset_artifact_id,
+                    "replay_dataset_artifact_id",
+                )?;
                 Ok(())
             }
             Self::PrepareValidationDataset {
@@ -554,7 +557,7 @@ impl ResearchRequest {
                     return Err(ProtocolError::InvalidResearchRequest("target_candle_count"));
                 }
                 if let Some(id) = checkpoint_artifact_id {
-                    validate_sha256_artifact_id(id)?;
+                    validate_sha256_artifact_id(id, "checkpoint_artifact_id")?;
                 }
                 Ok(())
             }
@@ -1554,20 +1557,19 @@ fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
-fn validate_sha256_artifact_id(value: &str) -> Result<(), ProtocolError> {
+fn validate_sha256_artifact_id(
+    value: &str,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
     let Some(hex) = value.strip_prefix("sha256:") else {
-        return Err(ProtocolError::InvalidResearchRequest(
-            "replay_dataset_artifact_id",
-        ));
+        return Err(ProtocolError::InvalidResearchRequest(field));
     };
     if hex.len() != 64
         || !hex
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
-        return Err(ProtocolError::InvalidResearchRequest(
-            "replay_dataset_artifact_id",
-        ));
+        return Err(ProtocolError::InvalidResearchRequest(field));
     }
     Ok(())
 }
