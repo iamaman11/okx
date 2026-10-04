@@ -160,12 +160,10 @@ pub(super) async fn prepare_validation_dataset(
 
     match checkpoint.phase {
         ResearchCheckpointPhase::Candles => {
-            let mut current_rows = checkpoint
-                .completed_pages
-                .iter()
-                .filter(|page| page.kind == ResearchSourceKind::Candle)
-                .map(|page| page.row_count as usize)
-                .sum::<usize>();
+            let mut current_rows = match load_candles(&store, &checkpoint.completed_pages) {
+                Ok(value) => value.len(),
+                Err(error) => return Ok(research_failure(request, generated_at, error)),
+            };
             let mut exhausted = false;
 
             for _ in 0..VALIDATION_PAGES_PER_CALL {
@@ -252,11 +250,31 @@ pub(super) async fn prepare_validation_dataset(
                     Ok(value) => value,
                     Err(error) => return Ok(research_failure(request, generated_at, error)),
                 };
+                if checkpoint
+                    .remaining_cursor
+                    .as_deref()
+                    .is_some_and(|cursor| {
+                        cursor
+                            .parse::<u64>()
+                            .ok()
+                            .zip(oldest.parse::<u64>().ok())
+                            .is_none_or(|(previous, next)| next >= previous)
+                    })
+                {
+                    return Ok(research_failure(
+                        request,
+                        generated_at,
+                        okx_research::ResearchError::CursorDidNotAdvance,
+                    ));
+                }
                 checkpoint
                     .completed_pages
                     .push(page_ref(&chunk_artifact, artifact_id));
                 checkpoint.remaining_cursor = Some(oldest);
-                current_rows += chunk.rows.len();
+                current_rows = match load_candles(&store, &checkpoint.completed_pages) {
+                    Ok(value) => value.len(),
+                    Err(error) => return Ok(research_failure(request, generated_at, error)),
+                };
                 if page_exhausted {
                     exhausted = true;
                     break;
@@ -264,14 +282,27 @@ pub(super) async fn prepare_validation_dataset(
             }
 
             if current_rows < usize::from(target_candle_count) {
+                let state = if exhausted {
+                    ValidationDatasetState::InsufficientData
+                } else {
+                    ValidationDatasetState::ContinuationRequired
+                };
                 let next = match ResearchCheckpoint::build(
                     parent_checkpoint_id,
                     instrument,
                     bar,
                     target_candle_count,
-                    ResearchCheckpointPhase::Candles,
+                    if exhausted {
+                        ResearchCheckpointPhase::InsufficientData
+                    } else {
+                        ResearchCheckpointPhase::Candles
+                    },
                     checkpoint.completed_pages,
-                    checkpoint.remaining_cursor,
+                    if exhausted {
+                        None
+                    } else {
+                        checkpoint.remaining_cursor
+                    },
                     None,
                     None,
                     BUILD_SOURCE_TREE,
@@ -285,11 +316,7 @@ pub(super) async fn prepare_validation_dataset(
                     generated_at,
                     &store,
                     next,
-                    if exhausted {
-                        ValidationDatasetState::InsufficientData
-                    } else {
-                        ValidationDatasetState::ContinuationRequired
-                    },
+                    state,
                     Vec::new(),
                 );
             }
@@ -440,6 +467,22 @@ pub(super) async fn prepare_validation_dataset(
                         .push(page_ref(&chunk_artifact, artifact_id));
                 }
 
+                if checkpoint
+                    .remaining_cursor
+                    .as_deref()
+                    .is_some_and(|cursor| {
+                        cursor
+                            .parse::<u64>()
+                            .ok()
+                            .is_none_or(|previous| oldest_all >= previous)
+                    })
+                {
+                    return Ok(research_failure(
+                        request,
+                        generated_at,
+                        okx_research::ResearchError::CursorDidNotAdvance,
+                    ));
+                }
                 checkpoint.remaining_cursor = Some(oldest_all.to_string());
                 if oldest_all <= range_begin || page_exhausted {
                     done = true;
@@ -484,6 +527,14 @@ pub(super) async fn prepare_validation_dataset(
             )
             .await
         }
+        ResearchCheckpointPhase::InsufficientData => checkpoint_response(
+            request,
+            generated_at,
+            &store,
+            checkpoint,
+            ValidationDatasetState::InsufficientData,
+            Vec::new(),
+        ),
         ResearchCheckpointPhase::Complete => unreachable!("handled above"),
     }
 }
