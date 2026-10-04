@@ -369,11 +369,28 @@ Accepted evidence:
 
 Stage 3A exit is satisfied because the application can now prove what admitted historical data exists, its source/provenance/availability semantics, and where historical reference coverage is insufficient without inventing missing truth.
 
-**Current cursor: Stage 3B — Deterministic Replay Kernel.**
+### Stage 3B acceptance — 2026-10-04
 
-Stage-3B implementation rule (2026-10-04 refinement): experiment construction belongs with immutable research semantics, not in the composition root. `okx-agent` may map transport enums, validate/load an artifact, invoke the research function and project its compact response; it must not accumulate baseline mandate/risk/cost defaults. ChatGPT consumes compact decision-grade replay evidence and immutable ids, not raw replay events.
+Stage 3B — Deterministic Replay Kernel is **ACCEPTED/CLOSED**.
 
-The Stage-3 design freeze remains in force. New framework layers or methods require a reproduced source/runtime/test failure, not speculative completeness.
+Accepted evidence:
+- PR #203 squash-merged the deterministic replay kernel; exact-head CI #925 passed architecture, Cloudflare typecheck, Linux fmt/clippy/tests and Windows native clippy/tests/release artifact build;
+- the accepted Windows agent artifact was deployed through CONTROL with persisted provenance and restarted successfully; runtime advertised Stage `3B_V1` and the exact accepted replay source tree;
+- primary Cloudflare MCP produced a bounded BTC Tier-A replay artifact `sha256:578b3cb3918416a8374b1cfc57f1df163851d7e87c8f9ca0e30c9b9971c4c3a0` while preserving the typed `INSUFFICIENT_REFERENCE_HISTORY` blocker instead of inventing point-in-time reference truth;
+- primary `NO_TRADE` replay completed with 23 candles, 22 decisions, zero trades, zero gross/net/cost/funding, no bulk events and no exchange mutation authority;
+- primary `close_momentum` replay completed on the same immutable artifact with explicit `COUNTERFACTUAL_MECHANICS` evidence, 20 trades, gross PnL `-0.05931`, trading cost `0.170007765`, funding cost `-0.000526213889483853697`, and net PnL `-0.228791551110516146303`; accounting reconciled exactly as gross minus trading cost minus funding cost;
+- the compact replay decision packet was about 2.5 kB, well below the 12,288-byte normal-result budget, and returned no replay trace/bulk events;
+- repeated replay before restart produced the same hypothesis/spec/experiment/result artifact identities and numerical results;
+- after a controlled agent restart, direct-transport generation advanced from 138 to 139 and replaying the same artifact again produced the same immutable identities and numerical results;
+- historical-observed mechanics on insufficient point-in-time reference coverage failed closed as `INSUFFICIENT_REFERENCE_HISTORY` with zero decisions/trades;
+- a syntactically valid but missing replay artifact failed typed/non-retryable as `RESEARCH_ARTIFACT_FAILURE`;
+- Worker boundary/version mismatches discovered during acceptance were fixed narrowly in PRs #204/#205; Cloudflare deploys #21/#22 passed typecheck/deploy/health, and the live contract is `okx.mcp.tools/2026-10-04.3` with research catalog `okx.research.catalog/2026-10-04.2`.
+
+Stage 3B exit is satisfied: one strategy is replayed reproducibly without hidden future data, duplicate production formulas, bulk MCP traces or exchange mutation authority.
+
+**Current cursor: Stage 3C — Scientific Validation & Promotion.**
+
+The Stage-3 design freeze remains in force. Stage 3C must build on the accepted 3A/3B owners and artifacts; new framework layers or methods still require a reproduced source/runtime/test failure, not speculative completeness.
 
 ### Stage 4 — EXECUTION + TCA
 
