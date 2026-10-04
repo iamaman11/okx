@@ -1752,6 +1752,53 @@ mod tests {
                 "replay_dataset_artifact_id"
             ))
         ));
+
+        let validation = ResearchRequest::PrepareValidationDataset {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            bar: "1H".to_owned(),
+            target_candle_count: 240,
+            checkpoint_artifact_id: None,
+        };
+        assert_eq!(validation.validate(), Ok(()));
+
+        let validation_resume = ResearchRequest::PrepareValidationDataset {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            bar: "1H".to_owned(),
+            target_candle_count: 2400,
+            checkpoint_artifact_id: Some(
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+            ),
+        };
+        assert_eq!(validation_resume.validate(), Ok(()));
+
+        let validation_too_short = ResearchRequest::PrepareValidationDataset {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            bar: "1H".to_owned(),
+            target_candle_count: 239,
+            checkpoint_artifact_id: None,
+        };
+        assert!(matches!(
+            validation_too_short.validate(),
+            Err(ProtocolError::InvalidResearchRequest("target_candle_count"))
+        ));
+
+        let validation_bad_checkpoint = ResearchRequest::PrepareValidationDataset {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            bar: "1H".to_owned(),
+            target_candle_count: 240,
+            checkpoint_artifact_id: Some("bad".to_owned()),
+        };
+        assert!(matches!(
+            validation_bad_checkpoint.validate(),
+            Err(ProtocolError::InvalidResearchRequest(
+                "checkpoint_artifact_id"
+            ))
+        ));
     }
 
     fn execution_risk_request() -> ExecutionRiskBindingRequest {
