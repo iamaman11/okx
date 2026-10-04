@@ -1083,7 +1083,6 @@ fn research_failure(
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1102,7 +1101,10 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        (root.clone(), ResearchArtifactStore::at(root.join("research")))
+        (
+            root.clone(),
+            ResearchArtifactStore::at(root.join("research")),
+        )
     }
 
     fn history_candle(open_time_ms: u64, close: &str) -> HistoryCandle {
@@ -1174,9 +1176,11 @@ mod tests {
 
         let recovered = load_candles(&store, &pages).expect("recover");
         assert_eq!(recovered.len(), 6);
-        assert!(recovered
-            .windows(2)
-            .all(|pair| pair[0].open_time_ms < pair[1].open_time_ms));
+        assert!(
+            recovered
+                .windows(2)
+                .all(|pair| pair[0].open_time_ms < pair[1].open_time_ms)
+        );
 
         let selected = select_latest_candles(recovered, 4);
         assert_eq!(
@@ -1196,11 +1200,8 @@ mod tests {
         );
         assert_eq!(
             replay_range(&selected).expect("range"),
-            ResearchRange::new(
-                (2 * ONE_HOUR_MS).to_string(),
-                (6 * ONE_HOUR_MS).to_string()
-            )
-            .expect("expected range")
+            ResearchRange::new((2 * ONE_HOUR_MS).to_string(), (6 * ONE_HOUR_MS).to_string())
+                .expect("expected range")
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1212,10 +1213,7 @@ mod tests {
             history_candle(ONE_HOUR_MS, "101"),
             history_candle(2 * ONE_HOUR_MS, "102"),
         ];
-        let overlapping = vec![
-            history_candle(0, "100"),
-            history_candle(ONE_HOUR_MS, "101"),
-        ];
+        let overlapping = vec![history_candle(0, "100"), history_candle(ONE_HOUR_MS, "101")];
         let pages = vec![
             persist_candle_page(&store, &first, b"first", "latest_page"),
             persist_candle_page(&store, &overlapping, b"second", "older_than_cursor"),
