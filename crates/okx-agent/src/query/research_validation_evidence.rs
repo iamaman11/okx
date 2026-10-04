@@ -77,11 +77,7 @@ pub(super) fn evaluate_validation_evidence(
             ));
         }
     };
-    let quality = if prepared.evidence.blockers.is_empty() {
-        DataQuality::Fresh
-    } else {
-        DataQuality::Degraded
-    };
+    let quality = DataQuality::Fresh;
     let warnings = prepared
         .evidence
         .blockers
