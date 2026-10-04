@@ -14,6 +14,7 @@ pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
 pub const DIRECT_TRANSPORT_FRAME_SCHEMA_V1: &str = "okx.direct-transport.frame/v1";
 pub const DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.2";
+pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-04.1";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -46,6 +47,9 @@ pub enum ProtocolError {
 
     #[error("invalid analytical query plan: {0}")]
     InvalidAnalyticalQuery(&'static str),
+
+    #[error("invalid research request: {0}")]
+    InvalidResearchRequest(&'static str),
 
     #[error("position scenario requires exactly one exit_price or entry_move_ratio")]
     InvalidPositionScenarioExit,
@@ -408,6 +412,57 @@ pub struct VirtualPortfolioRequest {
     pub positions: Vec<VirtualPortfolioPositionRequest>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResearchRequest {
+    InspectTierA {
+        catalog_version: String,
+        instrument: String,
+        bar: String,
+        candle_limit: u16,
+        funding_limit: u16,
+    },
+}
+
+impl ResearchRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        match self {
+            Self::InspectTierA {
+                catalog_version,
+                instrument,
+                bar,
+                candle_limit,
+                funding_limit,
+            } => {
+                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
+                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
+                }
+                validate_instrument(instrument)?;
+                if !matches!(
+                    instrument.as_str(),
+                    "BTC-USDT-SWAP" | "ETH-USDT-SWAP" | "DOGE-USDT-SWAP"
+                ) {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "Stage 3A v1 instrument scope",
+                    ));
+                }
+                if bar != "1H" {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "Stage 3A v1 bar must be 1H",
+                    ));
+                }
+                if !(2..=100).contains(candle_limit) {
+                    return Err(ProtocolError::InvalidResearchRequest("candle_limit"));
+                }
+                if !(1..=400).contains(funding_limit) {
+                    return Err(ProtocolError::InvalidResearchRequest("funding_limit"));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionOrderType {
@@ -447,6 +502,10 @@ pub enum AgentOperation {
     QueryCapabilities,
     Query {
         plan: AnalyticalQueryPlan,
+    },
+    ResearchCapabilities,
+    Research {
+        request: ResearchRequest,
     },
     MarketHistory {
         instrument: String,
@@ -580,8 +639,9 @@ impl AgentOperation {
                 bar,
                 limit,
             } => validate_market_research(instruments, bar, *limit),
-            Self::QueryCapabilities => Ok(()),
+            Self::QueryCapabilities | Self::ResearchCapabilities => Ok(()),
             Self::Query { plan } => plan.validate(),
+            Self::Research { request } => request.validate(),
             Self::MarketHistory {
                 instrument,
                 bar,
@@ -1484,6 +1544,44 @@ fn validate_decimal_text(value: &str, field: &'static str) -> Result<(), Protoco
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_v1_scope_is_narrow_and_versioned() {
+        let valid = ResearchRequest::InspectTierA {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            bar: "1H".to_owned(),
+            candle_limit: 24,
+            funding_limit: 24,
+        };
+        assert_eq!(valid.validate(), Ok(()));
+
+        let wrong_instrument = ResearchRequest::InspectTierA {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "SOL-USDT-SWAP".to_owned(),
+            bar: "1H".to_owned(),
+            candle_limit: 24,
+            funding_limit: 24,
+        };
+        assert!(matches!(
+            wrong_instrument.validate(),
+            Err(ProtocolError::InvalidResearchRequest(
+                "Stage 3A v1 instrument scope"
+            ))
+        ));
+
+        let wrong_catalog = ResearchRequest::InspectTierA {
+            catalog_version: "okx.research.catalog/old".to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            bar: "1H".to_owned(),
+            candle_limit: 24,
+            funding_limit: 24,
+        };
+        assert!(matches!(
+            wrong_catalog.validate(),
+            Err(ProtocolError::InvalidResearchRequest("catalog_version"))
+        ));
+    }
 
     fn execution_risk_request() -> ExecutionRiskBindingRequest {
         ExecutionRiskBindingRequest {
