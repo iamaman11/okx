@@ -14,8 +14,7 @@ pub const VALIDATION_SPEC_SCHEMA_V1: &str = "okx.research.validation-spec/v1";
 pub const RESEARCH_FAMILY_SCHEMA_V1: &str = "okx.research.family/v1";
 pub const VALIDATION_SPLIT_SCHEMA_V1: &str = "okx.research.validation-split/v1";
 pub const VALIDATION_EVIDENCE_POLICY_V1: &str = "okx.research.validation-evidence/2026-10-05.1";
-pub const VALIDATION_PROMOTION_CRITERIA_V1: &str =
-    "okx.research.promotion-criteria/2026-10-05.1";
+pub const VALIDATION_PROMOTION_CRITERIA_V1: &str = "okx.research.promotion-criteria/2026-10-05.1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -174,7 +173,6 @@ impl ValidationSpec {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivedValidationSlice {
     pub role: ValidationPartitionRole,
@@ -303,19 +301,13 @@ pub fn derive_validation_slice(
                 .funding_time_ms
                 .parse::<u64>()
                 .ok()
-                .is_some_and(|timestamp| {
-                    timestamp >= effective_begin && timestamp < effective_end
-                })
+                .is_some_and(|timestamp| timestamp >= effective_begin && timestamp < effective_end)
         })
         .cloned()
         .collect::<Vec<_>>();
     let manifest = parent.manifest.derive_slice(effective_range.clone())?;
-    let replay_dataset = ReplayDatasetArtifact::build(
-        manifest,
-        candles,
-        funding,
-        parent.reference.clone(),
-    )?;
+    let replay_dataset =
+        ReplayDatasetArtifact::build(manifest, candles, funding, parent.reference.clone())?;
 
     Ok(DerivedValidationSlice {
         role,
@@ -325,9 +317,7 @@ pub fn derive_validation_slice(
     })
 }
 
-fn candle_slice_range(
-    candles: &[crate::ResearchCandle],
-) -> Result<ResearchRange, ResearchError> {
+fn candle_slice_range(candles: &[crate::ResearchCandle]) -> Result<ResearchRange, ResearchError> {
     let first = candles
         .first()
         .ok_or(ResearchError::ReplayMissingField("validation.candles"))?;
@@ -633,23 +623,19 @@ mod tests {
         assert_eq!(spec.partitions[1].range, range(12 * HOUR, 18 * HOUR));
         assert_eq!(spec.partitions[2].range, range(18 * HOUR, 24 * HOUR));
 
-        let train = derive_validation_slice(&parent, &spec, ValidationPartitionRole::Train)
-            .expect("train");
+        let train =
+            derive_validation_slice(&parent, &spec, ValidationPartitionRole::Train).expect("train");
         let validation =
             derive_validation_slice(&parent, &spec, ValidationPartitionRole::Validation)
                 .expect("validation");
-        let final_oos =
-            derive_validation_slice(&parent, &spec, ValidationPartitionRole::FinalOos)
-                .expect("final oos");
+        let final_oos = derive_validation_slice(&parent, &spec, ValidationPartitionRole::FinalOos)
+            .expect("final oos");
 
         assert_eq!(train.replay_dataset.candles.len(), 10);
         assert_eq!(validation.replay_dataset.candles.len(), 4);
         assert_eq!(final_oos.replay_dataset.candles.len(), 6);
         assert_eq!(train.effective_range, range(0, 10 * HOUR));
-        assert_eq!(
-            validation.effective_range,
-            range(12 * HOUR, 16 * HOUR)
-        );
+        assert_eq!(validation.effective_range, range(12 * HOUR, 16 * HOUR));
         assert_eq!(final_oos.effective_range, range(18 * HOUR, 24 * HOUR));
     }
 
