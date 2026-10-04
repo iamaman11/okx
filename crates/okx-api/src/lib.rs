@@ -37,7 +37,8 @@ pub use market_data::{
     is_open_interest_history_period,
 };
 pub use public_data::{
-    PublicDataApi, PublicInstrument, PublicPriceLimit, SystemStatus, UpcomingParameterChange,
+    PublicDataApi, PublicInstrument, PublicMarketDataHistory, PublicMarketDataHistoryDetail,
+    PublicMarketDataHistoryFile, PublicPriceLimit, SystemStatus, UpcomingParameterChange,
 };
 pub use rate::{
     DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S, GENERAL_RATE_LIMIT_CODE, RATE_BUDGET_SNAPSHOT_SCHEMA_V1,
