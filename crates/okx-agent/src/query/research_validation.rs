@@ -1176,11 +1176,10 @@ mod tests {
 
         let recovered = load_candles(&store, &pages).expect("recover");
         assert_eq!(recovered.len(), 6);
-        assert!(
-            recovered
-                .windows(2)
-                .all(|pair| pair[0].open_time_ms < pair[1].open_time_ms)
-        );
+        assert!(recovered.windows(2).all(|pair| {
+            pair[0].open_time_ms.parse::<u64>().expect("left timestamp")
+                < pair[1].open_time_ms.parse::<u64>().expect("right timestamp")
+        }));
 
         let selected = select_latest_candles(recovered, 4);
         assert_eq!(
