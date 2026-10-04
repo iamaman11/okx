@@ -1,4 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, File},
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use okx_observation::{FundingHistoryEvent, HistoryCandle, InstrumentSpec};
 use serde::{Deserialize, Serialize};
@@ -12,6 +17,9 @@ pub const CHECKPOINT_SCHEMA_V1: &str = "okx.research.checkpoint/v1";
 pub const RESEARCH_CANDLE_SCHEMA_V1: &str = "okx.research.candle/v1";
 pub const RESEARCH_FUNDING_SCHEMA_V1: &str = "okx.research.funding-event/v1";
 pub const RESEARCH_REFERENCE_SCHEMA_V1: &str = "okx.research.instrument-reference/v1";
+pub const BUILD_SOURCE_TREE: &str = env!("OKX_SOURCE_TREE");
+const EVIDENCE_DIR: &str = "evidence";
+const SOURCE_CACHE_DIR: &str = "source-cache";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -583,8 +591,177 @@ pub enum ResearchError {
     #[error("historical source host is not allowlisted: '{0}'")]
     SourceHostNotAllowed(String),
 
+    #[error("research artifact I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("research artifact id is invalid")]
+    InvalidArtifactId,
+
+    #[error("research artifact content does not match its content-addressed identity")]
+    ArtifactIdentityMismatch,
+
     #[error("failed to serialize canonical research evidence: {0}")]
     Serialization(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Clone)]
+pub struct ResearchArtifactStore {
+    root: PathBuf,
+}
+
+impl ResearchArtifactStore {
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn evidence_dir(&self) -> PathBuf {
+        self.root.join(EVIDENCE_DIR)
+    }
+
+    pub fn source_cache_dir(&self) -> PathBuf {
+        self.root.join(SOURCE_CACHE_DIR)
+    }
+
+    pub fn publish_evidence<T: Serialize>(
+        &self,
+        artifact_id: &str,
+        value: &T,
+    ) -> Result<PathBuf, ResearchError> {
+        validate_sha256_id(artifact_id)?;
+        let bytes = serde_json::to_vec(value)?;
+        if sha256_bytes(&bytes) != artifact_id {
+            return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+        let path = self.evidence_dir().join(format!("{artifact_id}.json"));
+        publish_atomic_verified(&path, &bytes)?;
+        Ok(path)
+    }
+
+    pub fn publish_source_bytes(
+        &self,
+        raw_sha256: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, ResearchError> {
+        validate_sha256_id(raw_sha256)?;
+        if sha256_bytes(bytes) != raw_sha256 {
+            return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+        let path = self.source_cache_dir().join(format!("{raw_sha256}.bin"));
+        publish_atomic_verified(&path, bytes)?;
+        Ok(path)
+    }
+
+    pub fn read_evidence(&self, artifact_id: &str) -> Result<Vec<u8>, ResearchError> {
+        validate_sha256_id(artifact_id)?;
+        let path = self.evidence_dir().join(format!("{artifact_id}.json"));
+        let bytes = fs::read(path)?;
+        if sha256_bytes(&bytes) != artifact_id {
+            return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+        Ok(bytes)
+    }
+
+    pub fn read_source_bytes(&self, raw_sha256: &str) -> Result<Vec<u8>, ResearchError> {
+        validate_sha256_id(raw_sha256)?;
+        let path = self.source_cache_dir().join(format!("{raw_sha256}.bin"));
+        let bytes = fs::read(path)?;
+        if sha256_bytes(&bytes) != raw_sha256 {
+            return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+        Ok(bytes)
+    }
+}
+
+pub fn detect_fixed_interval_gaps(
+    event_times_ms: &[String],
+    expected_interval_ms: u64,
+) -> Result<Vec<DataGap>, ResearchError> {
+    if expected_interval_ms == 0 {
+        return Err(ResearchError::InvalidRange {
+            begin_ms: "expected_interval_ms=0".to_owned(),
+            end_ms: "expected_interval_ms=0".to_owned(),
+        });
+    }
+    let mut times = event_times_ms
+        .iter()
+        .map(|value| parse_ms("event_time_ms", value))
+        .collect::<Result<Vec<_>, _>>()?;
+    times.sort_unstable();
+    if times.windows(2).any(|pair| pair[0] == pair[1]) {
+        let duplicate = times
+            .windows(2)
+            .find(|pair| pair[0] == pair[1])
+            .expect("duplicate exists")[0];
+        return Err(ResearchError::DuplicateTimestamp(duplicate.to_string()));
+    }
+
+    let mut gaps = Vec::new();
+    for pair in times.windows(2) {
+        let expected_next = pair[0]
+            .checked_add(expected_interval_ms)
+            .ok_or_else(|| ResearchError::InvalidTimestamp {
+                field: "expected_next_event_time_ms",
+                value: pair[0].to_string(),
+            })?;
+        if pair[1] > expected_next {
+            gaps.push(DataGap {
+                begin_ms: expected_next.to_string(),
+                end_ms: pair[1].to_string(),
+                reason: "missing_fixed_interval_events".to_owned(),
+            });
+        }
+    }
+    Ok(gaps)
+}
+
+fn validate_sha256_id(value: &str) -> Result<(), ResearchError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(ResearchError::InvalidArtifactId);
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ResearchError::InvalidArtifactId);
+    }
+    Ok(())
+}
+
+fn publish_atomic_verified(path: &Path, bytes: &[u8]) -> Result<(), ResearchError> {
+    if path.exists() {
+        let existing = fs::read(path)?;
+        if existing == bytes {
+            return Ok(());
+        }
+        return Err(ResearchError::ArtifactIdentityMismatch);
+    }
+
+    let parent = path
+        .parent()
+        .ok_or(ResearchError::InvalidArtifactId)?;
+    fs::create_dir_all(parent)?;
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    if temp.exists() {
+        fs::remove_file(&temp)?;
+    }
+    let mut file = File::create(&temp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+
+    match fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(error) if path.exists() => {
+            let _ = fs::remove_file(&temp);
+            let existing = fs::read(path)?;
+            if existing == bytes {
+                Ok(())
+            } else {
+                Err(ResearchError::ArtifactIdentityMismatch)
+            }
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            Err(error.into())
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1432,4 +1609,76 @@ mod tests {
 
         assert_ne!(clean.dataset_id, gapped.dataset_id);
     }
+
+    #[test]
+    fn fixed_interval_gap_detection_is_deterministic() {
+        let gaps = detect_fixed_interval_gaps(
+            &[
+                "1700000000000".to_owned(),
+                "1700003600000".to_owned(),
+                "1700010800000".to_owned(),
+            ],
+            3_600_000,
+        )
+        .expect("gaps");
+        assert_eq!(
+            gaps,
+            vec![DataGap {
+                begin_ms: "1700007200000".to_owned(),
+                end_ms: "1700010800000".to_owned(),
+                reason: "missing_fixed_interval_events".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn content_addressed_store_is_idempotent_and_detects_corruption() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+
+        let suffix = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "okx-research-test-{}-{suffix}",
+            std::process::id()
+        ));
+        let store = ResearchArtifactStore::at(&root);
+
+        let payload = serde_json::json!({"schema":"test/v1","value":"stable"});
+        let bytes = serde_json::to_vec(&payload).expect("serialize");
+        let id = sha256_bytes(&bytes);
+
+        let first = store.publish_evidence(&id, &payload).expect("publish");
+        let second = store.publish_evidence(&id, &payload).expect("retry");
+        assert_eq!(first, second);
+        assert_eq!(store.read_evidence(&id).expect("read"), bytes);
+
+        fs::write(&first, b"corrupt").expect("corrupt");
+        assert!(matches!(
+            store.read_evidence(&id),
+            Err(ResearchError::ArtifactIdentityMismatch)
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn source_cache_rejects_identity_mismatch() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-research-source-test-{}",
+            std::process::id()
+        ));
+        let store = ResearchArtifactStore::at(&root);
+        let bytes = b"raw-okx-response";
+        let id = sha256_bytes(bytes);
+        store
+            .publish_source_bytes(&id, bytes)
+            .expect("publish source");
+        assert_eq!(store.read_source_bytes(&id).expect("read"), bytes);
+        assert!(matches!(
+            store.publish_source_bytes(&id, b"different"),
+            Err(ResearchError::ArtifactIdentityMismatch)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
 }
