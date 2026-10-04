@@ -1188,7 +1188,7 @@ mod tests {
                 .iter()
                 .map(|row| row.open_time_ms.as_str())
                 .collect::<Vec<_>>(),
-            vec![
+            [
                 (2 * ONE_HOUR_MS).to_string(),
                 (3 * ONE_HOUR_MS).to_string(),
                 (4 * ONE_HOUR_MS).to_string(),
