@@ -51,7 +51,10 @@ pub struct ResearchRange {
 }
 
 impl ResearchRange {
-    pub fn new(begin_ms: impl Into<String>, end_ms: impl Into<String>) -> Result<Self, ResearchError> {
+    pub fn new(
+        begin_ms: impl Into<String>,
+        end_ms: impl Into<String>,
+    ) -> Result<Self, ResearchError> {
         let range = Self {
             begin_ms: begin_ms.into(),
             end_ms: end_ms.into(),
@@ -224,7 +227,11 @@ pub struct ReferenceCoverageWindow {
 }
 
 impl ReferenceCoverageWindow {
-    pub fn covers(&self, instrument_id: &str, range: &ResearchRange) -> Result<bool, ResearchError> {
+    pub fn covers(
+        &self,
+        instrument_id: &str,
+        range: &ResearchRange,
+    ) -> Result<bool, ResearchError> {
         if self.instrument_id != instrument_id {
             return Ok(false);
         }
@@ -518,7 +525,9 @@ pub fn validate_archive_member_path(path: &str) -> Result<(), ResearchError> {
         || trimmed.starts_with('\\')
         || trimmed.contains('\\')
         || trimmed.contains(':')
-        || trimmed.split('/').any(|part| matches!(part, "" | "." | ".."))
+        || trimmed
+            .split('/')
+            .any(|part| matches!(part, "" | "." | ".."))
     {
         return Err(ResearchError::UnsafeArchivePath(path.to_owned()));
     }
@@ -609,12 +618,12 @@ pub fn build_candle_chunk(
         if !row.confirmed {
             return Err(ResearchError::UnconfirmedCandle(row.open_time_ms.clone()));
         }
-        let available = open
-            .checked_add(bar_ms)
-            .ok_or_else(|| ResearchError::InvalidTimestamp {
-                field: "candle.available_time_ms",
-                value: row.open_time_ms.clone(),
-            })?;
+        let available =
+            open.checked_add(bar_ms)
+                .ok_or_else(|| ResearchError::InvalidTimestamp {
+                    field: "candle.available_time_ms",
+                    value: row.open_time_ms.clone(),
+                })?;
         normalized.push(ResearchCandle {
             schema: RESEARCH_CANDLE_SCHEMA_V1.to_owned(),
             open_time_ms: open.to_string(),
@@ -662,7 +671,9 @@ pub fn build_funding_chunk(
     for row in rows {
         let time = parse_ms("funding_time_ms", &row.funding_time_ms)?;
         if !timestamps.insert(time) {
-            return Err(ResearchError::DuplicateTimestamp(row.funding_time_ms.clone()));
+            return Err(ResearchError::DuplicateTimestamp(
+                row.funding_time_ms.clone(),
+            ));
         }
         normalized.push(ResearchFundingEvent {
             schema: RESEARCH_FUNDING_SCHEMA_V1.to_owned(),
@@ -702,7 +713,13 @@ pub fn build_reference_chunk(
     parser_version: impl Into<String>,
     normalization_version: impl Into<String>,
     source_tree: impl Into<String>,
-) -> Result<(NormalizedChunk<ResearchInstrumentReference>, ReferenceCoverageWindow), ResearchError> {
+) -> Result<
+    (
+        NormalizedChunk<ResearchInstrumentReference>,
+        ReferenceCoverageWindow,
+    ),
+    ResearchError,
+> {
     source.validate()?;
     if source.instrument_id != instrument.instrument_id {
         return Err(ResearchError::InstrumentMismatch {
@@ -1188,7 +1205,10 @@ mod tests {
         )
         .expect("manifest");
 
-        assert_eq!(manifest.reference_coverage, ReferenceCoverageStatus::Complete);
+        assert_eq!(
+            manifest.reference_coverage,
+            ReferenceCoverageStatus::Complete
+        );
     }
 
     #[test]
@@ -1259,7 +1279,11 @@ mod tests {
         .expect("first");
         let retry = ResearchCheckpoint::build(
             None,
-            vec!["chunk-a".to_owned(), "chunk-b".to_owned(), "chunk-a".to_owned()],
+            vec![
+                "chunk-a".to_owned(),
+                "chunk-b".to_owned(),
+                "chunk-a".to_owned(),
+            ],
             Some("cursor-2".to_owned()),
             TREE,
             "1700012000000",
@@ -1269,13 +1293,20 @@ mod tests {
 
         let next = ResearchCheckpoint::build(
             Some(first.checkpoint_id.clone()),
-            vec!["chunk-a".to_owned(), "chunk-b".to_owned(), "chunk-c".to_owned()],
+            vec![
+                "chunk-a".to_owned(),
+                "chunk-b".to_owned(),
+                "chunk-c".to_owned(),
+            ],
             None,
             TREE,
             "1700013000000",
         )
         .expect("next");
-        assert_eq!(next.parent_checkpoint_id.as_deref(), Some(first.checkpoint_id.as_str()));
+        assert_eq!(
+            next.parent_checkpoint_id.as_deref(),
+            Some(first.checkpoint_id.as_str())
+        );
         assert_ne!(next.checkpoint_id, first.checkpoint_id);
     }
 
@@ -1318,11 +1349,24 @@ mod tests {
         };
         validate_archive_budget(50, 400, 80, limits).expect("valid archive");
         assert!(matches!(
-            validate_archive_budget(50, 600, 80, ArchiveLimits { max_decompression_ratio: 10, ..limits }),
+            validate_archive_budget(
+                50,
+                600,
+                80,
+                ArchiveLimits {
+                    max_decompression_ratio: 10,
+                    ..limits
+                }
+            ),
             Err(ResearchError::ArchiveBudgetExceeded)
         ));
         assert!(validate_archive_member_path("BTC-USDT-SWAP/2026-10.csv").is_ok());
-        for path in ["../secret", "/absolute/file", r"C:\\windows\\file", "a/../b"] {
+        for path in [
+            "../secret",
+            "/absolute/file",
+            r"C:\\windows\\file",
+            "a/../b",
+        ] {
             assert!(matches!(
                 validate_archive_member_path(path),
                 Err(ResearchError::UnsafeArchivePath(_))
@@ -1332,10 +1376,7 @@ mod tests {
 
     #[test]
     fn historical_source_host_is_explicitly_allowlisted() {
-        let allowed = BTreeSet::from([
-            "www.okx.com".to_owned(),
-            "openapi.okx.com".to_owned(),
-        ]);
+        let allowed = BTreeSet::from(["www.okx.com".to_owned(), "openapi.okx.com".to_owned()]);
         validate_source_host("www.okx.com", &allowed).expect("allowlisted");
         assert!(matches!(
             validate_source_host("example.com", &allowed),
