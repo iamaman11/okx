@@ -276,6 +276,45 @@ export const mcpApi = {
             },
           },
           {
+            name: "research_capabilities",
+            description: "Get the versioned Stage-3 research catalog, bounded data scope, provenance guarantees, and transport budgets.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+          {
+            name: "research",
+            description: "Run one bounded Stage-3 research operation in the Windows runtime. Stage 3A v1 supports compact Tier-A data inspection only; bulk history is never returned.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                request: {
+                  type: "object",
+                  properties: {
+                    action: { type: "string", enum: ["inspect_tier_a"] },
+                    catalog_version: { type: "string", const: "okx.research.catalog/2026-10-04.1" },
+                    instrument: {
+                      type: "string",
+                      enum: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
+                    },
+                    bar: { type: "string", const: "1H" },
+                    candle_limit: { type: "integer", minimum: 2, maximum: 100 },
+                    funding_limit: { type: "integer", minimum: 1, maximum: 400 },
+                  },
+                  required: [
+                    "action",
+                    "catalog_version",
+                    "instrument",
+                    "bar",
+                    "candle_limit",
+                    "funding_limit",
+                  ],
+                  additionalProperties: false,
+                },
+              },
+              required: ["request"],
+              additionalProperties: false,
+            },
+          },
+          {
             name: "account_summary",
             description: "Get a bounded read-only OKX account and ledger truth summary, including history coverage and durable execution-ledger reconciliation.",
             inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -543,6 +582,79 @@ export const mcpApi = {
           schema: "okx.agent.request/v1",
           request_id: requestId(),
           operation: { type: "query_capabilities" },
+        };
+        return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+      }
+      if (name === "research_capabilities") {
+        const agentRequest = {
+          schema: "okx.agent.request/v1",
+          request_id: requestId(),
+          operation: { type: "research_capabilities" },
+        };
+        return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+      }
+      if (name === "research") {
+        if (!hasOnlyKeys(args, ["request"]) || !isObject(args.request)) {
+          return jsonRpcError(id, -32602, "invalid research request");
+        }
+        const research = args.request;
+        if (
+          !hasOnlyKeys(research, [
+            "action",
+            "catalog_version",
+            "instrument",
+            "bar",
+            "candle_limit",
+            "funding_limit",
+          ])
+        ) {
+          return jsonRpcError(id, -32602, "unsupported research request field");
+        }
+        if (research.action !== "inspect_tier_a") {
+          return jsonRpcError(id, -32602, "invalid research action");
+        }
+        if (research.catalog_version !== "okx.research.catalog/2026-10-04.1") {
+          return jsonRpcError(id, -32602, "invalid research catalog_version");
+        }
+        const instrument = normalizeInstrument(research.instrument);
+        if (
+          instrument === null ||
+          !["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"].includes(instrument)
+        ) {
+          return jsonRpcError(id, -32602, "invalid Stage 3A instrument");
+        }
+        if (research.bar !== "1H") {
+          return jsonRpcError(id, -32602, "invalid Stage 3A bar");
+        }
+        if (
+          !Number.isInteger(research.candle_limit) ||
+          Number(research.candle_limit) < 2 ||
+          Number(research.candle_limit) > 100
+        ) {
+          return jsonRpcError(id, -32602, "invalid candle_limit");
+        }
+        if (
+          !Number.isInteger(research.funding_limit) ||
+          Number(research.funding_limit) < 1 ||
+          Number(research.funding_limit) > 400
+        ) {
+          return jsonRpcError(id, -32602, "invalid funding_limit");
+        }
+
+        const agentRequest = {
+          schema: "okx.agent.request/v1",
+          request_id: requestId(),
+          operation: {
+            type: "research",
+            request: {
+              action: "inspect_tier_a",
+              catalog_version: research.catalog_version,
+              instrument,
+              bar: "1H",
+              candle_limit: research.candle_limit,
+              funding_limit: research.funding_limit,
+            },
+          },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }
