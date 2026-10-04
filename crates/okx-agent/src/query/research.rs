@@ -47,8 +47,10 @@ struct ResearchCapabilitiesResult {
 struct ResearchChunkSummary {
     kind: ResearchSourceKind,
     chunk_id: String,
+    capture_id: String,
     artifact_id: String,
     raw_sha256: String,
+    raw_size_bytes: u64,
     normalized_sha256: String,
     normalized_row_count: u64,
     oldest_event_time_ms: Option<String>,
@@ -191,18 +193,24 @@ async fn inspect_tier_a(
         Err(error) => return Ok(source_failure(request, generated_at, error)),
     };
 
-    let Some(first) = candles.rows.first() else {
+    let confirmed_candles = candles
+        .rows
+        .iter()
+        .filter(|row| row.confirmed)
+        .cloned()
+        .collect::<Vec<_>>();
+    let Some(first) = confirmed_candles.first() else {
         return Ok(failure_response(
             request,
             generated_at,
             AgentResponseStatus::Failed,
             MARKET_PUBLIC_API_UNAVAILABLE_CODE,
-            format!("OKX returned no research candles for '{instrument}'"),
+            format!("OKX returned no confirmed research candles for '{instrument}'"),
             true,
         ));
     };
-    let Some(last) = candles.rows.last() else {
-        unreachable!("first row exists");
+    let Some(last) = confirmed_candles.last() else {
+        unreachable!("first confirmed row exists");
     };
     let range_end = match last
         .open_time_ms
@@ -242,7 +250,7 @@ async fn inspect_tier_a(
         candle_source,
         candles.acquired_at_ms,
         &candles.raw_body,
-        &candles.rows,
+        &confirmed_candles,
         ONE_HOUR_MS,
         PARSER_VERSION_V1,
         NORMALIZATION_VERSION_V1,
@@ -293,12 +301,42 @@ async fn inspect_tier_a(
         Err(error) => return Ok(research_failure(request, generated_at, error)),
     };
 
+    let reference_observed_ms = match reference.acquired_at_ms.parse::<u64>() {
+        Ok(value) => value,
+        Err(_) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                RESEARCH_ARTIFACT_FAILURE_CODE,
+                "captured reference timestamp is invalid".to_owned(),
+                false,
+            ));
+        }
+    };
+    let reference_through_ms = match reference_observed_ms.checked_add(1) {
+        Some(value) => value,
+        None => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                RESEARCH_ARTIFACT_FAILURE_CODE,
+                "captured reference timestamp overflowed u64".to_owned(),
+                false,
+            ));
+        }
+    };
     let reference_source = SourceRequest {
         provider: "okx_public_rest".to_owned(),
         resource: "/api/v5/public/instruments".to_owned(),
         instrument_id: instrument.to_owned(),
         bar: None,
-        range: range.clone(),
+        range: ResearchRange::new(
+            reference_observed_ms.to_string(),
+            reference_through_ms.to_string(),
+        )
+        .expect("one millisecond reference capture range"),
         parameters: BTreeMap::from([(
             "semantics".to_owned(),
             "current_snapshot_only".to_owned(),
@@ -309,9 +347,9 @@ async fn inspect_tier_a(
         reference.acquired_at_ms.clone(),
         &reference.raw_body,
         &reference.instrument,
-        reference.acquired_at_ms.clone(),
-        reference.acquired_at_ms.clone(),
-        reference.acquired_at_ms,
+        reference_observed_ms.to_string(),
+        reference_through_ms.to_string(),
+        reference_observed_ms.to_string(),
         reference.reference_generation,
         PARSER_VERSION_V1,
         NORMALIZATION_VERSION_V1,
@@ -372,8 +410,10 @@ async fn inspect_tier_a(
             chunks.push(ResearchChunkSummary {
                 kind: chunk.kind,
                 chunk_id: chunk.chunk_id.clone(),
+                capture_id: chunk.capture_id.clone(),
                 artifact_id,
                 raw_sha256: chunk.raw_sha256.clone(),
+                raw_size_bytes: chunk.raw_size_bytes,
                 normalized_sha256: chunk.normalized_sha256.clone(),
                 normalized_row_count: chunk.normalized_row_count,
                 oldest_event_time_ms: chunk.oldest_event_time_ms.clone(),
