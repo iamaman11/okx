@@ -280,14 +280,12 @@ fn require_nonempty(field: &'static str, value: &str) -> Result<(), ResearchErro
 }
 
 fn require_sha256(field: &'static str, value: &str) -> Result<(), ResearchError> {
-    let valid = value
-        .strip_prefix("sha256:")
-        .is_some_and(|hex| {
-            hex.len() == 64
-                && hex
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        });
+    let valid = value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    });
     if valid {
         Ok(())
     } else {
@@ -346,31 +344,35 @@ mod tests {
 
     #[test]
     fn validation_spec_rejects_overlapping_or_reordered_partitions() {
-        assert!(ValidationSpec::build(
-            id('a'),
-            id('b'),
-            BaselineStrategyKind::CloseMomentum,
-            BASELINE_STRATEGY_VERSION_V1,
-            range(0, 150),
-            range(100, 200),
-            range(200, 300),
-            "adequacy/v1",
-            "promotion/v1",
-        )
-        .is_err());
+        assert!(
+            ValidationSpec::build(
+                id('a'),
+                id('b'),
+                BaselineStrategyKind::CloseMomentum,
+                BASELINE_STRATEGY_VERSION_V1,
+                range(0, 150),
+                range(100, 200),
+                range(200, 300),
+                "adequacy/v1",
+                "promotion/v1",
+            )
+            .is_err()
+        );
 
-        assert!(ValidationSpec::build(
-            id('a'),
-            id('b'),
-            BaselineStrategyKind::CloseMomentum,
-            BASELINE_STRATEGY_VERSION_V1,
-            range(0, 100),
-            range(200, 300),
-            range(150, 200),
-            "adequacy/v1",
-            "promotion/v1",
-        )
-        .is_err());
+        assert!(
+            ValidationSpec::build(
+                id('a'),
+                id('b'),
+                BaselineStrategyKind::CloseMomentum,
+                BASELINE_STRATEGY_VERSION_V1,
+                range(0, 100),
+                range(200, 300),
+                range(150, 200),
+                "adequacy/v1",
+                "promotion/v1",
+            )
+            .is_err()
+        );
     }
 
     #[test]
