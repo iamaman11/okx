@@ -112,6 +112,50 @@ pub struct PublicInstrument {
     pub upcoming_parameter_changes: Vec<UpcomingParameterChange>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PublicMarketDataHistoryFile {
+    #[serde(default)]
+    pub filename: String,
+    #[serde(rename = "dataTs", default)]
+    pub data_timestamp_ms: String,
+    #[serde(rename = "dateTs", default)]
+    pub date_timestamp_alias_ms: String,
+    #[serde(rename = "sizeMB", default)]
+    pub size_mb: String,
+    #[serde(default)]
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PublicMarketDataHistoryDetail {
+    #[serde(rename = "instId", default)]
+    pub instrument_id: String,
+    #[serde(rename = "instFamily", default)]
+    pub instrument_family: String,
+    #[serde(rename = "instType", default)]
+    pub instrument_type: String,
+    #[serde(rename = "dateRangeStart", default)]
+    pub date_range_start_ms: String,
+    #[serde(rename = "dateRangeEnd", default)]
+    pub date_range_end_ms: String,
+    #[serde(rename = "groupSizeMB", default)]
+    pub group_size_mb: String,
+    #[serde(rename = "groupDetails", default)]
+    pub group_details: Vec<PublicMarketDataHistoryFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PublicMarketDataHistory {
+    #[serde(default)]
+    pub ts: String,
+    #[serde(rename = "totalSizeMB", default)]
+    pub total_size_mb: String,
+    #[serde(rename = "dateAggrType", default)]
+    pub date_aggregation_type: String,
+    #[serde(default)]
+    pub details: Vec<PublicMarketDataHistoryDetail>,
+}
+
 #[derive(Clone)]
 pub struct PublicDataApi {
     client: OkxPublicClient,
@@ -176,6 +220,30 @@ impl PublicDataApi {
             )));
         }
         Ok(captured)
+    }
+
+    pub async fn market_data_history_captured(
+        &self,
+        module: &str,
+        instrument_type: InstrumentType,
+        date_aggregation_type: &str,
+        begin_ms: &str,
+        end_ms: &str,
+        instrument_family_list: &str,
+    ) -> Result<CapturedPublicRows<PublicMarketDataHistory>, OkxError> {
+        self.client
+            .public_get_captured(
+                "/api/v5/public/market-data-history",
+                &[
+                    ("module", module.to_owned()),
+                    ("instType", instrument_type.to_string()),
+                    ("dateAggrType", date_aggregation_type.to_owned()),
+                    ("begin", begin_ms.to_owned()),
+                    ("end", end_ms.to_owned()),
+                    ("instFamilyList", instrument_family_list.to_owned()),
+                ],
+            )
+            .await
     }
 
     pub async fn derivative_instruments(&self) -> Result<Vec<PublicInstrument>, OkxError> {
@@ -257,5 +325,42 @@ mod tests {
             instrument.upcoming_parameter_changes[0].new_value,
             "0.000001"
         );
+    }
+
+    #[test]
+    fn market_data_history_preserves_download_metadata_and_date_alias() {
+        let row: PublicMarketDataHistory = serde_json::from_str(
+            r#"{
+                "ts":"1760800000000",
+                "totalSizeMB":"1.63",
+                "dateAggrType":"daily",
+                "details":[{
+                    "instId":"",
+                    "instFamily":"BTC-USDT",
+                    "instType":"SWAP",
+                    "dateRangeStart":"1760630400000",
+                    "dateRangeEnd":"1760630400000",
+                    "groupSizeMB":"1.63",
+                    "groupDetails":[{
+                        "filename":"BTC-USDT-SWAP-orderbook-50-2025-10-17.zip",
+                        "dateTs":"1760630400000",
+                        "sizeMB":"1.63",
+                        "url":"https://static.okx.com/example.zip"
+                    }]
+                }]
+            }"#,
+        )
+        .expect("market data history");
+
+        assert_eq!(row.date_aggregation_type, "daily");
+        assert_eq!(row.details.len(), 1);
+        let detail = &row.details[0];
+        assert_eq!(detail.instrument_family, "BTC-USDT");
+        assert_eq!(detail.instrument_type, "SWAP");
+        let file = &detail.group_details[0];
+        assert_eq!(file.data_timestamp_ms, "");
+        assert_eq!(file.date_timestamp_alias_ms, "1760630400000");
+        assert_eq!(file.size_mb, "1.63");
+        assert!(file.url.starts_with("https://"));
     }
 }
