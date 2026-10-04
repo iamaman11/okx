@@ -21,6 +21,8 @@ pub const CHUNK_MANIFEST_SCHEMA_V1: &str = "okx.research.chunk-manifest/v1";
 pub const SOURCE_CAPTURE_SCHEMA_V1: &str = "okx.research.source-capture/v1";
 pub const REFERENCE_WINDOW_SCHEMA_V1: &str = "okx.research.reference-window/v1";
 pub const CHECKPOINT_SCHEMA_V1: &str = "okx.research.checkpoint/v1";
+pub const CHECKPOINT_SCHEMA_V2: &str = "okx.research.checkpoint/v2";
+pub const CHUNK_ARTIFACT_SCHEMA_V1: &str = "okx.research.normalized-chunk/v1";
 pub const RESEARCH_CANDLE_SCHEMA_V1: &str = "okx.research.candle/v1";
 pub const RESEARCH_FUNDING_SCHEMA_V1: &str = "okx.research.funding-event/v1";
 pub const RESEARCH_TRADE_SCHEMA_V1: &str = "okx.research.trade-event/v1";
@@ -156,6 +158,48 @@ pub struct ChunkManifest {
 pub struct NormalizedChunk<T> {
     pub manifest: ChunkManifest,
     pub rows: Vec<T>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchChunkArtifact<T> {
+    pub schema: String,
+    pub manifest: ChunkManifest,
+    pub rows: Vec<T>,
+}
+
+impl<T> ResearchChunkArtifact<T>
+where
+    T: Serialize,
+{
+    pub fn validate(&self) -> Result<(), ResearchError> {
+        if self.schema != CHUNK_ARTIFACT_SCHEMA_V1 {
+            return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+        let row_count =
+            u64::try_from(self.rows.len()).map_err(|_| ResearchError::ArchiveBudgetExceeded)?;
+        if row_count != self.manifest.normalized_row_count
+            || canonical_sha256(&self.rows)? != self.manifest.normalized_sha256
+        {
+            return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+        Ok(())
+    }
+}
+
+pub fn build_chunk_artifact<T>(
+    chunk: &NormalizedChunk<T>,
+) -> Result<ResearchChunkArtifact<T>, ResearchError>
+where
+    T: Clone + Serialize,
+{
+    let artifact = ResearchChunkArtifact {
+        schema: CHUNK_ARTIFACT_SCHEMA_V1.to_owned(),
+        manifest: chunk.manifest.clone(),
+        rows: chunk.rows.clone(),
+    };
+    artifact.validate()?;
+    Ok(artifact)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,6 +475,27 @@ impl DatasetManifest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ResearchCheckpointPhase {
+    Candles,
+    Funding,
+    Complete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchCheckpointPage {
+    pub kind: ResearchSourceKind,
+    pub chunk_id: String,
+    pub artifact_id: String,
+    pub row_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_event_time_ms: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest_event_time_ms: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchCheckpoint {
@@ -438,9 +503,15 @@ pub struct ResearchCheckpoint {
     pub checkpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_checkpoint_id: Option<String>,
-    pub completed_chunk_ids: Vec<String>,
+    pub instrument_id: String,
+    pub bar: String,
+    pub target_candle_count: u16,
+    pub phase: ResearchCheckpointPhase,
+    pub completed_pages: Vec<ResearchCheckpointPage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dataset_range: Option<ResearchRange>,
     pub source_tree: String,
     pub created_at_ms: String,
 }
@@ -449,38 +520,90 @@ pub struct ResearchCheckpoint {
 struct CheckpointIdentity<'a> {
     schema: &'static str,
     parent_checkpoint_id: &'a Option<String>,
-    completed_chunk_ids: &'a [String],
+    instrument_id: &'a str,
+    bar: &'a str,
+    target_candle_count: u16,
+    phase: ResearchCheckpointPhase,
+    completed_pages: &'a [ResearchCheckpointPage],
     remaining_cursor: &'a Option<String>,
+    dataset_range: &'a Option<ResearchRange>,
     source_tree: &'a str,
 }
 
 impl ResearchCheckpoint {
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         parent_checkpoint_id: Option<String>,
-        mut completed_chunk_ids: Vec<String>,
+        instrument_id: impl Into<String>,
+        bar: impl Into<String>,
+        target_candle_count: u16,
+        phase: ResearchCheckpointPhase,
+        completed_pages: Vec<ResearchCheckpointPage>,
         remaining_cursor: Option<String>,
+        dataset_range: Option<ResearchRange>,
         source_tree: impl Into<String>,
         created_at_ms: impl Into<String>,
     ) -> Result<Self, ResearchError> {
-        completed_chunk_ids.sort();
-        completed_chunk_ids.dedup();
+        let instrument_id = instrument_id.into();
+        let bar = bar.into();
         let source_tree = source_tree.into();
         let created_at_ms = created_at_ms.into();
-        required("source_tree", &source_tree)?;
-        parse_ms("created_at_ms", &created_at_ms)?;
+        required("checkpoint.instrument_id", &instrument_id)?;
+        required("checkpoint.bar", &bar)?;
+        required("checkpoint.source_tree", &source_tree)?;
+        if target_candle_count < 2 {
+            return Err(ResearchError::InvalidRange {
+                begin_ms: "target_candle_count<2".to_owned(),
+                end_ms: target_candle_count.to_string(),
+            });
+        }
+        parse_ms("checkpoint.created_at_ms", &created_at_ms)?;
+        if matches!(
+            phase,
+            ResearchCheckpointPhase::Funding | ResearchCheckpointPhase::Complete
+        ) && dataset_range.is_none()
+        {
+            return Err(ResearchError::MissingField("checkpoint.dataset_range"));
+        }
+        if phase == ResearchCheckpointPhase::Complete && remaining_cursor.is_some() {
+            return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+
+        let mut chunk_ids = BTreeSet::new();
+        let mut artifact_ids = BTreeSet::new();
+        for page in &completed_pages {
+            validate_sha256_id(&page.chunk_id)?;
+            validate_sha256_id(&page.artifact_id)?;
+            if !chunk_ids.insert(page.chunk_id.clone())
+                || !artifact_ids.insert(page.artifact_id.clone())
+            {
+                return Err(ResearchError::DuplicateChunk);
+            }
+        }
+
         let checkpoint_id = canonical_sha256(&CheckpointIdentity {
-            schema: CHECKPOINT_SCHEMA_V1,
+            schema: CHECKPOINT_SCHEMA_V2,
             parent_checkpoint_id: &parent_checkpoint_id,
-            completed_chunk_ids: &completed_chunk_ids,
+            instrument_id: &instrument_id,
+            bar: &bar,
+            target_candle_count,
+            phase,
+            completed_pages: &completed_pages,
             remaining_cursor: &remaining_cursor,
+            dataset_range: &dataset_range,
             source_tree: &source_tree,
         })?;
         Ok(Self {
-            schema: CHECKPOINT_SCHEMA_V1.to_owned(),
+            schema: CHECKPOINT_SCHEMA_V2.to_owned(),
             checkpoint_id,
             parent_checkpoint_id,
-            completed_chunk_ids,
+            instrument_id,
+            bar,
+            target_candle_count,
+            phase,
+            completed_pages,
             remaining_cursor,
+            dataset_range,
             source_tree,
             created_at_ms,
         })
