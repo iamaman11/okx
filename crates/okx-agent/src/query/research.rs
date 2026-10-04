@@ -9,9 +9,12 @@ use okx_protocol::{
 use okx_research::{
     BUILD_SOURCE_TREE, DatasetManifest, ReferenceCoverageStatus, ReplayDatasetArtifact,
     ReplayEvidenceClass, ReplayMechanicsProvenance, ReplayStatus, ResearchArtifactStore,
-    ResearchRange, ResearchSourceKind, ResearchTier, SourceRequest, build_baseline_experiment,
+    BASELINE_VALIDATION_SPLIT_POLICY_V1, BUILD_SOURCE_TREE, DatasetManifest,
+    PreparedValidationSlice, ReferenceCoverageStatus, ReplayDatasetArtifact, ReplayEvidenceClass,
+    ReplayMechanicsProvenance, ReplayStatus, ResearchArtifactStore, ResearchRange,
+    ResearchSourceKind, ResearchTier, SourceRequest, build_baseline_experiment,
     build_candle_chunk, build_funding_chunk, build_reference_chunk, build_tier_b_trade_chunk,
-    detect_fixed_interval_gaps, replay_experiment,
+    detect_fixed_interval_gaps, prepare_baseline_validation_split, replay_experiment,
 };
 use serde::Serialize;
 
@@ -25,6 +28,7 @@ pub const RESEARCH_CAPABILITIES_SCHEMA_V1: &str = "okx.research-capabilities/v1"
 pub const RESEARCH_DATA_INSPECTION_SCHEMA_V1: &str = "okx.research-data-inspection/v1";
 pub const RESEARCH_TIER_B_INSPECTION_SCHEMA_V1: &str = "okx.research-tier-b-inspection/v1";
 pub const RESEARCH_REPLAY_RESULT_SCHEMA_V1: &str = "okx.research-replay-summary/v1";
+pub const RESEARCH_VALIDATION_SPLIT_SCHEMA_V1: &str = "okx.research-validation-split/v1";
 pub const RESEARCH_ARTIFACT_FAILURE_CODE: &str = "RESEARCH_ARTIFACT_FAILURE";
 pub const INSUFFICIENT_REFERENCE_HISTORY_CODE: &str = "INSUFFICIENT_REFERENCE_HISTORY";
 pub(super) const PARSER_VERSION_V1: &str = "okx.public-history-parser/v1";
@@ -54,6 +58,9 @@ struct ResearchCapabilitiesResult {
     validation_target_candles_max: u16,
     validation_pages_per_call: usize,
     validation_checkpointed: bool,
+    validation_split_policy: &'static str,
+    validation_materialized_partitions: [&'static str; 2],
+    validation_final_oos_sealed: bool,
     normal_result_target_bytes: u64,
     source_tree: &'static str,
     source_tree_bound: bool,
@@ -163,6 +170,40 @@ struct ResearchReplaySummary {
     exchange_mutation_authority: bool,
 }
 
+#[derive(Serialize)]
+struct ValidationSliceSummary {
+    role: &'static str,
+    validation_slice_id: String,
+    manifest_artifact_id: String,
+    replay_dataset_id: String,
+    replay_dataset_artifact_id: String,
+    range: ResearchRange,
+}
+
+#[derive(Serialize)]
+struct ResearchValidationSplitSummary {
+    schema: &'static str,
+    catalog_version: &'static str,
+    stage: &'static str,
+    instrument: String,
+    strategy: BaselineStrategyKind,
+    split_policy_version: String,
+    validation_spec_id: String,
+    validation_spec_artifact_id: String,
+    parent_replay_dataset_artifact_id: String,
+    parent_dataset_id: String,
+    train: ValidationSliceSummary,
+    validation: ValidationSliceSummary,
+    final_oos_range: ResearchRange,
+    final_oos_consumed: bool,
+    purge_bars: u16,
+    embargo_bars: u16,
+    bulk_rows_returned: bool,
+    parent_source_tree: String,
+    validation_source_tree: String,
+    exchange_mutation_authority: bool,
+}
+
 pub(crate) async fn dispatch(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
@@ -241,6 +282,22 @@ pub(crate) async fn dispatch(
             )
             .await
         }
+        AgentOperation::Research {
+            request:
+                ResearchRequest::PrepareValidationSplit {
+                    catalog_version: _,
+                    instrument,
+                    parent_replay_dataset_artifact_id,
+                    strategy,
+                },
+        } => prepare_validation_split(
+            request,
+            context,
+            generated_at,
+            instrument,
+            parent_replay_dataset_artifact_id,
+            *strategy,
+        ),
         _ => Ok(unavailable(request, generated_at)),
     }
 }
@@ -267,6 +324,9 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
         validation_target_candles_max: super::research_validation::VALIDATION_TARGET_CANDLES_MAX,
         validation_pages_per_call: super::research_validation::VALIDATION_PAGES_PER_CALL,
         validation_checkpointed: true,
+        validation_split_policy: BASELINE_VALIDATION_SPLIT_POLICY_V1,
+        validation_materialized_partitions: ["TRAIN", "VALIDATION"],
+        validation_final_oos_sealed: true,
         normal_result_target_bytes: NORMAL_RESULT_TARGET_BYTES,
         source_tree: BUILD_SOURCE_TREE,
         source_tree_bound: BUILD_SOURCE_TREE != "UNAVAILABLE",
@@ -293,6 +353,113 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
             Vec::new()
         },
     })
+}
+
+fn prepare_validation_split(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    instrument: &str,
+    parent_replay_dataset_artifact_id: &str,
+    strategy: ResearchReplayStrategy,
+) -> AgentResult<AgentResponse> {
+    let Some(research_root) = context.research_root else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            RESEARCH_ARTIFACT_FAILURE_CODE,
+            "research artifact root is unavailable".to_owned(),
+            false,
+        ));
+    };
+    if BUILD_SOURCE_TREE == "UNAVAILABLE" {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            RESEARCH_ARTIFACT_FAILURE_CODE,
+            "research source tree is not bound into this build".to_owned(),
+            false,
+        ));
+    }
+    let store = ResearchArtifactStore::at(research_root);
+    let parent: ReplayDatasetArtifact =
+        match store.read_evidence_json(parent_replay_dataset_artifact_id) {
+            Ok(value) => value,
+            Err(error) => return Ok(research_failure(request, generated_at, error)),
+        };
+    if parent.manifest.instrument_id != instrument {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            RESEARCH_ARTIFACT_FAILURE_CODE,
+            "validation parent artifact instrument does not match request".to_owned(),
+            false,
+        ));
+    }
+    let strategy = match strategy {
+        ResearchReplayStrategy::NoTrade => BaselineStrategyKind::NoTrade,
+        ResearchReplayStrategy::CloseMomentum => BaselineStrategyKind::CloseMomentum,
+    };
+    let prepared =
+        match prepare_baseline_validation_split(&store, parent_replay_dataset_artifact_id, strategy)
+        {
+            Ok(value) => value,
+            Err(error) => return Ok(research_failure(request, generated_at, error)),
+        };
+    let parent_source_tree = parent.manifest.source_tree.clone();
+    let result = ResearchValidationSplitSummary {
+        schema: RESEARCH_VALIDATION_SPLIT_SCHEMA_V1,
+        catalog_version: RESEARCH_CATALOG_VERSION_V1,
+        stage: "3C_V1_SPLIT_OOS",
+        instrument: instrument.to_owned(),
+        strategy,
+        split_policy_version: prepared.split_policy_version,
+        validation_spec_id: prepared.validation_spec.validation_spec_id.clone(),
+        validation_spec_artifact_id: prepared.validation_spec_artifact_id,
+        parent_replay_dataset_artifact_id: prepared
+            .validation_spec
+            .parent_replay_dataset_artifact_id
+            .clone(),
+        parent_dataset_id: prepared.validation_spec.parent_dataset_id.clone(),
+        train: validation_slice_summary("TRAIN", prepared.train),
+        validation: validation_slice_summary("VALIDATION", prepared.validation),
+        final_oos_range: prepared.final_oos_range,
+        final_oos_consumed: prepared.final_oos_consumed,
+        purge_bars: prepared.validation_spec.purge_bars,
+        embargo_bars: prepared.validation_spec.embargo_bars,
+        bulk_rows_returned: false,
+        parent_source_tree,
+        validation_source_tree: prepared.validation_spec.validation_source_tree,
+        exchange_mutation_authority: false,
+    };
+    Ok(AgentResponse {
+        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+        request_id: request.request_id.clone(),
+        status: AgentResponseStatus::Completed,
+        generated_at: generated_at.to_owned(),
+        quality: DataQuality::Fresh,
+        result_schema: Some(RESEARCH_VALIDATION_SPLIT_SCHEMA_V1.to_owned()),
+        result: Some(serde_json::to_value(result)?),
+        failure: None,
+        warnings: Vec::new(),
+    })
+}
+
+fn validation_slice_summary(
+    role: &'static str,
+    slice: PreparedValidationSlice,
+) -> ValidationSliceSummary {
+    ValidationSliceSummary {
+        role,
+        validation_slice_id: slice.manifest.validation_slice_id,
+        manifest_artifact_id: slice.manifest_artifact_id,
+        replay_dataset_id: slice.manifest.replay_dataset_id,
+        replay_dataset_artifact_id: slice.manifest.replay_dataset_artifact_id,
+        range: slice.manifest.range,
+    }
 }
 
 async fn inspect_tier_a(
