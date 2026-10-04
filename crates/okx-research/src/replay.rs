@@ -36,6 +36,10 @@ pub struct ReplayDatasetArtifact {
 }
 
 impl ReplayDatasetArtifact {
+    pub fn validate(&self) -> Result<(), ResearchError> {
+        validate_replay_dataset_artifact(self)
+    }
+
     pub fn build(
         manifest: DatasetManifest,
         candles: Vec<ResearchCandle>,
@@ -830,6 +834,9 @@ fn terminal_result(
 }
 
 fn validate_replay_dataset_artifact(artifact: &ReplayDatasetArtifact) -> Result<(), ResearchError> {
+    if artifact.schema != REPLAY_DATASET_ARTIFACT_SCHEMA_V1 {
+        return Err(ResearchError::ArtifactIdentityMismatch);
+    }
     let begin = artifact.manifest.range.begin()?;
     let end = artifact.manifest.range.end()?;
     let mut previous = None::<u64>;
