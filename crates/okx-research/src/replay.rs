@@ -12,16 +12,55 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DatasetManifest, ReferenceCoverageStatus, ResearchCandle, ResearchError, ResearchFundingEvent,
-    canonical_sha256,
+    ResearchInstrumentReference, canonical_sha256,
 };
 
 pub const HYPOTHESIS_SCHEMA_V1: &str = "okx.research.hypothesis/v1";
 pub const EXPERIMENT_SPEC_SCHEMA_V1: &str = "okx.research.experiment-spec/v1";
 pub const EXPERIMENT_RESULT_SCHEMA_V1: &str = "okx.research.experiment-result/v1";
 pub const REPLAY_EXECUTION_MODEL_VERSION_V1: &str = "okx.research.replay-execution/2026-10-04.1";
+pub const REPLAY_DATASET_ARTIFACT_SCHEMA_V1: &str = "okx.research.replay-dataset/v1";
 
 const ONE_HOUR_MS: u64 = 3_600_000;
 const ONE_DAY_MS: u64 = 86_400_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayDatasetArtifact {
+    pub schema: String,
+    pub manifest: DatasetManifest,
+    pub candles: Vec<ResearchCandle>,
+    pub funding: Vec<ResearchFundingEvent>,
+    pub reference: Option<ResearchInstrumentReference>,
+}
+
+impl ReplayDatasetArtifact {
+    pub fn build(
+        manifest: DatasetManifest,
+        candles: Vec<ResearchCandle>,
+        funding: Vec<ResearchFundingEvent>,
+        reference: Option<ResearchInstrumentReference>,
+    ) -> Result<Self, ResearchError> {
+        if candles.is_empty() {
+            return Err(ResearchError::ReplayMissingField("replay_dataset.candles"));
+        }
+        if reference
+            .as_ref()
+            .is_some_and(|value| value.instrument_id != manifest.instrument_id)
+        {
+            return Err(ResearchError::ReplayDatasetMismatch);
+        }
+        let artifact = Self {
+            schema: REPLAY_DATASET_ARTIFACT_SCHEMA_V1.to_owned(),
+            manifest,
+            candles,
+            funding,
+            reference,
+        };
+        validate_replay_dataset_artifact(&artifact)?;
+        Ok(artifact)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -657,6 +696,35 @@ fn terminal_result(
     })
 }
 
+fn validate_replay_dataset_artifact(
+    artifact: &ReplayDatasetArtifact,
+) -> Result<(), ResearchError> {
+    let begin = artifact.manifest.range.begin()?;
+    let end = artifact.manifest.range.end()?;
+    let mut previous = None::<u64>;
+    for candle in &artifact.candles {
+        let open = timestamp("replay_dataset.candle.open_time_ms", &candle.open_time_ms)?;
+        let available = timestamp(
+            "replay_dataset.candle.available_time_ms",
+            &candle.available_time_ms,
+        )?;
+        if open < begin || open >= end || available != open.saturating_add(ONE_HOUR_MS) {
+            return Err(ResearchError::ReplayCausalityViolation);
+        }
+        if previous.is_some_and(|value| open <= value) {
+            return Err(ResearchError::ReplayEventOrdering);
+        }
+        previous = Some(open);
+    }
+    for event in &artifact.funding {
+        let event_time = timestamp("replay_dataset.funding_time_ms", &event.funding_time_ms)?;
+        if event_time < begin || event_time >= end {
+            return Err(ResearchError::ReplayDatasetMismatch);
+        }
+    }
+    Ok(())
+}
+
 fn validate_replay_inputs(
     dataset: &DatasetManifest,
     candles: &[ResearchCandle],
@@ -714,6 +782,8 @@ fn evidence_class(dataset: &DatasetManifest, spec: &ExperimentSpec) -> ReplayEvi
         ReplayEvidenceClass::DataOnly
     } else if spec.execution.mechanics_provenance == ReplayMechanicsProvenance::HistoricalObserved
         && dataset.reference_coverage == ReferenceCoverageStatus::Complete
+        && spec.execution.fee_provenance == "HISTORICAL_OBSERVED"
+        && spec.execution.funding_provenance == "HISTORICAL_OBSERVED"
     {
         ReplayEvidenceClass::HistoricalObserved
     } else {
