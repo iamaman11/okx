@@ -628,7 +628,7 @@ impl ResearchArtifactStore {
         let artifact_id = sha256_bytes(&bytes);
         let path = self
             .evidence_dir()
-            .join(format!("{}.json", sha256_hex(artifact_id)?));
+            .join(format!("{}.json", sha256_hex(&artifact_id)?));
         publish_atomic_verified(&path, &bytes)?;
         Ok((artifact_id, path))
     }
@@ -756,7 +756,7 @@ fn publish_atomic_verified(path: &Path, bytes: &[u8]) -> Result<(), ResearchErro
 
     match fs::rename(&temp, path) {
         Ok(()) => Ok(()),
-        Err(error) if path.exists() => {
+        Err(_error) if path.exists() => {
             let _ = fs::remove_file(&temp);
             let existing = fs::read(path)?;
             if existing == bytes {
