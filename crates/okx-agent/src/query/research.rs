@@ -86,13 +86,14 @@ pub(crate) async fn dispatch(
     match &request.operation {
         AgentOperation::ResearchCapabilities => capabilities(request, generated_at),
         AgentOperation::Research {
-            request: ResearchRequest::InspectTierA {
-                catalog_version: _,
-                instrument,
-                bar,
-                candle_limit,
-                funding_limit,
-            },
+            request:
+                ResearchRequest::InspectTierA {
+                    catalog_version: _,
+                    instrument,
+                    bar,
+                    candle_limit,
+                    funding_limit,
+                },
         } => {
             inspect_tier_a(
                 request,
@@ -114,11 +115,7 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
         schema: RESEARCH_CAPABILITIES_SCHEMA_V1,
         catalog_version: RESEARCH_CATALOG_VERSION_V1,
         stage: "3A_V1",
-        tier_a_instruments: [
-            "BTC-USDT-SWAP",
-            "ETH-USDT-SWAP",
-            "DOGE-USDT-SWAP",
-        ],
+        tier_a_instruments: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
         tier_a_bars: ["1H"],
         candle_page_limit_max: 100,
         funding_page_limit_max: 400,
@@ -337,10 +334,7 @@ async fn inspect_tier_a(
             reference_through_ms.to_string(),
         )
         .expect("one millisecond reference capture range"),
-        parameters: BTreeMap::from([(
-            "semantics".to_owned(),
-            "current_snapshot_only".to_owned(),
-        )]),
+        parameters: BTreeMap::from([("semantics".to_owned(), "current_snapshot_only".to_owned())]),
     };
     let (reference_chunk, reference_window) = match build_reference_chunk(
         reference_source,
@@ -396,9 +390,18 @@ async fn inspect_tier_a(
     let store = ResearchArtifactStore::at(research_root.join("research"));
     let persisted = (|| {
         let raw_sources = [
-            (&candle_chunk.manifest.raw_sha256, candles.raw_body.as_slice()),
-            (&funding_chunk.manifest.raw_sha256, funding.raw_body.as_slice()),
-            (&reference_chunk.manifest.raw_sha256, reference.raw_body.as_slice()),
+            (
+                &candle_chunk.manifest.raw_sha256,
+                candles.raw_body.as_slice(),
+            ),
+            (
+                &funding_chunk.manifest.raw_sha256,
+                funding.raw_body.as_slice(),
+            ),
+            (
+                &reference_chunk.manifest.raw_sha256,
+                reference.raw_body.as_slice(),
+            ),
         ];
         for (id, bytes) in raw_sources {
             store.publish_source_bytes(id, bytes)?;
@@ -430,13 +433,13 @@ async fn inspect_tier_a(
 
     let strategy_ready = manifest.reference_coverage == ReferenceCoverageStatus::Complete
         && manifest.gaps.is_empty();
-    let blocker = (!strategy_ready).then_some(if manifest.reference_coverage
-        != ReferenceCoverageStatus::Complete
-    {
-        INSUFFICIENT_REFERENCE_HISTORY_CODE
-    } else {
-        "INSUFFICIENT_DATA"
-    });
+    let blocker = (!strategy_ready).then_some(
+        if manifest.reference_coverage != ReferenceCoverageStatus::Complete {
+            INSUFFICIENT_REFERENCE_HISTORY_CODE
+        } else {
+            "INSUFFICIENT_DATA"
+        },
+    );
     let quality = if strategy_ready {
         DataQuality::Fresh
     } else {
