@@ -158,7 +158,7 @@ Pure deterministic analysis:
 - current cost;
 - position scenarios.
 
-Inputs are immutable accepted snapshots. Portfolio mandate/hard-policy arithmetic, covariance/correlation, scenario/stress and future statistical risk calculations belong here as pure deterministic/statistical functions. No collector, transport, lifecycle or mutation ownership lives here.
+Inputs are immutable accepted snapshots. Portfolio mandate/hard-policy arithmetic, covariance/correlation, scenario/stress and future statistical risk calculations belong here as pure deterministic/statistical functions. Stage-3C validation statistics (for example applicable Sharpe-like/DSR/PBO primitives) and strategy research metadata such as lookback/forward holding horizon also belong here as pure versioned functions; promotion/family/holdout state does not. No collector, transport, lifecycle or mutation ownership lives here.
 
 ### `okx-research` (Stage-3 admitted boundary)
 
@@ -170,7 +170,8 @@ It owns the Stage-3 research boundary and may own:
 - deterministic replay orchestration over normalized historical facts;
 - hypothesis / experiment / validation lineage;
 - versioned baseline experiment/profile construction for replay (assumptions, declared cost model, mandate and hard-policy values), while policy arithmetic remains in `okx-analysis`;
-- walk-forward/OOS/anti-overfit orchestration;
+- walk-forward/OOS/anti-overfit orchestration over immutable parent/slice artifacts;
+- immutable research-family, frozen validation-spec, holdout-consumption and promotion lineage;
 - immutable promotion bundles;
 - compact paper/shadow research evidence.
 
@@ -191,6 +192,8 @@ It must not own:
 The research artifact repository is content-addressed/immutable evidence, not live state. The same artifact bytes/config map to the same identity; accepted artifacts are never silently rewritten.
 
 Replay provenance distinguishes two source trees: `dataset_source_tree` identifies the build that captured/normalized the immutable dataset, while `replay_source_tree` identifies the exact build whose strategy/risk/replay code produced the experiment. `replay_source_tree` is part of `ExperimentSpec` identity; changing replay code therefore changes experiment identity even when the dataset is unchanged.
+
+Stage 3C must reuse this replay owner rather than implement a validation-specific simulator. A validation split is represented as immutable, content-addressed slice evidence derived from a parent research dataset and bound by a frozen validation specification. Long-range acquisition reuses the existing cursor-capable historical adapters plus immutable checkpoint lineage; it is not a second collector or background job system. Research-family manifests enumerate existing trial artifacts and do not authorize an autonomous parameter-search service.
 
 A separate `okx-strategy` crate is not admitted for Stage 3 v1. Production-intended feature/strategy logic belongs as deterministic modules under `okx-analysis` until a reproduced ownership/dependency problem justifies another boundary.
 
