@@ -30,6 +30,7 @@ pub struct MailboxQueryRuntimeContext<'a> {
     pub account: Option<&'a AccountBootstrapper>,
     pub private_ws: Option<&'a PrivateWsHandle>,
     pub execution: Option<&'a ExecutionRuntime>,
+    pub research_root: &'a Path,
 }
 
 pub struct GitHubMailboxClient {
@@ -104,6 +105,7 @@ impl GitHubMailboxClient {
             account,
             private_ws,
             execution,
+            research_root,
         } = context;
         let mut checkpoint = self.load_checkpoint_for_poll()?;
         let fetch_started = Instant::now();
@@ -176,13 +178,14 @@ impl GitHubMailboxClient {
                 &envelope,
                 expected_key_id,
                 agent_private_key,
-                ObservationQueryContext::live_with_execution(
+                ObservationQueryContext::live_with_execution_and_research(
                     public_ws,
                     market,
                     mailbox_telemetry.as_ref(),
                     account,
                     private_ws,
                     execution,
+                    Some(research_root),
                 ),
             )
             .await
