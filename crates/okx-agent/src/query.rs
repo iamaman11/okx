@@ -56,6 +56,7 @@ mod execution;
 mod market;
 mod research;
 mod research_validation;
+mod research_validation_split;
 mod universal;
 
 pub const P1_NOT_AVAILABLE_CODE: &str = "P1_OPERATION_NOT_AVAILABLE";
