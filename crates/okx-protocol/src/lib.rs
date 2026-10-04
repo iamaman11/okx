@@ -551,9 +551,7 @@ impl ResearchRequest {
                     ));
                 }
                 if !(240..=2400).contains(target_candle_count) {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "target_candle_count",
-                    ));
+                    return Err(ProtocolError::InvalidResearchRequest("target_candle_count"));
                 }
                 if let Some(id) = checkpoint_artifact_id {
                     validate_sha256_artifact_id(id)?;
