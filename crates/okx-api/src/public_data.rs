@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{client::OkxPublicClient, error::OkxError, instrument::InstrumentType};
+use crate::{
+    client::{CapturedPublicRows, OkxPublicClient},
+    error::OkxError,
+    instrument::InstrumentType,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct UpcomingParameterChange {
@@ -148,6 +152,30 @@ impl PublicDataApi {
             )));
         };
         Ok(row.clone())
+    }
+
+    pub async fn instrument_captured(
+        &self,
+        instrument_type: InstrumentType,
+        instrument_id: &str,
+    ) -> Result<CapturedPublicRows<PublicInstrument>, OkxError> {
+        let captured = self
+            .client
+            .public_get_captured(
+                "/api/v5/public/instruments",
+                &[
+                    ("instType", instrument_type.to_string()),
+                    ("instId", instrument_id.to_owned()),
+                ],
+            )
+            .await?;
+        if captured.rows.len() != 1 {
+            return Err(OkxError::Response(format!(
+                "expected exactly one captured public instrument row for {instrument_id}, found {}",
+                captured.rows.len()
+            )));
+        }
+        Ok(captured)
     }
 
     pub async fn derivative_instruments(&self) -> Result<Vec<PublicInstrument>, OkxError> {
