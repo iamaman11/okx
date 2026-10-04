@@ -190,6 +190,8 @@ It must not own:
 
 The research artifact repository is content-addressed/immutable evidence, not live state. The same artifact bytes/config map to the same identity; accepted artifacts are never silently rewritten.
 
+Replay provenance distinguishes two source trees: `dataset_source_tree` identifies the build that captured/normalized the immutable dataset, while `replay_source_tree` identifies the exact build whose strategy/risk/replay code produced the experiment. `replay_source_tree` is part of `ExperimentSpec` identity; changing replay code therefore changes experiment identity even when the dataset is unchanged.
+
 A separate `okx-strategy` crate is not admitted for Stage 3 v1. Production-intended feature/strategy logic belongs as deterministic modules under `okx-analysis` until a reproduced ownership/dependency problem justifies another boundary.
 
 ### `okx-execution`

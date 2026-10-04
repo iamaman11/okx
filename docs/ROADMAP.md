@@ -304,7 +304,7 @@ Canonical Stage-3 execution order — exactly four large slices:
    - deterministic experiment hash/result.
    - **T1:** feature golden vectors, poisoned-future/same-close isolation, ordering, intrabar ambiguity, price-role, variable-funding, fee provenance, quantization/cost/capacity monotonicity and repeatability.
    - **T2:** captured-live replay parity where semantics match; no out-of-split reads; restart/resume same terminal hash; Stage-2 risk remains authoritative.
-   - **T3:** experiment binds exact source/dataset/algorithm/mandate/risk/cost versions.
+   - **T3:** experiment binds exact source/dataset/algorithm/mandate/risk/cost versions; dataset acquisition provenance and replay-algorithm provenance are distinct (`dataset_source_tree` vs `replay_source_tree`), and the replay source tree participates in immutable experiment identity.
    - **T4:** primary MCP proves `NO_TRADE` + one manually auditable baseline before a real Tier-A experiment; Tier-B claims require inspected compatible Tier-B source semantics; the normal replay response is a self-contained <=12,288-byte decision packet and returns no bulk events/traces.
    - **T5:** future poison/gaps/unsupported Tier-B return typed failure or `INSUFFICIENT_DATA`; exchange mutations = 0.
    - Exit: one strategy can be replayed reproducibly without hidden future data or duplicate production formulas.
