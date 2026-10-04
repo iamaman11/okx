@@ -1,3 +1,7 @@
+mod replay;
+
+pub use replay::*;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
@@ -635,6 +639,30 @@ pub enum ResearchError {
 
     #[error("research artifact content does not match its content-addressed identity")]
     ArtifactIdentityMismatch,
+
+    #[error("analysis error: {0}")]
+    Analysis(#[from] okx_analysis::AnalysisError),
+
+    #[error("replay dataset/spec identity mismatch")]
+    ReplayDatasetMismatch,
+
+    #[error("replay event ordering is not strictly chronological")]
+    ReplayEventOrdering,
+
+    #[error("replay causal ordering was violated")]
+    ReplayCausalityViolation,
+
+    #[error("replay bar '{0}' is not supported by the current deterministic kernel")]
+    ReplayUnsupportedBar(String),
+
+    #[error("invalid replay execution model field '{0}'")]
+    ReplayInvalidExecutionModel(String),
+
+    #[error("invalid replay decimal field '{field}': '{value}'")]
+    ReplayInvalidDecimal { field: &'static str, value: String },
+
+    #[error("missing required replay field '{0}'")]
+    ReplayMissingField(&'static str),
 
     #[error("failed to serialize canonical research evidence: {0}")]
     Serialization(#[from] serde_json::Error),
