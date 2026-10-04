@@ -543,6 +543,29 @@ struct CheckpointIdentity<'a> {
 }
 
 impl ResearchCheckpoint {
+    pub fn validate(&self) -> Result<(), ResearchError> {
+        if self.schema != CHECKPOINT_SCHEMA_V2 {
+            return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+        let rebuilt = Self::build(
+            self.parent_checkpoint_id.clone(),
+            self.instrument_id.clone(),
+            self.bar.clone(),
+            self.target_candle_count,
+            self.phase,
+            self.completed_pages.clone(),
+            self.remaining_cursor.clone(),
+            self.dataset_range.clone(),
+            self.terminal.clone(),
+            self.source_tree.clone(),
+            self.created_at_ms.clone(),
+        )?;
+        if rebuilt.checkpoint_id != self.checkpoint_id {
+            return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         parent_checkpoint_id: Option<String>,
