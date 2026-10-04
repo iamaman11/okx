@@ -1021,6 +1021,7 @@ mod tests {
                 account_fallback: None,
                 private_ws: None,
                 execution: None,
+                research_root: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1060,6 +1061,7 @@ mod tests {
                 account_fallback: None,
                 private_ws: None,
                 execution: None,
+                research_root: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1100,6 +1102,7 @@ mod tests {
                 account_fallback: None,
                 private_ws: None,
                 execution: None,
+                research_root: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
