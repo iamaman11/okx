@@ -347,25 +347,30 @@ pub fn build_baseline_experiment(
     let reference = dataset
         .reference
         .as_ref()
-        .ok_or(ResearchError::ReplayMissingField("replay_dataset.reference"))?;
-    let contract_value = reference
-        .contract_value
-        .as_deref()
         .ok_or(ResearchError::ReplayMissingField(
-            "replay_dataset.reference.contract_value",
+            "replay_dataset.reference",
         ))?;
-    let contract_value_currency = reference
-        .contract_value_currency
-        .as_deref()
-        .ok_or(ResearchError::ReplayMissingField(
-            "replay_dataset.reference.contract_value_currency",
-        ))?;
-    let settle_currency = reference
-        .settle_currency
-        .as_deref()
-        .ok_or(ResearchError::ReplayMissingField(
-            "replay_dataset.reference.settle_currency",
-        ))?;
+    let contract_value =
+        reference
+            .contract_value
+            .as_deref()
+            .ok_or(ResearchError::ReplayMissingField(
+                "replay_dataset.reference.contract_value",
+            ))?;
+    let contract_value_currency =
+        reference
+            .contract_value_currency
+            .as_deref()
+            .ok_or(ResearchError::ReplayMissingField(
+                "replay_dataset.reference.contract_value_currency",
+            ))?;
+    let settle_currency =
+        reference
+            .settle_currency
+            .as_deref()
+            .ok_or(ResearchError::ReplayMissingField(
+                "replay_dataset.reference.settle_currency",
+            ))?;
 
     let hypothesis = Hypothesis::build(
         match strategy {
