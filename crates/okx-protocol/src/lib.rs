@@ -592,9 +592,13 @@ impl ResearchRequest {
                     parent_replay_dataset_artifact_id,
                     "parent_replay_dataset_artifact_id",
                 )?;
-                if [train_candle_count, validation_candle_count, final_oos_candle_count]
-                    .iter()
-                    .any(|count| **count < 4 || **count > 2400)
+                if [
+                    train_candle_count,
+                    validation_candle_count,
+                    final_oos_candle_count,
+                ]
+                .iter()
+                .any(|count| **count < 4 || **count > 2400)
                 {
                     return Err(ProtocolError::InvalidResearchRequest(
                         "validation split candle counts",
@@ -1852,8 +1856,7 @@ mod tests {
             catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
             instrument: "BTC-USDT-SWAP".to_owned(),
             parent_replay_dataset_artifact_id:
-                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                    .to_owned(),
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
             strategy: ResearchReplayStrategy::CloseMomentum,
             train_candle_count: 144,
             validation_candle_count: 48,
@@ -1865,8 +1868,7 @@ mod tests {
             catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
             instrument: "BTC-USDT-SWAP".to_owned(),
             parent_replay_dataset_artifact_id:
-                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-                    .to_owned(),
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
             strategy: ResearchReplayStrategy::CloseMomentum,
             train_candle_count: 120,
             validation_candle_count: 40,
