@@ -6,8 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+okx-analysis = { path = "../okx-analysis" }
 okx-observation = { path = "../okx-observation" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rust_decimal = "1"
 sha2 = "0.10"
 thiserror = "2"

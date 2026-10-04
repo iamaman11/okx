@@ -6,6 +6,7 @@ mod microstructure;
 mod risk;
 mod scenario;
 mod statistics;
+mod strategy;
 
 pub use candidate::{
     CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderAssumptions,
@@ -31,8 +32,9 @@ pub use microstructure::{
     analyze_market_intelligence, analyze_spread_bps,
 };
 pub use risk::{
-    ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, CandidateProjection, ClusterExposure,
-    CorrelatedClusterLimit, ExposureAggregate, HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy,
+    ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, CandidateProjection,
+    CandidateRiskContext, CandidateRiskGate, ClusterExposure, CorrelatedClusterLimit,
+    ExposureAggregate, HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy,
     PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2, PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3, PortfolioCandidate,
     PortfolioRiskAnalysis, PositionRiskAnalysis, RISK_ORACLE_COMPARISON_SCHEMA_V2,
     RISK_ORACLE_CONSISTENCY_POLICY_V1, RiskDegradedMode, RiskMinimumQuality, RiskOracleComparison,
@@ -42,13 +44,14 @@ pub use risk::{
     VirtualNotionalOracleInput, VirtualNotionalOraclePositionComparison,
     VirtualPositionConstraintEvidence, VirtualPositionConstraintInput, analyze_account_risk,
     analyze_portfolio_risk, compare_account_position_risk_oracle,
-    compare_virtual_position_builder_notional, validate_virtual_linear_position,
-    virtual_portfolio_initial_margin_usd,
+    compare_virtual_position_builder_notional, evaluate_candidate_risk,
+    validate_virtual_linear_position, virtual_portfolio_initial_margin_usd,
 };
 pub use scenario::{
     HISTORY_BEHAVIOR_SCHEMA_V1, HistoryBehaviorAnalysis, POSITION_SCENARIO_SCHEMA_V1,
-    PositionScenarioAnalysis, PositionScenarioAssumptions, ScenarioExitAssumption,
-    ScenarioPriceSource, analyze_history_behavior, analyze_position_scenario,
+    PositionScenarioAnalysis, PositionScenarioAssumptions, PositionScenarioMechanics,
+    ScenarioExitAssumption, ScenarioPriceSource, analyze_history_behavior,
+    analyze_position_scenario, analyze_position_scenario_values, funding_user_cost_quote,
 };
 pub use statistics::{
     CovarianceCell, HISTORICAL_STRESS_FORMULA_V1, HistoricalStressResult,
@@ -58,6 +61,10 @@ pub use statistics::{
     VolatilityContribution, analyze_portfolio_statistics, covariance_correlation, decimal_sqrt,
     sample_covariance_matrix,
 };
+pub use strategy::{
+    BASELINE_STRATEGY_VERSION_V1, BarDecisionInput, BaselineStrategyKind, StrategyDecision,
+    evaluate_baseline_strategy,
+};
 
 use std::str::FromStr;
 
@@ -65,19 +72,19 @@ use okx_observation::{
     FeeScheduleSnapshot, FundingRequirement, InstrumentRulesSnapshot, MarketSnapshot,
 };
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const COST_ANALYSIS_SCHEMA_V1: &str = "okx.cost-analysis/v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiquidityRole {
     Maker,
     Taker,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PositionDirection {
     Long,
@@ -306,14 +313,14 @@ pub fn analyze_cost(
                 .funding
                 .as_ref()
                 .ok_or(AnalysisError::MissingFunding)?;
-            let rate = decimal("funding_rate", &funding.rate)?;
-            let signed = match direction {
-                PositionDirection::Long => quote_notional * rate,
-                PositionDirection::Short => -(quote_notional * rate),
-            };
+            let user_cost_quote = funding_user_cost_quote(
+                &quote_notional.normalize().to_string(),
+                &funding.rate,
+                direction,
+            )?;
             Some(FundingProjection {
                 exchange_rate: funding.rate.clone(),
-                user_cost_quote: signed.normalize().to_string(),
+                user_cost_quote,
                 funding_time_ms: funding.funding_time_ms.clone(),
                 next_funding_time_ms: funding.next_funding_time_ms.clone(),
             })
@@ -404,10 +411,16 @@ mod tests {
 
     #[test]
     fn funding_direction_sign_is_deterministic() {
-        let notional = Decimal::from_str("2500").expect("notional");
-        let rate = Decimal::from_str("0.0001").expect("rate");
-        assert_eq!((notional * rate).normalize().to_string(), "0.25");
-        assert_eq!((-(notional * rate)).normalize().to_string(), "-0.25");
+        assert_eq!(
+            funding_user_cost_quote("2500", "0.0001", PositionDirection::Long)
+                .expect("long funding"),
+            "0.25"
+        );
+        assert_eq!(
+            funding_user_cost_quote("2500", "0.0001", PositionDirection::Short)
+                .expect("short funding"),
+            "-0.25"
+        );
     }
 
     #[test]

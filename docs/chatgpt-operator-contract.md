@@ -38,6 +38,9 @@ ChatGPT-side rules:
 7. Prefer bounded application/query-plan operations for ordinary analysis. Low-level bulk/detail operations are forensic tools and should be used only when the extra detail is necessary.
 8. Decrypt a fallback DATA terminal once, validate it, reduce it immediately to compact evidence, and discard the large plaintext from the working conversational summary.
 9. Reuse compact evidence rather than repeatedly reopening the same mailbox terminal or re-fetching the same large primary result.
+10. Treat the normal result as a self-contained decision packet: identity/version, status/quality, provenance/coverage, assumptions, bounded key metrics, risk/policy outcome, warnings/blockers/invalidation conditions, and artifact/continuation ids when needed.
+11. Default interaction budget for an ordinary analytical/research question is one coarse MCP operation and <= 12,288 bytes of result evidence once the capability contract is known. Extra calls must be justified by a typed incomplete/degraded result, explicit forensic need, or bounded continuation.
+12. Never request raw candles/trades/L2/replay traces merely to reproduce deterministic Rust calculations in ChatGPT.
 
 A ChatGPT stream/tool timeout must therefore be diagnosed separately from application transport health. DATA/CONTROL evidence is considered implicated only when their own typed telemetry/status shows a transport failure.
 
@@ -131,7 +134,7 @@ provenance / generations required by the operation
 response-size telemetry when relevant
 ```
 
-Raw low-level payloads remain available for forensic use but are not copied into normal conversational context.
+Raw low-level payloads remain available for forensic use but are not copied into normal conversational context. A fresh chat must be able to continue from the compact record plus immutable artifact/experiment ids rather than depending on prior conversational history.
 
 ## CI / artifact discipline
 
