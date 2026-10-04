@@ -72,19 +72,19 @@ use okx_observation::{
     FeeScheduleSnapshot, FundingRequirement, InstrumentRulesSnapshot, MarketSnapshot,
 };
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const COST_ANALYSIS_SCHEMA_V1: &str = "okx.cost-analysis/v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiquidityRole {
     Maker,
     Taker,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PositionDirection {
     Long,
