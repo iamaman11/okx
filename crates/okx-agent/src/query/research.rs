@@ -7,7 +7,8 @@ use okx_protocol::{
 use okx_research::{
     BUILD_SOURCE_TREE, DatasetManifest, ReferenceCoverageStatus, ResearchArtifactStore,
     ResearchRange, ResearchSourceKind, ResearchTier, SourceRequest, build_candle_chunk,
-    build_funding_chunk, build_reference_chunk, detect_fixed_interval_gaps,
+    build_funding_chunk, build_reference_chunk, build_tier_b_trade_chunk,
+    detect_fixed_interval_gaps,
 };
 use serde::Serialize;
 
@@ -19,6 +20,7 @@ use crate::{AgentResult, market_bootstrap::MarketBootstrapError};
 
 pub const RESEARCH_CAPABILITIES_SCHEMA_V1: &str = "okx.research-capabilities/v1";
 pub const RESEARCH_DATA_INSPECTION_SCHEMA_V1: &str = "okx.research-data-inspection/v1";
+pub const RESEARCH_TIER_B_INSPECTION_SCHEMA_V1: &str = "okx.research-tier-b-inspection/v1";
 pub const RESEARCH_ARTIFACT_FAILURE_CODE: &str = "RESEARCH_ARTIFACT_FAILURE";
 pub const INSUFFICIENT_REFERENCE_HISTORY_CODE: &str = "INSUFFICIENT_REFERENCE_HISTORY";
 const PARSER_VERSION_V1: &str = "okx.public-history-parser/v1";
@@ -33,8 +35,11 @@ struct ResearchCapabilitiesResult {
     stage: &'static str,
     tier_a_instruments: [&'static str; 3],
     tier_a_bars: [&'static str; 1],
+    tier_b_instruments: [&'static str; 1],
+    tier_b_sources: [&'static str; 1],
     candle_page_limit_max: u16,
     funding_page_limit_max: u16,
+    trade_page_limit_max: u16,
     normal_result_target_bytes: u64,
     source_tree: &'static str,
     source_tree_bound: bool,
@@ -78,6 +83,27 @@ struct ResearchDataInspectionResult {
     source_cache: &'static str,
 }
 
+#[derive(Serialize)]
+struct ResearchTierBInspectionResult {
+    schema: &'static str,
+    catalog_version: &'static str,
+    stage: &'static str,
+    tier: ResearchTier,
+    instrument: String,
+    source: &'static str,
+    source_scope: &'static str,
+    acquired_at_ms: String,
+    range: ResearchRange,
+    chunk: ResearchChunkSummary,
+    availability_semantics: &'static str,
+    continuity_semantics: &'static str,
+    bulk_rows_returned: bool,
+    source_tree: &'static str,
+    evidence_store: &'static str,
+    source_cache: &'static str,
+    evidence_label: &'static str,
+}
+
 pub(crate) async fn dispatch(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
@@ -106,6 +132,14 @@ pub(crate) async fn dispatch(
             )
             .await
         }
+        AgentOperation::Research {
+            request:
+                ResearchRequest::InspectTierB {
+                    catalog_version: _,
+                    instrument,
+                    trade_limit,
+                },
+        } => inspect_tier_b(request, context, generated_at, instrument, *trade_limit).await,
         _ => Ok(unavailable(request, generated_at)),
     }
 }
@@ -117,8 +151,11 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
         stage: "3A_V1",
         tier_a_instruments: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
         tier_a_bars: ["1H"],
+        tier_b_instruments: ["BTC-USDT-SWAP"],
+        tier_b_sources: ["okx_public_rest_history_trades"],
         candle_page_limit_max: 100,
         funding_page_limit_max: 400,
+        trade_page_limit_max: 100,
         normal_result_target_bytes: NORMAL_RESULT_TARGET_BYTES,
         source_tree: BUILD_SOURCE_TREE,
         source_tree_bound: BUILD_SOURCE_TREE != "UNAVAILABLE",
@@ -483,6 +520,160 @@ async fn inspect_tier_a(
         result: Some(serde_json::to_value(result)?),
         failure: None,
         warnings,
+    })
+}
+
+async fn inspect_tier_b(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    instrument: &str,
+    trade_limit: u16,
+) -> AgentResult<AgentResponse> {
+    let Some(market) = context.market_fallback else {
+        return Ok(unavailable(request, generated_at));
+    };
+    let Some(research_root) = context.research_root else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            RESEARCH_ARTIFACT_FAILURE_CODE,
+            "research artifact root is unavailable".to_owned(),
+            false,
+        ));
+    };
+    if BUILD_SOURCE_TREE == "UNAVAILABLE" {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            RESEARCH_ARTIFACT_FAILURE_CODE,
+            "research source tree is not bound into this build".to_owned(),
+            false,
+        ));
+    }
+
+    let trades = match market
+        .research_trades_page(instrument, None, None, trade_limit)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(source_failure(request, generated_at, error)),
+    };
+    if trades.rows.len() < 2 {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            MARKET_PUBLIC_API_UNAVAILABLE_CODE,
+            format!("OKX returned fewer than two historical trades for '{instrument}'"),
+            true,
+        ));
+    }
+
+    let first = trades.rows.first().expect("two or more historical trades");
+    let last = trades.rows.last().expect("two or more historical trades");
+    let range_end = match last
+        .exchange_timestamp_ms
+        .parse::<u64>()
+        .ok()
+        .and_then(|value| value.checked_add(1))
+    {
+        Some(value) => value.to_string(),
+        None => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                RESEARCH_ARTIFACT_FAILURE_CODE,
+                "Tier B trade range overflowed u64".to_owned(),
+                false,
+            ));
+        }
+    };
+    let range = match ResearchRange::new(first.exchange_timestamp_ms.clone(), range_end) {
+        Ok(value) => value,
+        Err(error) => return Ok(research_failure(request, generated_at, error)),
+    };
+
+    let source = SourceRequest {
+        provider: "okx_public_rest".to_owned(),
+        resource: "/api/v5/market/history-trades".to_owned(),
+        instrument_id: instrument.to_owned(),
+        bar: None,
+        range: range.clone(),
+        parameters: BTreeMap::from([
+            ("limit".to_owned(), trade_limit.to_string()),
+            ("pagination".to_owned(), "trade_id".to_owned()),
+            ("type".to_owned(), "1".to_owned()),
+        ]),
+    };
+    let chunk = match build_tier_b_trade_chunk(
+        source,
+        trades.acquired_at_ms.clone(),
+        &trades.raw_body,
+        &trades.rows,
+        PARSER_VERSION_V1,
+        NORMALIZATION_VERSION_V1,
+        BUILD_SOURCE_TREE,
+    ) {
+        Ok(value) => value,
+        Err(error) => return Ok(research_failure(request, generated_at, error)),
+    };
+
+    let store = ResearchArtifactStore::at(research_root.join("research"));
+    if let Err(error) = store.publish_source_bytes(&chunk.manifest.raw_sha256, &trades.raw_body) {
+        return Ok(research_failure(request, generated_at, error));
+    }
+    let artifact_id = match store.publish_evidence(&chunk.manifest) {
+        Ok((id, _)) => id,
+        Err(error) => return Ok(research_failure(request, generated_at, error)),
+    };
+
+    let result = ResearchTierBInspectionResult {
+        schema: RESEARCH_TIER_B_INSPECTION_SCHEMA_V1,
+        catalog_version: RESEARCH_CATALOG_VERSION_V1,
+        stage: "3A_V1",
+        tier: ResearchTier::TierB,
+        instrument: instrument.to_owned(),
+        source: "/api/v5/market/history-trades",
+        source_scope: "OKX historical trades; bounded latest page within the endpoint retention window",
+        acquired_at_ms: trades.acquired_at_ms,
+        range,
+        chunk: ResearchChunkSummary {
+            kind: chunk.manifest.kind,
+            chunk_id: chunk.manifest.chunk_id,
+            capture_id: chunk.manifest.capture_id,
+            artifact_id,
+            raw_sha256: chunk.manifest.raw_sha256,
+            raw_size_bytes: chunk.manifest.raw_size_bytes,
+            normalized_sha256: chunk.manifest.normalized_sha256,
+            normalized_row_count: chunk.manifest.normalized_row_count,
+            oldest_event_time_ms: chunk.manifest.oldest_event_time_ms,
+            newest_event_time_ms: chunk.manifest.newest_event_time_ms,
+        },
+        availability_semantics:
+            "exchange event time is a lower bound; retrospective research acquisition is recorded separately",
+        continuity_semantics:
+            "trade ids must be unique; this bounded page does not infer complete tick continuity outside returned events",
+        bulk_rows_returned: false,
+        source_tree: BUILD_SOURCE_TREE,
+        evidence_store: "PINNED_CONTENT_ADDRESSED",
+        source_cache: "CONTENT_ADDRESSED_REDOWNLOADABLE",
+        evidence_label: "OBSERVED_OKX_HISTORICAL_TRADE_SOURCE",
+    };
+
+    Ok(AgentResponse {
+        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+        request_id: request.request_id.clone(),
+        status: AgentResponseStatus::Completed,
+        generated_at: generated_at.to_owned(),
+        quality: DataQuality::Fresh,
+        result_schema: Some(RESEARCH_TIER_B_INSPECTION_SCHEMA_V1.to_owned()),
+        result: Some(serde_json::to_value(result)?),
+        failure: None,
+        warnings: Vec::new(),
     })
 }
 
