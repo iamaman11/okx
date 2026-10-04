@@ -282,15 +282,15 @@ export const mcpApi = {
           },
           {
             name: "research",
-            description: "Run one bounded Stage-3 research operation in the Windows runtime. Stage 3A data inspection and Stage 3B deterministic replay share this coarse tool; bulk history and replay traces are never returned.",
+            description: "Run one bounded Stage-3 research operation in the Windows runtime. Data inspection, deterministic replay, and Stage-3C checkpointed validation-dataset preparation share this coarse tool; bulk history and replay traces are never returned.",
             inputSchema: {
               type: "object",
               properties: {
                 request: {
                   type: "object",
                   properties: {
-                    action: { type: "string", enum: ["inspect_tier_a", "inspect_tier_b", "run_replay"] },
-                    catalog_version: { type: "string", const: "okx.research.catalog/2026-10-04.2" },
+                    action: { type: "string", enum: ["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset"] },
+                    catalog_version: { type: "string", const: "okx.research.catalog/2026-10-04.3" },
                     instrument: {
                       type: "string",
                       enum: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
@@ -307,6 +307,11 @@ export const mcpApi = {
                     mechanics_provenance: {
                       type: "string",
                       enum: ["declared_counterfactual", "historical_observed"],
+                    },
+                    target_candle_count: { type: "integer", minimum: 240, maximum: 2400 },
+                    checkpoint_artifact_id: {
+                      type: "string",
+                      pattern: "^sha256:[0-9a-f]{64}$",
                     },
                   },
                   required: ["action", "catalog_version", "instrument"],
@@ -613,14 +618,16 @@ export const mcpApi = {
             "replay_dataset_artifact_id",
             "strategy",
             "mechanics_provenance",
+            "target_candle_count",
+            "checkpoint_artifact_id",
           ])
         ) {
           return jsonRpcError(id, -32602, "unsupported research request field");
         }
-        if (!["inspect_tier_a", "inspect_tier_b", "run_replay"].includes(String(research.action))) {
+        if (!["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset"].includes(String(research.action))) {
           return jsonRpcError(id, -32602, "invalid research action");
         }
-        if (research.catalog_version !== "okx.research.catalog/2026-10-04.2") {
+        if (research.catalog_version !== "okx.research.catalog/2026-10-04.3") {
           return jsonRpcError(id, -32602, "invalid research catalog_version");
         }
         const instrument = normalizeInstrument(research.instrument);
@@ -637,6 +644,8 @@ export const mcpApi = {
             research.replay_dataset_artifact_id !== undefined ||
             research.strategy !== undefined ||
             research.mechanics_provenance !== undefined ||
+            research.target_candle_count !== undefined ||
+            research.checkpoint_artifact_id !== undefined ||
             research.bar !== "1H" ||
             !Number.isInteger(research.candle_limit) ||
             Number(research.candle_limit) < 2 ||
@@ -674,6 +683,8 @@ export const mcpApi = {
             research.replay_dataset_artifact_id !== undefined ||
             research.strategy !== undefined ||
             research.mechanics_provenance !== undefined ||
+            research.target_candle_count !== undefined ||
+            research.checkpoint_artifact_id !== undefined ||
             !Number.isInteger(research.trade_limit) ||
             Number(research.trade_limit) < 2 ||
             Number(research.trade_limit) > 100
@@ -696,12 +707,51 @@ export const mcpApi = {
           return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
         }
 
+        if (research.action === "prepare_validation_dataset") {
+          if (
+            instrument !== "BTC-USDT-SWAP" ||
+            research.bar !== "1H" ||
+            research.candle_limit !== undefined ||
+            research.funding_limit !== undefined ||
+            research.trade_limit !== undefined ||
+            research.replay_dataset_artifact_id !== undefined ||
+            research.strategy !== undefined ||
+            research.mechanics_provenance !== undefined ||
+            !Number.isInteger(research.target_candle_count) ||
+            Number(research.target_candle_count) < 240 ||
+            Number(research.target_candle_count) > 2400 ||
+            (research.checkpoint_artifact_id !== undefined &&
+              (typeof research.checkpoint_artifact_id !== "string" ||
+                !/^sha256:[0-9a-f]{64}$/.test(research.checkpoint_artifact_id)))
+          ) {
+            return jsonRpcError(id, -32602, "invalid Stage-3C validation dataset request");
+          }
+          const agentRequest = {
+            schema: "okx.agent.request/v1",
+            request_id: requestId(),
+            operation: {
+              type: "research",
+              request: {
+                action: "prepare_validation_dataset",
+                catalog_version: research.catalog_version,
+                instrument,
+                bar: "1H",
+                target_candle_count: research.target_candle_count,
+                checkpoint_artifact_id: research.checkpoint_artifact_id,
+              },
+            },
+          };
+          return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+        }
+
         if (
           instrument !== "BTC-USDT-SWAP" ||
           research.bar !== undefined ||
           research.candle_limit !== undefined ||
           research.funding_limit !== undefined ||
           research.trade_limit !== undefined ||
+          research.target_candle_count !== undefined ||
+          research.checkpoint_artifact_id !== undefined ||
           typeof research.replay_dataset_artifact_id !== "string" ||
           !/^sha256:[0-9a-f]{64}$/.test(research.replay_dataset_artifact_id) ||
           !["no_trade", "close_momentum"].includes(String(research.strategy)) ||
