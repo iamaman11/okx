@@ -3,12 +3,44 @@ use serde::{Deserialize, Serialize};
 use crate::{AnalysisError, decimal};
 
 pub const BASELINE_STRATEGY_VERSION_V1: &str = "okx.strategy.baseline/2026-10-04.1";
+pub const STRATEGY_RESEARCH_METADATA_VERSION_V1: &str =
+    "okx.strategy.research-metadata/2026-10-04.1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BaselineStrategyKind {
     NoTrade,
     CloseMomentum,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyParameterSurface {
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyResearchMetadata {
+    pub version: String,
+    pub signal_lookback_bars: u16,
+    pub forward_outcome_bars: u16,
+    pub parameter_surface: StrategyParameterSurface,
+}
+
+pub fn baseline_strategy_research_metadata(
+    strategy: BaselineStrategyKind,
+) -> StrategyResearchMetadata {
+    let (signal_lookback_bars, forward_outcome_bars) = match strategy {
+        BaselineStrategyKind::NoTrade => (0, 0),
+        BaselineStrategyKind::CloseMomentum => (1, 2),
+    };
+    StrategyResearchMetadata {
+        version: STRATEGY_RESEARCH_METADATA_VERSION_V1.to_owned(),
+        signal_lookback_bars,
+        forward_outcome_bars,
+        parameter_surface: StrategyParameterSurface::None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +122,26 @@ mod tests {
         assert_eq!(
             evaluate_baseline_strategy(BaselineStrategyKind::CloseMomentum, &input("100", "100")),
             Ok(StrategyDecision::Hold)
+        );
+    }
+
+    #[test]
+    fn research_metadata_declares_only_real_strategy_horizons() {
+        let no_trade = baseline_strategy_research_metadata(BaselineStrategyKind::NoTrade);
+        assert_eq!(no_trade.signal_lookback_bars, 0);
+        assert_eq!(no_trade.forward_outcome_bars, 0);
+        assert_eq!(no_trade.parameter_surface, StrategyParameterSurface::None);
+
+        let momentum = baseline_strategy_research_metadata(BaselineStrategyKind::CloseMomentum);
+        assert_eq!(momentum.signal_lookback_bars, 1);
+        assert_eq!(momentum.forward_outcome_bars, 2);
+        assert_eq!(
+            momentum.parameter_surface,
+            StrategyParameterSurface::None
+        );
+        assert_eq!(
+            momentum.version,
+            STRATEGY_RESEARCH_METADATA_VERSION_V1
         );
     }
 
