@@ -173,6 +173,56 @@ pub fn normalize_research_candles(
     Ok(normalized.into_iter().map(|(_, candle)| candle).collect())
 }
 
+pub fn normalize_research_trades(
+    instrument_id: &str,
+    rows: Vec<PublicTrade>,
+    max_rows: usize,
+) -> Result<Vec<MarketTrade>, MarketHistoryError> {
+    if rows.len() > max_rows {
+        return Err(MarketHistoryError::TooManyRows);
+    }
+
+    let mut trade_ids = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.instrument_id != instrument_id {
+            return Err(MarketHistoryError::InstrumentMismatch {
+                expected: instrument_id.to_owned(),
+                actual: row.instrument_id,
+            });
+        }
+        if !trade_ids.insert(row.trade_id.clone()) {
+            return Err(MarketHistoryError::DuplicateTradeId(row.trade_id));
+        }
+        let timestamp = row
+            .timestamp_ms
+            .parse::<u64>()
+            .map_err(|_| MarketHistoryError::InvalidTimestamp(row.timestamp_ms.clone()))?;
+        let side = match row.side.as_str() {
+            "buy" => MarketTradeSide::Buy,
+            "sell" => MarketTradeSide::Sell,
+            _ => return Err(MarketHistoryError::InvalidTradeSide(row.side)),
+        };
+        normalized.push((
+            timestamp,
+            MarketTrade {
+                trade_id: required("tradeId", row.trade_id)?,
+                price: required("px", row.price)?,
+                size_contracts: required("sz", row.size)?,
+                side,
+                source: optional_text(row.source),
+                exchange_timestamp_ms: required("ts", row.timestamp_ms)?,
+            },
+        ));
+    }
+    normalized.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.trade_id.cmp(&right.1.trade_id))
+    });
+    Ok(normalized.into_iter().map(|(_, trade)| trade).collect())
+}
+
 pub fn normalize_research_funding(
     instrument_id: &str,
     rows: Vec<PublicFundingHistory>,
@@ -410,48 +460,7 @@ impl MarketTradesSnapshot {
             return Err(MarketHistoryError::TooManyRows);
         }
 
-        let mut trade_ids = BTreeSet::new();
-        let mut normalized = Vec::with_capacity(rows.len());
-        for row in rows {
-            if row.instrument_id != instrument_id {
-                return Err(MarketHistoryError::InstrumentMismatch {
-                    expected: instrument_id.to_owned(),
-                    actual: row.instrument_id,
-                });
-            }
-            if !trade_ids.insert(row.trade_id.clone()) {
-                return Err(MarketHistoryError::DuplicateTradeId(row.trade_id));
-            }
-            let timestamp = row
-                .timestamp_ms
-                .parse::<u64>()
-                .map_err(|_| MarketHistoryError::InvalidTimestamp(row.timestamp_ms.clone()))?;
-            let side = match row.side.as_str() {
-                "buy" => MarketTradeSide::Buy,
-                "sell" => MarketTradeSide::Sell,
-                _ => return Err(MarketHistoryError::InvalidTradeSide(row.side)),
-            };
-            normalized.push((
-                timestamp,
-                MarketTrade {
-                    trade_id: required("tradeId", row.trade_id)?,
-                    price: required("px", row.price)?,
-                    size_contracts: required("sz", row.size)?,
-                    side,
-                    source: optional_text(row.source),
-                    exchange_timestamp_ms: required("ts", row.timestamp_ms)?,
-                },
-            ));
-        }
-        normalized.sort_by(|left, right| {
-            left.0
-                .cmp(&right.0)
-                .then_with(|| left.1.trade_id.cmp(&right.1.trade_id))
-        });
-        let trades = normalized
-            .into_iter()
-            .map(|(_, trade)| trade)
-            .collect::<Vec<_>>();
+        let trades = normalize_research_trades(instrument_id, rows, requested_limit as usize)?;
 
         let mut snapshot = Self {
             schema: MARKET_TRADES_SCHEMA_V1.to_owned(),
