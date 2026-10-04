@@ -482,6 +482,7 @@ impl DatasetManifest {
 pub enum ResearchCheckpointPhase {
     Candles,
     Funding,
+    InsufficientData,
     Complete,
 }
 
@@ -600,6 +601,9 @@ impl ResearchCheckpoint {
         ) && dataset_range.is_none()
         {
             return Err(ResearchError::MissingField("checkpoint.dataset_range"));
+        }
+        if phase == ResearchCheckpointPhase::InsufficientData && remaining_cursor.is_some() {
+            return Err(ResearchError::ArtifactIdentityMismatch);
         }
         if phase == ResearchCheckpointPhase::Complete {
             if remaining_cursor.is_some() || terminal.is_none() {
@@ -811,6 +815,9 @@ pub enum ResearchError {
 
     #[error("research artifact content does not match its content-addressed identity")]
     ArtifactIdentityMismatch,
+
+    #[error("historical research cursor did not advance strictly toward older evidence")]
+    CursorDidNotAdvance,
 
     #[error("analysis error: {0}")]
     Analysis(#[from] okx_analysis::AnalysisError),
