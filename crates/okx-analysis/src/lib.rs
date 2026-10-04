@@ -313,14 +313,14 @@ pub fn analyze_cost(
                 .funding
                 .as_ref()
                 .ok_or(AnalysisError::MissingFunding)?;
-            let rate = decimal("funding_rate", &funding.rate)?;
-            let signed = match direction {
-                PositionDirection::Long => quote_notional * rate,
-                PositionDirection::Short => -(quote_notional * rate),
-            };
+            let user_cost_quote = funding_user_cost_quote(
+                &quote_notional.normalize().to_string(),
+                &funding.rate,
+                direction,
+            )?;
             Some(FundingProjection {
                 exchange_rate: funding.rate.clone(),
-                user_cost_quote: signed.normalize().to_string(),
+                user_cost_quote,
                 funding_time_ms: funding.funding_time_ms.clone(),
                 next_funding_time_ms: funding.next_funding_time_ms.clone(),
             })
@@ -411,10 +411,16 @@ mod tests {
 
     #[test]
     fn funding_direction_sign_is_deterministic() {
-        let notional = Decimal::from_str("2500").expect("notional");
-        let rate = Decimal::from_str("0.0001").expect("rate");
-        assert_eq!((notional * rate).normalize().to_string(), "0.25");
-        assert_eq!((-(notional * rate)).normalize().to_string(), "-0.25");
+        assert_eq!(
+            funding_user_cost_quote("2500", "0.0001", PositionDirection::Long)
+                .expect("long funding"),
+            "0.25"
+        );
+        assert_eq!(
+            funding_user_cost_quote("2500", "0.0001", PositionDirection::Short)
+                .expect("short funding"),
+            "-0.25"
+        );
     }
 
     #[test]
