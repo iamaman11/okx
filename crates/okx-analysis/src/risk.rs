@@ -251,6 +251,29 @@ pub struct RiskOracleComparison {
     pub consistent: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateRiskContext {
+    pub total_equity_usd: String,
+    pub account_gross_notional_usd: String,
+    pub instrument_gross_notional_usd: String,
+    pub account_initial_margin_usd: String,
+    pub capital_base_drawdown_ratio: String,
+    pub daily_realized_loss_usd: String,
+    pub account_is_fresh: bool,
+    #[serde(default)]
+    pub correlated_cluster_gross_notional_usd: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CandidateRiskGate {
+    pub decision: RiskPolicyDecision,
+    pub projected_account_gross_notional_usd: String,
+    pub projected_instrument_gross_notional_usd: String,
+    pub projected_margin_utilization_ratio: Option<String>,
+    pub violations: Vec<RiskPolicyViolation>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskPolicyDecision {
@@ -556,6 +579,177 @@ pub fn analyze_account_risk(
         open_position_count: positions.len(),
         pending_order_count: account.pending_orders.len(),
         positions,
+    })
+}
+
+pub fn evaluate_candidate_risk(
+    mandate: &TradingMandate,
+    policy: &HardRiskPolicy,
+    candidate: &PortfolioCandidate,
+    context: &CandidateRiskContext,
+) -> Result<CandidateRiskGate, AnalysisError> {
+    let total_equity = non_negative_decimal("risk_total_equity_usd", &context.total_equity_usd)?;
+    let account_gross =
+        non_negative_decimal("risk_account_gross_notional_usd", &context.account_gross_notional_usd)?;
+    let instrument_gross = non_negative_decimal(
+        "risk_instrument_gross_notional_usd",
+        &context.instrument_gross_notional_usd,
+    )?;
+    let current_imr =
+        non_negative_decimal("risk_account_initial_margin_usd", &context.account_initial_margin_usd)?;
+    let drawdown =
+        non_negative_decimal("risk_capital_base_drawdown_ratio", &context.capital_base_drawdown_ratio)?;
+    let daily_loss =
+        non_negative_decimal("risk_daily_realized_loss_usd", &context.daily_realized_loss_usd)?;
+
+    let notional = positive_decimal("candidate_notional_usd", &candidate.notional_usd)?;
+    let candidate_loss =
+        decimal("candidate_worst_case_loss_usd", &candidate.worst_case_loss_usd)?.abs();
+    let leverage = positive_decimal("candidate_leverage", &candidate.leverage)?;
+
+    let mut violations = Vec::new();
+    if matches!(policy.minimum_quality, RiskMinimumQuality::Fresh) && !context.account_is_fresh {
+        violations.push(RiskPolicyViolation {
+            code: "MINIMUM_DATA_QUALITY",
+            scope: "account".to_owned(),
+            observed: "degraded".to_owned(),
+            limit: "fresh".to_owned(),
+        });
+    }
+    if !context.account_is_fresh && matches!(policy.degraded_mode, RiskDegradedMode::Reject) {
+        violations.push(RiskPolicyViolation {
+            code: "DEGRADED_MODE_REJECT",
+            scope: "account".to_owned(),
+            observed: "degraded".to_owned(),
+            limit: "reject".to_owned(),
+        });
+    }
+    if !mandate.allowed_instruments.is_empty()
+        && !mandate.allowed_instruments.contains(&candidate.instrument)
+    {
+        violations.push(RiskPolicyViolation {
+            code: "MANDATE_INSTRUMENT_NOT_ALLOWED",
+            scope: candidate.instrument.clone(),
+            observed: "candidate".to_owned(),
+            limit: "mandate.allowed_instruments".to_owned(),
+        });
+    }
+    if !policy.allowed_instruments.is_empty()
+        && !policy.allowed_instruments.contains(&candidate.instrument)
+    {
+        violations.push(RiskPolicyViolation {
+            code: "INSTRUMENT_NOT_ALLOWED",
+            scope: candidate.instrument.clone(),
+            observed: "candidate".to_owned(),
+            limit: "policy.allowed_instruments".to_owned(),
+        });
+    }
+
+    compare_limit(
+        &mut violations,
+        "MAX_LOSS_PER_TRADE",
+        &candidate.instrument,
+        candidate_loss,
+        &policy.max_loss_per_trade_usd,
+    )?;
+    compare_limit(
+        &mut violations,
+        "MAX_LEVERAGE",
+        &candidate.instrument,
+        leverage,
+        &policy.max_leverage,
+    )?;
+    compare_limit(
+        &mut violations,
+        "MANDATE_LEVERAGE_CEILING",
+        &candidate.instrument,
+        leverage,
+        &mandate.leverage_ceiling,
+    )?;
+    compare_limit(
+        &mut violations,
+        "MAX_DRAWDOWN",
+        "capital_base",
+        drawdown,
+        &policy.max_drawdown_ratio,
+    )?;
+    compare_limit(
+        &mut violations,
+        "MANDATE_MAX_DRAWDOWN",
+        "capital_base",
+        drawdown,
+        &mandate.max_drawdown_ratio,
+    )?;
+    compare_limit(
+        &mut violations,
+        "MAX_DAILY_REALIZED_LOSS",
+        "utc_day",
+        daily_loss,
+        &policy.max_daily_realized_loss_usd,
+    )?;
+
+    let projected_account = account_gross + notional;
+    let projected_instrument = instrument_gross + notional;
+    compare_limit(
+        &mut violations,
+        "MAX_ACCOUNT_GROSS_NOTIONAL_PROJECTED",
+        "account",
+        projected_account,
+        &policy.max_account_gross_notional_usd,
+    )?;
+    compare_limit(
+        &mut violations,
+        "MAX_INSTRUMENT_GROSS_NOTIONAL_PROJECTED",
+        &candidate.instrument,
+        projected_instrument,
+        &policy.max_instrument_gross_notional_usd,
+    )?;
+
+    let projected_margin = if total_equity > Decimal::ZERO {
+        Some(((current_imr + notional / leverage) / total_equity).normalize())
+    } else {
+        None
+    };
+    if let Some(value) = projected_margin {
+        compare_limit(
+            &mut violations,
+            "MAX_MARGIN_UTILIZATION_PROJECTED",
+            "account",
+            value,
+            &policy.max_margin_utilization_ratio,
+        )?;
+    }
+
+    for cluster in &policy.correlated_clusters {
+        if !cluster.instruments.contains(&candidate.instrument) {
+            continue;
+        }
+        let current = context
+            .correlated_cluster_gross_notional_usd
+            .get(&cluster.id)
+            .map(|value| non_negative_decimal("risk_cluster_gross_notional_usd", value))
+            .transpose()?
+            .unwrap_or(Decimal::ZERO);
+        compare_limit(
+            &mut violations,
+            "MAX_CORRELATED_CLUSTER_GROSS_NOTIONAL",
+            &cluster.id,
+            current + notional,
+            &cluster.max_gross_notional_usd,
+        )?;
+    }
+
+    Ok(CandidateRiskGate {
+        decision: if violations.is_empty() {
+            RiskPolicyDecision::Accepted
+        } else {
+            RiskPolicyDecision::Rejected
+        },
+        projected_account_gross_notional_usd: projected_account.normalize().to_string(),
+        projected_instrument_gross_notional_usd: projected_instrument.normalize().to_string(),
+        projected_margin_utilization_ratio: projected_margin
+            .map(|value| value.normalize().to_string()),
+        violations,
     })
 }
 
@@ -1149,6 +1343,96 @@ fn normalized(value: Option<Decimal>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn replay_mandate() -> TradingMandate {
+        TradingMandate {
+            schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
+            version: "test-mandate/v1".to_owned(),
+            capital_base_usd: "100".to_owned(),
+            decision_horizon_hours: 1,
+            benchmark: None,
+            allowed_instruments: vec!["BTC-USDT-SWAP".to_owned()],
+            max_drawdown_ratio: "0.2".to_owned(),
+            leverage_ceiling: "5".to_owned(),
+            minimum_liquidity_notional_usd: "0".to_owned(),
+            max_turnover_ratio: "10".to_owned(),
+        }
+    }
+
+    fn replay_policy() -> HardRiskPolicy {
+        HardRiskPolicy {
+            schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
+            version: "test-policy/v1".to_owned(),
+            max_account_gross_notional_usd: "100".to_owned(),
+            max_instrument_gross_notional_usd: "100".to_owned(),
+            max_margin_utilization_ratio: "0.5".to_owned(),
+            max_loss_per_trade_usd: "10".to_owned(),
+            max_daily_realized_loss_usd: "20".to_owned(),
+            max_drawdown_ratio: "0.2".to_owned(),
+            max_leverage: "5".to_owned(),
+            allowed_instruments: vec!["BTC-USDT-SWAP".to_owned()],
+            minimum_quality: RiskMinimumQuality::Fresh,
+            degraded_mode: RiskDegradedMode::Reject,
+            correlated_clusters: Vec::new(),
+        }
+    }
+
+    fn replay_context() -> CandidateRiskContext {
+        CandidateRiskContext {
+            total_equity_usd: "100".to_owned(),
+            account_gross_notional_usd: "0".to_owned(),
+            instrument_gross_notional_usd: "0".to_owned(),
+            account_initial_margin_usd: "0".to_owned(),
+            capital_base_drawdown_ratio: "0".to_owned(),
+            daily_realized_loss_usd: "0".to_owned(),
+            account_is_fresh: true,
+            correlated_cluster_gross_notional_usd: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn reusable_candidate_risk_gate_accepts_bounded_candidate() {
+        let candidate = PortfolioCandidate {
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            direction: PositionDirection::Long,
+            notional_usd: "20".to_owned(),
+            worst_case_loss_usd: "2".to_owned(),
+            leverage: "2".to_owned(),
+        };
+        let result = evaluate_candidate_risk(
+            &replay_mandate(),
+            &replay_policy(),
+            &candidate,
+            &replay_context(),
+        )
+        .expect("risk");
+        assert_eq!(result.decision, RiskPolicyDecision::Accepted);
+        assert_eq!(result.projected_margin_utilization_ratio.as_deref(), Some("0.1"));
+    }
+
+    #[test]
+    fn reusable_candidate_risk_gate_rejects_policy_and_mandate_violation() {
+        let candidate = PortfolioCandidate {
+            instrument: "ETH-USDT-SWAP".to_owned(),
+            direction: PositionDirection::Short,
+            notional_usd: "120".to_owned(),
+            worst_case_loss_usd: "12".to_owned(),
+            leverage: "6".to_owned(),
+        };
+        let result = evaluate_candidate_risk(
+            &replay_mandate(),
+            &replay_policy(),
+            &candidate,
+            &replay_context(),
+        )
+        .expect("risk");
+        assert_eq!(result.decision, RiskPolicyDecision::Rejected);
+        assert!(result.violations.iter().any(|row| row.code == "INSTRUMENT_NOT_ALLOWED"));
+        assert!(result.violations.iter().any(|row| row.code == "MAX_LOSS_PER_TRADE"));
+        assert!(result.violations.iter().any(|row| row.code == "MAX_LEVERAGE"));
+    }
+
     use okx_observation::{
         AccountAuthorityEvidence, AccountBalanceState, AccountLedgerSummary, AccountPositionState,
         AccountSnapshot, CurrencyAggregate,
