@@ -1419,6 +1419,7 @@ dependencies = [
  "okx-github",
  "okx-observation",
  "okx-protocol",
+ "okx-research",
  "okx-runtime",
  "serde",
  "serde_json",
