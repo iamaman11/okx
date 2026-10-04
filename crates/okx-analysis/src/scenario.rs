@@ -107,6 +107,20 @@ pub struct PositionScenarioMechanics {
     pub exit_fee_rate: String,
 }
 
+pub fn funding_user_cost_quote(
+    notional_quote: &str,
+    funding_rate: &str,
+    direction: PositionDirection,
+) -> Result<String, AnalysisError> {
+    let notional = positive_decimal("funding_notional_quote", notional_quote)?;
+    let rate = decimal("funding_rate", funding_rate)?;
+    let user_cost = match direction {
+        PositionDirection::Long => notional * rate,
+        PositionDirection::Short => -(notional * rate),
+    };
+    Ok(user_cost.normalize().to_string())
+}
+
 pub fn analyze_position_scenario(
     rules: &InstrumentRulesSnapshot,
     fees: &FeeScheduleSnapshot,
@@ -461,6 +475,25 @@ mod tests {
             entry_liquidity_role: LiquidityRole::Taker,
             exit_liquidity_role: LiquidityRole::Taker,
         }
+    }
+
+    #[test]
+    fn historical_funding_cost_uses_position_direction() {
+        assert_eq!(
+            funding_user_cost_quote("1000", "0.0001", PositionDirection::Long)
+                .expect("long funding"),
+            "0.1"
+        );
+        assert_eq!(
+            funding_user_cost_quote("1000", "0.0001", PositionDirection::Short)
+                .expect("short funding"),
+            "-0.1"
+        );
+        assert_eq!(
+            funding_user_cost_quote("1000", "-0.0001", PositionDirection::Long)
+                .expect("negative funding"),
+            "-0.1"
+        );
     }
 
     #[test]
