@@ -471,8 +471,52 @@ mod tests {
         format!("sha256:{}", ch.to_string().repeat(64))
     }
 
+    const HOUR: u64 = 3_600_000;
+
     fn range(begin: u64, end: u64) -> ResearchRange {
         ResearchRange::new(begin.to_string(), end.to_string()).expect("range")
+    }
+
+    fn parent_dataset(candle_count: usize) -> ReplayDatasetArtifact {
+        let candles = (0..candle_count)
+            .map(|index| {
+                let open = u64::try_from(index).expect("index") * HOUR;
+                crate::ResearchCandle {
+                    schema: crate::RESEARCH_CANDLE_SCHEMA_V1.to_owned(),
+                    open_time_ms: open.to_string(),
+                    available_time_ms: (open + HOUR).to_string(),
+                    open: (100 + index).to_string(),
+                    high: (101 + index).to_string(),
+                    low: (99 + index).to_string(),
+                    close: (100 + index).to_string(),
+                    volume: "1".to_owned(),
+                    volume_currency: "1".to_owned(),
+                    volume_quote: Some("1".to_owned()),
+                }
+            })
+            .collect::<Vec<_>>();
+        ReplayDatasetArtifact::build(
+            crate::DatasetManifest {
+                schema: crate::DATASET_MANIFEST_SCHEMA_V1.to_owned(),
+                dataset_id: id('b'),
+                tier: crate::ResearchTier::TierA,
+                instrument_id: "BTC-USDT-SWAP".to_owned(),
+                bar: Some("1H".to_owned()),
+                range: range(0, u64::try_from(candle_count).expect("count") * HOUR),
+                reference_coverage: crate::ReferenceCoverageStatus::InsufficientReferenceHistory,
+                reference_window: None,
+                chunk_ids: vec![id('c')],
+                gaps: Vec::new(),
+                parser_version: "parser/v1".to_owned(),
+                normalization_version: "normalizer/v1".to_owned(),
+                source_tree: BUILD_SOURCE_TREE.to_owned(),
+                created_at_ms: "1".to_owned(),
+            },
+            candles,
+            Vec::new(),
+            None,
+        )
+        .expect("parent dataset")
     }
 
     #[test]
@@ -560,6 +604,100 @@ mod tests {
         .expect("spec");
         assert_eq!(spec.purge_bars, 0);
         assert!(!spec.parameter_sensitivity_applicable());
+    }
+
+    #[test]
+    fn count_based_spec_and_slices_are_deterministic_and_apply_purge() {
+        let parent = parent_dataset(24);
+        let spec = build_validation_spec_from_counts(
+            id('a'),
+            &parent,
+            BaselineStrategyKind::CloseMomentum,
+            12,
+            6,
+            6,
+        )
+        .expect("spec");
+        let retry = build_validation_spec_from_counts(
+            id('a'),
+            &parent,
+            BaselineStrategyKind::CloseMomentum,
+            12,
+            6,
+            6,
+        )
+        .expect("retry");
+        assert_eq!(spec.validation_spec_id, retry.validation_spec_id);
+        assert_eq!(spec.purge_bars, 2);
+        assert_eq!(spec.partitions[0].range, range(0, 12 * HOUR));
+        assert_eq!(spec.partitions[1].range, range(12 * HOUR, 18 * HOUR));
+        assert_eq!(spec.partitions[2].range, range(18 * HOUR, 24 * HOUR));
+
+        let train = derive_validation_slice(&parent, &spec, ValidationPartitionRole::Train)
+            .expect("train");
+        let validation =
+            derive_validation_slice(&parent, &spec, ValidationPartitionRole::Validation)
+                .expect("validation");
+        let final_oos =
+            derive_validation_slice(&parent, &spec, ValidationPartitionRole::FinalOos)
+                .expect("final oos");
+
+        assert_eq!(train.replay_dataset.candles.len(), 10);
+        assert_eq!(validation.replay_dataset.candles.len(), 4);
+        assert_eq!(final_oos.replay_dataset.candles.len(), 6);
+        assert_eq!(train.effective_range, range(0, 10 * HOUR));
+        assert_eq!(
+            validation.effective_range,
+            range(12 * HOUR, 16 * HOUR)
+        );
+        assert_eq!(final_oos.effective_range, range(18 * HOUR, 24 * HOUR));
+    }
+
+    #[test]
+    fn final_oos_future_poison_cannot_change_train_slice() {
+        let parent = parent_dataset(24);
+        let spec = build_validation_spec_from_counts(
+            id('a'),
+            &parent,
+            BaselineStrategyKind::CloseMomentum,
+            12,
+            6,
+            6,
+        )
+        .expect("spec");
+        let baseline = derive_validation_slice(&parent, &spec, ValidationPartitionRole::Train)
+            .expect("baseline train");
+
+        let mut poisoned = parent.clone();
+        poisoned.candles[23].close = "999999999".to_owned();
+        let poisoned_train =
+            derive_validation_slice(&poisoned, &spec, ValidationPartitionRole::Train)
+                .expect("poisoned train");
+
+        assert_eq!(
+            baseline.replay_dataset.candles,
+            poisoned_train.replay_dataset.candles
+        );
+        assert_eq!(
+            baseline.replay_dataset.manifest.dataset_id,
+            poisoned_train.replay_dataset.manifest.dataset_id
+        );
+    }
+
+    #[test]
+    fn count_based_spec_requires_exact_parent_partitioning() {
+        let parent = parent_dataset(24);
+        assert!(matches!(
+            build_validation_spec_from_counts(
+                id('a'),
+                &parent,
+                BaselineStrategyKind::CloseMomentum,
+                12,
+                6,
+                5,
+            ),
+            Err(ResearchError::ReplayDatasetMismatch)
+        ));
     }
 
     #[test]
