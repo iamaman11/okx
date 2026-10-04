@@ -10,8 +10,8 @@ use okx_research::{
     BASELINE_VALIDATION_SPLIT_POLICY_V1, BUILD_SOURCE_TREE, DatasetManifest,
     PreparedValidationSlice, ReferenceCoverageStatus, ReplayDatasetArtifact, ReplayEvidenceClass,
     ReplayMechanicsProvenance, ReplayStatus, ResearchArtifactStore, ResearchRange,
-    ResearchSourceKind, ResearchTier, SourceRequest, build_baseline_experiment,
-    build_candle_chunk, build_funding_chunk, build_reference_chunk, build_tier_b_trade_chunk,
+    ResearchSourceKind, ResearchTier, SourceRequest, build_baseline_experiment, build_candle_chunk,
+    build_funding_chunk, build_reference_chunk, build_tier_b_trade_chunk,
     detect_fixed_interval_gaps, prepare_baseline_validation_split, replay_experiment,
 };
 use serde::Serialize;
@@ -401,12 +401,14 @@ fn prepare_validation_split(
         ResearchReplayStrategy::NoTrade => BaselineStrategyKind::NoTrade,
         ResearchReplayStrategy::CloseMomentum => BaselineStrategyKind::CloseMomentum,
     };
-    let prepared =
-        match prepare_baseline_validation_split(&store, parent_replay_dataset_artifact_id, strategy)
-        {
-            Ok(value) => value,
-            Err(error) => return Ok(research_failure(request, generated_at, error)),
-        };
+    let prepared = match prepare_baseline_validation_split(
+        &store,
+        parent_replay_dataset_artifact_id,
+        strategy,
+    ) {
+        Ok(value) => value,
+        Err(error) => return Ok(research_failure(request, generated_at, error)),
+    };
     let parent_source_tree = parent.manifest.source_tree.clone();
     let result = ResearchValidationSplitSummary {
         schema: RESEARCH_VALIDATION_SPLIT_SCHEMA_V1,
