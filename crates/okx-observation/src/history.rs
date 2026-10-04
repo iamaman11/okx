@@ -170,10 +170,7 @@ pub fn normalize_research_candles(
         ));
     }
     normalized.sort_by_key(|(timestamp, _)| *timestamp);
-    Ok(normalized
-        .into_iter()
-        .map(|(_, candle)| candle)
-        .collect())
+    Ok(normalized.into_iter().map(|(_, candle)| candle).collect())
 }
 
 pub fn normalize_research_funding(
@@ -499,8 +496,7 @@ impl FundingHistorySnapshot {
             return Err(MarketHistoryError::TooManyRows);
         }
 
-        let events =
-            normalize_research_funding(instrument_id, rows, requested_limit as usize)?;
+        let events = normalize_research_funding(instrument_id, rows, requested_limit as usize)?;
 
         let mut snapshot = Self {
             schema: FUNDING_HISTORY_SCHEMA_V1.to_owned(),
