@@ -1696,11 +1696,9 @@ mod tests {
             catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
             instrument: "BTC-USDT-SWAP".to_owned(),
             replay_dataset_artifact_id:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .to_owned(),
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             strategy: ResearchReplayStrategy::NoTrade,
-            mechanics_provenance:
-                ResearchReplayMechanicsProvenance::DeclaredCounterfactual,
+            mechanics_provenance: ResearchReplayMechanicsProvenance::DeclaredCounterfactual,
         };
         assert_eq!(replay.validate(), Ok(()));
 
