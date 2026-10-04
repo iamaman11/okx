@@ -28,7 +28,6 @@ const MIN_WALK_FORWARD_FOLDS_V1: usize = 3;
 pub enum ValidationEvidenceReadiness {
     ReadyForFinalOos,
     InsufficientEvidence,
-    Reject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
