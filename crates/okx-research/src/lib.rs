@@ -1,6 +1,8 @@
 mod replay;
+mod validation;
 
 pub use replay::*;
+pub use validation::*;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
