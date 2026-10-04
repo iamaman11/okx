@@ -14,7 +14,7 @@ pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
 pub const DIRECT_TRANSPORT_FRAME_SCHEMA_V1: &str = "okx.direct-transport.frame/v1";
 pub const DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.2";
-pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-04.3";
+pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-05.4";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -455,6 +455,15 @@ pub enum ResearchRequest {
         target_candle_count: u16,
         checkpoint_artifact_id: Option<String>,
     },
+    PrepareValidationSplit {
+        catalog_version: String,
+        instrument: String,
+        parent_replay_dataset_artifact_id: String,
+        strategy: ResearchReplayStrategy,
+        train_candle_count: u16,
+        validation_candle_count: u16,
+        final_oos_candle_count: u16,
+    },
 }
 
 impl ResearchRequest {
@@ -558,6 +567,50 @@ impl ResearchRequest {
                 }
                 if let Some(id) = checkpoint_artifact_id {
                     validate_sha256_artifact_id(id, "checkpoint_artifact_id")?;
+                }
+                Ok(())
+            }
+            Self::PrepareValidationSplit {
+                catalog_version,
+                instrument,
+                parent_replay_dataset_artifact_id,
+                train_candle_count,
+                validation_candle_count,
+                final_oos_candle_count,
+                ..
+            } => {
+                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
+                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
+                }
+                validate_instrument(instrument)?;
+                if instrument != "BTC-USDT-SWAP" {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "Stage 3C v1 validation instrument scope",
+                    ));
+                }
+                validate_sha256_artifact_id(
+                    parent_replay_dataset_artifact_id,
+                    "parent_replay_dataset_artifact_id",
+                )?;
+                if [
+                    train_candle_count,
+                    validation_candle_count,
+                    final_oos_candle_count,
+                ]
+                .iter()
+                .any(|count| **count < 4 || **count > 2400)
+                {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "validation split candle counts",
+                    ));
+                }
+                let total = u32::from(*train_candle_count)
+                    + u32::from(*validation_candle_count)
+                    + u32::from(*final_oos_candle_count);
+                if !(240..=2400).contains(&total) {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "validation split total candles",
+                    ));
                 }
                 Ok(())
             }
@@ -1796,6 +1849,35 @@ mod tests {
             validation_bad_checkpoint.validate(),
             Err(ProtocolError::InvalidResearchRequest(
                 "checkpoint_artifact_id"
+            ))
+        ));
+
+        let validation_split = ResearchRequest::PrepareValidationSplit {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            parent_replay_dataset_artifact_id:
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+            strategy: ResearchReplayStrategy::CloseMomentum,
+            train_candle_count: 144,
+            validation_candle_count: 48,
+            final_oos_candle_count: 48,
+        };
+        assert_eq!(validation_split.validate(), Ok(()));
+
+        let invalid_split_total = ResearchRequest::PrepareValidationSplit {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            parent_replay_dataset_artifact_id:
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
+            strategy: ResearchReplayStrategy::CloseMomentum,
+            train_candle_count: 120,
+            validation_candle_count: 40,
+            final_oos_candle_count: 40,
+        };
+        assert!(matches!(
+            invalid_split_total.validate(),
+            Err(ProtocolError::InvalidResearchRequest(
+                "validation split total candles"
             ))
         ));
     }
