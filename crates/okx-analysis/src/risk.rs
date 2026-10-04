@@ -589,22 +589,33 @@ pub fn evaluate_candidate_risk(
     context: &CandidateRiskContext,
 ) -> Result<CandidateRiskGate, AnalysisError> {
     let total_equity = non_negative_decimal("risk_total_equity_usd", &context.total_equity_usd)?;
-    let account_gross =
-        non_negative_decimal("risk_account_gross_notional_usd", &context.account_gross_notional_usd)?;
+    let account_gross = non_negative_decimal(
+        "risk_account_gross_notional_usd",
+        &context.account_gross_notional_usd,
+    )?;
     let instrument_gross = non_negative_decimal(
         "risk_instrument_gross_notional_usd",
         &context.instrument_gross_notional_usd,
     )?;
-    let current_imr =
-        non_negative_decimal("risk_account_initial_margin_usd", &context.account_initial_margin_usd)?;
-    let drawdown =
-        non_negative_decimal("risk_capital_base_drawdown_ratio", &context.capital_base_drawdown_ratio)?;
-    let daily_loss =
-        non_negative_decimal("risk_daily_realized_loss_usd", &context.daily_realized_loss_usd)?;
+    let current_imr = non_negative_decimal(
+        "risk_account_initial_margin_usd",
+        &context.account_initial_margin_usd,
+    )?;
+    let drawdown = non_negative_decimal(
+        "risk_capital_base_drawdown_ratio",
+        &context.capital_base_drawdown_ratio,
+    )?;
+    let daily_loss = non_negative_decimal(
+        "risk_daily_realized_loss_usd",
+        &context.daily_realized_loss_usd,
+    )?;
 
     let notional = positive_decimal("candidate_notional_usd", &candidate.notional_usd)?;
-    let candidate_loss =
-        decimal("candidate_worst_case_loss_usd", &candidate.worst_case_loss_usd)?.abs();
+    let candidate_loss = decimal(
+        "candidate_worst_case_loss_usd",
+        &candidate.worst_case_loss_usd,
+    )?
+    .abs();
     let leverage = positive_decimal("candidate_leverage", &candidate.leverage)?;
 
     let mut violations = Vec::new();
@@ -1408,7 +1419,10 @@ mod tests {
         )
         .expect("risk");
         assert_eq!(result.decision, RiskPolicyDecision::Accepted);
-        assert_eq!(result.projected_margin_utilization_ratio.as_deref(), Some("0.1"));
+        assert_eq!(
+            result.projected_margin_utilization_ratio.as_deref(),
+            Some("0.1")
+        );
     }
 
     #[test]
@@ -1428,9 +1442,24 @@ mod tests {
         )
         .expect("risk");
         assert_eq!(result.decision, RiskPolicyDecision::Rejected);
-        assert!(result.violations.iter().any(|row| row.code == "INSTRUMENT_NOT_ALLOWED"));
-        assert!(result.violations.iter().any(|row| row.code == "MAX_LOSS_PER_TRADE"));
-        assert!(result.violations.iter().any(|row| row.code == "MAX_LEVERAGE"));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|row| row.code == "INSTRUMENT_NOT_ALLOWED")
+        );
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|row| row.code == "MAX_LOSS_PER_TRADE")
+        );
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|row| row.code == "MAX_LEVERAGE")
+        );
     }
 
     use okx_observation::{
