@@ -135,14 +135,8 @@ mod tests {
         let momentum = baseline_strategy_research_metadata(BaselineStrategyKind::CloseMomentum);
         assert_eq!(momentum.signal_lookback_bars, 1);
         assert_eq!(momentum.forward_outcome_bars, 2);
-        assert_eq!(
-            momentum.parameter_surface,
-            StrategyParameterSurface::None
-        );
-        assert_eq!(
-            momentum.version,
-            STRATEGY_RESEARCH_METADATA_VERSION_V1
-        );
+        assert_eq!(momentum.parameter_surface, StrategyParameterSurface::None);
+        assert_eq!(momentum.version, STRATEGY_RESEARCH_METADATA_VERSION_V1);
     }
 
     #[test]
