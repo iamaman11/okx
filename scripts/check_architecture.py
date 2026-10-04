@@ -27,6 +27,7 @@ ALLOWED = {
         "okx-github",
         "okx-observation",
         "okx-protocol",
+        "okx-research",
         "okx-runtime",
     },
 }
