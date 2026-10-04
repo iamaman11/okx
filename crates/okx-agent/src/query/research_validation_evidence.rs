@@ -8,8 +8,7 @@ use serde::Serialize;
 use super::{ObservationQueryContext, failure_response};
 use crate::AgentResult;
 
-pub const RESEARCH_VALIDATION_EVIDENCE_SCHEMA_V1: &str =
-    "okx.research-validation-evidence/v1";
+pub const RESEARCH_VALIDATION_EVIDENCE_SCHEMA_V1: &str = "okx.research-validation-evidence/v1";
 
 #[derive(Debug, Serialize)]
 struct ValidationEvidenceResult {
