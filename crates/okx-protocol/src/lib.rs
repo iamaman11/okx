@@ -1847,6 +1847,37 @@ mod tests {
                 "checkpoint_artifact_id"
             ))
         ));
+
+        let validation_split = ResearchRequest::PrepareValidationSplit {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            parent_replay_dataset_artifact_id:
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    .to_owned(),
+            strategy: ResearchReplayStrategy::CloseMomentum,
+            train_candle_count: 144,
+            validation_candle_count: 48,
+            final_oos_candle_count: 48,
+        };
+        assert_eq!(validation_split.validate(), Ok(()));
+
+        let invalid_split_total = ResearchRequest::PrepareValidationSplit {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            parent_replay_dataset_artifact_id:
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    .to_owned(),
+            strategy: ResearchReplayStrategy::CloseMomentum,
+            train_candle_count: 120,
+            validation_candle_count: 40,
+            final_oos_candle_count: 40,
+        };
+        assert!(matches!(
+            invalid_split_total.validate(),
+            Err(ProtocolError::InvalidResearchRequest(
+                "validation split total candles"
+            ))
+        ));
     }
 
     fn execution_risk_request() -> ExecutionRiskBindingRequest {
