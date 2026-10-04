@@ -282,14 +282,14 @@ export const mcpApi = {
           },
           {
             name: "research",
-            description: "Run one bounded Stage-3 research operation in the Windows runtime. Stage 3A v1 supports compact Tier-A data inspection and one bounded BTC Tier-B trade provenance probe; bulk history is never returned.",
+            description: "Run one bounded Stage-3 research operation in the Windows runtime. Stage 3A data inspection and Stage 3B deterministic replay share this coarse tool; bulk history and replay traces are never returned.",
             inputSchema: {
               type: "object",
               properties: {
                 request: {
                   type: "object",
                   properties: {
-                    action: { type: "string", enum: ["inspect_tier_a", "inspect_tier_b"] },
+                    action: { type: "string", enum: ["inspect_tier_a", "inspect_tier_b", "run_replay"] },
                     catalog_version: { type: "string", const: "okx.research.catalog/2026-10-04.1" },
                     instrument: {
                       type: "string",
@@ -299,6 +299,15 @@ export const mcpApi = {
                     candle_limit: { type: "integer", minimum: 2, maximum: 100 },
                     funding_limit: { type: "integer", minimum: 1, maximum: 400 },
                     trade_limit: { type: "integer", minimum: 2, maximum: 100 },
+                    replay_dataset_artifact_id: {
+                      type: "string",
+                      pattern: "^sha256:[0-9a-f]{64}$",
+                    },
+                    strategy: { type: "string", enum: ["no_trade", "close_momentum"] },
+                    mechanics_provenance: {
+                      type: "string",
+                      enum: ["declared_counterfactual", "historical_observed"],
+                    },
                   },
                   required: ["action", "catalog_version", "instrument"],
                   additionalProperties: false,
@@ -601,11 +610,14 @@ export const mcpApi = {
             "candle_limit",
             "funding_limit",
             "trade_limit",
+            "replay_dataset_artifact_id",
+            "strategy",
+            "mechanics_provenance",
           ])
         ) {
           return jsonRpcError(id, -32602, "unsupported research request field");
         }
-        if (!["inspect_tier_a", "inspect_tier_b"].includes(String(research.action))) {
+        if (!["inspect_tier_a", "inspect_tier_b", "run_replay"].includes(String(research.action))) {
           return jsonRpcError(id, -32602, "invalid research action");
         }
         if (research.catalog_version !== "okx.research.catalog/2026-10-04.1") {
@@ -616,12 +628,15 @@ export const mcpApi = {
           instrument === null ||
           !["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"].includes(instrument)
         ) {
-          return jsonRpcError(id, -32602, "invalid Stage 3A instrument");
+          return jsonRpcError(id, -32602, "invalid Stage-3 instrument");
         }
 
         if (research.action === "inspect_tier_a") {
           if (
             research.trade_limit !== undefined ||
+            research.replay_dataset_artifact_id !== undefined ||
+            research.strategy !== undefined ||
+            research.mechanics_provenance !== undefined ||
             research.bar !== "1H" ||
             !Number.isInteger(research.candle_limit) ||
             Number(research.candle_limit) < 2 ||
@@ -650,16 +665,51 @@ export const mcpApi = {
           return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
         }
 
+        if (research.action === "inspect_tier_b") {
+          if (
+            instrument !== "BTC-USDT-SWAP" ||
+            research.bar !== undefined ||
+            research.candle_limit !== undefined ||
+            research.funding_limit !== undefined ||
+            research.replay_dataset_artifact_id !== undefined ||
+            research.strategy !== undefined ||
+            research.mechanics_provenance !== undefined ||
+            !Number.isInteger(research.trade_limit) ||
+            Number(research.trade_limit) < 2 ||
+            Number(research.trade_limit) > 100
+          ) {
+            return jsonRpcError(id, -32602, "invalid Tier-B research request");
+          }
+          const agentRequest = {
+            schema: "okx.agent.request/v1",
+            request_id: requestId(),
+            operation: {
+              type: "research",
+              request: {
+                action: "inspect_tier_b",
+                catalog_version: research.catalog_version,
+                instrument,
+                trade_limit: research.trade_limit,
+              },
+            },
+          };
+          return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+        }
+
         if (
           instrument !== "BTC-USDT-SWAP" ||
           research.bar !== undefined ||
           research.candle_limit !== undefined ||
           research.funding_limit !== undefined ||
-          !Number.isInteger(research.trade_limit) ||
-          Number(research.trade_limit) < 2 ||
-          Number(research.trade_limit) > 100
+          research.trade_limit !== undefined ||
+          typeof research.replay_dataset_artifact_id !== "string" ||
+          !/^sha256:[0-9a-f]{64}$/.test(research.replay_dataset_artifact_id) ||
+          !["no_trade", "close_momentum"].includes(String(research.strategy)) ||
+          !["declared_counterfactual", "historical_observed"].includes(
+            String(research.mechanics_provenance),
+          )
         ) {
-          return jsonRpcError(id, -32602, "invalid Tier-B research request");
+          return jsonRpcError(id, -32602, "invalid Stage-3B replay request");
         }
         const agentRequest = {
           schema: "okx.agent.request/v1",
@@ -667,10 +717,12 @@ export const mcpApi = {
           operation: {
             type: "research",
             request: {
-              action: "inspect_tier_b",
+              action: "run_replay",
               catalog_version: research.catalog_version,
               instrument,
-              trade_limit: research.trade_limit,
+              replay_dataset_artifact_id: research.replay_dataset_artifact_id,
+              strategy: research.strategy,
+              mechanics_provenance: research.mechanics_provenance,
             },
           },
         };
