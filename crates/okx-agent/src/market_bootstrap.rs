@@ -1,15 +1,39 @@
 use chrono::{SecondsFormat, Utc};
-use okx_api::{InstrumentType, MarketDataApi, OkxPublicClient};
+use okx_api::{InstrumentType, MarketDataApi, OkxPublicClient, PublicDataApi};
 use okx_observation::{
-    FundingHistorySnapshot, FundingRequirement, MarketBootstrap, MarketError, MarketHistoryError,
-    MarketHistorySnapshot, MarketSnapshot, MarketTradesSnapshot, MarketUniverseTicker,
-    OpenInterestHistorySnapshot, ReferenceRegistry,
+    FundingHistoryEvent, FundingHistorySnapshot, FundingRequirement, HistoryCandle,
+    InstrumentSpec, MarketBootstrap, MarketError, MarketHistoryError, MarketHistorySnapshot,
+    MarketSnapshot, MarketTradesSnapshot, MarketUniverseTicker, OpenInterestHistorySnapshot,
+    ReferenceRegistry, normalize_research_candles, normalize_research_funding,
 };
 use thiserror::Error;
 
 #[derive(Clone)]
 pub struct MarketBootstrapper {
     api: MarketDataApi,
+    public_data: PublicDataApi,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResearchCandleCapture {
+    pub raw_body: Vec<u8>,
+    pub rows: Vec<HistoryCandle>,
+    pub acquired_at_ms: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResearchFundingCapture {
+    pub raw_body: Vec<u8>,
+    pub rows: Vec<FundingHistoryEvent>,
+    pub acquired_at_ms: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResearchReferenceCapture {
+    pub raw_body: Vec<u8>,
+    pub instrument: InstrumentSpec,
+    pub reference_generation: String,
+    pub acquired_at_ms: String,
 }
 
 #[derive(Debug, Error)]
@@ -41,8 +65,74 @@ pub enum MarketBootstrapError {
 impl MarketBootstrapper {
     pub fn new(client: OkxPublicClient) -> Self {
         Self {
-            api: MarketDataApi::new(client),
+            api: MarketDataApi::new(client.clone()),
+            public_data: PublicDataApi::new(client),
         }
+    }
+
+    pub async fn research_candles_page(
+        &self,
+        instrument_id: &str,
+        bar: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<ResearchCandleCapture, MarketBootstrapError> {
+        let captured = self
+            .api
+            .history_candles_page_captured(instrument_id, bar, after, before, limit)
+            .await?;
+        let acquired_at_ms = Utc::now().timestamp_millis().max(1).to_string();
+        let rows = normalize_research_candles(captured.rows, limit as usize)?;
+        Ok(ResearchCandleCapture {
+            raw_body: captured.raw_body,
+            rows,
+            acquired_at_ms,
+        })
+    }
+
+    pub async fn research_funding_page(
+        &self,
+        instrument_id: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<ResearchFundingCapture, MarketBootstrapError> {
+        let captured = self
+            .api
+            .funding_rate_history_page_captured(instrument_id, after, before, limit)
+            .await?;
+        let acquired_at_ms = Utc::now().timestamp_millis().max(1).to_string();
+        let rows = normalize_research_funding(instrument_id, captured.rows, limit as usize)?;
+        Ok(ResearchFundingCapture {
+            raw_body: captured.raw_body,
+            rows,
+            acquired_at_ms,
+        })
+    }
+
+    pub async fn research_current_reference(
+        &self,
+        instrument_id: &str,
+    ) -> Result<ResearchReferenceCapture, MarketBootstrapError> {
+        let instrument_type = InstrumentType::Swap;
+        let captured = self
+            .public_data
+            .instrument_captured(instrument_type, instrument_id)
+            .await?;
+        let acquired = Utc::now();
+        let acquired_at_ms = acquired.timestamp_millis().max(1).to_string();
+        let received_at = acquired.to_rfc3339_opts(SecondsFormat::Millis, true);
+        let registry = ReferenceRegistry::from_public(received_at, captured.rows)?;
+        let instrument = registry.get(instrument_id).cloned().ok_or_else(|| {
+            MarketBootstrapError::ReferenceInstrumentNotFound(instrument_id.to_owned())
+        })?;
+        Ok(ResearchReferenceCapture {
+            raw_body: captured.raw_body,
+            instrument,
+            reference_generation: registry.generation().as_str().to_owned(),
+            acquired_at_ms,
+        })
     }
 
     pub async fn snapshot(
