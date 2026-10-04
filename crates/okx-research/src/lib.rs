@@ -12,6 +12,7 @@ use thiserror::Error;
 
 pub const DATASET_MANIFEST_SCHEMA_V1: &str = "okx.research.dataset-manifest/v1";
 pub const CHUNK_MANIFEST_SCHEMA_V1: &str = "okx.research.chunk-manifest/v1";
+pub const SOURCE_CAPTURE_SCHEMA_V1: &str = "okx.research.source-capture/v1";
 pub const REFERENCE_WINDOW_SCHEMA_V1: &str = "okx.research.reference-window/v1";
 pub const CHECKPOINT_SCHEMA_V1: &str = "okx.research.checkpoint/v1";
 pub const RESEARCH_CANDLE_SCHEMA_V1: &str = "okx.research.candle/v1";
@@ -116,6 +117,7 @@ impl SourceRequest {
 pub struct ChunkManifest {
     pub schema: String,
     pub chunk_id: String,
+    pub capture_id: String,
     pub kind: ResearchSourceKind,
     pub source: SourceRequest,
     pub acquired_at_ms: String,
@@ -289,7 +291,7 @@ struct DatasetIdentity<'a> {
     bar: &'a Option<String>,
     range: &'a ResearchRange,
     reference_coverage: ReferenceCoverageStatus,
-    reference_hash: Option<&'a str>,
+    reference_window: &'a Option<ReferenceCoverageWindow>,
     chunk_ids: &'a [String],
     gaps: &'a [DataGap],
     parser_version: &'a str,
@@ -356,10 +358,6 @@ impl DatasetManifest {
             }
             _ => ReferenceCoverageStatus::InsufficientReferenceHistory,
         };
-        let reference_hash = reference_window
-            .as_ref()
-            .map(|window| window.reference_hash.as_str());
-
         let dataset_id = canonical_sha256(&DatasetIdentity {
             schema: DATASET_MANIFEST_SCHEMA_V1,
             tier,
@@ -367,7 +365,7 @@ impl DatasetManifest {
             bar: &bar,
             range: &range,
             reference_coverage,
-            reference_hash,
+            reference_window: &reference_window,
             chunk_ids: &chunk_ids,
             gaps: &gaps,
             parser_version: &parser_version,
@@ -977,12 +975,19 @@ where
     times.sort_unstable();
 
     #[derive(Serialize)]
-    struct ChunkIdentity<'a> {
+    struct SourceCaptureIdentity<'a> {
         schema: &'static str,
         kind: ResearchSourceKind,
         source: &'a SourceRequest,
         raw_sha256: &'a str,
         raw_size_bytes: u64,
+    }
+
+    #[derive(Serialize)]
+    struct ChunkIdentity<'a> {
+        schema: &'static str,
+        kind: ResearchSourceKind,
+        source: &'a SourceRequest,
         normalized_sha256: &'a str,
         normalized_row_count: u64,
         parser_version: &'a str,
@@ -990,12 +995,17 @@ where
         source_tree: &'a str,
     }
 
-    let chunk_id = canonical_sha256(&ChunkIdentity {
-        schema: CHUNK_MANIFEST_SCHEMA_V1,
+    let capture_id = canonical_sha256(&SourceCaptureIdentity {
+        schema: SOURCE_CAPTURE_SCHEMA_V1,
         kind,
         source: &source,
         raw_sha256: &raw_sha256,
         raw_size_bytes,
+    })?;
+    let chunk_id = canonical_sha256(&ChunkIdentity {
+        schema: CHUNK_MANIFEST_SCHEMA_V1,
+        kind,
+        source: &source,
         normalized_sha256: &normalized_sha256,
         normalized_row_count,
         parser_version: &parser_version,
@@ -1007,6 +1017,7 @@ where
         manifest: ChunkManifest {
             schema: CHUNK_MANIFEST_SCHEMA_V1.to_owned(),
             chunk_id,
+            capture_id,
             kind,
             source,
             acquired_at_ms,
@@ -1227,7 +1238,8 @@ mod tests {
         .expect("b");
 
         assert_ne!(a.manifest.raw_sha256, b.manifest.raw_sha256);
-        assert_ne!(a.manifest.chunk_id, b.manifest.chunk_id);
+        assert_ne!(a.manifest.capture_id, b.manifest.capture_id);
+        assert_eq!(a.manifest.chunk_id, b.manifest.chunk_id);
         assert_eq!(a.manifest.normalized_sha256, b.manifest.normalized_sha256);
     }
 
