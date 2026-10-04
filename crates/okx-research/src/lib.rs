@@ -12,7 +12,7 @@ use std::{
 use okx_observation::{
     FundingHistoryEvent, HistoryCandle, InstrumentSpec, MarketTrade, MarketTradeSide,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -725,6 +725,14 @@ impl ResearchArtifactStore {
             return Err(ResearchError::ArtifactIdentityMismatch);
         }
         Ok(bytes)
+    }
+
+    pub fn read_evidence_json<T: DeserializeOwned>(
+        &self,
+        artifact_id: &str,
+    ) -> Result<T, ResearchError> {
+        let bytes = self.read_evidence(artifact_id)?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     pub fn read_source_bytes(&self, raw_sha256: &str) -> Result<Vec<u8>, ResearchError> {
