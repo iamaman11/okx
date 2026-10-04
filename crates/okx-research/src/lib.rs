@@ -86,6 +86,18 @@ impl ResearchRange {
     pub fn end(&self) -> Result<u64, ResearchError> {
         parse_ms("end_ms", &self.end_ms)
     }
+
+    pub fn validate(&self) -> Result<(), ResearchError> {
+        let begin = self.begin()?;
+        let end = self.end()?;
+        if begin >= end {
+            return Err(ResearchError::InvalidRange {
+                begin_ms: self.begin_ms.clone(),
+                end_ms: self.end_ms.clone(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,8 +118,7 @@ impl SourceRequest {
         required("provider", &self.provider)?;
         required("resource", &self.resource)?;
         required("instrument_id", &self.instrument_id)?;
-        self.range.begin()?;
-        self.range.end()?;
+        self.range.validate()?;
         Ok(())
     }
 }
@@ -248,6 +259,13 @@ impl ReferenceCoverageWindow {
         let observed_from = parse_ms("observed_from_ms", &self.observed_from_ms)?;
         let observed_through = parse_ms("observed_through_ms", &self.observed_through_ms)?;
         let available_from = parse_ms("available_from_ms", &self.available_from_ms)?;
+        if observed_from > observed_through || available_from > observed_through {
+            return Err(ResearchError::InvalidRange {
+                begin_ms: self.observed_from_ms.clone(),
+                end_ms: self.observed_through_ms.clone(),
+            });
+        }
+        range.validate()?;
         let begin = range.begin()?;
         let end = range.end()?;
         Ok(observed_from <= begin && available_from <= begin && observed_through >= end)
@@ -1700,4 +1718,31 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn deserialized_invalid_ranges_fail_validation() {
+        let invalid: ResearchRange = serde_json::from_value(serde_json::json!({
+            "begin_ms": "200",
+            "end_ms": "100"
+        }))
+        .expect("deserialize");
+        assert!(matches!(
+            invalid.validate(),
+            Err(ResearchError::InvalidRange { .. })
+        ));
+
+        let source = SourceRequest {
+            provider: "okx".to_owned(),
+            resource: "history".to_owned(),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            bar: Some("1H".to_owned()),
+            range: invalid,
+            parameters: BTreeMap::new(),
+        };
+        assert!(matches!(
+            source.validate(),
+            Err(ResearchError::InvalidRange { .. })
+        ));
+    }
+
 }
