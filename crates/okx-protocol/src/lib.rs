@@ -14,7 +14,7 @@ pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
 pub const DIRECT_TRANSPORT_FRAME_SCHEMA_V1: &str = "okx.direct-transport.frame/v1";
 pub const DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.2";
-pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-04.1";
+pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-04.2";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -412,6 +412,20 @@ pub struct VirtualPortfolioRequest {
     pub positions: Vec<VirtualPortfolioPositionRequest>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchReplayStrategy {
+    NoTrade,
+    CloseMomentum,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchReplayMechanicsProvenance {
+    DeclaredCounterfactual,
+    HistoricalObserved,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchRequest {
@@ -426,6 +440,13 @@ pub enum ResearchRequest {
         catalog_version: String,
         instrument: String,
         trade_limit: u16,
+    },
+    RunReplay {
+        catalog_version: String,
+        instrument: String,
+        replay_dataset_artifact_id: String,
+        strategy: ResearchReplayStrategy,
+        mechanics_provenance: ResearchReplayMechanicsProvenance,
     },
 }
 
@@ -481,6 +502,24 @@ impl ResearchRequest {
                 if !(2..=100).contains(trade_limit) {
                     return Err(ProtocolError::InvalidResearchRequest("trade_limit"));
                 }
+                Ok(())
+            }
+            Self::RunReplay {
+                catalog_version,
+                instrument,
+                replay_dataset_artifact_id,
+                ..
+            } => {
+                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
+                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
+                }
+                validate_instrument(instrument)?;
+                if instrument != "BTC-USDT-SWAP" {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "Stage 3B v1 replay instrument scope",
+                    ));
+                }
+                validate_sha256_artifact_id(replay_dataset_artifact_id)?;
                 Ok(())
             }
         }
@@ -1479,6 +1518,24 @@ fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
+fn validate_sha256_artifact_id(value: &str) -> Result<(), ProtocolError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(ProtocolError::InvalidResearchRequest(
+            "replay_dataset_artifact_id",
+        ));
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(ProtocolError::InvalidResearchRequest(
+            "replay_dataset_artifact_id",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_non_negative_decimal_text(
     value: &str,
     field: &'static str,
@@ -1633,6 +1690,33 @@ mod tests {
         assert!(matches!(
             tier_b_unbounded.validate(),
             Err(ProtocolError::InvalidResearchRequest("trade_limit"))
+        ));
+
+        let replay = ResearchRequest::RunReplay {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            replay_dataset_artifact_id:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+            strategy: ResearchReplayStrategy::NoTrade,
+            mechanics_provenance:
+                ResearchReplayMechanicsProvenance::DeclaredCounterfactual,
+        };
+        assert_eq!(replay.validate(), Ok(()));
+
+        let mut bad_replay = replay;
+        if let ResearchRequest::RunReplay {
+            replay_dataset_artifact_id,
+            ..
+        } = &mut bad_replay
+        {
+            *replay_dataset_artifact_id = "bad".to_owned();
+        }
+        assert!(matches!(
+            bad_replay.validate(),
+            Err(ProtocolError::InvalidResearchRequest(
+                "replay_dataset_artifact_id"
+            ))
         ));
     }
 
