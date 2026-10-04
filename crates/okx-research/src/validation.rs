@@ -542,8 +542,17 @@ fn require_sha256(field: &'static str, value: &str) -> Result<(), ResearchError>
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
+    use crate::{
+        DATASET_MANIFEST_SCHEMA_V1, RESEARCH_CANDLE_SCHEMA_V1, ReferenceCoverageStatus,
+        ResearchCandle, ResearchTier,
+    };
     use okx_analysis::BASELINE_STRATEGY_VERSION_V1;
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    const HOUR_MS: u64 = 3_600_000;
 
     fn id(ch: char) -> String {
         format!("sha256:{}", ch.to_string().repeat(64))
