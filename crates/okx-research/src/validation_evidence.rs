@@ -11,14 +11,12 @@ use serde_json::Value;
 use crate::{
     BUILD_SOURCE_TREE, EXPERIMENT_RESULT_SCHEMA_V1, ReplayDatasetArtifact, ResearchArtifactStore,
     ResearchError, ResearchFamily, ResearchTrialOutcome, ResearchTrialRef, ValidationPartitionRole,
-    ValidationSpec, canonical_sha256,
+    ValidationSpec, VALIDATION_EVIDENCE_POLICY_V1, canonical_sha256,
 };
 
 pub const PRE_HOLDOUT_EVIDENCE_SCHEMA_V1: &str = "okx.research.pre-holdout-evidence/v1";
 pub const PRE_HOLDOUT_EVIDENCE_ALGORITHM_V1: &str =
     "okx.research.pre-holdout-evidence/2026-10-05.1";
-pub const VALIDATION_EVIDENCE_POLICY_V1: &str = "okx.research.validation-evidence/2026-10-05.1";
-
 const ONE_HOUR_MS: u64 = 3_600_000;
 const MIN_TRAIN_TRADES_V1: usize = 30;
 const MIN_VALIDATION_TRADES_V1: usize = 30;
@@ -153,6 +151,7 @@ struct ReplayResultView {
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_pre_holdout_evidence(
     store: &ResearchArtifactStore,
+    expected_instrument: &str,
     validation_spec_artifact_id: &str,
     train_replay_dataset_artifact_id: &str,
     train_experiment_result_artifact_id: &str,
@@ -174,9 +173,15 @@ pub fn prepare_pre_holdout_evidence(
         store.read_evidence_json(validation_replay_dataset_artifact_id)?;
     train_dataset.validate()?;
     validation_dataset.validate()?;
-    if train_dataset.manifest.instrument_id != validation_dataset.manifest.instrument_id {
+    if train_dataset.manifest.instrument_id != expected_instrument {
         return Err(ResearchError::InstrumentMismatch {
-            expected: train_dataset.manifest.instrument_id.clone(),
+            expected: expected_instrument.to_owned(),
+            actual: train_dataset.manifest.instrument_id.clone(),
+        });
+    }
+    if validation_dataset.manifest.instrument_id != expected_instrument {
+        return Err(ResearchError::InstrumentMismatch {
+            expected: expected_instrument.to_owned(),
             actual: validation_dataset.manifest.instrument_id.clone(),
         });
     }
