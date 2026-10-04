@@ -422,6 +422,11 @@ pub enum ResearchRequest {
         candle_limit: u16,
         funding_limit: u16,
     },
+    InspectTierB {
+        catalog_version: String,
+        instrument: String,
+        trade_limit: u16,
+    },
 }
 
 impl ResearchRequest {
@@ -456,6 +461,25 @@ impl ResearchRequest {
                 }
                 if !(1..=400).contains(funding_limit) {
                     return Err(ProtocolError::InvalidResearchRequest("funding_limit"));
+                }
+                Ok(())
+            }
+            Self::InspectTierB {
+                catalog_version,
+                instrument,
+                trade_limit,
+            } => {
+                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
+                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
+                }
+                validate_instrument(instrument)?;
+                if instrument != "BTC-USDT-SWAP" {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "Stage 3A v1 Tier B instrument scope",
+                    ));
+                }
+                if !(2..=100).contains(trade_limit) {
+                    return Err(ProtocolError::InvalidResearchRequest("trade_limit"));
                 }
                 Ok(())
             }
@@ -1580,6 +1604,35 @@ mod tests {
         assert!(matches!(
             wrong_catalog.validate(),
             Err(ProtocolError::InvalidResearchRequest("catalog_version"))
+        ));
+
+        let tier_b = ResearchRequest::InspectTierB {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            trade_limit: 20,
+        };
+        assert_eq!(tier_b.validate(), Ok(()));
+
+        let tier_b_wrong_instrument = ResearchRequest::InspectTierB {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "ETH-USDT-SWAP".to_owned(),
+            trade_limit: 20,
+        };
+        assert!(matches!(
+            tier_b_wrong_instrument.validate(),
+            Err(ProtocolError::InvalidResearchRequest(
+                "Stage 3A v1 Tier B instrument scope"
+            ))
+        ));
+
+        let tier_b_unbounded = ResearchRequest::InspectTierB {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            trade_limit: 101,
+        };
+        assert!(matches!(
+            tier_b_unbounded.validate(),
+            Err(ProtocolError::InvalidResearchRequest("trade_limit"))
         ));
     }
 
