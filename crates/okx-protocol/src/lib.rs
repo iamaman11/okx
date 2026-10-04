@@ -14,7 +14,7 @@ pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
 pub const DIRECT_TRANSPORT_FRAME_SCHEMA_V1: &str = "okx.direct-transport.frame/v1";
 pub const DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.2";
-pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-04.2";
+pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-04.3";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -448,6 +448,13 @@ pub enum ResearchRequest {
         strategy: ResearchReplayStrategy,
         mechanics_provenance: ResearchReplayMechanicsProvenance,
     },
+    PrepareValidationDataset {
+        catalog_version: String,
+        instrument: String,
+        bar: String,
+        target_candle_count: u16,
+        checkpoint_artifact_id: Option<String>,
+    },
 }
 
 impl ResearchRequest {
@@ -520,6 +527,37 @@ impl ResearchRequest {
                     ));
                 }
                 validate_sha256_artifact_id(replay_dataset_artifact_id)?;
+                Ok(())
+            }
+            Self::PrepareValidationDataset {
+                catalog_version,
+                instrument,
+                bar,
+                target_candle_count,
+                checkpoint_artifact_id,
+            } => {
+                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
+                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
+                }
+                validate_instrument(instrument)?;
+                if instrument != "BTC-USDT-SWAP" {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "Stage 3C v1 validation instrument scope",
+                    ));
+                }
+                if bar != "1H" {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "Stage 3C v1 validation bar must be 1H",
+                    ));
+                }
+                if !(240..=2400).contains(target_candle_count) {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "target_candle_count",
+                    ));
+                }
+                if let Some(id) = checkpoint_artifact_id {
+                    validate_sha256_artifact_id(id)?;
+                }
                 Ok(())
             }
         }
