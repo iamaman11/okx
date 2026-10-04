@@ -165,20 +165,20 @@ pub(super) fn prepare_validation_split(
                 ));
             }
         };
-        let (replay_dataset_artifact_id, _) =
-            match store.publish_evidence(&derived.replay_dataset) {
-                Ok(value) => value,
-                Err(error) => {
-                    return Ok(failure_response(
-                        request,
-                        generated_at,
-                        AgentResponseStatus::Failed,
-                        super::research::RESEARCH_ARTIFACT_FAILURE_CODE,
-                        error.to_string(),
-                        false,
-                    ));
-                }
-            };
+        let (replay_dataset_artifact_id, _) = match store.publish_evidence(&derived.replay_dataset)
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    super::research::RESEARCH_ARTIFACT_FAILURE_CODE,
+                    error.to_string(),
+                    false,
+                ));
+            }
+        };
         slices.push(slice_summary(derived, replay_dataset_artifact_id));
     }
 
