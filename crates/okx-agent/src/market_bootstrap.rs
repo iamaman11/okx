@@ -1,10 +1,10 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{InstrumentType, MarketDataApi, OkxPublicClient, PublicDataApi};
 use okx_observation::{
-    FundingHistoryEvent, FundingHistorySnapshot, FundingRequirement, HistoryCandle,
-    InstrumentSpec, MarketBootstrap, MarketError, MarketHistoryError, MarketHistorySnapshot,
-    MarketSnapshot, MarketTradesSnapshot, MarketUniverseTicker, OpenInterestHistorySnapshot,
-    ReferenceRegistry, normalize_research_candles, normalize_research_funding,
+    FundingHistoryEvent, FundingHistorySnapshot, FundingRequirement, HistoryCandle, InstrumentSpec,
+    MarketBootstrap, MarketError, MarketHistoryError, MarketHistorySnapshot, MarketSnapshot,
+    MarketTradesSnapshot, MarketUniverseTicker, OpenInterestHistorySnapshot, ReferenceRegistry,
+    normalize_research_candles, normalize_research_funding,
 };
 use thiserror::Error;
 
