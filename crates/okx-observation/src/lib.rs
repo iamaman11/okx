@@ -33,7 +33,8 @@ pub use history::{
     MARKET_RESEARCH_SOURCE_GENERATION_SCHEMA_V1, MARKET_TRADES_SCHEMA_V1, MARKET_TRADES_SOURCE_V1,
     MarketHistoryError, MarketHistorySnapshot, MarketTrade, MarketTradeSide, MarketTradesSnapshot,
     OPEN_INTEREST_HISTORY_SCHEMA_V1, OPEN_INTEREST_HISTORY_SOURCE_V1, OpenInterestHistoryPoint,
-    OpenInterestHistorySnapshot, market_research_source_generation,
+    OpenInterestHistorySnapshot, market_research_source_generation, normalize_research_candles,
+    normalize_research_funding, normalize_research_trades,
 };
 pub use market::{
     FundingState, IndexPriceState, M2_REST_BOOTSTRAP_REASON, MARKET_SNAPSHOT_SCHEMA_V1,

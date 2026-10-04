@@ -1419,6 +1419,7 @@ dependencies = [
  "okx-github",
  "okx-observation",
  "okx-protocol",
+ "okx-research",
  "okx-runtime",
  "serde",
  "serde_json",
@@ -1569,6 +1570,17 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror",
  "x25519-dalek",
+]
+
+[[package]]
+name = "okx-research"
+version = "0.1.0"
+dependencies = [
+ "okx-observation",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
 ]
 
 [[package]]

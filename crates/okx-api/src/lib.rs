@@ -20,7 +20,7 @@ pub use account::{
     PositionBuilderSimPosition, PositionBuilderSnapshot, account_uid_fingerprint,
 };
 pub use asset::{AssetApi, FundingBalance};
-pub use client::{OkxPublicClient, OkxRestClient};
+pub use client::{CapturedPublicRows, OkxPublicClient, OkxRestClient};
 pub use clock::{
     ClockEvidence, ClockEvidenceSnapshot, MAX_CLOCK_ABS_OFFSET_MS, MAX_CLOCK_EVIDENCE_AGE_MS,
     MAX_CLOCK_RTT_MS, MAX_MUTATION_REQUEST_TTL_MS, MUTATION_REQUEST_TTL_MS, MutationTiming,
@@ -37,7 +37,8 @@ pub use market_data::{
     is_open_interest_history_period,
 };
 pub use public_data::{
-    PublicDataApi, PublicInstrument, PublicPriceLimit, SystemStatus, UpcomingParameterChange,
+    PublicDataApi, PublicInstrument, PublicMarketDataHistory, PublicMarketDataHistoryDetail,
+    PublicMarketDataHistoryFile, PublicPriceLimit, SystemStatus, UpcomingParameterChange,
 };
 pub use rate::{
     DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S, GENERAL_RATE_LIMIT_CODE, RATE_BUDGET_SNAPSHOT_SCHEMA_V1,

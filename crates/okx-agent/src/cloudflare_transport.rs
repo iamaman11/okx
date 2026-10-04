@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
@@ -72,6 +72,7 @@ pub struct CloudflareQueryRuntimeContext<'a> {
     pub account: Option<&'a AccountBootstrapper>,
     pub private_ws: Option<&'a PrivateWsHandle>,
     pub execution: Option<&'a ExecutionRuntime>,
+    pub research_root: &'a Path,
 }
 
 pub async fn run_cloudflare_transport(
@@ -375,14 +376,16 @@ async fn run_session(
                             continue;
                         }
 
-                        let query_context = ObservationQueryContext::live_with_execution(
-                            context.public_ws,
-                            context.market,
-                            None,
-                            context.account,
-                            context.private_ws,
-                            context.execution,
-                        );
+                        let query_context =
+                            ObservationQueryContext::live_with_execution_and_research(
+                                context.public_ws,
+                                context.market,
+                                None,
+                                context.account,
+                                context.private_ws,
+                                context.execution,
+                                Some(context.research_root),
+                            );
                         let generated_at =
                             Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
                         let response_request_id = request.request_id.clone();

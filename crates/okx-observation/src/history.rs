@@ -129,6 +129,142 @@ pub struct OpenInterestHistorySnapshot {
     pub points: Vec<OpenInterestHistoryPoint>,
 }
 
+pub fn normalize_research_candles(
+    rows: Vec<PublicCandle>,
+    max_rows: usize,
+) -> Result<Vec<HistoryCandle>, MarketHistoryError> {
+    if rows.len() > max_rows {
+        return Err(MarketHistoryError::TooManyRows);
+    }
+
+    let mut normalized = Vec::with_capacity(rows.len());
+    let mut timestamps = BTreeSet::new();
+    for row in rows {
+        let timestamp = row
+            .timestamp_ms
+            .parse::<u64>()
+            .map_err(|_| MarketHistoryError::InvalidTimestamp(row.timestamp_ms.clone()))?;
+        if !timestamps.insert(timestamp) {
+            return Err(MarketHistoryError::DuplicateTimestamp(row.timestamp_ms));
+        }
+
+        let confirmed = match row.confirm.as_str() {
+            "0" => false,
+            "1" => true,
+            _ => return Err(MarketHistoryError::InvalidConfirm(row.confirm)),
+        };
+
+        normalized.push((
+            timestamp,
+            HistoryCandle {
+                open_time_ms: required("ts", row.timestamp_ms)?,
+                open: required("o", row.open)?,
+                high: required("h", row.high)?,
+                low: required("l", row.low)?,
+                close: required("c", row.close)?,
+                volume: required("vol", row.volume)?,
+                volume_currency: required("volCcy", row.volume_currency)?,
+                volume_quote: optional(row.volume_quote),
+                confirmed,
+            },
+        ));
+    }
+    normalized.sort_by_key(|(timestamp, _)| *timestamp);
+    Ok(normalized.into_iter().map(|(_, candle)| candle).collect())
+}
+
+pub fn normalize_research_trades(
+    instrument_id: &str,
+    rows: Vec<PublicTrade>,
+    max_rows: usize,
+) -> Result<Vec<MarketTrade>, MarketHistoryError> {
+    if rows.len() > max_rows {
+        return Err(MarketHistoryError::TooManyRows);
+    }
+
+    let mut trade_ids = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.instrument_id != instrument_id {
+            return Err(MarketHistoryError::InstrumentMismatch {
+                expected: instrument_id.to_owned(),
+                actual: row.instrument_id,
+            });
+        }
+        if !trade_ids.insert(row.trade_id.clone()) {
+            return Err(MarketHistoryError::DuplicateTradeId(row.trade_id));
+        }
+        let timestamp = row
+            .timestamp_ms
+            .parse::<u64>()
+            .map_err(|_| MarketHistoryError::InvalidTimestamp(row.timestamp_ms.clone()))?;
+        let side = match row.side.as_str() {
+            "buy" => MarketTradeSide::Buy,
+            "sell" => MarketTradeSide::Sell,
+            _ => return Err(MarketHistoryError::InvalidTradeSide(row.side)),
+        };
+        normalized.push((
+            timestamp,
+            MarketTrade {
+                trade_id: required("tradeId", row.trade_id)?,
+                price: required("px", row.price)?,
+                size_contracts: required("sz", row.size)?,
+                side,
+                source: optional_text(row.source),
+                exchange_timestamp_ms: required("ts", row.timestamp_ms)?,
+            },
+        ));
+    }
+    normalized.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.trade_id.cmp(&right.1.trade_id))
+    });
+    Ok(normalized.into_iter().map(|(_, trade)| trade).collect())
+}
+
+pub fn normalize_research_funding(
+    instrument_id: &str,
+    rows: Vec<PublicFundingHistory>,
+    max_rows: usize,
+) -> Result<Vec<FundingHistoryEvent>, MarketHistoryError> {
+    if rows.len() > max_rows {
+        return Err(MarketHistoryError::TooManyRows);
+    }
+
+    let mut timestamps = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.instrument_id != instrument_id {
+            return Err(MarketHistoryError::InstrumentMismatch {
+                expected: instrument_id.to_owned(),
+                actual: row.instrument_id,
+            });
+        }
+        let timestamp = row
+            .funding_time_ms
+            .parse::<u64>()
+            .map_err(|_| MarketHistoryError::InvalidTimestamp(row.funding_time_ms.clone()))?;
+        if !timestamps.insert(timestamp) {
+            return Err(MarketHistoryError::DuplicateFundingTimestamp(
+                row.funding_time_ms,
+            ));
+        }
+        normalized.push((
+            timestamp,
+            FundingHistoryEvent {
+                funding_time_ms: required("fundingTime", row.funding_time_ms)?,
+                funding_rate: required("fundingRate", row.funding_rate)?,
+                realized_rate: optional_text(row.realized_rate),
+                formula_type: optional_text(row.formula_type),
+                method: optional_text(row.method),
+            },
+        ));
+    }
+    normalized.sort_by_key(|(timestamp, _)| *timestamp);
+    Ok(normalized.into_iter().map(|(_, event)| event).collect())
+}
+
 #[derive(Debug, Error)]
 pub enum MarketHistoryError {
     #[error("history source receive timestamp is empty")]
@@ -217,45 +353,10 @@ impl MarketHistorySnapshot {
             return Err(MarketHistoryError::TooManyRows);
         }
 
-        let mut normalized = Vec::with_capacity(rows.len());
-        let mut timestamps = BTreeSet::new();
-
-        for row in rows {
-            let timestamp = row
-                .timestamp_ms
-                .parse::<u64>()
-                .map_err(|_| MarketHistoryError::InvalidTimestamp(row.timestamp_ms.clone()))?;
-            if !timestamps.insert(timestamp) {
-                return Err(MarketHistoryError::DuplicateTimestamp(row.timestamp_ms));
-            }
-
-            let confirmed = match row.confirm.as_str() {
-                "0" => false,
-                "1" => true,
-                _ => return Err(MarketHistoryError::InvalidConfirm(row.confirm)),
-            };
-
-            normalized.push((
-                timestamp,
-                HistoryCandle {
-                    open_time_ms: required("ts", row.timestamp_ms)?,
-                    open: required("o", row.open)?,
-                    high: required("h", row.high)?,
-                    low: required("l", row.low)?,
-                    close: required("c", row.close)?,
-                    volume: required("vol", row.volume)?,
-                    volume_currency: required("volCcy", row.volume_currency)?,
-                    volume_quote: optional(row.volume_quote),
-                    confirmed,
-                },
-            ));
+        let candles = normalize_research_candles(rows, requested_limit as usize)?;
+        if candles.is_empty() {
+            return Err(MarketHistoryError::EmptyHistory);
         }
-
-        normalized.sort_by_key(|(timestamp, _)| *timestamp);
-        let candles = normalized
-            .into_iter()
-            .map(|(_, candle)| candle)
-            .collect::<Vec<_>>();
         let oldest_open_time_ms = candles
             .first()
             .expect("history is non-empty")
@@ -359,48 +460,7 @@ impl MarketTradesSnapshot {
             return Err(MarketHistoryError::TooManyRows);
         }
 
-        let mut trade_ids = BTreeSet::new();
-        let mut normalized = Vec::with_capacity(rows.len());
-        for row in rows {
-            if row.instrument_id != instrument_id {
-                return Err(MarketHistoryError::InstrumentMismatch {
-                    expected: instrument_id.to_owned(),
-                    actual: row.instrument_id,
-                });
-            }
-            if !trade_ids.insert(row.trade_id.clone()) {
-                return Err(MarketHistoryError::DuplicateTradeId(row.trade_id));
-            }
-            let timestamp = row
-                .timestamp_ms
-                .parse::<u64>()
-                .map_err(|_| MarketHistoryError::InvalidTimestamp(row.timestamp_ms.clone()))?;
-            let side = match row.side.as_str() {
-                "buy" => MarketTradeSide::Buy,
-                "sell" => MarketTradeSide::Sell,
-                _ => return Err(MarketHistoryError::InvalidTradeSide(row.side)),
-            };
-            normalized.push((
-                timestamp,
-                MarketTrade {
-                    trade_id: required("tradeId", row.trade_id)?,
-                    price: required("px", row.price)?,
-                    size_contracts: required("sz", row.size)?,
-                    side,
-                    source: optional_text(row.source),
-                    exchange_timestamp_ms: required("ts", row.timestamp_ms)?,
-                },
-            ));
-        }
-        normalized.sort_by(|left, right| {
-            left.0
-                .cmp(&right.0)
-                .then_with(|| left.1.trade_id.cmp(&right.1.trade_id))
-        });
-        let trades = normalized
-            .into_iter()
-            .map(|(_, trade)| trade)
-            .collect::<Vec<_>>();
+        let trades = normalize_research_trades(instrument_id, rows, requested_limit as usize)?;
 
         let mut snapshot = Self {
             schema: MARKET_TRADES_SCHEMA_V1.to_owned(),
@@ -445,40 +505,7 @@ impl FundingHistorySnapshot {
             return Err(MarketHistoryError::TooManyRows);
         }
 
-        let mut timestamps = BTreeSet::new();
-        let mut normalized = Vec::with_capacity(rows.len());
-        for row in rows {
-            if row.instrument_id != instrument_id {
-                return Err(MarketHistoryError::InstrumentMismatch {
-                    expected: instrument_id.to_owned(),
-                    actual: row.instrument_id,
-                });
-            }
-            let timestamp = row
-                .funding_time_ms
-                .parse::<u64>()
-                .map_err(|_| MarketHistoryError::InvalidTimestamp(row.funding_time_ms.clone()))?;
-            if !timestamps.insert(timestamp) {
-                return Err(MarketHistoryError::DuplicateFundingTimestamp(
-                    row.funding_time_ms,
-                ));
-            }
-            normalized.push((
-                timestamp,
-                FundingHistoryEvent {
-                    funding_time_ms: required("fundingTime", row.funding_time_ms)?,
-                    funding_rate: required("fundingRate", row.funding_rate)?,
-                    realized_rate: optional_text(row.realized_rate),
-                    formula_type: optional_text(row.formula_type),
-                    method: optional_text(row.method),
-                },
-            ));
-        }
-        normalized.sort_by_key(|(timestamp, _)| *timestamp);
-        let events = normalized
-            .into_iter()
-            .map(|(_, event)| event)
-            .collect::<Vec<_>>();
+        let events = normalize_research_funding(instrument_id, rows, requested_limit as usize)?;
 
         let mut snapshot = Self {
             schema: FUNDING_HISTORY_SCHEMA_V1.to_owned(),
@@ -774,6 +801,36 @@ mod tests {
         assert_eq!(first.trades[1].side, MarketTradeSide::Sell);
         assert_eq!(first.trades_generation, second.trades_generation);
         assert_ne!(first.source_received_at, second.source_received_at);
+    }
+
+    #[test]
+    fn research_normalization_does_not_consult_current_reference_state() {
+        let candles = normalize_research_candles(
+            vec![
+                row("1790470800000", "0.13", "1"),
+                row("1790467200000", "0.12", "1"),
+            ],
+            100,
+        )
+        .expect("research candles");
+        assert_eq!(candles[0].open_time_ms, "1790467200000");
+        assert_eq!(candles[1].open_time_ms, "1790470800000");
+
+        let funding = normalize_research_funding(
+            "DELISTED-USDT-SWAP",
+            vec![PublicFundingHistory {
+                instrument_type: "SWAP".to_owned(),
+                instrument_id: "DELISTED-USDT-SWAP".to_owned(),
+                funding_rate: "0.0001".to_owned(),
+                funding_time_ms: "1790467200000".to_owned(),
+                realized_rate: "0.00011".to_owned(),
+                formula_type: "withRate".to_owned(),
+                method: "current_period".to_owned(),
+            }],
+            400,
+        )
+        .expect("research funding");
+        assert_eq!(funding.len(), 1);
     }
 
     #[test]
