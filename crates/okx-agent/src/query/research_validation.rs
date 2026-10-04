@@ -1082,3 +1082,164 @@ fn research_failure(
         false,
     )
 }
+
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use okx_observation::HistoryCandle;
+    use okx_research::{ResearchChunkArtifact, ResearchError};
+
+    use super::*;
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_store() -> (std::path::PathBuf, ResearchArtifactStore) {
+        let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "okx-stage3c-validation-test-{}-{id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        (root.clone(), ResearchArtifactStore::at(root.join("research")))
+    }
+
+    fn history_candle(open_time_ms: u64, close: &str) -> HistoryCandle {
+        HistoryCandle {
+            open_time_ms: open_time_ms.to_string(),
+            open: close.to_owned(),
+            high: close.to_owned(),
+            low: close.to_owned(),
+            close: close.to_owned(),
+            volume: "1".to_owned(),
+            volume_currency: "1".to_owned(),
+            volume_quote: Some("1".to_owned()),
+            confirmed: true,
+        }
+    }
+
+    fn source(range: ResearchRange, selection: &str) -> SourceRequest {
+        SourceRequest {
+            provider: "okx_public_rest".to_owned(),
+            resource: "/api/v5/market/history-candles".to_owned(),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            bar: Some("1H".to_owned()),
+            range,
+            parameters: BTreeMap::from([("selection".to_owned(), selection.to_owned())]),
+        }
+    }
+
+    fn persist_candle_page(
+        store: &ResearchArtifactStore,
+        rows: &[HistoryCandle],
+        raw: &[u8],
+        selection: &str,
+    ) -> ResearchCheckpointPage {
+        let (range, _) = candle_page_range(rows).expect("page range");
+        let chunk = build_candle_chunk(
+            source(range, selection),
+            "1700000000000",
+            raw,
+            rows,
+            ONE_HOUR_MS,
+            PARSER_VERSION_V1,
+            NORMALIZATION_VERSION_V1,
+            "0123456789abcdef",
+        )
+        .expect("chunk");
+        let artifact: ResearchChunkArtifact<ResearchCandle> =
+            build_chunk_artifact(&chunk).expect("artifact");
+        let (artifact_id, _) = store.publish_evidence(&artifact).expect("publish");
+        page_ref(&artifact, artifact_id)
+    }
+
+    #[test]
+    fn multi_page_recovery_is_chronological_and_selects_exact_latest_target() {
+        let (root, store) = temp_store();
+        let newer = vec![
+            history_candle(3 * ONE_HOUR_MS, "103"),
+            history_candle(4 * ONE_HOUR_MS, "104"),
+            history_candle(5 * ONE_HOUR_MS, "105"),
+        ];
+        let older = vec![
+            history_candle(0, "100"),
+            history_candle(ONE_HOUR_MS, "101"),
+            history_candle(2 * ONE_HOUR_MS, "102"),
+        ];
+        let pages = vec![
+            persist_candle_page(&store, &newer, b"newer", "latest_page"),
+            persist_candle_page(&store, &older, b"older", "older_than_cursor"),
+        ];
+
+        let recovered = load_candles(&store, &pages).expect("recover");
+        assert_eq!(recovered.len(), 6);
+        assert!(recovered
+            .windows(2)
+            .all(|pair| pair[0].open_time_ms < pair[1].open_time_ms));
+
+        let selected = select_latest_candles(recovered, 4);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|row| row.open_time_ms.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                (2 * ONE_HOUR_MS).to_string(),
+                (3 * ONE_HOUR_MS).to_string(),
+                (4 * ONE_HOUR_MS).to_string(),
+                (5 * ONE_HOUR_MS).to_string(),
+            ]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            replay_range(&selected).expect("range"),
+            ResearchRange::new(
+                (2 * ONE_HOUR_MS).to_string(),
+                (6 * ONE_HOUR_MS).to_string()
+            )
+            .expect("expected range")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn overlapping_page_evidence_fails_closed_on_duplicate_timestamp() {
+        let (root, store) = temp_store();
+        let first = vec![
+            history_candle(ONE_HOUR_MS, "101"),
+            history_candle(2 * ONE_HOUR_MS, "102"),
+        ];
+        let overlapping = vec![
+            history_candle(0, "100"),
+            history_candle(ONE_HOUR_MS, "101"),
+        ];
+        let pages = vec![
+            persist_candle_page(&store, &first, b"first", "latest_page"),
+            persist_candle_page(&store, &overlapping, b"second", "older_than_cursor"),
+        ];
+
+        assert!(matches!(
+            load_candles(&store, &pages),
+            Err(ResearchError::DuplicateTimestamp(value))
+                if value == ONE_HOUR_MS.to_string()
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn candle_page_range_uses_oldest_event_as_next_after_cursor() {
+        let rows = vec![
+            history_candle(7 * ONE_HOUR_MS, "107"),
+            history_candle(5 * ONE_HOUR_MS, "105"),
+            history_candle(6 * ONE_HOUR_MS, "106"),
+        ];
+        let (range, cursor) = candle_page_range(&rows).expect("page range");
+
+        assert_eq!(cursor, (5 * ONE_HOUR_MS).to_string());
+        assert_eq!(range.begin_ms, (5 * ONE_HOUR_MS).to_string());
+        assert_eq!(range.end_ms, (8 * ONE_HOUR_MS).to_string());
+    }
+}
