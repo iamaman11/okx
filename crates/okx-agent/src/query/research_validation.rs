@@ -23,8 +23,7 @@ use super::research::{
     NORMALIZATION_VERSION_V1, ONE_HOUR_MS, PARSER_VERSION_V1, RESEARCH_ARTIFACT_FAILURE_CODE,
 };
 
-pub(super) const RESEARCH_VALIDATION_DATASET_SCHEMA_V1: &str =
-    "okx.research-validation-dataset/v1";
+pub(super) const RESEARCH_VALIDATION_DATASET_SCHEMA_V1: &str = "okx.research-validation-dataset/v1";
 pub(super) const VALIDATION_TARGET_CANDLES_MIN: u16 = 240;
 pub(super) const VALIDATION_TARGET_CANDLES_MAX: u16 = 2400;
 pub(super) const VALIDATION_PAGES_PER_CALL: usize = 2;
@@ -157,8 +156,7 @@ pub(super) async fn prepare_validation_dataset(
         );
     }
 
-    let parent_checkpoint_id = checkpoint_artifact_id
-        .map(|_| checkpoint.checkpoint_id.clone());
+    let parent_checkpoint_id = checkpoint_artifact_id.map(|_| checkpoint.checkpoint_id.clone());
 
     match checkpoint.phase {
         ResearchCheckpointPhase::Candles => {
@@ -254,7 +252,9 @@ pub(super) async fn prepare_validation_dataset(
                     Ok(value) => value,
                     Err(error) => return Ok(research_failure(request, generated_at, error)),
                 };
-                checkpoint.completed_pages.push(page_ref(&chunk_artifact, artifact_id));
+                checkpoint
+                    .completed_pages
+                    .push(page_ref(&chunk_artifact, artifact_id));
                 checkpoint.remaining_cursor = Some(oldest);
                 current_rows += chunk.rows.len();
                 if page_exhausted {
@@ -374,7 +374,9 @@ pub(super) async fn prepare_validation_dataset(
                         row.funding_time_ms
                             .parse::<u64>()
                             .ok()
-                            .is_some_and(|timestamp| timestamp >= range_begin && timestamp < range_end)
+                            .is_some_and(|timestamp| {
+                                timestamp >= range_begin && timestamp < range_end
+                            })
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -386,7 +388,10 @@ pub(super) async fn prepare_validation_dataset(
                     };
                     let mut parameters = BTreeMap::from([
                         ("limit".to_owned(), FUNDING_PAGE_LIMIT.to_string()),
-                        ("selection".to_owned(), "events_within_parent_range".to_owned()),
+                        (
+                            "selection".to_owned(),
+                            "events_within_parent_range".to_owned(),
+                        ),
                     ]);
                     if let Some(cursor) = checkpoint.remaining_cursor.as_ref() {
                         parameters.insert("after".to_owned(), cursor.clone());
@@ -528,7 +533,10 @@ async fn finalize_dataset(
         Err(error) => return Ok(research_failure(request, generated_at, error)),
     };
 
-    let reference = match market.research_current_reference(&checkpoint.instrument_id).await {
+    let reference = match market
+        .research_current_reference(&checkpoint.instrument_id)
+        .await
+    {
         Ok(value) => value,
         Err(error) => return Ok(source_failure(request, generated_at, error)),
     };
@@ -936,9 +944,7 @@ fn select_latest_candles(
     rows
 }
 
-fn replay_range(
-    rows: &[ResearchCandle],
-) -> Result<ResearchRange, okx_research::ResearchError> {
+fn replay_range(rows: &[ResearchCandle]) -> Result<ResearchRange, okx_research::ResearchError> {
     let first = rows
         .first()
         .ok_or(okx_research::ResearchError::MissingField(
@@ -970,12 +976,12 @@ fn candle_page_range(
     let mut times = rows
         .iter()
         .map(|row| {
-            row.open_time_ms
-                .parse::<u64>()
-                .map_err(|_| okx_research::ResearchError::InvalidTimestamp {
+            row.open_time_ms.parse::<u64>().map_err(|_| {
+                okx_research::ResearchError::InvalidTimestamp {
                     field: "validation.candle_page.open_time_ms",
                     value: row.open_time_ms.clone(),
-                })
+                }
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     times.sort_unstable();
@@ -1003,12 +1009,12 @@ fn funding_page_range(
     let mut times = rows
         .iter()
         .map(|row| {
-            row.funding_time_ms
-                .parse::<u64>()
-                .map_err(|_| okx_research::ResearchError::InvalidTimestamp {
+            row.funding_time_ms.parse::<u64>().map_err(|_| {
+                okx_research::ResearchError::InvalidTimestamp {
                     field: "validation.funding_page.funding_time_ms",
                     value: row.funding_time_ms.clone(),
-                })
+                }
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     times.sort_unstable();
@@ -1018,12 +1024,13 @@ fn funding_page_range(
             "validation.funding_page",
         ))?;
     let newest = *times.last().expect("non-empty page");
-    let end = newest.checked_add(1).ok_or_else(|| {
-        okx_research::ResearchError::InvalidTimestamp {
-            field: "validation.funding_page.end_ms",
-            value: newest.to_string(),
-        }
-    })?;
+    let end =
+        newest
+            .checked_add(1)
+            .ok_or_else(|| okx_research::ResearchError::InvalidTimestamp {
+                field: "validation.funding_page.end_ms",
+                value: newest.to_string(),
+            })?;
     ResearchRange::new(oldest.to_string(), end.to_string())
 }
 
