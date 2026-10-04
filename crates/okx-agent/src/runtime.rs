@@ -104,6 +104,7 @@ pub async fn run_mailbox_until_shutdown(
         account,
         private_ws,
         execution,
+        research_root: &config.root,
     };
     let mut cloudflare_runtime = Box::pin(async move {
         match cloudflare {
@@ -234,6 +235,7 @@ pub async fn run_mailbox_until_shutdown(
                         account,
                         private_ws,
                         execution,
+                        research_root: &config.root,
                     })
                     .await
                 {
