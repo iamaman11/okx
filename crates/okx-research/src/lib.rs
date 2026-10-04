@@ -5,7 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use okx_observation::{FundingHistoryEvent, HistoryCandle, InstrumentSpec};
+use okx_observation::{
+    FundingHistoryEvent, HistoryCandle, InstrumentSpec, MarketTrade, MarketTradeSide,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -17,6 +19,7 @@ pub const REFERENCE_WINDOW_SCHEMA_V1: &str = "okx.research.reference-window/v1";
 pub const CHECKPOINT_SCHEMA_V1: &str = "okx.research.checkpoint/v1";
 pub const RESEARCH_CANDLE_SCHEMA_V1: &str = "okx.research.candle/v1";
 pub const RESEARCH_FUNDING_SCHEMA_V1: &str = "okx.research.funding-event/v1";
+pub const RESEARCH_TRADE_SCHEMA_V1: &str = "okx.research.trade-event/v1";
 pub const RESEARCH_REFERENCE_SCHEMA_V1: &str = "okx.research.instrument-reference/v1";
 pub const BUILD_SOURCE_TREE: &str = env!("OKX_SOURCE_TREE");
 const EVIDENCE_DIR: &str = "evidence";
@@ -180,6 +183,20 @@ pub struct ResearchFundingEvent {
     pub formula_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchTradeEvent {
+    pub schema: String,
+    pub trade_id: String,
+    pub event_time_ms: String,
+    pub available_time_ms: String,
+    pub price: String,
+    pub size_contracts: String,
+    pub side: MarketTradeSide,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -589,6 +606,9 @@ pub enum ResearchError {
     #[error("dataset contains duplicate chunk identity")]
     DuplicateChunk,
 
+    #[error("research trade history contains duplicate trade id '{0}'")]
+    DuplicateTradeId(String),
+
     #[error("unconfirmed candle '{0}' is not admissible research history")]
     UnconfirmedCandle(String),
 
@@ -907,6 +927,65 @@ pub fn build_funding_chunk(
     )
 }
 
+pub fn build_tier_b_trade_chunk(
+    source: SourceRequest,
+    acquired_at_ms: impl Into<String>,
+    raw_body: &[u8],
+    rows: &[MarketTrade],
+    parser_version: impl Into<String>,
+    normalization_version: impl Into<String>,
+    source_tree: impl Into<String>,
+) -> Result<NormalizedChunk<ResearchTradeEvent>, ResearchError> {
+    source.validate()?;
+    let acquired_at_ms = acquired_at_ms.into();
+    parse_ms("acquired_at_ms", &acquired_at_ms)?;
+
+    let mut trade_ids = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(rows.len());
+    for row in rows {
+        if !trade_ids.insert(row.trade_id.clone()) {
+            return Err(ResearchError::DuplicateTradeId(row.trade_id.clone()));
+        }
+        let event_time = parse_ms("trade.exchange_timestamp_ms", &row.exchange_timestamp_ms)?;
+        normalized.push(ResearchTradeEvent {
+            schema: RESEARCH_TRADE_SCHEMA_V1.to_owned(),
+            trade_id: required_owned("trade_id", &row.trade_id)?,
+            event_time_ms: event_time.to_string(),
+            available_time_ms: event_time.to_string(),
+            price: required_owned("price", &row.price)?,
+            size_contracts: required_owned("size_contracts", &row.size_contracts)?,
+            side: row.side,
+            source: row.source.clone(),
+        });
+    }
+    normalized.sort_by(|left, right| {
+        left.event_time_ms
+            .parse::<u64>()
+            .unwrap_or_default()
+            .cmp(
+                &right
+                    .event_time_ms
+                    .parse::<u64>()
+                    .unwrap_or_default(),
+            )
+            .then_with(|| left.trade_id.cmp(&right.trade_id))
+    });
+
+    build_normalized_chunk(
+        ChunkBuildInput {
+            kind: ResearchSourceKind::TierBProbe,
+            source,
+            acquired_at_ms,
+            raw_body,
+            parser_version: parser_version.into(),
+            normalization_version: normalization_version.into(),
+            source_tree: source_tree.into(),
+        },
+        normalized,
+        |row: &ResearchTradeEvent| &row.event_time_ms,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_reference_chunk(
     source: SourceRequest,
@@ -1177,6 +1256,27 @@ mod tests {
         ]
     }
 
+    fn trades() -> Vec<MarketTrade> {
+        vec![
+            MarketTrade {
+                trade_id: "1001".to_owned(),
+                price: "100.1".to_owned(),
+                size_contracts: "2".to_owned(),
+                side: MarketTradeSide::Buy,
+                source: Some("0".to_owned()),
+                exchange_timestamp_ms: "1700000000100".to_owned(),
+            },
+            MarketTrade {
+                trade_id: "1002".to_owned(),
+                price: "100.2".to_owned(),
+                size_contracts: "1".to_owned(),
+                side: MarketTradeSide::Sell,
+                source: Some("0".to_owned()),
+                exchange_timestamp_ms: "1700000000200".to_owned(),
+            },
+        ]
+    }
+
     fn funding() -> Vec<FundingHistoryEvent> {
         vec![
             FundingHistoryEvent {
@@ -1292,6 +1392,44 @@ mod tests {
         assert_ne!(a.manifest.capture_id, b.manifest.capture_id);
         assert_eq!(a.manifest.chunk_id, b.manifest.chunk_id);
         assert_eq!(a.manifest.normalized_sha256, b.manifest.normalized_sha256);
+    }
+
+    #[test]
+    fn tier_b_trade_chunk_is_reference_free_and_causal() {
+        let mut trade_source = source("/api/v5/market/history-trades");
+        trade_source.bar = None;
+        let chunk = build_tier_b_trade_chunk(
+            trade_source,
+            "1700010000000",
+            br#"{"code":"0","data":[{"tradeId":"1002"},{"tradeId":"1001"}]}"#,
+            &trades(),
+            PARSER,
+            NORMALIZER,
+            TREE,
+        )
+        .expect("tier b trade chunk");
+
+        assert_eq!(chunk.manifest.kind, ResearchSourceKind::TierBProbe);
+        assert_eq!(chunk.rows.len(), 2);
+        assert_eq!(chunk.rows[0].trade_id, "1001");
+        assert_eq!(chunk.rows[0].available_time_ms, chunk.rows[0].event_time_ms);
+        assert_eq!(chunk.manifest.oldest_event_time_ms.as_deref(), Some("1700000000100"));
+        assert_eq!(chunk.manifest.newest_event_time_ms.as_deref(), Some("1700000000200"));
+
+        let mut duplicate = trades();
+        duplicate[1].trade_id = duplicate[0].trade_id.clone();
+        assert!(matches!(
+            build_tier_b_trade_chunk(
+                source("/api/v5/market/history-trades"),
+                "1700010000000",
+                b"x",
+                &duplicate,
+                PARSER,
+                NORMALIZER,
+                TREE,
+            ),
+            Err(ResearchError::DuplicateTradeId(_))
+        ));
     }
 
     #[test]
