@@ -760,7 +760,6 @@ async fn run_replay(
         capital_base_drawdown_ratio: "0".to_owned(),
         daily_realized_loss_usd: "0".to_owned(),
         account_is_fresh: true,
-        correlated_cluster_gross_notional_usd: BTreeMap::new(),
     };
     let execution = ReplayExecutionModel {
         version: REPLAY_EXECUTION_MODEL_VERSION_V1.to_owned(),
