@@ -649,6 +649,106 @@ It must use atomic verified publication and hash-addressed identity. It is not a
 
 Negative experiments remain part of lineage. A later version cannot rewrite an earlier experiment or promotion decision.
 
+### Stage-3 causal/replay invariants
+
+Research replay is causal, not merely timestamp-sorted.
+
+Required temporal roles:
+- `event_time`: when the exchange event/fact occurred;
+- `available_time`: earliest time the strategy may use the fact;
+- `decision_time`: when the deterministic strategy produced its decision;
+- `earliest_execution_time`: earliest admissible simulated/real execution time.
+
+A completed-bar signal cannot be filled at the already-known same close unless the admitted replay source explicitly proves that execution semantics.
+
+Tier-A bar replay never guesses favorable hidden intrabar order. If stop/target/limit/liquidation ordering is unknowable from admitted data, use a declared conservative deterministic rule, return `AMBIGUOUS_FILL`, or require Tier B.
+
+Price roles are typed and distinct: signal, mark, index and execution. Leverage/margin/liquidation claims must use the role required by the venue model; missing required history is explicit `INSUFFICIENT_DATA` or a declared conservative counterfactual, never silent substitution.
+
+Funding is replayed as dated events using admitted interval/mechanism evidence. Fees, spread/slippage/impact and capacity/sizing assumptions are versioned and carry provenance; present-day fees are never silently called historical.
+
+### Stage-3 selection/holdout invariants
+
+All research variants belong to immutable family lineage:
+- human-authored;
+- ChatGPT-authored;
+- parameter sweeps;
+- failed/negative trials.
+
+The family records parent/trial identity, changed fields and declared search/selection context where applicable. Promotion evidence cannot hide losing variants.
+
+Final OOS is sealed before candidate freeze. Opening it creates immutable consumption evidence. A descendant changed after viewing the holdout must label that interval `POST_SELECTION`, not pristine OOS.
+
+Evidence adequacy is first-class. Too few/effectively dependent observations may return `INSUFFICIENT_EVIDENCE` even when point estimates look attractive.
+
+Before alpha claims, replay accounting must pass:
+- a `NO_TRADE` null baseline with zero trades/fees/funding/PnL;
+- one simple manually auditable deterministic baseline.
+
+### Research artifact/storage invariants
+
+Artifact identity binds both source and normalized evidence:
+- source identity/request/range/acquisition metadata;
+- raw content SHA-256 + size;
+- parser/normalization/schema versions;
+- normalized canonical content SHA-256 + row/event count;
+- deterministic field/map ordering, decimal formatting and UTC time encoding.
+
+A stable URL never implies stable bytes.
+
+Storage has two roles:
+- `EvidenceStore`: pinned accepted manifests/results/promotion evidence and required reproducibility chunks; no silent eviction;
+- `SourceCache`: large re-downloadable raw chunks; bounded quota and evictable only when unpinned.
+
+Disk quota and free-space floor are explicit. Exhaustion fails with typed `STORAGE_BUDGET_EXCEEDED` instead of threatening the runtime.
+
+Historical archives are untrusted external input:
+- allowlisted official source families/hosts only;
+- no arbitrary URL fetch;
+- bounded compressed/decompressed bytes, rows/events and decompression ratio;
+- no archive path traversal;
+- strict numeric/time/reference validation;
+- malformed/corrupt input fails closed.
+
+### Research control vs live decision path
+
+Cloudflare/ChatGPT is a research control/inspection plane, never a live decision latency dependency.
+
+```text
+user -> ChatGPT -> MCP -> start / inspect / resume / authorize promotion
+
+OKX live feed
+ -> existing runtime/observation
+ -> local versioned strategy
+ -> Stage-2 risk
+ -> PAPER simulated execution
+    or SHADOW WOULD_SUBMIT
+ -> immutable research evidence
+```
+
+Two independent freshness domains are reported:
+- `MCP_TRANSPORT`: whether new remote commands can be safely accepted;
+- `RESEARCH_INPUT`: whether the underlying market/reference/account facts are fresh/complete enough for a local research decision.
+
+A stale MCP session does not by itself terminate an already accepted local paper/shadow run. Stale/gapped research input blocks the affected local decision and records a typed reject.
+
+### PAPER / SHADOW semantics and authority
+
+`PAPER`:
+- consumes live accepted facts;
+- uses research simulated execution;
+- records virtual positions/PnL;
+- performs no exchange mutation.
+
+`SHADOW`:
+- runs the production-intended signal/candidate/Stage-2-risk/pre-execution path as far as practical;
+- records `WOULD_SUBMIT`;
+- stops before any exchange order mutation.
+
+Stage 4 Demo Trading is the first stage permitted to prove actual order mutation.
+
+The research engine may automatically classify `REJECT`, `INSUFFICIENT_DATA` or `INSUFFICIENT_EVIDENCE`. Positive promotions `BACKTESTED -> PAPER -> SHADOW` require explicit operator authorization recorded in immutable lineage. Stage 3 can never authorize live trading.
+
 ### Scientific boundary
 
 Minimum accepted methodology:
@@ -695,10 +795,11 @@ Stage 3 preserves the accepted direct-transport limits instead of raising them:
 - existing bounded direct in-flight request count.
 
 Large acquisition/replay is expressed as deterministic bounded steps:
-- one call performs one bounded unit;
-- a nonterminal result returns a typed continuation plus immutable artifact/experiment identity;
-- the next call resumes from that identity;
-- completed steps are idempotent/content-addressed;
+- one call performs a declared bounded work budget (source requests/input bytes/events) within the existing deadline;
+- a nonterminal result returns an immutable parent-linked checkpoint/continuation identity plus remaining cursor;
+- the next call resumes from that identity with no mutable job-status database;
+- ChatGPT may execute several bounded calls synchronously within one user turn; users are not expected to manually advance every source chunk;
+- completed chunks/checkpoints are idempotent/content-addressed;
 - response loss can be retried without duplicating exchange actions or rewriting evidence.
 
 This is resumable request/response work, **not** a background daemon, job queue, polling scheduler or second runtime.
@@ -726,6 +827,21 @@ RESEARCH -> BACKTESTED -> PAPER -> SHADOW
 
 No Stage-3 state grants exchange mutation authority.
 
+### Stage-3A v1 implementation scope
+
+The first implementation is deliberately narrow so the research truth layer can be physically proven before broadening the universe:
+
+- USDT linear perpetuals only;
+- BTC-USDT-SWAP, ETH-USDT-SWAP and DOGE-USDT-SWAP as initial Tier-A instruments;
+- 1H Tier-A cadence;
+- candles + funding + point-in-time instrument/reference timeline;
+- historical mark/index evidence only when required by the admitted strategy/risk claim;
+- one bounded BTC-USDT-SWAP Tier-B archive sample for **schema/provenance/gap semantics proof**, not a generic L2 engine.
+
+Stage 3A v1 explicitly does not attempt all OKX products, all cadences or full L2 history.
+
+If historical reference facts cannot be proven for a requested interval, return `INSUFFICIENT_REFERENCE_HISTORY`; never reconstruct them from the current registry by assumption.
+
 ### Stage-3 architecture budget
 
 Expected maximum structural delta for the whole stage:
@@ -745,6 +861,12 @@ production exchange mutations   0
 ```
 
 Any larger delta requires a reproduced product/ownership failure and explicit architecture review before code is merged.
+
+### Stage-3 design freeze
+
+The accepted #160/ROADMAP contract plus these invariants is the final pre-implementation architecture pass.
+
+The next cursor is **Stage 3A v1 implementation**. Do not add framework layers, services, statistical methods or storage authorities for speculative completeness. Any non-planned structural delta requires a reproduced source/runtime/test contradiction and explicit architecture review.
 
 ## Non-goals
 
