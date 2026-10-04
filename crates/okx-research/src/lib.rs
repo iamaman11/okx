@@ -624,17 +624,13 @@ impl ResearchArtifactStore {
 
     pub fn publish_evidence<T: Serialize>(
         &self,
-        artifact_id: &str,
         value: &T,
-    ) -> Result<PathBuf, ResearchError> {
-        validate_sha256_id(artifact_id)?;
+    ) -> Result<(String, PathBuf), ResearchError> {
         let bytes = serde_json::to_vec(value)?;
-        if sha256_bytes(&bytes) != artifact_id {
-            return Err(ResearchError::ArtifactIdentityMismatch);
-        }
+        let artifact_id = sha256_bytes(&bytes);
         let path = self.evidence_dir().join(format!("{artifact_id}.json"));
         publish_atomic_verified(&path, &bytes)?;
-        Ok(path)
+        Ok((artifact_id, path))
     }
 
     pub fn publish_source_bytes(
@@ -1647,8 +1643,10 @@ mod tests {
         let bytes = serde_json::to_vec(&payload).expect("serialize");
         let id = sha256_bytes(&bytes);
 
-        let first = store.publish_evidence(&id, &payload).expect("publish");
-        let second = store.publish_evidence(&id, &payload).expect("retry");
+        let (first_id, first) = store.publish_evidence(&payload).expect("publish");
+        let (second_id, second) = store.publish_evidence(&payload).expect("retry");
+        assert_eq!(first_id, id);
+        assert_eq!(second_id, id);
         assert_eq!(first, second);
         assert_eq!(store.read_evidence(&id).expect("read"), bytes);
 
