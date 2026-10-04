@@ -51,7 +51,7 @@ pub use scenario::{
     HISTORY_BEHAVIOR_SCHEMA_V1, HistoryBehaviorAnalysis, POSITION_SCENARIO_SCHEMA_V1,
     PositionScenarioAnalysis, PositionScenarioAssumptions, PositionScenarioMechanics,
     ScenarioExitAssumption, ScenarioPriceSource, analyze_history_behavior,
-    analyze_position_scenario, analyze_position_scenario_values,
+    analyze_position_scenario, analyze_position_scenario_values, funding_user_cost_quote,
 };
 pub use strategy::{
     BASELINE_STRATEGY_VERSION_V1, BarDecisionInput, BaselineStrategyKind, StrategyDecision,
