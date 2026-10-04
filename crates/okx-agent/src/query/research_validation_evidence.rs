@@ -59,6 +59,7 @@ pub(super) fn evaluate_validation_evidence(
     let store = ResearchArtifactStore::at(research_root.join("research"));
     let prepared = match prepare_pre_holdout_evidence(
         &store,
+        instrument,
         validation_spec_artifact_id,
         train_replay_dataset_artifact_id,
         train_experiment_result_artifact_id,
@@ -77,17 +78,6 @@ pub(super) fn evaluate_validation_evidence(
             ));
         }
     };
-    if prepared.evidence.instrument_id != instrument {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Failed,
-            super::research::RESEARCH_ARTIFACT_FAILURE_CODE,
-            "validation evidence instrument does not match request".to_owned(),
-            false,
-        ));
-    }
-
     let quality = if prepared.evidence.blockers.is_empty() {
         DataQuality::Fresh
     } else {
