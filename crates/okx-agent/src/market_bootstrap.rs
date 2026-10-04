@@ -64,8 +64,6 @@ pub enum MarketBootstrapError {
     #[error("reference normalization error: {0}")]
     ReferenceNormalize(#[from] ReferenceError),
 
-    #[error("reference normalization error: {0}")]
-    ReferenceNormalize(#[from] ReferenceError),
 }
 
 impl MarketBootstrapper {
