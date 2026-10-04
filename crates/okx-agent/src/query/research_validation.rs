@@ -408,64 +408,58 @@ pub(super) async fn prepare_validation_dataset(
                     .cloned()
                     .collect::<Vec<_>>();
 
-                if !in_range.is_empty() {
-                    let source_range = match funding_page_range(&in_range) {
-                        Ok(value) => value,
-                        Err(error) => return Ok(research_failure(request, generated_at, error)),
-                    };
-                    let mut parameters = BTreeMap::from([
-                        ("limit".to_owned(), FUNDING_PAGE_LIMIT.to_string()),
-                        (
-                            "selection".to_owned(),
-                            "events_within_parent_range".to_owned(),
-                        ),
-                    ]);
-                    if let Some(cursor) = checkpoint.remaining_cursor.as_ref() {
-                        parameters.insert("after".to_owned(), cursor.clone());
-                    }
-                    let source = SourceRequest {
-                        provider: "okx_public_rest".to_owned(),
-                        resource: "/api/v5/public/funding-rate-history".to_owned(),
-                        instrument_id: instrument.to_owned(),
-                        bar: None,
-                        range: source_range,
-                        parameters,
-                    };
-                    let chunk = match build_funding_chunk(
-                        source,
-                        captured.acquired_at_ms,
-                        &captured.raw_body,
-                        &in_range,
-                        PARSER_VERSION_V1,
-                        NORMALIZATION_VERSION_V1,
-                        BUILD_SOURCE_TREE,
-                    ) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            return Ok(research_failure(request, generated_at, error));
-                        }
-                    };
-                    if let Err(error) =
-                        store.publish_source_bytes(&chunk.manifest.raw_sha256, &captured.raw_body)
-                    {
+                let mut parameters = BTreeMap::from([
+                    ("limit".to_owned(), FUNDING_PAGE_LIMIT.to_string()),
+                    (
+                        "selection".to_owned(),
+                        "events_within_parent_range".to_owned(),
+                    ),
+                ]);
+                if let Some(cursor) = checkpoint.remaining_cursor.as_ref() {
+                    parameters.insert("after".to_owned(), cursor.clone());
+                }
+                let source = SourceRequest {
+                    provider: "okx_public_rest".to_owned(),
+                    resource: "/api/v5/public/funding-rate-history".to_owned(),
+                    instrument_id: instrument.to_owned(),
+                    bar: None,
+                    range: range.clone(),
+                    parameters,
+                };
+                let chunk = match build_funding_chunk(
+                    source,
+                    captured.acquired_at_ms,
+                    &captured.raw_body,
+                    &in_range,
+                    PARSER_VERSION_V1,
+                    NORMALIZATION_VERSION_V1,
+                    BUILD_SOURCE_TREE,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
                         return Ok(research_failure(request, generated_at, error));
                     }
-                    let chunk_artifact = match build_chunk_artifact(&chunk) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            return Ok(research_failure(request, generated_at, error));
-                        }
-                    };
-                    let (artifact_id, _) = match store.publish_evidence(&chunk_artifact) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            return Ok(research_failure(request, generated_at, error));
-                        }
-                    };
-                    checkpoint
-                        .completed_pages
-                        .push(page_ref(&chunk_artifact, artifact_id));
+                };
+                if let Err(error) =
+                    store.publish_source_bytes(&chunk.manifest.raw_sha256, &captured.raw_body)
+                {
+                    return Ok(research_failure(request, generated_at, error));
                 }
+                let chunk_artifact = match build_chunk_artifact(&chunk) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(research_failure(request, generated_at, error));
+                    }
+                };
+                let (artifact_id, _) = match store.publish_evidence(&chunk_artifact) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(research_failure(request, generated_at, error));
+                    }
+                };
+                checkpoint
+                    .completed_pages
+                    .push(page_ref(&chunk_artifact, artifact_id));
 
                 if checkpoint
                     .remaining_cursor
@@ -926,7 +920,13 @@ fn load_candles(
     }
     rows.sort_by_key(|row| row.open_time_ms.parse::<u64>().unwrap_or_default());
     let mut seen = BTreeSet::new();
-    rows.retain(|row| seen.insert(row.open_time_ms.clone()));
+    for row in &rows {
+        if !seen.insert(row.open_time_ms.clone()) {
+            return Err(okx_research::ResearchError::DuplicateTimestamp(
+                row.open_time_ms.clone(),
+            ));
+        }
+    }
     Ok(rows)
 }
 
@@ -957,7 +957,13 @@ fn load_funding(
     }
     rows.sort_by_key(|row| row.funding_time_ms.parse::<u64>().unwrap_or_default());
     let mut seen = BTreeSet::new();
-    rows.retain(|row| seen.insert(row.funding_time_ms.clone()));
+    for row in &rows {
+        if !seen.insert(row.funding_time_ms.clone()) {
+            return Err(okx_research::ResearchError::DuplicateTimestamp(
+                row.funding_time_ms.clone(),
+            ));
+        }
+    }
     Ok(rows)
 }
 
@@ -1052,37 +1058,6 @@ fn candle_page_range(
         ResearchRange::new(oldest.to_string(), end.to_string())?,
         oldest.to_string(),
     ))
-}
-
-fn funding_page_range(
-    rows: &[okx_observation::FundingHistoryEvent],
-) -> Result<ResearchRange, okx_research::ResearchError> {
-    let mut times = rows
-        .iter()
-        .map(|row| {
-            row.funding_time_ms.parse::<u64>().map_err(|_| {
-                okx_research::ResearchError::InvalidTimestamp {
-                    field: "validation.funding_page.funding_time_ms",
-                    value: row.funding_time_ms.clone(),
-                }
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    times.sort_unstable();
-    let oldest = *times
-        .first()
-        .ok_or(okx_research::ResearchError::MissingField(
-            "validation.funding_page",
-        ))?;
-    let newest = *times.last().expect("non-empty page");
-    let end =
-        newest
-            .checked_add(1)
-            .ok_or_else(|| okx_research::ResearchError::InvalidTimestamp {
-                field: "validation.funding_page.end_ms",
-                value: newest.to_string(),
-            })?;
-    ResearchRange::new(oldest.to_string(), end.to_string())
 }
 
 fn source_failure(
