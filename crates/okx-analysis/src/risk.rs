@@ -1467,7 +1467,6 @@ mod tests {
         AccountSnapshot, CurrencyAggregate,
     };
 
-    use super::*;
 
     fn account(position_mode: &str, positions: Vec<AccountPositionState>) -> AccountSnapshot {
         AccountSnapshot {
