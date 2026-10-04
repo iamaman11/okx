@@ -626,7 +626,9 @@ impl ResearchArtifactStore {
     ) -> Result<(String, PathBuf), ResearchError> {
         let bytes = serde_json::to_vec(value)?;
         let artifact_id = sha256_bytes(&bytes);
-        let path = self.evidence_dir().join(format!("{artifact_id}.json"));
+        let path = self
+            .evidence_dir()
+            .join(format!("{}.json", sha256_hex(artifact_id)?));
         publish_atomic_verified(&path, &bytes)?;
         Ok((artifact_id, path))
     }
@@ -640,14 +642,18 @@ impl ResearchArtifactStore {
         if sha256_bytes(bytes) != raw_sha256 {
             return Err(ResearchError::ArtifactIdentityMismatch);
         }
-        let path = self.source_cache_dir().join(format!("{raw_sha256}.bin"));
+        let path = self
+            .source_cache_dir()
+            .join(format!("{}.bin", sha256_hex(raw_sha256)?));
         publish_atomic_verified(&path, bytes)?;
         Ok(path)
     }
 
     pub fn read_evidence(&self, artifact_id: &str) -> Result<Vec<u8>, ResearchError> {
         validate_sha256_id(artifact_id)?;
-        let path = self.evidence_dir().join(format!("{artifact_id}.json"));
+        let path = self
+            .evidence_dir()
+            .join(format!("{}.json", sha256_hex(artifact_id)?));
         let bytes = fs::read(path)?;
         if sha256_bytes(&bytes) != artifact_id {
             return Err(ResearchError::ArtifactIdentityMismatch);
@@ -657,7 +663,9 @@ impl ResearchArtifactStore {
 
     pub fn read_source_bytes(&self, raw_sha256: &str) -> Result<Vec<u8>, ResearchError> {
         validate_sha256_id(raw_sha256)?;
-        let path = self.source_cache_dir().join(format!("{raw_sha256}.bin"));
+        let path = self
+            .source_cache_dir()
+            .join(format!("{}.bin", sha256_hex(raw_sha256)?));
         let bytes = fs::read(path)?;
         if sha256_bytes(&bytes) != raw_sha256 {
             return Err(ResearchError::ArtifactIdentityMismatch);
@@ -709,13 +717,21 @@ pub fn detect_fixed_interval_gaps(
 }
 
 fn validate_sha256_id(value: &str) -> Result<(), ResearchError> {
+    sha256_hex(value).map(|_| ())
+}
+
+fn sha256_hex(value: &str) -> Result<&str, ResearchError> {
     let Some(hex) = value.strip_prefix("sha256:") else {
         return Err(ResearchError::InvalidArtifactId);
     };
-    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
         return Err(ResearchError::InvalidArtifactId);
     }
-    Ok(())
+    Ok(hex)
 }
 
 fn publish_atomic_verified(path: &Path, bytes: &[u8]) -> Result<(), ResearchError> {
