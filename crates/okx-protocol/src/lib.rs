@@ -1930,6 +1930,37 @@ mod tests {
                 "validation split total candles"
             ))
         ));
+
+        let validation_evidence = ResearchRequest::EvaluateValidationEvidence {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            validation_spec_artifact_id:
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            train_replay_dataset_artifact_id:
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
+            train_experiment_result_artifact_id:
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333".to_owned(),
+            validation_replay_dataset_artifact_id:
+                "sha256:4444444444444444444444444444444444444444444444444444444444444444".to_owned(),
+            validation_experiment_result_artifact_id:
+                "sha256:5555555555555555555555555555555555555555555555555555555555555555".to_owned(),
+        };
+        assert_eq!(validation_evidence.validate(), Ok(()));
+
+        let mut invalid_validation_evidence = validation_evidence;
+        if let ResearchRequest::EvaluateValidationEvidence {
+            validation_experiment_result_artifact_id,
+            ..
+        } = &mut invalid_validation_evidence
+        {
+            *validation_experiment_result_artifact_id = "bad".to_owned();
+        }
+        assert!(matches!(
+            invalid_validation_evidence.validate(),
+            Err(ProtocolError::InvalidResearchRequest(
+                "validation_experiment_result_artifact_id"
+            ))
+        ));
     }
 
     fn execution_risk_request() -> ExecutionRiskBindingRequest {
