@@ -1467,7 +1467,6 @@ mod tests {
         AccountSnapshot, CurrencyAggregate,
     };
 
-
     fn account(position_mode: &str, positions: Vec<AccountPositionState>) -> AccountSnapshot {
         AccountSnapshot {
             schema: "okx.account-snapshot/v2".to_owned(),
