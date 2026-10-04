@@ -144,7 +144,8 @@ struct ResearchReplaySummary {
     funding_cost_quote: String,
     net_pnl_quote: String,
     bulk_events_returned: bool,
-    source_tree: String,
+    dataset_source_tree: String,
+    replay_source_tree: String,
     exchange_mutation_authority: bool,
 }
 
@@ -740,7 +741,8 @@ async fn run_replay(
         funding_cost_quote: result.funding_cost_quote,
         net_pnl_quote: result.net_pnl_quote,
         bulk_events_returned: false,
-        source_tree: result.source_tree,
+        dataset_source_tree: result.dataset_source_tree,
+        replay_source_tree: result.replay_source_tree,
         exchange_mutation_authority: false,
     };
 

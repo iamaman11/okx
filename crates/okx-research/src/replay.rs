@@ -160,6 +160,7 @@ pub struct ExperimentSpec {
     pub experiment_spec_id: String,
     pub hypothesis_id: String,
     pub dataset_id: String,
+    pub replay_source_tree: String,
     pub instrument_id: String,
     pub bar: String,
     pub strategy: BaselineStrategyKind,
@@ -176,6 +177,7 @@ struct ExperimentSpecIdentity<'a> {
     schema: &'static str,
     hypothesis_id: &'a str,
     dataset_id: &'a str,
+    replay_source_tree: &'a str,
     instrument_id: &'a str,
     bar: &'a str,
     strategy: BaselineStrategyKind,
@@ -205,12 +207,14 @@ impl ExperimentSpec {
         let bar = bar.into();
         required("experiment.dataset_id", &dataset_id)?;
         required("experiment.instrument_id", &instrument_id)?;
+        required("experiment.replay_source_tree", crate::BUILD_SOURCE_TREE)?;
         required("experiment.bar", &bar)?;
         validate_execution_model(&execution)?;
         let experiment_spec_id = canonical_sha256(&ExperimentSpecIdentity {
             schema: EXPERIMENT_SPEC_SCHEMA_V1,
             hypothesis_id: &hypothesis.hypothesis_id,
             dataset_id: &dataset_id,
+            replay_source_tree: crate::BUILD_SOURCE_TREE,
             instrument_id: &instrument_id,
             bar: &bar,
             strategy: hypothesis.strategy,
@@ -226,6 +230,7 @@ impl ExperimentSpec {
             experiment_spec_id,
             hypothesis_id: hypothesis.hypothesis_id.clone(),
             dataset_id,
+            replay_source_tree: crate::BUILD_SOURCE_TREE.to_owned(),
             instrument_id,
             bar,
             strategy: hypothesis.strategy,
@@ -277,7 +282,8 @@ pub struct ExperimentResult {
     pub experiment_spec_id: String,
     pub hypothesis_id: String,
     pub dataset_id: String,
-    pub source_tree: String,
+    pub dataset_source_tree: String,
+    pub replay_source_tree: String,
     pub status: ReplayStatus,
     pub evidence_class: ReplayEvidenceClass,
     pub blocker: Option<&'static str>,
@@ -301,7 +307,8 @@ struct ExperimentResultIdentity<'a> {
     experiment_spec_id: &'a str,
     hypothesis_id: &'a str,
     dataset_id: &'a str,
-    source_tree: &'a str,
+    dataset_source_tree: &'a str,
+    replay_source_tree: &'a str,
     status: ReplayStatus,
     evidence_class: ReplayEvidenceClass,
     blocker: &'a Option<&'static str>,
@@ -772,7 +779,8 @@ fn terminal_result(
         experiment_spec_id: &spec.experiment_spec_id,
         hypothesis_id: &spec.hypothesis_id,
         dataset_id: &dataset.dataset_id,
-        source_tree: &dataset.source_tree,
+        dataset_source_tree: &dataset.source_tree,
+        replay_source_tree: &spec.replay_source_tree,
         status,
         evidence_class,
         blocker: &blocker,
@@ -796,7 +804,8 @@ fn terminal_result(
         experiment_spec_id: spec.experiment_spec_id.clone(),
         hypothesis_id: spec.hypothesis_id.clone(),
         dataset_id: dataset.dataset_id.clone(),
-        source_tree: dataset.source_tree.clone(),
+        dataset_source_tree: dataset.source_tree.clone(),
+        replay_source_tree: spec.replay_source_tree.clone(),
         status,
         evidence_class,
         blocker,
