@@ -343,6 +343,29 @@ struct TerminalResultParts {
     funding_cost: Decimal,
 }
 
+pub fn build_baseline_hypothesis(
+    strategy: BaselineStrategyKind,
+) -> Result<Hypothesis, ResearchError> {
+    Hypothesis::build(
+        match strategy {
+            BaselineStrategyKind::NoTrade => "NO_TRADE null baseline",
+            BaselineStrategyKind::CloseMomentum => {
+                "1H completed-bar close momentum predicts the next one-hour price move"
+            }
+        },
+        match strategy {
+            BaselineStrategyKind::NoTrade => {
+                "any trade, fee, funding cashflow, or non-zero PnL falsifies the null accounting baseline"
+            }
+            BaselineStrategyKind::CloseMomentum => {
+                "replay records deterministic next-open decisions and net PnL without same-close execution"
+            }
+        },
+        strategy,
+        BASELINE_STRATEGY_VERSION_V1,
+    )
+}
+
 pub fn build_baseline_experiment(
     dataset: &ReplayDatasetArtifact,
     strategy: BaselineStrategyKind,
@@ -376,24 +399,7 @@ pub fn build_baseline_experiment(
                 "replay_dataset.reference.settle_currency",
             ))?;
 
-    let hypothesis = Hypothesis::build(
-        match strategy {
-            BaselineStrategyKind::NoTrade => "NO_TRADE null baseline",
-            BaselineStrategyKind::CloseMomentum => {
-                "1H completed-bar close momentum predicts the next one-hour price move"
-            }
-        },
-        match strategy {
-            BaselineStrategyKind::NoTrade => {
-                "any trade, fee, funding cashflow, or non-zero PnL falsifies the null accounting baseline"
-            }
-            BaselineStrategyKind::CloseMomentum => {
-                "replay records deterministic next-open decisions and net PnL without same-close execution"
-            }
-        },
-        strategy,
-        BASELINE_STRATEGY_VERSION_V1,
-    )?;
+    let hypothesis = build_baseline_hypothesis(strategy)?;
 
     let instrument = dataset.manifest.instrument_id.clone();
     let mandate = TradingMandate {
