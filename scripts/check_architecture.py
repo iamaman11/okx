@@ -12,6 +12,7 @@ ALLOWED = {
     "okx-observation": {"okx-api"},
     "okx-runtime": {"okx-api", "okx-observation", "okx-ws"},
     "okx-analysis": {"okx-observation"},
+    "okx-research": {"okx-observation"},
     "okx-execution": {"okx-api", "okx-analysis", "okx-observation"},
     "okx-protocol": set(),
     "okx-github": set(),
