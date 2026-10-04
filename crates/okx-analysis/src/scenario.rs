@@ -179,13 +179,13 @@ pub fn analyze_position_scenario_values(
     if mechanics.settle_currency.trim().is_empty() {
         return Err(AnalysisError::MissingSettlementCurrency);
     }
-    if contract_value_currency.trim().is_empty() {
+    if mechanics.contract_value_currency.trim().is_empty() {
         return Err(AnalysisError::MissingContractValueCurrency);
     }
-    let contract_value = positive_decimal("contract_value", &contract_value)?;
-    let tick_size = positive_decimal("tick_size", &tick_size)?;
-    let entry_fee_rate = decimal("entry_fee_rate", &entry_fee_rate)?;
-    let exit_fee_rate = decimal("exit_fee_rate", &exit_fee_rate)?;
+    let contract_value = positive_decimal("contract_value", &mechanics.contract_value)?;
+    let tick_size = positive_decimal("tick_size", &mechanics.tick_size)?;
+    let entry_fee_rate = decimal("entry_fee_rate", &mechanics.entry_fee_rate)?;
+    let exit_fee_rate = decimal("exit_fee_rate", &mechanics.exit_fee_rate)?;
 
     let contracts = positive_decimal("contracts", &assumptions.contracts)?;
     let entry_price = positive_decimal("entry_price", &assumptions.entry_price)?;
