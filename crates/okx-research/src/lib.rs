@@ -699,12 +699,12 @@ pub fn detect_fixed_interval_gaps(
 
     let mut gaps = Vec::new();
     for pair in times.windows(2) {
-        let expected_next = pair[0]
-            .checked_add(expected_interval_ms)
-            .ok_or_else(|| ResearchError::InvalidTimestamp {
+        let expected_next = pair[0].checked_add(expected_interval_ms).ok_or_else(|| {
+            ResearchError::InvalidTimestamp {
                 field: "expected_next_event_time_ms",
                 value: pair[0].to_string(),
-            })?;
+            }
+        })?;
         if pair[1] > expected_next {
             gaps.push(DataGap {
                 begin_ms: expected_next.to_string(),
@@ -743,9 +743,7 @@ fn publish_atomic_verified(path: &Path, bytes: &[u8]) -> Result<(), ResearchErro
         return Err(ResearchError::ArtifactIdentityMismatch);
     }
 
-    let parent = path
-        .parent()
-        .ok_or(ResearchError::InvalidArtifactId)?;
+    let parent = path.parent().ok_or(ResearchError::InvalidArtifactId)?;
     fs::create_dir_all(parent)?;
     let temp = path.with_extension(format!("tmp-{}", std::process::id()));
     if temp.exists() {
@@ -1661,10 +1659,8 @@ mod tests {
         static NEXT: AtomicU64 = AtomicU64::new(1);
 
         let suffix = NEXT.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "okx-research-test-{}-{suffix}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("okx-research-test-{}-{suffix}", std::process::id()));
         let store = ResearchArtifactStore::at(&root);
 
         let payload = serde_json::json!({"schema":"test/v1","value":"stable"});
@@ -1689,10 +1685,8 @@ mod tests {
 
     #[test]
     fn source_cache_rejects_identity_mismatch() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-research-source-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("okx-research-source-test-{}", std::process::id()));
         let store = ResearchArtifactStore::at(&root);
         let bytes = b"raw-okx-response";
         let id = sha256_bytes(bytes);
@@ -1706,5 +1700,4 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(root);
     }
-
 }
