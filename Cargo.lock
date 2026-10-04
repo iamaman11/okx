@@ -1576,6 +1576,7 @@ dependencies = [
 name = "okx-research"
 version = "0.1.0"
 dependencies = [
+ "okx-analysis",
  "okx-observation",
  "serde",
  "serde_json",
