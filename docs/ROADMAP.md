@@ -313,19 +313,32 @@ Canonical Stage-3 execution order — exactly four large slices:
    - chronological train/validation/untouched final OOS;
    - walk-forward;
    - purge/embargo only where overlapping horizons require it;
-   - physically sealed final-holdout consumption lineage;
+   - physically sealed/consumed final-holdout lineage;
    - immutable research-family lineage for human/ChatGPT/sweep trials;
    - sample/evidence adequacy;
-   - cost/capacity/parameter sensitivity and regime breakdown;
+   - cost/capacity and applicable parameter sensitivity plus regime breakdown;
    - immutable negative-trial retention;
-   - DSR by default where applicable; PBO/CSCV only where candidate-family/sample assumptions are satisfied;
+   - DSR only where its Sharpe-like selection assumptions and sample/trial inputs are satisfied; PBO/CSCV only where a genuine comparable candidate family and valid block structure exist; unsupported diagnostics are `NOT_APPLICABLE`;
    - immutable promotion + demotion/invalidation criteria and `PromotionBundle`.
-   - **T1:** split/walk-forward/purge/embargo/DSR/PBO/overfit/all-trials/sample-adequacy/sealed-holdout fixtures.
-   - **T2:** same immutable experiment family -> same validation decision; negative trials stay queryable; prior lineage cannot be rewritten.
-   - **T3:** promotion bundle binds all exact hashes/versions/criteria.
-   - **T4:** primary MCP returns one compact `REJECT | BACKTESTED | INSUFFICIENT_DATA` decision with OOS/walk-forward/cost/anti-overfit evidence.
-   - **T5:** deliberate overfit/corruption/missing applicable anti-overfit evidence blocks promotion.
-   - Exit: `BACKTESTED` requires predeclared reproducible scientific evidence.
+
+   **3C v1 implementation contract (preflight 2026-10-04):**
+   - 3C adds **no new crate, long-lived task, state owner, DB, scheduler/poll loop, transport, mutation authority or MCP tool**. Default dependency delta is zero.
+   - Current Stage-3A primary acquisition is latest-page bounded (<=100 1H candles), which is adequate for 3A/3B proof but not scientific train/validation/OOS. 3C first wires bounded exact-range/multi-page acquisition through the **existing** cursor-capable OKX history adapters and the existing immutable `ResearchCheckpoint` chain; it must not create a second collector/job engine.
+   - A frozen `ValidationSpec` binds the parent dataset, exact chronological split/fold boundaries, applicable purge/embargo, evidence-adequacy policy, diagnostics/applicability rules, cost/capacity sensitivity grid, regime definitions and promotion/invalidation criteria **before** final holdout consumption. This artifact is the holdout seal; no separate mutable holdout service exists.
+   - Validation derives immutable time-slice replay artifacts from the parent dataset and reuses the accepted Stage-3B replay kernel unchanged. Split/OOS semantics must not create a second replay implementation or duplicate strategy/risk/accounting formulas.
+   - `ResearchFamily` is an immutable/versioned manifest over already executed trial artifacts (including negative/failed human, ChatGPT and bounded sweep variants). 3C v1 does **not** add an autonomous optimizer, sweep scheduler or background search engine.
+   - `okx-analysis` owns pure validation/statistical math and strategy research metadata (lookback/forward holding horizon/applicable parameter surface); `okx-research` owns family/split/holdout/validation/promotion orchestration; `okx-agent` remains load/invoke/project only; Cloudflare remains validation/bounds/thin mapping only.
+   - Statistical outputs that participate in artifact identity use explicit algorithm versions and canonical bounded precision with cross-platform golden vectors. Do not add a statistics dependency unless a reproduced formula/portability gap proves it necessary.
+   - Promotion decision is exactly `REJECT | BACKTESTED | INSUFFICIENT_DATA | INSUFFICIENT_EVIDENCE`. `NOT_APPLICABLE` belongs to individual diagnostics, not the terminal promotion state.
+   - Real T4 is not required to manufacture a `BACKTESTED` result. If the real family/sample is inadequate, `INSUFFICIENT_EVIDENCE` is the scientifically correct PASS behavior.
+   - Normal MCP output remains one self-contained decision packet <=12,288 bytes; folds/trials/raw series stay in immutable local evidence and are referenced by ids.
+
+   - **T1:** exact split-boundary/future-poison fixtures; derived-slice identity; walk-forward ordering; strategy-metadata-driven purge/embargo; sealed-holdout and descendant `POST_SELECTION` rules; family all-trials/negative-trials lineage; sample-adequacy verdicts; cost monotonicity; parameter-sensitivity `NOT_APPLICABLE` for a parameterless strategy; DSR reference vectors and PBO/CSCV small-matrix reference vectors only under applicable assumptions; deliberately overfit synthetic family cannot promote; all deterministic outputs match on Linux/Windows golden fixtures.
+   - **T2:** bounded multi-page acquisition -> immutable checkpoint -> restart/resume -> identical terminal parent dataset; same immutable family/spec -> identical validation decision; negative trials remain queryable; lineage cannot be rewritten; validation work does not create a second market/reference owner or starve existing runtime/control paths.
+   - **T3:** `ValidationSpec`, family/result and `PromotionBundle` bind exact parent/slice artifact ids, source trees, strategy/analysis/replay algorithm versions, mandate/risk/cost versions, statistical algorithm versions, criteria and holdout-consumption lineage.
+   - **T4:** primary MCP performs bounded continuation to prepare/inspect one sufficiently long real Tier-A parent dataset, evaluates one real Stage-3 family through the existing `research` tool, and returns one compact `REJECT | BACKTESTED | INSUFFICIENT_DATA | INSUFFICIENT_EVIDENCE` decision with OOS/walk-forward/cost/applicable anti-overfit evidence; no bulk folds/traces.
+   - **T5:** future-partition poison; deliberately overfit family; missing/corrupt parent/slice/trial artifacts; reused final holdout after candidate change; missing **applicable** anti-overfit evidence; invalid family rewrite; and any attempt to reach exchange mutation all fail closed.
+   - Exit: `BACKTESTED` requires a frozen reproducible validation spec and sufficient predeclared scientific evidence; otherwise the typed non-promotion state is preserved.
 
 4. **3D Paper/Shadow + Product UX + final Stage-3 acceptance**
    - states `RESEARCH -> BACKTESTED -> PAPER -> SHADOW`, with explicit operator authorization for positive promotion;
