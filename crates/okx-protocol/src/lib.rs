@@ -14,7 +14,7 @@ pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
 pub const DIRECT_TRANSPORT_FRAME_SCHEMA_V1: &str = "okx.direct-transport.frame/v1";
 pub const DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.2";
-pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-05.4";
+pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-05.5";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -464,6 +464,15 @@ pub enum ResearchRequest {
         validation_candle_count: u16,
         final_oos_candle_count: u16,
     },
+    EvaluateValidationEvidence {
+        catalog_version: String,
+        instrument: String,
+        validation_spec_artifact_id: String,
+        train_replay_dataset_artifact_id: String,
+        train_experiment_result_artifact_id: String,
+        validation_replay_dataset_artifact_id: String,
+        validation_experiment_result_artifact_id: String,
+    },
 }
 
 impl ResearchRequest {
@@ -611,6 +620,47 @@ impl ResearchRequest {
                     return Err(ProtocolError::InvalidResearchRequest(
                         "validation split total candles",
                     ));
+                }
+                Ok(())
+            }
+            Self::EvaluateValidationEvidence {
+                catalog_version,
+                instrument,
+                validation_spec_artifact_id,
+                train_replay_dataset_artifact_id,
+                train_experiment_result_artifact_id,
+                validation_replay_dataset_artifact_id,
+                validation_experiment_result_artifact_id,
+            } => {
+                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
+                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
+                }
+                validate_instrument(instrument)?;
+                if instrument != "BTC-USDT-SWAP" {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "Stage 3C v1 validation instrument scope",
+                    ));
+                }
+                for (artifact_id, field) in [
+                    (validation_spec_artifact_id, "validation_spec_artifact_id"),
+                    (
+                        train_replay_dataset_artifact_id,
+                        "train_replay_dataset_artifact_id",
+                    ),
+                    (
+                        train_experiment_result_artifact_id,
+                        "train_experiment_result_artifact_id",
+                    ),
+                    (
+                        validation_replay_dataset_artifact_id,
+                        "validation_replay_dataset_artifact_id",
+                    ),
+                    (
+                        validation_experiment_result_artifact_id,
+                        "validation_experiment_result_artifact_id",
+                    ),
+                ] {
+                    validate_sha256_artifact_id(artifact_id, field)?;
                 }
                 Ok(())
             }
@@ -1878,6 +1928,37 @@ mod tests {
             invalid_split_total.validate(),
             Err(ProtocolError::InvalidResearchRequest(
                 "validation split total candles"
+            ))
+        ));
+
+        let validation_evidence = ResearchRequest::EvaluateValidationEvidence {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            validation_spec_artifact_id:
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            train_replay_dataset_artifact_id:
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
+            train_experiment_result_artifact_id:
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333".to_owned(),
+            validation_replay_dataset_artifact_id:
+                "sha256:4444444444444444444444444444444444444444444444444444444444444444".to_owned(),
+            validation_experiment_result_artifact_id:
+                "sha256:5555555555555555555555555555555555555555555555555555555555555555".to_owned(),
+        };
+        assert_eq!(validation_evidence.validate(), Ok(()));
+
+        let mut invalid_validation_evidence = validation_evidence;
+        if let ResearchRequest::EvaluateValidationEvidence {
+            validation_experiment_result_artifact_id,
+            ..
+        } = &mut invalid_validation_evidence
+        {
+            *validation_experiment_result_artifact_id = "bad".to_owned();
+        }
+        assert!(matches!(
+            invalid_validation_evidence.validate(),
+            Err(ProtocolError::InvalidResearchRequest(
+                "validation_experiment_result_artifact_id"
             ))
         ));
     }

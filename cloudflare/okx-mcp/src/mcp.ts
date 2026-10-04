@@ -289,8 +289,8 @@ export const mcpApi = {
                 request: {
                   type: "object",
                   properties: {
-                    action: { type: "string", enum: ["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split"] },
-                    catalog_version: { type: "string", const: "okx.research.catalog/2026-10-05.4" },
+                    action: { type: "string", enum: ["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split", "evaluate_validation_evidence"] },
+                    catalog_version: { type: "string", const: "okx.research.catalog/2026-10-05.5" },
                     instrument: {
                       type: "string",
                       enum: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
@@ -320,6 +320,26 @@ export const mcpApi = {
                     train_candle_count: { type: "integer", minimum: 4, maximum: 2400 },
                     validation_candle_count: { type: "integer", minimum: 4, maximum: 2400 },
                     final_oos_candle_count: { type: "integer", minimum: 4, maximum: 2400 },
+                    validation_spec_artifact_id: {
+                      type: "string",
+                      pattern: "^sha256:[0-9a-f]{64}$",
+                    },
+                    train_replay_dataset_artifact_id: {
+                      type: "string",
+                      pattern: "^sha256:[0-9a-f]{64}$",
+                    },
+                    train_experiment_result_artifact_id: {
+                      type: "string",
+                      pattern: "^sha256:[0-9a-f]{64}$",
+                    },
+                    validation_replay_dataset_artifact_id: {
+                      type: "string",
+                      pattern: "^sha256:[0-9a-f]{64}$",
+                    },
+                    validation_experiment_result_artifact_id: {
+                      type: "string",
+                      pattern: "^sha256:[0-9a-f]{64}$",
+                    },
                   },
                   required: ["action", "catalog_version", "instrument"],
                   additionalProperties: false,
@@ -631,14 +651,19 @@ export const mcpApi = {
             "train_candle_count",
             "validation_candle_count",
             "final_oos_candle_count",
+            "validation_spec_artifact_id",
+            "train_replay_dataset_artifact_id",
+            "train_experiment_result_artifact_id",
+            "validation_replay_dataset_artifact_id",
+            "validation_experiment_result_artifact_id",
           ])
         ) {
           return jsonRpcError(id, -32602, "unsupported research request field");
         }
-        if (!["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split"].includes(String(research.action))) {
+        if (!["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split", "evaluate_validation_evidence"].includes(String(research.action))) {
           return jsonRpcError(id, -32602, "invalid research action");
         }
-        if (research.catalog_version !== "okx.research.catalog/2026-10-05.4") {
+        if (research.catalog_version !== "okx.research.catalog/2026-10-05.5") {
           return jsonRpcError(id, -32602, "invalid research catalog_version");
         }
         const instrument = normalizeInstrument(research.instrument);
@@ -661,6 +686,11 @@ export const mcpApi = {
             research.train_candle_count !== undefined ||
             research.validation_candle_count !== undefined ||
             research.final_oos_candle_count !== undefined ||
+            research.validation_spec_artifact_id !== undefined ||
+            research.train_replay_dataset_artifact_id !== undefined ||
+            research.train_experiment_result_artifact_id !== undefined ||
+            research.validation_replay_dataset_artifact_id !== undefined ||
+            research.validation_experiment_result_artifact_id !== undefined ||
             research.bar !== "1H" ||
             !Number.isInteger(research.candle_limit) ||
             Number(research.candle_limit) < 2 ||
@@ -704,6 +734,11 @@ export const mcpApi = {
             research.train_candle_count !== undefined ||
             research.validation_candle_count !== undefined ||
             research.final_oos_candle_count !== undefined ||
+            research.validation_spec_artifact_id !== undefined ||
+            research.train_replay_dataset_artifact_id !== undefined ||
+            research.train_experiment_result_artifact_id !== undefined ||
+            research.validation_replay_dataset_artifact_id !== undefined ||
+            research.validation_experiment_result_artifact_id !== undefined ||
             !Number.isInteger(research.trade_limit) ||
             Number(research.trade_limit) < 2 ||
             Number(research.trade_limit) > 100
@@ -740,6 +775,11 @@ export const mcpApi = {
             research.train_candle_count !== undefined ||
             research.validation_candle_count !== undefined ||
             research.final_oos_candle_count !== undefined ||
+            research.validation_spec_artifact_id !== undefined ||
+            research.train_replay_dataset_artifact_id !== undefined ||
+            research.train_experiment_result_artifact_id !== undefined ||
+            research.validation_replay_dataset_artifact_id !== undefined ||
+            research.validation_experiment_result_artifact_id !== undefined ||
             !Number.isInteger(research.target_candle_count) ||
             Number(research.target_candle_count) < 240 ||
             Number(research.target_candle_count) > 2400 ||
@@ -790,7 +830,12 @@ export const mcpApi = {
               (value) => !Number.isInteger(value) || Number(value) < 4 || Number(value) > 2400,
             ) ||
             splitCounts.reduce((sum, value) => sum + Number(value), 0) < 240 ||
-            splitCounts.reduce((sum, value) => sum + Number(value), 0) > 2400
+            splitCounts.reduce((sum, value) => sum + Number(value), 0) > 2400 ||
+            research.validation_spec_artifact_id !== undefined ||
+            research.train_replay_dataset_artifact_id !== undefined ||
+            research.train_experiment_result_artifact_id !== undefined ||
+            research.validation_replay_dataset_artifact_id !== undefined ||
+            research.validation_experiment_result_artifact_id !== undefined
           ) {
             return jsonRpcError(id, -32602, "invalid Stage-3C validation split request");
           }
@@ -814,6 +859,56 @@ export const mcpApi = {
           return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
         }
 
+        if (research.action === "evaluate_validation_evidence") {
+          const artifactFields = [
+            research.validation_spec_artifact_id,
+            research.train_replay_dataset_artifact_id,
+            research.train_experiment_result_artifact_id,
+            research.validation_replay_dataset_artifact_id,
+            research.validation_experiment_result_artifact_id,
+          ];
+          if (
+            instrument !== "BTC-USDT-SWAP" ||
+            research.bar !== undefined ||
+            research.candle_limit !== undefined ||
+            research.funding_limit !== undefined ||
+            research.trade_limit !== undefined ||
+            research.replay_dataset_artifact_id !== undefined ||
+            research.strategy !== undefined ||
+            research.mechanics_provenance !== undefined ||
+            research.target_candle_count !== undefined ||
+            research.checkpoint_artifact_id !== undefined ||
+            research.parent_replay_dataset_artifact_id !== undefined ||
+            research.train_candle_count !== undefined ||
+            research.validation_candle_count !== undefined ||
+            research.final_oos_candle_count !== undefined ||
+            artifactFields.some(
+              (value) => typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value),
+            )
+          ) {
+            return jsonRpcError(id, -32602, "invalid Stage-3C validation evidence request");
+          }
+          const agentRequest = {
+            schema: "okx.agent.request/v1",
+            request_id: requestId(),
+            operation: {
+              type: "research",
+              request: {
+                action: "evaluate_validation_evidence",
+                catalog_version: research.catalog_version,
+                instrument,
+                validation_spec_artifact_id: research.validation_spec_artifact_id,
+                train_replay_dataset_artifact_id: research.train_replay_dataset_artifact_id,
+                train_experiment_result_artifact_id: research.train_experiment_result_artifact_id,
+                validation_replay_dataset_artifact_id: research.validation_replay_dataset_artifact_id,
+                validation_experiment_result_artifact_id:
+                  research.validation_experiment_result_artifact_id,
+              },
+            },
+          };
+          return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+        }
+
         if (
           instrument !== "BTC-USDT-SWAP" ||
           research.bar !== undefined ||
@@ -826,6 +921,11 @@ export const mcpApi = {
           research.train_candle_count !== undefined ||
           research.validation_candle_count !== undefined ||
           research.final_oos_candle_count !== undefined ||
+          research.validation_spec_artifact_id !== undefined ||
+          research.train_replay_dataset_artifact_id !== undefined ||
+          research.train_experiment_result_artifact_id !== undefined ||
+          research.validation_replay_dataset_artifact_id !== undefined ||
+          research.validation_experiment_result_artifact_id !== undefined ||
           typeof research.replay_dataset_artifact_id !== "string" ||
           !/^sha256:[0-9a-f]{64}$/.test(research.replay_dataset_artifact_id) ||
           !["no_trade", "close_momentum"].includes(String(research.strategy)) ||

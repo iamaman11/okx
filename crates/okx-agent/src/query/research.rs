@@ -57,6 +57,8 @@ struct ResearchCapabilitiesResult {
     validation_split_strategies: [&'static str; 2],
     validation_final_oos_sealed: bool,
     validation_final_oos_consumed_by_split: bool,
+    validation_pre_holdout_evidence: bool,
+    validation_pre_holdout_reads_final_oos: bool,
     normal_result_target_bytes: u64,
     source_tree: &'static str,
     source_tree_bound: bool,
@@ -266,6 +268,28 @@ pub(crate) async fn dispatch(
             *validation_candle_count,
             *final_oos_candle_count,
         ),
+        AgentOperation::Research {
+            request:
+                ResearchRequest::EvaluateValidationEvidence {
+                    catalog_version: _,
+                    instrument,
+                    validation_spec_artifact_id,
+                    train_replay_dataset_artifact_id,
+                    train_experiment_result_artifact_id,
+                    validation_replay_dataset_artifact_id,
+                    validation_experiment_result_artifact_id,
+                },
+        } => super::research_validation_evidence::evaluate_validation_evidence(
+            request,
+            context,
+            generated_at,
+            instrument,
+            validation_spec_artifact_id,
+            train_replay_dataset_artifact_id,
+            train_experiment_result_artifact_id,
+            validation_replay_dataset_artifact_id,
+            validation_experiment_result_artifact_id,
+        ),
         _ => Ok(unavailable(request, generated_at)),
     }
 }
@@ -274,7 +298,7 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
     let result = ResearchCapabilitiesResult {
         schema: RESEARCH_CAPABILITIES_SCHEMA_V1,
         catalog_version: RESEARCH_CATALOG_VERSION_V1,
-        stage: "3C_V1_SPLIT",
+        stage: "3C_V1_EVIDENCE",
         tier_a_instruments: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
         tier_a_bars: ["1H"],
         tier_b_instruments: ["BTC-USDT-SWAP"],
@@ -295,6 +319,8 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
         validation_split_strategies: ["no_trade", "close_momentum"],
         validation_final_oos_sealed: true,
         validation_final_oos_consumed_by_split: false,
+        validation_pre_holdout_evidence: true,
+        validation_pre_holdout_reads_final_oos: false,
         normal_result_target_bytes: NORMAL_RESULT_TARGET_BYTES,
         source_tree: BUILD_SOURCE_TREE,
         source_tree_bound: BUILD_SOURCE_TREE != "UNAVAILABLE",

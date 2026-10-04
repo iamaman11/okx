@@ -7,6 +7,7 @@ mod risk;
 mod scenario;
 mod statistics;
 mod strategy;
+mod validation;
 
 pub use candidate::{
     CANDIDATE_ORDER_ANALYSIS_SCHEMA_V1, CandidateOrderAnalysis, CandidateOrderAssumptions,
@@ -65,6 +66,12 @@ pub use strategy::{
     BASELINE_STRATEGY_VERSION_V1, BarDecisionInput, BaselineStrategyKind,
     STRATEGY_RESEARCH_METADATA_VERSION_V1, StrategyDecision, StrategyParameterSurface,
     StrategyResearchMetadata, baseline_strategy_research_metadata, evaluate_baseline_strategy,
+};
+pub use validation::{
+    VALIDATION_COST_STRESS_ALGORITHM_V1, VALIDATION_COST_STRESS_SCHEMA_V1,
+    VALIDATION_SAMPLE_STATISTICS_SCHEMA_V1, VALIDATION_STATISTICS_ALGORITHM_V1,
+    ValidationCostStress, ValidationCostStressPoint, ValidationSampleStatistics,
+    analyze_validation_cost_stress, analyze_validation_pnl_samples,
 };
 
 use std::str::FromStr;
