@@ -1,6 +1,6 @@
 use okx_observation::{FeeScheduleSnapshot, InstrumentRulesSnapshot, MarketHistorySnapshot};
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::candidate::{
     ceil_to_increment, fee_rate, floor_to_increment, gross_pnl, target_price_for_net_pnl,
@@ -96,13 +96,15 @@ pub struct HistoryBehaviorAnalysis {
     pub confirmed_high_low_range_ratio: String,
 }
 
-struct ScenarioMechanics {
-    settle_currency: String,
-    contract_value_currency: String,
-    contract_value: Decimal,
-    tick_size: Decimal,
-    entry_fee_rate: Decimal,
-    exit_fee_rate: Decimal,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PositionScenarioMechanics {
+    pub settle_currency: String,
+    pub contract_value_currency: String,
+    pub contract_value: String,
+    pub tick_size: String,
+    pub entry_fee_rate: String,
+    pub exit_fee_rate: String,
 }
 
 pub fn analyze_position_scenario(
@@ -151,29 +153,40 @@ pub fn analyze_position_scenario(
     let entry_fee_rate = fee_rate(fees, assumptions.entry_liquidity_role)?;
     let exit_fee_rate = fee_rate(fees, assumptions.exit_liquidity_role)?;
 
-    analyze_position_values(
+    analyze_position_scenario_values(
         &instrument.instrument_id,
         &rules.reference_generation,
         &fees.fee_generation,
-        &ScenarioMechanics {
+        &PositionScenarioMechanics {
             settle_currency,
             contract_value_currency,
-            contract_value,
-            tick_size,
-            entry_fee_rate,
-            exit_fee_rate,
+            contract_value: contract_value.normalize().to_string(),
+            tick_size: tick_size.normalize().to_string(),
+            entry_fee_rate: entry_fee_rate.normalize().to_string(),
+            exit_fee_rate: exit_fee_rate.normalize().to_string(),
         },
         assumptions,
     )
 }
 
-fn analyze_position_values(
+pub fn analyze_position_scenario_values(
     instrument_id: &str,
     reference_generation: &str,
     fee_generation: &str,
-    mechanics: &ScenarioMechanics,
+    mechanics: &PositionScenarioMechanics,
     assumptions: &PositionScenarioAssumptions,
 ) -> Result<PositionScenarioAnalysis, AnalysisError> {
+    if mechanics.settle_currency.trim().is_empty() {
+        return Err(AnalysisError::MissingSettlementCurrency);
+    }
+    if contract_value_currency.trim().is_empty() {
+        return Err(AnalysisError::MissingContractValueCurrency);
+    }
+    let contract_value = positive_decimal("contract_value", &contract_value)?;
+    let tick_size = positive_decimal("tick_size", &tick_size)?;
+    let entry_fee_rate = decimal("entry_fee_rate", &entry_fee_rate)?;
+    let exit_fee_rate = decimal("exit_fee_rate", &exit_fee_rate)?;
+
     let contracts = positive_decimal("contracts", &assumptions.contracts)?;
     let entry_price = positive_decimal("entry_price", &assumptions.entry_price)?;
 
@@ -200,11 +213,11 @@ fn analyze_position_values(
         }
     };
 
-    let base_quantity = contracts * mechanics.contract_value;
+    let base_quantity = contracts * contract_value;
     let entry_notional = base_quantity * entry_price;
     let exit_notional = base_quantity * exit_price;
-    let entry_cost = user_trading_cost(entry_notional, mechanics.entry_fee_rate);
-    let exit_cost = user_trading_cost(exit_notional, mechanics.exit_fee_rate);
+    let entry_cost = user_trading_cost(entry_notional, entry_fee_rate);
+    let exit_cost = user_trading_cost(exit_notional, exit_fee_rate);
     let gross = gross_pnl(
         assumptions.direction,
         base_quantity,
@@ -217,15 +230,15 @@ fn analyze_position_values(
 
     let raw_break_even = target_price_for_net_pnl(
         assumptions.direction,
-        mechanics.contract_value,
+        contract_value,
         entry_price,
-        mechanics.entry_fee_rate,
-        mechanics.exit_fee_rate,
+        entry_fee_rate,
+        exit_fee_rate,
         Decimal::ZERO,
     )?;
     let tick_break_even = match assumptions.direction {
-        PositionDirection::Long => ceil_to_increment(raw_break_even, mechanics.tick_size),
-        PositionDirection::Short => floor_to_increment(raw_break_even, mechanics.tick_size),
+        PositionDirection::Long => ceil_to_increment(raw_break_even, tick_size),
+        PositionDirection::Short => floor_to_increment(raw_break_even, tick_size),
     };
     if tick_break_even <= Decimal::ZERO {
         return Err(AnalysisError::InvalidTargetPrice(instrument_id.to_owned()));
@@ -237,21 +250,21 @@ fn analyze_position_values(
         reference_generation: reference_generation.to_owned(),
         fee_generation: fee_generation.to_owned(),
         settle_currency: mechanics.settle_currency.clone(),
-        contract_value_currency: mechanics.contract_value_currency.clone(),
+        contract_value_currency: contract_value_currency.clone(),
         direction: assumptions.direction,
         contracts: contracts.normalize().to_string(),
-        contract_value: mechanics.contract_value.normalize().to_string(),
+        contract_value: contract_value.normalize().to_string(),
         base_quantity: base_quantity.normalize().to_string(),
         entry_price: entry_price.normalize().to_string(),
         scenario_price_source: price_source,
         requested_move_ratio,
         exit_price: exit_price.normalize().to_string(),
-        exit_price_tick_aligned: exit_price % mechanics.tick_size == Decimal::ZERO,
+        exit_price_tick_aligned: exit_price % tick_size == Decimal::ZERO,
         price_move_ratio: move_ratio.normalize().to_string(),
         entry_liquidity_role: assumptions.entry_liquidity_role,
         exit_liquidity_role: assumptions.exit_liquidity_role,
-        entry_exchange_fee_rate: mechanics.entry_fee_rate.normalize().to_string(),
-        exit_exchange_fee_rate: mechanics.exit_fee_rate.normalize().to_string(),
+        entry_exchange_fee_rate: entry_fee_rate.normalize().to_string(),
+        exit_exchange_fee_rate: exit_fee_rate.normalize().to_string(),
         entry_settle_notional: entry_notional.normalize().to_string(),
         exit_settle_notional: exit_notional.normalize().to_string(),
         entry_trading_cost_settle: entry_cost.normalize().to_string(),
