@@ -60,6 +60,9 @@ pub enum MarketBootstrapError {
 
     #[error("market history normalization error: {0}")]
     HistoryNormalize(#[from] MarketHistoryError),
+
+    #[error("reference normalization error: {0}")]
+    ReferenceNormalize(#[from] ReferenceError),
 }
 
 impl MarketBootstrapper {
