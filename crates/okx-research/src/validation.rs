@@ -562,6 +562,63 @@ mod tests {
         ResearchRange::new(begin.to_string(), end.to_string()).expect("range")
     }
 
+    fn temp_store() -> (std::path::PathBuf, ResearchArtifactStore) {
+        let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "okx-validation-split-test-{}-{id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        (root.clone(), ResearchArtifactStore::at(root.join("research")))
+    }
+
+    fn parent_dataset(final_oos_poison: Option<&str>) -> ReplayDatasetArtifact {
+        let candles = (0..20)
+            .map(|index| {
+                let open = index * HOUR_MS;
+                let close = if index == 19 {
+                    final_oos_poison.unwrap_or("119").to_owned()
+                } else {
+                    (100 + index).to_string()
+                };
+                ResearchCandle {
+                    schema: RESEARCH_CANDLE_SCHEMA_V1.to_owned(),
+                    open_time_ms: open.to_string(),
+                    available_time_ms: (open + HOUR_MS).to_string(),
+                    open: close.clone(),
+                    high: close.clone(),
+                    low: close.clone(),
+                    close,
+                    volume: "1".to_owned(),
+                    volume_currency: "1".to_owned(),
+                    volume_quote: Some("1".to_owned()),
+                }
+            })
+            .collect::<Vec<_>>();
+        ReplayDatasetArtifact::build(
+            crate::DatasetManifest {
+                schema: DATASET_MANIFEST_SCHEMA_V1.to_owned(),
+                dataset_id: id('a'),
+                tier: ResearchTier::TierA,
+                instrument_id: "BTC-USDT-SWAP".to_owned(),
+                bar: Some("1H".to_owned()),
+                range: range(0, 20 * HOUR_MS),
+                reference_coverage: ReferenceCoverageStatus::InsufficientReferenceHistory,
+                reference_window: None,
+                chunk_ids: vec![id('b')],
+                gaps: Vec::new(),
+                parser_version: "parser/v1".to_owned(),
+                normalization_version: "normalizer/v1".to_owned(),
+                source_tree: "0123456789abcdef".to_owned(),
+                created_at_ms: "1700000000000".to_owned(),
+            },
+            candles,
+            Vec::new(),
+            None,
+        )
+        .expect("parent dataset")
+    }
+
     #[test]
     fn validation_spec_is_frozen_and_strategy_metadata_drives_purge() {
         let spec = ValidationSpec::build(
