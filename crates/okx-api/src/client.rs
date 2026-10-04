@@ -41,6 +41,12 @@ fn build_http_client() -> Result<Client, reqwest::Error> {
         .build()
 }
 
+#[derive(Debug, Clone)]
+pub struct CapturedPublicRows<T> {
+    pub rows: Vec<T>,
+    pub raw_body: Vec<u8>,
+}
+
 #[derive(Clone)]
 pub struct OkxPublicClient {
     http: Client,
@@ -98,6 +104,39 @@ impl OkxPublicClient {
         }
 
         decode(request.send().await?, &self.rate_budget, &plan).await
+    }
+
+    pub(crate) async fn public_get_captured<T>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+    ) -> Result<CapturedPublicRows<T>, OkxError>
+    where
+        T: DeserializeOwned,
+    {
+        let plan = self.rate_budget.public_rest_plan(path, params);
+        admit(&self.rate_budget, &plan)?;
+
+        let request_path = request_path_with_query(path, params);
+        let url = format!("{}{}", self.environment.rest_base_url(), request_path);
+
+        let mut request = self.http.get(url).header("Accept", "application/json");
+        if self.environment.demo {
+            request = request.header("x-simulated-trading", "1");
+        }
+
+        let (envelope, raw_body) =
+            decode_envelope_captured(request.send().await?, &self.rate_budget, &plan).await?;
+        if envelope.code != "0" {
+            return Err(OkxError::Api {
+                code: envelope.code,
+                message: envelope.msg,
+            });
+        }
+        Ok(CapturedPublicRows {
+            rows: envelope.data,
+            raw_body,
+        })
     }
 }
 
@@ -357,6 +396,18 @@ async fn decode_envelope<T>(
 where
     T: DeserializeOwned,
 {
+    let (envelope, _) = decode_envelope_captured(response, rate_budget, plan).await?;
+    Ok(envelope)
+}
+
+async fn decode_envelope_captured<T>(
+    response: reqwest::Response,
+    rate_budget: &RateBudget,
+    plan: &RateRequestPlan,
+) -> Result<(ApiEnvelope<T>, Vec<u8>), OkxError>
+where
+    T: DeserializeOwned,
+{
     let server_retry_after_ms = retry_after_ms(&response);
 
     if response.status() == StatusCode::TOO_MANY_REQUESTS {
@@ -370,7 +421,8 @@ where
     }
 
     let response = response.error_for_status()?;
-    let envelope: ApiEnvelope<T> = response.json().await?;
+    let body = response.bytes().await?;
+    let envelope: ApiEnvelope<T> = serde_json::from_slice(&body)?;
 
     if matches!(
         envelope.code.as_str(),
@@ -383,7 +435,7 @@ where
         });
     }
 
-    Ok(envelope)
+    Ok((envelope, body.to_vec()))
 }
 
 fn throttle_code_from_http_429_body(body: &[u8]) -> String {
