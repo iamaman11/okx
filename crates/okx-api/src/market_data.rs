@@ -3,7 +3,11 @@ use serde::{
     de::{self, Deserializer},
 };
 
-use crate::{client::OkxPublicClient, error::OkxError, instrument::InstrumentType};
+use crate::{
+    client::{CapturedPublicRows, OkxPublicClient},
+    error::OkxError,
+    instrument::InstrumentType,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PublicTicker {
@@ -460,20 +464,36 @@ impl MarketDataApi {
         instrument_id: &str,
         limit: u16,
     ) -> Result<Vec<PublicFundingHistory>, OkxError> {
-        if !(1..=100).contains(&limit) {
+        Ok(self
+            .funding_rate_history_page_captured(instrument_id, None, None, limit)
+            .await?
+            .rows)
+    }
+
+    pub async fn funding_rate_history_page_captured(
+        &self,
+        instrument_id: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<CapturedPublicRows<PublicFundingHistory>, OkxError> {
+        if !(1..=400).contains(&limit) {
             return Err(OkxError::Response(
-                "funding history limit must be between 1 and 100".to_owned(),
+                "funding history limit must be between 1 and 400".to_owned(),
             ));
         }
 
+        let mut params = vec![("instId", instrument_id.to_owned())];
+        if let Some(after) = after.filter(|value| !value.trim().is_empty()) {
+            params.push(("after", after.to_owned()));
+        }
+        if let Some(before) = before.filter(|value| !value.trim().is_empty()) {
+            params.push(("before", before.to_owned()));
+        }
+        params.push(("limit", limit.to_string()));
+
         self.client
-            .public_get(
-                "/api/v5/public/funding-rate-history",
-                &[
-                    ("instId", instrument_id.to_owned()),
-                    ("limit", limit.to_string()),
-                ],
-            )
+            .public_get_captured("/api/v5/public/funding-rate-history", &params)
             .await
     }
 
@@ -483,21 +503,38 @@ impl MarketDataApi {
         bar: &str,
         limit: u16,
     ) -> Result<Vec<PublicCandle>, OkxError> {
+        Ok(self
+            .history_candles_page_captured(instrument_id, bar, None, None, limit)
+            .await?
+            .rows)
+    }
+
+    pub async fn history_candles_page_captured(
+        &self,
+        instrument_id: &str,
+        bar: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<CapturedPublicRows<PublicCandle>, OkxError> {
         if !(1..=100).contains(&limit) {
             return Err(OkxError::Response(
                 "history candle limit must be between 1 and 100".to_owned(),
             ));
         }
 
+        let mut params = vec![("instId", instrument_id.to_owned())];
+        if let Some(after) = after.filter(|value| !value.trim().is_empty()) {
+            params.push(("after", after.to_owned()));
+        }
+        if let Some(before) = before.filter(|value| !value.trim().is_empty()) {
+            params.push(("before", before.to_owned()));
+        }
+        params.push(("bar", bar.to_owned()));
+        params.push(("limit", limit.to_string()));
+
         self.client
-            .public_get(
-                "/api/v5/market/history-candles",
-                &[
-                    ("instId", instrument_id.to_owned()),
-                    ("bar", bar.to_owned()),
-                    ("limit", limit.to_string()),
-                ],
-            )
+            .public_get_captured("/api/v5/market/history-candles", &params)
             .await
     }
 }
@@ -515,6 +552,14 @@ fn one<T>(mut rows: Vec<T>, label: &'static str) -> Result<T, OkxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn historical_page_limits_match_current_okx_contract() {
+        assert!((1..=100).contains(&100_u16));
+        assert!(!(1..=100).contains(&101_u16));
+        assert!((1..=400).contains(&400_u16));
+        assert!(!(1..=400).contains(&401_u16));
+    }
 
     #[test]
     fn ticker_preserves_exchange_decimal_text_exactly() {
