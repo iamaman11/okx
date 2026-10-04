@@ -13,6 +13,7 @@ use serde::Serialize;
 
 use super::{
     MARKET_PUBLIC_API_UNAVAILABLE_CODE, ObservationQueryContext, failure_response, unavailable,
+    utc_now_ms,
 };
 use crate::{AgentResult, market_bootstrap::MarketBootstrapError};
 
