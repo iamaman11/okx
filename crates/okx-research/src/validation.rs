@@ -224,9 +224,7 @@ impl ValidationSliceManifest {
             "validation_slice.replay_dataset_artifact_id",
             &replay_dataset_artifact_id,
         )?;
-        if replay_dataset.manifest.dataset_id != replay_dataset.dataset_id()
-            || replay_dataset.manifest.range != range
-        {
+        if replay_dataset.manifest.range != range {
             return Err(ResearchError::ArtifactIdentityMismatch);
         }
         let validation_slice_id = canonical_sha256(&ValidationSliceIdentity {
