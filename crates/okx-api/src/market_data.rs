@@ -459,6 +459,36 @@ impl MarketDataApi {
             .await
     }
 
+    pub async fn history_trades_page_captured(
+        &self,
+        instrument_id: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<CapturedPublicRows<PublicTrade>, OkxError> {
+        if !(1..=100).contains(&limit) {
+            return Err(OkxError::Response(
+                "history trades limit must be between 1 and 100".to_owned(),
+            ));
+        }
+
+        let mut params = vec![
+            ("instId", instrument_id.to_owned()),
+            ("type", "1".to_owned()),
+        ];
+        if let Some(after) = after.filter(|value| !value.trim().is_empty()) {
+            params.push(("after", after.to_owned()));
+        }
+        if let Some(before) = before.filter(|value| !value.trim().is_empty()) {
+            params.push(("before", before.to_owned()));
+        }
+        params.push(("limit", limit.to_string()));
+
+        self.client
+            .public_get_captured("/api/v5/market/history-trades", &params)
+            .await
+    }
+
     pub async fn funding_rate_history(
         &self,
         instrument_id: &str,
