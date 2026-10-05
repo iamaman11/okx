@@ -632,6 +632,83 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn live_session_binding_requires_exact_promoted_spec_identity() {
+        let spec = spec();
+        let bundle = crate::PromotionBundle {
+            schema: crate::PROMOTION_BUNDLE_SCHEMA_V1.to_owned(),
+            promotion_bundle_id: "sha256:bundle".to_owned(),
+            algorithm_version: "promotion/v1".to_owned(),
+            decision: crate::ValidationFinalDecision::Backtested,
+            decision_blockers: Vec::new(),
+            promotion_criteria: crate::validation_promotion_criteria_v2(),
+            validation_spec_id: "sha256:validation".to_owned(),
+            validation_spec_artifact_id: "sha256:validation-artifact".to_owned(),
+            research_family_id: "sha256:family".to_owned(),
+            research_family_artifact_id: "sha256:family-artifact".to_owned(),
+            hypothesis_id: spec.hypothesis_id.clone(),
+            strategy: spec.strategy,
+            strategy_version: spec.strategy_version.clone(),
+            robustness_id: "sha256:robustness".to_owned(),
+            robustness_artifact_id: "sha256:robustness-artifact".to_owned(),
+            consumption_intent_id: "sha256:intent".to_owned(),
+            consumption_intent_artifact_id: "sha256:intent-artifact".to_owned(),
+            final_oos: crate::FinalOosEvidence {
+                replay_dataset_artifact_id: "sha256:dataset-artifact".to_owned(),
+                dataset_id: spec.dataset_id.clone(),
+                experiment_spec_artifact_id: "sha256:spec-artifact".to_owned(),
+                experiment_result_artifact_id: "sha256:result-artifact".to_owned(),
+                experiment_id: "sha256:experiment".to_owned(),
+                replay_source_tree: "promotion-tree".to_owned(),
+                status: "COMPLETED".to_owned(),
+                evidence_class: "COUNTERFACTUAL_MECHANICS".to_owned(),
+                candles_processed: 96,
+                trade_count: 40,
+                net_pnl_quote: "1".to_owned(),
+                statistics: None,
+                cost_stress: okx_analysis::ValidationCostStress {
+                    schema: "cost-stress/v1".to_owned(),
+                    algorithm_version: "cost/v1".to_owned(),
+                    points: vec![okx_analysis::ValidationCostStressPoint {
+                        trading_cost_multiplier: "1".to_owned(),
+                        stressed_net_pnl_quote: "1".to_owned(),
+                    }],
+                    monotonic_nonincreasing: true,
+                },
+            },
+            final_oos_status: "CONSUMED".to_owned(),
+            invalidation_conditions: Vec::new(),
+            source_tree: "promotion-tree".to_owned(),
+        };
+        let transition = crate::PromotionTransition {
+            schema: crate::PROMOTION_TRANSITION_SCHEMA_V1.to_owned(),
+            transition_id: "sha256:transition".to_owned(),
+            algorithm_version: crate::PROMOTION_TRANSITION_ALGORITHM_V1.to_owned(),
+            promotion_bundle_id: bundle.promotion_bundle_id.clone(),
+            promotion_bundle_artifact_id: "sha256:bundle-artifact".to_owned(),
+            hypothesis_id: bundle.hypothesis_id.clone(),
+            strategy: bundle.strategy,
+            strategy_version: bundle.strategy_version.clone(),
+            from: crate::ResearchPromotionState::Backtested,
+            to: crate::ResearchPromotionState::Paper,
+            previous_transition_artifact_id: None,
+            authorization_id: "operator".to_owned(),
+            authorization_statement: "paper".to_owned(),
+            promotion_source_tree: bundle.source_tree.clone(),
+            transition_source_tree: crate::BUILD_SOURCE_TREE.to_owned(),
+        };
+
+        validate_live_session_binding(&transition, &bundle, &spec).expect("exact binding");
+
+        let mut mismatched = spec.clone();
+        mismatched.strategy_version = "changed-after-promotion".to_owned();
+        assert!(matches!(
+            validate_live_session_binding(&transition, &bundle, &mismatched),
+            Err(ResearchError::ArtifactIdentityMismatch)
+        ));
+    }
+
     #[test]
     fn checkpoint_identity_is_deterministic() {
         let first = LiveResearchSessionCheckpoint::build(
