@@ -415,9 +415,7 @@ fn pre_holdout_promotion_blockers(
     if positive_folds < criteria.min_positive_walk_forward_folds {
         blockers.push("WALK_FORWARD_POSITIVE_FOLDS_BELOW_PROMOTION_MINIMUM".to_owned());
     }
-    if criteria.require_positive_walk_forward_aggregate
-        && walk_forward_total <= Decimal::ZERO
-    {
+    if criteria.require_positive_walk_forward_aggregate && walk_forward_total <= Decimal::ZERO {
         blockers.push("WALK_FORWARD_AGGREGATE_NET_PNL_NOT_POSITIVE".to_owned());
     }
 
@@ -426,9 +424,7 @@ fn pre_holdout_promotion_blockers(
         .cost_stress
         .points
         .iter()
-        .find(|point| {
-            point.trading_cost_multiplier == criteria.validation_cost_stress_multiplier
-        })
+        .find(|point| point.trading_cost_multiplier == criteria.validation_cost_stress_multiplier)
         .ok_or(ResearchError::ArtifactIdentityMismatch)?;
     if decimal(&stressed.stressed_net_pnl_quote)?
         <= decimal(&criteria.min_validation_stressed_net_pnl_exclusive)?
