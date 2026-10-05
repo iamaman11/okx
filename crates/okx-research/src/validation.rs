@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use okx_analysis::{
     BaselineStrategyKind, StrategyParameterSurface, StrategyResearchMetadata,
-    baseline_strategy_research_metadata, baseline_strategy_version, validation_median_absolute_return,
+    baseline_strategy_research_metadata, baseline_strategy_version,
+    validation_median_absolute_return,
 };
 use serde::{Deserialize, Serialize};
 
