@@ -221,6 +221,31 @@ fn decode_pointer(bytes: &[u8]) -> Result<ResearchSessionPointer, ResearchSessio
     Ok(pointer)
 }
 
+fn read_pointer_file(
+    path: &Path,
+) -> Result<Option<ResearchSessionPointer>, ResearchSessionRuntimeError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(decode_pointer(&bytes)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_recoverable_pointer(
+    path: &Path,
+) -> Result<Option<ResearchSessionPointer>, ResearchSessionRuntimeError> {
+    let temp = path.with_extension("tmp");
+    match read_pointer_file(&temp) {
+        Ok(Some(pointer)) => Ok(Some(pointer)),
+        Ok(None) => read_pointer_file(path),
+        Err(temp_error) => match read_pointer_file(path) {
+            Ok(Some(pointer)) => Ok(Some(pointer)),
+            Ok(None) => Err(temp_error),
+            Err(main_error) => Err(main_error),
+        },
+    }
+}
+
 pub struct ResearchSessionRuntime {
     root: PathBuf,
     store: ResearchArtifactStore,
@@ -908,12 +933,7 @@ impl ResearchSessionRuntime {
     }
 
     fn read_pointer(&self) -> Result<Option<ResearchSessionPointer>, ResearchSessionRuntimeError> {
-        let path = self.pointer_path();
-        match fs::read(path) {
-            Ok(bytes) => Ok(Some(decode_pointer(&bytes)?)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        read_recoverable_pointer(&self.pointer_path())
     }
 
     fn write_pointer(&self, checkpoint_artifact_id: &str) -> Result<(), ResearchSessionRuntimeError> {
@@ -970,6 +990,46 @@ mod tests {
         assert!(bucket_already_evaluated(Some("3600000"), ONE_HOUR_MS));
         assert!(bucket_already_evaluated(Some("7200000"), ONE_HOUR_MS));
         assert!(!bucket_already_evaluated(Some("3600000"), 2 * ONE_HOUR_MS));
+    }
+
+    #[test]
+    fn synced_temp_pointer_recovers_interrupted_replace() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-research-pointer-recovery-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("root");
+        let path = root.join("live-session-pointer.json");
+        let old = br#"{"schema":"okx.research.live-session-pointer/v1","checkpoint_artifact_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+        let new = br#"{"schema":"okx.research.live-session-pointer/v1","checkpoint_artifact_id":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#;
+        fs::write(&path, old).expect("old pointer");
+        fs::write(path.with_extension("tmp"), new).expect("synced temp simulation");
+
+        assert_eq!(
+            read_recoverable_pointer(&path)
+                .expect("recover")
+                .expect("pointer")
+                .checkpoint_artifact_id,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+
+        fs::write(path.with_extension("tmp"), b"{").expect("partial temp");
+        assert_eq!(
+            read_recoverable_pointer(&path)
+                .expect("fallback")
+                .expect("pointer")
+                .checkpoint_artifact_id,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+
+        fs::remove_file(&path).expect("remove main");
+        assert!(matches!(
+            read_recoverable_pointer(&path),
+            Err(ResearchSessionRuntimeError::Json(_))
+        ));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
