@@ -15,8 +15,7 @@ pub const VALIDATION_SPEC_SCHEMA_V1: &str = "okx.research.validation-spec/v1";
 pub const VALIDATION_SPEC_SCHEMA_V2: &str = "okx.research.validation-spec/v2";
 pub const VALIDATION_WALK_FORWARD_PLAN_VERSION_V1: &str =
     "okx.research.walk-forward-plan/2026-10-05.1";
-pub const VALIDATION_REGIME_PLAN_VERSION_V1: &str =
-    "okx.research.regime-plan/2026-10-05.1";
+pub const VALIDATION_REGIME_PLAN_VERSION_V1: &str = "okx.research.regime-plan/2026-10-05.1";
 pub const RESEARCH_FAMILY_SCHEMA_V1: &str = "okx.research.family/v1";
 pub const VALIDATION_SPLIT_SCHEMA_V1: &str = "okx.research.validation-split/v1";
 pub const VALIDATION_EVIDENCE_POLICY_V1: &str = "okx.research.validation-evidence/2026-10-05.1";
@@ -375,9 +374,8 @@ pub fn build_validation_spec_from_counts(
         return Err(ResearchError::ReplayDatasetMismatch);
     }
 
-    let purge_bars = usize::from(
-        baseline_strategy_research_metadata(strategy).forward_outcome_bars,
-    );
+    let purge_bars =
+        usize::from(baseline_strategy_research_metadata(strategy).forward_outcome_bars);
     let effective_train_count = train_end
         .checked_sub(purge_bars)
         .ok_or(ResearchError::ReplayDatasetMismatch)?;
@@ -409,8 +407,7 @@ pub fn build_validation_spec_from_counts(
     }
     let walk_forward_plan = ValidationWalkForwardPlan {
         version: VALIDATION_WALK_FORWARD_PLAN_VERSION_V1.to_owned(),
-        fold_count: u16::try_from(FOLD_COUNT)
-            .map_err(|_| ResearchError::ReplayDatasetMismatch)?,
+        fold_count: u16::try_from(FOLD_COUNT).map_err(|_| ResearchError::ReplayDatasetMismatch)?,
         validation_candles_per_fold: u16::try_from(VALIDATION_CANDLES_PER_FOLD)
             .map_err(|_| ResearchError::ReplayDatasetMismatch)?,
         folds,
@@ -873,10 +870,22 @@ mod tests {
         let walk_forward = spec.walk_forward_plan.as_ref().expect("walk-forward plan");
         assert_eq!(walk_forward.fold_count, 3);
         assert_eq!(walk_forward.validation_candles_per_fold, 24);
-        assert_eq!(walk_forward.folds[0].train_declared_range, range(0, 70 * HOUR));
-        assert_eq!(walk_forward.folds[0].train_effective_range, range(0, 68 * HOUR));
-        assert_eq!(walk_forward.folds[0].validation_range, range(70 * HOUR, 94 * HOUR));
-        assert_eq!(walk_forward.folds[2].validation_range, range(118 * HOUR, 142 * HOUR));
+        assert_eq!(
+            walk_forward.folds[0].train_declared_range,
+            range(0, 70 * HOUR)
+        );
+        assert_eq!(
+            walk_forward.folds[0].train_effective_range,
+            range(0, 68 * HOUR)
+        );
+        assert_eq!(
+            walk_forward.folds[0].validation_range,
+            range(70 * HOUR, 94 * HOUR)
+        );
+        assert_eq!(
+            walk_forward.folds[2].validation_range,
+            range(118 * HOUR, 142 * HOUR)
+        );
         let regime = spec.regime_plan.as_ref().expect("regime plan");
         assert_eq!(regime.threshold_source, "TRAIN_MEDIAN");
         assert_eq!(regime.threshold_abs_return, "0");
