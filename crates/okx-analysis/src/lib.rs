@@ -63,10 +63,10 @@ pub use statistics::{
     sample_covariance_matrix,
 };
 pub use strategy::{
-    BASELINE_STRATEGY_VERSION_V1, TWO_BAR_MOMENTUM_STRATEGY_VERSION_V1, BarDecisionInput,
-    BaselineStrategyKind, STRATEGY_RESEARCH_METADATA_VERSION_V1, StrategyDecision,
-    StrategyParameterSurface, StrategyResearchMetadata, baseline_strategy_research_metadata,
-    baseline_strategy_version, evaluate_baseline_strategy,
+    BASELINE_STRATEGY_VERSION_V1, BarDecisionInput, BaselineStrategyKind,
+    STRATEGY_RESEARCH_METADATA_VERSION_V1, StrategyDecision, StrategyParameterSurface,
+    StrategyResearchMetadata, TWO_BAR_MOMENTUM_STRATEGY_VERSION_V1,
+    baseline_strategy_research_metadata, baseline_strategy_version, evaluate_baseline_strategy,
 };
 pub use validation::{
     VALIDATION_COST_STRESS_ALGORITHM_V1, VALIDATION_COST_STRESS_SCHEMA_V1,
