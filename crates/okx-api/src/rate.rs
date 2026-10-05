@@ -535,6 +535,7 @@ fn private_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Opti
         "/api/v5/account/account-position-risk" => (10, 2_000),
         "/api/v5/account/position-builder" => (2, 2_000),
         "/api/v5/account/positions-history" => (10, 2_000),
+        "/api/v5/asset/balances" => (6, 1_000),
         "/api/v5/trade/orders-pending" => (60, 2_000),
         "/api/v5/trade/orders-history-archive" => (20, 2_000),
         "/api/v5/trade/fills-history" => (10, 2_000),
@@ -570,6 +571,20 @@ mod tests {
         assert_eq!(position_risk.domains[0].window_ms, 2_000);
         assert_eq!(config.domains[0].key.kind, RateDomainKind::PrivateRestUser);
         assert_eq!(positions.domains[0].max_requests, 10);
+    }
+
+    #[test]
+    fn funding_balance_endpoint_uses_documented_user_budget() {
+        let budget = RateBudget::new();
+        let plan = budget.private_rest_plan("/api/v5/asset/balances", &[]);
+        assert_eq!(plan.domains.len(), 1);
+        assert_eq!(plan.domains[0].key.kind, RateDomainKind::PrivateRestUser);
+        assert_eq!(
+            plan.domains[0].key.scope.as_deref(),
+            Some("authenticated_user")
+        );
+        assert_eq!(plan.domains[0].max_requests, 6);
+        assert_eq!(plan.domains[0].window_ms, 1_000);
     }
 
     #[test]
