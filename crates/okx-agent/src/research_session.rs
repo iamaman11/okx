@@ -617,7 +617,7 @@ impl ResearchSessionRuntime {
         };
 
         let metadata = baseline_strategy_research_metadata(active.spec.strategy);
-        let history_limit = u16::from(metadata.signal_lookback_bars).saturating_add(2);
+        let history_limit = metadata.signal_lookback_bars.saturating_add(2);
         let history = match self
             .market
             .history(
@@ -671,8 +671,9 @@ impl ResearchSessionRuntime {
             active.checkpoint.paper_realized_net_pnl_quote.clone();
         let mut paper_open_position = active.checkpoint.paper_open_position.clone();
 
-        if active.config.mode == LiveResearchSessionMode::Paper {
-            if let Some(position) = paper_open_position.take() {
+        if active.config.mode == LiveResearchSessionMode::Paper
+            && let Some(position) = paper_open_position.take()
+        {
                 let Some(exit_candle) = history.candles.last() else {
                     self.active = Some(active);
                     return Ok(());
@@ -703,7 +704,6 @@ impl ResearchSessionRuntime {
                         return Ok(());
                     }
                 }
-            }
         }
 
         active.checkpoint.latest_paper_trade_artifact_id = latest_paper_trade_artifact_id.clone();
