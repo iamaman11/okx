@@ -131,7 +131,7 @@ struct PreHoldoutEvidenceIdentity<'a> {
 }
 
 pub(crate) struct ReplayResultView {
-    hypothesis_id: String,
+    pub(crate) hypothesis_id: String,
     pub(crate) dataset_id: String,
     pub(crate) experiment_id: String,
     pub(crate) replay_source_tree: String,
