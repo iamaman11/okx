@@ -65,7 +65,8 @@ pub use statistics::{
 pub use strategy::{
     BASELINE_STRATEGY_VERSION_V1, BarDecisionInput, BaselineStrategyKind,
     STRATEGY_RESEARCH_METADATA_VERSION_V1, StrategyDecision, StrategyParameterSurface,
-    StrategyResearchMetadata, baseline_strategy_research_metadata, evaluate_baseline_strategy,
+    StrategyResearchMetadata, TWO_BAR_MOMENTUM_STRATEGY_VERSION_V1,
+    baseline_strategy_research_metadata, baseline_strategy_version, evaluate_baseline_strategy,
 };
 pub use validation::{
     VALIDATION_COST_STRESS_ALGORITHM_V1, VALIDATION_COST_STRESS_SCHEMA_V1,
@@ -132,6 +133,8 @@ pub struct CostAnalysis {
 pub enum AnalysisError {
     #[error("analysis input instrument mismatch")]
     InstrumentMismatch,
+    #[error("required strategy input '{0}' is missing")]
+    InvalidStrategyInput(&'static str),
     #[error("analysis input reference generation mismatch")]
     ReferenceGenerationMismatch,
     #[error("fee schedule is not exact for the requested instrument")]

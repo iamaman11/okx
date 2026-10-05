@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use okx_analysis::{
-    BASELINE_STRATEGY_VERSION_V1, BaselineStrategyKind, StrategyParameterSurface,
-    StrategyResearchMetadata, baseline_strategy_research_metadata,
+    BaselineStrategyKind, StrategyParameterSurface, StrategyResearchMetadata,
+    baseline_strategy_research_metadata, baseline_strategy_version,
     validation_median_absolute_return,
 };
 use serde::{Deserialize, Serialize};
@@ -481,7 +481,7 @@ pub fn build_validation_spec_from_counts(
         parent_replay_dataset_artifact_id,
         parent.manifest.dataset_id.clone(),
         strategy,
-        BASELINE_STRATEGY_VERSION_V1,
+        baseline_strategy_version(strategy),
         train,
         validation,
         final_oos,
