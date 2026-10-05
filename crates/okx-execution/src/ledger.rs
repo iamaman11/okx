@@ -408,6 +408,22 @@ impl DurableExecutionLedger {
         intent_id: &str,
         order_id: impl Into<String>,
         exchange_state: ExchangeOrderState,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.reconcile_found_with_mutation_resolution(
+            intent_id,
+            order_id,
+            exchange_state,
+            OrderMutationResolution::Pending,
+            observed_at_ms,
+        )
+    }
+
+    pub fn reconcile_found_with_mutation_resolution(
+        &mut self,
+        intent_id: &str,
+        order_id: impl Into<String>,
+        exchange_state: ExchangeOrderState,
         mutation_resolution: OrderMutationResolution,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
