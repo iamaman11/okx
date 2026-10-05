@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BUILD_SOURCE_TREE, PreHoldoutEvidence, ReplayMechanicsProvenance, ReplayStatus,
+    BUILD_SOURCE_TREE, PreHoldoutEvidence, ReplayEvidenceClass, ReplayMechanicsProvenance, ReplayStatus,
     ResearchArtifactStore, ResearchError, ResearchRange, VALIDATION_PROMOTION_CRITERIA_V2,
     VALIDATION_SPEC_SCHEMA_V2, ValidationEvidenceReadiness, ValidationPartitionRole,
     ValidationRobustnessEvidence, ValidationSpec, build_baseline_experiment, canonical_sha256,
@@ -83,7 +83,7 @@ pub struct FinalOosEvidence {
     pub experiment_result_artifact_id: String,
     pub experiment_id: String,
     pub replay_source_tree: String,
-    pub status: ReplayStatus,
+    pub status: String,
     pub evidence_class: String,
     pub candles_processed: usize,
     pub trade_count: usize,
@@ -314,8 +314,8 @@ pub fn consume_final_oos(
         experiment_result_artifact_id,
         experiment_id: result.experiment_id,
         replay_source_tree: result.replay_source_tree,
-        status: result.status,
-        evidence_class: format!("{:?}", result.evidence_class).to_uppercase(),
+        status: replay_status_label(result.status).to_owned(),
+        evidence_class: replay_evidence_class_label(result.evidence_class).to_owned(),
         candles_processed: result.candles_processed,
         trade_count: result.trade_count,
         net_pnl_quote: result.net_pnl_quote,
@@ -450,6 +450,22 @@ fn decide_final_oos(
         },
         blockers,
     ))
+}
+
+fn replay_status_label(status: ReplayStatus) -> &'static str {
+    match status {
+        ReplayStatus::Completed => "COMPLETED",
+        ReplayStatus::InsufficientData => "INSUFFICIENT_DATA",
+        ReplayStatus::InsufficientReferenceHistory => "INSUFFICIENT_REFERENCE_HISTORY",
+    }
+}
+
+fn replay_evidence_class_label(evidence_class: ReplayEvidenceClass) -> &'static str {
+    match evidence_class {
+        ReplayEvidenceClass::DataOnly => "DATA_ONLY",
+        ReplayEvidenceClass::HistoricalObserved => "HISTORICAL_OBSERVED",
+        ReplayEvidenceClass::CounterfactualMechanics => "COUNTERFACTUAL_MECHANICS",
+    }
 }
 
 fn decimal(value: &str) -> Result<Decimal, ResearchError> {
