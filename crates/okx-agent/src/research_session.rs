@@ -182,6 +182,45 @@ struct ActiveResearchSession {
     checkpoint_artifact_id: String,
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionAdmission {
+    Start,
+    Existing,
+}
+
+fn admit_session_identity(
+    active_session_id: Option<&str>,
+    requested_session_id: &str,
+) -> Result<SessionAdmission, ResearchSessionFailure> {
+    match active_session_id {
+        None => Ok(SessionAdmission::Start),
+        Some(active) if active == requested_session_id => Ok(SessionAdmission::Existing),
+        Some(active) => Err(ResearchSessionFailure::conflict(format!(
+            "research session '{active}' is already active"
+        ))),
+    }
+}
+
+fn bucket_already_evaluated(
+    last_evaluated_entry_open_time_ms: Option<&str>,
+    bucket_open_ms: u64,
+) -> bool {
+    last_evaluated_entry_open_time_ms
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|last| last >= bucket_open_ms)
+}
+
+fn decode_pointer(bytes: &[u8]) -> Result<ResearchSessionPointer, ResearchSessionRuntimeError> {
+    let pointer: ResearchSessionPointer = serde_json::from_slice(bytes)?;
+    if pointer.schema != POINTER_SCHEMA_V1
+        || !pointer.checkpoint_artifact_id.starts_with("sha256:")
+    {
+        return Err(ResearchSessionRuntimeError::PersistedState);
+    }
+    Ok(pointer)
+}
+
 pub struct ResearchSessionRuntime {
     root: PathBuf,
     store: ResearchArtifactStore,
@@ -335,14 +374,12 @@ impl ResearchSessionRuntime {
         )
         .map_err(|error| ResearchSessionFailure::invalid(error.to_string()))?;
 
-        if let Some(active) = self.active.as_ref() {
-            if active.config.session_id == config.session_id {
-                return Ok(self.status());
-            }
-            return Err(ResearchSessionFailure::conflict(format!(
-                "research session '{}' is already active",
-                active.config.session_id
-            )));
+        match admit_session_identity(
+            self.active.as_ref().map(|active| active.config.session_id.as_str()),
+            &config.session_id,
+        )? {
+            SessionAdmission::Existing => return Ok(self.status()),
+            SessionAdmission::Start => {}
         }
 
         self.public_ws
@@ -454,13 +491,13 @@ impl ResearchSessionRuntime {
             return Ok(());
         };
         let bucket_open_ms = (wakeup.received_at_ms / ONE_HOUR_MS) * ONE_HOUR_MS;
-        if active
-            .checkpoint
-            .last_evaluated_entry_open_time_ms
-            .as_deref()
-            .and_then(|value| value.parse::<u64>().ok())
-            .is_some_and(|last| last >= bucket_open_ms)
-        {
+        if bucket_already_evaluated(
+            active
+                .checkpoint
+                .last_evaluated_entry_open_time_ms
+                .as_deref(),
+            bucket_open_ms,
+        ) {
             return Ok(());
         }
 
@@ -873,15 +910,7 @@ impl ResearchSessionRuntime {
     fn read_pointer(&self) -> Result<Option<ResearchSessionPointer>, ResearchSessionRuntimeError> {
         let path = self.pointer_path();
         match fs::read(path) {
-            Ok(bytes) => {
-                let pointer: ResearchSessionPointer = serde_json::from_slice(&bytes)?;
-                if pointer.schema != POINTER_SCHEMA_V1
-                    || !pointer.checkpoint_artifact_id.starts_with("sha256:")
-                {
-                    return Err(ResearchSessionRuntimeError::PersistedState);
-                }
-                Ok(Some(pointer))
-            }
+            Ok(bytes) => Ok(Some(decode_pointer(&bytes)?)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
@@ -914,3 +943,53 @@ impl ResearchSessionRuntime {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_admission_is_single_owner_and_idempotent() {
+        assert_eq!(
+            admit_session_identity(None, "sha256:requested").expect("new"),
+            SessionAdmission::Start
+        );
+        assert_eq!(
+            admit_session_identity(Some("sha256:same"), "sha256:same").expect("same"),
+            SessionAdmission::Existing
+        );
+        let conflict =
+            admit_session_identity(Some("sha256:active"), "sha256:other").expect_err("conflict");
+        assert_eq!(conflict.code, "RESEARCH_SESSION_CONFLICT");
+        assert!(!conflict.retryable);
+    }
+
+    #[test]
+    fn evaluated_bucket_guard_rejects_duplicate_and_older_buckets() {
+        assert!(!bucket_already_evaluated(None, ONE_HOUR_MS));
+        assert!(bucket_already_evaluated(Some("3600000"), ONE_HOUR_MS));
+        assert!(bucket_already_evaluated(Some("7200000"), ONE_HOUR_MS));
+        assert!(!bucket_already_evaluated(Some("3600000"), 2 * ONE_HOUR_MS));
+    }
+
+    #[test]
+    fn corrupt_pointer_fails_closed() {
+        let good = br#"{"schema":"okx.research.live-session-pointer/v1","checkpoint_artifact_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+        assert_eq!(
+            decode_pointer(good)
+                .expect("valid pointer")
+                .checkpoint_artifact_id,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+
+        let wrong_schema = br#"{"schema":"wrong","checkpoint_artifact_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+        assert!(matches!(
+            decode_pointer(wrong_schema),
+            Err(ResearchSessionRuntimeError::PersistedState)
+        ));
+        assert!(matches!(
+            decode_pointer(br#"{"schema":"#),
+            Err(ResearchSessionRuntimeError::Json(_))
+        ));
+    }
+}
