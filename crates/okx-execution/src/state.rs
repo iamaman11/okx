@@ -433,10 +433,12 @@ impl ExecutionRecord {
             .rev()
             .find(|mutation| !mutation.state.is_terminal())
             .ok_or_else(|| ExecutionTransitionError::MutationNotFound("active".to_owned()))?;
-        if !matches!(
+        let allowed = matches!(
             mutation.state,
             OrderMutationState::Acknowledged | OrderMutationState::Unknown
-        ) {
+        ) || (mutation.state == OrderMutationState::Prepared
+            && resolution == OrderMutationResolution::Superseded);
+        if !allowed {
             return Err(ExecutionTransitionError::InvalidMutationTransition {
                 from: mutation.state,
                 to: match resolution {
