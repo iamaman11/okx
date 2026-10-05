@@ -134,8 +134,7 @@ pub fn load_accepted_promotion_transition(
                     "accepted SHADOW lineage must be PAPER->SHADOW",
                 ));
             }
-            let Some(previous_artifact_id) =
-                transition.previous_transition_artifact_id.as_deref()
+            let Some(previous_artifact_id) = transition.previous_transition_artifact_id.as_deref()
             else {
                 return Err(ResearchError::InvalidPromotionTransition(
                     "accepted SHADOW lineage requires PAPER transition",
@@ -146,8 +145,7 @@ pub fn load_accepted_promotion_transition(
             if previous.from != ResearchPromotionState::Backtested
                 || previous.to != ResearchPromotionState::Paper
                 || previous.previous_transition_artifact_id.is_some()
-                || previous.promotion_bundle_artifact_id
-                    != transition.promotion_bundle_artifact_id
+                || previous.promotion_bundle_artifact_id != transition.promotion_bundle_artifact_id
                 || previous.promotion_bundle_id != transition.promotion_bundle_id
                 || previous.hypothesis_id != transition.hypothesis_id
                 || previous.strategy != transition.strategy
