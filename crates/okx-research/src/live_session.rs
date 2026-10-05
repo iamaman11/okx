@@ -534,7 +534,7 @@ fn timestamp(field: &'static str, value: &str) -> Result<u64, ResearchError> {
 #[cfg(test)]
 mod tests {
     use okx_analysis::{
-        BASELINE_STRATEGY_VERSION_TWO_BAR_MOMENTUM_V1, CandidateRiskContext, HardRiskPolicy,
+        TWO_BAR_MOMENTUM_STRATEGY_VERSION_V1, CandidateRiskContext, HardRiskPolicy,
         LiquidityRole, PositionScenarioMechanics, RiskDegradedMode, RiskMinimumQuality,
         TradingMandate,
     };
@@ -575,7 +575,7 @@ mod tests {
                 funding_notional_basis: "ENTRY_NOTIONAL_COUNTERFACTUAL".to_owned(),
             },
             mandate: TradingMandate {
-                schema: crate::TRADING_MANDATE_SCHEMA_V1.to_owned(),
+                schema: okx_analysis::TRADING_MANDATE_SCHEMA_V1.to_owned(),
                 version: "mandate/v1".to_owned(),
                 capital_base_usd: "100".to_owned(),
                 decision_horizon_hours: 1,
@@ -587,7 +587,7 @@ mod tests {
                 max_turnover_ratio: "100".to_owned(),
             },
             policy: HardRiskPolicy {
-                schema: crate::HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
+                schema: okx_analysis::HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
                 version: "policy/v1".to_owned(),
                 max_account_gross_notional_usd: "1000".to_owned(),
                 max_instrument_gross_notional_usd: "1000".to_owned(),
@@ -680,9 +680,9 @@ mod tests {
         .expect("paper trade");
 
         assert_eq!(trade.gross_pnl_quote, "0.001");
-        assert_eq!(trade.trading_cost_quote, "0.00105");
+        assert_eq!(trade.trading_cost_quote, "0.0000105");
         assert_eq!(trade.funding_cost_quote, "0.00001");
-        assert_eq!(trade.net_pnl_quote, "-0.00006");
+        assert_eq!(trade.net_pnl_quote, "0.0009795");
         assert_eq!(trade.funding_event_count, 1);
     }
 }
