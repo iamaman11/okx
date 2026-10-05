@@ -385,6 +385,8 @@ pub struct LiveResearchSessionCheckpoint {
     pub latest_decision_artifact_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_paper_trade_artifact_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_blocker: Option<String>,
     pub decision_count: u64,
     pub blocked_count: u64,
     pub would_submit_count: u64,
@@ -406,6 +408,7 @@ struct LiveResearchSessionCheckpointIdentity<'a> {
     last_evaluated_entry_open_time_ms: &'a Option<String>,
     latest_decision_artifact_id: &'a Option<String>,
     latest_paper_trade_artifact_id: &'a Option<String>,
+    last_blocker: &'a Option<String>,
     decision_count: u64,
     blocked_count: u64,
     would_submit_count: u64,
@@ -425,6 +428,7 @@ impl LiveResearchSessionCheckpoint {
         last_evaluated_entry_open_time_ms: Option<String>,
         latest_decision_artifact_id: Option<String>,
         latest_paper_trade_artifact_id: Option<String>,
+        last_blocker: Option<String>,
         decision_count: u64,
         blocked_count: u64,
         would_submit_count: u64,
@@ -457,6 +461,7 @@ impl LiveResearchSessionCheckpoint {
             last_evaluated_entry_open_time_ms: &last_evaluated_entry_open_time_ms,
             latest_decision_artifact_id: &latest_decision_artifact_id,
             latest_paper_trade_artifact_id: &latest_paper_trade_artifact_id,
+            last_blocker: &last_blocker,
             decision_count,
             blocked_count,
             would_submit_count,
@@ -476,6 +481,7 @@ impl LiveResearchSessionCheckpoint {
             last_evaluated_entry_open_time_ms,
             latest_decision_artifact_id,
             latest_paper_trade_artifact_id,
+            last_blocker,
             decision_count,
             blocked_count,
             would_submit_count,
@@ -501,6 +507,7 @@ impl LiveResearchSessionCheckpoint {
             self.last_evaluated_entry_open_time_ms.clone(),
             self.latest_decision_artifact_id.clone(),
             self.latest_paper_trade_artifact_id.clone(),
+            self.last_blocker.clone(),
             self.decision_count,
             self.blocked_count,
             self.would_submit_count,
@@ -513,6 +520,18 @@ impl LiveResearchSessionCheckpoint {
         }
         Ok(())
     }
+}
+
+pub fn paper_realized_pnl_after_trade(
+    current_realized_net_pnl_quote: &str,
+    trade: &PaperVirtualTradeEvidence,
+) -> Result<String, ResearchError> {
+    let current = decimal(
+        "paper_realized_net_pnl_quote",
+        current_realized_net_pnl_quote,
+    )?;
+    let trade_net = decimal("paper_trade.net_pnl_quote", &trade.net_pnl_quote)?;
+    Ok((current + trade_net).normalize().to_string())
 }
 
 fn decimal(field: &'static str, value: &str) -> Result<Decimal, ResearchError> {
@@ -622,6 +641,7 @@ mod tests {
             None,
             Some("3600000".to_owned()),
             Some("sha256:decision".to_owned()),
+            None,
             None,
             1,
             0,
