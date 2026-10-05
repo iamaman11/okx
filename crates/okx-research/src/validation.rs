@@ -254,21 +254,72 @@ impl ValidationSpec {
             &parent_replay_dataset_artifact_id,
         )?;
         require_sha256("validation.parent_dataset_id", &parent_dataset_id)?;
+        require_nonempty("validation.strategy_version", &strategy_version)?;
+        require_nonempty(
+            "validation.evidence_policy_version",
+            &evidence_policy_version,
+        )?;
+        require_nonempty(
+            "validation.promotion_criteria_version",
+            &promotion_criteria_version,
+        )?;
+        if BUILD_SOURCE_TREE == "UNAVAILABLE" {
+            return Err(ResearchError::MissingField(
+                "validation.validation_source_tree",
+            ));
+        }
+
         train.validate()?;
         validation.validate()?;
         final_oos.validate()?;
-        if train.end()? != validation.begin()? || validation.end()? != final_oos.begin()? {
+        let train_begin = train.begin()?;
+        let train_end = train.end()?;
+        if train_end != validation.begin()? || validation.end()? != final_oos.begin()? {
             return Err(ResearchError::InvalidRange {
                 begin_ms: train.begin_ms,
                 end_ms: final_oos.end_ms,
             });
         }
-        if walk_forward_plan.fold_count != 3
+        if walk_forward_plan.version != VALIDATION_WALK_FORWARD_PLAN_VERSION_V1
+            || walk_forward_plan.fold_count != 3
             || usize::from(walk_forward_plan.fold_count) != walk_forward_plan.folds.len()
             || walk_forward_plan.validation_candles_per_fold < 4
+            || regime_plan.version != VALIDATION_REGIME_PLAN_VERSION_V1
+            || regime_plan.basis != "ABSOLUTE_COMPLETED_BAR_OPEN_CLOSE_RETURN"
+            || regime_plan.threshold_source != "TRAIN_MEDIAN"
             || regime_plan.minimum_trades_per_regime == 0
         {
             return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+        let expected_fold_span_ms = u64::from(walk_forward_plan.validation_candles_per_fold)
+            .checked_mul(3_600_000)
+            .ok_or(ResearchError::ReplayDatasetMismatch)?;
+        let mut previous_validation_end = None::<u64>;
+        for (index, fold) in walk_forward_plan.folds.iter().enumerate() {
+            fold.train_declared_range.validate()?;
+            fold.train_effective_range.validate()?;
+            fold.validation_range.validate()?;
+            let declared_begin = fold.train_declared_range.begin()?;
+            let declared_end = fold.train_declared_range.end()?;
+            let effective_begin = fold.train_effective_range.begin()?;
+            let effective_end = fold.train_effective_range.end()?;
+            let validation_begin = fold.validation_range.begin()?;
+            let validation_end = fold.validation_range.end()?;
+            if usize::from(fold.fold_index) != index
+                || declared_begin != train_begin
+                || effective_begin != train_begin
+                || effective_end > declared_end
+                || declared_end != validation_begin
+                || validation_end > train_end
+                || validation_end
+                    .checked_sub(validation_begin)
+                    .ok_or(ResearchError::ReplayDatasetMismatch)?
+                    != expected_fold_span_ms
+                || previous_validation_end.is_some_and(|previous| previous != validation_begin)
+            {
+                return Err(ResearchError::ArtifactIdentityMismatch);
+            }
+            previous_validation_end = Some(validation_end);
         }
 
         let strategy_metadata = baseline_strategy_research_metadata(strategy);
