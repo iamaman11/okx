@@ -282,16 +282,18 @@ mod tests {
         }
     }
 
-    fn store() -> (ResearchArtifactStore, std::path::PathBuf) {
-        let root =
-            std::env::temp_dir().join(format!("okx-promotion-transition-{}", std::process::id()));
+    fn store(tag: &str) -> (ResearchArtifactStore, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "okx-promotion-transition-{}-{tag}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         (ResearchArtifactStore::at(root.join("research")), root)
     }
 
     #[test]
     fn backtested_to_paper_then_paper_to_shadow_is_deterministic() {
-        let (store, root) = store();
+        let (store, root) = store("deterministic");
         let (bundle_artifact_id, _) = store
             .publish_evidence(&backtested_bundle())
             .expect("publish bundle");
@@ -340,7 +342,7 @@ mod tests {
 
     #[test]
     fn invalid_or_skipped_positive_transitions_fail_closed() {
-        let (store, root) = store();
+        let (store, root) = store("invalid-transition");
         let (bundle_artifact_id, _) = store
             .publish_evidence(&backtested_bundle())
             .expect("publish bundle");
@@ -387,7 +389,7 @@ mod tests {
 
     #[test]
     fn rejected_bundle_and_mismatched_paper_lineage_cannot_promote() {
-        let (store, root) = store();
+        let (store, root) = store("lineage");
         let mut rejected = backtested_bundle();
         rejected.decision = ValidationFinalDecision::Reject;
         rejected.decision_blockers = vec!["failed".to_owned()];
