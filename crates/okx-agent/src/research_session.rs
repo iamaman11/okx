@@ -27,7 +27,7 @@ use crate::{
 
 const COMMAND_CAPACITY: usize = 8;
 const POINTER_SCHEMA_V1: &str = "okx.research.live-session-pointer/v1";
-const SESSION_STATUS_SCHEMA_V1: &str = "okx.research.live-session-status/v1";
+pub const RESEARCH_SESSION_STATUS_SCHEMA_V1: &str = "okx.research.live-session-status/v1";
 const ONE_HOUR_MS: u64 = 3_600_000;
 const FUNDING_HISTORY_LIMIT: u16 = 20;
 
@@ -831,7 +831,7 @@ impl ResearchSessionRuntime {
             .or(self.last_config.as_ref());
 
         ResearchSessionStatus {
-            schema: SESSION_STATUS_SCHEMA_V1,
+            schema: RESEARCH_SESSION_STATUS_SCHEMA_V1,
             state: match checkpoint.map(|(value, _)| value.status) {
                 Some(LiveResearchSessionStatus::Active) => "ACTIVE",
                 Some(LiveResearchSessionStatus::Stopped) => "STOPPED",
