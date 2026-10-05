@@ -65,7 +65,10 @@ impl PromotionTransition {
         {
             return Err(ResearchError::ArtifactIdentityMismatch);
         }
-        require_nonempty("promotion_transition.authorization_id", &self.authorization_id)?;
+        require_nonempty(
+            "promotion_transition.authorization_id",
+            &self.authorization_id,
+        )?;
         require_nonempty(
             "promotion_transition.authorization_statement",
             &self.authorization_statement,
@@ -124,8 +127,7 @@ pub fn authorize_promotion_transition(
         ));
     }
 
-    let previous_transition_artifact_id =
-        previous_transition_artifact_id.map(ToOwned::to_owned);
+    let previous_transition_artifact_id = previous_transition_artifact_id.map(ToOwned::to_owned);
     match (from, to) {
         (ResearchPromotionState::Backtested, ResearchPromotionState::Paper) => {
             if previous_transition_artifact_id.is_some() {
@@ -210,14 +212,11 @@ fn require_nonempty(field: &'static str, value: &str) -> Result<(), ResearchErro
 mod tests {
     use std::fs;
 
-    use okx_analysis::{
-        BaselineStrategyKind, ValidationCostStress, ValidationCostStressPoint,
-    };
+    use okx_analysis::{BaselineStrategyKind, ValidationCostStress, ValidationCostStressPoint};
 
     use super::*;
     use crate::{
-        FinalOosEvidence, PromotionBundle, ValidationPromotionCriteria,
-        PROMOTION_BUNDLE_SCHEMA_V1,
+        FinalOosEvidence, PROMOTION_BUNDLE_SCHEMA_V1, PromotionBundle, ValidationPromotionCriteria,
     };
 
     fn id(ch: char) -> String {
@@ -284,10 +283,8 @@ mod tests {
     }
 
     fn store() -> (ResearchArtifactStore, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "okx-promotion-transition-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("okx-promotion-transition-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         (ResearchArtifactStore::at(root.join("research")), root)
     }
@@ -332,7 +329,10 @@ mod tests {
             "authorize bounded SHADOW observation",
         )
         .expect("shadow");
-        assert_eq!(shadow.previous_transition_artifact_id, Some(paper_artifact_id));
+        assert_eq!(
+            shadow.previous_transition_artifact_id,
+            Some(paper_artifact_id)
+        );
         assert_eq!(shadow.to, ResearchPromotionState::Shadow);
 
         let _ = fs::remove_dir_all(root);
@@ -346,8 +346,14 @@ mod tests {
             .expect("publish bundle");
 
         for (from, to) in [
-            (ResearchPromotionState::Research, ResearchPromotionState::Paper),
-            (ResearchPromotionState::Backtested, ResearchPromotionState::Shadow),
+            (
+                ResearchPromotionState::Research,
+                ResearchPromotionState::Paper,
+            ),
+            (
+                ResearchPromotionState::Backtested,
+                ResearchPromotionState::Shadow,
+            ),
             (ResearchPromotionState::Paper, ResearchPromotionState::Paper),
         ] {
             assert!(matches!(
