@@ -175,8 +175,7 @@ impl PublicWsCoordinator {
     ) -> (Self, PublicWsHandle) {
         let state = Arc::new(RwLock::new(PublicRuntimeState::new(reference)));
         let (commands_tx, commands_rx) = mpsc::channel(COMMAND_CAPACITY);
-        let (market_updates, _market_updates_rx) =
-            watch::channel(PublicMarketWakeup::default());
+        let (market_updates, _market_updates_rx) = watch::channel(PublicMarketWakeup::default());
         (
             Self {
                 environment,
@@ -674,11 +673,8 @@ mod tests {
 
     #[tokio::test]
     async fn market_wakeup_watch_coalesces_to_latest_sequence() {
-        let reference = ReferenceRegistry::from_public(
-            "2026-10-05T00:00:00.000Z",
-            Vec::new(),
-        )
-        .expect("reference");
+        let reference = ReferenceRegistry::from_public("2026-10-05T00:00:00.000Z", Vec::new())
+            .expect("reference");
         let (coordinator, handle) = PublicWsCoordinator::new(
             OkxEnvironment::new(okx_api::Region::Global, false),
             reference,
