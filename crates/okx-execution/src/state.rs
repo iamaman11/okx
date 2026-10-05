@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::ExecutionPlan;
+use crate::{
+    ExecutionPlan,
+    model::{valid_mutation_id},
+};
 
 pub const ALLOW_LIVE_TRADING_DEFAULT: bool = false;
+pub const MAX_ORDER_MUTATIONS_PER_EXECUTION: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -34,6 +38,102 @@ pub enum ExchangeOrderState {
     Canceled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderMutationKind {
+    Amend,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderMutationState {
+    Prepared,
+    Submitting,
+    Acknowledged,
+    Unknown,
+    Applied,
+    Superseded,
+    Rejected,
+}
+
+impl OrderMutationState {
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Applied | Self::Superseded | Self::Rejected)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderMutationResolution {
+    Pending,
+    Applied,
+    Superseded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderMutationRecord {
+    pub mutation_id: String,
+    pub kind: OrderMutationKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_size: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_price: Option<String>,
+    pub state: OrderMutationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection_code: Option<String>,
+}
+
+impl OrderMutationRecord {
+    pub fn amend(
+        mutation_id: impl Into<String>,
+        request_id: impl Into<String>,
+        new_size: Option<String>,
+        new_price: Option<String>,
+    ) -> Result<Self, ExecutionTransitionError> {
+        let mutation_id = mutation_id.into();
+        let request_id = request_id.into();
+        if !valid_mutation_id(&mutation_id) {
+            return Err(ExecutionTransitionError::InvalidMutationId);
+        }
+        if request_id.trim().is_empty() {
+            return Err(ExecutionTransitionError::InvalidMutationRequest);
+        }
+        if new_size.is_none() && new_price.is_none() {
+            return Err(ExecutionTransitionError::InvalidMutationRequest);
+        }
+        Ok(Self {
+            mutation_id,
+            kind: OrderMutationKind::Amend,
+            request_id: Some(request_id),
+            new_size,
+            new_price,
+            state: OrderMutationState::Prepared,
+            rejection_code: None,
+        })
+    }
+
+    pub fn cancel(
+        mutation_id: impl Into<String>,
+    ) -> Result<Self, ExecutionTransitionError> {
+        let mutation_id = mutation_id.into();
+        if !valid_mutation_id(&mutation_id) {
+            return Err(ExecutionTransitionError::InvalidMutationId);
+        }
+        Ok(Self {
+            mutation_id,
+            kind: OrderMutationKind::Cancel,
+            request_id: None,
+            new_size: None,
+            new_price: None,
+            state: OrderMutationState::Prepared,
+            rejection_code: None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionRecord {
@@ -42,6 +142,8 @@ pub struct ExecutionRecord {
     pub order_id: Option<String>,
     pub exchange_state: Option<ExchangeOrderState>,
     pub rejection_code: Option<String>,
+    #[serde(default)]
+    pub mutations: Vec<OrderMutationRecord>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -63,6 +165,33 @@ pub enum ExecutionTransitionError {
 
     #[error("rejection code must not be empty")]
     EmptyRejectionCode,
+
+    #[error("order mutation id is invalid")]
+    InvalidMutationId,
+
+    #[error("order mutation request is invalid")]
+    InvalidMutationRequest,
+
+    #[error("order mutation '{0}' conflicts with an existing durable mutation")]
+    MutationConflict(String),
+
+    #[error("execution already has a nonterminal order mutation")]
+    MutationAlreadyActive,
+
+    #[error("order mutation is not allowed while execution state is {0:?}")]
+    MutationNotAllowed(ExecutionState),
+
+    #[error("order mutation '{0}' is not present")]
+    MutationNotFound(String),
+
+    #[error("order mutation capacity is exhausted")]
+    MutationCapacityExceeded,
+
+    #[error("order mutation transition from {from:?} to {to:?} is not allowed")]
+    InvalidMutationTransition {
+        from: OrderMutationState,
+        to: OrderMutationState,
+    },
 }
 
 impl ExecutionRecord {
@@ -73,6 +202,7 @@ impl ExecutionRecord {
             order_id: None,
             exchange_state: None,
             rejection_code: None,
+            mutations: Vec::new(),
         }
     }
 
@@ -160,6 +290,197 @@ impl ExecutionRecord {
         matches!(self.state, ExecutionState::Prepared)
     }
 
+    pub fn active_mutation(&self) -> Option<&OrderMutationRecord> {
+        self.mutations
+            .iter()
+            .rev()
+            .find(|mutation| !mutation.state.is_terminal())
+    }
+
+    pub fn effective_size(&self) -> &str {
+        let mut value = self.plan.size.as_str();
+        for mutation in &self.mutations {
+            if mutation.kind == OrderMutationKind::Amend
+                && mutation.state == OrderMutationState::Applied
+                && let Some(size) = mutation.new_size.as_deref()
+            {
+                value = size;
+            }
+        }
+        value
+    }
+
+    pub fn effective_price(&self) -> &str {
+        let mut value = self.plan.price.as_str();
+        for mutation in &self.mutations {
+            if mutation.kind == OrderMutationKind::Amend
+                && mutation.state == OrderMutationState::Applied
+                && let Some(price) = mutation.new_price.as_deref()
+            {
+                value = price;
+            }
+        }
+        value
+    }
+
+    pub fn prepare_mutation(
+        &mut self,
+        mutation: OrderMutationRecord,
+    ) -> Result<bool, ExecutionTransitionError> {
+        if let Some(existing) = self
+            .mutations
+            .iter()
+            .find(|existing| existing.mutation_id == mutation.mutation_id)
+        {
+            return if existing == &mutation {
+                Ok(false)
+            } else {
+                Err(ExecutionTransitionError::MutationConflict(
+                    mutation.mutation_id,
+                ))
+            };
+        }
+        if self.active_mutation().is_some() {
+            return Err(ExecutionTransitionError::MutationAlreadyActive);
+        }
+        if !matches!(self.state, ExecutionState::Live | ExecutionState::PartiallyFilled) {
+            return Err(ExecutionTransitionError::MutationNotAllowed(self.state));
+        }
+        if self.mutations.len() >= MAX_ORDER_MUTATIONS_PER_EXECUTION {
+            return Err(ExecutionTransitionError::MutationCapacityExceeded);
+        }
+        self.mutations.push(mutation);
+        Ok(true)
+    }
+
+    pub fn begin_mutation_submission(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        self.mutation_transition(
+            mutation_id,
+            OrderMutationState::Prepared,
+            OrderMutationState::Submitting,
+        )
+    }
+
+    pub fn acknowledge_mutation(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        self.mutation_transition(
+            mutation_id,
+            OrderMutationState::Submitting,
+            OrderMutationState::Acknowledged,
+        )
+    }
+
+    pub fn mark_mutation_unknown(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        self.mutation_transition(
+            mutation_id,
+            OrderMutationState::Submitting,
+            OrderMutationState::Unknown,
+        )
+    }
+
+    pub fn reject_mutation(
+        &mut self,
+        mutation_id: &str,
+        code: impl Into<String>,
+    ) -> Result<(), ExecutionTransitionError> {
+        let mutation = self.mutation_mut(mutation_id)?;
+        if mutation.state != OrderMutationState::Submitting {
+            return Err(ExecutionTransitionError::InvalidMutationTransition {
+                from: mutation.state,
+                to: OrderMutationState::Rejected,
+            });
+        }
+        let code = code.into();
+        if code.trim().is_empty() {
+            return Err(ExecutionTransitionError::EmptyRejectionCode);
+        }
+        mutation.rejection_code = Some(code);
+        mutation.state = OrderMutationState::Rejected;
+        Ok(())
+    }
+
+    pub fn recover_inflight_mutation(&mut self) -> bool {
+        let Some(mutation) = self
+            .mutations
+            .iter_mut()
+            .rev()
+            .find(|mutation| mutation.state == OrderMutationState::Submitting)
+        else {
+            return false;
+        };
+        mutation.state = OrderMutationState::Unknown;
+        true
+    }
+
+    pub fn resolve_active_mutation(
+        &mut self,
+        resolution: OrderMutationResolution,
+    ) -> Result<(), ExecutionTransitionError> {
+        if resolution == OrderMutationResolution::Pending {
+            return Ok(());
+        }
+        let mutation = self
+            .mutations
+            .iter_mut()
+            .rev()
+            .find(|mutation| !mutation.state.is_terminal())
+            .ok_or_else(|| ExecutionTransitionError::MutationNotFound("active".to_owned()))?;
+        if !matches!(
+            mutation.state,
+            OrderMutationState::Acknowledged | OrderMutationState::Unknown
+        ) {
+            return Err(ExecutionTransitionError::InvalidMutationTransition {
+                from: mutation.state,
+                to: match resolution {
+                    OrderMutationResolution::Applied => OrderMutationState::Applied,
+                    OrderMutationResolution::Superseded => OrderMutationState::Superseded,
+                    OrderMutationResolution::Pending => unreachable!(),
+                },
+            });
+        }
+        mutation.state = match resolution {
+            OrderMutationResolution::Applied => OrderMutationState::Applied,
+            OrderMutationResolution::Superseded => OrderMutationState::Superseded,
+            OrderMutationResolution::Pending => unreachable!(),
+        };
+        Ok(())
+    }
+
+    fn mutation_transition(
+        &mut self,
+        mutation_id: &str,
+        from: OrderMutationState,
+        to: OrderMutationState,
+    ) -> Result<(), ExecutionTransitionError> {
+        let mutation = self.mutation_mut(mutation_id)?;
+        if mutation.state != from {
+            return Err(ExecutionTransitionError::InvalidMutationTransition {
+                from: mutation.state,
+                to,
+            });
+        }
+        mutation.state = to;
+        Ok(())
+    }
+
+    fn mutation_mut(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<&mut OrderMutationRecord, ExecutionTransitionError> {
+        self.mutations
+            .iter_mut()
+            .find(|mutation| mutation.mutation_id == mutation_id)
+            .ok_or_else(|| ExecutionTransitionError::MutationNotFound(mutation_id.to_owned()))
+    }
+
     fn transition(
         &mut self,
         from: ExecutionState,
@@ -227,6 +548,75 @@ mod tests {
             open_risk: None,
             risk_binding: None,
         }
+    }
+
+    #[test]
+    fn mutation_is_durable_idempotent_and_fail_closed() {
+        let mut record = ExecutionRecord::new(plan());
+        record.begin_submission().expect("submit");
+        record.acknowledge("ord-1").expect("ack");
+        record
+            .reconcile_found("ord-1", ExchangeOrderState::Live)
+            .expect("live");
+
+        let mutation = OrderMutationRecord::amend(
+            "mutation_01234567",
+            "amend000000000000000000000000001",
+            None,
+            Some("0.11".to_owned()),
+        )
+        .expect("mutation");
+        assert!(record.prepare_mutation(mutation.clone()).expect("created"));
+        assert!(!record.prepare_mutation(mutation).expect("idempotent"));
+
+        record
+            .begin_mutation_submission("mutation_01234567")
+            .expect("submit mutation");
+        assert!(record.recover_inflight_mutation());
+        assert_eq!(
+            record.active_mutation().expect("active").state,
+            OrderMutationState::Unknown
+        );
+        assert!(matches!(
+            record.begin_mutation_submission("mutation_01234567"),
+            Err(ExecutionTransitionError::InvalidMutationTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn applied_amend_updates_effective_terms_without_rewriting_plan() {
+        let mut record = ExecutionRecord::new(plan());
+        record.begin_submission().expect("submit");
+        record.acknowledge("ord-1").expect("ack");
+        record
+            .reconcile_found("ord-1", ExchangeOrderState::Live)
+            .expect("live");
+        let original_price = record.plan.price.clone();
+
+        record
+            .prepare_mutation(
+                OrderMutationRecord::amend(
+                    "mutation_01234567",
+                    "amend000000000000000000000000001",
+                    Some("2".to_owned()),
+                    Some("0.11".to_owned()),
+                )
+                .expect("mutation"),
+            )
+            .expect("prepare");
+        record
+            .begin_mutation_submission("mutation_01234567")
+            .expect("submit mutation");
+        record
+            .acknowledge_mutation("mutation_01234567")
+            .expect("ack mutation");
+        record
+            .resolve_active_mutation(OrderMutationResolution::Applied)
+            .expect("applied");
+
+        assert_eq!(record.plan.price, original_price);
+        assert_eq!(record.effective_size(), "2");
+        assert_eq!(record.effective_price(), "0.11");
     }
 
     #[test]
