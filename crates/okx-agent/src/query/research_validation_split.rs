@@ -22,7 +22,8 @@ struct ValidationSliceSummary {
     candle_count: usize,
     funding_event_count: usize,
     dataset_id: String,
-    replay_dataset_artifact_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replay_dataset_artifact_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -164,18 +165,21 @@ pub(super) fn prepare_validation_split(
                 ));
             }
         };
-        let (replay_dataset_artifact_id, _) = match store.publish_evidence(&derived.replay_dataset)
-        {
-            Ok(value) => value,
-            Err(error) => {
-                return Ok(failure_response(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Failed,
-                    super::research::RESEARCH_ARTIFACT_FAILURE_CODE,
-                    error.to_string(),
-                    false,
-                ));
+        let replay_dataset_artifact_id = if role == ValidationPartitionRole::FinalOos {
+            None
+        } else {
+            match store.publish_evidence(&derived.replay_dataset) {
+                Ok((artifact_id, _)) => Some(artifact_id),
+                Err(error) => {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        super::research::RESEARCH_ARTIFACT_FAILURE_CODE,
+                        error.to_string(),
+                        false,
+                    ));
+                }
             }
         };
         slices.push(slice_summary(derived, replay_dataset_artifact_id));
@@ -217,7 +221,7 @@ pub(super) fn prepare_validation_split(
 
 fn slice_summary(
     derived: DerivedValidationSlice,
-    replay_dataset_artifact_id: String,
+    replay_dataset_artifact_id: Option<String>,
 ) -> ValidationSliceSummary {
     ValidationSliceSummary {
         role: derived.role,
