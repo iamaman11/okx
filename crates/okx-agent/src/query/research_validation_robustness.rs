@@ -2,10 +2,7 @@ use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentRequest, AgentResponse, AgentResponseStatus, DataQuality,
     RESEARCH_CATALOG_VERSION_V1,
 };
-use okx_research::{
-    BUILD_SOURCE_TREE, ResearchArtifactStore, ValidationEvidenceReadiness,
-    prepare_validation_robustness,
-};
+use okx_research::{BUILD_SOURCE_TREE, ResearchArtifactStore, prepare_validation_robustness};
 use serde::Serialize;
 
 use super::{ObservationQueryContext, failure_response};
