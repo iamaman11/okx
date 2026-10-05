@@ -8,19 +8,17 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BUILD_SOURCE_TREE, PreHoldoutEvidence, ReplayEvidenceClass, ReplayMechanicsProvenance, ReplayStatus,
-    ResearchArtifactStore, ResearchError, ResearchRange, VALIDATION_PROMOTION_CRITERIA_V2,
-    VALIDATION_SPEC_SCHEMA_V2, ValidationEvidenceReadiness, ValidationPartitionRole,
-    ValidationRobustnessEvidence, ValidationSpec, build_baseline_experiment, canonical_sha256,
-    derive_validation_slice, replay_experiment,
+    BUILD_SOURCE_TREE, PreHoldoutEvidence, ReplayEvidenceClass, ReplayMechanicsProvenance,
+    ReplayStatus, ResearchArtifactStore, ResearchError, ResearchRange,
+    VALIDATION_PROMOTION_CRITERIA_V2, VALIDATION_SPEC_SCHEMA_V2, ValidationEvidenceReadiness,
+    ValidationPartitionRole, ValidationRobustnessEvidence, ValidationSpec,
+    build_baseline_experiment, canonical_sha256, derive_validation_slice, replay_experiment,
 };
 
 pub const FINAL_OOS_CONSUMPTION_INTENT_SCHEMA_V1: &str =
     "okx.research.final-oos-consumption-intent/v1";
 pub const PROMOTION_BUNDLE_SCHEMA_V1: &str = "okx.research.promotion-bundle/v1";
-pub const FINAL_OOS_PROMOTION_ALGORITHM_V1: &str =
-    "okx.research.final-oos-promotion/2026-10-05.1";
-
+pub const FINAL_OOS_PROMOTION_ALGORITHM_V1: &str = "okx.research.final-oos-promotion/2026-10-05.1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -223,8 +221,7 @@ pub fn consume_final_oos(
         });
     }
 
-    let final_slice =
-        derive_validation_slice(&parent, &spec, ValidationPartitionRole::FinalOos)?;
+    let final_slice = derive_validation_slice(&parent, &spec, ValidationPartitionRole::FinalOos)?;
     let criteria = validation_promotion_criteria_v2();
 
     let (hypothesis, experiment) = build_baseline_experiment(
@@ -416,8 +413,7 @@ fn decide_final_oos(
     };
 
     let mut blockers = Vec::new();
-    if decimal(&statistics.total_net_pnl_quote)?
-        <= decimal(&criteria.min_net_pnl_quote_exclusive)?
+    if decimal(&statistics.total_net_pnl_quote)? <= decimal(&criteria.min_net_pnl_quote_exclusive)?
     {
         blockers.push("FINAL_OOS_NET_PNL_NOT_POSITIVE".to_owned());
     }
@@ -433,8 +429,7 @@ fn decide_final_oos(
         blockers.push("FINAL_OOS_PROFIT_FACTOR_NOT_ABOVE_ONE".to_owned());
     }
 
-    let mean_to_stddev_threshold =
-        decimal(&criteria.min_mean_to_sample_stddev_ratio_exclusive)?;
+    let mean_to_stddev_threshold = decimal(&criteria.min_mean_to_sample_stddev_ratio_exclusive)?;
     let mean_to_stddev_pass = statistics
         .mean_to_sample_stddev_ratio
         .as_deref()
@@ -490,7 +485,10 @@ mod tests {
 
     fn statistics(samples: &[&str]) -> ValidationSampleStatistics {
         analyze_validation_pnl_samples(
-            &samples.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>(),
+            &samples
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>(),
         )
         .expect("statistics")
     }
@@ -502,15 +500,14 @@ mod tests {
             .collect::<Vec<_>>();
         let stats = statistics(&samples);
         let stress = analyze_validation_cost_stress("16", "2", "0").expect("stress");
-        let (decision, blockers) =
-            decide_final_oos(
-                ReplayStatus::Completed,
-                40,
-                Some(&stats),
-                &stress,
-                &validation_promotion_criteria_v2(),
-            )
-                .expect("decision");
+        let (decision, blockers) = decide_final_oos(
+            ReplayStatus::Completed,
+            40,
+            Some(&stats),
+            &stress,
+            &validation_promotion_criteria_v2(),
+        )
+        .expect("decision");
         assert_eq!(decision, ValidationFinalDecision::Backtested);
         assert!(blockers.is_empty());
     }
@@ -522,15 +519,14 @@ mod tests {
             .collect::<Vec<_>>();
         let stats = statistics(&samples);
         let stress = analyze_validation_cost_stress("-16", "2", "0").expect("stress");
-        let (decision, blockers) =
-            decide_final_oos(
-                ReplayStatus::Completed,
-                40,
-                Some(&stats),
-                &stress,
-                &validation_promotion_criteria_v2(),
-            )
-                .expect("decision");
+        let (decision, blockers) = decide_final_oos(
+            ReplayStatus::Completed,
+            40,
+            Some(&stats),
+            &stress,
+            &validation_promotion_criteria_v2(),
+        )
+        .expect("decision");
         assert_eq!(decision, ValidationFinalDecision::Reject);
         assert!(blockers.contains(&"FINAL_OOS_NET_PNL_NOT_POSITIVE".to_owned()));
     }
@@ -539,15 +535,14 @@ mod tests {
     fn final_oos_small_sample_is_insufficient_data() {
         let stats = statistics(&["1", "-0.25"]);
         let stress = analyze_validation_cost_stress("1", "0.25", "0").expect("stress");
-        let (decision, blockers) =
-            decide_final_oos(
-                ReplayStatus::Completed,
-                2,
-                Some(&stats),
-                &stress,
-                &validation_promotion_criteria_v2(),
-            )
-                .expect("decision");
+        let (decision, blockers) = decide_final_oos(
+            ReplayStatus::Completed,
+            2,
+            Some(&stats),
+            &stress,
+            &validation_promotion_criteria_v2(),
+        )
+        .expect("decision");
         assert_eq!(decision, ValidationFinalDecision::InsufficientData);
         assert_eq!(blockers, vec!["FINAL_OOS_SAMPLE_BELOW_POLICY_MINIMUM"]);
     }
