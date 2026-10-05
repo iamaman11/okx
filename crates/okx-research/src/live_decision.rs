@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{BUILD_SOURCE_TREE, ExperimentSpec, ResearchError, canonical_sha256};
 
 pub const LIVE_RESEARCH_DECISION_SCHEMA_V1: &str = "okx.research.live-decision/v1";
-pub const LIVE_RESEARCH_DECISION_ALGORITHM_V1: &str =
-    "okx.research.live-decision/2026-10-05.1";
+pub const LIVE_RESEARCH_DECISION_ALGORITHM_V1: &str = "okx.research.live-decision/2026-10-05.1";
 const ONE_HOUR_MS: u64 = 3_600_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,18 +172,20 @@ pub fn evaluate_live_research_decision(
     let signal = confirmed
         .last()
         .ok_or(ResearchError::InvalidLiveDecision("missing signal candle"))?;
-    let signal_open_time_ms = signal
-        .open_time_ms
-        .parse::<u64>()
-        .map_err(|_| ResearchError::InvalidTimestamp {
-            field: "live_decision.signal_open_time_ms",
-            value: signal.open_time_ms.clone(),
-        })?;
-    let signal_available_time_ms = signal_open_time_ms
-        .checked_add(ONE_HOUR_MS)
-        .ok_or(ResearchError::InvalidLiveDecision(
-            "signal availability timestamp overflow",
-        ))?;
+    let signal_open_time_ms =
+        signal
+            .open_time_ms
+            .parse::<u64>()
+            .map_err(|_| ResearchError::InvalidTimestamp {
+                field: "live_decision.signal_open_time_ms",
+                value: signal.open_time_ms.clone(),
+            })?;
+    let signal_available_time_ms =
+        signal_open_time_ms
+            .checked_add(ONE_HOUR_MS)
+            .ok_or(ResearchError::InvalidLiveDecision(
+                "signal availability timestamp overflow",
+            ))?;
     if signal_available_time_ms.to_string() != entry.open_time_ms {
         return Err(ResearchError::ReplayCausalityViolation);
     }
@@ -192,24 +193,18 @@ pub fn evaluate_live_research_decision(
     let (antecedent_close, previous_close) = match spec.strategy {
         BaselineStrategyKind::NoTrade => (None, signal.close.clone()),
         BaselineStrategyKind::CloseMomentum => {
-            let previous = confirmed
-                .get(confirmed.len().saturating_sub(2))
-                .ok_or(ResearchError::InvalidLiveDecision(
-                    "close momentum previous candle is missing",
-                ))?;
+            let previous = confirmed.get(confirmed.len().saturating_sub(2)).ok_or(
+                ResearchError::InvalidLiveDecision("close momentum previous candle is missing"),
+            )?;
             (None, previous.close.clone())
         }
         BaselineStrategyKind::TwoBarMomentum => {
-            let previous = confirmed
-                .get(confirmed.len().saturating_sub(2))
-                .ok_or(ResearchError::InvalidLiveDecision(
-                    "two-bar momentum previous candle is missing",
-                ))?;
-            let antecedent = confirmed
-                .get(confirmed.len().saturating_sub(3))
-                .ok_or(ResearchError::InvalidLiveDecision(
-                    "two-bar momentum antecedent candle is missing",
-                ))?;
+            let previous = confirmed.get(confirmed.len().saturating_sub(2)).ok_or(
+                ResearchError::InvalidLiveDecision("two-bar momentum previous candle is missing"),
+            )?;
+            let antecedent = confirmed.get(confirmed.len().saturating_sub(3)).ok_or(
+                ResearchError::InvalidLiveDecision("two-bar momentum antecedent candle is missing"),
+            )?;
             (Some(antecedent.close.clone()), previous.close.clone())
         }
     };
@@ -267,12 +262,8 @@ pub fn evaluate_live_research_decision(
                 .map(|violation| violation.code.to_owned())
                 .collect();
             match gate.decision {
-                okx_analysis::RiskPolicyDecision::Accepted => {
-                    LiveResearchDisposition::WouldSubmit
-                }
-                okx_analysis::RiskPolicyDecision::Rejected => {
-                    LiveResearchDisposition::RiskRejected
-                }
+                okx_analysis::RiskPolicyDecision::Accepted => LiveResearchDisposition::WouldSubmit,
+                okx_analysis::RiskPolicyDecision::Rejected => LiveResearchDisposition::RiskRejected,
             }
         }
     };
@@ -498,9 +489,12 @@ mod tests {
         .expect("direct strategy");
         assert_eq!(result.strategy_decision, direct_strategy);
 
-        let direct_notional = linear_contract_notional_usd("0.01", "0.01", "103")
-            .expect("direct notional");
-        assert_eq!(result.candidate_notional_usd.as_deref(), Some(direct_notional.as_str()));
+        let direct_notional =
+            linear_contract_notional_usd("0.01", "0.01", "103").expect("direct notional");
+        assert_eq!(
+            result.candidate_notional_usd.as_deref(),
+            Some(direct_notional.as_str())
+        );
     }
 
     #[test]

@@ -1,3 +1,5 @@
+mod live_decision;
+mod live_session;
 mod promotion_lifecycle;
 mod replay;
 mod validation;
@@ -5,6 +7,8 @@ mod validation_evidence;
 mod validation_promotion;
 mod validation_robustness;
 
+pub use live_decision::*;
+pub use live_session::*;
 pub use promotion_lifecycle::*;
 pub use replay::*;
 pub use validation::*;
@@ -902,6 +906,9 @@ pub enum ResearchError {
 
     #[error("invalid live research decision: {0}")]
     InvalidLiveDecision(&'static str),
+
+    #[error("invalid live research session: {0}")]
+    InvalidLiveResearchSession(&'static str),
 
     #[error("historical research cursor did not advance strictly toward older evidence")]
     CursorDidNotAdvance,

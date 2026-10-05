@@ -264,6 +264,12 @@ pub struct CandidateRiskContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CandidateRiskContextEvidence {
+    pub context: CandidateRiskContext,
+    pub unsupported_daily_loss_currencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CandidateRiskGate {
     pub decision: RiskPolicyDecision,
     pub projected_account_gross_notional_usd: String,
@@ -577,6 +583,77 @@ pub fn analyze_account_risk(
         open_position_count: positions.len(),
         pending_order_count: account.pending_orders.len(),
         positions,
+    })
+}
+
+pub fn candidate_risk_context_from_account(
+    account: &AccountSnapshot,
+    ledger: &AccountLedgerSummary,
+    mandate: &TradingMandate,
+    instrument_id: &str,
+    account_is_fresh: bool,
+) -> Result<CandidateRiskContextEvidence, AnalysisError> {
+    let account_risk = analyze_account_risk(account)?;
+    candidate_risk_context_from_analysis(
+        &account_risk,
+        ledger,
+        mandate,
+        instrument_id,
+        account_is_fresh,
+    )
+}
+
+fn candidate_risk_context_from_analysis(
+    account_risk: &AccountRiskAnalysis,
+    ledger: &AccountLedgerSummary,
+    mandate: &TradingMandate,
+    instrument_id: &str,
+    account_is_fresh: bool,
+) -> Result<CandidateRiskContextEvidence, AnalysisError> {
+    let total_equity =
+        non_negative_decimal("risk_total_equity_usd", &account_risk.total_equity_usd)?;
+    let capital_base = positive_decimal("capital_base_usd", &mandate.capital_base_usd)?;
+    let account_gross = non_negative_decimal(
+        "risk_account_gross_notional_usd",
+        &account_risk.gross_position_notional_usd,
+    )?;
+    let instrument_gross = account_risk
+        .positions
+        .iter()
+        .filter(|position| position.instrument_id == instrument_id)
+        .try_fold(Decimal::ZERO, |sum, position| {
+            Ok::<_, AnalysisError>(
+                sum + non_negative_decimal(
+                    "risk_instrument_gross_notional_usd",
+                    &position.position_notional_usd,
+                )?,
+            )
+        })?;
+    let account_initial_margin = account_risk
+        .initial_margin_requirement_usd
+        .as_deref()
+        .map(|value| non_negative_decimal("risk_account_initial_margin_usd", value))
+        .transpose()?
+        .unwrap_or(Decimal::ZERO);
+    let drawdown = if total_equity < capital_base {
+        (capital_base - total_equity) / capital_base
+    } else {
+        Decimal::ZERO
+    };
+    let (daily_loss, unsupported_daily_loss_currencies) =
+        usd_equivalent_daily_loss(&ledger.daily_realized_pnl_utc)?;
+
+    Ok(CandidateRiskContextEvidence {
+        context: CandidateRiskContext {
+            total_equity_usd: total_equity.normalize().to_string(),
+            account_gross_notional_usd: account_gross.normalize().to_string(),
+            instrument_gross_notional_usd: instrument_gross.normalize().to_string(),
+            account_initial_margin_usd: account_initial_margin.normalize().to_string(),
+            capital_base_drawdown_ratio: drawdown.normalize().to_string(),
+            daily_realized_loss_usd: daily_loss.unwrap_or(Decimal::ZERO).normalize().to_string(),
+            account_is_fresh,
+        },
+        unsupported_daily_loss_currencies,
     })
 }
 
@@ -1342,6 +1419,91 @@ mod tests {
             daily_realized_loss_usd: "0".to_owned(),
             account_is_fresh: true,
         }
+    }
+
+    #[test]
+    fn candidate_risk_context_reuses_account_and_ledger_truth() {
+        let snapshot = account(
+            "long_short_mode",
+            vec![
+                position(
+                    "BTC-USDT-SWAP",
+                    "SWAP",
+                    "long",
+                    "2",
+                    Some("60"),
+                    Some("100"),
+                    Some("80"),
+                ),
+                position(
+                    "ETH-USDT-SWAP",
+                    "SWAP",
+                    "short",
+                    "3",
+                    Some("40"),
+                    Some("100"),
+                    Some("125"),
+                ),
+            ],
+        );
+        let ledger = AccountLedgerSummary {
+            schema: "okx.account-ledger-summary/v1",
+            source_received_at: "2026-09-27T20:00:00Z".to_owned(),
+            current_account_as_of_ms: Some("1".to_owned()),
+            account_generation: "sha256:test".to_owned(),
+            authority: AccountAuthorityEvidence {
+                scope: "authenticated_account_only",
+                account_type: "0".to_owned(),
+                is_subaccount: true,
+                account_uid_fingerprint: "uid".to_owned(),
+                main_account_uid_fingerprint: Some("main".to_owned()),
+                api_key_permissions: vec!["read_only".to_owned()],
+                multi_account_inventory_complete: false,
+            },
+            total_equity_usd: "500".to_owned(),
+            trading_equity_detail_usd_sum: "500".to_owned(),
+            trading_equity_residual_usd: "0".to_owned(),
+            funding_balances: Vec::new(),
+            open_positions: 2,
+            pending_orders: 0,
+            current_unrealized_pnl: Vec::new(),
+            history_coverage: Vec::new(),
+            realized_pnl_basis: "positions-history",
+            realized_pnl: Vec::new(),
+            daily_realized_pnl_utc_basis: "utc-calendar-day",
+            daily_realized_pnl_utc_day_start_ms: Some("0".to_owned()),
+            daily_realized_pnl_utc_day_end_ms: Some("1".to_owned()),
+            daily_realized_pnl_utc: vec![CurrencyAggregate {
+                currency: "USDT".to_owned(),
+                amount: "-3".to_owned(),
+                events: 1,
+            }],
+            trade_fee_basis: "fills",
+            trade_fees: Vec::new(),
+            funding_basis: "bills",
+            funding: Vec::new(),
+            position_pnl_identity_rows_checked: 0,
+            fill_order_links_checked: 0,
+            fill_order_links_unresolved_due_to_truncation: 0,
+        };
+
+        let evidence = candidate_risk_context_from_account(
+            &snapshot,
+            &ledger,
+            &replay_mandate(),
+            "BTC-USDT-SWAP",
+            true,
+        )
+        .expect("context");
+
+        assert_eq!(evidence.context.total_equity_usd, "500");
+        assert_eq!(evidence.context.account_gross_notional_usd, "100");
+        assert_eq!(evidence.context.instrument_gross_notional_usd, "60");
+        assert_eq!(evidence.context.account_initial_margin_usd, "100");
+        assert_eq!(evidence.context.daily_realized_loss_usd, "3");
+        assert_eq!(evidence.context.capital_base_drawdown_ratio, "0");
+        assert!(evidence.context.account_is_fresh);
+        assert!(evidence.unsupported_daily_loss_currencies.is_empty());
     }
 
     #[test]

@@ -22,6 +22,7 @@ const IDLE_BEFORE_PING_SECONDS: u64 = 20;
 const PONG_TIMEOUT_SECONDS: u64 = 10;
 const SERVICE_UPGRADE_NOTICE_CODE: &str = "64008";
 
+#[derive(Clone)]
 pub struct PrivateWsHandle {
     state: Arc<RwLock<PrivateRuntimeState>>,
 }

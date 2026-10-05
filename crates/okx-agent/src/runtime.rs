@@ -19,6 +19,7 @@ use crate::{
     github_mailbox::{GitHubMailboxClient, MailboxQueryRuntimeContext},
     identity::AgentIdentity,
     market_bootstrap::MarketBootstrapper,
+    research_session::ResearchSessionRuntime,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -86,6 +87,17 @@ pub async fn run_mailbox_until_shutdown(
 
     let (runtime_shutdown_tx, public_shutdown_rx) = watch::channel(false);
     let mut public_runtime_task = tokio::spawn(public_ws_coordinator.run(public_shutdown_rx));
+
+    let (research_session_runtime, research_session) = ResearchSessionRuntime::new(
+        config.root.clone(),
+        public_ws.clone(),
+        market.clone(),
+        account.cloned(),
+        private_ws.cloned(),
+    );
+    let research_shutdown_rx = runtime_shutdown_tx.subscribe();
+    let mut research_session_task =
+        tokio::spawn(research_session_runtime.run(research_shutdown_rx));
     let mut private_runtime_task = private_ws_coordinator.map(|coordinator| {
         let private_shutdown_rx = runtime_shutdown_tx.subscribe();
         tokio::spawn(async move {
@@ -105,6 +117,7 @@ pub async fn run_mailbox_until_shutdown(
         private_ws,
         execution,
         research_root: &config.root,
+        research_session: &research_session,
     };
     let mut cloudflare_runtime = Box::pin(async move {
         match cloudflare {
@@ -163,6 +176,21 @@ pub async fn run_mailbox_until_shutdown(
                         "Cloudflare transport exited before agent shutdown".to_owned(),
                     )),
                     Err(error) => Err(error),
+                };
+            }
+            research_result = &mut research_session_task => {
+                emit(
+                    RuntimeState::ShuttingDown,
+                    config,
+                    identity,
+                    Some(mailbox_issue),
+                )?;
+                return match research_result {
+                    Ok(Ok(())) => Err(AgentError::ResearchSessionTask(
+                        "research session owner exited before agent shutdown".to_owned(),
+                    )),
+                    Ok(Err(error)) => Err(AgentError::ResearchSessionTask(error.to_string())),
+                    Err(error) => Err(AgentError::ResearchSessionTask(error.to_string())),
                 };
             }
             _ = ticker.tick() => {
@@ -236,6 +264,7 @@ pub async fn run_mailbox_until_shutdown(
                         private_ws,
                         execution,
                         research_root: &config.root,
+                        research_session: &research_session,
                     })
                     .await
                 {
@@ -279,6 +308,12 @@ pub async fn run_mailbox_until_shutdown(
             Ok(Err(error)) => eprintln!("private WebSocket shutdown error: {error}"),
             Err(error) => eprintln!("private WebSocket task join error: {error}"),
         }
+    }
+
+    match research_session_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(AgentError::ResearchSessionTask(error.to_string())),
+        Err(error) => return Err(AgentError::ResearchSessionTask(error.to_string())),
     }
 
     emit(

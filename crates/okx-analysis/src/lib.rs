@@ -34,8 +34,8 @@ pub use microstructure::{
 };
 pub use risk::{
     ACCOUNT_RISK_ANALYSIS_SCHEMA_V1, AccountRiskAnalysis, CandidateProjection,
-    CandidateRiskContext, CandidateRiskGate, ClusterExposure, CorrelatedClusterLimit,
-    ExposureAggregate, HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy,
+    CandidateRiskContext, CandidateRiskContextEvidence, CandidateRiskGate, ClusterExposure,
+    CorrelatedClusterLimit, ExposureAggregate, HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy,
     PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2, PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3, PortfolioCandidate,
     PortfolioRiskAnalysis, PositionRiskAnalysis, RISK_ORACLE_COMPARISON_SCHEMA_V2,
     RISK_ORACLE_CONSISTENCY_POLICY_V1, RiskDegradedMode, RiskMinimumQuality, RiskOracleComparison,
@@ -44,9 +44,10 @@ pub use risk::{
     VIRTUAL_POSITION_CONSTRAINT_SCHEMA_V1, VirtualNotionalOracleComparison,
     VirtualNotionalOracleInput, VirtualNotionalOraclePositionComparison,
     VirtualPositionConstraintEvidence, VirtualPositionConstraintInput, analyze_account_risk,
-    analyze_portfolio_risk, compare_account_position_risk_oracle,
-    compare_virtual_position_builder_notional, evaluate_candidate_risk,
-    validate_virtual_linear_position, virtual_portfolio_initial_margin_usd,
+    analyze_portfolio_risk, candidate_risk_context_from_account,
+    compare_account_position_risk_oracle, compare_virtual_position_builder_notional,
+    evaluate_candidate_risk, validate_virtual_linear_position,
+    virtual_portfolio_initial_margin_usd,
 };
 pub use scenario::{
     HISTORY_BEHAVIOR_SCHEMA_V1, HistoryBehaviorAnalysis, POSITION_SCENARIO_SCHEMA_V1,

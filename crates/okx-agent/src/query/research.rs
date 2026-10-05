@@ -19,7 +19,11 @@ use super::{
     MARKET_PUBLIC_API_UNAVAILABLE_CODE, ObservationQueryContext, failure_response, unavailable,
     utc_now_ms,
 };
-use crate::{AgentResult, market_bootstrap::MarketBootstrapError};
+use crate::{
+    AgentResult,
+    market_bootstrap::MarketBootstrapError,
+    research_session::{RESEARCH_SESSION_STATUS_SCHEMA_V1, ResearchSessionFailure},
+};
 
 pub const RESEARCH_CAPABILITIES_SCHEMA_V1: &str = "okx.research-capabilities/v1";
 pub const RESEARCH_DATA_INSPECTION_SCHEMA_V1: &str = "okx.research-data-inspection/v1";
@@ -65,6 +69,11 @@ struct ResearchCapabilitiesResult {
     validation_final_oos_replay_artifact_exposed_by_split: bool,
     validation_final_oos_consumption: bool,
     validation_promotion_bundle: bool,
+    live_session_control: bool,
+    live_session_modes: [&'static str; 2],
+    live_session_event_driven: bool,
+    live_session_single_writer: bool,
+    live_session_exchange_mutation_authority: bool,
     normal_result_target_bytes: u64,
     source_tree: &'static str,
     source_tree_bound: bool,
@@ -334,7 +343,85 @@ pub(crate) async fn dispatch(
             validation_spec_artifact_id,
             validation_robustness_artifact_id,
         ),
+        AgentOperation::Research {
+            request:
+                ResearchRequest::StartLiveSession {
+                    catalog_version: _,
+                    promotion_transition_artifact_id,
+                    experiment_spec_artifact_id,
+                },
+        } => {
+            let Some(session) = context.research_session else {
+                return Ok(unavailable(request, generated_at));
+            };
+            session_response(
+                request,
+                generated_at,
+                session
+                    .start(
+                        promotion_transition_artifact_id.clone(),
+                        experiment_spec_artifact_id.clone(),
+                    )
+                    .await,
+            )
+        }
+        AgentOperation::Research {
+            request: ResearchRequest::InspectLiveSession { catalog_version: _ },
+        } => {
+            let Some(session) = context.research_session else {
+                return Ok(unavailable(request, generated_at));
+            };
+            session_response(request, generated_at, session.inspect().await)
+        }
+        AgentOperation::Research {
+            request:
+                ResearchRequest::StopLiveSession {
+                    catalog_version: _,
+                    session_id,
+                },
+        } => {
+            let Some(session) = context.research_session else {
+                return Ok(unavailable(request, generated_at));
+            };
+            session_response(
+                request,
+                generated_at,
+                session.stop(session_id.clone()).await,
+            )
+        }
         _ => Ok(unavailable(request, generated_at)),
+    }
+}
+
+fn session_response(
+    request: &AgentRequest,
+    generated_at: &str,
+    result: Result<crate::research_session::ResearchSessionStatus, ResearchSessionFailure>,
+) -> AgentResult<AgentResponse> {
+    match result {
+        Ok(status) => Ok(AgentResponse {
+            schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+            request_id: request.request_id.clone(),
+            status: AgentResponseStatus::Completed,
+            generated_at: generated_at.to_owned(),
+            quality: DataQuality::Fresh,
+            result_schema: Some(RESEARCH_SESSION_STATUS_SCHEMA_V1.to_owned()),
+            result: Some(serde_json::to_value(status)?),
+            failure: None,
+            warnings: Vec::new(),
+        }),
+        Err(error) => Ok(failure_response(
+            request,
+            generated_at,
+            if error.retryable {
+                AgentResponseStatus::Failed
+            } else {
+                AgentResponseStatus::Rejected
+            },
+            error.code,
+            error.message,
+            error.retryable,
+        )),
     }
 }
 
@@ -342,7 +429,7 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
     let result = ResearchCapabilitiesResult {
         schema: RESEARCH_CAPABILITIES_SCHEMA_V1,
         catalog_version: RESEARCH_CATALOG_VERSION_V1,
-        stage: "3C_V1_FINAL_GATE",
+        stage: "3D_V1_SESSION",
         tier_a_instruments: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
         tier_a_bars: ["1H"],
         tier_b_instruments: ["BTC-USDT-SWAP"],
@@ -371,6 +458,11 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
         validation_final_oos_replay_artifact_exposed_by_split: false,
         validation_final_oos_consumption: true,
         validation_promotion_bundle: true,
+        live_session_control: true,
+        live_session_modes: ["PAPER", "SHADOW"],
+        live_session_event_driven: true,
+        live_session_single_writer: true,
+        live_session_exchange_mutation_authority: false,
         normal_result_target_bytes: NORMAL_RESULT_TARGET_BYTES,
         source_tree: BUILD_SOURCE_TREE,
         source_tree_bound: BUILD_SOURCE_TREE != "UNAVAILABLE",

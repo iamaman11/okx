@@ -12,6 +12,7 @@ pub mod okx_credentials;
 pub mod once;
 mod query;
 pub mod reference_bootstrap;
+pub mod research_session;
 pub mod runtime;
 
 use thiserror::Error;
@@ -41,6 +42,9 @@ pub enum AgentError {
 
     #[error("public observation runtime task failed: {0}")]
     PublicRuntimeTask(String),
+
+    #[error("research session runtime task failed: {0}")]
+    ResearchSessionTask(String),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

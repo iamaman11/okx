@@ -18,6 +18,7 @@ use crate::{
     identity::AgentIdentity,
     market_bootstrap::MarketBootstrapper,
     once::{ObservationQueryContext, process_once_now_with_size_telemetry},
+    research_session::ResearchSessionHandle,
 };
 
 pub const GITHUB_MAILBOX_IDENTITY_SCHEMA_V1: &str = "okx.github-mailbox.identity/v1";
@@ -31,6 +32,7 @@ pub struct MailboxQueryRuntimeContext<'a> {
     pub private_ws: Option<&'a PrivateWsHandle>,
     pub execution: Option<&'a ExecutionRuntime>,
     pub research_root: &'a Path,
+    pub research_session: &'a ResearchSessionHandle,
 }
 
 pub struct GitHubMailboxClient {
@@ -106,6 +108,7 @@ impl GitHubMailboxClient {
             private_ws,
             execution,
             research_root,
+            research_session,
         } = context;
         let mut checkpoint = self.load_checkpoint_for_poll()?;
         let fetch_started = Instant::now();
@@ -178,7 +181,7 @@ impl GitHubMailboxClient {
                 &envelope,
                 expected_key_id,
                 agent_private_key,
-                ObservationQueryContext::live_with_execution_and_research(
+                ObservationQueryContext::live_with_execution_research_and_session(
                     public_ws,
                     market,
                     mailbox_telemetry.as_ref(),
@@ -186,6 +189,7 @@ impl GitHubMailboxClient {
                     private_ws,
                     execution,
                     Some(research_root),
+                    Some(research_session),
                 ),
             )
             .await

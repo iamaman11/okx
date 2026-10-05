@@ -96,6 +96,74 @@ impl PromotionTransition {
     }
 }
 
+pub fn load_accepted_promotion_transition(
+    store: &ResearchArtifactStore,
+    transition_artifact_id: &str,
+) -> Result<PromotionTransition, ResearchError> {
+    let transition: PromotionTransition = store.read_evidence_json(transition_artifact_id)?;
+    transition.validate()?;
+
+    let bundle: PromotionBundle =
+        store.read_evidence_json(&transition.promotion_bundle_artifact_id)?;
+    if bundle.schema != PROMOTION_BUNDLE_SCHEMA_V1
+        || bundle.decision != ValidationFinalDecision::Backtested
+        || !bundle.decision_blockers.is_empty()
+        || bundle.final_oos_status != "CONSUMED"
+        || transition.promotion_bundle_id != bundle.promotion_bundle_id
+        || transition.hypothesis_id != bundle.hypothesis_id
+        || transition.strategy != bundle.strategy
+        || transition.strategy_version != bundle.strategy_version
+        || transition.promotion_source_tree != bundle.source_tree
+    {
+        return Err(ResearchError::ArtifactIdentityMismatch);
+    }
+
+    match transition.to {
+        ResearchPromotionState::Paper => {
+            if transition.from != ResearchPromotionState::Backtested
+                || transition.previous_transition_artifact_id.is_some()
+            {
+                return Err(ResearchError::InvalidPromotionTransition(
+                    "accepted PAPER lineage must be BACKTESTED->PAPER",
+                ));
+            }
+        }
+        ResearchPromotionState::Shadow => {
+            if transition.from != ResearchPromotionState::Paper {
+                return Err(ResearchError::InvalidPromotionTransition(
+                    "accepted SHADOW lineage must be PAPER->SHADOW",
+                ));
+            }
+            let Some(previous_artifact_id) = transition.previous_transition_artifact_id.as_deref()
+            else {
+                return Err(ResearchError::InvalidPromotionTransition(
+                    "accepted SHADOW lineage requires PAPER transition",
+                ));
+            };
+            let previous: PromotionTransition = store.read_evidence_json(previous_artifact_id)?;
+            previous.validate()?;
+            if previous.from != ResearchPromotionState::Backtested
+                || previous.to != ResearchPromotionState::Paper
+                || previous.previous_transition_artifact_id.is_some()
+                || previous.promotion_bundle_artifact_id != transition.promotion_bundle_artifact_id
+                || previous.promotion_bundle_id != transition.promotion_bundle_id
+                || previous.hypothesis_id != transition.hypothesis_id
+                || previous.strategy != transition.strategy
+                || previous.strategy_version != transition.strategy_version
+            {
+                return Err(ResearchError::ArtifactIdentityMismatch);
+            }
+        }
+        ResearchPromotionState::Research | ResearchPromotionState::Backtested => {
+            return Err(ResearchError::InvalidPromotionTransition(
+                "live research requires PAPER or SHADOW promotion",
+            ));
+        }
+    }
+
+    Ok(transition)
+}
+
 pub fn authorize_promotion_transition(
     store: &ResearchArtifactStore,
     promotion_bundle_artifact_id: &str,
