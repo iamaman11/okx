@@ -502,7 +502,7 @@ impl PublicWsCoordinator {
         let is_market_update = !matches!(&arg.channel, PublicChannel::Instruments);
         let mut state = self.state.write().await;
 
-        let reference_changed = match arg.channel {
+        let reference_changed: Result<bool, PublicRuntimeError> = match arg.channel {
             PublicChannel::Instruments => {
                 let updates: Vec<PublicInstrument> = data
                     .into_iter()
@@ -600,7 +600,8 @@ impl PublicWsCoordinator {
                 }
                 Ok(false)
             }
-        }?;
+        };
+        let reference_changed = reference_changed?;
         drop(state);
 
         if is_market_update {
