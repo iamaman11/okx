@@ -255,16 +255,10 @@ mod tests {
         let payload = private_subscribe_payload(&subscriptions).expect("subscribe");
         let value: Value = serde_json::from_str(&payload).expect("json");
         assert_eq!(value["args"][0]["channel"], "account");
-        assert_eq!(
-            value["args"][0]["extraParams"],
-            EVENT_ONLY_EXTRA_PARAMS
-        );
+        assert_eq!(value["args"][0]["extraParams"], EVENT_ONLY_EXTRA_PARAMS);
         assert_eq!(value["args"][1]["channel"], "positions");
         assert_eq!(value["args"][1]["instType"], "ANY");
-        assert_eq!(
-            value["args"][1]["extraParams"],
-            EVENT_ONLY_EXTRA_PARAMS
-        );
+        assert_eq!(value["args"][1]["extraParams"], EVENT_ONLY_EXTRA_PARAMS);
         assert_eq!(value["args"][2]["channel"], "orders");
         assert_eq!(value["args"][2]["instType"], "ANY");
         assert!(value["args"][2].get("extraParams").is_none());
