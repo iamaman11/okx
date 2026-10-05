@@ -1,9 +1,11 @@
+mod promotion_lifecycle;
 mod replay;
 mod validation;
 mod validation_evidence;
 mod validation_promotion;
 mod validation_robustness;
 
+pub use promotion_lifecycle::*;
 pub use replay::*;
 pub use validation::*;
 pub use validation_evidence::*;
@@ -894,6 +896,9 @@ pub enum ResearchError {
 
     #[error("research artifact content does not match its content-addressed identity")]
     ArtifactIdentityMismatch,
+
+    #[error("invalid research promotion transition: {0}")]
+    InvalidPromotionTransition(&'static str),
 
     #[error("historical research cursor did not advance strictly toward older evidence")]
     CursorDidNotAdvance,
