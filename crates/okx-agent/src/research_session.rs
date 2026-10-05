@@ -8,7 +8,7 @@ use okx_analysis::{candidate_risk_context_from_account, baseline_strategy_resear
 use okx_observation::MarketReadiness;
 use okx_protocol::DataQuality;
 use okx_research::{
-    BUILD_SOURCE_TREE, ExperimentSpec, LIVE_RESEARCH_SESSION_CHECKPOINT_SCHEMA_V1,
+    BUILD_SOURCE_TREE, ExperimentSpec,
     LiveResearchDisposition, LiveResearchSessionCheckpoint, LiveResearchSessionConfig,
     LiveResearchSessionMode, LiveResearchSessionStatus, PaperVirtualPosition,
     RESEARCH_FUNDING_SCHEMA_V1, ResearchArtifactStore, ResearchFundingEvent,
@@ -479,7 +479,7 @@ impl ResearchSessionRuntime {
         &mut self,
         session_id: &str,
     ) -> Result<ResearchSessionStatus, ResearchSessionFailure> {
-        let Some(mut active) = self.active.take() else {
+        let Some(active) = self.active.take() else {
             if self
                 .last_checkpoint
                 .as_ref()
