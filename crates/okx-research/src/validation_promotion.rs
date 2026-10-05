@@ -304,8 +304,13 @@ pub fn consume_final_oos(
         &result.trading_cost_quote,
         &result.funding_cost_quote,
     )?;
-    let (decision, decision_blockers) =
-        decide_final_oos(result.status, result.trade_count, statistics.as_ref(), &cost_stress)?;
+    let (decision, decision_blockers) = decide_final_oos(
+        result.status,
+        result.trade_count,
+        statistics.as_ref(),
+        &cost_stress,
+        &criteria,
+    )?;
 
     let final_oos = FinalOosEvidence {
         replay_dataset_artifact_id: final_oos_replay_dataset_artifact_id,
@@ -390,6 +395,7 @@ fn decide_final_oos(
     trade_count: usize,
     statistics: Option<&ValidationSampleStatistics>,
     cost_stress: &ValidationCostStress,
+    criteria: &ValidationPromotionCriteria,
 ) -> Result<(ValidationFinalDecision, Vec<String>), ResearchError> {
     if status != ReplayStatus::Completed {
         return Ok((
@@ -397,7 +403,7 @@ fn decide_final_oos(
             vec!["FINAL_OOS_REPLAY_NOT_COMPLETED".to_owned()],
         ));
     }
-    if trade_count < MIN_FINAL_OOS_TRADES_V2 {
+    if trade_count < criteria.min_final_oos_trades {
         return Ok((
             ValidationFinalDecision::InsufficientData,
             vec!["FINAL_OOS_SAMPLE_BELOW_POLICY_MINIMUM".to_owned()],
@@ -411,12 +417,14 @@ fn decide_final_oos(
     };
 
     let mut blockers = Vec::new();
-    if decimal(&statistics.total_net_pnl_quote)? <= Decimal::ZERO {
+    if decimal(&statistics.total_net_pnl_quote)?
+        <= decimal(&criteria.min_net_pnl_quote_exclusive)?
+    {
         blockers.push("FINAL_OOS_NET_PNL_NOT_POSITIVE".to_owned());
     }
 
     let profit_factor_pass = match &statistics.profit_factor {
-        Some(value) => decimal(value)? > Decimal::ONE,
+        Some(value) => decimal(value)? > decimal(&criteria.min_profit_factor_exclusive)?,
         None => {
             decimal(&statistics.gross_loss_abs_quote)? == Decimal::ZERO
                 && decimal(&statistics.gross_profit_quote)? > Decimal::ZERO
@@ -431,12 +439,16 @@ fn decide_final_oos(
         .as_deref()
         .map(decimal)
         .transpose()?
-        .is_some_and(|value| value > Decimal::ZERO);
+        .is_some_and(|value| {
+            value
+                > decimal(&criteria.min_mean_to_sample_stddev_ratio_exclusive)
+                    .unwrap_or(Decimal::ZERO)
+        });
     if !mean_to_stddev_pass {
         blockers.push("FINAL_OOS_MEAN_TO_STDDEV_NOT_POSITIVE".to_owned());
     }
 
-    if !cost_stress.monotonic_nonincreasing {
+    if criteria.require_cost_stress_monotonic && !cost_stress.monotonic_nonincreasing {
         blockers.push("FINAL_OOS_COST_STRESS_NOT_MONOTONIC".to_owned());
     }
 
@@ -494,7 +506,13 @@ mod tests {
         let stats = statistics(&samples);
         let stress = analyze_validation_cost_stress("16", "2", "0").expect("stress");
         let (decision, blockers) =
-            decide_final_oos(ReplayStatus::Completed, 40, Some(&stats), &stress)
+            decide_final_oos(
+                ReplayStatus::Completed,
+                40,
+                Some(&stats),
+                &stress,
+                &validation_promotion_criteria_v2(),
+            )
                 .expect("decision");
         assert_eq!(decision, ValidationFinalDecision::Backtested);
         assert!(blockers.is_empty());
@@ -508,7 +526,13 @@ mod tests {
         let stats = statistics(&samples);
         let stress = analyze_validation_cost_stress("-16", "2", "0").expect("stress");
         let (decision, blockers) =
-            decide_final_oos(ReplayStatus::Completed, 40, Some(&stats), &stress)
+            decide_final_oos(
+                ReplayStatus::Completed,
+                40,
+                Some(&stats),
+                &stress,
+                &validation_promotion_criteria_v2(),
+            )
                 .expect("decision");
         assert_eq!(decision, ValidationFinalDecision::Reject);
         assert!(blockers.contains(&"FINAL_OOS_NET_PNL_NOT_POSITIVE".to_owned()));
@@ -519,7 +543,13 @@ mod tests {
         let stats = statistics(&["1", "-0.25"]);
         let stress = analyze_validation_cost_stress("1", "0.25", "0").expect("stress");
         let (decision, blockers) =
-            decide_final_oos(ReplayStatus::Completed, 2, Some(&stats), &stress)
+            decide_final_oos(
+                ReplayStatus::Completed,
+                2,
+                Some(&stats),
+                &stress,
+                &validation_promotion_criteria_v2(),
+            )
                 .expect("decision");
         assert_eq!(decision, ValidationFinalDecision::InsufficientData);
         assert_eq!(blockers, vec!["FINAL_OOS_SAMPLE_BELOW_POLICY_MINIMUM"]);
