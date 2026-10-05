@@ -845,30 +845,41 @@ mod tests {
 
     #[test]
     fn count_based_spec_and_slices_are_deterministic_and_apply_purge() {
-        let parent = parent_dataset(24);
+        let parent = parent_dataset(240);
         let spec = build_validation_spec_from_counts(
             id('a'),
             &parent,
             BaselineStrategyKind::CloseMomentum,
-            12,
-            6,
-            6,
+            144,
+            48,
+            48,
         )
         .expect("spec");
         let retry = build_validation_spec_from_counts(
             id('a'),
             &parent,
             BaselineStrategyKind::CloseMomentum,
-            12,
-            6,
-            6,
+            144,
+            48,
+            48,
         )
         .expect("retry");
         assert_eq!(spec.validation_spec_id, retry.validation_spec_id);
         assert_eq!(spec.purge_bars, 2);
-        assert_eq!(spec.partitions[0].range, range(0, 12 * HOUR));
-        assert_eq!(spec.partitions[1].range, range(12 * HOUR, 18 * HOUR));
-        assert_eq!(spec.partitions[2].range, range(18 * HOUR, 24 * HOUR));
+        assert_eq!(spec.schema, VALIDATION_SPEC_SCHEMA_V2);
+        assert_eq!(spec.partitions[0].range, range(0, 144 * HOUR));
+        assert_eq!(spec.partitions[1].range, range(144 * HOUR, 192 * HOUR));
+        assert_eq!(spec.partitions[2].range, range(192 * HOUR, 240 * HOUR));
+        let walk_forward = spec.walk_forward_plan.as_ref().expect("walk-forward plan");
+        assert_eq!(walk_forward.fold_count, 3);
+        assert_eq!(walk_forward.validation_candles_per_fold, 24);
+        assert_eq!(walk_forward.folds[0].train_declared_range, range(0, 70 * HOUR));
+        assert_eq!(walk_forward.folds[0].train_effective_range, range(0, 68 * HOUR));
+        assert_eq!(walk_forward.folds[0].validation_range, range(70 * HOUR, 94 * HOUR));
+        assert_eq!(walk_forward.folds[2].validation_range, range(118 * HOUR, 142 * HOUR));
+        let regime = spec.regime_plan.as_ref().expect("regime plan");
+        assert_eq!(regime.threshold_source, "TRAIN_MEDIAN");
+        assert_eq!(regime.threshold_abs_return, "0");
 
         let train =
             derive_validation_slice(&parent, &spec, ValidationPartitionRole::Train).expect("train");
@@ -878,31 +889,31 @@ mod tests {
         let final_oos = derive_validation_slice(&parent, &spec, ValidationPartitionRole::FinalOos)
             .expect("final oos");
 
-        assert_eq!(train.replay_dataset.candles.len(), 10);
-        assert_eq!(validation.replay_dataset.candles.len(), 4);
-        assert_eq!(final_oos.replay_dataset.candles.len(), 6);
-        assert_eq!(train.effective_range, range(0, 10 * HOUR));
-        assert_eq!(validation.effective_range, range(12 * HOUR, 16 * HOUR));
-        assert_eq!(final_oos.effective_range, range(18 * HOUR, 24 * HOUR));
+        assert_eq!(train.replay_dataset.candles.len(), 142);
+        assert_eq!(validation.replay_dataset.candles.len(), 46);
+        assert_eq!(final_oos.replay_dataset.candles.len(), 48);
+        assert_eq!(train.effective_range, range(0, 142 * HOUR));
+        assert_eq!(validation.effective_range, range(144 * HOUR, 190 * HOUR));
+        assert_eq!(final_oos.effective_range, range(192 * HOUR, 240 * HOUR));
     }
 
     #[test]
     fn final_oos_future_poison_cannot_change_train_slice() {
-        let parent = parent_dataset(24);
+        let parent = parent_dataset(240);
         let spec = build_validation_spec_from_counts(
             id('a'),
             &parent,
             BaselineStrategyKind::CloseMomentum,
-            12,
-            6,
-            6,
+            144,
+            48,
+            48,
         )
         .expect("spec");
         let baseline = derive_validation_slice(&parent, &spec, ValidationPartitionRole::Train)
             .expect("baseline train");
 
         let mut poisoned = parent.clone();
-        poisoned.candles[23].close = "999999999".to_owned();
+        poisoned.candles[239].close = "999999999".to_owned();
         let poisoned_train =
             derive_validation_slice(&poisoned, &spec, ValidationPartitionRole::Train)
                 .expect("poisoned train");
@@ -919,15 +930,15 @@ mod tests {
 
     #[test]
     fn count_based_spec_requires_exact_parent_partitioning() {
-        let parent = parent_dataset(24);
+        let parent = parent_dataset(240);
         assert!(matches!(
             build_validation_spec_from_counts(
                 id('a'),
                 &parent,
                 BaselineStrategyKind::CloseMomentum,
-                12,
-                6,
-                5,
+                144,
+                48,
+                47,
             ),
             Err(ResearchError::ReplayDatasetMismatch)
         ));
