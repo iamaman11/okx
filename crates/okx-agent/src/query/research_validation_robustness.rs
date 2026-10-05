@@ -11,8 +11,7 @@ use serde::Serialize;
 use super::{ObservationQueryContext, failure_response};
 use crate::AgentResult;
 
-pub const RESEARCH_VALIDATION_ROBUSTNESS_SCHEMA_V1: &str =
-    "okx.research-validation-robustness/v1";
+pub const RESEARCH_VALIDATION_ROBUSTNESS_SCHEMA_V1: &str = "okx.research-validation-robustness/v1";
 
 #[derive(Debug, Serialize)]
 struct ValidationRobustnessResult {
