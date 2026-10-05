@@ -36,15 +36,26 @@ const SERVICE_UPGRADE_NOTICE_CODE: &str = "64008";
 const COMMAND_CAPACITY: usize = 128;
 pub const MAX_ACTIVE_MARKETS: usize = 12;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PublicMarketWakeup {
+    pub sequence: u64,
+    pub generation: u64,
+    pub received_at_ms: u64,
+}
+
+#[derive(Clone)]
 pub struct PublicWsHandle {
     commands: mpsc::Sender<CoordinatorCommand>,
     state: Arc<RwLock<PublicRuntimeState>>,
+    market_updates: watch::Sender<PublicMarketWakeup>,
 }
 
 pub struct PublicWsCoordinator {
     environment: OkxEnvironment,
     state: Arc<RwLock<PublicRuntimeState>>,
     commands: mpsc::Receiver<CoordinatorCommand>,
+    market_updates: watch::Sender<PublicMarketWakeup>,
+    market_update_sequence: u64,
     demands: BTreeSet<String>,
     demand_recency: VecDeque<String>,
     generation: u64,
@@ -143,6 +154,10 @@ impl PublicWsHandle {
     pub fn state(&self) -> Arc<RwLock<PublicRuntimeState>> {
         Arc::clone(&self.state)
     }
+
+    pub fn subscribe_market_updates(&self) -> watch::Receiver<PublicMarketWakeup> {
+        self.market_updates.subscribe()
+    }
 }
 
 impl PublicWsCoordinator {
@@ -160,11 +175,15 @@ impl PublicWsCoordinator {
     ) -> (Self, PublicWsHandle) {
         let state = Arc::new(RwLock::new(PublicRuntimeState::new(reference)));
         let (commands_tx, commands_rx) = mpsc::channel(COMMAND_CAPACITY);
+        let (market_updates, _market_updates_rx) =
+            watch::channel(PublicMarketWakeup::default());
         (
             Self {
                 environment,
                 state: Arc::clone(&state),
                 commands: commands_rx,
+                market_updates: market_updates.clone(),
+                market_update_sequence: 0,
                 demands: BTreeSet::new(),
                 demand_recency: VecDeque::new(),
                 generation: 0,
@@ -173,6 +192,7 @@ impl PublicWsCoordinator {
             PublicWsHandle {
                 commands: commands_tx,
                 state,
+                market_updates,
             },
         )
     }
@@ -479,9 +499,10 @@ impl PublicWsCoordinator {
     ) -> Result<bool, PublicRuntimeError> {
         let received_at_ms = now_ms()?;
         let received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let is_market_update = !matches!(&arg.channel, PublicChannel::Instruments);
         let mut state = self.state.write().await;
 
-        match arg.channel {
+        let reference_changed = match arg.channel {
             PublicChannel::Instruments => {
                 let updates: Vec<PublicInstrument> = data
                     .into_iter()
@@ -579,7 +600,19 @@ impl PublicWsCoordinator {
                 }
                 Ok(false)
             }
+        }?;
+        drop(state);
+
+        if is_market_update {
+            self.market_update_sequence = self.market_update_sequence.saturating_add(1);
+            self.market_updates.send_replace(PublicMarketWakeup {
+                sequence: self.market_update_sequence,
+                generation,
+                received_at_ms,
+            });
         }
+
+        Ok(reference_changed)
     }
 
     async fn backoff_until(
