@@ -289,8 +289,8 @@ export const mcpApi = {
                 request: {
                   type: "object",
                   properties: {
-                    action: { type: "string", enum: ["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split", "evaluate_validation_evidence", "evaluate_validation_robustness", "consume_final_oos"] },
-                    catalog_version: { type: "string", const: "okx.research.catalog/2026-10-05.8" },
+                    action: { type: "string", enum: ["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split", "evaluate_validation_evidence", "evaluate_validation_robustness", "consume_final_oos", "start_live_session", "inspect_live_session", "stop_live_session"] },
+                    catalog_version: { type: "string", const: "okx.research.catalog/2026-10-05.9" },
                     instrument: {
                       type: "string",
                       enum: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
@@ -348,8 +348,20 @@ export const mcpApi = {
                       type: "string",
                       pattern: "^sha256:[0-9a-f]{64}$",
                     },
+                    promotion_transition_artifact_id: {
+                      type: "string",
+                      pattern: "^sha256:[0-9a-f]{64}$",
+                    },
+                    experiment_spec_artifact_id: {
+                      type: "string",
+                      pattern: "^sha256:[0-9a-f]{64}$",
+                    },
+                    session_id: {
+                      type: "string",
+                      pattern: "^sha256:[0-9a-f]{64}$",
+                    },
                   },
-                  required: ["action", "catalog_version", "instrument"],
+                  required: ["action", "catalog_version"],
                   additionalProperties: false,
                 },
               },
@@ -666,16 +678,130 @@ export const mcpApi = {
             "validation_experiment_result_artifact_id",
             "pre_holdout_evidence_artifact_id",
             "validation_robustness_artifact_id",
+            "promotion_transition_artifact_id",
+            "experiment_spec_artifact_id",
+            "session_id",
           ])
         ) {
           return jsonRpcError(id, -32602, "unsupported research request field");
         }
-        if (!["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split", "evaluate_validation_evidence", "evaluate_validation_robustness", "consume_final_oos"].includes(String(research.action))) {
+        if (!["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split", "evaluate_validation_evidence", "evaluate_validation_robustness", "consume_final_oos", "start_live_session", "inspect_live_session", "stop_live_session"].includes(String(research.action))) {
           return jsonRpcError(id, -32602, "invalid research action");
         }
-        if (research.catalog_version !== "okx.research.catalog/2026-10-05.8") {
+        if (research.catalog_version !== "okx.research.catalog/2026-10-05.9") {
           return jsonRpcError(id, -32602, "invalid research catalog_version");
         }
+        const sessionArtifactPattern = /^sha256:[0-9a-f]{64}$/;
+        const legacyResearchFields = [
+          "instrument",
+          "bar",
+          "candle_limit",
+          "funding_limit",
+          "trade_limit",
+          "replay_dataset_artifact_id",
+          "strategy",
+          "mechanics_provenance",
+          "target_candle_count",
+          "checkpoint_artifact_id",
+          "parent_replay_dataset_artifact_id",
+          "train_candle_count",
+          "validation_candle_count",
+          "final_oos_candle_count",
+          "validation_spec_artifact_id",
+          "train_replay_dataset_artifact_id",
+          "train_experiment_result_artifact_id",
+          "validation_replay_dataset_artifact_id",
+          "validation_experiment_result_artifact_id",
+          "pre_holdout_evidence_artifact_id",
+          "validation_robustness_artifact_id",
+        ] as const;
+        const hasLegacyResearchField = legacyResearchFields.some(
+          (field) => research[field] !== undefined,
+        );
+
+        if (research.action === "start_live_session") {
+          if (
+            hasLegacyResearchField ||
+            typeof research.promotion_transition_artifact_id !== "string" ||
+            !sessionArtifactPattern.test(research.promotion_transition_artifact_id) ||
+            typeof research.experiment_spec_artifact_id !== "string" ||
+            !sessionArtifactPattern.test(research.experiment_spec_artifact_id) ||
+            research.session_id !== undefined
+          ) {
+            return jsonRpcError(id, -32602, "invalid Stage-3D live session start request");
+          }
+          const agentRequest = {
+            schema: "okx.agent.request/v1",
+            request_id: requestId(),
+            operation: {
+              type: "research",
+              request: {
+                action: "start_live_session",
+                catalog_version: research.catalog_version,
+                promotion_transition_artifact_id: research.promotion_transition_artifact_id,
+                experiment_spec_artifact_id: research.experiment_spec_artifact_id,
+              },
+            },
+          };
+          return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+        }
+
+        if (research.action === "inspect_live_session") {
+          if (
+            hasLegacyResearchField ||
+            research.promotion_transition_artifact_id !== undefined ||
+            research.experiment_spec_artifact_id !== undefined ||
+            research.session_id !== undefined
+          ) {
+            return jsonRpcError(id, -32602, "invalid Stage-3D live session inspect request");
+          }
+          const agentRequest = {
+            schema: "okx.agent.request/v1",
+            request_id: requestId(),
+            operation: {
+              type: "research",
+              request: {
+                action: "inspect_live_session",
+                catalog_version: research.catalog_version,
+              },
+            },
+          };
+          return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+        }
+
+        if (research.action === "stop_live_session") {
+          if (
+            hasLegacyResearchField ||
+            research.promotion_transition_artifact_id !== undefined ||
+            research.experiment_spec_artifact_id !== undefined ||
+            typeof research.session_id !== "string" ||
+            !sessionArtifactPattern.test(research.session_id)
+          ) {
+            return jsonRpcError(id, -32602, "invalid Stage-3D live session stop request");
+          }
+          const agentRequest = {
+            schema: "okx.agent.request/v1",
+            request_id: requestId(),
+            operation: {
+              type: "research",
+              request: {
+                action: "stop_live_session",
+                catalog_version: research.catalog_version,
+                session_id: research.session_id,
+              },
+            },
+          };
+          return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+        }
+
+        if (
+          research.promotion_transition_artifact_id !== undefined ||
+          research.experiment_spec_artifact_id !== undefined ||
+          research.session_id !== undefined
+        ) {
+          return jsonRpcError(id, -32602, "live-session fields are not valid for this research action");
+        }
+
         const instrument = normalizeInstrument(research.instrument);
         if (
           instrument === null ||
