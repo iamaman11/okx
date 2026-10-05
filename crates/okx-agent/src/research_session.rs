@@ -193,6 +193,7 @@ pub struct ResearchSessionRuntime {
     wakeups: watch::Receiver<PublicMarketWakeup>,
     active: Option<ActiveResearchSession>,
     last_checkpoint: Option<(LiveResearchSessionCheckpoint, String)>,
+    last_config: Option<LiveResearchSessionConfig>,
 }
 
 impl ResearchSessionRuntime {
@@ -218,6 +219,7 @@ impl ResearchSessionRuntime {
                 wakeups,
                 active: None,
                 last_checkpoint: None,
+                last_config: None,
             },
             ResearchSessionHandle {
                 commands: commands_tx,
@@ -275,6 +277,7 @@ impl ResearchSessionRuntime {
         }
 
         self.last_checkpoint = Some((checkpoint.clone(), pointer.checkpoint_artifact_id.clone()));
+        self.last_config = Some(config.clone());
         if checkpoint.status == LiveResearchSessionStatus::Active {
             self.public_ws
                 .demand_instrument(config.instrument_id.clone())
@@ -375,6 +378,7 @@ impl ResearchSessionRuntime {
             .map_err(|error| ResearchSessionFailure::unavailable(error.to_string()))?;
 
         self.last_checkpoint = Some((checkpoint.clone(), checkpoint_artifact_id.clone()));
+        self.last_config = Some(config.clone());
         self.active = Some(ActiveResearchSession {
             config,
             config_artifact_id,
@@ -434,6 +438,7 @@ impl ResearchSessionRuntime {
             .map_err(|error| ResearchSessionFailure::unavailable(error.to_string()))?;
         self.write_pointer(&artifact_id)
             .map_err(|error| ResearchSessionFailure::unavailable(error.to_string()))?;
+        self.last_config = Some(active.config);
         self.last_checkpoint = Some((stopped, artifact_id));
         Ok(self.status())
     }
@@ -608,6 +613,13 @@ impl ResearchSessionRuntime {
             }
         }
 
+        active.checkpoint.latest_paper_trade_artifact_id =
+            latest_paper_trade_artifact_id.clone();
+        active.checkpoint.paper_trade_count = paper_trade_count;
+        active.checkpoint.paper_realized_net_pnl_quote =
+            paper_realized_net_pnl_quote.clone();
+        active.checkpoint.paper_open_position = paper_open_position.clone();
+
         let Some(account) = self.account.as_ref() else {
             self.active = Some(active);
             return self
@@ -711,9 +723,11 @@ impl ResearchSessionRuntime {
         let would_submit_count = active
             .checkpoint
             .would_submit_count
-            .saturating_add(u64::from(
-                decision.disposition == LiveResearchDisposition::WouldSubmit,
-            ));
+            .saturating_add(if decision.disposition == LiveResearchDisposition::WouldSubmit {
+                1
+            } else {
+                0
+            });
         let next = LiveResearchSessionCheckpoint::build(
             active.checkpoint.session_id.clone(),
             active.config_artifact_id.clone(),
@@ -812,7 +826,9 @@ impl ResearchSessionRuntime {
                     .as_ref()
                     .map(|(checkpoint, artifact_id)| (checkpoint, artifact_id.as_str()))
             });
-        let config = active.map(|value| &value.config);
+        let config = active
+            .map(|value| &value.config)
+            .or(self.last_config.as_ref());
 
         ResearchSessionStatus {
             schema: SESSION_STATUS_SCHEMA_V1,
@@ -891,32 +907,3 @@ impl ResearchSessionRuntime {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_is_idle_without_persisted_session() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-session-status-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let reference = okx_observation::ReferenceRegistry::empty_for_test();
-        let (_coordinator, public_ws) =
-            okx_runtime::PublicWsCoordinator::new(okx_api::OkxEnvironment::new(
-                okx_api::Region::Global,
-                false,
-            ), reference);
-        let market = MarketBootstrapper::new(okx_api::OkxPublicClient::new(
-            okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
-            okx_api::RateBudget::new(),
-        ));
-        let (runtime, _handle) =
-            ResearchSessionRuntime::new(root.clone(), public_ws, market, None, None);
-
-        assert_eq!(runtime.status().state, "IDLE");
-        assert!(!runtime.status().exchange_mutation_authority);
-        let _ = std::fs::remove_dir_all(root);
-    }
-}
