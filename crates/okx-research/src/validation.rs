@@ -20,6 +20,7 @@ pub const RESEARCH_FAMILY_SCHEMA_V1: &str = "okx.research.family/v1";
 pub const VALIDATION_SPLIT_SCHEMA_V1: &str = "okx.research.validation-split/v1";
 pub const VALIDATION_EVIDENCE_POLICY_V1: &str = "okx.research.validation-evidence/2026-10-05.1";
 pub const VALIDATION_PROMOTION_CRITERIA_V1: &str = "okx.research.promotion-criteria/2026-10-05.1";
+pub const VALIDATION_PROMOTION_CRITERIA_V2: &str = "okx.research.promotion-criteria/2026-10-05.2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -485,7 +486,7 @@ pub fn build_validation_spec_from_counts(
         validation,
         final_oos,
         VALIDATION_EVIDENCE_POLICY_V1,
-        VALIDATION_PROMOTION_CRITERIA_V1,
+        VALIDATION_PROMOTION_CRITERIA_V2,
         walk_forward_plan,
         regime_plan,
     )
