@@ -11,6 +11,5 @@ pub use private::{
 pub use public::{
     PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2, PublicConnectionState, PublicMarketWakeup,
     PublicQualitySnapshot, PublicRuntimeError, PublicRuntimeState, PublicWsCoordinator,
-    PublicWsHandle,
-    RECONNECT_BACKOFF_SECONDS, reconnect_delay,
+    PublicWsHandle, RECONNECT_BACKOFF_SECONDS, reconnect_delay,
 };
