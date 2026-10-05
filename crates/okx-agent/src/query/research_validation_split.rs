@@ -110,6 +110,7 @@ pub(super) fn prepare_validation_split(
     let strategy = match strategy {
         ResearchReplayStrategy::NoTrade => BaselineStrategyKind::NoTrade,
         ResearchReplayStrategy::CloseMomentum => BaselineStrategyKind::CloseMomentum,
+        ResearchReplayStrategy::TwoBarMomentum => BaselineStrategyKind::TwoBarMomentum,
     };
     let spec = match build_validation_spec_from_counts(
         parent_replay_dataset_artifact_id,
