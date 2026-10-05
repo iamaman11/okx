@@ -21,7 +21,6 @@ pub const PROMOTION_BUNDLE_SCHEMA_V1: &str = "okx.research.promotion-bundle/v1";
 pub const FINAL_OOS_PROMOTION_ALGORITHM_V1: &str =
     "okx.research.final-oos-promotion/2026-10-05.1";
 
-const MIN_FINAL_OOS_TRADES_V2: usize = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -45,7 +44,7 @@ pub struct ValidationPromotionCriteria {
 pub fn validation_promotion_criteria_v2() -> ValidationPromotionCriteria {
     ValidationPromotionCriteria {
         version: VALIDATION_PROMOTION_CRITERIA_V2.to_owned(),
-        min_final_oos_trades: MIN_FINAL_OOS_TRADES_V2,
+        min_final_oos_trades: 30,
         min_net_pnl_quote_exclusive: "0".to_owned(),
         min_profit_factor_exclusive: "1".to_owned(),
         min_mean_to_sample_stddev_ratio_exclusive: "0".to_owned(),
@@ -434,16 +433,14 @@ fn decide_final_oos(
         blockers.push("FINAL_OOS_PROFIT_FACTOR_NOT_ABOVE_ONE".to_owned());
     }
 
+    let mean_to_stddev_threshold =
+        decimal(&criteria.min_mean_to_sample_stddev_ratio_exclusive)?;
     let mean_to_stddev_pass = statistics
         .mean_to_sample_stddev_ratio
         .as_deref()
         .map(decimal)
         .transpose()?
-        .is_some_and(|value| {
-            value
-                > decimal(&criteria.min_mean_to_sample_stddev_ratio_exclusive)
-                    .unwrap_or(Decimal::ZERO)
-        });
+        .is_some_and(|value| value > mean_to_stddev_threshold);
     if !mean_to_stddev_pass {
         blockers.push("FINAL_OOS_MEAN_TO_STDDEV_NOT_POSITIVE".to_owned());
     }
