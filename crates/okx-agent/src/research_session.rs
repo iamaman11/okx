@@ -674,36 +674,36 @@ impl ResearchSessionRuntime {
         if active.config.mode == LiveResearchSessionMode::Paper
             && let Some(position) = paper_open_position.take()
         {
-                let Some(exit_candle) = history.candles.last() else {
-                    self.active = Some(active);
-                    return Ok(());
-                };
-                let funding = paper_funding.as_deref().unwrap_or(&[]);
-                match settle_paper_virtual_position(
-                    &active.config.session_id,
-                    &active.spec,
-                    &position,
-                    &exit_candle.open_time_ms,
-                    &exit_candle.open,
-                    funding,
-                ) {
-                    Ok(trade) => {
-                        paper_realized_net_pnl_quote =
-                            paper_realized_pnl_after_trade(&paper_realized_net_pnl_quote, &trade)?;
-                        paper_trade_count = paper_trade_count.saturating_add(1);
-                        let (artifact_id, _) = self.store.publish_evidence(&trade)?;
-                        latest_paper_trade_artifact_id = Some(artifact_id);
-                    }
-                    Err(error) => {
-                        active.checkpoint.paper_open_position = Some(position);
-                        self.active = Some(active);
-                        self.persist_terminal_block(
-                            bucket_open_ms,
-                            format!("PAPER_SETTLEMENT_FAILED:{error}"),
-                        )?;
-                        return Ok(());
-                    }
+            let Some(exit_candle) = history.candles.last() else {
+                self.active = Some(active);
+                return Ok(());
+            };
+            let funding = paper_funding.as_deref().unwrap_or(&[]);
+            match settle_paper_virtual_position(
+                &active.config.session_id,
+                &active.spec,
+                &position,
+                &exit_candle.open_time_ms,
+                &exit_candle.open,
+                funding,
+            ) {
+                Ok(trade) => {
+                    paper_realized_net_pnl_quote =
+                        paper_realized_pnl_after_trade(&paper_realized_net_pnl_quote, &trade)?;
+                    paper_trade_count = paper_trade_count.saturating_add(1);
+                    let (artifact_id, _) = self.store.publish_evidence(&trade)?;
+                    latest_paper_trade_artifact_id = Some(artifact_id);
                 }
+                Err(error) => {
+                    active.checkpoint.paper_open_position = Some(position);
+                    self.active = Some(active);
+                    self.persist_terminal_block(
+                        bucket_open_ms,
+                        format!("PAPER_SETTLEMENT_FAILED:{error}"),
+                    )?;
+                    return Ok(());
+                }
+            }
         }
 
         active.checkpoint.latest_paper_trade_artifact_id = latest_paper_trade_artifact_id.clone();
