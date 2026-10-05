@@ -290,7 +290,7 @@ export const mcpApi = {
                   type: "object",
                   properties: {
                     action: { type: "string", enum: ["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split", "evaluate_validation_evidence", "evaluate_validation_robustness", "consume_final_oos"] },
-                    catalog_version: { type: "string", const: "okx.research.catalog/2026-10-05.7" },
+                    catalog_version: { type: "string", const: "okx.research.catalog/2026-10-05.8" },
                     instrument: {
                       type: "string",
                       enum: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
@@ -303,7 +303,7 @@ export const mcpApi = {
                       type: "string",
                       pattern: "^sha256:[0-9a-f]{64}$",
                     },
-                    strategy: { type: "string", enum: ["no_trade", "close_momentum"] },
+                    strategy: { type: "string", enum: ["no_trade", "close_momentum", "two_bar_momentum"] },
                     mechanics_provenance: {
                       type: "string",
                       enum: ["declared_counterfactual", "historical_observed"],
@@ -673,7 +673,7 @@ export const mcpApi = {
         if (!["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split", "evaluate_validation_evidence", "evaluate_validation_robustness", "consume_final_oos"].includes(String(research.action))) {
           return jsonRpcError(id, -32602, "invalid research action");
         }
-        if (research.catalog_version !== "okx.research.catalog/2026-10-05.7") {
+        if (research.catalog_version !== "okx.research.catalog/2026-10-05.8") {
           return jsonRpcError(id, -32602, "invalid research catalog_version");
         }
         const instrument = normalizeInstrument(research.instrument);
@@ -841,7 +841,7 @@ export const mcpApi = {
             research.checkpoint_artifact_id !== undefined ||
             typeof research.parent_replay_dataset_artifact_id !== "string" ||
             !/^sha256:[0-9a-f]{64}$/.test(research.parent_replay_dataset_artifact_id) ||
-            !["no_trade", "close_momentum"].includes(String(research.strategy)) ||
+            !["no_trade", "close_momentum", "two_bar_momentum"].includes(String(research.strategy)) ||
             splitCounts.some(
               (value) => !Number.isInteger(value) || Number(value) < 4 || Number(value) > 2400,
             ) ||
@@ -1049,7 +1049,7 @@ export const mcpApi = {
             research.validation_robustness_artifact_id !== undefined ||
           typeof research.replay_dataset_artifact_id !== "string" ||
           !/^sha256:[0-9a-f]{64}$/.test(research.replay_dataset_artifact_id) ||
-          !["no_trade", "close_momentum"].includes(String(research.strategy)) ||
+          !["no_trade", "close_momentum", "two_bar_momentum"].includes(String(research.strategy)) ||
           !["declared_counterfactual", "historical_observed"].includes(
             String(research.mechanics_provenance),
           )
