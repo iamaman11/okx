@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use okx_analysis::{
     BASELINE_STRATEGY_VERSION_V1, BaselineStrategyKind, StrategyParameterSurface,
     StrategyResearchMetadata, baseline_strategy_research_metadata,
+    validation_median_absolute_return,
 };
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +12,10 @@ use crate::{
 };
 
 pub const VALIDATION_SPEC_SCHEMA_V1: &str = "okx.research.validation-spec/v1";
+pub const VALIDATION_SPEC_SCHEMA_V2: &str = "okx.research.validation-spec/v2";
+pub const VALIDATION_WALK_FORWARD_PLAN_VERSION_V1: &str =
+    "okx.research.walk-forward-plan/2026-10-05.1";
+pub const VALIDATION_REGIME_PLAN_VERSION_V1: &str = "okx.research.regime-plan/2026-10-05.1";
 pub const RESEARCH_FAMILY_SCHEMA_V1: &str = "okx.research.family/v1";
 pub const VALIDATION_SPLIT_SCHEMA_V1: &str = "okx.research.validation-split/v1";
 pub const VALIDATION_EVIDENCE_POLICY_V1: &str = "okx.research.validation-evidence/2026-10-05.1";
@@ -33,6 +38,34 @@ pub struct ValidationPartition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ValidationWalkForwardFold {
+    pub fold_index: u16,
+    pub train_declared_range: ResearchRange,
+    pub train_effective_range: ResearchRange,
+    pub validation_range: ResearchRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationWalkForwardPlan {
+    pub version: String,
+    pub fold_count: u16,
+    pub validation_candles_per_fold: u16,
+    pub folds: Vec<ValidationWalkForwardFold>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationRegimePlan {
+    pub version: String,
+    pub basis: String,
+    pub threshold_source: String,
+    pub threshold_abs_return: String,
+    pub minimum_trades_per_regime: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValidationSpec {
     pub schema: String,
     pub validation_spec_id: String,
@@ -46,6 +79,10 @@ pub struct ValidationSpec {
     pub embargo_bars: u16,
     pub evidence_policy_version: String,
     pub promotion_criteria_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub walk_forward_plan: Option<ValidationWalkForwardPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regime_plan: Option<ValidationRegimePlan>,
     pub validation_source_tree: String,
 }
 
@@ -62,6 +99,24 @@ struct ValidationSpecIdentity<'a> {
     embargo_bars: u16,
     evidence_policy_version: &'a str,
     promotion_criteria_version: &'a str,
+    validation_source_tree: &'a str,
+}
+
+#[derive(Serialize)]
+struct ValidationSpecIdentityV2<'a> {
+    schema: &'static str,
+    parent_replay_dataset_artifact_id: &'a str,
+    parent_dataset_id: &'a str,
+    strategy: BaselineStrategyKind,
+    strategy_version: &'a str,
+    strategy_metadata: &'a StrategyResearchMetadata,
+    partitions: &'a [ValidationPartition],
+    purge_bars: u16,
+    embargo_bars: u16,
+    evidence_policy_version: &'a str,
+    promotion_criteria_version: &'a str,
+    walk_forward_plan: &'a ValidationWalkForwardPlan,
+    regime_plan: &'a ValidationRegimePlan,
     validation_source_tree: &'a str,
 }
 
@@ -160,6 +215,8 @@ impl ValidationSpec {
             embargo_bars,
             evidence_policy_version,
             promotion_criteria_version,
+            walk_forward_plan: None,
+            regime_plan: None,
             validation_source_tree: BUILD_SOURCE_TREE.to_owned(),
         })
     }
@@ -170,6 +227,152 @@ impl ValidationSpec {
 
     pub fn parameter_sensitivity_applicable(&self) -> bool {
         self.strategy_metadata.parameter_surface != StrategyParameterSurface::None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_v2(
+        parent_replay_dataset_artifact_id: impl Into<String>,
+        parent_dataset_id: impl Into<String>,
+        strategy: BaselineStrategyKind,
+        strategy_version: impl Into<String>,
+        train: ResearchRange,
+        validation: ResearchRange,
+        final_oos: ResearchRange,
+        evidence_policy_version: impl Into<String>,
+        promotion_criteria_version: impl Into<String>,
+        walk_forward_plan: ValidationWalkForwardPlan,
+        regime_plan: ValidationRegimePlan,
+    ) -> Result<Self, ResearchError> {
+        let parent_replay_dataset_artifact_id = parent_replay_dataset_artifact_id.into();
+        let parent_dataset_id = parent_dataset_id.into();
+        let strategy_version = strategy_version.into();
+        let evidence_policy_version = evidence_policy_version.into();
+        let promotion_criteria_version = promotion_criteria_version.into();
+
+        require_sha256(
+            "validation.parent_replay_dataset_artifact_id",
+            &parent_replay_dataset_artifact_id,
+        )?;
+        require_sha256("validation.parent_dataset_id", &parent_dataset_id)?;
+        require_nonempty("validation.strategy_version", &strategy_version)?;
+        require_nonempty(
+            "validation.evidence_policy_version",
+            &evidence_policy_version,
+        )?;
+        require_nonempty(
+            "validation.promotion_criteria_version",
+            &promotion_criteria_version,
+        )?;
+        if BUILD_SOURCE_TREE == "UNAVAILABLE" {
+            return Err(ResearchError::MissingField(
+                "validation.validation_source_tree",
+            ));
+        }
+
+        train.validate()?;
+        validation.validate()?;
+        final_oos.validate()?;
+        let train_begin = train.begin()?;
+        let train_end = train.end()?;
+        if train_end != validation.begin()? || validation.end()? != final_oos.begin()? {
+            return Err(ResearchError::InvalidRange {
+                begin_ms: train.begin_ms,
+                end_ms: final_oos.end_ms,
+            });
+        }
+        if walk_forward_plan.version != VALIDATION_WALK_FORWARD_PLAN_VERSION_V1
+            || walk_forward_plan.fold_count != 3
+            || usize::from(walk_forward_plan.fold_count) != walk_forward_plan.folds.len()
+            || walk_forward_plan.validation_candles_per_fold < 4
+            || regime_plan.version != VALIDATION_REGIME_PLAN_VERSION_V1
+            || regime_plan.basis != "ABSOLUTE_COMPLETED_BAR_OPEN_CLOSE_RETURN"
+            || regime_plan.threshold_source != "TRAIN_MEDIAN"
+            || regime_plan.minimum_trades_per_regime == 0
+        {
+            return Err(ResearchError::ArtifactIdentityMismatch);
+        }
+        let expected_fold_span_ms = u64::from(walk_forward_plan.validation_candles_per_fold)
+            .checked_mul(3_600_000)
+            .ok_or(ResearchError::ReplayDatasetMismatch)?;
+        let mut previous_validation_end = None::<u64>;
+        for (index, fold) in walk_forward_plan.folds.iter().enumerate() {
+            fold.train_declared_range.validate()?;
+            fold.train_effective_range.validate()?;
+            fold.validation_range.validate()?;
+            let declared_begin = fold.train_declared_range.begin()?;
+            let declared_end = fold.train_declared_range.end()?;
+            let effective_begin = fold.train_effective_range.begin()?;
+            let effective_end = fold.train_effective_range.end()?;
+            let validation_begin = fold.validation_range.begin()?;
+            let validation_end = fold.validation_range.end()?;
+            if usize::from(fold.fold_index) != index
+                || declared_begin != train_begin
+                || effective_begin != train_begin
+                || effective_end > declared_end
+                || declared_end != validation_begin
+                || validation_end > train_end
+                || validation_end
+                    .checked_sub(validation_begin)
+                    .ok_or(ResearchError::ReplayDatasetMismatch)?
+                    != expected_fold_span_ms
+                || previous_validation_end.is_some_and(|previous| previous != validation_begin)
+            {
+                return Err(ResearchError::ArtifactIdentityMismatch);
+            }
+            previous_validation_end = Some(validation_end);
+        }
+
+        let strategy_metadata = baseline_strategy_research_metadata(strategy);
+        let purge_bars = strategy_metadata.forward_outcome_bars;
+        let embargo_bars = 0;
+        let partitions = vec![
+            ValidationPartition {
+                role: ValidationPartitionRole::Train,
+                range: train,
+            },
+            ValidationPartition {
+                role: ValidationPartitionRole::Validation,
+                range: validation,
+            },
+            ValidationPartition {
+                role: ValidationPartitionRole::FinalOos,
+                range: final_oos,
+            },
+        ];
+        let validation_spec_id = canonical_sha256(&ValidationSpecIdentityV2 {
+            schema: VALIDATION_SPEC_SCHEMA_V2,
+            parent_replay_dataset_artifact_id: &parent_replay_dataset_artifact_id,
+            parent_dataset_id: &parent_dataset_id,
+            strategy,
+            strategy_version: &strategy_version,
+            strategy_metadata: &strategy_metadata,
+            partitions: &partitions,
+            purge_bars,
+            embargo_bars,
+            evidence_policy_version: &evidence_policy_version,
+            promotion_criteria_version: &promotion_criteria_version,
+            walk_forward_plan: &walk_forward_plan,
+            regime_plan: &regime_plan,
+            validation_source_tree: BUILD_SOURCE_TREE,
+        })?;
+
+        Ok(Self {
+            schema: VALIDATION_SPEC_SCHEMA_V2.to_owned(),
+            validation_spec_id,
+            parent_replay_dataset_artifact_id,
+            parent_dataset_id,
+            strategy,
+            strategy_version,
+            strategy_metadata,
+            partitions,
+            purge_bars,
+            embargo_bars,
+            evidence_policy_version,
+            promotion_criteria_version,
+            walk_forward_plan: Some(walk_forward_plan),
+            regime_plan: Some(regime_plan),
+            validation_source_tree: BUILD_SOURCE_TREE.to_owned(),
+        })
     }
 }
 
@@ -222,7 +425,58 @@ pub fn build_validation_spec_from_counts(
         return Err(ResearchError::ReplayDatasetMismatch);
     }
 
-    ValidationSpec::build(
+    let purge_bars =
+        usize::from(baseline_strategy_research_metadata(strategy).forward_outcome_bars);
+    let effective_train_count = train_end
+        .checked_sub(purge_bars)
+        .ok_or(ResearchError::ReplayDatasetMismatch)?;
+    const FOLD_COUNT: usize = 3;
+    const VALIDATION_CANDLES_PER_FOLD: usize = 24;
+    let validation_span = FOLD_COUNT * VALIDATION_CANDLES_PER_FOLD;
+    if effective_train_count <= validation_span + purge_bars + 3 {
+        return Err(ResearchError::ReplayMissingField(
+            "validation.walk_forward_train_history",
+        ));
+    }
+    let initial_train_count = effective_train_count - validation_span;
+    let mut folds = Vec::with_capacity(FOLD_COUNT);
+    for fold_index in 0..FOLD_COUNT {
+        let validation_begin = initial_train_count + fold_index * VALIDATION_CANDLES_PER_FOLD;
+        let validation_end = validation_begin + VALIDATION_CANDLES_PER_FOLD;
+        let train_effective_end = validation_begin
+            .checked_sub(purge_bars)
+            .ok_or(ResearchError::ReplayDatasetMismatch)?;
+        folds.push(ValidationWalkForwardFold {
+            fold_index: u16::try_from(fold_index)
+                .map_err(|_| ResearchError::ReplayDatasetMismatch)?,
+            train_declared_range: candle_slice_range(&parent.candles[..validation_begin])?,
+            train_effective_range: candle_slice_range(&parent.candles[..train_effective_end])?,
+            validation_range: candle_slice_range(
+                &parent.candles[validation_begin..validation_end],
+            )?,
+        });
+    }
+    let walk_forward_plan = ValidationWalkForwardPlan {
+        version: VALIDATION_WALK_FORWARD_PLAN_VERSION_V1.to_owned(),
+        fold_count: u16::try_from(FOLD_COUNT).map_err(|_| ResearchError::ReplayDatasetMismatch)?,
+        validation_candles_per_fold: u16::try_from(VALIDATION_CANDLES_PER_FOLD)
+            .map_err(|_| ResearchError::ReplayDatasetMismatch)?,
+        folds,
+    };
+
+    let regime_prices = parent.candles[..effective_train_count]
+        .iter()
+        .map(|candle| (candle.open.clone(), candle.close.clone()))
+        .collect::<Vec<_>>();
+    let regime_plan = ValidationRegimePlan {
+        version: VALIDATION_REGIME_PLAN_VERSION_V1.to_owned(),
+        basis: "ABSOLUTE_COMPLETED_BAR_OPEN_CLOSE_RETURN".to_owned(),
+        threshold_source: "TRAIN_MEDIAN".to_owned(),
+        threshold_abs_return: validation_median_absolute_return(&regime_prices)?,
+        minimum_trades_per_regime: 5,
+    };
+
+    ValidationSpec::build_v2(
         parent_replay_dataset_artifact_id,
         parent.manifest.dataset_id.clone(),
         strategy,
@@ -232,6 +486,8 @@ pub fn build_validation_spec_from_counts(
         final_oos,
         VALIDATION_EVIDENCE_POLICY_V1,
         VALIDATION_PROMOTION_CRITERIA_V1,
+        walk_forward_plan,
+        regime_plan,
     )
 }
 
@@ -313,6 +569,47 @@ pub fn derive_validation_slice(
         effective_range,
         replay_dataset,
     })
+}
+
+pub fn derive_replay_range(
+    parent: &ReplayDatasetArtifact,
+    range: &ResearchRange,
+) -> Result<ReplayDatasetArtifact, ResearchError> {
+    parent.validate()?;
+    range.validate()?;
+    let begin = range.begin()?;
+    let end = range.end()?;
+    if begin < parent.manifest.range.begin()? || end > parent.manifest.range.end()? {
+        return Err(ResearchError::ReplayDatasetMismatch);
+    }
+    let candles = parent
+        .candles
+        .iter()
+        .filter(|row| {
+            row.open_time_ms
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|timestamp| timestamp >= begin && timestamp < end)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if candles.is_empty() || candle_slice_range(&candles)? != *range {
+        return Err(ResearchError::ReplayDatasetMismatch);
+    }
+    let funding = parent
+        .funding
+        .iter()
+        .filter(|event| {
+            event
+                .funding_time_ms
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|timestamp| timestamp >= begin && timestamp < end)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let manifest = parent.manifest.derive_slice(range.clone())?;
+    ReplayDatasetArtifact::build(manifest, candles, funding, parent.reference.clone())
 }
 
 fn candle_slice_range(candles: &[crate::ResearchCandle]) -> Result<ResearchRange, ResearchError> {
@@ -596,30 +893,53 @@ mod tests {
 
     #[test]
     fn count_based_spec_and_slices_are_deterministic_and_apply_purge() {
-        let parent = parent_dataset(24);
+        let parent = parent_dataset(240);
         let spec = build_validation_spec_from_counts(
             id('a'),
             &parent,
             BaselineStrategyKind::CloseMomentum,
-            12,
-            6,
-            6,
+            144,
+            48,
+            48,
         )
         .expect("spec");
         let retry = build_validation_spec_from_counts(
             id('a'),
             &parent,
             BaselineStrategyKind::CloseMomentum,
-            12,
-            6,
-            6,
+            144,
+            48,
+            48,
         )
         .expect("retry");
         assert_eq!(spec.validation_spec_id, retry.validation_spec_id);
         assert_eq!(spec.purge_bars, 2);
-        assert_eq!(spec.partitions[0].range, range(0, 12 * HOUR));
-        assert_eq!(spec.partitions[1].range, range(12 * HOUR, 18 * HOUR));
-        assert_eq!(spec.partitions[2].range, range(18 * HOUR, 24 * HOUR));
+        assert_eq!(spec.schema, VALIDATION_SPEC_SCHEMA_V2);
+        assert_eq!(spec.partitions[0].range, range(0, 144 * HOUR));
+        assert_eq!(spec.partitions[1].range, range(144 * HOUR, 192 * HOUR));
+        assert_eq!(spec.partitions[2].range, range(192 * HOUR, 240 * HOUR));
+        let walk_forward = spec.walk_forward_plan.as_ref().expect("walk-forward plan");
+        assert_eq!(walk_forward.fold_count, 3);
+        assert_eq!(walk_forward.validation_candles_per_fold, 24);
+        assert_eq!(
+            walk_forward.folds[0].train_declared_range,
+            range(0, 70 * HOUR)
+        );
+        assert_eq!(
+            walk_forward.folds[0].train_effective_range,
+            range(0, 68 * HOUR)
+        );
+        assert_eq!(
+            walk_forward.folds[0].validation_range,
+            range(70 * HOUR, 94 * HOUR)
+        );
+        assert_eq!(
+            walk_forward.folds[2].validation_range,
+            range(118 * HOUR, 142 * HOUR)
+        );
+        let regime = spec.regime_plan.as_ref().expect("regime plan");
+        assert_eq!(regime.threshold_source, "TRAIN_MEDIAN");
+        assert_eq!(regime.threshold_abs_return, "0");
 
         let train =
             derive_validation_slice(&parent, &spec, ValidationPartitionRole::Train).expect("train");
@@ -629,35 +949,47 @@ mod tests {
         let final_oos = derive_validation_slice(&parent, &spec, ValidationPartitionRole::FinalOos)
             .expect("final oos");
 
-        assert_eq!(train.replay_dataset.candles.len(), 10);
-        assert_eq!(validation.replay_dataset.candles.len(), 4);
-        assert_eq!(final_oos.replay_dataset.candles.len(), 6);
-        assert_eq!(train.effective_range, range(0, 10 * HOUR));
-        assert_eq!(validation.effective_range, range(12 * HOUR, 16 * HOUR));
-        assert_eq!(final_oos.effective_range, range(18 * HOUR, 24 * HOUR));
+        assert_eq!(train.replay_dataset.candles.len(), 142);
+        assert_eq!(validation.replay_dataset.candles.len(), 46);
+        assert_eq!(final_oos.replay_dataset.candles.len(), 48);
+        assert_eq!(train.effective_range, range(0, 142 * HOUR));
+        assert_eq!(validation.effective_range, range(144 * HOUR, 190 * HOUR));
+        assert_eq!(final_oos.effective_range, range(192 * HOUR, 240 * HOUR));
     }
 
     #[test]
     fn final_oos_future_poison_cannot_change_train_slice() {
-        let parent = parent_dataset(24);
+        let parent = parent_dataset(240);
         let spec = build_validation_spec_from_counts(
             id('a'),
             &parent,
             BaselineStrategyKind::CloseMomentum,
-            12,
-            6,
-            6,
+            144,
+            48,
+            48,
         )
         .expect("spec");
         let baseline = derive_validation_slice(&parent, &spec, ValidationPartitionRole::Train)
             .expect("baseline train");
 
         let mut poisoned = parent.clone();
-        poisoned.candles[23].close = "999999999".to_owned();
+        poisoned.candles[239].close = "999999999".to_owned();
+        let poisoned_spec = build_validation_spec_from_counts(
+            id('a'),
+            &poisoned,
+            BaselineStrategyKind::CloseMomentum,
+            144,
+            48,
+            48,
+        )
+        .expect("poisoned spec");
         let poisoned_train =
             derive_validation_slice(&poisoned, &spec, ValidationPartitionRole::Train)
                 .expect("poisoned train");
 
+        assert_eq!(spec.validation_spec_id, poisoned_spec.validation_spec_id);
+        assert_eq!(spec.walk_forward_plan, poisoned_spec.walk_forward_plan);
+        assert_eq!(spec.regime_plan, poisoned_spec.regime_plan);
         assert_eq!(
             baseline.replay_dataset.candles,
             poisoned_train.replay_dataset.candles
@@ -669,16 +1001,49 @@ mod tests {
     }
 
     #[test]
+    fn reordered_walk_forward_plan_fails_closed() {
+        let parent = parent_dataset(240);
+        let spec = build_validation_spec_from_counts(
+            id('a'),
+            &parent,
+            BaselineStrategyKind::CloseMomentum,
+            144,
+            48,
+            48,
+        )
+        .expect("spec");
+        let mut walk_forward = spec.walk_forward_plan.clone().expect("walk-forward");
+        walk_forward.folds.swap(0, 1);
+        let regime = spec.regime_plan.clone().expect("regime");
+        assert!(matches!(
+            ValidationSpec::build_v2(
+                id('a'),
+                parent.manifest.dataset_id.clone(),
+                BaselineStrategyKind::CloseMomentum,
+                BASELINE_STRATEGY_VERSION_V1,
+                spec.partitions[0].range.clone(),
+                spec.partitions[1].range.clone(),
+                spec.partitions[2].range.clone(),
+                VALIDATION_EVIDENCE_POLICY_V1,
+                VALIDATION_PROMOTION_CRITERIA_V1,
+                walk_forward,
+                regime,
+            ),
+            Err(ResearchError::ArtifactIdentityMismatch)
+        ));
+    }
+
+    #[test]
     fn count_based_spec_requires_exact_parent_partitioning() {
-        let parent = parent_dataset(24);
+        let parent = parent_dataset(240);
         assert!(matches!(
             build_validation_spec_from_counts(
                 id('a'),
                 &parent,
                 BaselineStrategyKind::CloseMomentum,
-                12,
-                6,
-                5,
+                144,
+                48,
+                47,
             ),
             Err(ResearchError::ReplayDatasetMismatch)
         ));

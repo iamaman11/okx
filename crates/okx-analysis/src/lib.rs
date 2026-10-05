@@ -69,9 +69,12 @@ pub use strategy::{
 };
 pub use validation::{
     VALIDATION_COST_STRESS_ALGORITHM_V1, VALIDATION_COST_STRESS_SCHEMA_V1,
-    VALIDATION_SAMPLE_STATISTICS_SCHEMA_V1, VALIDATION_STATISTICS_ALGORITHM_V1,
-    ValidationCostStress, ValidationCostStressPoint, ValidationSampleStatistics,
-    analyze_validation_cost_stress, analyze_validation_pnl_samples,
+    VALIDATION_REGIME_ALGORITHM_V1, VALIDATION_SAMPLE_STATISTICS_SCHEMA_V1,
+    VALIDATION_STATISTICS_ALGORITHM_V1, ValidationCostStress, ValidationCostStressPoint,
+    ValidationRegimeStatistics, ValidationSampleStatistics, ValidationVolatilityRegime,
+    analyze_validation_cost_stress, analyze_validation_pnl_samples, analyze_validation_regime_pnl,
+    classify_validation_volatility_regime, validation_absolute_return,
+    validation_median_absolute_return,
 };
 
 use std::str::FromStr;

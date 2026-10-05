@@ -11,6 +11,7 @@ pub const VALIDATION_STATISTICS_ALGORITHM_V1: &str =
 pub const VALIDATION_COST_STRESS_SCHEMA_V1: &str = "okx.analysis.validation-cost-stress/v1";
 pub const VALIDATION_COST_STRESS_ALGORITHM_V1: &str =
     "okx.analysis.validation-cost-stress/2026-10-05.1";
+pub const VALIDATION_REGIME_ALGORITHM_V1: &str = "okx.analysis.validation-regime/2026-10-05.1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +46,107 @@ pub struct ValidationCostStress {
     pub algorithm_version: String,
     pub points: Vec<ValidationCostStressPoint>,
     pub monotonic_nonincreasing: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ValidationVolatilityRegime {
+    Low,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationRegimeStatistics {
+    pub regime: ValidationVolatilityRegime,
+    pub trade_count: usize,
+    pub net_pnl_quote: String,
+    pub statistics: Option<ValidationSampleStatistics>,
+}
+
+pub fn validation_absolute_return(open: &str, close: &str) -> Result<Decimal, AnalysisError> {
+    let open = validation_decimal("validation_regime_open", open)?;
+    let close = validation_decimal("validation_regime_close", close)?;
+    if open <= Decimal::ZERO {
+        return Err(AnalysisError::NonPositive("validation_regime_open"));
+    }
+    Ok(((close - open) / open).abs())
+}
+
+pub fn validation_median_absolute_return(
+    prices: &[(String, String)],
+) -> Result<String, AnalysisError> {
+    if prices.is_empty() {
+        return Err(AnalysisError::InsufficientStatisticalSamples(0));
+    }
+    let mut values = prices
+        .iter()
+        .map(|(open, close)| validation_absolute_return(open, close))
+        .collect::<Result<Vec<_>, _>>()?;
+    values.sort();
+    let middle = values.len() / 2;
+    let median = if values.len() % 2 == 0 {
+        (values[middle - 1] + values[middle]) / Decimal::from(2_u32)
+    } else {
+        values[middle]
+    };
+    Ok(normalized(median))
+}
+
+pub fn classify_validation_volatility_regime(
+    open: &str,
+    close: &str,
+    threshold_abs_return: &str,
+) -> Result<ValidationVolatilityRegime, AnalysisError> {
+    let threshold = validation_decimal(
+        "validation_regime_threshold_abs_return",
+        threshold_abs_return,
+    )?;
+    if threshold < Decimal::ZERO {
+        return Err(AnalysisError::Negative(
+            "validation_regime_threshold_abs_return",
+        ));
+    }
+    let value = validation_absolute_return(open, close)?;
+    Ok(if value <= threshold {
+        ValidationVolatilityRegime::Low
+    } else {
+        ValidationVolatilityRegime::High
+    })
+}
+
+pub fn analyze_validation_regime_pnl(
+    samples: &[(ValidationVolatilityRegime, String)],
+) -> Result<Vec<ValidationRegimeStatistics>, AnalysisError> {
+    let mut output = Vec::with_capacity(2);
+    for regime in [
+        ValidationVolatilityRegime::Low,
+        ValidationVolatilityRegime::High,
+    ] {
+        let values = samples
+            .iter()
+            .filter(|(sample_regime, _)| *sample_regime == regime)
+            .map(|(_, pnl)| pnl.clone())
+            .collect::<Vec<_>>();
+        let net_pnl_quote = values
+            .iter()
+            .map(|value| validation_decimal("validation_regime_net_pnl_quote", value))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum::<Decimal>();
+        let statistics = if values.len() >= 2 {
+            Some(analyze_validation_pnl_samples(&values)?)
+        } else {
+            None
+        };
+        output.push(ValidationRegimeStatistics {
+            regime,
+            trade_count: values.len(),
+            net_pnl_quote: normalized(net_pnl_quote),
+            statistics,
+        });
+    }
+    Ok(output)
 }
 
 pub fn analyze_validation_pnl_samples(
@@ -205,6 +307,42 @@ mod tests {
         assert_eq!(result.points[1].stressed_net_pnl_quote, "6");
         assert_eq!(result.points[2].stressed_net_pnl_quote, "5");
         assert!(result.monotonic_nonincreasing);
+    }
+
+    #[test]
+    fn median_regime_threshold_is_exact_and_balances_ordered_sample() {
+        let threshold = validation_median_absolute_return(&[
+            ("100".to_owned(), "101".to_owned()),
+            ("100".to_owned(), "102".to_owned()),
+            ("100".to_owned(), "104".to_owned()),
+            ("100".to_owned(), "108".to_owned()),
+        ])
+        .expect("median");
+        assert_eq!(threshold, "0.03");
+        assert_eq!(
+            classify_validation_volatility_regime("100", "102", &threshold).expect("low"),
+            ValidationVolatilityRegime::Low
+        );
+        assert_eq!(
+            classify_validation_volatility_regime("100", "104", &threshold).expect("high"),
+            ValidationVolatilityRegime::High
+        );
+    }
+
+    #[test]
+    fn regime_pnl_retains_both_regimes_and_exact_totals() {
+        let result = analyze_validation_regime_pnl(&[
+            (ValidationVolatilityRegime::Low, "1".to_owned()),
+            (ValidationVolatilityRegime::Low, "-0.25".to_owned()),
+            (ValidationVolatilityRegime::High, "2".to_owned()),
+            (ValidationVolatilityRegime::High, "-0.5".to_owned()),
+        ])
+        .expect("regimes");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].trade_count, 2);
+        assert_eq!(result[0].net_pnl_quote, "0.75");
+        assert_eq!(result[1].trade_count, 2);
+        assert_eq!(result[1].net_pnl_quote, "1.5");
     }
 
     #[test]

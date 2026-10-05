@@ -14,7 +14,7 @@ pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
 pub const DIRECT_TRANSPORT_FRAME_SCHEMA_V1: &str = "okx.direct-transport.frame/v1";
 pub const DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.2";
-pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-05.5";
+pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-05.6";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -473,6 +473,15 @@ pub enum ResearchRequest {
         validation_replay_dataset_artifact_id: String,
         validation_experiment_result_artifact_id: String,
     },
+    EvaluateValidationRobustness {
+        catalog_version: String,
+        instrument: String,
+        validation_spec_artifact_id: String,
+        pre_holdout_evidence_artifact_id: String,
+        train_replay_dataset_artifact_id: String,
+        validation_replay_dataset_artifact_id: String,
+        validation_experiment_result_artifact_id: String,
+    },
 }
 
 impl ResearchRequest {
@@ -650,6 +659,47 @@ impl ResearchRequest {
                     (
                         train_experiment_result_artifact_id,
                         "train_experiment_result_artifact_id",
+                    ),
+                    (
+                        validation_replay_dataset_artifact_id,
+                        "validation_replay_dataset_artifact_id",
+                    ),
+                    (
+                        validation_experiment_result_artifact_id,
+                        "validation_experiment_result_artifact_id",
+                    ),
+                ] {
+                    validate_sha256_artifact_id(artifact_id, field)?;
+                }
+                Ok(())
+            }
+            Self::EvaluateValidationRobustness {
+                catalog_version,
+                instrument,
+                validation_spec_artifact_id,
+                pre_holdout_evidence_artifact_id,
+                train_replay_dataset_artifact_id,
+                validation_replay_dataset_artifact_id,
+                validation_experiment_result_artifact_id,
+            } => {
+                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
+                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
+                }
+                validate_instrument(instrument)?;
+                if instrument != "BTC-USDT-SWAP" {
+                    return Err(ProtocolError::InvalidResearchRequest(
+                        "Stage 3C v1 validation instrument scope",
+                    ));
+                }
+                for (artifact_id, field) in [
+                    (validation_spec_artifact_id, "validation_spec_artifact_id"),
+                    (
+                        pre_holdout_evidence_artifact_id,
+                        "pre_holdout_evidence_artifact_id",
+                    ),
+                    (
+                        train_replay_dataset_artifact_id,
+                        "train_replay_dataset_artifact_id",
                     ),
                     (
                         validation_replay_dataset_artifact_id,
@@ -1959,6 +2009,37 @@ mod tests {
             invalid_validation_evidence.validate(),
             Err(ProtocolError::InvalidResearchRequest(
                 "validation_experiment_result_artifact_id"
+            ))
+        ));
+
+        let validation_robustness = ResearchRequest::EvaluateValidationRobustness {
+            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            validation_spec_artifact_id:
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            pre_holdout_evidence_artifact_id:
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
+            train_replay_dataset_artifact_id:
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333".to_owned(),
+            validation_replay_dataset_artifact_id:
+                "sha256:4444444444444444444444444444444444444444444444444444444444444444".to_owned(),
+            validation_experiment_result_artifact_id:
+                "sha256:5555555555555555555555555555555555555555555555555555555555555555".to_owned(),
+        };
+        assert_eq!(validation_robustness.validate(), Ok(()));
+
+        let mut invalid_validation_robustness = validation_robustness;
+        if let ResearchRequest::EvaluateValidationRobustness {
+            pre_holdout_evidence_artifact_id,
+            ..
+        } = &mut invalid_validation_robustness
+        {
+            *pre_holdout_evidence_artifact_id = "bad".to_owned();
+        }
+        assert!(matches!(
+            invalid_validation_robustness.validate(),
+            Err(ProtocolError::InvalidResearchRequest(
+                "pre_holdout_evidence_artifact_id"
             ))
         ));
     }
