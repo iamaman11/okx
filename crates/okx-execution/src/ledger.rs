@@ -666,37 +666,52 @@ mod tests {
         let path = root.join("ledger.json");
         let store = ExecutionLedgerStore::at(&path);
 
-        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
-        ledger
-            .prepare(plan("intent_0123456789abcdef"), 101)
-            .expect("prepare");
-        ledger
-            .begin_submission("intent_0123456789abcdef", 102)
-            .expect("submit");
-        ledger
-            .acknowledge("intent_0123456789abcdef", "ord-1", 103)
-            .expect("ack");
-        ledger
-            .reconcile_found(
-                "intent_0123456789abcdef",
-                "ord-1",
-                ExchangeOrderState::PartiallyFilled,
-                104,
-            )
-            .expect("partial");
-        ledger
+        {
+            let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+            ledger
+                .prepare(plan("intent_0123456789abcdef"), 101)
+                .expect("prepare");
+            ledger
+                .begin_submission("intent_0123456789abcdef", 102)
+                .expect("submit");
+            ledger
+                .acknowledge("intent_0123456789abcdef", "ord-1", 103)
+                .expect("ack");
+            let partial = ledger
+                .reconcile_found(
+                    "intent_0123456789abcdef",
+                    "ord-1",
+                    ExchangeOrderState::PartiallyFilled,
+                    104,
+                )
+                .expect("partial");
+            assert_eq!(partial.record.state, ExecutionState::PartiallyFilled);
+            assert!(!partial.record.can_submit());
+        }
+
+        let mut reopened =
+            DurableExecutionLedger::open(store.clone(), 200).expect("partial-fill restart");
+        let partial = &reopened
+            .get("intent_0123456789abcdef")
+            .expect("partial entry")
+            .record;
+        assert_eq!(partial.state, ExecutionState::PartiallyFilled);
+        assert_eq!(partial.order_id.as_deref(), Some("ord-1"));
+        assert!(!partial.can_submit());
+
+        reopened
             .reconcile_found(
                 "intent_0123456789abcdef",
                 "ord-1",
                 ExchangeOrderState::Filled,
-                105,
+                201,
             )
-            .expect("filled");
+            .expect("filled after restart");
 
-        let reopened = DurableExecutionLedger::open(store, 200).expect("reopen");
-        let record = &reopened
+        let terminal = DurableExecutionLedger::open(store, 300).expect("terminal reopen");
+        let record = &terminal
             .get("intent_0123456789abcdef")
-            .expect("entry")
+            .expect("terminal entry")
             .record;
         assert_eq!(record.state, ExecutionState::Filled);
         assert_eq!(record.order_id.as_deref(), Some("ord-1"));
