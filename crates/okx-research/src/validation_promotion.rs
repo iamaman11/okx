@@ -569,6 +569,27 @@ mod tests {
     }
 
     #[test]
+    fn final_oos_cannot_override_pre_holdout_promotion_failure() {
+        let samples = (0..40)
+            .map(|index| if index % 5 == 0 { "-0.25" } else { "0.5" })
+            .collect::<Vec<_>>();
+        let stats = statistics(&samples);
+        let stress = analyze_validation_cost_stress("16", "2", "0").expect("stress");
+        let blocker = "WALK_FORWARD_AGGREGATE_NET_PNL_NOT_POSITIVE".to_owned();
+        let (decision, blockers) = decide_final_oos(
+            ReplayStatus::Completed,
+            40,
+            Some(&stats),
+            &stress,
+            &validation_promotion_criteria_v2(),
+            vec![blocker.clone()],
+        )
+        .expect("decision");
+        assert_eq!(decision, ValidationFinalDecision::Reject);
+        assert!(blockers.contains(&blocker));
+    }
+
+    #[test]
     fn final_oos_negative_edge_is_rejected() {
         let samples = (0..40)
             .map(|index| if index % 5 == 0 { "0.25" } else { "-0.5" })
