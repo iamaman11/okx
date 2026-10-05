@@ -191,15 +191,33 @@ enum SessionAdmission {
 
 fn admit_session_identity(
     active_session_id: Option<&str>,
+    stopped_session_id: Option<&str>,
     requested_session_id: &str,
 ) -> Result<SessionAdmission, ResearchSessionFailure> {
     match active_session_id {
-        None => Ok(SessionAdmission::Start),
-        Some(active) if active == requested_session_id => Ok(SessionAdmission::Existing),
-        Some(active) => Err(ResearchSessionFailure::conflict(format!(
-            "research session '{active}' is already active"
-        ))),
+        Some(active) if active == requested_session_id => return Ok(SessionAdmission::Existing),
+        Some(active) => {
+            return Err(ResearchSessionFailure::conflict(format!(
+                "research session '{active}' is already active"
+            )));
+        }
+        None => {}
     }
+    if stopped_session_id == Some(requested_session_id) {
+        return Err(ResearchSessionFailure::conflict(format!(
+            "research session '{requested_session_id}' is terminally stopped"
+        )));
+    }
+    Ok(SessionAdmission::Start)
+}
+
+fn bucket_gap_detected(
+    last_evaluated_entry_open_time_ms: Option<&str>,
+    bucket_open_ms: u64,
+) -> bool {
+    last_evaluated_entry_open_time_ms
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|last| bucket_open_ms > last.saturating_add(ONE_HOUR_MS))
 }
 
 fn bucket_already_evaluated(
@@ -399,8 +417,14 @@ impl ResearchSessionRuntime {
         )
         .map_err(|error| ResearchSessionFailure::invalid(error.to_string()))?;
 
+        let stopped_session_id = self
+            .last_checkpoint
+            .as_ref()
+            .filter(|(checkpoint, _)| checkpoint.status == LiveResearchSessionStatus::Stopped)
+            .map(|(checkpoint, _)| checkpoint.session_id.as_str());
         match admit_session_identity(
             self.active.as_ref().map(|active| active.config.session_id.as_str()),
+            stopped_session_id,
             &config.session_id,
         )? {
             SessionAdmission::Existing => return Ok(self.status()),
@@ -523,6 +547,19 @@ impl ResearchSessionRuntime {
                 .as_deref(),
             bucket_open_ms,
         ) {
+            return Ok(());
+        }
+        if bucket_gap_detected(
+            active
+                .checkpoint
+                .last_evaluated_entry_open_time_ms
+                .as_deref(),
+            bucket_open_ms,
+        ) {
+            self.persist_terminal_block(
+                bucket_open_ms,
+                "ENTRY_BUCKET_GAP_DETECTED".to_owned(),
+            )?;
             return Ok(());
         }
 
@@ -971,17 +1008,39 @@ mod tests {
     #[test]
     fn session_admission_is_single_owner_and_idempotent() {
         assert_eq!(
-            admit_session_identity(None, "sha256:requested").expect("new"),
+            admit_session_identity(None, None, "sha256:requested").expect("new"),
             SessionAdmission::Start
         );
         assert_eq!(
-            admit_session_identity(Some("sha256:same"), "sha256:same").expect("same"),
+            admit_session_identity(Some("sha256:same"), None, "sha256:same").expect("same"),
             SessionAdmission::Existing
         );
-        let conflict =
-            admit_session_identity(Some("sha256:active"), "sha256:other").expect_err("conflict");
+        let conflict = admit_session_identity(
+            Some("sha256:active"),
+            None,
+            "sha256:other",
+        )
+        .expect_err("active conflict");
         assert_eq!(conflict.code, "RESEARCH_SESSION_CONFLICT");
         assert!(!conflict.retryable);
+
+        let stopped = admit_session_identity(
+            None,
+            Some("sha256:stopped"),
+            "sha256:stopped",
+        )
+        .expect_err("stopped is terminal");
+        assert_eq!(stopped.code, "RESEARCH_SESSION_CONFLICT");
+        assert!(!stopped.retryable);
+        assert_eq!(
+            admit_session_identity(
+                None,
+                Some("sha256:stopped"),
+                "sha256:new",
+            )
+            .expect("new lineage"),
+            SessionAdmission::Start
+        );
     }
 
     #[test]
@@ -1030,6 +1089,19 @@ mod tests {
         ));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cross_hour_bucket_gap_is_detected_fail_closed() {
+        assert!(!bucket_gap_detected(None, 3 * ONE_HOUR_MS));
+        assert!(!bucket_gap_detected(
+            Some("3600000"),
+            2 * ONE_HOUR_MS
+        ));
+        assert!(bucket_gap_detected(
+            Some("3600000"),
+            3 * ONE_HOUR_MS
+        ));
     }
 
     #[test]
