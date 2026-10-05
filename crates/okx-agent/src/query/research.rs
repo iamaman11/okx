@@ -45,7 +45,7 @@ struct ResearchCapabilitiesResult {
     funding_page_limit_max: u16,
     trade_page_limit_max: u16,
     replay_instruments: [&'static str; 1],
-    replay_strategies: [&'static str; 2],
+    replay_strategies: [&'static str; 3],
     replay_mechanics_provenance: [&'static str; 2],
     replay_requires_artifact_id: bool,
     replay_bulk_events_over_mcp: bool,
@@ -54,7 +54,7 @@ struct ResearchCapabilitiesResult {
     validation_target_candles_max: u16,
     validation_pages_per_call: usize,
     validation_checkpointed: bool,
-    validation_split_strategies: [&'static str; 2],
+    validation_split_strategies: [&'static str; 3],
     validation_final_oos_sealed: bool,
     validation_final_oos_consumed_by_split: bool,
     validation_pre_holdout_evidence: bool,
@@ -351,7 +351,7 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
         funding_page_limit_max: 400,
         trade_page_limit_max: 100,
         replay_instruments: ["BTC-USDT-SWAP"],
-        replay_strategies: ["no_trade", "close_momentum"],
+        replay_strategies: ["no_trade", "close_momentum", "two_bar_momentum"],
         replay_mechanics_provenance: ["declared_counterfactual", "historical_observed"],
         replay_requires_artifact_id: true,
         replay_bulk_events_over_mcp: false,
@@ -360,7 +360,7 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
         validation_target_candles_max: super::research_validation::VALIDATION_TARGET_CANDLES_MAX,
         validation_pages_per_call: super::research_validation::VALIDATION_PAGES_PER_CALL,
         validation_checkpointed: true,
-        validation_split_strategies: ["no_trade", "close_momentum"],
+        validation_split_strategies: ["no_trade", "close_momentum", "two_bar_momentum"],
         validation_final_oos_sealed: true,
         validation_final_oos_consumed_by_split: false,
         validation_pre_holdout_evidence: true,
@@ -803,6 +803,7 @@ async fn run_replay(
     let strategy = match strategy {
         ResearchReplayStrategy::NoTrade => BaselineStrategyKind::NoTrade,
         ResearchReplayStrategy::CloseMomentum => BaselineStrategyKind::CloseMomentum,
+        ResearchReplayStrategy::TwoBarMomentum => BaselineStrategyKind::TwoBarMomentum,
     };
     let mechanics_provenance = match mechanics_provenance {
         ResearchReplayMechanicsProvenance::DeclaredCounterfactual => {
