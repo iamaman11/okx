@@ -72,9 +72,9 @@ pub use validation::{
     VALIDATION_REGIME_ALGORITHM_V1, VALIDATION_SAMPLE_STATISTICS_SCHEMA_V1,
     VALIDATION_STATISTICS_ALGORITHM_V1, ValidationCostStress, ValidationCostStressPoint,
     ValidationRegimeStatistics, ValidationSampleStatistics, ValidationVolatilityRegime,
-    analyze_validation_cost_stress, analyze_validation_pnl_samples,
-    analyze_validation_regime_pnl, classify_validation_volatility_regime,
-    validation_absolute_return, validation_median_absolute_return,
+    analyze_validation_cost_stress, analyze_validation_pnl_samples, analyze_validation_regime_pnl,
+    classify_validation_volatility_regime, validation_absolute_return,
+    validation_median_absolute_return,
 };
 
 use std::str::FromStr;
