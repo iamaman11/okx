@@ -1,10 +1,12 @@
 mod replay;
 mod validation;
 mod validation_evidence;
+mod validation_robustness;
 
 pub use replay::*;
 pub use validation::*;
 pub use validation_evidence::*;
+pub use validation_robustness::*;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
