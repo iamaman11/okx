@@ -618,20 +618,20 @@ async fn resolve_instrument_rules(
     }
 }
 
-struct AssembledAccountSnapshot {
-    snapshot: AccountSnapshot,
-    quality: DataQuality,
-    result_schema: &'static str,
-    warnings: Vec<String>,
+pub(crate) struct AssembledAccountSnapshot {
+    pub(crate) snapshot: AccountSnapshot,
+    pub(crate) quality: DataQuality,
+    pub(crate) result_schema: &'static str,
+    pub(crate) warnings: Vec<String>,
 }
 
-enum AccountQueryError {
+pub(crate) enum AccountQueryError {
     CredentialUnavailable,
     Bootstrap(AccountBootstrapError),
     Convergence(AccountError),
 }
 
-async fn assemble_account_snapshot(
+pub(crate) async fn assemble_account_snapshot(
     context: ObservationQueryContext<'_>,
 ) -> Result<AssembledAccountSnapshot, AccountQueryError> {
     let account = context
