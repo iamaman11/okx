@@ -28,6 +28,7 @@ use crate::{
     execution_runtime::ExecutionRuntime,
     market_bootstrap::MarketBootstrapper,
     query::{ObservationQueryContext, dispatch},
+    research_session::ResearchSessionHandle,
 };
 
 const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
@@ -73,6 +74,7 @@ pub struct CloudflareQueryRuntimeContext<'a> {
     pub private_ws: Option<&'a PrivateWsHandle>,
     pub execution: Option<&'a ExecutionRuntime>,
     pub research_root: &'a Path,
+    pub research_session: &'a ResearchSessionHandle,
 }
 
 pub async fn run_cloudflare_transport(
@@ -377,7 +379,7 @@ async fn run_session(
                         }
 
                         let query_context =
-                            ObservationQueryContext::live_with_execution_and_research(
+                            ObservationQueryContext::live_with_execution_research_and_session(
                                 context.public_ws,
                                 context.market,
                                 None,
@@ -385,6 +387,7 @@ async fn run_session(
                                 context.private_ws,
                                 context.execution,
                                 Some(context.research_root),
+                                Some(context.research_session),
                             );
                         let generated_at =
                             Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
