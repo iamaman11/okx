@@ -10,7 +10,9 @@ use thiserror::Error;
 
 use crate::{
     EXECUTION_PLAN_SCHEMA_V1, ExchangeOrderState, ExecutionPlan, ExecutionRecord, ExecutionState,
-    ExecutionTransitionError, derive_client_order_id, model::valid_intent_id,
+    ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
+    OrderMutationRecord, OrderMutationResolution, OrderMutationState, derive_client_order_id,
+    model::{valid_intent_id, valid_mutation_id},
 };
 
 pub const EXECUTION_LEDGER_SCHEMA_V1: &str = "okx.execution-ledger/v1";
@@ -27,6 +29,12 @@ pub struct ExecutionLedgerEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrepareDisposition {
+    Created(ExecutionLedgerEntry),
+    Existing(ExecutionLedgerEntry),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationPrepareDisposition {
     Created(ExecutionLedgerEntry),
     Existing(ExecutionLedgerEntry),
 }
@@ -201,6 +209,10 @@ impl DurableExecutionLedger {
                 entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
                 recovered = true;
             }
+            if entry.record.recover_inflight_mutation() {
+                entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
+                recovered = true;
+            }
         }
 
         if recovered {
@@ -311,16 +323,98 @@ impl DurableExecutionLedger {
         })
     }
 
+    pub fn prepare_order_mutation(
+        &mut self,
+        intent_id: &str,
+        mutation: OrderMutationRecord,
+        observed_at_ms: u64,
+    ) -> Result<MutationPrepareDisposition, ExecutionLedgerError> {
+        require_timestamp(observed_at_ms)?;
+        let existing = self
+            .entries
+            .get(intent_id)
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        if let Some(previous) = existing
+            .record
+            .mutations
+            .iter()
+            .find(|previous| previous.mutation_id == mutation.mutation_id)
+        {
+            return if previous == &mutation {
+                Ok(MutationPrepareDisposition::Existing(existing.clone()))
+            } else {
+                Err(ExecutionTransitionError::MutationConflict(mutation.mutation_id).into())
+            };
+        }
+
+        let entry = self.mutate(intent_id, observed_at_ms, move |record| {
+            record.prepare_mutation(mutation).map(|_| ())
+        })?;
+        Ok(MutationPrepareDisposition::Created(entry))
+    }
+
+    pub fn begin_order_mutation_submission(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        let mutation_id = mutation_id.to_owned();
+        self.mutate(intent_id, observed_at_ms, move |record| {
+            record.begin_mutation_submission(&mutation_id)
+        })
+    }
+
+    pub fn acknowledge_order_mutation(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        let mutation_id = mutation_id.to_owned();
+        self.mutate(intent_id, observed_at_ms, move |record| {
+            record.acknowledge_mutation(&mutation_id)
+        })
+    }
+
+    pub fn mark_order_mutation_unknown(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        let mutation_id = mutation_id.to_owned();
+        self.mutate(intent_id, observed_at_ms, move |record| {
+            record.mark_mutation_unknown(&mutation_id)
+        })
+    }
+
+    pub fn reject_order_mutation(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        code: impl Into<String>,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        let mutation_id = mutation_id.to_owned();
+        let code = code.into();
+        self.mutate(intent_id, observed_at_ms, move |record| {
+            record.reject_mutation(&mutation_id, code)
+        })
+    }
+
     pub fn reconcile_found(
         &mut self,
         intent_id: &str,
         order_id: impl Into<String>,
         exchange_state: ExchangeOrderState,
+        mutation_resolution: OrderMutationResolution,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
         let order_id = order_id.into();
         self.mutate(intent_id, observed_at_ms, move |record| {
-            record.reconcile_found(order_id, exchange_state)
+            record.reconcile_found(order_id, exchange_state)?;
+            record.resolve_active_mutation(mutation_resolution)
         })
     }
 
@@ -379,6 +473,7 @@ impl DurableExecutionLedger {
 
 fn validate_entry(entry: &ExecutionLedgerEntry) -> Result<(), ExecutionLedgerError> {
     validate_plan_identity(&entry.record.plan)?;
+    validate_order_mutations(&entry.record)?;
     if entry.created_at_ms == 0
         || entry.updated_at_ms == 0
         || entry.updated_at_ms < entry.created_at_ms
@@ -438,6 +533,73 @@ fn validate_entry(entry: &ExecutionLedgerEntry) -> Result<(), ExecutionLedgerErr
         }
     }
 
+    Ok(())
+}
+
+fn validate_order_mutations(record: &ExecutionRecord) -> Result<(), ExecutionLedgerError> {
+    if record.mutations.len() > MAX_ORDER_MUTATIONS_PER_EXECUTION {
+        return Err(ExecutionLedgerError::Corrupt(
+            "order mutation count exceeds capacity",
+        ));
+    }
+
+    let mut ids = BTreeSet::new();
+    let mut nonterminal = 0_usize;
+    for mutation in &record.mutations {
+        if !valid_mutation_id(&mutation.mutation_id) || !ids.insert(mutation.mutation_id.clone()) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "invalid or duplicate order mutation id",
+            ));
+        }
+        if !mutation.state.is_terminal() {
+            nonterminal += 1;
+        }
+        if mutation.state == OrderMutationState::Rejected {
+            if !mutation
+                .rejection_code
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "rejected order mutation is missing rejection code",
+                ));
+            }
+        } else if mutation.rejection_code.is_some() {
+            return Err(ExecutionLedgerError::Corrupt(
+                "non-rejected order mutation contains rejection code",
+            ));
+        }
+
+        match mutation.kind {
+            OrderMutationKind::Amend => {
+                if !mutation
+                    .request_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    || (mutation.new_size.is_none() && mutation.new_price.is_none())
+                {
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "amend mutation metadata is incomplete",
+                    ));
+                }
+            }
+            OrderMutationKind::Cancel => {
+                if mutation.request_id.is_some()
+                    || mutation.new_size.is_some()
+                    || mutation.new_price.is_some()
+                {
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "cancel mutation contains amend metadata",
+                    ));
+                }
+            }
+        }
+    }
+    if nonterminal > 1 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "multiple nonterminal order mutations",
+        ));
+    }
     Ok(())
 }
 
