@@ -48,6 +48,7 @@ use crate::{
     },
     execution_runtime::ExecutionRuntime,
     market_bootstrap::{MarketBootstrapError, MarketBootstrapper},
+    research_session::ResearchSessionHandle,
 };
 
 mod account;
@@ -136,6 +137,7 @@ pub struct ObservationQueryContext<'a> {
     private_ws: Option<&'a PrivateWsHandle>,
     execution: Option<&'a ExecutionRuntime>,
     research_root: Option<&'a Path>,
+    research_session: Option<&'a ResearchSessionHandle>,
 }
 
 impl<'a> ObservationQueryContext<'a> {
@@ -149,6 +151,7 @@ impl<'a> ObservationQueryContext<'a> {
             private_ws: None,
             execution: None,
             research_root: None,
+            research_session: None,
         }
     }
 
@@ -236,6 +239,29 @@ impl<'a> ObservationQueryContext<'a> {
         execution: Option<&'a ExecutionRuntime>,
         research_root: Option<&'a Path>,
     ) -> Self {
+        Self::live_with_execution_research_and_session(
+            public_ws,
+            market_fallback,
+            mailbox_telemetry,
+            account_fallback,
+            private_ws,
+            execution,
+            research_root,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub const fn live_with_execution_research_and_session(
+        public_ws: &'a PublicWsHandle,
+        market_fallback: &'a MarketBootstrapper,
+        mailbox_telemetry: Option<&'a IssuePollTelemetryStatus>,
+        account_fallback: Option<&'a AccountBootstrapper>,
+        private_ws: Option<&'a PrivateWsHandle>,
+        execution: Option<&'a ExecutionRuntime>,
+        research_root: Option<&'a Path>,
+        research_session: Option<&'a ResearchSessionHandle>,
+    ) -> Self {
         Self {
             standalone_reference: None,
             market_fallback: Some(market_fallback),
@@ -245,6 +271,7 @@ impl<'a> ObservationQueryContext<'a> {
             private_ws,
             execution,
             research_root,
+            research_session,
         }
     }
 }
