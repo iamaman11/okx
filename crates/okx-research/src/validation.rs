@@ -974,10 +974,22 @@ mod tests {
 
         let mut poisoned = parent.clone();
         poisoned.candles[239].close = "999999999".to_owned();
+        let poisoned_spec = build_validation_spec_from_counts(
+            id('a'),
+            &poisoned,
+            BaselineStrategyKind::CloseMomentum,
+            144,
+            48,
+            48,
+        )
+        .expect("poisoned spec");
         let poisoned_train =
             derive_validation_slice(&poisoned, &spec, ValidationPartitionRole::Train)
                 .expect("poisoned train");
 
+        assert_eq!(spec.validation_spec_id, poisoned_spec.validation_spec_id);
+        assert_eq!(spec.walk_forward_plan, poisoned_spec.walk_forward_plan);
+        assert_eq!(spec.regime_plan, poisoned_spec.regime_plan);
         assert_eq!(
             baseline.replay_dataset.candles,
             poisoned_train.replay_dataset.candles
@@ -986,6 +998,39 @@ mod tests {
             baseline.replay_dataset.manifest.dataset_id,
             poisoned_train.replay_dataset.manifest.dataset_id
         );
+    }
+
+    #[test]
+    fn reordered_walk_forward_plan_fails_closed() {
+        let parent = parent_dataset(240);
+        let spec = build_validation_spec_from_counts(
+            id('a'),
+            &parent,
+            BaselineStrategyKind::CloseMomentum,
+            144,
+            48,
+            48,
+        )
+        .expect("spec");
+        let mut walk_forward = spec.walk_forward_plan.clone().expect("walk-forward");
+        walk_forward.folds.swap(0, 1);
+        let regime = spec.regime_plan.clone().expect("regime");
+        assert!(matches!(
+            ValidationSpec::build_v2(
+                id('a'),
+                parent.manifest.dataset_id.clone(),
+                BaselineStrategyKind::CloseMomentum,
+                BASELINE_STRATEGY_VERSION_V1,
+                spec.partitions[0].range.clone(),
+                spec.partitions[1].range.clone(),
+                spec.partitions[2].range.clone(),
+                VALIDATION_EVIDENCE_POLICY_V1,
+                VALIDATION_PROMOTION_CRITERIA_V1,
+                walk_forward,
+                regime,
+            ),
+            Err(ResearchError::ArtifactIdentityMismatch)
+        ));
     }
 
     #[test]
