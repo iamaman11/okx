@@ -571,7 +571,7 @@ mod tests {
             instrument_id: "BTC-USDT-SWAP".to_owned(),
             bar: "1H".to_owned(),
             strategy: okx_analysis::BaselineStrategyKind::TwoBarMomentum,
-            strategy_version: BASELINE_STRATEGY_VERSION_TWO_BAR_MOMENTUM_V1.to_owned(),
+            strategy_version: TWO_BAR_MOMENTUM_STRATEGY_VERSION_V1.to_owned(),
             deterministic_seed: 0,
             execution: ReplayExecutionModel {
                 version: "execution/v1".to_owned(),
@@ -658,6 +658,7 @@ mod tests {
             None,
             Some("3600000".to_owned()),
             Some("sha256:decision".to_owned()),
+            None,
             None,
             1,
             0,
