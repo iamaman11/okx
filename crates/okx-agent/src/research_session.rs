@@ -4,14 +4,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use okx_analysis::{candidate_risk_context_from_account, baseline_strategy_research_metadata};
+use okx_analysis::{baseline_strategy_research_metadata, candidate_risk_context_from_account};
 use okx_observation::MarketReadiness;
 use okx_protocol::DataQuality;
 use okx_research::{
-    BUILD_SOURCE_TREE, ExperimentSpec,
-    LiveResearchDisposition, LiveResearchSessionCheckpoint, LiveResearchSessionConfig,
-    LiveResearchSessionMode, LiveResearchSessionStatus, PaperVirtualPosition,
-    RESEARCH_FUNDING_SCHEMA_V1, ResearchArtifactStore, ResearchFundingEvent,
+    BUILD_SOURCE_TREE, ExperimentSpec, LiveResearchDisposition, LiveResearchSessionCheckpoint,
+    LiveResearchSessionConfig, LiveResearchSessionMode, LiveResearchSessionStatus,
+    PaperVirtualPosition, RESEARCH_FUNDING_SCHEMA_V1, ResearchArtifactStore, ResearchFundingEvent,
     evaluate_live_research_decision, load_live_research_session_config,
     paper_realized_pnl_after_trade, settle_paper_virtual_position,
 };
@@ -182,7 +181,6 @@ struct ActiveResearchSession {
     checkpoint_artifact_id: String,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionAdmission {
     Start,
@@ -231,8 +229,7 @@ fn bucket_already_evaluated(
 
 fn decode_pointer(bytes: &[u8]) -> Result<ResearchSessionPointer, ResearchSessionRuntimeError> {
     let pointer: ResearchSessionPointer = serde_json::from_slice(bytes)?;
-    if pointer.schema != POINTER_SCHEMA_V1
-        || !pointer.checkpoint_artifact_id.starts_with("sha256:")
+    if pointer.schema != POINTER_SCHEMA_V1 || !pointer.checkpoint_artifact_id.starts_with("sha256:")
     {
         return Err(ResearchSessionRuntimeError::PersistedState);
     }
@@ -343,11 +340,13 @@ impl ResearchSessionRuntime {
         let Some(pointer) = self.read_pointer()? else {
             return Ok(());
         };
-        let checkpoint: LiveResearchSessionCheckpoint =
-            self.store.read_evidence_json(&pointer.checkpoint_artifact_id)?;
+        let checkpoint: LiveResearchSessionCheckpoint = self
+            .store
+            .read_evidence_json(&pointer.checkpoint_artifact_id)?;
         checkpoint.validate()?;
-        let config: LiveResearchSessionConfig =
-            self.store.read_evidence_json(&checkpoint.config_artifact_id)?;
+        let config: LiveResearchSessionConfig = self
+            .store
+            .read_evidence_json(&checkpoint.config_artifact_id)?;
         config.validate()?;
         let (rebuilt, spec) = load_live_research_session_config(
             &self.store,
@@ -423,7 +422,9 @@ impl ResearchSessionRuntime {
             .filter(|(checkpoint, _)| checkpoint.status == LiveResearchSessionStatus::Stopped)
             .map(|(checkpoint, _)| checkpoint.session_id.as_str());
         match admit_session_identity(
-            self.active.as_ref().map(|active| active.config.session_id.as_str()),
+            self.active
+                .as_ref()
+                .map(|active| active.config.session_id.as_str()),
             stopped_session_id,
             &config.session_id,
         )? {
@@ -556,10 +557,7 @@ impl ResearchSessionRuntime {
                 .as_deref(),
             bucket_open_ms,
         ) {
-            self.persist_terminal_block(
-                bucket_open_ms,
-                "ENTRY_BUCKET_GAP_DETECTED".to_owned(),
-            )?;
+            self.persist_terminal_block(bucket_open_ms, "ENTRY_BUCKET_GAP_DETECTED".to_owned())?;
             return Ok(());
         }
 
@@ -641,8 +639,7 @@ impl ResearchSessionRuntime {
             }
         };
         let current = history.candles.last();
-        if current
-            .and_then(|candle| candle.open_time_ms.parse::<u64>().ok())
+        if current.and_then(|candle| candle.open_time_ms.parse::<u64>().ok())
             != Some(bucket_open_ms)
         {
             return self
@@ -691,10 +688,7 @@ impl ResearchSessionRuntime {
                 ) {
                     Ok(trade) => {
                         paper_realized_net_pnl_quote =
-                            paper_realized_pnl_after_trade(
-                                &paper_realized_net_pnl_quote,
-                                &trade,
-                            )?;
+                            paper_realized_pnl_after_trade(&paper_realized_net_pnl_quote, &trade)?;
                         paper_trade_count = paper_trade_count.saturating_add(1);
                         let (artifact_id, _) = self.store.publish_evidence(&trade)?;
                         latest_paper_trade_artifact_id = Some(artifact_id);
@@ -712,20 +706,15 @@ impl ResearchSessionRuntime {
             }
         }
 
-        active.checkpoint.latest_paper_trade_artifact_id =
-            latest_paper_trade_artifact_id.clone();
+        active.checkpoint.latest_paper_trade_artifact_id = latest_paper_trade_artifact_id.clone();
         active.checkpoint.paper_trade_count = paper_trade_count;
-        active.checkpoint.paper_realized_net_pnl_quote =
-            paper_realized_net_pnl_quote.clone();
+        active.checkpoint.paper_realized_net_pnl_quote = paper_realized_net_pnl_quote.clone();
         active.checkpoint.paper_open_position = paper_open_position.clone();
 
         let Some(account) = self.account.as_ref() else {
             self.active = Some(active);
             return self
-                .persist_blocked_bucket(
-                    bucket_open_ms,
-                    "ACCOUNT_OBSERVER_UNAVAILABLE".to_owned(),
-                )
+                .persist_blocked_bucket(bucket_open_ms, "ACCOUNT_OBSERVER_UNAVAILABLE".to_owned())
                 .map(|_| ());
         };
         let assembled = match assemble_account_snapshot(ObservationQueryContext::live_with_private(
@@ -753,10 +742,7 @@ impl ResearchSessionRuntime {
             Err(_) => {
                 self.active = Some(active);
                 return self
-                    .persist_blocked_bucket(
-                        bucket_open_ms,
-                        "ACCOUNT_LEDGER_UNAVAILABLE".to_owned(),
-                    )
+                    .persist_blocked_bucket(bucket_open_ms, "ACCOUNT_LEDGER_UNAVAILABLE".to_owned())
                     .map(|_| ());
             }
         };
@@ -771,10 +757,7 @@ impl ResearchSessionRuntime {
             Err(error) => {
                 self.active = Some(active);
                 return self
-                    .persist_blocked_bucket(
-                        bucket_open_ms,
-                        format!("RISK_CONTEXT_INVALID:{error}"),
-                    )
+                    .persist_blocked_bucket(bucket_open_ms, format!("RISK_CONTEXT_INVALID:{error}"))
                     .map(|_| ());
             }
         };
@@ -783,11 +766,8 @@ impl ResearchSessionRuntime {
             risk_context.account_is_fresh = false;
         }
 
-        let decision = match evaluate_live_research_decision(
-            &active.spec,
-            &history,
-            &risk_context,
-        ) {
+        let decision = match evaluate_live_research_decision(&active.spec, &history, &risk_context)
+        {
             Ok(value) => value,
             Err(error) => {
                 self.active = Some(active);
@@ -819,14 +799,13 @@ impl ResearchSessionRuntime {
         }
 
         let decision_count = active.checkpoint.decision_count.saturating_add(1);
-        let would_submit_count = active
-            .checkpoint
-            .would_submit_count
-            .saturating_add(if decision.disposition == LiveResearchDisposition::WouldSubmit {
+        let would_submit_count = active.checkpoint.would_submit_count.saturating_add(
+            if decision.disposition == LiveResearchDisposition::WouldSubmit {
                 1
             } else {
                 0
-            });
+            },
+        );
         let next = LiveResearchSessionCheckpoint::build(
             active.checkpoint.session_id.clone(),
             active.config_artifact_id.clone(),
@@ -954,10 +933,10 @@ impl ResearchSessionRuntime {
             blocked_count: checkpoint.map_or(0, |(value, _)| value.blocked_count),
             would_submit_count: checkpoint.map_or(0, |(value, _)| value.would_submit_count),
             paper_trade_count: checkpoint.map_or(0, |(value, _)| value.paper_trade_count),
-            paper_realized_net_pnl_quote: checkpoint
-                .map_or_else(|| "0".to_owned(), |(value, _)| {
-                    value.paper_realized_net_pnl_quote.clone()
-                }),
+            paper_realized_net_pnl_quote: checkpoint.map_or_else(
+                || "0".to_owned(),
+                |(value, _)| value.paper_realized_net_pnl_quote.clone(),
+            ),
             paper_position_open: checkpoint
                 .is_some_and(|(value, _)| value.paper_open_position.is_some()),
             source_tree: BUILD_SOURCE_TREE,
@@ -973,9 +952,14 @@ impl ResearchSessionRuntime {
         read_recoverable_pointer(&self.pointer_path())
     }
 
-    fn write_pointer(&self, checkpoint_artifact_id: &str) -> Result<(), ResearchSessionRuntimeError> {
+    fn write_pointer(
+        &self,
+        checkpoint_artifact_id: &str,
+    ) -> Result<(), ResearchSessionRuntimeError> {
         let path = self.pointer_path();
-        let parent = path.parent().ok_or(ResearchSessionRuntimeError::PersistedState)?;
+        let parent = path
+            .parent()
+            .ok_or(ResearchSessionRuntimeError::PersistedState)?;
         fs::create_dir_all(parent)?;
         let pointer = ResearchSessionPointer {
             schema: POINTER_SCHEMA_V1.to_owned(),
@@ -1000,7 +984,6 @@ impl ResearchSessionRuntime {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1015,30 +998,18 @@ mod tests {
             admit_session_identity(Some("sha256:same"), None, "sha256:same").expect("same"),
             SessionAdmission::Existing
         );
-        let conflict = admit_session_identity(
-            Some("sha256:active"),
-            None,
-            "sha256:other",
-        )
-        .expect_err("active conflict");
+        let conflict = admit_session_identity(Some("sha256:active"), None, "sha256:other")
+            .expect_err("active conflict");
         assert_eq!(conflict.code, "RESEARCH_SESSION_CONFLICT");
         assert!(!conflict.retryable);
 
-        let stopped = admit_session_identity(
-            None,
-            Some("sha256:stopped"),
-            "sha256:stopped",
-        )
-        .expect_err("stopped is terminal");
+        let stopped = admit_session_identity(None, Some("sha256:stopped"), "sha256:stopped")
+            .expect_err("stopped is terminal");
         assert_eq!(stopped.code, "RESEARCH_SESSION_CONFLICT");
         assert!(!stopped.retryable);
         assert_eq!(
-            admit_session_identity(
-                None,
-                Some("sha256:stopped"),
-                "sha256:new",
-            )
-            .expect("new lineage"),
+            admit_session_identity(None, Some("sha256:stopped"), "sha256:new",)
+                .expect("new lineage"),
             SessionAdmission::Start
         );
     }
@@ -1094,14 +1065,8 @@ mod tests {
     #[test]
     fn cross_hour_bucket_gap_is_detected_fail_closed() {
         assert!(!bucket_gap_detected(None, 3 * ONE_HOUR_MS));
-        assert!(!bucket_gap_detected(
-            Some("3600000"),
-            2 * ONE_HOUR_MS
-        ));
-        assert!(bucket_gap_detected(
-            Some("3600000"),
-            3 * ONE_HOUR_MS
-        ));
+        assert!(!bucket_gap_detected(Some("3600000"), 2 * ONE_HOUR_MS));
+        assert!(bucket_gap_detected(Some("3600000"), 3 * ONE_HOUR_MS));
     }
 
     #[test]
