@@ -13,13 +13,11 @@ use crate::{
     ResearchPromotionState, canonical_sha256, load_accepted_promotion_transition,
 };
 
-pub const LIVE_RESEARCH_SESSION_CONFIG_SCHEMA_V1: &str =
-    "okx.research.live-session-config/v1";
+pub const LIVE_RESEARCH_SESSION_CONFIG_SCHEMA_V1: &str = "okx.research.live-session-config/v1";
 pub const LIVE_RESEARCH_SESSION_CHECKPOINT_SCHEMA_V1: &str =
     "okx.research.live-session-checkpoint/v1";
 pub const PAPER_VIRTUAL_TRADE_SCHEMA_V1: &str = "okx.research.paper-virtual-trade/v1";
-pub const LIVE_RESEARCH_SESSION_ALGORITHM_V1: &str =
-    "okx.research.live-session/2026-10-05.1";
+pub const LIVE_RESEARCH_SESSION_ALGORITHM_V1: &str = "okx.research.live-session/2026-10-05.1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -117,8 +115,7 @@ pub fn load_live_research_session_config(
         return Err(ResearchError::MissingField("live_session.source_tree"));
     }
 
-    let transition =
-        load_accepted_promotion_transition(store, promotion_transition_artifact_id)?;
+    let transition = load_accepted_promotion_transition(store, promotion_transition_artifact_id)?;
     let bundle: PromotionBundle =
         store.read_evidence_json(&transition.promotion_bundle_artifact_id)?;
     if bundle.schema != PROMOTION_BUNDLE_SCHEMA_V1
@@ -553,9 +550,8 @@ fn timestamp(field: &'static str, value: &str) -> Result<u64, ResearchError> {
 #[cfg(test)]
 mod tests {
     use okx_analysis::{
-        TWO_BAR_MOMENTUM_STRATEGY_VERSION_V1, CandidateRiskContext, HardRiskPolicy,
-        LiquidityRole, PositionScenarioMechanics, RiskDegradedMode, RiskMinimumQuality,
-        TradingMandate,
+        CandidateRiskContext, HardRiskPolicy, LiquidityRole, PositionScenarioMechanics,
+        RiskDegradedMode, RiskMinimumQuality, TWO_BAR_MOMENTUM_STRATEGY_VERSION_V1, TradingMandate,
     };
 
     use super::*;
@@ -631,7 +627,6 @@ mod tests {
             },
         }
     }
-
 
     #[test]
     fn live_session_binding_requires_exact_promoted_spec_identity() {
