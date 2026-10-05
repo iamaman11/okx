@@ -1,12 +1,13 @@
 use std::str::FromStr;
 
 use okx_analysis::{
-    BASELINE_STRATEGY_VERSION_V1, BarDecisionInput, BaselineStrategyKind, CandidateRiskContext,
+    BarDecisionInput, BaselineStrategyKind, CandidateRiskContext,
     HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy, LiquidityRole, PortfolioCandidate,
     PositionDirection, PositionScenarioAssumptions, PositionScenarioMechanics, RiskDegradedMode,
     RiskMinimumQuality, RiskPolicyDecision, ScenarioExitAssumption, StrategyDecision,
     TRADING_MANDATE_SCHEMA_V1, TradingMandate, analyze_position_scenario_values,
-    evaluate_baseline_strategy, evaluate_candidate_risk, funding_user_cost_quote,
+    baseline_strategy_research_metadata, baseline_strategy_version, evaluate_baseline_strategy,
+    evaluate_candidate_risk, funding_user_cost_quote,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -250,6 +251,8 @@ impl ExperimentSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReplayDecisionTrace {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub antecedent_close: Option<String>,
     pub signal_open_time_ms: String,
     pub signal_available_time_ms: String,
     pub earliest_execution_time_ms: String,
@@ -352,6 +355,9 @@ pub fn build_baseline_hypothesis(
             BaselineStrategyKind::CloseMomentum => {
                 "1H completed-bar close momentum predicts the next one-hour price move"
             }
+            BaselineStrategyKind::TwoBarMomentum => {
+                "two consecutive same-direction 1H completed-bar close moves predict continuation over the next one-hour price move"
+            }
         },
         match strategy {
             BaselineStrategyKind::NoTrade => {
@@ -360,9 +366,12 @@ pub fn build_baseline_hypothesis(
             BaselineStrategyKind::CloseMomentum => {
                 "replay records deterministic next-open decisions and net PnL without same-close execution"
             }
+            BaselineStrategyKind::TwoBarMomentum => {
+                "falsified when the two-bar confirmation rule does not retain positive out-of-sample net expectancy after declared costs"
+            }
         },
         strategy,
-        BASELINE_STRATEGY_VERSION_V1,
+        baseline_strategy_version(strategy),
     )
 }
 
@@ -526,6 +535,7 @@ pub fn replay_experiment(
         for pair in candles.windows(2) {
             let signal = &pair[1];
             decisions.push(ReplayDecisionTrace {
+                antecedent_close: None,
                 signal_open_time_ms: signal.open_time_ms.clone(),
                 signal_available_time_ms: signal.available_time_ms.clone(),
                 earliest_execution_time_ms: signal.available_time_ms.clone(),
@@ -553,7 +563,10 @@ pub fn replay_experiment(
         );
     }
 
-    if candles.len() < 4 {
+    let strategy_metadata = baseline_strategy_research_metadata(spec.strategy);
+    let signal_lookback_bars = usize::from(strategy_metadata.signal_lookback_bars);
+    let minimum_candles = signal_lookback_bars.saturating_add(3);
+    if candles.len() < minimum_candles {
         return terminal_result(
             dataset,
             spec,
@@ -591,7 +604,12 @@ pub fn replay_experiment(
     let mut trading_cost_total = Decimal::ZERO;
     let mut funding_cost_total = Decimal::ZERO;
 
-    for signal_index in 1..(candles.len() - 2) {
+    for signal_index in signal_lookback_bars..(candles.len() - 2) {
+        let antecedent = if spec.strategy == BaselineStrategyKind::TwoBarMomentum {
+            Some(&candles[signal_index - 2])
+        } else {
+            None
+        };
         let previous = &candles[signal_index - 1];
         let signal = &candles[signal_index];
         let entry = &candles[signal_index + 1];
@@ -607,12 +625,14 @@ pub fn replay_experiment(
         let decision = evaluate_baseline_strategy(
             spec.strategy,
             &BarDecisionInput {
+                antecedent_close: antecedent.map(|candle| candle.close.clone()),
                 previous_close: previous.close.clone(),
                 signal_close: signal.close.clone(),
             },
         )?;
         if decision == StrategyDecision::Hold {
             decisions.push(ReplayDecisionTrace {
+                antecedent_close: None,
                 signal_open_time_ms: signal.open_time_ms.clone(),
                 signal_available_time_ms: signal.available_time_ms.clone(),
                 earliest_execution_time_ms: entry.open_time_ms.clone(),
@@ -676,6 +696,7 @@ pub fn replay_experiment(
         )?;
 
         decisions.push(ReplayDecisionTrace {
+            antecedent_close: antecedent.map(|candle| candle.close.clone()),
             signal_open_time_ms: signal.open_time_ms.clone(),
             signal_available_time_ms: signal.available_time_ms.clone(),
             earliest_execution_time_ms: entry.open_time_ms.clone(),
