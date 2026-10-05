@@ -115,7 +115,7 @@ struct PreHoldoutEvidenceIdentity<'a> {
     validation_spec_artifact_id: &'a str,
     research_family_id: &'a str,
     research_family_artifact_id: &'a str,
-    hypothesis_id: &'a str,
+    pub(crate) hypothesis_id: &'a str,
     instrument_id: &'a str,
     strategy: BaselineStrategyKind,
     strategy_version: &'a str,
@@ -130,22 +130,23 @@ struct PreHoldoutEvidenceIdentity<'a> {
     source_tree: &'a str,
 }
 
-struct ReplayResultView {
+pub(crate) struct ReplayResultView {
     hypothesis_id: String,
-    dataset_id: String,
-    experiment_id: String,
-    replay_source_tree: String,
-    evidence_class: String,
-    candles_processed: usize,
-    trade_count: usize,
-    gross_pnl_quote: String,
-    trading_cost_quote: String,
-    funding_cost_quote: String,
-    net_pnl_quote: String,
-    trade_net_pnl: Vec<String>,
-    trade_gross_pnl: Vec<String>,
-    trade_trading_cost: Vec<String>,
-    trade_funding_cost: Vec<String>,
+    pub(crate) dataset_id: String,
+    pub(crate) experiment_id: String,
+    pub(crate) replay_source_tree: String,
+    pub(crate) evidence_class: String,
+    pub(crate) candles_processed: usize,
+    pub(crate) trade_count: usize,
+    pub(crate) gross_pnl_quote: String,
+    pub(crate) trading_cost_quote: String,
+    pub(crate) funding_cost_quote: String,
+    pub(crate) net_pnl_quote: String,
+    pub(crate) trade_net_pnl: Vec<String>,
+    pub(crate) trade_gross_pnl: Vec<String>,
+    pub(crate) trade_trading_cost: Vec<String>,
+    pub(crate) trade_funding_cost: Vec<String>,
+    pub(crate) trade_signal_available_time_ms: Vec<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -423,7 +424,7 @@ fn validate_slice(
     Ok(())
 }
 
-fn replay_result_view(value: &Value) -> Result<ReplayResultView, ResearchError> {
+pub(crate) fn replay_result_view(value: &Value) -> Result<ReplayResultView, ResearchError> {
     if string_field(value, "schema")? != EXPERIMENT_RESULT_SCHEMA_V1
         || string_field(value, "status")? != "COMPLETED"
     {
@@ -445,11 +446,14 @@ fn replay_result_view(value: &Value) -> Result<ReplayResultView, ResearchError> 
     let mut trade_gross_pnl = Vec::with_capacity(trades.len());
     let mut trade_trading_cost = Vec::with_capacity(trades.len());
     let mut trade_funding_cost = Vec::with_capacity(trades.len());
+    let mut trade_signal_available_time_ms = Vec::with_capacity(trades.len());
     for trade in trades {
         trade_net_pnl.push(string_field(trade, "net_pnl_quote")?.to_owned());
         trade_gross_pnl.push(string_field(trade, "gross_pnl_quote")?.to_owned());
         trade_trading_cost.push(string_field(trade, "trading_cost_quote")?.to_owned());
         trade_funding_cost.push(string_field(trade, "funding_cost_quote")?.to_owned());
+        trade_signal_available_time_ms
+            .push(string_field(trade, "signal_available_time_ms")?.to_owned());
     }
 
     let result = ReplayResultView {
@@ -468,6 +472,7 @@ fn replay_result_view(value: &Value) -> Result<ReplayResultView, ResearchError> 
         trade_gross_pnl,
         trade_trading_cost,
         trade_funding_cost,
+        trade_signal_available_time_ms,
     };
     validate_replay_totals(&result)?;
     Ok(result)
@@ -574,6 +579,7 @@ mod tests {
             .iter()
             .map(|net| {
                 json!({
+                    "signal_available_time_ms": "3600000",
                     "gross_pnl_quote": net,
                     "trading_cost_quote": "0",
                     "funding_cost_quote": "0",
