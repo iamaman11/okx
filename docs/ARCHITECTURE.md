@@ -609,7 +609,9 @@ Stage 2 status: **ACCEPTED/CLOSED**.
 - production live trading remains disabled;
 - current roadmap cursor: **Stage 3 — SCIENTIFIC RESEARCH + REPLAY**.
 
-Primary Cloudflare MCP is healthy on Worker contract `okx.mcp.tools/2026-10-03.3`; `account_summary` and `portfolio_risk` are callable. After the Stage-2 exact-artifact deployment the direct runtime is PASS/connected/session_fresh at generation 114, and account summary is FRESH/coherent with zero positions/pending orders and consistent ledger reconciliation. GitHub DATA remains fallback/parity only.
+Primary Cloudflare MCP is healthy on Worker contract `okx.mcp.tools/2026-10-05.9`; the connected runtime is PASS/connected/session_fresh and research catalog `okx.research.catalog/2026-10-05.8` is callable. Runtime connection generation is operational telemetry and is intentionally not a documentation authority. Account truth remains FRESH/coherent with zero open positions/pending orders and consistent ledger reconciliation. GitHub DATA remains fallback/parity only.
+
+Stage 3A/3B/3C infrastructure is accepted. H1 `close_momentum` was scientifically REJECTED. H2 `two_bar_momentum` passed the frozen development screen and is waiting for its fresh independent 96h FINAL_OOS in #216. Stage 3D has accepted both the immutable promotion gate (#217) and causal live-decision parity kernel (#218). The active implementation cursor is the single bounded event-driven PAPER/SHADOW session owner inside the existing agent lifecycle; final Stage-3 acceptance still requires a future BACKTESTED candidate observed through real PAPER/SHADOW evidence.
 
 ## Stage-3 research ownership and product boundary
 

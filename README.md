@@ -20,9 +20,14 @@ Accepted:
 - Stage 1 TRUTH — ACCEPTED/CLOSED;
 - Stage 2 INTELLIGENCE + RISK — ACCEPTED/CLOSED on account-mode-aware Futures risk evidence;
 - Stage 3A DATA FOUNDATION — ACCEPTED/CLOSED;
-- Stage 3B DETERMINISTIC REPLAY KERNEL — ACCEPTED/CLOSED on primary MCP replay + restart/determinism + fail-closed evidence.
+- Stage 3B DETERMINISTIC REPLAY KERNEL — ACCEPTED/CLOSED on primary MCP replay + restart/determinism + fail-closed evidence;
+- Stage 3C SCIENTIFIC VALIDATION & PROMOTION — ACCEPTED/CLOSED as infrastructure; H1 `close_momentum` was scientifically REJECTED;
+- H2 `two_bar_momentum` — development screen PASS, frozen for a fresh independent 96h FINAL_OOS tracked in #216;
+- Stage 3D immutable promotion gate — ACCEPTED;
+- Stage 3D causal live-decision parity kernel — ACCEPTED;
+- Stage 3D bounded event-driven PAPER/SHADOW session owner — current implementation cursor.
 
-Current canonical roadmap: **#160**. Current development cursor: **Stage 3C — SCIENTIFIC VALIDATION & PROMOTION**.
+Current canonical roadmap: **#160**. Current development cursor: **Stage 3D — bounded event-driven PAPER/SHADOW session owner**.
 
 Live trading is **not enabled**. Production construction of the executor remains disabled before SUBMITTING persistence and before any exchange mutation.
 
@@ -82,7 +87,15 @@ No observation, analysis, transport or host-control component may directly becom
 
 ## DATA and CONTROL
 
-DATA #10 is the encrypted application/query transport:
+Normal ChatGPT product/research queries use the primary Cloudflare MCP path:
+
+```text
+ChatGPT -> OAuth MCP Worker -> Cloudflare RuntimeSession
+        -> authenticated outbound Windows WSS -> okx-agent
+        <- bounded typed AgentResponse <-
+```
+
+The direct path is generation-bound, heartbeat-probed and bounded by frame size, in-flight concurrency and response deadline. Mutation-capable operations remain rejected on this transport at the current stage. GitHub DATA #10 remains an encrypted **fallback/parity/recovery** path, not the normal product path:
 
 ```text
 ChatGPT -> encrypted typed request -> GitHub #10 -> okx-agent
@@ -149,6 +162,7 @@ Installed production binaries do not execute from the mutable source checkout.
 Canonical issues:
 
 - #160 current industrial roadmap and acceptance authority;
+- #216 deferred frozen H2 fresh 96h independent FINAL_OOS;
 - #113 historical production-readiness closure baseline;
 - #5 product/domain architecture;
 - #7 Windows runtime/deployment;

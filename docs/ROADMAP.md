@@ -99,13 +99,19 @@ Cross-cutting CONTROL reliability debt discovered during item 5 is **DONE / ACCE
 - post-recovery production account remained FRESH/coherent with 0 positions, 0 pending orders and consistent ledger reconciliation.
 
 Current operational baseline:
-- canonical main `36c42c7cc7022f0c2ccaab2631ca4ce4b7609b4f`;
-- Worker contract `okx.mcp.tools/2026-10-03.3`;
-- direct runtime PASS / connected / session_fresh, generation 114;
-- Stage 2 PASS/CLOSED;
+- canonical main `b2688e1c2186e83b9c47cf513668e53a034fe891`;
+- Worker contract `okx.mcp.tools/2026-10-05.9`;
+- research catalog `okx.research.catalog/2026-10-05.8`;
+- direct runtime PASS / connected / session_fresh; connection generation is telemetry rather than roadmap identity;
+- Stage 1 and Stage 2 PASS/CLOSED;
+- Stage 3A/3B/3C infrastructure PASS/CLOSED;
+- H1 `close_momentum` REJECTED;
+- H2 `two_bar_momentum` development screen PASS and frozen pending fresh independent FINAL_OOS in #216;
+- Stage-3D immutable promotion gate ACCEPTED in #217;
+- Stage-3D causal live-decision parity kernel ACCEPTED in #218;
 - production live trading remains disabled.
 
-**Stage 3 — SCIENTIFIC RESEARCH + REPLAY is now the current roadmap cursor.** Its implementation must continue to extend the accepted owners without reintroducing endpoint-per-question growth or a second product runtime.
+**Stage 3D — bounded event-driven PAPER/SHADOW session owner — is the current implementation cursor.** The admitted delta is exactly one agent-root task, one single-writer session owner and one bounded command/wakeup channel over the existing public observation owner; no second market connection, timer/poller or mutation authority. Stage-3 final acceptance still requires a future BACKTESTED candidate plus real PAPER/SHADOW evidence; Stage 4 remains gated behind that exit.
 
 ## Repository Guard v1
 
@@ -401,9 +407,9 @@ Accepted evidence:
 
 Stage 3B exit is satisfied: one strategy is replayed reproducibly without hidden future data, duplicate production formulas, bulk MCP traces or exchange mutation authority.
 
-**Current cursor: Stage 3C — Scientific Validation & Promotion.**
+Stage 3B exit remains satisfied. Stage 3C scientific-validation infrastructure has since been accepted, including sealed FINAL_OOS consumption and immutable promotion evidence. Stage 3D has also accepted the immutable positive-promotion gate and causal live-decision parity kernel. The current implementation cursor is the bounded event-driven PAPER/SHADOW session owner; H2 final scientific acceptance is deferred to #216 until the fresh independent holdout exists.
 
-The Stage-3 design freeze remains in force. Stage 3C must build on the accepted 3A/3B owners and artifacts; new framework layers or methods still require a reproduced source/runtime/test failure, not speculative completeness.
+The Stage-3 design freeze remains in force. Stage 3D must build on the accepted 3A/3B/3C owners and artifacts; new framework layers or methods still require a reproduced source/runtime/test failure, not speculative completeness.
 
 ### Stage 4 — EXECUTION + TCA
 
