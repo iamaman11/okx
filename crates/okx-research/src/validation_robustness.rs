@@ -8,13 +8,13 @@ use okx_analysis::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::validation_evidence::replay_result_view;
 use crate::{
     BUILD_SOURCE_TREE, PreHoldoutEvidence, ReplayMechanicsProvenance, ReplayStatus,
-    ResearchArtifactStore, ResearchError, ResearchRange, ValidationEvidenceReadiness,
-    ValidationSpec, VALIDATION_SPEC_SCHEMA_V2, build_baseline_experiment, canonical_sha256,
+    ResearchArtifactStore, ResearchError, ResearchRange, VALIDATION_SPEC_SCHEMA_V2,
+    ValidationEvidenceReadiness, ValidationSpec, build_baseline_experiment, canonical_sha256,
     derive_replay_range, replay_experiment,
 };
-use crate::validation_evidence::replay_result_view;
 
 pub const VALIDATION_ROBUSTNESS_SCHEMA_V1: &str = "okx.research.validation-robustness/v1";
 pub const VALIDATION_ROBUSTNESS_ALGORITHM_V1: &str =
@@ -106,7 +106,9 @@ pub fn prepare_validation_robustness(
     validation_experiment_result_artifact_id: &str,
 ) -> Result<PreparedValidationRobustness, ResearchError> {
     if BUILD_SOURCE_TREE == "UNAVAILABLE" {
-        return Err(ResearchError::MissingField("validation_robustness.source_tree"));
+        return Err(ResearchError::MissingField(
+            "validation_robustness.source_tree",
+        ));
     }
 
     let spec: ValidationSpec = store.read_evidence_json(validation_spec_artifact_id)?;
@@ -321,8 +323,8 @@ pub fn prepare_validation_robustness(
         pre_holdout_evidence_artifact_id: pre_holdout_evidence_artifact_id.to_owned(),
         train_replay_dataset_artifact_id: train_replay_dataset_artifact_id.to_owned(),
         validation_replay_dataset_artifact_id: validation_replay_dataset_artifact_id.to_owned(),
-        validation_experiment_result_artifact_id:
-            validation_experiment_result_artifact_id.to_owned(),
+        validation_experiment_result_artifact_id: validation_experiment_result_artifact_id
+            .to_owned(),
         walk_forward_folds: fold_evidence,
         regime,
         readiness,
