@@ -118,6 +118,29 @@ struct SubscriptionRequest<'a> {
     args: &'a [PrivateSubscription],
 }
 
+#[derive(Debug, Serialize)]
+struct SubscribeRequest<'a> {
+    op: &'static str,
+    args: Vec<SubscribeArg<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct SubscribeArg<'a> {
+    #[serde(flatten)]
+    subscription: &'a PrivateSubscription,
+    #[serde(rename = "extraParams", skip_serializing_if = "Option::is_none")]
+    extra_params: Option<&'static str>,
+}
+
+const EVENT_ONLY_EXTRA_PARAMS: &str = r#"{"updateInterval":"0"}"#;
+
+fn subscribe_extra_params(subscription: &PrivateSubscription) -> Option<&'static str> {
+    match subscription.channel {
+        PrivateChannel::Account | PrivateChannel::Positions => Some(EVENT_ONLY_EXTRA_PARAMS),
+        PrivateChannel::Orders => None,
+    }
+}
+
 pub fn login_payload(material: &WsLoginMaterial) -> Result<String, serde_json::Error> {
     serde_json::to_string(&LoginRequest {
         op: "login",
@@ -128,9 +151,16 @@ pub fn login_payload(material: &WsLoginMaterial) -> Result<String, serde_json::E
 pub fn private_subscribe_payload(
     subscriptions: &[PrivateSubscription],
 ) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&SubscriptionRequest {
+    let args = subscriptions
+        .iter()
+        .map(|subscription| SubscribeArg {
+            subscription,
+            extra_params: subscribe_extra_params(subscription),
+        })
+        .collect();
+    serde_json::to_string(&SubscribeRequest {
         op: "subscribe",
-        args: subscriptions,
+        args,
     })
 }
 
@@ -225,10 +255,22 @@ mod tests {
         let payload = private_subscribe_payload(&subscriptions).expect("subscribe");
         let value: Value = serde_json::from_str(&payload).expect("json");
         assert_eq!(value["args"][0]["channel"], "account");
+        assert_eq!(
+            value["args"][0]["extraParams"],
+            EVENT_ONLY_EXTRA_PARAMS
+        );
         assert_eq!(value["args"][1]["channel"], "positions");
         assert_eq!(value["args"][1]["instType"], "ANY");
+        assert_eq!(
+            value["args"][1]["extraParams"],
+            EVENT_ONLY_EXTRA_PARAMS
+        );
         assert_eq!(value["args"][2]["channel"], "orders");
         assert_eq!(value["args"][2]["instType"], "ANY");
+        assert!(value["args"][2].get("extraParams").is_none());
+
+        let unsubscribe = private_unsubscribe_payload(&subscriptions).expect("unsubscribe");
+        assert!(!unsubscribe.contains("extraParams"));
     }
 
     #[test]
@@ -241,7 +283,7 @@ mod tests {
 
         assert!(matches!(
             parse_private_text(
-                r#"{"event":"subscribe","arg":{"channel":"positions","instType":"ANY"},"connId":"abc"}"#
+                r#"{"event":"subscribe","arg":{"channel":"positions","instType":"ANY","extraParams":"{\"updateInterval\":\"0\"}"},"connId":"abc"}"#
             )
             .expect("subscribe"),
             PrivateInboundMessage::Subscribed {
