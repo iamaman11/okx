@@ -665,7 +665,7 @@ export const mcpApi = {
         ) {
           return jsonRpcError(id, -32602, "unsupported research request field");
         }
-        if (!["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split", "evaluate_validation_evidence"].includes(String(research.action))) {
+        if (!["inspect_tier_a", "inspect_tier_b", "run_replay", "prepare_validation_dataset", "prepare_validation_split", "evaluate_validation_evidence", "evaluate_validation_robustness"].includes(String(research.action))) {
           return jsonRpcError(id, -32602, "invalid research action");
         }
         if (research.catalog_version !== "okx.research.catalog/2026-10-05.6") {
@@ -696,7 +696,7 @@ export const mcpApi = {
             research.train_experiment_result_artifact_id !== undefined ||
             research.validation_replay_dataset_artifact_id !== undefined ||
             research.validation_experiment_result_artifact_id !== undefined ||
-            research.pre_holdout_evidence_artifact_id !== undefined ||
+          research.pre_holdout_evidence_artifact_id !== undefined ||
             research.bar !== "1H" ||
             !Number.isInteger(research.candle_limit) ||
             Number(research.candle_limit) < 2 ||
@@ -843,7 +843,8 @@ export const mcpApi = {
             research.train_replay_dataset_artifact_id !== undefined ||
             research.train_experiment_result_artifact_id !== undefined ||
             research.validation_replay_dataset_artifact_id !== undefined ||
-            research.validation_experiment_result_artifact_id !== undefined
+            research.validation_experiment_result_artifact_id !== undefined ||
+            research.pre_holdout_evidence_artifact_id !== undefined
           ) {
             return jsonRpcError(id, -32602, "invalid Stage-3C validation split request");
           }
@@ -890,6 +891,7 @@ export const mcpApi = {
             research.train_candle_count !== undefined ||
             research.validation_candle_count !== undefined ||
             research.final_oos_candle_count !== undefined ||
+            research.pre_holdout_evidence_artifact_id !== undefined ||
             artifactFields.some(
               (value) => typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value),
             )
