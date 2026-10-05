@@ -610,7 +610,8 @@ fn candidate_risk_context_from_analysis(
     instrument_id: &str,
     account_is_fresh: bool,
 ) -> Result<CandidateRiskContextEvidence, AnalysisError> {
-    let total_equity = non_negative_decimal("risk_total_equity_usd", &account_risk.total_equity_usd)?;
+    let total_equity =
+        non_negative_decimal("risk_total_equity_usd", &account_risk.total_equity_usd)?;
     let capital_base = positive_decimal("capital_base_usd", &mandate.capital_base_usd)?;
     let account_gross = non_negative_decimal(
         "risk_account_gross_notional_usd",
@@ -649,10 +650,7 @@ fn candidate_risk_context_from_analysis(
             instrument_gross_notional_usd: instrument_gross.normalize().to_string(),
             account_initial_margin_usd: account_initial_margin.normalize().to_string(),
             capital_base_drawdown_ratio: drawdown.normalize().to_string(),
-            daily_realized_loss_usd: daily_loss
-                .unwrap_or(Decimal::ZERO)
-                .normalize()
-                .to_string(),
+            daily_realized_loss_usd: daily_loss.unwrap_or(Decimal::ZERO).normalize().to_string(),
             account_is_fresh,
         },
         unsupported_daily_loss_currencies,
