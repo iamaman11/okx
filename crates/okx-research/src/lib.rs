@@ -900,6 +900,9 @@ pub enum ResearchError {
     #[error("invalid research promotion transition: {0}")]
     InvalidPromotionTransition(&'static str),
 
+    #[error("invalid live research decision: {0}")]
+    InvalidLiveDecision(&'static str),
+
     #[error("historical research cursor did not advance strictly toward older evidence")]
     CursorDidNotAdvance,
 
