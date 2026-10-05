@@ -256,17 +256,25 @@ impl AccountBootstrapper {
         strict_read_only_permissions(&config.perm)
             .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
 
-        let funding_balances = self.asset.funding_balances().await?;
-        let positions_swap = self.history.positions_history(InstrumentType::Swap).await?;
-        let positions_futures = self
-            .history
-            .positions_history(InstrumentType::Futures)
-            .await?;
-        let orders_swap = self.history.orders_history(InstrumentType::Swap).await?;
-        let orders_futures = self.history.orders_history(InstrumentType::Futures).await?;
-        let fills_swap = self.history.fills_history(InstrumentType::Swap).await?;
-        let fills_futures = self.history.fills_history(InstrumentType::Futures).await?;
-        let bills = self.history.bills_history().await?;
+        let (
+            funding_balances,
+            positions_swap,
+            positions_futures,
+            orders_swap,
+            orders_futures,
+            fills_swap,
+            fills_futures,
+            bills,
+        ) = tokio::try_join!(
+            self.asset.funding_balances(),
+            self.history.positions_history(InstrumentType::Swap),
+            self.history.positions_history(InstrumentType::Futures),
+            self.history.orders_history(InstrumentType::Swap),
+            self.history.orders_history(InstrumentType::Futures),
+            self.history.fills_history(InstrumentType::Swap),
+            self.history.fills_history(InstrumentType::Futures),
+            self.history.bills_history(),
+        )?;
 
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         Ok(AccountLedgerFacts::from_okx(

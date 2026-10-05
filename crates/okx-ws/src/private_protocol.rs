@@ -115,7 +115,24 @@ struct LoginRequest<'a> {
 #[derive(Debug, Serialize)]
 struct SubscriptionRequest<'a> {
     op: &'static str,
-    args: &'a [PrivateSubscription],
+    args: Vec<SubscriptionArg<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct SubscriptionArg<'a> {
+    #[serde(flatten)]
+    subscription: &'a PrivateSubscription,
+    #[serde(rename = "extraParams", skip_serializing_if = "Option::is_none")]
+    extra_params: Option<&'static str>,
+}
+
+const EVENT_ONLY_EXTRA_PARAMS: &str = r#"{"updateInterval":"0"}"#;
+
+fn subscription_extra_params(subscription: &PrivateSubscription) -> Option<&'static str> {
+    match subscription.channel {
+        PrivateChannel::Account | PrivateChannel::Positions => Some(EVENT_ONLY_EXTRA_PARAMS),
+        PrivateChannel::Orders => None,
+    }
 }
 
 pub fn login_payload(material: &WsLoginMaterial) -> Result<String, serde_json::Error> {
@@ -125,22 +142,30 @@ pub fn login_payload(material: &WsLoginMaterial) -> Result<String, serde_json::E
     })
 }
 
+fn subscription_payload(
+    op: &'static str,
+    subscriptions: &[PrivateSubscription],
+) -> Result<String, serde_json::Error> {
+    let args = subscriptions
+        .iter()
+        .map(|subscription| SubscriptionArg {
+            subscription,
+            extra_params: subscription_extra_params(subscription),
+        })
+        .collect();
+    serde_json::to_string(&SubscriptionRequest { op, args })
+}
+
 pub fn private_subscribe_payload(
     subscriptions: &[PrivateSubscription],
 ) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&SubscriptionRequest {
-        op: "subscribe",
-        args: subscriptions,
-    })
+    subscription_payload("subscribe", subscriptions)
 }
 
 pub fn private_unsubscribe_payload(
     subscriptions: &[PrivateSubscription],
 ) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&SubscriptionRequest {
-        op: "unsubscribe",
-        args: subscriptions,
-    })
+    subscription_payload("unsubscribe", subscriptions)
 }
 
 pub fn parse_private_text(text: &str) -> Result<PrivateInboundMessage, serde_json::Error> {
@@ -225,10 +250,25 @@ mod tests {
         let payload = private_subscribe_payload(&subscriptions).expect("subscribe");
         let value: Value = serde_json::from_str(&payload).expect("json");
         assert_eq!(value["args"][0]["channel"], "account");
+        assert_eq!(value["args"][0]["extraParams"], EVENT_ONLY_EXTRA_PARAMS);
         assert_eq!(value["args"][1]["channel"], "positions");
         assert_eq!(value["args"][1]["instType"], "ANY");
+        assert_eq!(value["args"][1]["extraParams"], EVENT_ONLY_EXTRA_PARAMS);
         assert_eq!(value["args"][2]["channel"], "orders");
         assert_eq!(value["args"][2]["instType"], "ANY");
+        assert!(value["args"][2].get("extraParams").is_none());
+
+        let unsubscribe = private_unsubscribe_payload(&subscriptions).expect("unsubscribe");
+        let unsubscribe: Value = serde_json::from_str(&unsubscribe).expect("unsubscribe json");
+        assert_eq!(
+            unsubscribe["args"][0]["extraParams"],
+            EVENT_ONLY_EXTRA_PARAMS
+        );
+        assert_eq!(
+            unsubscribe["args"][1]["extraParams"],
+            EVENT_ONLY_EXTRA_PARAMS
+        );
+        assert!(unsubscribe["args"][2].get("extraParams").is_none());
     }
 
     #[test]
@@ -241,7 +281,7 @@ mod tests {
 
         assert!(matches!(
             parse_private_text(
-                r#"{"event":"subscribe","arg":{"channel":"positions","instType":"ANY"},"connId":"abc"}"#
+                r#"{"event":"subscribe","arg":{"channel":"positions","instType":"ANY","extraParams":"{\"updateInterval\":\"0\"}"},"connId":"abc"}"#
             )
             .expect("subscribe"),
             PrivateInboundMessage::Subscribed {
