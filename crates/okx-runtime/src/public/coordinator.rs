@@ -672,6 +672,37 @@ pub fn reconnect_delay(attempt: usize) -> Duration {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn market_wakeup_watch_coalesces_to_latest_sequence() {
+        let reference = ReferenceRegistry::from_public(
+            "2026-10-05T00:00:00.000Z",
+            Vec::new(),
+        )
+        .expect("reference");
+        let (coordinator, handle) = PublicWsCoordinator::new(
+            OkxEnvironment::new(okx_api::Region::Global, false),
+            reference,
+        );
+        let mut updates = handle.subscribe_market_updates();
+
+        coordinator.market_updates.send_replace(PublicMarketWakeup {
+            sequence: 1,
+            generation: 7,
+            received_at_ms: 3_600_000,
+        });
+        coordinator.market_updates.send_replace(PublicMarketWakeup {
+            sequence: 2,
+            generation: 7,
+            received_at_ms: 3_600_100,
+        });
+
+        updates.changed().await.expect("latest wakeup");
+        let latest = *updates.borrow_and_update();
+        assert_eq!(latest.sequence, 2);
+        assert_eq!(latest.generation, 7);
+        assert_eq!(latest.received_at_ms, 3_600_100);
+    }
+
     #[test]
     fn demand_working_set_is_bounded_and_lru() {
         let mut demands = BTreeSet::new();
