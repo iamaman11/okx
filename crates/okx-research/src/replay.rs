@@ -632,7 +632,7 @@ pub fn replay_experiment(
         )?;
         if decision == StrategyDecision::Hold {
             decisions.push(ReplayDecisionTrace {
-                antecedent_close: None,
+                antecedent_close: antecedent.map(|candle| candle.close.clone()),
                 signal_open_time_ms: signal.open_time_ms.clone(),
                 signal_available_time_ms: signal.available_time_ms.clone(),
                 earliest_execution_time_ms: entry.open_time_ms.clone(),
