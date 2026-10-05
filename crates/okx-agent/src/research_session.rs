@@ -896,13 +896,20 @@ impl ResearchSessionRuntime {
             checkpoint_artifact_id: checkpoint_artifact_id.to_owned(),
         };
         let bytes = serde_json::to_vec(&pointer)?;
+        let temp = path.with_extension("tmp");
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
-            .open(path)?;
+            .open(&temp)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
+        drop(file);
+
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        fs::rename(&temp, &path)?;
         Ok(())
     }
 }
