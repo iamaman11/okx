@@ -62,6 +62,9 @@ struct ResearchCapabilitiesResult {
     validation_walk_forward_fold_count: u16,
     validation_regime_basis: &'static str,
     validation_robustness_reads_final_oos: bool,
+    validation_final_oos_replay_artifact_exposed_by_split: bool,
+    validation_final_oos_consumption: bool,
+    validation_promotion_bundle: bool,
     normal_result_target_bytes: u64,
     source_tree: &'static str,
     source_tree_bound: bool,
@@ -315,6 +318,22 @@ pub(crate) async fn dispatch(
             validation_replay_dataset_artifact_id,
             validation_experiment_result_artifact_id,
         ),
+        AgentOperation::Research {
+            request:
+                ResearchRequest::ConsumeFinalOos {
+                    catalog_version: _,
+                    instrument,
+                    validation_spec_artifact_id,
+                    validation_robustness_artifact_id,
+                },
+        } => super::research_validation_promotion::consume_final_oos(
+            request,
+            context,
+            generated_at,
+            instrument,
+            validation_spec_artifact_id,
+            validation_robustness_artifact_id,
+        ),
         _ => Ok(unavailable(request, generated_at)),
     }
 }
@@ -323,7 +342,7 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
     let result = ResearchCapabilitiesResult {
         schema: RESEARCH_CAPABILITIES_SCHEMA_V1,
         catalog_version: RESEARCH_CATALOG_VERSION_V1,
-        stage: "3C_V1_ROBUSTNESS",
+        stage: "3C_V1_FINAL_GATE",
         tier_a_instruments: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "DOGE-USDT-SWAP"],
         tier_a_bars: ["1H"],
         tier_b_instruments: ["BTC-USDT-SWAP"],
@@ -349,6 +368,9 @@ fn capabilities(request: &AgentRequest, generated_at: &str) -> AgentResult<Agent
         validation_walk_forward_fold_count: 3,
         validation_regime_basis: "ABSOLUTE_COMPLETED_BAR_OPEN_CLOSE_RETURN_TRAIN_MEDIAN",
         validation_robustness_reads_final_oos: false,
+        validation_final_oos_replay_artifact_exposed_by_split: false,
+        validation_final_oos_consumption: true,
+        validation_promotion_bundle: true,
         normal_result_target_bytes: NORMAL_RESULT_TARGET_BYTES,
         source_tree: BUILD_SOURCE_TREE,
         source_tree_bound: BUILD_SOURCE_TREE != "UNAVAILABLE",
