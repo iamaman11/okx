@@ -11,8 +11,7 @@ pub const VALIDATION_STATISTICS_ALGORITHM_V1: &str =
 pub const VALIDATION_COST_STRESS_SCHEMA_V1: &str = "okx.analysis.validation-cost-stress/v1";
 pub const VALIDATION_COST_STRESS_ALGORITHM_V1: &str =
     "okx.analysis.validation-cost-stress/2026-10-05.1";
-pub const VALIDATION_REGIME_ALGORITHM_V1: &str =
-    "okx.analysis.validation-regime/2026-10-05.1";
+pub const VALIDATION_REGIME_ALGORITHM_V1: &str = "okx.analysis.validation-regime/2026-10-05.1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,10 +64,7 @@ pub struct ValidationRegimeStatistics {
     pub statistics: Option<ValidationSampleStatistics>,
 }
 
-pub fn validation_absolute_return(
-    open: &str,
-    close: &str,
-) -> Result<Decimal, AnalysisError> {
+pub fn validation_absolute_return(open: &str, close: &str) -> Result<Decimal, AnalysisError> {
     let open = validation_decimal("validation_regime_open", open)?;
     let close = validation_decimal("validation_regime_close", close)?;
     if open <= Decimal::ZERO {
