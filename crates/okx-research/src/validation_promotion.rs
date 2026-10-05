@@ -32,6 +32,10 @@ pub enum ValidationFinalDecision {
 #[serde(deny_unknown_fields)]
 pub struct ValidationPromotionCriteria {
     pub version: String,
+    pub min_positive_walk_forward_folds: usize,
+    pub require_positive_walk_forward_aggregate: bool,
+    pub validation_cost_stress_multiplier: String,
+    pub min_validation_stressed_net_pnl_exclusive: String,
     pub min_final_oos_trades: usize,
     pub min_net_pnl_quote_exclusive: String,
     pub min_profit_factor_exclusive: String,
@@ -42,6 +46,10 @@ pub struct ValidationPromotionCriteria {
 pub fn validation_promotion_criteria_v2() -> ValidationPromotionCriteria {
     ValidationPromotionCriteria {
         version: VALIDATION_PROMOTION_CRITERIA_V2.to_owned(),
+        min_positive_walk_forward_folds: 2,
+        require_positive_walk_forward_aggregate: true,
+        validation_cost_stress_multiplier: "1.5".to_owned(),
+        min_validation_stressed_net_pnl_exclusive: "0".to_owned(),
         min_final_oos_trades: 30,
         min_net_pnl_quote_exclusive: "0".to_owned(),
         min_profit_factor_exclusive: "1".to_owned(),
@@ -221,8 +229,10 @@ pub fn consume_final_oos(
         });
     }
 
-    let final_slice = derive_validation_slice(&parent, &spec, ValidationPartitionRole::FinalOos)?;
     let criteria = validation_promotion_criteria_v2();
+    let pre_holdout_blockers =
+        pre_holdout_promotion_blockers(&robustness, &pre_holdout, &criteria)?;
+    let final_slice = derive_validation_slice(&parent, &spec, ValidationPartitionRole::FinalOos)?;
 
     let (hypothesis, experiment) = build_baseline_experiment(
         &final_slice.replay_dataset,
@@ -306,6 +316,7 @@ pub fn consume_final_oos(
         statistics.as_ref(),
         &cost_stress,
         &criteria,
+        pre_holdout_blockers,
     )?;
 
     let final_oos = FinalOosEvidence {
@@ -386,33 +397,77 @@ pub fn consume_final_oos(
     })
 }
 
+fn pre_holdout_promotion_blockers(
+    robustness: &ValidationRobustnessEvidence,
+    pre_holdout: &PreHoldoutEvidence,
+    criteria: &ValidationPromotionCriteria,
+) -> Result<Vec<String>, ResearchError> {
+    let mut blockers = Vec::new();
+    let mut positive_folds = 0usize;
+    let mut walk_forward_total = Decimal::ZERO;
+    for fold in &robustness.walk_forward_folds {
+        let net = decimal(&fold.net_pnl_quote)?;
+        if net > Decimal::ZERO {
+            positive_folds += 1;
+        }
+        walk_forward_total += net;
+    }
+    if positive_folds < criteria.min_positive_walk_forward_folds {
+        blockers.push("WALK_FORWARD_POSITIVE_FOLDS_BELOW_PROMOTION_MINIMUM".to_owned());
+    }
+    if criteria.require_positive_walk_forward_aggregate
+        && walk_forward_total <= Decimal::ZERO
+    {
+        blockers.push("WALK_FORWARD_AGGREGATE_NET_PNL_NOT_POSITIVE".to_owned());
+    }
+
+    let stressed = pre_holdout
+        .validation
+        .cost_stress
+        .points
+        .iter()
+        .find(|point| {
+            point.trading_cost_multiplier == criteria.validation_cost_stress_multiplier
+        })
+        .ok_or(ResearchError::ArtifactIdentityMismatch)?;
+    if decimal(&stressed.stressed_net_pnl_quote)?
+        <= decimal(&criteria.min_validation_stressed_net_pnl_exclusive)?
+    {
+        blockers.push("VALIDATION_COST_STRESS_NOT_POSITIVE".to_owned());
+    }
+
+    blockers.sort();
+    blockers.dedup();
+    Ok(blockers)
+}
+
 fn decide_final_oos(
     status: ReplayStatus,
     trade_count: usize,
     statistics: Option<&ValidationSampleStatistics>,
     cost_stress: &ValidationCostStress,
     criteria: &ValidationPromotionCriteria,
+    mut blockers: Vec<String>,
 ) -> Result<(ValidationFinalDecision, Vec<String>), ResearchError> {
     if status != ReplayStatus::Completed {
-        return Ok((
-            ValidationFinalDecision::InsufficientData,
-            vec!["FINAL_OOS_REPLAY_NOT_COMPLETED".to_owned()],
-        ));
+        blockers.push("FINAL_OOS_REPLAY_NOT_COMPLETED".to_owned());
+        blockers.sort();
+        blockers.dedup();
+        return Ok((ValidationFinalDecision::InsufficientData, blockers));
     }
     if trade_count < criteria.min_final_oos_trades {
-        return Ok((
-            ValidationFinalDecision::InsufficientData,
-            vec!["FINAL_OOS_SAMPLE_BELOW_POLICY_MINIMUM".to_owned()],
-        ));
+        blockers.push("FINAL_OOS_SAMPLE_BELOW_POLICY_MINIMUM".to_owned());
+        blockers.sort();
+        blockers.dedup();
+        return Ok((ValidationFinalDecision::InsufficientData, blockers));
     }
     let Some(statistics) = statistics else {
-        return Ok((
-            ValidationFinalDecision::InsufficientData,
-            vec!["FINAL_OOS_STATISTICS_UNAVAILABLE".to_owned()],
-        ));
+        blockers.push("FINAL_OOS_STATISTICS_UNAVAILABLE".to_owned());
+        blockers.sort();
+        blockers.dedup();
+        return Ok((ValidationFinalDecision::InsufficientData, blockers));
     };
 
-    let mut blockers = Vec::new();
     if decimal(&statistics.total_net_pnl_quote)? <= decimal(&criteria.min_net_pnl_quote_exclusive)?
     {
         blockers.push("FINAL_OOS_NET_PNL_NOT_POSITIVE".to_owned());
@@ -506,6 +561,7 @@ mod tests {
             Some(&stats),
             &stress,
             &validation_promotion_criteria_v2(),
+            Vec::new(),
         )
         .expect("decision");
         assert_eq!(decision, ValidationFinalDecision::Backtested);
@@ -525,6 +581,7 @@ mod tests {
             Some(&stats),
             &stress,
             &validation_promotion_criteria_v2(),
+            Vec::new(),
         )
         .expect("decision");
         assert_eq!(decision, ValidationFinalDecision::Reject);
@@ -541,6 +598,7 @@ mod tests {
             Some(&stats),
             &stress,
             &validation_promotion_criteria_v2(),
+            Vec::new(),
         )
         .expect("decision");
         assert_eq!(decision, ValidationFinalDecision::InsufficientData);
