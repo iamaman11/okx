@@ -8,7 +8,8 @@ use okx_ws::{PublicChannel, PublicWsError};
 use thiserror::Error;
 
 pub use coordinator::{
-    PublicWsCoordinator, PublicWsHandle, RECONNECT_BACKOFF_SECONDS, reconnect_delay,
+    PublicMarketWakeup, PublicWsCoordinator, PublicWsHandle, RECONNECT_BACKOFF_SECONDS,
+    reconnect_delay,
 };
 pub use state::{PublicConnectionState, PublicQualitySnapshot, PublicRuntimeState};
 
