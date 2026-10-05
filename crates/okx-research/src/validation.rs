@@ -523,6 +523,47 @@ pub fn derive_validation_slice(
     })
 }
 
+pub fn derive_replay_range(
+    parent: &ReplayDatasetArtifact,
+    range: &ResearchRange,
+) -> Result<ReplayDatasetArtifact, ResearchError> {
+    parent.validate()?;
+    range.validate()?;
+    let begin = range.begin()?;
+    let end = range.end()?;
+    if begin < parent.manifest.range.begin()? || end > parent.manifest.range.end()? {
+        return Err(ResearchError::ReplayDatasetMismatch);
+    }
+    let candles = parent
+        .candles
+        .iter()
+        .filter(|row| {
+            row.open_time_ms
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|timestamp| timestamp >= begin && timestamp < end)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if candles.is_empty() || candle_slice_range(&candles)? != *range {
+        return Err(ResearchError::ReplayDatasetMismatch);
+    }
+    let funding = parent
+        .funding
+        .iter()
+        .filter(|event| {
+            event
+                .funding_time_ms
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|timestamp| timestamp >= begin && timestamp < end)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let manifest = parent.manifest.derive_slice(range.clone())?;
+    ReplayDatasetArtifact::build(manifest, candles, funding, parent.reference.clone())
+}
+
 fn candle_slice_range(candles: &[crate::ResearchCandle]) -> Result<ResearchRange, ResearchError> {
     let first = candles
         .first()
