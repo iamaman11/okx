@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{AnalysisError, decimal};
 
 pub const BASELINE_STRATEGY_VERSION_V1: &str = "okx.strategy.baseline/2026-10-04.1";
-pub const TWO_BAR_MOMENTUM_STRATEGY_VERSION_V1: &str =
-    "okx.strategy.two-bar-momentum/2026-10-05.1";
+pub const TWO_BAR_MOMENTUM_STRATEGY_VERSION_V1: &str = "okx.strategy.two-bar-momentum/2026-10-05.1";
 pub const STRATEGY_RESEARCH_METADATA_VERSION_V1: &str =
     "okx.strategy.research-metadata/2026-10-04.1";
 
@@ -95,12 +94,15 @@ pub fn evaluate_baseline_strategy(
             } else {
                 StrategyDecision::Hold
             })
-        },
+        }
         BaselineStrategyKind::TwoBarMomentum => {
-            let antecedent = input
-                .antecedent_close
-                .as_deref()
-                .ok_or(AnalysisError::InvalidStrategyInput("strategy_antecedent_close"))?;
+            let antecedent =
+                input
+                    .antecedent_close
+                    .as_deref()
+                    .ok_or(AnalysisError::InvalidStrategyInput(
+                        "strategy_antecedent_close",
+                    ))?;
             let antecedent = decimal("strategy_antecedent_close", antecedent)?;
             let previous = decimal("strategy_previous_close", &input.previous_close)?;
             let signal = decimal("strategy_signal_close", &input.signal_close)?;
