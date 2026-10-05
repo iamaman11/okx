@@ -176,6 +176,7 @@ impl<'a> ObservationQueryContext<'a> {
             private_ws: None,
             execution: None,
             research_root: None,
+            research_session: None,
         }
     }
 
