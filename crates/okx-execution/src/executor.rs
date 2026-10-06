@@ -245,6 +245,40 @@ where
         )?)
     }
 
+    pub fn prepare_reverse_close(
+        &mut self,
+        plan: ExecutionPlan,
+        target_position_side: PositionSide,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
+        Ok(classify_prepare_result(self.ledger.prepare_reverse_close(
+            plan,
+            target_position_side,
+            observed_at_ms,
+        ))?)
+    }
+
+    pub fn prepare_reverse_open(
+        &mut self,
+        root_intent_id: &str,
+        plan: ExecutionPlan,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
+        Ok(classify_prepare_result(self.ledger.prepare_reverse_open(
+            root_intent_id,
+            plan,
+            observed_at_ms,
+        ))?)
+    }
+
+    pub fn abort_reverse(
+        &mut self,
+        root_intent_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        Ok(self.ledger.abort_reverse(root_intent_id, observed_at_ms)?)
+    }
+
     pub fn prepare_amend(
         &mut self,
         intent_id: &str,
