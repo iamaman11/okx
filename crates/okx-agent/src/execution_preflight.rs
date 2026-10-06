@@ -416,12 +416,7 @@ mod tests {
     #[test]
     fn demo_acceptance_preflight_requires_demo_and_preserves_production_rejection() {
         let observer = config("sub-uid", "main-uid", "read_only", "");
-        let executor = config(
-            "sub-uid",
-            "main-uid",
-            "read_only,trade",
-            "203.0.113.10",
-        );
+        let executor = config("sub-uid", "main-uid", "read_only,trade", "203.0.113.10");
         let demo = OkxEnvironment::new(Region::Global, true);
         let production = OkxEnvironment::new(Region::Global, false);
 
@@ -432,8 +427,7 @@ mod tests {
             "production_environment is raw evidence, not the Demo authority decision"
         );
 
-        let rejected =
-            evaluate_demo_executor_preflight(production, &observer, &executor);
+        let rejected = evaluate_demo_executor_preflight(production, &observer, &executor);
         assert!(!rejected.accepted);
         assert!(rejected.production_environment);
 
