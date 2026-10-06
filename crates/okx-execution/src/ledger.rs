@@ -9,13 +9,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    EXECUTION_PLAN_SCHEMA_V1, ExchangeOrderState, ExecutionPlan, ExecutionRecord, ExecutionState,
-    ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
-    OrderMutationRecord, OrderMutationResolution, OrderMutationState, derive_client_order_id,
+    EXECUTION_PLAN_SCHEMA_V1, ExchangeOrderState, ExecutionAction, ExecutionPlan, ExecutionRecord,
+    ExecutionState, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
+    OrderMutationRecord, OrderMutationResolution, OrderMutationState, PositionSide,
+    ReverseContinuation, ReverseExecutionLink, ReverseLeg, derive_client_order_id,
+    derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
 pub const EXECUTION_LEDGER_SCHEMA_V1: &str = "okx.execution-ledger/v1";
+pub const EXECUTION_LEDGER_SCHEMA_V2: &str = "okx.execution-ledger/v2";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
 const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.json";
 
@@ -59,8 +62,17 @@ pub enum ExecutionLedgerError {
     #[error("execution ledger client_order_id collision")]
     ClientOrderIdCollision,
 
-    #[error("another nonterminal managed execution already owns this instrument")]
+    #[error("another nonterminal managed execution or pending reverse owns this instrument")]
     InstrumentBusy,
+
+    #[error("reverse execution linkage does not match the requested continuation")]
+    ReverseMismatch,
+
+    #[error("reverse execution is not ready for the opposite open leg")]
+    ReverseNotReady,
+
+    #[error("reverse execution continuation was explicitly aborted")]
+    ReverseAborted,
 
     #[error("execution ledger capacity of {0} records is exhausted")]
     CapacityExceeded(usize),
@@ -119,7 +131,10 @@ impl ExecutionLedgerStore {
 
         let bytes = fs::read(&self.path)?;
         let file: ExecutionLedgerFile = serde_json::from_slice(&bytes)?;
-        if file.schema != EXECUTION_LEDGER_SCHEMA_V1 {
+        if !matches!(
+            file.schema.as_str(),
+            EXECUTION_LEDGER_SCHEMA_V1 | EXECUTION_LEDGER_SCHEMA_V2
+        ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
         if file.records.len() > self.max_records {
@@ -172,7 +187,7 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V1.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V2.to_owned(),
             records: entries.values().cloned().collect(),
         })?;
 
@@ -246,11 +261,88 @@ impl DurableExecutionLedger {
         plan: ExecutionPlan,
         observed_at_ms: u64,
     ) -> Result<PrepareDisposition, ExecutionLedgerError> {
-        require_timestamp(observed_at_ms)?;
-        validate_plan_identity(&plan)?;
+        self.prepare_record(ExecutionRecord::new(plan), None, observed_at_ms)
+    }
 
-        if let Some(existing) = self.entries.get(&plan.intent_id) {
-            return if existing.record.plan == plan {
+    pub fn prepare_reverse_close(
+        &mut self,
+        plan: ExecutionPlan,
+        target_position_side: PositionSide,
+        observed_at_ms: u64,
+    ) -> Result<PrepareDisposition, ExecutionLedgerError> {
+        if plan.action != ExecutionAction::Close {
+            return Err(ExecutionLedgerError::ReverseMismatch);
+        }
+        let root_intent_id = plan.intent_id.clone();
+        let open_intent_id = derive_reverse_open_intent_id(&root_intent_id);
+        let mut record = ExecutionRecord::new(plan);
+        record.attach_reverse(ReverseExecutionLink::close(
+            root_intent_id,
+            open_intent_id,
+            target_position_side,
+        )?)?;
+        self.prepare_record(record, None, observed_at_ms)
+    }
+
+    pub fn prepare_reverse_open(
+        &mut self,
+        root_intent_id: &str,
+        plan: ExecutionPlan,
+        observed_at_ms: u64,
+    ) -> Result<PrepareDisposition, ExecutionLedgerError> {
+        let root = self
+            .entries
+            .get(root_intent_id)
+            .cloned()
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(root_intent_id.to_owned()))?;
+        let reverse = root
+            .record
+            .reverse
+            .as_ref()
+            .ok_or(ExecutionLedgerError::ReverseMismatch)?;
+        if reverse.leg != ReverseLeg::Close
+            || plan.action != ExecutionAction::Open
+            || plan.intent_id != reverse.open_intent_id
+            || plan.instrument_id != root.record.plan.instrument_id
+            || plan.trade_mode != root.record.plan.trade_mode
+            || plan.position_side != reverse.target_position_side
+        {
+            return Err(ExecutionLedgerError::ReverseMismatch);
+        }
+        if reverse.continuation == ReverseContinuation::Aborted {
+            return Err(ExecutionLedgerError::ReverseAborted);
+        }
+        if root.record.state != ExecutionState::Filled {
+            return Err(ExecutionLedgerError::ReverseNotReady);
+        }
+
+        let mut record = ExecutionRecord::new(plan);
+        record.attach_reverse(ReverseExecutionLink::open_from(reverse)?)?;
+        self.prepare_record(record, Some(root_intent_id), observed_at_ms)
+    }
+
+    pub fn abort_reverse(
+        &mut self,
+        root_intent_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(root_intent_id, observed_at_ms, |record| {
+            record.abort_reverse_continuation()
+        })
+    }
+
+    fn prepare_record(
+        &mut self,
+        record: ExecutionRecord,
+        reverse_root_bypass: Option<&str>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareDisposition, ExecutionLedgerError> {
+        require_timestamp(observed_at_ms)?;
+        validate_plan_identity(&record.plan)?;
+        validate_reverse_link(&record)?;
+
+        if let Some(existing) = self.entries.get(&record.plan.intent_id) {
+            return if existing.record == record {
                 Ok(PrepareDisposition::Existing(existing.clone()))
             } else {
                 Err(ExecutionLedgerError::IntentConflict)
@@ -263,23 +355,24 @@ impl DurableExecutionLedger {
             ));
         }
 
-        if self.entries.values().any(|entry| {
-            entry.record.plan.instrument_id == plan.instrument_id
-                && !entry.record.state.is_terminal()
-        }) {
+        if self.instrument_reserved(
+            &record.plan.instrument_id,
+            &record.plan.intent_id,
+            reverse_root_bypass,
+        ) {
             return Err(ExecutionLedgerError::InstrumentBusy);
         }
 
         if self
             .entries
             .values()
-            .any(|entry| entry.record.plan.client_order_id == plan.client_order_id)
+            .any(|entry| entry.record.plan.client_order_id == record.plan.client_order_id)
         {
             return Err(ExecutionLedgerError::ClientOrderIdCollision);
         }
 
         let entry = ExecutionLedgerEntry {
-            record: ExecutionRecord::new(plan),
+            record,
             created_at_ms: observed_at_ms,
             updated_at_ms: observed_at_ms,
         };
@@ -287,6 +380,31 @@ impl DurableExecutionLedger {
         let intent_id = entry.record.plan.intent_id.clone();
         self.commit_new(intent_id, entry.clone())?;
         Ok(PrepareDisposition::Created(entry))
+    }
+
+    fn instrument_reserved(
+        &self,
+        instrument_id: &str,
+        incoming_intent_id: &str,
+        reverse_root_bypass: Option<&str>,
+    ) -> bool {
+        self.entries.values().any(|entry| {
+            if entry.record.plan.instrument_id != instrument_id {
+                return false;
+            }
+            if !entry.record.state.is_terminal() {
+                return true;
+            }
+            let Some(reverse) = entry.record.reverse.as_ref() else {
+                return false;
+            };
+            reverse.leg == ReverseLeg::Close
+                && reverse.continuation == ReverseContinuation::Required
+                && entry.record.state == ExecutionState::Filled
+                && !self.entries.contains_key(&reverse.open_intent_id)
+                && !(reverse_root_bypass == Some(reverse.root_intent_id.as_str())
+                    && incoming_intent_id == reverse.open_intent_id)
+        })
     }
 
     pub fn begin_submission(
@@ -500,6 +618,7 @@ impl DurableExecutionLedger {
 fn validate_entry(entry: &ExecutionLedgerEntry) -> Result<(), ExecutionLedgerError> {
     validate_plan_identity(&entry.record.plan)?;
     validate_order_mutations(&entry.record)?;
+    validate_reverse_link(&entry.record)?;
     if entry.created_at_ms == 0
         || entry.updated_at_ms == 0
         || entry.updated_at_ms < entry.created_at_ms
@@ -559,6 +678,41 @@ fn validate_entry(entry: &ExecutionLedgerEntry) -> Result<(), ExecutionLedgerErr
         }
     }
 
+    Ok(())
+}
+
+fn validate_reverse_link(record: &ExecutionRecord) -> Result<(), ExecutionLedgerError> {
+    let Some(reverse) = record.reverse.as_ref() else {
+        return Ok(());
+    };
+    if !valid_intent_id(&reverse.root_intent_id)
+        || !valid_intent_id(&reverse.open_intent_id)
+        || reverse.root_intent_id == reverse.open_intent_id
+    {
+        return Err(ExecutionLedgerError::Corrupt("invalid reverse linkage"));
+    }
+    match reverse.leg {
+        ReverseLeg::Close => {
+            if record.plan.intent_id != reverse.root_intent_id
+                || record.plan.action != ExecutionAction::Close
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "reverse close linkage does not match plan",
+                ));
+            }
+        }
+        ReverseLeg::Open => {
+            if record.plan.intent_id != reverse.open_intent_id
+                || record.plan.action != ExecutionAction::Open
+                || record.plan.position_side != reverse.target_position_side
+                || reverse.continuation != ReverseContinuation::Required
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "reverse open linkage does not match plan",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -757,6 +911,29 @@ mod tests {
         }
     }
 
+    fn close_plan(intent_id: &str, position_side: PositionSide) -> ExecutionPlan {
+        let mut value = plan(intent_id);
+        value.action = ExecutionAction::Close;
+        value.position_side = position_side;
+        value.side = match position_side {
+            PositionSide::Long => OrderSide::Sell,
+            PositionSide::Short => OrderSide::Buy,
+        };
+        value.open_risk = None;
+        value
+    }
+
+    fn reverse_open_plan(root_intent_id: &str, position_side: PositionSide) -> ExecutionPlan {
+        let intent_id = derive_reverse_open_intent_id(root_intent_id);
+        let mut value = plan(&intent_id);
+        value.position_side = position_side;
+        value.side = match position_side {
+            PositionSide::Long => OrderSide::Buy,
+            PositionSide::Short => OrderSide::Sell,
+        };
+        value
+    }
+
     #[test]
     fn missing_ledger_opens_empty_and_prepare_round_trips() {
         let root = temp_root("roundtrip");
@@ -840,6 +1017,185 @@ mod tests {
             ledger.prepare(second, 106).expect("second after terminal"),
             PrepareDisposition::Created(_)
         ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reverse_reserves_instrument_across_restart_until_fresh_open_is_prepared() {
+        let root = temp_root("reverse-reservation");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let reverse_id = "intent_reverse_01234567";
+
+        {
+            let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+            let close = close_plan(reverse_id, PositionSide::Long);
+            ledger
+                .prepare_reverse_close(close, PositionSide::Short, 101)
+                .expect("prepare reverse close");
+            ledger
+                .begin_submission(reverse_id, 102)
+                .expect("submit close");
+            ledger
+                .acknowledge(reverse_id, "close-ord", 103)
+                .expect("ack close");
+            ledger
+                .reconcile_found(reverse_id, "close-ord", ExchangeOrderState::Filled, 104)
+                .expect("close filled");
+
+            assert!(matches!(
+                ledger.prepare(plan("intent_unrelated_012345"), 105),
+                Err(ExecutionLedgerError::InstrumentBusy)
+            ));
+        }
+
+        let mut reopened = DurableExecutionLedger::open(store.clone(), 200).expect("restart");
+        assert!(matches!(
+            reopened.prepare(plan("intent_unrelated_765432"), 201),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
+
+        let open = reverse_open_plan(reverse_id, PositionSide::Short);
+        let prepared = reopened
+            .prepare_reverse_open(reverse_id, open.clone(), 202)
+            .expect("fresh reverse open");
+        assert!(matches!(prepared, PrepareDisposition::Created(_)));
+        let open_entry = reopened.get(&open.intent_id).expect("reverse open entry");
+        let link = open_entry.record.reverse.as_ref().expect("reverse link");
+        assert_eq!(link.root_intent_id, reverse_id);
+        assert_eq!(link.leg, ReverseLeg::Open);
+        assert_eq!(link.target_position_side, PositionSide::Short);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reverse_open_is_blocked_before_close_terminal_and_after_abort() {
+        let root = temp_root("reverse-gates");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = DurableExecutionLedger::open(store, 100).expect("open");
+        let reverse_id = "intent_reverse_gate_012345";
+
+        ledger
+            .prepare_reverse_close(
+                close_plan(reverse_id, PositionSide::Long),
+                PositionSide::Short,
+                101,
+            )
+            .expect("prepare close");
+
+        assert!(matches!(
+            ledger.prepare_reverse_open(
+                reverse_id,
+                reverse_open_plan(reverse_id, PositionSide::Short),
+                102,
+            ),
+            Err(ExecutionLedgerError::ReverseNotReady)
+        ));
+
+        ledger
+            .begin_submission(reverse_id, 103)
+            .expect("submit close");
+        ledger
+            .acknowledge(reverse_id, "close-ord", 104)
+            .expect("ack close");
+        ledger
+            .reconcile_found(reverse_id, "close-ord", ExchangeOrderState::Filled, 105)
+            .expect("close filled");
+        ledger.abort_reverse(reverse_id, 106).expect("abort");
+
+        assert!(matches!(
+            ledger.prepare_reverse_open(
+                reverse_id,
+                reverse_open_plan(reverse_id, PositionSide::Short),
+                107,
+            ),
+            Err(ExecutionLedgerError::ReverseAborted)
+        ));
+        assert!(matches!(
+            ledger
+                .prepare(plan("intent_after_abort_012345"), 108)
+                .expect("reservation released"),
+            PrepareDisposition::Created(_)
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reverse_open_identity_must_match_deterministic_child_and_target_side() {
+        let root = temp_root("reverse-identity");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = DurableExecutionLedger::open(store, 100).expect("open");
+        let reverse_id = "intent_reverse_identity_01";
+
+        ledger
+            .prepare_reverse_close(
+                close_plan(reverse_id, PositionSide::Long),
+                PositionSide::Short,
+                101,
+            )
+            .expect("prepare close");
+        ledger.begin_submission(reverse_id, 102).expect("submit");
+        ledger
+            .acknowledge(reverse_id, "close-ord", 103)
+            .expect("ack");
+        ledger
+            .reconcile_found(reverse_id, "close-ord", ExchangeOrderState::Filled, 104)
+            .expect("filled");
+
+        let mut wrong_side = reverse_open_plan(reverse_id, PositionSide::Long);
+        assert!(matches!(
+            ledger.prepare_reverse_open(reverse_id, wrong_side.clone(), 105),
+            Err(ExecutionLedgerError::ReverseMismatch)
+        ));
+
+        wrong_side.position_side = PositionSide::Short;
+        wrong_side.side = OrderSide::Sell;
+        wrong_side.intent_id = "intent_wrong_child_012345".to_owned();
+        wrong_side.client_order_id = derive_client_order_id(&wrong_side.intent_id);
+        assert!(matches!(
+            ledger.prepare_reverse_open(reverse_id, wrong_side, 106),
+            Err(ExecutionLedgerError::ReverseMismatch)
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_v1_ledger_loads_and_next_write_upgrades_to_v2() {
+        let root = temp_root("schema-upgrade");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("root");
+        let path = root.join("ledger.json");
+        let entry = ExecutionLedgerEntry {
+            record: ExecutionRecord::new(plan("intent_legacy_0123456789")),
+            created_at_ms: 100,
+            updated_at_ms: 100,
+        };
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&ExecutionLedgerFile {
+                schema: EXECUTION_LEDGER_SCHEMA_V1.to_owned(),
+                records: vec![entry],
+            })
+            .expect("legacy json"),
+        )
+        .expect("write legacy");
+
+        let store = ExecutionLedgerStore::at(&path);
+        let mut ledger = DurableExecutionLedger::open(store, 101).expect("load v1");
+        assert_eq!(ledger.len(), 1);
+        ledger
+            .begin_submission("intent_legacy_0123456789", 102)
+            .expect("write v2");
+
+        let file: ExecutionLedgerFile =
+            serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
+        assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V2);
 
         let _ = fs::remove_dir_all(root);
     }

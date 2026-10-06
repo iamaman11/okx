@@ -2,11 +2,13 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    ExchangeOrderState, ExecutionAction, ExecutionLedgerEntry, ExecutionLedgerError, ExecutionPlan,
-    ExecutionState, OrderSide, OrderType, PositionSide, PrepareDisposition, TradeMode,
+    DurableExecutionLedger, ExchangeOrderState, ExecutionAction, ExecutionLedgerEntry,
+    ExecutionLedgerError, ExecutionPlan, ExecutionState, OrderSide, OrderType, PositionSide,
+    PrepareDisposition, ReverseContinuation, ReverseLeg, TradeMode,
 };
 
 pub const EXECUTION_STATUS_SCHEMA_V1: &str = "okx.execution-status/v1";
+pub const EXECUTION_STATUS_SCHEMA_V2: &str = "okx.execution-status/v2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrepareOutcome {
@@ -58,6 +60,9 @@ pub fn classify_prepare_result(
         Err(error @ ExecutionLedgerError::Corrupt(_)) => Err(error),
         Err(error @ ExecutionLedgerError::InvalidTimestamp) => Err(error),
         Err(error @ ExecutionLedgerError::IntentNotFound(_)) => Err(error),
+        Err(error @ ExecutionLedgerError::ReverseMismatch) => Err(error),
+        Err(error @ ExecutionLedgerError::ReverseNotReady) => Err(error),
+        Err(error @ ExecutionLedgerError::ReverseAborted) => Err(error),
         Err(error @ ExecutionLedgerError::Transition(_)) => Err(error),
     }
 }
@@ -83,6 +88,36 @@ pub struct ExecutionStatusSnapshot {
     pub rejection_code: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReverseExecutionStage {
+    Closing,
+    AwaitingFreshOpen,
+    Opening,
+    Completed,
+    Aborted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReverseExecutionStatus {
+    pub root_intent_id: String,
+    pub open_intent_id: String,
+    pub target_position_side: PositionSide,
+    pub stage: ReverseExecutionStage,
+    pub close_state: ExecutionState,
+    pub open_state: Option<ExecutionState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionStatusEnvelope {
+    pub schema: &'static str,
+    pub execution: ExecutionStatusSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<ReverseExecutionStatus>,
 }
 
 pub fn execution_status(
@@ -112,6 +147,60 @@ pub fn execution_status(
         rejection_code: entry.record.rejection_code.clone(),
         created_at_ms: entry.created_at_ms,
         updated_at_ms: entry.updated_at_ms,
+    })
+}
+
+pub fn execution_status_with_ledger(
+    ledger: &DurableExecutionLedger,
+    intent_id: &str,
+) -> Result<Option<ExecutionStatusEnvelope>, serde_json::Error> {
+    let Some(entry) = ledger.get(intent_id) else {
+        return Ok(None);
+    };
+    let reverse = reverse_status(ledger, entry);
+    Ok(Some(ExecutionStatusEnvelope {
+        schema: EXECUTION_STATUS_SCHEMA_V2,
+        execution: execution_status(entry)?,
+        reverse,
+    }))
+}
+
+fn reverse_status(
+    ledger: &DurableExecutionLedger,
+    entry: &ExecutionLedgerEntry,
+) -> Option<ReverseExecutionStatus> {
+    let link = entry.record.reverse.as_ref()?;
+    let (root, open) = match link.leg {
+        ReverseLeg::Close => (entry, ledger.get(&link.open_intent_id)),
+        ReverseLeg::Open => (ledger.get(&link.root_intent_id)?, Some(entry)),
+    };
+    let root_link = root.record.reverse.as_ref()?;
+    let open_state = open.map(|value| value.record.state);
+    let stage = if root_link.continuation == ReverseContinuation::Aborted {
+        ReverseExecutionStage::Aborted
+    } else if root.record.state != ExecutionState::Filled {
+        if root.record.state.is_terminal() {
+            ReverseExecutionStage::Aborted
+        } else {
+            ReverseExecutionStage::Closing
+        }
+    } else {
+        match open_state {
+            None => ReverseExecutionStage::AwaitingFreshOpen,
+            Some(ExecutionState::Filled) => ReverseExecutionStage::Completed,
+            Some(ExecutionState::Canceled | ExecutionState::Rejected) => {
+                ReverseExecutionStage::Aborted
+            }
+            Some(_) => ReverseExecutionStage::Opening,
+        }
+    };
+    Some(ReverseExecutionStatus {
+        root_intent_id: root_link.root_intent_id.clone(),
+        open_intent_id: root_link.open_intent_id.clone(),
+        target_position_side: root_link.target_position_side,
+        stage,
+        close_state: root.record.state,
+        open_state,
     })
 }
 
@@ -257,6 +346,101 @@ mod tests {
         let status = execution_status(recovered).expect("status");
         assert_eq!(status.state, ExecutionState::UnknownSubmission);
         assert_eq!(status.intent_id, original.intent_id);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reverse_status_is_derived_from_durable_close_and_open_records() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-execution-reverse-status-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = crate::ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = crate::DurableExecutionLedger::open(store, 100).expect("open");
+        let root_intent_id = "intent_reverse_status_0123";
+
+        let mut close = plan(root_intent_id);
+        close.action = ExecutionAction::Close;
+        close.position_side = PositionSide::Long;
+        close.side = OrderSide::Sell;
+        close.open_risk = None;
+        ledger
+            .prepare_reverse_close(close, PositionSide::Short, 101)
+            .expect("prepare reverse close");
+
+        let closing = execution_status_with_ledger(&ledger, root_intent_id)
+            .expect("status")
+            .expect("root");
+        assert_eq!(closing.schema, EXECUTION_STATUS_SCHEMA_V2);
+        assert_eq!(
+            closing.reverse.expect("reverse").stage,
+            ReverseExecutionStage::Closing
+        );
+
+        ledger
+            .begin_submission(root_intent_id, 102)
+            .expect("submit close");
+        ledger
+            .acknowledge(root_intent_id, "close-order", 103)
+            .expect("ack close");
+        ledger
+            .reconcile_found(
+                root_intent_id,
+                "close-order",
+                ExchangeOrderState::Filled,
+                104,
+            )
+            .expect("close filled");
+
+        let awaiting = execution_status_with_ledger(&ledger, root_intent_id)
+            .expect("status")
+            .expect("root");
+        let awaiting_reverse = awaiting.reverse.expect("reverse");
+        assert_eq!(
+            awaiting_reverse.stage,
+            ReverseExecutionStage::AwaitingFreshOpen
+        );
+        assert_eq!(awaiting_reverse.open_state, None);
+
+        let open_intent_id = crate::derive_reverse_open_intent_id(root_intent_id);
+        let mut open = plan(&open_intent_id);
+        open.position_side = PositionSide::Short;
+        open.side = OrderSide::Sell;
+        ledger
+            .prepare_reverse_open(root_intent_id, open, 105)
+            .expect("prepare reverse open");
+
+        let opening = execution_status_with_ledger(&ledger, root_intent_id)
+            .expect("status")
+            .expect("root");
+        assert_eq!(
+            opening.reverse.expect("reverse").stage,
+            ReverseExecutionStage::Opening
+        );
+
+        ledger
+            .begin_submission(&open_intent_id, 106)
+            .expect("submit open");
+        ledger
+            .acknowledge(&open_intent_id, "open-order", 107)
+            .expect("ack open");
+        ledger
+            .reconcile_found(
+                &open_intent_id,
+                "open-order",
+                ExchangeOrderState::Filled,
+                108,
+            )
+            .expect("open filled");
+
+        let completed = execution_status_with_ledger(&ledger, root_intent_id)
+            .expect("status")
+            .expect("root");
+        let completed_reverse = completed.reverse.expect("reverse");
+        assert_eq!(completed_reverse.stage, ReverseExecutionStage::Completed);
+        assert_eq!(completed_reverse.open_state, Some(ExecutionState::Filled));
 
         let _ = fs::remove_dir_all(root);
     }

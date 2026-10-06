@@ -5,15 +5,16 @@ use okx_analysis::{
 };
 use okx_api::{MUTATION_REQUEST_TTL_MS, MarginMode};
 use okx_execution::{
-    EXECUTION_STATUS_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionRiskBinding,
-    ExecutionTransitionError, OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide,
-    PrepareDeferral, PrepareFailure, PrepareOutcome, PrepareRejection, TradeMode,
-    prepare_execution, revalidate_execution_plan, revalidate_hard_risk_policy,
-    revalidate_venue_execution,
+    EXECUTION_STATUS_SCHEMA_V2, ExecutionAction, ExecutionIntent, ExecutionLedgerError,
+    ExecutionRiskBinding, ExecutionState, ExecutionTransitionError, OrderExecutorError, OrderType,
+    PositionSide as ExecutionPositionSide, PrepareDeferral, PrepareFailure, PrepareOutcome,
+    PrepareRejection, ReverseContinuation, ReverseLeg, TradeMode, prepare_execution,
+    revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
 };
 use okx_protocol::{
-    ExecutionOrderType, ExecutionRiskBindingRequest, ExecutionTradeMode,
-    LiquidityRole as ProtocolLiquidityRole, PositionSide as ProtocolPositionSide,
+    ExecutionEntryRequest, ExecutionOrderType, ExecutionPrepareSpec, ExecutionRiskBindingRequest,
+    ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
+    PositionSide as ProtocolPositionSide,
 };
 
 use super::*;
@@ -51,6 +52,29 @@ pub(super) async fn dispatch(
         AgentOperation::ExecutorPreflight => {
             executor_preflight(request, context, generated_at).await
         }
+        AgentOperation::PrepareExecution {
+            intent_id,
+            instrument,
+            trade_mode,
+            order_type,
+            spec,
+            risk,
+        } => {
+            prepare_generic_execution(
+                request,
+                context,
+                generated_at,
+                PrepareCommon {
+                    intent_id,
+                    instrument,
+                    trade_mode: *trade_mode,
+                    order_type: *order_type,
+                    risk: risk.as_deref(),
+                },
+                spec,
+            )
+            .await
+        }
         AgentOperation::PrepareOpenExecution {
             intent_id,
             instrument,
@@ -66,79 +90,34 @@ pub(super) async fn dispatch(
             exit_liquidity_role,
             risk,
         } => {
-            let Some(execution) = context.execution else {
-                return Ok(execution_unavailable(request, generated_at));
+            let entry = ExecutionEntryRequest {
+                entry_price: entry_price.clone(),
+                stop_price: stop_price.clone(),
+                max_settle_notional: max_settle_notional.clone(),
+                max_loss_settle: max_loss_settle.clone(),
+                target_rr: target_rr.clone(),
+                entry_liquidity_role: *entry_liquidity_role,
+                exit_liquidity_role: *exit_liquidity_role,
             };
-            let account = match fresh_account(request, context, generated_at).await? {
-                FreshAccount::Ready(value) => value,
-                FreshAccount::Response(response) => return Ok(*response),
-            };
-            let preflight =
-                match executor_preflight_check(request, generated_at, execution, &account).await? {
-                    ExecutorPreflightCheck::Ready(value) => value,
-                    ExecutorPreflightCheck::Response(response) => return Ok(*response),
-                };
-            if !preflight.accepted {
-                return Ok(preflight_rejected(request, generated_at));
-            }
-            let Some(rules) = current_rules(context, instrument).await else {
-                return Ok(reference_not_found(request, generated_at, instrument));
-            };
-            let Some(observer) = context.account_fallback else {
-                return Ok(execution_unavailable(request, generated_at));
-            };
-            let fees = match observer.fee_schedule(&rules).await {
-                Ok(value) => value,
-                Err(error) => return Ok(fee_schedule_failure(request, generated_at, error)),
-            };
-            let direction = match position_side {
-                ProtocolPositionSide::Long => PositionDirection::Long,
-                ProtocolPositionSide::Short => PositionDirection::Short,
-            };
-            let candidate = match analyze_candidate_order(
-                &rules,
-                &fees,
-                &CandidateOrderAssumptions {
-                    direction,
-                    entry_price: entry_price.clone(),
-                    stop_price: stop_price.clone(),
-                    max_settle_notional: max_settle_notional.clone(),
-                    max_loss_settle: max_loss_settle.clone(),
-                    target_rr: target_rr.clone(),
-                    entry_liquidity_role: analysis_liquidity_role(*entry_liquidity_role),
-                    exit_liquidity_role: analysis_liquidity_role(*exit_liquidity_role),
+            prepare_risk_increasing(
+                request,
+                context,
+                generated_at,
+                EntryPrepare {
+                    common: PrepareCommon {
+                        intent_id,
+                        instrument,
+                        trade_mode: *trade_mode,
+                        order_type: *order_type,
+                        risk: risk.as_deref(),
+                    },
+                    position_side: *position_side,
+                    entry: &entry,
+                    action: ExecutionAction::Open,
+                    target: PrepareTarget::Normal,
                 },
-            ) {
-                Ok(value) => value,
-                Err(error) => {
-                    return Ok(analysis_failure(
-                        request,
-                        generated_at,
-                        AgentResponseStatus::Rejected,
-                        error,
-                    ));
-                }
-            };
-
-            let intent = ExecutionIntent {
-                intent_id: intent_id.clone(),
-                expected_reference_generation: rules.reference_generation.clone(),
-                expected_account_generation: account.account_generation.clone(),
-                instrument_id: instrument.clone(),
-                trade_mode: execution_trade_mode(*trade_mode),
-                position_side: execution_position_side(*position_side),
-                action: ExecutionAction::Open,
-                order_type: execution_order_type(*order_type),
-                size: candidate.contracts.clone(),
-                price: candidate.entry_price.clone(),
-            };
-            let mut plan = match prepare_execution(&intent, &rules, &account, Some(&candidate)) {
-                Ok(value) => value,
-                Err(error) => return Ok(validation_failure(request, generated_at, error)),
-            };
-            plan.risk_binding = risk.as_deref().map(execution_risk_binding);
-            let outcome = execution.prepare(plan, utc_now_ms()).await?;
-            prepare_outcome_response(request, generated_at, outcome)
+            )
+            .await
         }
         AgentOperation::PrepareCloseExecution {
             intent_id,
@@ -150,51 +129,520 @@ pub(super) async fn dispatch(
             price,
             risk,
         } => {
-            let Some(execution) = context.execution else {
-                return Ok(execution_unavailable(request, generated_at));
-            };
-            let account = match fresh_account(request, context, generated_at).await? {
-                FreshAccount::Ready(value) => value,
-                FreshAccount::Response(response) => return Ok(*response),
-            };
-            let preflight =
-                match executor_preflight_check(request, generated_at, execution, &account).await? {
-                    ExecutorPreflightCheck::Ready(value) => value,
-                    ExecutorPreflightCheck::Response(response) => return Ok(*response),
-                };
-            if !preflight.accepted {
-                return Ok(preflight_rejected(request, generated_at));
-            }
-            let Some(rules) = current_rules(context, instrument).await else {
-                return Ok(reference_not_found(request, generated_at, instrument));
-            };
-            let intent = ExecutionIntent {
-                intent_id: intent_id.clone(),
-                expected_reference_generation: rules.reference_generation.clone(),
-                expected_account_generation: account.account_generation.clone(),
-                instrument_id: instrument.clone(),
-                trade_mode: execution_trade_mode(*trade_mode),
-                position_side: execution_position_side(*position_side),
-                action: ExecutionAction::Close,
-                order_type: execution_order_type(*order_type),
-                size: size.clone(),
-                price: price.clone(),
-            };
-            let mut plan = match prepare_execution(&intent, &rules, &account, None) {
-                Ok(value) => value,
-                Err(error) => return Ok(validation_failure(request, generated_at, error)),
-            };
-            plan.risk_binding = risk.as_deref().map(execution_risk_binding);
-            let outcome = execution.prepare(plan, utc_now_ms()).await?;
-            prepare_outcome_response(request, generated_at, outcome)
+            prepare_risk_reducing(
+                request,
+                context,
+                generated_at,
+                SizedPrepare {
+                    common: PrepareCommon {
+                        intent_id,
+                        instrument,
+                        trade_mode: *trade_mode,
+                        order_type: *order_type,
+                        risk: risk.as_deref(),
+                    },
+                    position_side: *position_side,
+                    size,
+                    price,
+                    action: ExecutionAction::Close,
+                    target: PrepareTarget::Normal,
+                },
+            )
+            .await
         }
         AgentOperation::SubmitPreparedExecution { intent_id } => {
             submit_prepared(request, context, generated_at, intent_id).await
+        }
+        AgentOperation::AbortReverseExecution { intent_id } => {
+            abort_reverse_execution(request, context, generated_at, intent_id).await
         }
         AgentOperation::ExecutionStatus { intent_id } => {
             execution_status_response(request, context, generated_at, intent_id).await
         }
         _ => unreachable!("execution dispatcher received unsupported operation"),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PrepareTarget {
+    Normal,
+    ReverseClose {
+        target_position_side: ExecutionPositionSide,
+    },
+    ReverseOpen {
+        root_intent_id: String,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct PrepareCommon<'a> {
+    intent_id: &'a str,
+    instrument: &'a str,
+    trade_mode: ExecutionTradeMode,
+    order_type: ExecutionOrderType,
+    risk: Option<&'a ExecutionRiskBindingRequest>,
+}
+
+struct EntryPrepare<'a> {
+    common: PrepareCommon<'a>,
+    position_side: ProtocolPositionSide,
+    entry: &'a ExecutionEntryRequest,
+    action: ExecutionAction,
+    target: PrepareTarget,
+}
+
+struct SizedPrepare<'a> {
+    common: PrepareCommon<'a>,
+    position_side: ProtocolPositionSide,
+    size: &'a str,
+    price: &'a str,
+    action: ExecutionAction,
+    target: PrepareTarget,
+}
+
+async fn prepare_generic_execution(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    common: PrepareCommon<'_>,
+    spec: &ExecutionPrepareSpec,
+) -> AgentResult<AgentResponse> {
+    match spec {
+        ExecutionPrepareSpec::Open {
+            position_side,
+            entry,
+        } => {
+            prepare_risk_increasing(
+                request,
+                context,
+                generated_at,
+                EntryPrepare {
+                    common,
+                    position_side: *position_side,
+                    entry,
+                    action: ExecutionAction::Open,
+                    target: PrepareTarget::Normal,
+                },
+            )
+            .await
+        }
+        ExecutionPrepareSpec::Add {
+            position_side,
+            entry,
+        } => {
+            prepare_risk_increasing(
+                request,
+                context,
+                generated_at,
+                EntryPrepare {
+                    common,
+                    position_side: *position_side,
+                    entry,
+                    action: ExecutionAction::Add,
+                    target: PrepareTarget::Normal,
+                },
+            )
+            .await
+        }
+        ExecutionPrepareSpec::Hedge {
+            position_side,
+            entry,
+        } => {
+            prepare_risk_increasing(
+                request,
+                context,
+                generated_at,
+                EntryPrepare {
+                    common,
+                    position_side: *position_side,
+                    entry,
+                    action: ExecutionAction::Hedge,
+                    target: PrepareTarget::Normal,
+                },
+            )
+            .await
+        }
+        ExecutionPrepareSpec::Reduce {
+            position_side,
+            size,
+            price,
+        } => {
+            prepare_risk_reducing(
+                request,
+                context,
+                generated_at,
+                SizedPrepare {
+                    common,
+                    position_side: *position_side,
+                    size,
+                    price,
+                    action: ExecutionAction::Reduce,
+                    target: PrepareTarget::Normal,
+                },
+            )
+            .await
+        }
+        ExecutionPrepareSpec::Close {
+            position_side,
+            size,
+            price,
+        } => {
+            prepare_risk_reducing(
+                request,
+                context,
+                generated_at,
+                SizedPrepare {
+                    common,
+                    position_side: *position_side,
+                    size,
+                    price,
+                    action: ExecutionAction::Close,
+                    target: PrepareTarget::Normal,
+                },
+            )
+            .await
+        }
+        ExecutionPrepareSpec::Reverse {
+            position_side,
+            size,
+            price,
+        } => {
+            let target_position_side = match position_side {
+                ProtocolPositionSide::Long => ExecutionPositionSide::Short,
+                ProtocolPositionSide::Short => ExecutionPositionSide::Long,
+            };
+            prepare_risk_reducing(
+                request,
+                context,
+                generated_at,
+                SizedPrepare {
+                    common,
+                    position_side: *position_side,
+                    size,
+                    price,
+                    action: ExecutionAction::Close,
+                    target: PrepareTarget::ReverseClose {
+                        target_position_side,
+                    },
+                },
+            )
+            .await
+        }
+        ExecutionPrepareSpec::ContinueReverse { entry } => {
+            prepare_reverse_open(request, context, generated_at, common, entry).await
+        }
+    }
+}
+
+async fn prepare_risk_increasing(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    input: EntryPrepare<'_>,
+) -> AgentResult<AgentResponse> {
+    let EntryPrepare {
+        common,
+        position_side,
+        entry,
+        action,
+        target,
+    } = input;
+    debug_assert!(action.is_risk_increasing());
+    let Some(execution) = context.execution else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    let account = match fresh_account(request, context, generated_at).await? {
+        FreshAccount::Ready(value) => value,
+        FreshAccount::Response(response) => return Ok(*response),
+    };
+    let preflight =
+        match executor_preflight_check(request, generated_at, execution, &account).await? {
+            ExecutorPreflightCheck::Ready(value) => value,
+            ExecutorPreflightCheck::Response(response) => return Ok(*response),
+        };
+    if !preflight.accepted {
+        return Ok(preflight_rejected(request, generated_at));
+    }
+    let Some(rules) = current_rules(context, common.instrument).await else {
+        return Ok(reference_not_found(
+            request,
+            generated_at,
+            common.instrument,
+        ));
+    };
+    let Some(observer) = context.account_fallback else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    let fees = match observer.fee_schedule(&rules).await {
+        Ok(value) => value,
+        Err(error) => return Ok(fee_schedule_failure(request, generated_at, error)),
+    };
+    let direction = match position_side {
+        ProtocolPositionSide::Long => PositionDirection::Long,
+        ProtocolPositionSide::Short => PositionDirection::Short,
+    };
+    let candidate = match analyze_candidate_order(
+        &rules,
+        &fees,
+        &CandidateOrderAssumptions {
+            direction,
+            entry_price: entry.entry_price.clone(),
+            stop_price: entry.stop_price.clone(),
+            max_settle_notional: entry.max_settle_notional.clone(),
+            max_loss_settle: entry.max_loss_settle.clone(),
+            target_rr: entry.target_rr.clone(),
+            entry_liquidity_role: analysis_liquidity_role(entry.entry_liquidity_role),
+            exit_liquidity_role: analysis_liquidity_role(entry.exit_liquidity_role),
+        },
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(analysis_failure(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                error,
+            ));
+        }
+    };
+    let intent = ExecutionIntent {
+        intent_id: common.intent_id.to_owned(),
+        expected_reference_generation: rules.reference_generation.clone(),
+        expected_account_generation: account.account_generation.clone(),
+        instrument_id: common.instrument.to_owned(),
+        trade_mode: execution_trade_mode(common.trade_mode),
+        position_side: execution_position_side(position_side),
+        action,
+        order_type: execution_order_type(common.order_type),
+        size: candidate.contracts.clone(),
+        price: candidate.entry_price.clone(),
+    };
+    let mut plan = match prepare_execution(&intent, &rules, &account, Some(&candidate)) {
+        Ok(value) => value,
+        Err(error) => return Ok(validation_failure(request, generated_at, error)),
+    };
+    plan.risk_binding = common.risk.map(execution_risk_binding);
+    commit_prepared(request, generated_at, execution, plan, target).await
+}
+
+async fn prepare_risk_reducing(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    input: SizedPrepare<'_>,
+) -> AgentResult<AgentResponse> {
+    let SizedPrepare {
+        common,
+        position_side,
+        size,
+        price,
+        action,
+        target,
+    } = input;
+    debug_assert!(action.is_risk_reducing());
+    let Some(execution) = context.execution else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    let account = match fresh_account(request, context, generated_at).await? {
+        FreshAccount::Ready(value) => value,
+        FreshAccount::Response(response) => return Ok(*response),
+    };
+    let preflight =
+        match executor_preflight_check(request, generated_at, execution, &account).await? {
+            ExecutorPreflightCheck::Ready(value) => value,
+            ExecutorPreflightCheck::Response(response) => return Ok(*response),
+        };
+    if !preflight.accepted {
+        return Ok(preflight_rejected(request, generated_at));
+    }
+    let Some(rules) = current_rules(context, common.instrument).await else {
+        return Ok(reference_not_found(
+            request,
+            generated_at,
+            common.instrument,
+        ));
+    };
+    let intent = ExecutionIntent {
+        intent_id: common.intent_id.to_owned(),
+        expected_reference_generation: rules.reference_generation.clone(),
+        expected_account_generation: account.account_generation.clone(),
+        instrument_id: common.instrument.to_owned(),
+        trade_mode: execution_trade_mode(common.trade_mode),
+        position_side: execution_position_side(position_side),
+        action,
+        order_type: execution_order_type(common.order_type),
+        size: size.to_owned(),
+        price: price.to_owned(),
+    };
+    let mut plan = match prepare_execution(&intent, &rules, &account, None) {
+        Ok(value) => value,
+        Err(error) => return Ok(validation_failure(request, generated_at, error)),
+    };
+    plan.risk_binding = common.risk.map(execution_risk_binding);
+    commit_prepared(request, generated_at, execution, plan, target).await
+}
+
+async fn prepare_reverse_open(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    common: PrepareCommon<'_>,
+    entry: &ExecutionEntryRequest,
+) -> AgentResult<AgentResponse> {
+    let root_intent_id = common.intent_id;
+    let Some(execution) = context.execution else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    let Some(root) = execution.entry(root_intent_id).await else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RECORD_NOT_FOUND_CODE,
+            "reverse root execution record was not found".to_owned(),
+            false,
+        ));
+    };
+    let Some(reverse) = root.record.reverse.as_ref() else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_INPUT_INCONSISTENT_CODE,
+            "execution record is not a reverse root".to_owned(),
+            false,
+        ));
+    };
+    if reverse.leg != ReverseLeg::Close
+        || reverse.continuation != ReverseContinuation::Required
+        || root.record.state != ExecutionState::Filled
+        || root.record.plan.instrument_id != common.instrument
+        || root.record.plan.trade_mode != execution_trade_mode(common.trade_mode)
+    {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_INPUT_INCONSISTENT_CODE,
+            "reverse root is not ready for a fresh opposite open".to_owned(),
+            true,
+        ));
+    }
+    let protocol_side = match reverse.target_position_side {
+        ExecutionPositionSide::Long => ProtocolPositionSide::Long,
+        ExecutionPositionSide::Short => ProtocolPositionSide::Short,
+    };
+    prepare_risk_increasing(
+        request,
+        context,
+        generated_at,
+        EntryPrepare {
+            common: PrepareCommon {
+                intent_id: &reverse.open_intent_id,
+                ..common
+            },
+            position_side: protocol_side,
+            entry,
+            action: ExecutionAction::Open,
+            target: PrepareTarget::ReverseOpen {
+                root_intent_id: root_intent_id.to_owned(),
+            },
+        },
+    )
+    .await
+}
+
+async fn commit_prepared(
+    request: &AgentRequest,
+    generated_at: &str,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+    plan: okx_execution::ExecutionPlan,
+    target: PrepareTarget,
+) -> AgentResult<AgentResponse> {
+    let observed_at_ms = utc_now_ms();
+    let result = match target {
+        PrepareTarget::Normal => execution.prepare(plan, observed_at_ms).await,
+        PrepareTarget::ReverseClose {
+            target_position_side,
+        } => {
+            execution
+                .prepare_reverse_close(plan, target_position_side, observed_at_ms)
+                .await
+        }
+        PrepareTarget::ReverseOpen { root_intent_id } => {
+            execution
+                .prepare_reverse_open(&root_intent_id, plan, observed_at_ms)
+                .await
+        }
+    };
+    match result {
+        Ok(outcome) => prepare_outcome_response(request, generated_at, outcome),
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::ReverseNotReady)) => {
+            Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_INPUT_INCONSISTENT_CODE,
+                "reverse execution is not ready for its next leg".to_owned(),
+                true,
+            ))
+        }
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::ReverseMismatch)) => {
+            Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_INPUT_INCONSISTENT_CODE,
+                "reverse continuation does not match the durable root".to_owned(),
+                false,
+            ))
+        }
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::ReverseAborted)) => {
+            Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_INPUT_INCONSISTENT_CODE,
+                "reverse continuation was explicitly aborted".to_owned(),
+                false,
+            ))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn abort_reverse_execution(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    intent_id: &str,
+) -> AgentResult<AgentResponse> {
+    let Some(execution) = context.execution else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    match execution.abort_reverse(intent_id, utc_now_ms()).await {
+        Ok(_) => execution_status_response(request, context, generated_at, intent_id).await,
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::IntentNotFound(_))) => {
+            Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RECORD_NOT_FOUND_CODE,
+                "reverse root execution record was not found".to_owned(),
+                false,
+            ))
+        }
+        Err(OrderExecutorError::Transition(ExecutionTransitionError::InvalidReverseTransition)) => {
+            Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_INPUT_INCONSISTENT_CODE,
+                "reverse continuation cannot be aborted in the current state".to_owned(),
+                false,
+            ))
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -324,7 +772,7 @@ async fn submit_prepared(
         ));
     };
 
-    let current_fee_generation = if plan.action == ExecutionAction::Open {
+    let current_fee_generation = if plan.action.is_risk_increasing() {
         let Some(observer) = context.account_fallback else {
             return Ok(execution_unavailable(request, generated_at));
         };
@@ -414,7 +862,7 @@ async fn submit_prepared(
         ));
     }
 
-    let configured_leverage = if plan.action == ExecutionAction::Open {
+    let configured_leverage = if plan.action.is_risk_increasing() {
         let margin_mode = match plan.trade_mode {
             TradeMode::Cross => MarginMode::Cross,
             TradeMode::Isolated => MarginMode::Isolated,
@@ -487,7 +935,7 @@ async fn submit_prepared(
         ));
     }
 
-    let risk_candidate = if plan.action == ExecutionAction::Open {
+    let risk_candidate = if plan.action.is_risk_increasing() {
         let Some(open_risk) = plan.open_risk.as_ref() else {
             return Ok(validation_failure(
                 request,
@@ -522,7 +970,7 @@ async fn submit_prepared(
             worst_case_loss_usd: open_risk.stop_loss_settle.clone(),
             leverage: configured_leverage
                 .clone()
-                .expect("open execution acquired configured leverage"),
+                .expect("risk-increasing execution acquired configured leverage"),
         })
     } else {
         None
@@ -913,7 +1361,7 @@ async fn execution_status_response(
     Ok(completed(
         request,
         generated_at,
-        EXECUTION_STATUS_SCHEMA_V1,
+        EXECUTION_STATUS_SCHEMA_V2,
         serde_json::to_value(status)?,
     ))
 }

@@ -7,6 +7,8 @@ const CLIENT_ORDER_ID_PREFIX: &str = "okx";
 const CLIENT_ORDER_ID_HASH_CHARS: usize = 29;
 const AMEND_REQUEST_ID_PREFIX: &str = "amx";
 const AMEND_REQUEST_ID_HASH_CHARS: usize = 29;
+const REVERSE_OPEN_INTENT_PREFIX: &str = "rvx";
+const REVERSE_OPEN_INTENT_HASH_CHARS: usize = 29;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -177,6 +179,16 @@ pub fn derive_client_order_id(intent_id: &str) -> String {
     )
 }
 
+pub fn derive_reverse_open_intent_id(root_intent_id: &str) -> String {
+    let digest =
+        Sha256::digest(format!("okx-execution-reverse-open-v1:{root_intent_id}").as_bytes());
+    let hex = format!("{digest:x}");
+    format!(
+        "{REVERSE_OPEN_INTENT_PREFIX}{}",
+        &hex[..REVERSE_OPEN_INTENT_HASH_CHARS]
+    )
+}
+
 pub fn derive_amend_request_id(intent_id: &str, mutation_id: &str) -> String {
     let digest =
         Sha256::digest(format!("okx-execution-amend-v1:{intent_id}:{mutation_id}").as_bytes());
@@ -208,6 +220,18 @@ mod tests {
         assert_ne!(first, other);
         assert_eq!(first.len(), 32);
         assert!(first.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn reverse_open_intent_id_is_stable_alphanumeric_and_bounded() {
+        let first = derive_reverse_open_intent_id("intent_reverse_01234567");
+        let again = derive_reverse_open_intent_id("intent_reverse_01234567");
+        let other = derive_reverse_open_intent_id("intent_reverse_76543210");
+
+        assert_eq!(first, again);
+        assert_ne!(first, other);
+        assert_eq!(first.len(), 32);
+        assert!(valid_intent_id(&first));
     }
 
     #[test]

@@ -805,6 +805,53 @@ pub enum ExecutionOrderType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionEntryRequest {
+    pub entry_price: String,
+    pub stop_price: String,
+    pub max_settle_notional: String,
+    pub max_loss_settle: String,
+    pub target_rr: String,
+    pub entry_liquidity_role: LiquidityRole,
+    pub exit_liquidity_role: LiquidityRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionPrepareSpec {
+    Open {
+        position_side: PositionSide,
+        entry: ExecutionEntryRequest,
+    },
+    Add {
+        position_side: PositionSide,
+        entry: ExecutionEntryRequest,
+    },
+    Hedge {
+        position_side: PositionSide,
+        entry: ExecutionEntryRequest,
+    },
+    Reduce {
+        position_side: PositionSide,
+        size: String,
+        price: String,
+    },
+    Close {
+        position_side: PositionSide,
+        size: String,
+        price: String,
+    },
+    Reverse {
+        position_side: PositionSide,
+        size: String,
+        price: String,
+    },
+    ContinueReverse {
+        entry: ExecutionEntryRequest,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentOperation {
     MarketSnapshot {
@@ -853,6 +900,14 @@ pub enum AgentOperation {
         instrument: String,
     },
     ExecutorPreflight,
+    PrepareExecution {
+        intent_id: String,
+        instrument: String,
+        trade_mode: ExecutionTradeMode,
+        order_type: ExecutionOrderType,
+        spec: ExecutionPrepareSpec,
+        risk: Option<Box<ExecutionRiskBindingRequest>>,
+    },
     PrepareOpenExecution {
         intent_id: String,
         instrument: String,
@@ -879,6 +934,9 @@ pub enum AgentOperation {
         risk: Option<Box<ExecutionRiskBindingRequest>>,
     },
     SubmitPreparedExecution {
+        intent_id: String,
+    },
+    AbortReverseExecution {
         intent_id: String,
     },
     ExecutionStatus {
@@ -931,9 +989,11 @@ impl AgentOperation {
     pub const fn direct_transport_read_only(&self) -> bool {
         !matches!(
             self,
-            Self::PrepareOpenExecution { .. }
+            Self::PrepareExecution { .. }
+                | Self::PrepareOpenExecution { .. }
                 | Self::PrepareCloseExecution { .. }
                 | Self::SubmitPreparedExecution { .. }
+                | Self::AbortReverseExecution { .. }
         )
     }
 
@@ -1063,6 +1123,21 @@ impl AgentOperation {
                 Ok(())
             }
             Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
+            Self::PrepareExecution {
+                intent_id,
+                instrument,
+                spec,
+                risk,
+                ..
+            } => {
+                validate_request_id(intent_id)?;
+                validate_instrument(instrument)?;
+                validate_execution_prepare_spec(spec)?;
+                if let Some(risk) = risk {
+                    validate_execution_risk_binding(risk)?;
+                }
+                Ok(())
+            }
             Self::PrepareOpenExecution {
                 intent_id,
                 instrument,
@@ -1103,9 +1178,9 @@ impl AgentOperation {
                 }
                 Ok(())
             }
-            Self::SubmitPreparedExecution { intent_id } | Self::ExecutionStatus { intent_id } => {
-                validate_request_id(intent_id)
-            }
+            Self::SubmitPreparedExecution { intent_id }
+            | Self::AbortReverseExecution { intent_id }
+            | Self::ExecutionStatus { intent_id } => validate_request_id(intent_id),
             Self::CurrentCost {
                 instrument,
                 contracts,
@@ -1643,6 +1718,31 @@ fn validate_history_request(
     Ok(())
 }
 
+fn validate_execution_entry_request(entry: &ExecutionEntryRequest) -> Result<(), ProtocolError> {
+    validate_decimal_text(&entry.entry_price, "entry.entry_price")?;
+    validate_decimal_text(&entry.stop_price, "entry.stop_price")?;
+    validate_decimal_text(&entry.max_settle_notional, "entry.max_settle_notional")?;
+    validate_decimal_text(&entry.max_loss_settle, "entry.max_loss_settle")?;
+    validate_decimal_text(&entry.target_rr, "entry.target_rr")
+}
+
+fn validate_execution_prepare_spec(spec: &ExecutionPrepareSpec) -> Result<(), ProtocolError> {
+    match spec {
+        ExecutionPrepareSpec::Open { entry, .. }
+        | ExecutionPrepareSpec::Add { entry, .. }
+        | ExecutionPrepareSpec::Hedge { entry, .. }
+        | ExecutionPrepareSpec::ContinueReverse { entry } => {
+            validate_execution_entry_request(entry)
+        }
+        ExecutionPrepareSpec::Reduce { size, price, .. }
+        | ExecutionPrepareSpec::Close { size, price, .. }
+        | ExecutionPrepareSpec::Reverse { size, price, .. } => {
+            validate_positive_decimal_text(size, "size")?;
+            validate_positive_decimal_text(price, "price")
+        }
+    }
+}
+
 fn validate_execution_risk_binding(
     risk: &ExecutionRiskBindingRequest,
 ) -> Result<(), ProtocolError> {
@@ -2170,10 +2270,29 @@ mod tests {
         };
         assert!(!prepare.direct_transport_read_only());
 
+        let generic = AgentOperation::PrepareExecution {
+            intent_id: "intent_generic_01234567".to_owned(),
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            trade_mode: ExecutionTradeMode::Cross,
+            order_type: ExecutionOrderType::Limit,
+            spec: ExecutionPrepareSpec::Reverse {
+                position_side: PositionSide::Long,
+                size: "1".to_owned(),
+                price: "0.1".to_owned(),
+            },
+            risk: None,
+        };
+        assert!(!generic.direct_transport_read_only());
+
         let submit = AgentOperation::SubmitPreparedExecution {
             intent_id: "intent_0123456789abcdef".to_owned(),
         };
         assert!(!submit.direct_transport_read_only());
+
+        let abort = AgentOperation::AbortReverseExecution {
+            intent_id: "intent_0123456789abcdef".to_owned(),
+        };
+        assert!(!abort.direct_transport_read_only());
     }
 
     #[test]
@@ -2465,6 +2584,74 @@ mod tests {
                 price: "0.1".to_owned(),
                 risk: None,
             },
+        };
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn generic_execution_prepare_contract_is_tagged_strict_and_round_trips() {
+        let entry = ExecutionEntryRequest {
+            entry_price: "0.1".to_owned(),
+            stop_price: "0.09".to_owned(),
+            max_settle_notional: "100".to_owned(),
+            max_loss_settle: "5".to_owned(),
+            target_rr: "2".to_owned(),
+            entry_liquidity_role: LiquidityRole::Taker,
+            exit_liquidity_role: LiquidityRole::Taker,
+        };
+        let operations = [
+            AgentOperation::PrepareExecution {
+                intent_id: "intent_generic_open_012345".to_owned(),
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                trade_mode: ExecutionTradeMode::Cross,
+                order_type: ExecutionOrderType::Limit,
+                spec: ExecutionPrepareSpec::Open {
+                    position_side: PositionSide::Long,
+                    entry: entry.clone(),
+                },
+                risk: Some(Box::new(execution_risk_request())),
+            },
+            AgentOperation::PrepareExecution {
+                intent_id: "intent_generic_reverse_01".to_owned(),
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                trade_mode: ExecutionTradeMode::Cross,
+                order_type: ExecutionOrderType::Limit,
+                spec: ExecutionPrepareSpec::Reverse {
+                    position_side: PositionSide::Long,
+                    size: "1".to_owned(),
+                    price: "0.1".to_owned(),
+                },
+                risk: None,
+            },
+            AgentOperation::PrepareExecution {
+                intent_id: "intent_generic_reverse_01".to_owned(),
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                trade_mode: ExecutionTradeMode::Cross,
+                order_type: ExecutionOrderType::Limit,
+                spec: ExecutionPrepareSpec::ContinueReverse { entry },
+                risk: Some(Box::new(execution_risk_request())),
+            },
+        ];
+
+        for operation in operations {
+            operation.validate().expect("valid generic execution");
+            assert!(!operation.direct_transport_read_only());
+            let json = serde_json::to_string(&operation).expect("serialize");
+            let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, operation);
+        }
+
+        let invalid = AgentOperation::PrepareExecution {
+            intent_id: "intent_generic_invalid_01".to_owned(),
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            trade_mode: ExecutionTradeMode::Cross,
+            order_type: ExecutionOrderType::Limit,
+            spec: ExecutionPrepareSpec::Reverse {
+                position_side: PositionSide::Long,
+                size: "0".to_owned(),
+                price: "0.1".to_owned(),
+            },
+            risk: None,
         };
         assert!(invalid.validate().is_err());
     }
