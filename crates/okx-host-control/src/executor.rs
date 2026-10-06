@@ -423,33 +423,72 @@ impl HostExecutor {
     }
 
     fn start_agent(&mut self) -> HostControlResult<Value> {
+        self.switch_agent_profile(AgentProfile::Production)
+    }
+
+    fn start_demo_acceptance(&mut self) -> HostControlResult<Value> {
+        self.switch_agent_profile(AgentProfile::DemoAcceptance)
+    }
+
+    fn restore_production_agent(&mut self) -> HostControlResult<Value> {
+        self.switch_agent_profile(AgentProfile::Production)
+    }
+
+    fn switch_agent_profile(&mut self, profile: AgentProfile) -> HostControlResult<Value> {
         self.require_agent_binary()?;
-        if self.agent_is_running()? {
-            self.persist_desired(AgentDesired::Running)?;
+        if self.agent_is_running()? && self.running_profile == Some(profile) {
+            self.persist_desired(AgentDesiredState {
+                agent: AgentDesired::Running,
+                profile,
+            })?;
             return Ok(json!({
                 "disposition": "ALREADY_RUNNING",
-                "desired": self.desired_agent
+                "desired": self.desired_agent,
+                "profile": profile,
+                "mailbox_issue": mailbox_issue(profile),
+                "runtime_root": runtime_dir(profile),
+                "cloudflare_attached": profile == AgentProfile::Production
             }));
         }
 
-        let pid = self.start_agent_process()?;
-        if let Err(error) = self.persist_desired(AgentDesired::Running) {
-            let _ = self.terminate_agent_owned();
-            return Err(error);
+        self.persist_desired(AgentDesiredState {
+            agent: AgentDesired::Running,
+            profile,
+        })?;
+        if self.agent_is_running()? {
+            self.terminate_agent_owned()?;
         }
+
+        let pid = match self.start_agent_process(profile) {
+            Ok(pid) => pid,
+            Err(error) if profile == AgentProfile::DemoAcceptance => {
+                let _ = self.persist_desired(AgentDesiredState::production_running());
+                if self.start_agent_process(AgentProfile::Production).is_err() {
+                    self.schedule_restart();
+                }
+                return Err(error);
+            }
+            Err(error) => {
+                self.schedule_restart();
+                return Err(error);
+            }
+        };
         self.restart_attempt = 0;
         self.next_restart_at = None;
 
         Ok(json!({
             "disposition": "STARTED",
             "pid": pid,
-            "mailbox_issue": 10,
-            "desired": self.desired_agent
+            "desired": self.desired_agent,
+            "profile": profile,
+            "mailbox_issue": mailbox_issue(profile),
+            "runtime_root": runtime_dir(profile),
+            "cloudflare_attached": profile == AgentProfile::Production
         }))
     }
 
     fn stop_agent(&mut self) -> HostControlResult<Value> {
-        self.persist_desired(AgentDesired::Stopped)?;
+        self.persist_desired(AgentDesiredState::stopped())?;
         let was_running = self.agent_is_running()?;
         if was_running {
             self.terminate_agent_owned()?;
@@ -459,24 +498,40 @@ impl HostExecutor {
 
         Ok(json!({
             "disposition": if was_running { "STOPPED" } else { "ALREADY_STOPPED" },
-            "desired": self.desired_agent
+            "desired": self.desired_agent,
+            "profile": self.desired_profile
         }))
     }
 
     fn restart_agent(&mut self) -> HostControlResult<Value> {
+        let profile = if self.desired_agent == AgentDesired::Running {
+            self.desired_profile
+        } else {
+            AgentProfile::Production
+        };
+        self.persist_desired(AgentDesiredState {
+            agent: AgentDesired::Running,
+            profile,
+        })?;
         let _ = self.terminate_agent_owned();
-        let pid = self.start_agent_process()?;
-        if let Err(error) = self.persist_desired(AgentDesired::Running) {
-            let _ = self.terminate_agent_owned();
-            return Err(error);
-        }
+        let pid = match self.start_agent_process(profile) {
+            Ok(pid) => pid,
+            Err(error) => {
+                self.schedule_restart();
+                return Err(error);
+            }
+        };
         self.restart_attempt = 0;
         self.next_restart_at = None;
 
         Ok(json!({
             "disposition": "RESTARTED",
             "pid": pid,
-            "desired": self.desired_agent
+            "desired": self.desired_agent,
+            "profile": profile,
+            "mailbox_issue": mailbox_issue(profile),
+            "runtime_root": runtime_dir(profile),
+            "cloudflare_attached": profile == AgentProfile::Production
         }))
     }
 
@@ -587,7 +642,7 @@ impl HostExecutor {
             return Err(error.into());
         }
 
-        if should_restore && let Err(error) = self.start_agent_process() {
+        if should_restore && let Err(error) = self.start_agent_process(self.desired_profile) {
             self.schedule_restart();
             return Err(error);
         }
@@ -595,21 +650,22 @@ impl HostExecutor {
         Ok(())
     }
 
-    fn start_agent_process(&mut self) -> HostControlResult<u32> {
+    fn start_agent_process(&mut self, profile: AgentProfile) -> HostControlResult<u32> {
         self.require_agent_binary()?;
-        fs::create_dir_all(self.runtime_dir())?;
+        let runtime_dir = runtime_dir(profile);
+        fs::create_dir_all(&runtime_dir)?;
 
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.runtime_dir().join("okx-agent.stdout.log"))?;
+            .open(runtime_dir.join("okx-agent.stdout.log"))?;
         let stderr = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.runtime_dir().join("okx-agent.stderr.log"))?;
+            .open(runtime_dir.join("okx-agent.stderr.log"))?;
 
         let mut child = hidden_command(self.agent_binary())
-            .args(production_agent_args())
+            .args(agent_args(profile))
             .current_dir(&self.repo_root)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
@@ -619,6 +675,7 @@ impl HostExecutor {
         let pid = child.id();
         self.agent_child = Some(child);
         self.agent_started_at = Some(Instant::now());
+        self.running_profile = Some(profile);
         self.next_restart_at = None;
         Ok(pid)
     }
@@ -634,12 +691,14 @@ impl HostExecutor {
             child.wait()?;
         }
         self.agent_started_at = None;
+        self.running_profile = None;
         Ok(())
     }
 
-    fn persist_desired(&mut self, desired: AgentDesired) -> HostControlResult<()> {
-        self.desired_store.save(desired)?;
-        self.desired_agent = desired;
+    fn persist_desired(&mut self, state: AgentDesiredState) -> HostControlResult<()> {
+        self.desired_store.save(state)?;
+        self.desired_agent = state.agent;
+        self.desired_profile = state.profile;
         self.desired_error = None;
         Ok(())
     }
