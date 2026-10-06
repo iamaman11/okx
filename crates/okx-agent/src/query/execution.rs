@@ -5,16 +5,17 @@ use okx_analysis::{
 };
 use okx_api::{MUTATION_REQUEST_TTL_MS, MarginMode};
 use okx_execution::{
-    EXECUTION_STATUS_SCHEMA_V2, ExecutionAction, ExecutionIntent, ExecutionLedgerError,
+    EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_STATUS_SCHEMA_V2, ExecutionAction,
+    ExecutionDecisionReference, ExecutionIntent, ExecutionLedgerError, ExecutionLineageBinding,
     ExecutionRiskBinding, ExecutionState, ExecutionTransitionError, OrderExecutorError, OrderType,
     PositionSide as ExecutionPositionSide, PrepareDeferral, PrepareFailure, PrepareOutcome,
     PrepareRejection, ReverseContinuation, ReverseLeg, TradeMode, prepare_execution,
     revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
 };
 use okx_protocol::{
-    ExecutionEntryRequest, ExecutionOrderType, ExecutionPrepareSpec, ExecutionRiskBindingRequest,
-    ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
-    PositionSide as ProtocolPositionSide,
+    ExecutionEntryRequest, ExecutionLineageRequest, ExecutionOrderType, ExecutionPrepareSpec,
+    ExecutionReferencePriceBasis, ExecutionRiskBindingRequest, ExecutionTradeMode,
+    LiquidityRole as ProtocolLiquidityRole, PositionSide as ProtocolPositionSide,
 };
 
 use super::*;
@@ -59,6 +60,7 @@ pub(super) async fn dispatch(
             order_type,
             spec,
             risk,
+            lineage,
         } => {
             prepare_generic_execution(
                 request,
@@ -70,6 +72,7 @@ pub(super) async fn dispatch(
                     trade_mode: *trade_mode,
                     order_type: *order_type,
                     risk: risk.as_deref(),
+                    lineage: lineage.as_deref(),
                 },
                 spec,
             )
@@ -106,6 +109,7 @@ struct PrepareCommon<'a> {
     trade_mode: ExecutionTradeMode,
     order_type: ExecutionOrderType,
     risk: Option<&'a ExecutionRiskBindingRequest>,
+    lineage: Option<&'a ExecutionLineageRequest>,
 }
 
 struct EntryPrepare<'a> {
@@ -347,7 +351,8 @@ async fn prepare_risk_increasing(
         Err(error) => return Ok(validation_failure(request, generated_at, error)),
     };
     plan.risk_binding = common.risk.map(execution_risk_binding);
-    commit_prepared(request, generated_at, execution, plan, target).await
+    let lineage = common.lineage.map(execution_lineage_binding);
+    commit_prepared(request, generated_at, execution, plan, lineage, target).await
 }
 
 async fn prepare_risk_reducing(
@@ -404,7 +409,8 @@ async fn prepare_risk_reducing(
         Err(error) => return Ok(validation_failure(request, generated_at, error)),
     };
     plan.risk_binding = common.risk.map(execution_risk_binding);
-    commit_prepared(request, generated_at, execution, plan, target).await
+    let lineage = common.lineage.map(execution_lineage_binding);
+    commit_prepared(request, generated_at, execution, plan, lineage, target).await
 }
 
 async fn prepare_reverse_open(
@@ -482,19 +488,30 @@ async fn commit_prepared(
     generated_at: &str,
     execution: &crate::execution_runtime::ExecutionRuntime,
     plan: okx_execution::ExecutionPlan,
+    lineage: Option<ExecutionLineageBinding>,
     target: PrepareTarget,
 ) -> AgentResult<AgentResponse> {
     let observed_at_ms = utc_now_ms();
     let result = match target {
-        PrepareTarget::Normal => execution.prepare(plan, observed_at_ms).await,
+        PrepareTarget::Normal => {
+            execution
+                .prepare_with_lineage(plan, lineage, observed_at_ms)
+                .await
+        }
         PrepareTarget::ReverseClose {
             target_position_side,
         } => {
             execution
-                .prepare_reverse_close(plan, target_position_side, observed_at_ms)
+                .prepare_reverse_close_with_lineage(
+                    plan,
+                    target_position_side,
+                    lineage,
+                    observed_at_ms,
+                )
                 .await
         }
         PrepareTarget::ReverseOpen { root_intent_id } => {
+            debug_assert!(lineage.is_none());
             execution
                 .prepare_reverse_open(&root_intent_id, plan, observed_at_ms)
                 .await
@@ -1289,6 +1306,37 @@ async fn execution_status_response(
         EXECUTION_STATUS_SCHEMA_V2,
         serde_json::to_value(status)?,
     ))
+}
+
+fn execution_lineage_binding(value: &ExecutionLineageRequest) -> ExecutionLineageBinding {
+    ExecutionLineageBinding {
+        schema: EXECUTION_LINEAGE_SCHEMA_V1.to_owned(),
+        origin_evidence_id: value.origin_evidence_id.clone(),
+        origin_schema: value.origin_schema.clone(),
+        origin_version: value.origin_version.clone(),
+        authority_evidence_id: value.authority_evidence_id.clone(),
+        decision_reference: ExecutionDecisionReference {
+            decision_time_ms: value.decision_reference.decision_time_ms,
+            price: value.decision_reference.price.clone(),
+            price_basis: match value.decision_reference.price_basis {
+                ExecutionReferencePriceBasis::DecisionPrice => {
+                    okx_execution::TcaReferencePriceBasis::DecisionPrice
+                }
+                ExecutionReferencePriceBasis::ArrivalMid => {
+                    okx_execution::TcaReferencePriceBasis::ArrivalMid
+                }
+                ExecutionReferencePriceBasis::Mark => okx_execution::TcaReferencePriceBasis::Mark,
+                ExecutionReferencePriceBasis::Index => {
+                    okx_execution::TcaReferencePriceBasis::Index
+                }
+                ExecutionReferencePriceBasis::Last => okx_execution::TcaReferencePriceBasis::Last,
+                ExecutionReferencePriceBasis::LimitPrice => {
+                    okx_execution::TcaReferencePriceBasis::LimitPrice
+                }
+            },
+            price_policy_version: value.decision_reference.price_policy_version.clone(),
+        },
+    }
 }
 
 fn execution_risk_binding(value: &ExecutionRiskBindingRequest) -> ExecutionRiskBinding {
