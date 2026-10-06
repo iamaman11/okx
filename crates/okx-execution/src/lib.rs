@@ -18,14 +18,16 @@ pub use executor::{
 };
 pub use ledger::{
     DurableExecutionLedger, EXECUTION_LEDGER_SCHEMA_V1, EXECUTION_LEDGER_SCHEMA_V2,
-    ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, MAX_EXECUTION_LEDGER_RECORDS,
-    MutationPrepareDisposition, PrepareDisposition,
+    EXECUTION_LEDGER_SCHEMA_V3, ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore,
+    MAX_EXECUTION_LEDGER_RECORDS, MutationPrepareDisposition, PrepareDisposition,
 };
 pub use model::{
-    EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionPlan,
+    EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_PLAN_SCHEMA_V1, ExecutionAction,
+    ExecutionDecisionReference, ExecutionIntent, ExecutionLineageBinding, ExecutionPlan,
     ExecutionRiskBinding, OpenRiskEvidence, OrderSide, OrderType, PositionSide, TradeMode,
     derive_amend_request_id, derive_client_order_id, derive_reverse_open_intent_id,
 };
+pub use okx_analysis::TcaReferencePriceBasis;
 pub use reconciliation::{
     ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1, AccountLedgerReconciliation,
     AccountLedgerReconciliationError, PositionAttributionDiagnostic, reconcile_account_ledger,

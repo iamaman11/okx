@@ -414,7 +414,12 @@ mod tests {
             trade_id: "trade-managed-1".to_owned(),
             side: "buy".to_owned(),
             position_side: "long".to_owned(),
+            fill_price: "0.1".to_owned(),
             fill_size: "1".to_owned(),
+            fee: Some("-0.001".to_owned()),
+            fee_currency: Some("USDT".to_owned()),
+            execution_type: Some("T".to_owned()),
+            fill_time_ms: 1_790_884_800_000,
         }];
         let managed_clients = BTreeSet::from(["managed-client"]);
         let managed_order_ids = BTreeSet::from(["ord-1"]);
@@ -458,7 +463,12 @@ mod tests {
             trade_id: "trade-1".to_owned(),
             side: "buy".to_owned(),
             position_side: "long".to_owned(),
+            fill_price: "0.1".to_owned(),
             fill_size: "1".to_owned(),
+            fee: Some("-0.001".to_owned()),
+            fee_currency: Some("USDT".to_owned()),
+            execution_type: Some("T".to_owned()),
+            fill_time_ms: 1_790_884_800_000,
         }];
         let result = reconcile_exchange_evidence(&ledger, &[], &orders, &fills).expect("reconcile");
         assert!(result.consistent);

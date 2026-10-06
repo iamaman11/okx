@@ -107,7 +107,12 @@ pub struct ExchangeFillIdentity {
     pub trade_id: String,
     pub side: String,
     pub position_side: String,
+    pub fill_price: String,
     pub fill_size: String,
+    pub fee: Option<String>,
+    pub fee_currency: Option<String>,
+    pub execution_type: Option<String>,
+    pub fill_time_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -319,11 +324,14 @@ impl AccountLedgerFacts {
                     )));
                 }
 
-                if !row.fee.trim().is_empty() {
+                let (fee, fee_currency) = if row.fee.trim().is_empty() {
+                    (None, None)
+                } else {
                     let fee = decimal_required("fills_history.fee", &row.fee)?;
                     let currency = required("fills_history.feeCcy", &row.fee_currency)?;
                     add_aggregate(&mut fees, currency, fee);
-                }
+                    (Some(fee.normalize().to_string()), Some(currency.to_owned()))
+                };
 
                 let order_id = optional(&row.order_id).map(str::to_owned);
                 if let Some(order_id) = order_id.as_deref() {
@@ -347,6 +355,13 @@ impl AccountLedgerFacts {
                 let side = required("fills_history.side", &row.side)?.to_owned();
                 let position_side =
                     required("fills_history.posSide", &row.position_side)?.to_owned();
+                let fill_price = decimal_required("fills_history.fillPx", &row.fill_price)?;
+                if fill_price <= Decimal::ZERO {
+                    return Err(AccountLedgerError::InvalidDecimal {
+                        field: "fills_history.fillPx",
+                        value: row.fill_price.clone(),
+                    });
+                }
                 let fill_size = decimal_required("fills_history.fillSz", &row.fill_size)?;
                 if fill_size <= Decimal::ZERO {
                     return Err(AccountLedgerError::InvalidDecimal {
@@ -363,9 +378,13 @@ impl AccountLedgerFacts {
                     trade_id: trade_id.to_owned(),
                     side,
                     position_side,
+                    fill_price: fill_price.normalize().to_string(),
                     fill_size: fill_size.normalize().to_string(),
+                    fee,
+                    fee_currency,
+                    execution_type: optional(&row.execution_type).map(str::to_owned),
+                    fill_time_ms: fill_time,
                 });
-                let _ = fill_time;
             }
         }
 

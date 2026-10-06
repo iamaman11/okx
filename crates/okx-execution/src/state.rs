@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ExecutionPlan, PositionSide,
+    ExecutionLineageBinding, ExecutionPlan, PositionSide,
     model::{valid_intent_id, valid_mutation_id},
 };
 
@@ -204,6 +204,8 @@ pub struct ExecutionRecord {
     #[serde(default)]
     pub mutations: Vec<OrderMutationRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<ExecutionLineageBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<ReverseExecutionLink>,
 }
 
@@ -254,6 +256,9 @@ pub enum ExecutionTransitionError {
         to: OrderMutationState,
     },
 
+    #[error("execution lineage can only be bound idempotently while PREPARED")]
+    InvalidLineageTransition,
+
     #[error("reverse execution linkage is invalid")]
     InvalidReverseLink,
 
@@ -270,6 +275,7 @@ impl ExecutionRecord {
             exchange_state: None,
             rejection_code: None,
             mutations: Vec::new(),
+            lineage: None,
             reverse: None,
         }
     }
@@ -351,6 +357,24 @@ impl ExecutionRecord {
         self.order_id = Some(incoming);
         self.exchange_state = Some(exchange_state);
         self.state = execution_state(exchange_state);
+        Ok(())
+    }
+
+    pub fn bind_lineage(
+        &mut self,
+        lineage: ExecutionLineageBinding,
+    ) -> Result<(), ExecutionTransitionError> {
+        if self.state != ExecutionState::Prepared {
+            return Err(ExecutionTransitionError::InvalidLineageTransition);
+        }
+        if self
+            .lineage
+            .as_ref()
+            .is_some_and(|existing| existing != &lineage)
+        {
+            return Err(ExecutionTransitionError::InvalidLineageTransition);
+        }
+        self.lineage = Some(lineage);
         Ok(())
     }
 
