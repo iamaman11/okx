@@ -558,6 +558,32 @@ impl ExecutionRecord {
         Ok(())
     }
 
+    pub fn effective_size(&self) -> &str {
+        let mut value = self.plan.size.as_str();
+        for mutation in &self.mutations {
+            if mutation.kind == OrderMutationKind::Amend
+                && mutation.state == OrderMutationState::Applied
+                && let Some(size) = mutation.new_size.as_deref()
+            {
+                value = size;
+            }
+        }
+        value
+    }
+
+    pub fn effective_price(&self) -> &str {
+        let mut value = self.plan.price.as_str();
+        for mutation in &self.mutations {
+            if mutation.kind == OrderMutationKind::Amend
+                && mutation.state == OrderMutationState::Applied
+                && let Some(price) = mutation.new_price.as_deref()
+            {
+                value = price;
+            }
+        }
+        value
+    }
+
     pub fn protection_requires_reconciliation(&self) -> bool {
         self.protection
             .as_ref()
@@ -1028,6 +1054,42 @@ mod tests {
             ProtectiveOrderStatus::Active
         );
         assert!(!record.protection_requires_reconciliation());
+    }
+
+    #[test]
+    fn effective_order_terms_use_only_applied_amendments() {
+        let mut record = ExecutionRecord::new(plan());
+        record
+            .prepare_amend(
+                "mutation_terms_012345",
+                "amx01234567890123456789012345678",
+                Some("2".to_owned()),
+                Some("0.11".to_owned()),
+            )
+            .expect("prepare amend");
+        assert_eq!(record.effective_size(), "1");
+        assert_eq!(record.effective_price(), "0.1");
+
+        record
+            .mutation_transition(
+                "mutation_terms_012345",
+                OrderMutationState::Prepared,
+                OrderMutationState::Submitting,
+            )
+            .expect("submitting");
+        record
+            .mutation_transition(
+                "mutation_terms_012345",
+                OrderMutationState::Submitting,
+                OrderMutationState::Acknowledged,
+            )
+            .expect("acknowledged");
+        record
+            .resolve_active_mutation(OrderMutationResolution::Applied)
+            .expect("applied");
+
+        assert_eq!(record.effective_size(), "2");
+        assert_eq!(record.effective_price(), "0.11");
     }
 
     #[test]
