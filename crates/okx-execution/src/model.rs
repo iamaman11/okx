@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const EXECUTION_PLAN_SCHEMA_V1: &str = "okx.execution-plan/v1";
+pub const EXECUTION_LINEAGE_SCHEMA_V1: &str = "okx.execution-lineage/v1";
 const CLIENT_ORDER_ID_PREFIX: &str = "okx";
 const CLIENT_ORDER_ID_HASH_CHARS: usize = 29;
 const AMEND_REQUEST_ID_PREFIX: &str = "amx";
@@ -96,6 +97,35 @@ impl OrderSide {
             Self::Sell => "sell",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionReferencePriceBasis {
+    DecisionPrice,
+    ArrivalMid,
+    Mark,
+    LimitPrice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionDecisionReference {
+    pub observed_at_ms: u64,
+    pub price: String,
+    pub price_basis: ExecutionReferencePriceBasis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionLineageBinding {
+    pub schema: String,
+    pub origin_evidence_id: String,
+    pub origin_schema: String,
+    pub origin_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_evidence_id: Option<String>,
+    pub decision_reference: ExecutionDecisionReference,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -7,6 +7,7 @@ mod risk;
 mod scenario;
 mod statistics;
 mod strategy;
+mod tca;
 mod validation;
 
 pub use candidate::{
@@ -68,6 +69,10 @@ pub use strategy::{
     STRATEGY_RESEARCH_METADATA_VERSION_V1, StrategyDecision, StrategyParameterSurface,
     StrategyResearchMetadata, TWO_BAR_MOMENTUM_STRATEGY_VERSION_V1,
     baseline_strategy_research_metadata, baseline_strategy_version, evaluate_baseline_strategy,
+};
+pub use tca::{
+    EXECUTION_TCA_SCHEMA_V1, ExecutionTcaAnalysis, TcaFeeTotal, TcaReference,
+    TcaReferencePriceBasis, TcaSide, analyze_execution_tca,
 };
 pub use validation::{
     VALIDATION_COST_STRESS_ALGORITHM_V1, VALIDATION_COST_STRESS_SCHEMA_V1,
@@ -271,6 +276,27 @@ pub enum AnalysisError {
     },
     #[error("crossed or locked order book: best_bid={best_bid}, best_ask={best_ask}")]
     CrossedOrderBook { best_bid: String, best_ask: String },
+    #[error("execution TCA requires at least one fill")]
+    EmptyTcaFills,
+    #[error("execution TCA fill instrument does not match the requested instrument")]
+    TcaInstrumentMismatch,
+    #[error("execution TCA fill side does not match the requested order side")]
+    TcaSideMismatch,
+    #[error("execution TCA contains duplicate trade id '{0}'")]
+    DuplicateTcaFill(String),
+    #[error("execution TCA fill execution type '{0}' is unsupported")]
+    UnsupportedTcaExecutionType(String),
+    #[error(
+        "execution TCA fill time {fill_time_ms} precedes reference time {reference_time_ms}"
+    )]
+    TcaFillBeforeReference {
+        fill_time_ms: u64,
+        reference_time_ms: u64,
+    },
+    #[error("execution TCA reference timestamp must be non-zero")]
+    InvalidTcaReferenceTimestamp,
+    #[error("execution TCA fee is missing its currency")]
+    MissingTcaFeeCurrency,
 }
 
 pub fn analyze_cost(

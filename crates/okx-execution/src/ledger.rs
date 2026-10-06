@@ -3,13 +3,17 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
+    str::FromStr,
 };
+
+use rust_decimal::Decimal;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    EXECUTION_PLAN_SCHEMA_V1, ExchangeOrderState, ExecutionAction, ExecutionPlan, ExecutionRecord,
+    EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_PLAN_SCHEMA_V1, ExchangeOrderState, ExecutionAction,
+    ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionReferencePriceBasis,
     ExecutionState, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
     OrderMutationRecord, OrderMutationResolution, OrderMutationState, PositionSide,
     ReverseContinuation, ReverseExecutionLink, ReverseLeg, derive_client_order_id,
@@ -261,7 +265,20 @@ impl DurableExecutionLedger {
         plan: ExecutionPlan,
         observed_at_ms: u64,
     ) -> Result<PrepareDisposition, ExecutionLedgerError> {
-        self.prepare_record(ExecutionRecord::new(plan), None, observed_at_ms)
+        self.prepare_with_lineage(plan, None, observed_at_ms)
+    }
+
+    pub fn prepare_with_lineage(
+        &mut self,
+        plan: ExecutionPlan,
+        lineage: Option<ExecutionLineageBinding>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareDisposition, ExecutionLedgerError> {
+        let mut record = ExecutionRecord::new(plan);
+        if let Some(lineage) = lineage {
+            record.bind_lineage(lineage)?;
+        }
+        self.prepare_record(record, None, observed_at_ms)
     }
 
     pub fn prepare_reverse_close(
@@ -270,12 +287,30 @@ impl DurableExecutionLedger {
         target_position_side: PositionSide,
         observed_at_ms: u64,
     ) -> Result<PrepareDisposition, ExecutionLedgerError> {
+        self.prepare_reverse_close_with_lineage(
+            plan,
+            target_position_side,
+            None,
+            observed_at_ms,
+        )
+    }
+
+    pub fn prepare_reverse_close_with_lineage(
+        &mut self,
+        plan: ExecutionPlan,
+        target_position_side: PositionSide,
+        lineage: Option<ExecutionLineageBinding>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareDisposition, ExecutionLedgerError> {
         if plan.action != ExecutionAction::Close {
             return Err(ExecutionLedgerError::ReverseMismatch);
         }
         let root_intent_id = plan.intent_id.clone();
         let open_intent_id = derive_reverse_open_intent_id(&root_intent_id);
         let mut record = ExecutionRecord::new(plan);
+        if let Some(lineage) = lineage {
+            record.bind_lineage(lineage)?;
+        }
         record.attach_reverse(ReverseExecutionLink::close(
             root_intent_id,
             open_intent_id,
@@ -317,6 +352,9 @@ impl DurableExecutionLedger {
         }
 
         let mut record = ExecutionRecord::new(plan);
+        if let Some(lineage) = root.record.lineage.clone() {
+            record.bind_lineage(lineage)?;
+        }
         record.attach_reverse(ReverseExecutionLink::open_from(reverse)?)?;
         self.prepare_record(record, Some(root_intent_id), observed_at_ms)
     }
@@ -617,6 +655,7 @@ impl DurableExecutionLedger {
 
 fn validate_entry(entry: &ExecutionLedgerEntry) -> Result<(), ExecutionLedgerError> {
     validate_plan_identity(&entry.record.plan)?;
+    validate_execution_lineage(&entry.record)?;
     validate_order_mutations(&entry.record)?;
     validate_reverse_link(&entry.record)?;
     if entry.created_at_ms == 0
@@ -679,6 +718,50 @@ fn validate_entry(entry: &ExecutionLedgerEntry) -> Result<(), ExecutionLedgerErr
     }
 
     Ok(())
+}
+
+fn validate_execution_lineage(record: &ExecutionRecord) -> Result<(), ExecutionLedgerError> {
+    let Some(lineage) = record.lineage.as_ref() else {
+        return Ok(());
+    };
+    let price = Decimal::from_str(&lineage.decision_reference.price)
+        .ok()
+        .filter(|value| *value > Decimal::ZERO);
+    if lineage.schema != EXECUTION_LINEAGE_SCHEMA_V1
+        || !valid_sha256_artifact_id(&lineage.origin_evidence_id)
+        || lineage.origin_schema.trim().is_empty()
+        || lineage.origin_schema.len() > 128
+        || lineage.origin_version.trim().is_empty()
+        || lineage.origin_version.len() > 128
+        || lineage
+            .authority_evidence_id
+            .as_deref()
+            .is_some_and(|value| !valid_sha256_artifact_id(value))
+        || lineage.decision_reference.observed_at_ms == 0
+        || price.is_none()
+    {
+        return Err(ExecutionLedgerError::Corrupt(
+            "invalid execution lineage binding",
+        ));
+    }
+
+    match lineage.decision_reference.price_basis {
+        ExecutionReferencePriceBasis::DecisionPrice
+        | ExecutionReferencePriceBasis::ArrivalMid
+        | ExecutionReferencePriceBasis::Mark
+        | ExecutionReferencePriceBasis::LimitPrice => {}
+    }
+    Ok(())
+}
+
+fn valid_sha256_artifact_id(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn validate_reverse_link(record: &ExecutionRecord) -> Result<(), ExecutionLedgerError> {
@@ -880,7 +963,9 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), ExecutionLedg
 mod tests {
     use super::*;
     use crate::{
-        EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, OrderSide, OrderType, PositionSide, TradeMode,
+        EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_PLAN_SCHEMA_V1, ExecutionAction,
+        ExecutionDecisionReference, ExecutionLineageBinding, ExecutionReferencePriceBasis,
+        OrderSide, OrderType, PositionSide, TradeMode,
     };
 
     fn temp_root(name: &str) -> PathBuf {
@@ -908,6 +993,21 @@ mod tests {
             price: "0.1".to_owned(),
             open_risk: None,
             risk_binding: None,
+        }
+    }
+
+    fn lineage(seed: char) -> ExecutionLineageBinding {
+        ExecutionLineageBinding {
+            schema: EXECUTION_LINEAGE_SCHEMA_V1.to_owned(),
+            origin_evidence_id: format!("sha256:{}", seed.to_string().repeat(64)),
+            origin_schema: "okx.research.live-decision/v1".to_owned(),
+            origin_version: "okx.research.live-decision/2026-10-05.1".to_owned(),
+            authority_evidence_id: Some(format!("sha256:{}", "f".repeat(64))),
+            decision_reference: ExecutionDecisionReference {
+                observed_at_ms: 100,
+                price: "0.1".to_owned(),
+                price_basis: ExecutionReferencePriceBasis::DecisionPrice,
+            },
         }
     }
 
@@ -956,6 +1056,49 @@ mod tests {
         assert!(
             reopened_entry.record.plan.risk_binding.is_none(),
             "legacy plan without serialized risk_binding must remain readable"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn execution_lineage_is_durable_idempotent_and_immutable() {
+        let root = temp_root("lineage");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent_id = "intent_lineage_012345678";
+        let expected = lineage('a');
+
+        {
+            let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+            let prepared = ledger
+                .prepare_with_lineage(plan(intent_id), Some(expected.clone()), 101)
+                .expect("prepare lineage");
+            assert!(matches!(prepared, PrepareDisposition::Created(_)));
+            assert_eq!(
+                ledger
+                    .get(intent_id)
+                    .and_then(|entry| entry.record.lineage.as_ref()),
+                Some(&expected)
+            );
+            assert!(matches!(
+                ledger
+                    .prepare_with_lineage(plan(intent_id), Some(expected.clone()), 102)
+                    .expect("idempotent"),
+                PrepareDisposition::Existing(_)
+            ));
+            assert!(matches!(
+                ledger.prepare_with_lineage(plan(intent_id), Some(lineage('b')), 103),
+                Err(ExecutionLedgerError::IntentConflict)
+            ));
+        }
+
+        let reopened = DurableExecutionLedger::open(store, 200).expect("restart");
+        assert_eq!(
+            reopened
+                .get(intent_id)
+                .and_then(|entry| entry.record.lineage.as_ref()),
+            Some(&expected)
         );
 
         let _ = fs::remove_dir_all(root);
