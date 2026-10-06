@@ -26,6 +26,7 @@ pub const EXECUTION_LEDGER_SCHEMA_V1: &str = "okx.execution-ledger/v1";
 pub const EXECUTION_LEDGER_SCHEMA_V2: &str = "okx.execution-ledger/v2";
 pub const EXECUTION_LEDGER_SCHEMA_V3: &str = "okx.execution-ledger/v3";
 pub const EXECUTION_LEDGER_SCHEMA_V4: &str = "okx.execution-ledger/v4";
+pub const EXECUTION_LEDGER_SCHEMA_V5: &str = "okx.execution-ledger/v5";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
 const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.json";
 
@@ -146,6 +147,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V2
                 | EXECUTION_LEDGER_SCHEMA_V3
                 | EXECUTION_LEDGER_SCHEMA_V4
+                | EXECUTION_LEDGER_SCHEMA_V5
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
@@ -199,7 +201,7 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V4.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V5.to_owned(),
             records: entries.values().cloned().collect(),
         })?;
 
@@ -456,8 +458,17 @@ impl DurableExecutionLedger {
         intent_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
-        self.mutate(intent_id, observed_at_ms, |record| {
-            record.begin_submission()
+        self.begin_submission_with_timing(intent_id, None, observed_at_ms)
+    }
+
+    pub fn begin_submission_with_timing(
+        &mut self,
+        intent_id: &str,
+        request_exchange_time_ms: Option<u64>,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, move |record| {
+            record.begin_submission_with_timing(request_exchange_time_ms)
         })
     }
 
@@ -467,8 +478,21 @@ impl DurableExecutionLedger {
         order_id: impl Into<String>,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.acknowledge_with_gateway_timing(intent_id, order_id, None, observed_at_ms)
+    }
+
+    pub fn acknowledge_with_gateway_timing(
+        &mut self,
+        intent_id: &str,
+        order_id: impl Into<String>,
+        gateway_timing_us: Option<(u64, u64)>,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
         let order_id = order_id.into();
         self.mutate(intent_id, observed_at_ms, move |record| {
+            if let Some((in_time_us, out_time_us)) = gateway_timing_us {
+                record.record_okx_gateway_timing(in_time_us, out_time_us)?;
+            }
             record.acknowledge(order_id)
         })
     }
@@ -478,7 +502,19 @@ impl DurableExecutionLedger {
         intent_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
-        self.mutate(intent_id, observed_at_ms, |record| {
+        self.mark_unknown_submission_with_gateway_timing(intent_id, None, observed_at_ms)
+    }
+
+    pub fn mark_unknown_submission_with_gateway_timing(
+        &mut self,
+        intent_id: &str,
+        gateway_timing_us: Option<(u64, u64)>,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, move |record| {
+            if let Some((in_time_us, out_time_us)) = gateway_timing_us {
+                record.record_okx_gateway_timing(in_time_us, out_time_us)?;
+            }
             record.mark_unknown_submission()
         })
     }
@@ -489,8 +525,21 @@ impl DurableExecutionLedger {
         code: impl Into<String>,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.reject_known_with_gateway_timing(intent_id, code, None, observed_at_ms)
+    }
+
+    pub fn reject_known_with_gateway_timing(
+        &mut self,
+        intent_id: &str,
+        code: impl Into<String>,
+        gateway_timing_us: Option<(u64, u64)>,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
         let code = code.into();
         self.mutate(intent_id, observed_at_ms, move |record| {
+            if let Some((in_time_us, out_time_us)) = gateway_timing_us {
+                record.record_okx_gateway_timing(in_time_us, out_time_us)?;
+            }
             record.reject_known(code)
         })
     }
@@ -685,6 +734,7 @@ impl DurableExecutionLedger {
 fn validate_entry(entry: &ExecutionLedgerEntry) -> Result<(), ExecutionLedgerError> {
     validate_plan_identity(&entry.record.plan)?;
     validate_execution_lineage(&entry.record)?;
+    validate_submission_timing(&entry.record)?;
     validate_protection_link(&entry.record)?;
     validate_order_mutations(&entry.record)?;
     validate_reverse_link(&entry.record)?;
@@ -748,6 +798,26 @@ fn validate_entry(entry: &ExecutionLedgerEntry) -> Result<(), ExecutionLedgerErr
     }
 
     Ok(())
+}
+
+fn validate_submission_timing(record: &ExecutionRecord) -> Result<(), ExecutionLedgerError> {
+    let Some(timing) = record.submission_timing.as_ref() else {
+        return Ok(());
+    };
+    if timing.request_exchange_time_ms == 0 || record.state == ExecutionState::Prepared {
+        return Err(ExecutionLedgerError::Corrupt(
+            "invalid execution submission timing",
+        ));
+    }
+    match (timing.okx_in_time_us, timing.okx_out_time_us) {
+        (None, None) => Ok(()),
+        (Some(in_time_us), Some(out_time_us)) if in_time_us > 0 && out_time_us >= in_time_us => {
+            Ok(())
+        }
+        _ => Err(ExecutionLedgerError::Corrupt(
+            "invalid OKX gateway timing evidence",
+        )),
+    }
 }
 
 fn validate_execution_lineage(record: &ExecutionRecord) -> Result<(), ExecutionLedgerError> {
