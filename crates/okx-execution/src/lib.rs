@@ -27,9 +27,8 @@ pub use model::{
     EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_PLAN_SCHEMA_V1,
     ExecutionAction, ExecutionDecisionReference, ExecutionIntent, ExecutionLineageBinding,
     ExecutionPlan, ExecutionRiskBinding, ExecutionTcaInstrumentType, ExecutionTcaMechanicsBinding,
-    OpenRiskEvidence, OrderSide, OrderType, PositionSide, TradeMode,
-    derive_amend_request_id, derive_client_order_id, derive_protective_algo_client_id,
-    derive_reverse_open_intent_id,
+    OpenRiskEvidence, OrderSide, OrderType, PositionSide, TradeMode, derive_amend_request_id,
+    derive_client_order_id, derive_protective_algo_client_id, derive_reverse_open_intent_id,
 };
 pub use okx_analysis::TcaReferencePriceBasis;
 pub use reconciliation::{
