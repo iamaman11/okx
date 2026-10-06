@@ -69,7 +69,9 @@ pub enum ExecutionLedgerError {
     #[error("execution ledger client_order_id collision")]
     ClientOrderIdCollision,
 
-    #[error("another nonterminal managed execution, unresolved protection, or pending reverse owns this instrument")]
+    #[error(
+        "another nonterminal managed execution, unresolved protection, or pending reverse owns this instrument"
+    )]
     InstrumentBusy,
 
     #[error("reverse execution linkage does not match the requested continuation")]
@@ -855,8 +857,10 @@ fn validate_protection_link(record: &ExecutionRecord) -> Result<(), ExecutionLed
             "filled parent cannot have not-activated protection",
         ));
     }
-    if matches!(record.state, ExecutionState::Live | ExecutionState::PartiallyFilled)
-        && protection.status != ProtectiveOrderStatus::Pending
+    if matches!(
+        record.state,
+        ExecutionState::Live | ExecutionState::PartiallyFilled
+    ) && protection.status != ProtectiveOrderStatus::Pending
     {
         return Err(ExecutionLedgerError::Corrupt(
             "nonterminal parent has resolved protective state",
@@ -1327,8 +1331,7 @@ mod tests {
             assert!(terminal.record.protection_requires_reconciliation());
         }
 
-        let mut restarted =
-            DurableExecutionLedger::open(store.clone(), 200).expect("restart");
+        let mut restarted = DurableExecutionLedger::open(store.clone(), 200).expect("restart");
         assert!(matches!(
             restarted.prepare(plan("intent_blocked_01234567"), 201),
             Err(ExecutionLedgerError::InstrumentBusy)
@@ -1348,7 +1351,12 @@ mod tests {
             )
             .expect("active protection");
         assert_eq!(
-            resolved.record.protection.as_ref().expect("protection").status,
+            resolved
+                .record
+                .protection
+                .as_ref()
+                .expect("protection")
+                .status,
             ProtectiveOrderStatus::Active
         );
         assert!(matches!(
