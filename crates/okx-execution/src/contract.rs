@@ -351,6 +351,104 @@ mod tests {
     }
 
     #[test]
+    fn reverse_status_is_derived_from_durable_close_and_open_records() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-execution-reverse-status-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = crate::ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = crate::DurableExecutionLedger::open(store, 100).expect("open");
+        let root_intent_id = "intent_reverse_status_0123";
+
+        let mut close = plan(root_intent_id);
+        close.action = ExecutionAction::Close;
+        close.position_side = PositionSide::Long;
+        close.side = OrderSide::Sell;
+        close.open_risk = None;
+        ledger
+            .prepare_reverse_close(close, PositionSide::Short, 101)
+            .expect("prepare reverse close");
+
+        let closing = execution_status_with_ledger(&ledger, root_intent_id)
+            .expect("status")
+            .expect("root");
+        assert_eq!(closing.schema, EXECUTION_STATUS_SCHEMA_V2);
+        assert_eq!(
+            closing.reverse.expect("reverse").stage,
+            ReverseExecutionStage::Closing
+        );
+
+        ledger
+            .begin_submission(root_intent_id, 102)
+            .expect("submit close");
+        ledger
+            .acknowledge(root_intent_id, "close-order", 103)
+            .expect("ack close");
+        ledger
+            .reconcile_found(
+                root_intent_id,
+                "close-order",
+                ExchangeOrderState::Filled,
+                104,
+            )
+            .expect("close filled");
+
+        let awaiting = execution_status_with_ledger(&ledger, root_intent_id)
+            .expect("status")
+            .expect("root");
+        let awaiting_reverse = awaiting.reverse.expect("reverse");
+        assert_eq!(
+            awaiting_reverse.stage,
+            ReverseExecutionStage::AwaitingFreshOpen
+        );
+        assert_eq!(awaiting_reverse.open_state, None);
+
+        let open_intent_id = crate::derive_reverse_open_intent_id(root_intent_id);
+        let mut open = plan(&open_intent_id);
+        open.position_side = PositionSide::Short;
+        open.side = OrderSide::Sell;
+        ledger
+            .prepare_reverse_open(root_intent_id, open, 105)
+            .expect("prepare reverse open");
+
+        let opening = execution_status_with_ledger(&ledger, root_intent_id)
+            .expect("status")
+            .expect("root");
+        assert_eq!(
+            opening.reverse.expect("reverse").stage,
+            ReverseExecutionStage::Opening
+        );
+
+        ledger
+            .begin_submission(&open_intent_id, 106)
+            .expect("submit open");
+        ledger
+            .acknowledge(&open_intent_id, "open-order", 107)
+            .expect("ack open");
+        ledger
+            .reconcile_found(
+                &open_intent_id,
+                "open-order",
+                ExchangeOrderState::Filled,
+                108,
+            )
+            .expect("open filled");
+
+        let completed = execution_status_with_ledger(&ledger, root_intent_id)
+            .expect("status")
+            .expect("root");
+        let completed_reverse = completed.reverse.expect("reverse");
+        assert_eq!(completed_reverse.stage, ReverseExecutionStage::Completed);
+        assert_eq!(
+            completed_reverse.open_state,
+            Some(ExecutionState::Filled)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn execution_status_is_compact_stable_and_does_not_expose_order_id() {
         let mut entry = entry("intent_status_01234567");
         entry.record.order_id = Some("exchange-order-id".to_owned());
