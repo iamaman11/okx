@@ -3,12 +3,15 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     DurableExecutionLedger, ExchangeOrderState, ExecutionAction, ExecutionLedgerEntry,
-    ExecutionLedgerError, ExecutionPlan, ExecutionState, OrderSide, OrderType, PositionSide,
-    PrepareDisposition, ReverseContinuation, ReverseLeg, TradeMode,
+    ExecutionLedgerError, ExecutionLineageBinding, ExecutionPlan, ExecutionState,
+    ExecutionSubmissionTimingEvidence, OrderSide, OrderType, PositionSide, PrepareDisposition,
+    ProtectiveOrderLink, ReverseContinuation, ReverseLeg, TradeMode,
 };
 
 pub const EXECUTION_STATUS_SCHEMA_V1: &str = "okx.execution-status/v1";
 pub const EXECUTION_STATUS_SCHEMA_V2: &str = "okx.execution-status/v2";
+pub const EXECUTION_STATUS_SCHEMA_V3: &str = "okx.execution-status/v3";
+pub const EXECUTION_STATUS_CORE_SCHEMA_V2: &str = "okx.execution-status-core/v2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrepareOutcome {
@@ -83,6 +86,8 @@ pub struct ExecutionStatusSnapshot {
     pub order_type: OrderType,
     pub size: String,
     pub price: String,
+    pub effective_size: String,
+    pub effective_price: String,
     pub order_id_present: bool,
     pub exchange_state: Option<ExchangeOrderState>,
     pub rejection_code: Option<String>,
@@ -113,11 +118,44 @@ pub struct ReverseExecutionStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ExecutionSubmissionTimingStatus {
+    pub request_exchange_time_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub okx_in_time_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub okx_out_time_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub okx_gateway_processing_us: Option<u64>,
+}
+
+impl From<&ExecutionSubmissionTimingEvidence> for ExecutionSubmissionTimingStatus {
+    fn from(value: &ExecutionSubmissionTimingEvidence) -> Self {
+        let okx_gateway_processing_us = value
+            .okx_in_time_us
+            .zip(value.okx_out_time_us)
+            .map(|(incoming, outgoing)| outgoing - incoming);
+        Self {
+            request_exchange_time_ms: value.request_exchange_time_ms,
+            okx_in_time_us: value.okx_in_time_us,
+            okx_out_time_us: value.okx_out_time_us,
+            okx_gateway_processing_us,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionStatusEnvelope {
     pub schema: &'static str,
     pub execution: ExecutionStatusSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reverse: Option<ReverseExecutionStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<ExecutionLineageBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protection: Option<ProtectiveOrderLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submission_timing: Option<ExecutionSubmissionTimingStatus>,
 }
 
 pub fn execution_status(
@@ -125,7 +163,7 @@ pub fn execution_status(
 ) -> Result<ExecutionStatusSnapshot, serde_json::Error> {
     let plan = &entry.record.plan;
     Ok(ExecutionStatusSnapshot {
-        schema: EXECUTION_STATUS_SCHEMA_V1,
+        schema: EXECUTION_STATUS_CORE_SCHEMA_V2,
         intent_id: plan.intent_id.clone(),
         plan_fingerprint: plan_fingerprint(plan)?,
         client_order_id: plan.client_order_id.clone(),
@@ -138,6 +176,8 @@ pub fn execution_status(
         order_type: plan.order_type,
         size: plan.size.clone(),
         price: plan.price.clone(),
+        effective_size: entry.record.effective_size().to_owned(),
+        effective_price: entry.record.effective_price().to_owned(),
         order_id_present: entry
             .record
             .order_id
@@ -159,9 +199,16 @@ pub fn execution_status_with_ledger(
     };
     let reverse = reverse_status(ledger, entry);
     Ok(Some(ExecutionStatusEnvelope {
-        schema: EXECUTION_STATUS_SCHEMA_V2,
+        schema: EXECUTION_STATUS_SCHEMA_V3,
         execution: execution_status(entry)?,
         reverse,
+        lineage: entry.record.lineage.clone(),
+        protection: entry.record.protection.clone(),
+        submission_timing: entry
+            .record
+            .submission_timing
+            .as_ref()
+            .map(ExecutionSubmissionTimingStatus::from),
     }))
 }
 
@@ -373,7 +420,7 @@ mod tests {
         let closing = execution_status_with_ledger(&ledger, root_intent_id)
             .expect("status")
             .expect("root");
-        assert_eq!(closing.schema, EXECUTION_STATUS_SCHEMA_V2);
+        assert_eq!(closing.schema, EXECUTION_STATUS_SCHEMA_V3);
         assert_eq!(
             closing.reverse.expect("reverse").stage,
             ReverseExecutionStage::Closing
