@@ -496,7 +496,7 @@ mod tests {
 
     fn preflight(accepted: bool) -> ExecutorCredentialPreflight {
         ExecutorCredentialPreflight {
-            schema: crate::execution_preflight::EXECUTOR_PREFLIGHT_SCHEMA_V3,
+            schema: crate::execution_preflight::EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1,
             accepted,
             observer_read_only: true,
             observer_private_ws_converged: true,
