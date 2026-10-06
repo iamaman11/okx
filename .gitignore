@@ -1,6 +1,0 @@
-/target
-.env
-.env.*
-!.env.example
-*.pem
-*.key

@@ -4,11 +4,12 @@ use okx_analysis::{
     TRADING_MANDATE_SCHEMA_V1, TcaFillOutcome, TcaReference, TcaSide, analyze_candidate_order,
     analyze_execution_tca_report, analyze_portfolio_risk,
 };
-use okx_api::{MUTATION_REQUEST_TTL_MS, MarginMode};
+use okx_api::{InstrumentType, MUTATION_REQUEST_TTL_MS, MarginMode};
 use okx_execution::{
-    EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_STATUS_SCHEMA_V3, ExecutionAction,
+    EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_STATUS_SCHEMA_V3, ExecutionAction,
     ExecutionDecisionReference, ExecutionIntent, ExecutionLedgerEntry, ExecutionLedgerError,
-    ExecutionLineageBinding, ExecutionRiskBinding, ExecutionState, ExecutionTransitionError,
+    ExecutionLineageBinding, ExecutionRiskBinding, ExecutionState, ExecutionTcaInstrumentType,
+    ExecutionTcaMechanicsBinding, ExecutionTransitionError,
     OrderExecutorError, OrderSide as ExecutionOrderSide, OrderType,
     PositionSide as ExecutionPositionSide, PrepareDeferral, PrepareFailure, PrepareOutcome,
     PrepareRejection, ReverseContinuation, ReverseLeg, TradeMode, prepare_execution,
@@ -353,7 +354,9 @@ async fn prepare_risk_increasing(
         Err(error) => return Ok(validation_failure(request, generated_at, error)),
     };
     plan.risk_binding = common.risk.map(execution_risk_binding);
-    let lineage = common.lineage.map(execution_lineage_binding);
+    let lineage = common
+        .lineage
+        .map(|value| execution_lineage_binding(value, &rules));
     commit_prepared(request, generated_at, execution, plan, lineage, target).await
 }
 
@@ -411,7 +414,9 @@ async fn prepare_risk_reducing(
         Err(error) => return Ok(validation_failure(request, generated_at, error)),
     };
     plan.risk_binding = common.risk.map(execution_risk_binding);
-    let lineage = common.lineage.map(execution_lineage_binding);
+    let lineage = common
+        .lineage
+        .map(|value| execution_lineage_binding(value, &rules));
     commit_prepared(request, generated_at, execution, plan, lineage, target).await
 }
 
@@ -1479,37 +1484,24 @@ async fn execution_tca_status(
             Vec::new(),
         );
     };
-    let Some(rules) = current_rules(context, &record.plan.instrument_id).await else {
+    let Some(mechanics) = lineage.tca_mechanics.as_ref() else {
         return (
-            ExecutionTcaStatus::unavailable("reference_rules_unavailable"),
+            ExecutionTcaStatus::unavailable("tca_mechanics_unavailable"),
             Vec::new(),
         );
     };
-    if rules.reference_generation != record.plan.reference_generation {
+    if mechanics.source_reference_generation != record.plan.reference_generation
+        || mechanics.contract_type != "linear"
+    {
         return (
-            ExecutionTcaStatus::unavailable("reference_generation_changed"),
+            ExecutionTcaStatus::unavailable("tca_mechanics_inconsistent"),
             Vec::new(),
         );
     }
-    let instrument = &rules.instrument;
-    let Some(contract_value) = instrument.contract_value.as_deref() else {
-        return (
-            ExecutionTcaStatus::unavailable("contract_value_unavailable"),
-            Vec::new(),
-        );
+    let instrument_type = match mechanics.instrument_type {
+        ExecutionTcaInstrumentType::Swap => InstrumentType::Swap,
+        ExecutionTcaInstrumentType::Futures => InstrumentType::Futures,
     };
-    let Some(settle_currency) = instrument.settle_currency.as_deref() else {
-        return (
-            ExecutionTcaStatus::unavailable("settle_currency_unavailable"),
-            Vec::new(),
-        );
-    };
-    if instrument.contract_type.as_deref() != Some("linear") {
-        return (
-            ExecutionTcaStatus::unavailable("unsupported_contract_mechanics"),
-            Vec::new(),
-        );
-    }
     let Some(observer) = context.account_fallback else {
         return (
             ExecutionTcaStatus::unavailable("account_observer_unavailable"),
@@ -1519,7 +1511,7 @@ async fn execution_tca_status(
 
     let evidence = match observer
         .execution_fills(
-            instrument.instrument_type,
+            instrument_type,
             &record.plan.instrument_id,
             order_id,
             &record.plan.client_order_id,
@@ -1606,8 +1598,8 @@ async fn execution_tca_status(
             ExecutionOrderSide::Buy => TcaSide::Buy,
             ExecutionOrderSide::Sell => TcaSide::Sell,
         },
-        contract_value,
-        settle_currency,
+        &mechanics.contract_value,
+        &mechanics.settle_currency,
         record.effective_size(),
         &TcaReference {
             price: lineage.decision_reference.price.clone(),
@@ -1667,9 +1659,34 @@ async fn execution_tca_status(
     )
 }
 
-fn execution_lineage_binding(value: &ExecutionLineageRequest) -> ExecutionLineageBinding {
+fn execution_lineage_binding(
+    value: &ExecutionLineageRequest,
+    rules: &InstrumentRulesSnapshot,
+) -> ExecutionLineageBinding {
+    let instrument = &rules.instrument;
+    let tca_mechanics = match (
+        instrument.contract_type.as_deref(),
+        instrument.contract_value.as_deref(),
+        instrument.settle_currency.as_deref(),
+    ) {
+        (Some("linear"), Some(contract_value), Some(settle_currency))
+            if !contract_value.trim().is_empty() && !settle_currency.trim().is_empty() =>
+        {
+            Some(ExecutionTcaMechanicsBinding {
+                source_reference_generation: rules.reference_generation.clone(),
+                instrument_type: match instrument.instrument_type {
+                    InstrumentType::Swap => ExecutionTcaInstrumentType::Swap,
+                    InstrumentType::Futures => ExecutionTcaInstrumentType::Futures,
+                },
+                contract_type: "linear".to_owned(),
+                contract_value: contract_value.to_owned(),
+                settle_currency: settle_currency.to_owned(),
+            })
+        }
+        _ => None,
+    };
     ExecutionLineageBinding {
-        schema: EXECUTION_LINEAGE_SCHEMA_V1.to_owned(),
+        schema: EXECUTION_LINEAGE_SCHEMA_V2.to_owned(),
         origin_evidence_id: value.origin_evidence_id.clone(),
         origin_schema: value.origin_schema.clone(),
         origin_version: value.origin_version.clone(),
@@ -1693,6 +1710,7 @@ fn execution_lineage_binding(value: &ExecutionLineageRequest) -> ExecutionLineag
             },
             price_policy_version: value.decision_reference.price_policy_version.clone(),
         },
+        tca_mechanics,
     }
 }
 
@@ -1784,7 +1802,7 @@ mod tests {
     fn full_execution_status_v3_stays_within_compact_transport_budget() {
         let mut entry = entry();
         entry.record.lineage = Some(okx_execution::ExecutionLineageBinding {
-            schema: EXECUTION_LINEAGE_SCHEMA_V1.to_owned(),
+            schema: EXECUTION_LINEAGE_SCHEMA_V2.to_owned(),
             origin_evidence_id: format!("sha256:{}", "a".repeat(64)),
             origin_schema: "o".repeat(128),
             origin_version: "v".repeat(128),
@@ -1795,6 +1813,13 @@ mod tests {
                 price_basis: okx_execution::TcaReferencePriceBasis::DecisionPrice,
                 price_policy_version: "p".repeat(128),
             },
+            tca_mechanics: Some(okx_execution::ExecutionTcaMechanicsBinding {
+                source_reference_generation: "sha256:reference".to_owned(),
+                instrument_type: okx_execution::ExecutionTcaInstrumentType::Swap,
+                contract_type: "linear".to_owned(),
+                contract_value: "0.001".to_owned(),
+                settle_currency: "USDT".to_owned(),
+            }),
         });
         entry.record.protection = Some(okx_execution::ProtectiveOrderLink {
             policy_version: "okx.protective-order/mark-market-v1".to_owned(),

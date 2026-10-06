@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_PLAN_SCHEMA_V1, ExchangeOrderState, ExecutionAction,
+    EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_PLAN_SCHEMA_V1,
+    ExchangeOrderState, ExecutionAction,
     ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
     ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
     OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
@@ -827,7 +828,20 @@ fn validate_execution_lineage(record: &ExecutionRecord) -> Result<(), ExecutionL
     let price = Decimal::from_str(&lineage.decision_reference.price)
         .ok()
         .filter(|value| *value > Decimal::ZERO);
-    if lineage.schema != EXECUTION_LINEAGE_SCHEMA_V1
+    let lineage_schema_valid = match lineage.schema.as_str() {
+        EXECUTION_LINEAGE_SCHEMA_V1 => lineage.tca_mechanics.is_none(),
+        EXECUTION_LINEAGE_SCHEMA_V2 => true,
+        _ => false,
+    };
+    let tca_mechanics_valid = lineage.tca_mechanics.as_ref().is_none_or(|mechanics| {
+        mechanics.source_reference_generation == record.plan.reference_generation
+            && mechanics.contract_type == "linear"
+            && positive_decimal(&mechanics.contract_value).is_some()
+            && !mechanics.settle_currency.trim().is_empty()
+            && mechanics.settle_currency.len() <= 16
+    });
+    if !lineage_schema_valid
+        || !tca_mechanics_valid
         || !valid_sha256_artifact_id(&lineage.origin_evidence_id)
         || lineage.origin_schema.trim().is_empty()
         || lineage.origin_schema.len() > 128
@@ -1201,6 +1215,7 @@ mod tests {
                 price_basis: TcaReferencePriceBasis::DecisionPrice,
                 price_policy_version: "decision-reference/v1".to_owned(),
             },
+            tca_mechanics: None,
         }
     }
 
