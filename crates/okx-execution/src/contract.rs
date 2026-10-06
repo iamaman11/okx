@@ -5,7 +5,7 @@ use crate::{
     DurableExecutionLedger, ExchangeOrderState, ExecutionAction, ExecutionLedgerEntry,
     ExecutionLedgerError, ExecutionLineageBinding, ExecutionPlan, ExecutionState,
     ExecutionSubmissionTimingEvidence, OrderSide, OrderType, PositionSide, PrepareDisposition,
-    ProtectiveOrderLink, ReverseContinuation, ReverseLeg, TradeMode,
+    ProtectiveOrderStatus, ProtectiveTriggerPriceBasis, ReverseContinuation, ReverseLeg, TradeMode,
 };
 
 pub const EXECUTION_STATUS_SCHEMA_V1: &str = "okx.execution-status/v1";
@@ -118,6 +118,20 @@ pub struct ReverseExecutionStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ProtectiveExecutionStatus {
+    pub policy_version: String,
+    pub algo_client_order_id: String,
+    pub trigger_price_basis: ProtectiveTriggerPriceBasis,
+    pub status: ProtectiveOrderStatus,
+    pub algo_order_id_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionSubmissionTimingStatus {
     pub basis: &'static str,
     pub request_exchange_time_ms: u64,
@@ -155,7 +169,7 @@ pub struct ExecutionStatusEnvelope {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lineage: Option<ExecutionLineageBinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub protection: Option<ProtectiveOrderLink>,
+    pub protection: Option<ProtectiveExecutionStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub submission_timing: Option<ExecutionSubmissionTimingStatus>,
 }
@@ -205,7 +219,18 @@ pub fn execution_status_with_ledger(
         execution: execution_status(entry)?,
         reverse,
         lineage: entry.record.lineage.clone(),
-        protection: entry.record.protection.clone(),
+        protection: entry.record.protection.as_ref().map(|value| ProtectiveExecutionStatus {
+            policy_version: value.policy_version.clone(),
+            algo_client_order_id: value.algo_client_order_id.clone(),
+            trigger_price_basis: value.trigger_price_basis,
+            status: value.status,
+            algo_order_id_present: value
+                .algo_order_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            covered_size: value.covered_size.clone(),
+            failure_code: value.failure_code.clone(),
+        }),
         submission_timing: entry
             .record
             .submission_timing
