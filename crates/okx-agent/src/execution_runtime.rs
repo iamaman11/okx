@@ -8,9 +8,9 @@ use okx_api::{
 };
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
-    ExecutionLedgerEntry, ExecutionLedgerStore, ExecutionPlan, ExecutionStatusSnapshot,
-    OrderExecutor, OrderExecutorError, PrepareOutcome, SubmitDisposition, execution_status,
-    reconcile_account_ledger,
+    ExecutionLedgerEntry, ExecutionLedgerStore, ExecutionPlan, ExecutionStatusEnvelope,
+    OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome, SubmitDisposition,
+    execution_status_with_ledger, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -124,7 +124,7 @@ impl ExecutionRuntime {
             account_instrument
         )?;
 
-        let max_order_size = if plan.action == okx_execution::ExecutionAction::Open {
+        let max_order_size = if plan.action.is_risk_increasing() {
             Some(
                 self.executor_account
                     .max_order_size(&plan.instrument_id, margin_mode, &plan.price)
@@ -168,18 +168,48 @@ impl ExecutionRuntime {
         self.executor.lock().await.prepare(plan, observed_at_ms)
     }
 
+    pub async fn prepare_reverse_close(
+        &self,
+        plan: ExecutionPlan,
+        target_position_side: PositionSide,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
+        self.executor
+            .lock()
+            .await
+            .prepare_reverse_close(plan, target_position_side, observed_at_ms)
+    }
+
+    pub async fn prepare_reverse_open(
+        &self,
+        root_intent_id: &str,
+        plan: ExecutionPlan,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
+        self.executor
+            .lock()
+            .await
+            .prepare_reverse_open(root_intent_id, plan, observed_at_ms)
+    }
+
+    pub async fn abort_reverse(
+        &self,
+        root_intent_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        self.executor
+            .lock()
+            .await
+            .abort_reverse(root_intent_id, observed_at_ms)
+    }
+
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {
         self.executor.lock().await.ledger().get(intent_id).cloned()
     }
 
-    pub async fn status(&self, intent_id: &str) -> AgentResult<Option<ExecutionStatusSnapshot>> {
+    pub async fn status(&self, intent_id: &str) -> AgentResult<Option<ExecutionStatusEnvelope>> {
         let executor = self.executor.lock().await;
-        executor
-            .ledger()
-            .get(intent_id)
-            .map(execution_status)
-            .transpose()
-            .map_err(AgentError::from)
+        execution_status_with_ledger(executor.ledger(), intent_id).map_err(AgentError::from)
     }
 
     pub async fn live_trading_enabled(&self) -> bool {
