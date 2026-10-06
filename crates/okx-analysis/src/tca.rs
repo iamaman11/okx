@@ -151,9 +151,7 @@ pub fn analyze_execution_tca_report(
                     (None, Some("settle_fee_cost_unavailable"))
                 }
             }
-            (TcaFillOutcome::Partial, _) => {
-                (None, Some("unfilled_opportunity_cost_not_observed"))
-            }
+            (TcaFillOutcome::Partial, _) => (None, Some("unfilled_opportunity_cost_not_observed")),
             (TcaFillOutcome::Missed, _) => {
                 (None, Some("missed_fill_opportunity_cost_not_observed"))
             }
@@ -377,7 +375,11 @@ mod tests {
             complete.implementation_shortfall_settle.as_deref(),
             Some("1.2")
         );
-        assert!(complete.implementation_shortfall_unavailable_reason.is_none());
+        assert!(
+            complete
+                .implementation_shortfall_unavailable_reason
+                .is_none()
+        );
 
         let partial = analyze_execution_tca_report(
             "BTC-USDT-SWAP",
