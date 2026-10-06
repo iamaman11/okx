@@ -502,7 +502,7 @@ mod tests {
         entry.updated_at_ms = 101;
 
         let status = execution_status(&entry).expect("status");
-        assert_eq!(status.schema, EXECUTION_STATUS_SCHEMA_V1);
+        assert_eq!(status.schema, EXECUTION_STATUS_CORE_SCHEMA_V2);
         assert_eq!(status.state, ExecutionState::Acknowledged);
         assert!(status.order_id_present);
         assert!(status.plan_fingerprint.starts_with("sha256:"));
