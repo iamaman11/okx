@@ -919,7 +919,12 @@ fn last_runtime_event(stdout: &str) -> Option<Value> {
 
 fn extract_okx_api_code(line: &str) -> Option<String> {
     if let Some(rest) = line.split("OKX API error ").nth(1) {
-        return rest.split(':').next().map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
+        return rest
+            .split(':')
+            .next()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned);
     }
     let rest = line.split("code:").nth(1)?;
     let trimmed = rest.trim_start().trim_start_matches('"');
@@ -1087,10 +1092,8 @@ mod tests {
 
     #[test]
     fn runtime_log_summary_returns_only_structured_bounded_diagnostics() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-runtime-diagnostics-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("okx-runtime-diagnostics-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("root");
         let stdout = root.join("stdout.log");
