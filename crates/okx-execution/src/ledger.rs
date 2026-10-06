@@ -10,10 +10,11 @@ use thiserror::Error;
 
 use crate::{
     EXECUTION_PLAN_SCHEMA_V1, ExchangeOrderState, ExecutionAction, ExecutionPlan, ExecutionRecord,
-    ExecutionState, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION,
-    OrderMutationKind, OrderMutationRecord, OrderMutationResolution, OrderMutationState,
-    PositionSide, ReverseContinuation, ReverseExecutionLink, ReverseLeg, derive_client_order_id,
-    derive_reverse_open_intent_id, model::{valid_intent_id, valid_mutation_id},
+    ExecutionState, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
+    OrderMutationRecord, OrderMutationResolution, OrderMutationState, PositionSide,
+    ReverseContinuation, ReverseExecutionLink, ReverseLeg, derive_client_order_id,
+    derive_reverse_open_intent_id,
+    model::{valid_intent_id, valid_mutation_id},
 };
 
 pub const EXECUTION_LEDGER_SCHEMA_V1: &str = "okx.execution-ledger/v1";
@@ -922,10 +923,7 @@ mod tests {
         value
     }
 
-    fn reverse_open_plan(
-        root_intent_id: &str,
-        position_side: PositionSide,
-    ) -> ExecutionPlan {
+    fn reverse_open_plan(root_intent_id: &str, position_side: PositionSide) -> ExecutionPlan {
         let intent_id = derive_reverse_open_intent_id(root_intent_id);
         let mut value = plan(&intent_id);
         value.position_side = position_side;
@@ -1043,12 +1041,7 @@ mod tests {
                 .acknowledge(reverse_id, "close-ord", 103)
                 .expect("ack close");
             ledger
-                .reconcile_found(
-                    reverse_id,
-                    "close-ord",
-                    ExchangeOrderState::Filled,
-                    104,
-                )
+                .reconcile_found(reverse_id, "close-ord", ExchangeOrderState::Filled, 104)
                 .expect("close filled");
 
             assert!(matches!(
@@ -1068,9 +1061,7 @@ mod tests {
             .prepare_reverse_open(reverse_id, open.clone(), 202)
             .expect("fresh reverse open");
         assert!(matches!(prepared, PrepareDisposition::Created(_)));
-        let open_entry = reopened
-            .get(&open.intent_id)
-            .expect("reverse open entry");
+        let open_entry = reopened.get(&open.intent_id).expect("reverse open entry");
         let link = open_entry.record.reverse.as_ref().expect("reverse link");
         assert_eq!(link.root_intent_id, reverse_id);
         assert_eq!(link.leg, ReverseLeg::Open);
@@ -1111,12 +1102,7 @@ mod tests {
             .acknowledge(reverse_id, "close-ord", 104)
             .expect("ack close");
         ledger
-            .reconcile_found(
-                reverse_id,
-                "close-ord",
-                ExchangeOrderState::Filled,
-                105,
-            )
+            .reconcile_found(reverse_id, "close-ord", ExchangeOrderState::Filled, 105)
             .expect("close filled");
         ledger.abort_reverse(reverse_id, 106).expect("abort");
 
@@ -1154,14 +1140,11 @@ mod tests {
             )
             .expect("prepare close");
         ledger.begin_submission(reverse_id, 102).expect("submit");
-        ledger.acknowledge(reverse_id, "close-ord", 103).expect("ack");
         ledger
-            .reconcile_found(
-                reverse_id,
-                "close-ord",
-                ExchangeOrderState::Filled,
-                104,
-            )
+            .acknowledge(reverse_id, "close-ord", 103)
+            .expect("ack");
+        ledger
+            .reconcile_found(reverse_id, "close-ord", ExchangeOrderState::Filled, 104)
             .expect("filled");
 
         let mut wrong_side = reverse_open_plan(reverse_id, PositionSide::Long);
