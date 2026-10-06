@@ -1088,6 +1088,30 @@ mod tests {
         }
     }
 
+    fn position(position_side: PositionSide, quantity: &str) -> AccountPositionState {
+        AccountPositionState {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            position: quantity.to_owned(),
+            position_side: position_side.as_str().to_owned(),
+            margin_mode: "cross".to_owned(),
+            average_price: Some("0.1".to_owned()),
+            mark_price: Some("0.1".to_owned()),
+            liquidation_price: None,
+            unrealized_pnl: Some("0".to_owned()),
+            unrealized_pnl_ratio: Some("0".to_owned()),
+            leverage: Some("5".to_owned()),
+            margin: Some("100".to_owned()),
+            initial_margin_requirement: Some("100".to_owned()),
+            maintenance_margin_requirement: Some("50".to_owned()),
+            margin_ratio: None,
+            notional_usd: Some("500".to_owned()),
+            margin_currency: Some("USDT".to_owned()),
+            creation_time_ms: Some("1790000000000".to_owned()),
+            update_time_ms: Some("1790000001000".to_owned()),
+        }
+    }
+
     fn fees(rules: &InstrumentRulesSnapshot) -> FeeScheduleSnapshot {
         FeeScheduleSnapshot::from_input(FeeScheduleInput {
             instrument_id: rules.instrument.instrument_id.clone(),
@@ -1163,6 +1187,86 @@ mod tests {
         assert_eq!(plan.price, candidate.entry_price);
         assert!(plan.open_risk.is_some());
         assert_eq!(plan.client_order_id.len(), 32);
+    }
+
+    #[test]
+    fn add_requires_existing_same_side_position_and_reuses_open_risk_path() {
+        let rules = rules();
+        let candidate = open_candidate(&rules, PositionDirection::Long);
+        let mut account = account();
+        let mut intent = open_intent(&rules, &account, &candidate, PositionSide::Long);
+        intent.action = ExecutionAction::Add;
+
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, Some(&candidate)),
+            Err(ExecutionValidationError::AddRequiresExistingPosition)
+        );
+
+        account.positions.push(position(PositionSide::Long, "5"));
+        intent.expected_account_generation = account.account_generation.clone();
+        let plan =
+            prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("add plan");
+        assert_eq!(plan.action, ExecutionAction::Add);
+        assert_eq!(plan.side, OrderSide::Buy);
+        assert!(plan.open_risk.is_some());
+    }
+
+    #[test]
+    fn hedge_requires_opposite_position_and_remains_risk_increasing() {
+        let rules = rules();
+        let candidate = open_candidate(&rules, PositionDirection::Short);
+        let mut account = account();
+        let mut intent = open_intent(&rules, &account, &candidate, PositionSide::Short);
+        intent.action = ExecutionAction::Hedge;
+
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, Some(&candidate)),
+            Err(ExecutionValidationError::HedgeRequiresOppositePosition)
+        );
+
+        account.positions.push(position(PositionSide::Long, "5"));
+        intent.expected_account_generation = account.account_generation.clone();
+        let plan =
+            prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("hedge plan");
+        assert_eq!(plan.action, ExecutionAction::Hedge);
+        assert_eq!(plan.side, OrderSide::Sell);
+        assert!(plan.open_risk.is_some());
+    }
+
+    #[test]
+    fn reduce_is_strictly_partial_while_close_can_consume_remaining_position() {
+        let rules = rules();
+        let mut account = account();
+        account.positions.push(position(PositionSide::Long, "5"));
+
+        let mut intent = ExecutionIntent {
+            intent_id: "intent_reduce_012345678".to_owned(),
+            expected_reference_generation: rules.reference_generation.clone(),
+            expected_account_generation: account.account_generation.clone(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            trade_mode: TradeMode::Cross,
+            position_side: PositionSide::Long,
+            action: ExecutionAction::Reduce,
+            order_type: OrderType::Limit,
+            size: "2".to_owned(),
+            price: "0.10000".to_owned(),
+        };
+
+        let reduce = prepare_execution(&intent, &rules, &account, None).expect("reduce plan");
+        assert_eq!(reduce.action, ExecutionAction::Reduce);
+        assert_eq!(reduce.side, OrderSide::Sell);
+        assert!(reduce.open_risk.is_none());
+
+        intent.size = "5".to_owned();
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, None),
+            Err(ExecutionValidationError::ReduceWouldFullyClose)
+        );
+
+        intent.action = ExecutionAction::Close;
+        let close = prepare_execution(&intent, &rules, &account, None).expect("full close");
+        assert_eq!(close.action, ExecutionAction::Close);
+        assert_eq!(close.size, "5");
     }
 
     #[test]
