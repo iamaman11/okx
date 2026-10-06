@@ -1439,6 +1439,8 @@ pub enum HostControlOperation {
     BootstrapAgentGithubToken,
     ProvisionCloudflareRuntimeToken,
     StartAgent,
+    StartDemoAcceptance,
+    RestoreProductionAgent,
     StopAgent,
     RestartAgent,
     InstallAutostart,
@@ -2747,6 +2749,25 @@ mod tests {
 
         let arbitrary = r#"{"schema":"okx.windows.control/v1","request_id":"ctl_0123456789abcdef","operation":{"type":"run_shell","command":"whoami"}}"#;
         assert!(serde_json::from_str::<HostControlRequest>(arbitrary).is_err());
+    }
+
+    #[test]
+    fn demo_lifecycle_control_operations_are_typed_and_parameter_free() {
+        for operation in [
+            HostControlOperation::StartDemoAcceptance,
+            HostControlOperation::RestoreProductionAgent,
+        ] {
+            let request = HostControlRequest {
+                schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
+                request_id: "ctl_stage4c_demo_01234567".to_owned(),
+                operation,
+            };
+            request.validate().expect("typed demo lifecycle request");
+            let json = serde_json::to_string(&request).expect("serialize");
+            let decoded: HostControlRequest =
+                serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, request);
+        }
     }
 
     #[test]
