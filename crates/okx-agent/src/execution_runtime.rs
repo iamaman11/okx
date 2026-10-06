@@ -231,8 +231,25 @@ impl ExecutionRuntime {
     }
 
     pub async fn status(&self, intent_id: &str) -> AgentResult<Option<ExecutionStatusEnvelope>> {
+        Ok(self
+            .status_with_entry(intent_id)
+            .await?
+            .map(|(_, status)| status))
+    }
+
+    pub async fn status_with_entry(
+        &self,
+        intent_id: &str,
+    ) -> AgentResult<Option<(ExecutionLedgerEntry, ExecutionStatusEnvelope)>> {
         let executor = self.executor.lock().await;
-        execution_status_with_ledger(executor.ledger(), intent_id).map_err(AgentError::from)
+        let Some(entry) = executor.ledger().get(intent_id).cloned() else {
+            return Ok(None);
+        };
+        let status = execution_status_with_ledger(executor.ledger(), intent_id)?
+            .ok_or_else(|| AgentError::ExecutionLedger(ExecutionLedgerError::IntentNotFound(
+                intent_id.to_owned(),
+            )))?;
+        Ok(Some((entry, status)))
     }
 
     pub async fn live_trading_enabled(&self) -> bool {
