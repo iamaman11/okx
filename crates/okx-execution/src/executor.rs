@@ -273,12 +273,7 @@ where
             ));
         }
         let request_id = derive_amend_request_id(intent_id, mutation_id);
-        let mutation = OrderMutationRecord::amend(
-            mutation_id,
-            request_id,
-            new_size,
-            new_price,
-        )?;
+        let mutation = OrderMutationRecord::amend(mutation_id, request_id, new_size, new_price)?;
         Ok(self
             .ledger
             .prepare_order_mutation(intent_id, mutation, observed_at_ms)?)
@@ -415,11 +410,8 @@ where
             Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
         };
 
-        self.ledger.begin_order_mutation_submission(
-            intent_id,
-            mutation_id,
-            observed_at_ms,
-        )?;
+        self.ledger
+            .begin_order_mutation_submission(intent_id, mutation_id, observed_at_ms)?;
 
         let result = match request {
             OrderMutationRequest::Amend(request) => {
@@ -635,8 +627,7 @@ fn classify_mutation_response(
         return MutationResponse::Ambiguous;
     }
     if mutation.kind == OrderMutationKind::Amend
-        && item.request_id
-            != mutation.request_id.as_deref().unwrap_or_default()
+        && item.request_id != mutation.request_id.as_deref().unwrap_or_default()
     {
         return MutationResponse::Ambiguous;
     }
@@ -749,14 +740,16 @@ fn validate_order_identity(
         if order_price != current_price || order_size != current_size {
             return Err(OrderExecutorError::ReconciliationIdentityMismatch);
         }
-        return Ok(if matches!(
-            exchange_state,
-            ExchangeOrderState::Filled | ExchangeOrderState::Canceled
-        ) {
-            OrderMutationResolution::Superseded
-        } else {
-            OrderMutationResolution::Pending
-        });
+        return Ok(
+            if matches!(
+                exchange_state,
+                ExchangeOrderState::Filled | ExchangeOrderState::Canceled
+            ) {
+                OrderMutationResolution::Superseded
+            } else {
+                OrderMutationResolution::Pending
+            },
+        );
     }
 
     let requested_price = mutation
@@ -777,14 +770,16 @@ fn validate_order_identity(
     if order_price == requested_price && order_size == requested_size {
         Ok(OrderMutationResolution::Applied)
     } else if order_price == current_price && order_size == current_size {
-        Ok(if matches!(
-            exchange_state,
-            ExchangeOrderState::Filled | ExchangeOrderState::Canceled
-        ) {
-            OrderMutationResolution::Superseded
-        } else {
-            OrderMutationResolution::Pending
-        })
+        Ok(
+            if matches!(
+                exchange_state,
+                ExchangeOrderState::Filled | ExchangeOrderState::Canceled
+            ) {
+                OrderMutationResolution::Superseded
+            } else {
+                OrderMutationResolution::Pending
+            },
+        )
     } else {
         Err(OrderExecutorError::ReconciliationIdentityMismatch)
     }
