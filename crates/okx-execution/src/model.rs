@@ -180,9 +180,8 @@ pub fn derive_client_order_id(intent_id: &str) -> String {
 }
 
 pub fn derive_reverse_open_intent_id(root_intent_id: &str) -> String {
-    let digest = Sha256::digest(
-        format!("okx-execution-reverse-open-v1:{root_intent_id}").as_bytes(),
-    );
+    let digest =
+        Sha256::digest(format!("okx-execution-reverse-open-v1:{root_intent_id}").as_bytes());
     let hex = format!("{digest:x}");
     format!(
         "{REVERSE_OPEN_INTENT_PREFIX}{}",
