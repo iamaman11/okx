@@ -17,7 +17,7 @@ use crate::{
     autostart,
     background_process::hidden_command,
     controller_update,
-    desired::{AgentDesired, DesiredStateStore},
+    desired::{AgentDesired, AgentDesiredState, AgentProfile, DesiredStateStore},
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
 };
@@ -25,6 +25,8 @@ use crate::{
 const CANONICAL_ROOT: &str = r"C:\okx";
 const RUNTIME_ROOT: &str = r"C:\okx-runtime";
 const AGENT_MAILBOX_ISSUE: &str = "10";
+const DEMO_MAILBOX_ISSUE: &str = "234";
+const DEMO_RUNTIME_ROOT: &str = r"C:\okx-runtime\demo";
 const AGENT_CLOUDFLARE_WS_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime";
 const AGENT_CLOUDFLARE_RUNTIME_ID: &str = "windows-primary";
 const HOST_CONTROL_CAPABILITIES_SCHEMA_V1: &str = "okx.host-control.capabilities/v1";
@@ -45,6 +47,8 @@ pub struct HostExecutor {
     agent_job: AgentJob,
     desired_store: DesiredStateStore,
     desired_agent: AgentDesired,
+    desired_profile: AgentProfile,
+    running_profile: Option<AgentProfile>,
     desired_error: Option<String>,
     restart_attempt: usize,
     next_restart_at: Option<Instant>,
@@ -54,9 +58,9 @@ pub struct HostExecutor {
 impl HostExecutor {
     pub fn canonical() -> HostControlResult<Self> {
         let desired_store = DesiredStateStore::canonical();
-        let (desired_agent, desired_error) = match desired_store.load() {
+        let (desired_state, desired_error) = match desired_store.load() {
             Ok(desired) => (desired, None),
-            Err(error) => (AgentDesired::Stopped, Some(error.to_string())),
+            Err(error) => (AgentDesiredState::stopped(), Some(error.to_string())),
         };
 
         Ok(Self {
@@ -65,7 +69,9 @@ impl HostExecutor {
             agent_started_at: None,
             agent_job: AgentJob::new()?,
             desired_store,
-            desired_agent,
+            desired_agent: desired_state.agent,
+            desired_profile: desired_state.profile,
+            running_profile: None,
             desired_error,
             restart_attempt: 0,
             next_restart_at: None,
@@ -96,6 +102,8 @@ impl HostExecutor {
                 self.provision_cloudflare_runtime_token()
             }
             HostControlOperation::StartAgent => self.start_agent(),
+            HostControlOperation::StartDemoAcceptance => self.start_demo_acceptance(),
+            HostControlOperation::RestoreProductionAgent => self.restore_production_agent(),
             HostControlOperation::StopAgent => self.stop_agent(),
             HostControlOperation::RestartAgent => self.restart_agent(),
             HostControlOperation::InstallAutostart => autostart::install(),
@@ -150,9 +158,12 @@ impl HostExecutor {
                     }
                     self.last_reconcile = "READY_RUNNING".to_owned();
                 } else if self.restart_due() {
-                    match self.start_agent_process() {
+                    match self.start_agent_process(self.desired_profile) {
                         Ok(pid) => {
-                            self.last_reconcile = format!("RESTORED_AGENT_PID_{pid}");
+                            self.last_reconcile = format!(
+                                "RESTORED_{:?}_AGENT_PID_{pid}",
+                                self.desired_profile
+                            );
                         }
                         Err(error) => {
                             self.schedule_restart();
@@ -212,6 +223,8 @@ impl HostExecutor {
             "agent_binary_present": agent_binary.is_file(),
             "agent_owned_running": running,
             "agent_desired": self.desired_agent,
+            "desired_profile": self.desired_profile,
+            "running_profile": self.running_profile,
             "desired_state_path": self.desired_store.path(),
             "desired_state_error": self.desired_error.clone(),
             "job_object_owned": true,
