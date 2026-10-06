@@ -1326,9 +1326,7 @@ fn execution_lineage_binding(value: &ExecutionLineageRequest) -> ExecutionLineag
                     okx_execution::TcaReferencePriceBasis::ArrivalMid
                 }
                 ExecutionReferencePriceBasis::Mark => okx_execution::TcaReferencePriceBasis::Mark,
-                ExecutionReferencePriceBasis::Index => {
-                    okx_execution::TcaReferencePriceBasis::Index
-                }
+                ExecutionReferencePriceBasis::Index => okx_execution::TcaReferencePriceBasis::Index,
                 ExecutionReferencePriceBasis::Last => okx_execution::TcaReferencePriceBasis::Last,
                 ExecutionReferencePriceBasis::LimitPrice => {
                     okx_execution::TcaReferencePriceBasis::LimitPrice

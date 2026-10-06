@@ -1709,7 +1709,11 @@ fn validate_execution_lineage(value: &ExecutionLineageRequest) -> Result<(), Pro
         || value.origin_version.trim().is_empty()
         || value.origin_version.len() > 128
         || value.decision_reference.decision_time_ms == 0
-        || value.decision_reference.price_policy_version.trim().is_empty()
+        || value
+            .decision_reference
+            .price_policy_version
+            .trim()
+            .is_empty()
         || value.decision_reference.price_policy_version.len() > 128
     {
         return Err(ProtocolError::InvalidAnalyticalQuery("execution lineage"));

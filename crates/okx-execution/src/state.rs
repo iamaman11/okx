@@ -245,8 +245,7 @@ impl ExecutionSubmissionTimingEvidence {
         if in_time_us == 0 || out_time_us < in_time_us {
             return Err(ExecutionTransitionError::InvalidSubmissionTiming);
         }
-        if let (Some(existing_in), Some(existing_out)) =
-            (self.okx_in_time_us, self.okx_out_time_us)
+        if let (Some(existing_in), Some(existing_out)) = (self.okx_in_time_us, self.okx_out_time_us)
         {
             return if existing_in == in_time_us && existing_out == out_time_us {
                 Ok(())

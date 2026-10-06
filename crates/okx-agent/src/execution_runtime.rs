@@ -10,8 +10,7 @@ use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
     ExecutionLedgerEntry, ExecutionLedgerStore, ExecutionLineageBinding, ExecutionPlan,
     ExecutionStatusEnvelope, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
-    SubmitDisposition,
-    execution_status_with_ledger, reconcile_account_ledger,
+    SubmitDisposition, execution_status_with_ledger, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -187,13 +186,8 @@ impl ExecutionRuntime {
         target_position_side: PositionSide,
         observed_at_ms: u64,
     ) -> Result<PrepareOutcome, OrderExecutorError> {
-        self.prepare_reverse_close_with_lineage(
-            plan,
-            target_position_side,
-            None,
-            observed_at_ms,
-        )
-        .await
+        self.prepare_reverse_close_with_lineage(plan, target_position_side, None, observed_at_ms)
+            .await
     }
 
     pub async fn prepare_reverse_close_with_lineage(
@@ -206,12 +200,7 @@ impl ExecutionRuntime {
         self.executor
             .lock()
             .await
-            .prepare_reverse_close_with_lineage(
-                plan,
-                target_position_side,
-                lineage,
-                observed_at_ms,
-            )
+            .prepare_reverse_close_with_lineage(plan, target_position_side, lineage, observed_at_ms)
     }
 
     pub async fn prepare_reverse_open(

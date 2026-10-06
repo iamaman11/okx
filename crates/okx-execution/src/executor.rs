@@ -13,11 +13,10 @@ use thiserror::Error;
 use crate::{
     DurableExecutionLedger, ExchangeOrderState, ExecutionLedgerEntry, ExecutionLedgerError,
     ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
-    ExecutionTransitionError,
-    MutationPrepareDisposition, OrderMutationKind, OrderMutationRecord, OrderMutationResolution,
-    OrderMutationState, OrderSide, OrderType, PositionSide, PrepareOutcome,
-    ProtectiveOrderResolution, ProtectiveTriggerPriceBasis, TradeMode, classify_prepare_result,
-    derive_amend_request_id, require_live_trading_enabled,
+    ExecutionTransitionError, MutationPrepareDisposition, OrderMutationKind, OrderMutationRecord,
+    OrderMutationResolution, OrderMutationState, OrderSide, OrderType, PositionSide,
+    PrepareOutcome, ProtectiveOrderResolution, ProtectiveTriggerPriceBasis, TradeMode,
+    classify_prepare_result, derive_amend_request_id, require_live_trading_enabled,
 };
 
 #[async_trait]
@@ -273,10 +272,11 @@ where
         lineage: Option<ExecutionLineageBinding>,
         observed_at_ms: u64,
     ) -> Result<PrepareOutcome, OrderExecutorError> {
-        Ok(classify_prepare_result(
-            self.ledger
-                .prepare_with_lineage(plan, lineage, observed_at_ms),
-        )?)
+        Ok(classify_prepare_result(self.ledger.prepare_with_lineage(
+            plan,
+            lineage,
+            observed_at_ms,
+        ))?)
     }
 
     pub fn prepare_reverse_close(
@@ -285,12 +285,7 @@ where
         target_position_side: PositionSide,
         observed_at_ms: u64,
     ) -> Result<PrepareOutcome, OrderExecutorError> {
-        self.prepare_reverse_close_with_lineage(
-            plan,
-            target_position_side,
-            None,
-            observed_at_ms,
-        )
+        self.prepare_reverse_close_with_lineage(plan, target_position_side, None, observed_at_ms)
     }
 
     pub fn prepare_reverse_close_with_lineage(
