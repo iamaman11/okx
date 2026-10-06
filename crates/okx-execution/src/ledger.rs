@@ -138,9 +138,7 @@ impl ExecutionLedgerStore {
         let file: ExecutionLedgerFile = serde_json::from_slice(&bytes)?;
         if !matches!(
             file.schema.as_str(),
-            EXECUTION_LEDGER_SCHEMA_V1
-                | EXECUTION_LEDGER_SCHEMA_V2
-                | EXECUTION_LEDGER_SCHEMA_V3
+            EXECUTION_LEDGER_SCHEMA_V1 | EXECUTION_LEDGER_SCHEMA_V2 | EXECUTION_LEDGER_SCHEMA_V3
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
@@ -1309,12 +1307,9 @@ mod tests {
 
     #[test]
     fn legacy_v1_v2_ledgers_load_and_next_write_upgrades_to_v3() {
-        for (index, schema) in [
-            EXECUTION_LEDGER_SCHEMA_V1,
-            EXECUTION_LEDGER_SCHEMA_V2,
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, schema) in [EXECUTION_LEDGER_SCHEMA_V1, EXECUTION_LEDGER_SCHEMA_V2]
+            .into_iter()
+            .enumerate()
         {
             let root = temp_root(&format!("schema-upgrade-{index}"));
             let _ = fs::remove_dir_all(&root);
@@ -1339,9 +1334,7 @@ mod tests {
             let store = ExecutionLedgerStore::at(&path);
             let mut ledger = DurableExecutionLedger::open(store, 101).expect("load legacy");
             assert_eq!(ledger.len(), 1);
-            ledger
-                .begin_submission(&intent_id, 102)
-                .expect("write v3");
+            ledger.begin_submission(&intent_id, 102).expect("write v3");
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
