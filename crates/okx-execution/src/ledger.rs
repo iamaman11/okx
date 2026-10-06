@@ -733,7 +733,11 @@ fn validate_execution_lineage(record: &ExecutionRecord) -> Result<(), ExecutionL
             .as_deref()
             .is_some_and(|value| !valid_sha256_artifact_id(value))
         || lineage.decision_reference.decision_time_ms == 0
-        || lineage.decision_reference.price_policy_version.trim().is_empty()
+        || lineage
+            .decision_reference
+            .price_policy_version
+            .trim()
+            .is_empty()
         || lineage.decision_reference.price_policy_version.len() > 128
         || price.is_none()
     {

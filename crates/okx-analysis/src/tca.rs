@@ -315,7 +315,7 @@ mod tests {
                 &TcaReference {
                     price: "100".to_owned(),
                     reference_time_ms: 1_000,
-                price_policy_version: "tca-reference/v1".to_owned(),
+                    price_policy_version: "tca-reference/v1".to_owned(),
                     price_basis: TcaReferencePriceBasis::DecisionPrice,
                 },
                 &[unknown.clone()],
@@ -334,7 +334,7 @@ mod tests {
                 &TcaReference {
                     price: "100".to_owned(),
                     reference_time_ms: 1_000,
-                price_policy_version: "tca-reference/v1".to_owned(),
+                    price_policy_version: "tca-reference/v1".to_owned(),
                     price_basis: TcaReferencePriceBasis::DecisionPrice,
                 },
                 &[unknown],
