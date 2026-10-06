@@ -158,6 +158,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         AgentOperation::InstrumentRules { .. }
         | AgentOperation::ExecutorPreflight
         | AgentOperation::SubmitPreparedExecution { .. }
+        | AgentOperation::MutateExecution { .. }
         | AgentOperation::AbortReverseExecution { .. }
         | AgentOperation::ExecutionStatus { .. }
         | AgentOperation::HistoryBehavior { .. }

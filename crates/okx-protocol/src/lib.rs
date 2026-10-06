@@ -24,6 +24,9 @@ pub enum ProtocolError {
     #[error("invalid request_id")]
     InvalidRequestId,
 
+    #[error("invalid mutation_id")]
+    InvalidMutationId,
+
     #[error("invalid agent key id")]
     InvalidAgentKeyId,
 
@@ -883,6 +886,19 @@ pub enum ExecutionPrepareSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionMutationRequest {
+    Amend {
+        mutation_id: String,
+        new_size: Option<String>,
+        new_price: Option<String>,
+    },
+    Cancel {
+        mutation_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentOperation {
     MarketSnapshot {
         instrument: String,
@@ -942,6 +958,10 @@ pub enum AgentOperation {
     SubmitPreparedExecution {
         intent_id: String,
     },
+    MutateExecution {
+        intent_id: String,
+        mutation: ExecutionMutationRequest,
+    },
     AbortReverseExecution {
         intent_id: String,
     },
@@ -997,6 +1017,7 @@ impl AgentOperation {
             self,
             Self::PrepareExecution { .. }
                 | Self::SubmitPreparedExecution { .. }
+                | Self::MutateExecution { .. }
                 | Self::AbortReverseExecution { .. }
         )
     }
@@ -1154,6 +1175,36 @@ impl AgentOperation {
             Self::SubmitPreparedExecution { intent_id }
             | Self::AbortReverseExecution { intent_id }
             | Self::ExecutionStatus { intent_id } => validate_request_id(intent_id),
+            Self::MutateExecution {
+                intent_id,
+                mutation,
+            } => {
+                validate_request_id(intent_id)?;
+                match mutation {
+                    ExecutionMutationRequest::Amend {
+                        mutation_id,
+                        new_size,
+                        new_price,
+                    } => {
+                        validate_mutation_id(mutation_id)?;
+                        if new_size.is_none() && new_price.is_none() {
+                            return Err(ProtocolError::InvalidAnalyticalQuery(
+                                "amend requires new_size and/or new_price",
+                            ));
+                        }
+                        if let Some(value) = new_size {
+                            validate_positive_decimal_text(value, "mutation.new_size")?;
+                        }
+                        if let Some(value) = new_price {
+                            validate_positive_decimal_text(value, "mutation.new_price")?;
+                        }
+                        Ok(())
+                    }
+                    ExecutionMutationRequest::Cancel { mutation_id } => {
+                        validate_mutation_id(mutation_id)
+                    }
+                }
+            }
             Self::CurrentCost {
                 instrument,
                 contracts,
@@ -1602,6 +1653,18 @@ fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
         Ok(())
     } else {
         Err(ProtocolError::InvalidRequestId)
+    }
+}
+
+fn validate_mutation_id(value: &str) -> Result<(), ProtocolError> {
+    if (8..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidMutationId)
     }
 }
 
@@ -2275,6 +2338,15 @@ mod tests {
             intent_id: "intent_0123456789abcdef".to_owned(),
         };
         assert!(!submit.direct_transport_read_only());
+
+        let mutate = AgentOperation::MutateExecution {
+            intent_id: "intent_0123456789abcdef".to_owned(),
+            mutation: ExecutionMutationRequest::Cancel {
+                mutation_id: "cancel_01234567".to_owned(),
+            },
+        };
+        mutate.validate().expect("valid mutation");
+        assert!(!mutate.direct_transport_read_only());
 
         let abort = AgentOperation::AbortReverseExecution {
             intent_id: "intent_0123456789abcdef".to_owned(),

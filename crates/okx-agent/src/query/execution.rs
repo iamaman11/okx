@@ -4,7 +4,7 @@ use okx_analysis::{
     TRADING_MANDATE_SCHEMA_V1, TcaFillOutcome, TcaReference, TcaSide, analyze_candidate_order,
     analyze_execution_tca_report, analyze_portfolio_risk,
 };
-use okx_api::{InstrumentType, MUTATION_REQUEST_TTL_MS, MarginMode};
+use okx_api::{InstrumentType, MUTATION_REQUEST_TTL_MS, MarginMode, MutationTiming};
 use okx_execution::{
     EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_STATUS_SCHEMA_V3, ExecutionAction,
     ExecutionDecisionReference, ExecutionIntent, ExecutionLedgerEntry, ExecutionLedgerError,
@@ -16,9 +16,10 @@ use okx_execution::{
     revalidate_hard_risk_policy, revalidate_venue_execution,
 };
 use okx_protocol::{
-    ExecutionEntryRequest, ExecutionLineageRequest, ExecutionOrderType, ExecutionPrepareSpec,
-    ExecutionReferencePriceBasis, ExecutionRiskBindingRequest, ExecutionTradeMode,
-    LiquidityRole as ProtocolLiquidityRole, PositionSide as ProtocolPositionSide,
+    ExecutionEntryRequest, ExecutionLineageRequest, ExecutionMutationRequest, ExecutionOrderType,
+    ExecutionPrepareSpec, ExecutionReferencePriceBasis, ExecutionRiskBindingRequest,
+    ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
+    PositionSide as ProtocolPositionSide,
 };
 
 use super::*;
@@ -47,6 +48,8 @@ pub const EXECUTION_RISK_POLICY_REJECTED_CODE: &str = "EXECUTION_RISK_POLICY_REJ
 pub const EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE: &str = "EXECUTION_RISK_EVIDENCE_UNAVAILABLE";
 pub const EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE: &str = "EXECUTION_RISK_EVIDENCE_NOT_FRESH";
 pub const EXECUTION_RECONCILIATION_FAILED_CODE: &str = "EXECUTION_RECONCILIATION_FAILED";
+pub const EXECUTION_RECONCILIATION_UNAVAILABLE_CODE: &str = "EXECUTION_RECONCILIATION_UNAVAILABLE";
+pub const EXECUTION_MUTATION_UNSAFE_CODE: &str = "EXECUTION_MUTATION_UNSAFE";
 
 pub(super) async fn dispatch(
     request: &AgentRequest,
@@ -85,6 +88,10 @@ pub(super) async fn dispatch(
         AgentOperation::SubmitPreparedExecution { intent_id } => {
             submit_prepared(request, context, generated_at, intent_id).await
         }
+        AgentOperation::MutateExecution {
+            intent_id,
+            mutation,
+        } => mutate_execution(request, context, generated_at, intent_id, mutation).await,
         AgentOperation::AbortReverseExecution { intent_id } => {
             abort_reverse_execution(request, context, generated_at, intent_id).await
         }
@@ -701,377 +708,14 @@ async fn submit_prepared(
         ));
     };
 
-    let account = match fresh_account(request, context, generated_at).await? {
-        FreshAccount::Ready(value) => value,
-        FreshAccount::Response(response) => return Ok(*response),
-    };
-    let preflight =
-        match executor_preflight_check(request, generated_at, execution, &account).await? {
-            ExecutorPreflightCheck::Ready(value) => value,
-            ExecutorPreflightCheck::Response(response) => return Ok(*response),
-        };
-    if !preflight.accepted {
-        return Ok(preflight_rejected(request, generated_at));
-    }
     let plan = entry.record.plan;
-    let Some(rules) = current_rules(context, &plan.instrument_id).await else {
-        return Ok(reference_not_found(
-            request,
-            generated_at,
-            &plan.instrument_id,
-        ));
-    };
-
-    let current_fee_generation = if plan.action.is_risk_increasing() {
-        let Some(observer) = context.account_fallback else {
-            return Ok(execution_unavailable(request, generated_at));
+    let admission =
+        match pre_mutation_admission(request, context, generated_at, execution, plan).await? {
+            PreMutationAdmissionResult::Ready(value) => value,
+            PreMutationAdmissionResult::Response(response) => return Ok(*response),
         };
-        let fees = match observer.fee_schedule(&rules).await {
-            Ok(value) => value,
-            Err(error) => return Ok(fee_schedule_failure(request, generated_at, error)),
-        };
-        Some(fees.fee_generation)
-    } else {
-        None
-    };
-
-    if let Err(error) =
-        revalidate_execution_plan(&plan, &rules, &account, current_fee_generation.as_deref())
-    {
-        return Ok(validation_failure(request, generated_at, error));
-    }
-
-    let Some(risk_binding) = plan.risk_binding.as_ref() else {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Rejected,
-            EXECUTION_RISK_POLICY_REQUIRED_CODE,
-            "prepared execution is missing the immutable mandate/hard-risk policy binding"
-                .to_owned(),
-            false,
-        ));
-    };
-    if risk_binding.mandate.schema != TRADING_MANDATE_SCHEMA_V1
-        || risk_binding.policy.schema != HARD_RISK_POLICY_SCHEMA_V1
-    {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Rejected,
-            EXECUTION_RISK_POLICY_REQUIRED_CODE,
-            "prepared execution carries an unsupported mandate/hard-risk policy schema".to_owned(),
-            false,
-        ));
-    }
-    let Some(observer) = context.account_fallback else {
-        return Ok(execution_unavailable(request, generated_at));
-    };
-    let Some(private_ws) = context.private_ws else {
-        return Ok(account_not_fresh(request, generated_at));
-    };
-    let risk_cursor = match private_ws.convergence_cursor().await {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Rejected,
-                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
-                format!("private account convergence cursor unavailable before risk read: {error}"),
-                true,
-            ));
-        }
-    };
-    let risk_facts = match observer.ledger_facts(&account).await {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Failed,
-                EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
-                error.to_string(),
-                true,
-            ));
-        }
-    };
-    if risk_facts
-        .summary
-        .history_coverage
-        .iter()
-        .any(|coverage| !coverage.complete_within_bound)
-    {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Rejected,
-            EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
-            "bounded account-history coverage is incomplete for pre-mutation risk".to_owned(),
-            true,
-        ));
-    }
-
-    let configured_leverage = if plan.action.is_risk_increasing() {
-        let margin_mode = match plan.trade_mode {
-            TradeMode::Cross => MarginMode::Cross,
-            TradeMode::Isolated => MarginMode::Isolated,
-        };
-        match observer
-            .configured_leverage(
-                &plan.instrument_id,
-                margin_mode,
-                plan.position_side.as_str(),
-            )
-            .await
-        {
-            Ok(value) => Some(value),
-            Err(error) => {
-                return Ok(failure_response(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Rejected,
-                    EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
-                    format!("configured leverage is not uniquely available: {error}"),
-                    true,
-                ));
-            }
-        }
-    } else {
-        None
-    };
-
-    match private_ws.convergence_window(risk_cursor).await {
-        Ok(window) if window.events.is_empty() => {}
-        Ok(window) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Rejected,
-                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
-                format!(
-                    "{} private account event(s) arrived while pre-mutation risk evidence was read",
-                    window.events.len()
-                ),
-                true,
-            ));
-        }
-        Err(error) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Rejected,
-                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
-                format!("private account coherence changed during pre-mutation risk read: {error}"),
-                true,
-            ));
-        }
-    }
-
-    let Some(rules_after_risk) = current_rules(context, &plan.instrument_id).await else {
-        return Ok(reference_not_fresh(request, generated_at));
-    };
-    if rules_after_risk.reference_generation != rules.reference_generation {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Rejected,
-            EXECUTION_REFERENCE_NOT_FRESH_CODE,
-            format!(
-                "reference generation changed during pre-mutation risk read: expected {}, observed {}",
-                rules.reference_generation, rules_after_risk.reference_generation
-            ),
-            true,
-        ));
-    }
-
-    let risk_candidate = if plan.action.is_risk_increasing() {
-        let Some(open_risk) = plan.open_risk.as_ref() else {
-            return Ok(validation_failure(
-                request,
-                generated_at,
-                okx_execution::ExecutionValidationError::MissingOpenRiskEvidence,
-            ));
-        };
-        let settle_currency = rules
-            .instrument
-            .settle_currency
-            .as_deref()
-            .unwrap_or_default();
-        if !matches!(settle_currency, "USD" | "USDT" | "USDC" | "USDG") {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Rejected,
-                EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
-                format!(
-                    "pre-mutation candidate USD equivalence is unsupported for settlement currency '{settle_currency}'"
-                ),
-                false,
-            ));
-        }
-        Some(PortfolioCandidate {
-            instrument: plan.instrument_id.clone(),
-            direction: match plan.position_side {
-                ExecutionPositionSide::Long => PositionDirection::Long,
-                ExecutionPositionSide::Short => PositionDirection::Short,
-            },
-            notional_usd: open_risk.entry_settle_notional.clone(),
-            worst_case_loss_usd: open_risk.stop_loss_settle.clone(),
-            leverage: configured_leverage
-                .clone()
-                .expect("risk-increasing execution acquired configured leverage"),
-        })
-    } else {
-        None
-    };
-
-    let risk_analysis = match analyze_portfolio_risk(
-        &account,
-        &risk_facts.summary,
-        risk_binding.mandate.clone(),
-        risk_binding.policy.clone(),
-        risk_candidate,
-        true,
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(analysis_failure(
-                request,
-                generated_at,
-                AgentResponseStatus::Rejected,
-                error,
-            ));
-        }
-    };
-    if let Err(error) = revalidate_hard_risk_policy(
-        &plan,
-        &risk_analysis,
-        &account.account_generation,
-        configured_leverage.as_deref(),
-    ) {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Rejected,
-            EXECUTION_RISK_POLICY_REJECTED_CODE,
-            error.to_string(),
-            false,
-        ));
-    }
-
-    let Some(public_ws) = context.public_ws else {
-        return Ok(reference_not_fresh(request, generated_at));
-    };
-    let public_state = public_ws.state();
-    if public_state.read().await.connection_state() != okx_runtime::PublicConnectionState::Connected
-    {
-        return Ok(reference_not_fresh(request, generated_at));
-    }
-
-    let venue = match execution.venue_execution_evidence(&plan, &rules).await {
-        Ok(value) => value,
-        Err(crate::AgentError::Okx(error)) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Failed,
-                EXECUTION_VENUE_UNAVAILABLE_CODE,
-                error.to_string(),
-                true,
-            ));
-        }
-        Err(crate::AgentError::Reference(error)) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Rejected,
-                EXECUTION_INPUT_INCONSISTENT_CODE,
-                error.to_string(),
-                false,
-            ));
-        }
-        Err(error) => return Err(error),
-    };
-
-    // Venue REST evidence can take long enough to consume the clock-evidence age budget.
-    // Sample exchange time only after all pre-mutation venue I/O is complete.
-    let clock = match execution.clock_evidence().await {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Failed,
-                EXECUTION_CLOCK_UNAVAILABLE_CODE,
-                error.to_string(),
-                true,
-            ));
-        }
-    };
-
-    let timing = match clock.mutation_timing(MUTATION_REQUEST_TTL_MS) {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Failed,
-                EXECUTION_CLOCK_UNSAFE_CODE,
-                error.to_string(),
-                true,
-            ));
-        }
-    };
-    if let Err(error) = revalidate_venue_execution(&plan, &rules, &venue, timing.exp_time_ms()) {
-        return Ok(validation_failure(request, generated_at, error));
-    }
-
-    // Risk evidence must still be current after all pre-mutation venue/clock I/O.
-    match private_ws.convergence_window(risk_cursor).await {
-        Ok(window) if window.events.is_empty() => {}
-        Ok(window) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Rejected,
-                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
-                format!(
-                    "{} private account event(s) arrived after risk evaluation and before mutation",
-                    window.events.len()
-                ),
-                true,
-            ));
-        }
-        Err(error) => {
-            return Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Rejected,
-                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
-                format!(
-                    "private account coherence changed after risk evaluation and before mutation: {error}"
-                ),
-                true,
-            ));
-        }
-    }
-    let Some(final_rules) = current_rules(context, &plan.instrument_id).await else {
-        return Ok(reference_not_fresh(request, generated_at));
-    };
-    if final_rules.reference_generation != rules.reference_generation {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Rejected,
-            EXECUTION_REFERENCE_NOT_FRESH_CODE,
-            format!(
-                "reference generation changed after risk evaluation and before mutation: expected {}, observed {}",
-                rules.reference_generation, final_rules.reference_generation
-            ),
-            true,
-        ));
-    }
+    let preflight = admission.preflight;
+    let timing = admission.timing;
 
     let observed_at_ms = timing.request_time_ms();
     let demo_acceptance = execution.demo_mutation_acceptance_requested();
@@ -1121,6 +765,690 @@ async fn submit_prepared(
             false,
         )),
     }
+}
+
+enum MutationReconciliationCheck {
+    Ready(Box<ExecutionLedgerEntry>),
+    Response(Box<AgentResponse>),
+}
+
+async fn reconcile_for_mutation(
+    request: &AgentRequest,
+    generated_at: &str,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+    intent_id: &str,
+) -> AgentResult<MutationReconciliationCheck> {
+    match execution.reconcile_once(intent_id, utc_now_ms()).await {
+        Ok(crate::execution_runtime::ExecutionReconciliation::NotRequired)
+        | Ok(crate::execution_runtime::ExecutionReconciliation::Reconciled) => {}
+        Ok(crate::execution_runtime::ExecutionReconciliation::Unavailable) => {
+            return Ok(MutationReconciliationCheck::Response(Box::new(
+                failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+                    "exact OKX order state is unavailable; mutation is blocked until exchange truth can be reconciled"
+                        .to_owned(),
+                    true,
+                ),
+            )));
+        }
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::IntentNotFound(_))) => {
+            return Ok(MutationReconciliationCheck::Response(Box::new(
+                failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    EXECUTION_RECORD_NOT_FOUND_CODE,
+                    "execution record was not found".to_owned(),
+                    false,
+                ),
+            )));
+        }
+        Err(
+            error @ (OrderExecutorError::ReconciliationIdentityMismatch
+            | OrderExecutorError::ProtectionIdentityMismatch
+            | OrderExecutorError::UnsupportedExchangeState(_)),
+        ) => {
+            return Ok(MutationReconciliationCheck::Response(Box::new(
+                failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    EXECUTION_RECONCILIATION_FAILED_CODE,
+                    error.to_string(),
+                    false,
+                ),
+            )));
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let Some(entry) = execution.entry(intent_id).await else {
+        return Ok(MutationReconciliationCheck::Response(Box::new(
+            failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RECORD_NOT_FOUND_CODE,
+                "execution record was not found after reconciliation".to_owned(),
+                false,
+            ),
+        )));
+    };
+    Ok(MutationReconciliationCheck::Ready(Box::new(entry)))
+}
+
+async fn cancel_mutation_admission(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+) -> AgentResult<PreMutationAdmissionResult> {
+    let account = match fresh_account(request, context, generated_at).await? {
+        FreshAccount::Ready(value) => value,
+        FreshAccount::Response(response) => {
+            return Ok(PreMutationAdmissionResult::Response(response));
+        }
+    };
+    let preflight =
+        match executor_preflight_check(request, generated_at, execution, &account).await? {
+            ExecutorPreflightCheck::Ready(value) => value,
+            ExecutorPreflightCheck::Response(response) => {
+                return Ok(PreMutationAdmissionResult::Response(response));
+            }
+        };
+    if !preflight.accepted {
+        return Ok(PreMutationAdmissionResult::Response(Box::new(
+            preflight_rejected(request, generated_at),
+        )));
+    }
+
+    let clock = match execution.clock_evidence().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(PreMutationAdmissionResult::Response(Box::new(
+                failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    EXECUTION_CLOCK_UNAVAILABLE_CODE,
+                    error.to_string(),
+                    true,
+                ),
+            )));
+        }
+    };
+    let timing = match clock.mutation_timing(MUTATION_REQUEST_TTL_MS) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(PreMutationAdmissionResult::Response(Box::new(
+                failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    EXECUTION_CLOCK_UNSAFE_CODE,
+                    error.to_string(),
+                    true,
+                ),
+            )));
+        }
+    };
+    Ok(PreMutationAdmissionResult::Ready(PreMutationAdmission {
+        preflight,
+        timing,
+    }))
+}
+
+async fn mutate_execution(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    intent_id: &str,
+    mutation: &ExecutionMutationRequest,
+) -> AgentResult<AgentResponse> {
+    let Some(execution) = context.execution else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    if !execution.demo_mutation_acceptance_requested() {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            LIVE_TRADING_DISABLED_CODE,
+            "execution mutation is disabled; only explicit OKX Demo acceptance mode can admit Stage 4C mutations"
+                .to_owned(),
+            false,
+        ));
+    }
+
+    let entry =
+        match reconcile_for_mutation(request, generated_at, execution, intent_id).await? {
+            MutationReconciliationCheck::Ready(value) => value,
+            MutationReconciliationCheck::Response(response) => return Ok(*response),
+        };
+
+    let (mutation_id, admission) = match mutation {
+        ExecutionMutationRequest::Amend {
+            mutation_id,
+            new_size,
+            new_price,
+        } => {
+            let shadow_plan = match execution
+                .amend_revalidation_plan(intent_id, new_size.clone(), new_price.clone())
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Rejected,
+                        EXECUTION_MUTATION_UNSAFE_CODE,
+                        error.to_string(),
+                        false,
+                    ));
+                }
+            };
+            let admission = match pre_mutation_admission(
+                request,
+                context,
+                generated_at,
+                execution,
+                shadow_plan,
+            )
+            .await?
+            {
+                PreMutationAdmissionResult::Ready(value) => value,
+                PreMutationAdmissionResult::Response(response) => return Ok(*response),
+            };
+            (mutation_id.as_str(), admission)
+        }
+        ExecutionMutationRequest::Cancel { mutation_id } => {
+            let admission =
+                match cancel_mutation_admission(request, context, generated_at, execution).await? {
+                    PreMutationAdmissionResult::Ready(value) => value,
+                    PreMutationAdmissionResult::Response(response) => return Ok(*response),
+                };
+            (mutation_id.as_str(), admission)
+        }
+    };
+
+    let observed_at_ms = admission
+        .timing
+        .request_time_ms()
+        .max(entry.updated_at_ms)
+        .max(utc_now_ms());
+    let prepared = match mutation {
+        ExecutionMutationRequest::Amend {
+            new_size,
+            new_price,
+            ..
+        } => {
+            execution
+                .prepare_amend(
+                    intent_id,
+                    mutation_id,
+                    new_size.clone(),
+                    new_price.clone(),
+                    observed_at_ms,
+                )
+                .await
+        }
+        ExecutionMutationRequest::Cancel { .. } => {
+            execution
+                .prepare_cancel(intent_id, mutation_id, observed_at_ms)
+                .await
+        }
+    };
+    if let Err(error) = prepared {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_INPUT_INCONSISTENT_CODE,
+            error.to_string(),
+            false,
+        ));
+    }
+
+    let submit = match execution
+        .submit_order_mutation_demo_authorized(
+            &admission.preflight,
+            intent_id,
+            mutation_id,
+            admission.timing,
+            observed_at_ms,
+        )
+        .await?
+    {
+        Some(result) => result,
+        None => return Ok(preflight_rejected(request, generated_at)),
+    };
+
+    match submit {
+        Ok(_) => execution_status_response(request, context, generated_at, intent_id).await,
+        Err(OrderExecutorError::Transition(ExecutionTransitionError::LiveTradingDisabled)) => {
+            Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                LIVE_TRADING_DISABLED_CODE,
+                "mutation authority was disabled before mutation persistence/send".to_owned(),
+                false,
+            ))
+        }
+        Err(error) => Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_INPUT_INCONSISTENT_CODE,
+            error.to_string(),
+            false,
+        )),
+    }
+}
+
+struct PreMutationAdmission {
+    preflight: crate::execution_preflight::ExecutorCredentialPreflight,
+    timing: MutationTiming,
+}
+
+enum PreMutationAdmissionResult {
+    Ready(PreMutationAdmission),
+    Response(Box<AgentResponse>),
+}
+
+async fn pre_mutation_admission(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+    plan: okx_execution::ExecutionPlan,
+) -> AgentResult<PreMutationAdmissionResult> {
+    macro_rules! admission_response {
+        ($response:expr) => {
+            return Ok(PreMutationAdmissionResult::Response(Box::new($response)))
+        };
+    }
+
+    let account = match fresh_account(request, context, generated_at).await? {
+        FreshAccount::Ready(value) => value,
+        FreshAccount::Response(response) => admission_response!(*response),
+    };
+    let preflight =
+        match executor_preflight_check(request, generated_at, execution, &account).await? {
+            ExecutorPreflightCheck::Ready(value) => value,
+            ExecutorPreflightCheck::Response(response) => admission_response!(*response),
+        };
+    if !preflight.accepted {
+        admission_response!(preflight_rejected(request, generated_at));
+    }
+    let Some(rules) = current_rules(context, &plan.instrument_id).await else {
+        admission_response!(reference_not_found(
+            request,
+            generated_at,
+            &plan.instrument_id,
+        ));
+    };
+
+    let current_fee_generation = if plan.action.is_risk_increasing() {
+        let Some(observer) = context.account_fallback else {
+            admission_response!(execution_unavailable(request, generated_at));
+        };
+        let fees = match observer.fee_schedule(&rules).await {
+            Ok(value) => value,
+            Err(error) => admission_response!(fee_schedule_failure(request, generated_at, error)),
+        };
+        Some(fees.fee_generation)
+    } else {
+        None
+    };
+
+    if let Err(error) =
+        revalidate_execution_plan(&plan, &rules, &account, current_fee_generation.as_deref())
+    {
+        admission_response!(validation_failure(request, generated_at, error));
+    }
+
+    let Some(risk_binding) = plan.risk_binding.as_ref() else {
+        admission_response!(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RISK_POLICY_REQUIRED_CODE,
+            "prepared execution is missing the immutable mandate/hard-risk policy binding"
+                .to_owned(),
+            false,
+        ));
+    };
+    if risk_binding.mandate.schema != TRADING_MANDATE_SCHEMA_V1
+        || risk_binding.policy.schema != HARD_RISK_POLICY_SCHEMA_V1
+    {
+        admission_response!(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RISK_POLICY_REQUIRED_CODE,
+            "prepared execution carries an unsupported mandate/hard-risk policy schema".to_owned(),
+            false,
+        ));
+    }
+    let Some(observer) = context.account_fallback else {
+        admission_response!(execution_unavailable(request, generated_at));
+    };
+    let Some(private_ws) = context.private_ws else {
+        admission_response!(account_not_fresh(request, generated_at));
+    };
+    let risk_cursor = match private_ws.convergence_cursor().await {
+        Ok(value) => value,
+        Err(error) => {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!("private account convergence cursor unavailable before risk read: {error}"),
+                true,
+            ));
+        }
+    };
+    let risk_facts = match observer.ledger_facts(&account).await {
+        Ok(value) => value,
+        Err(error) => {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+    if risk_facts
+        .summary
+        .history_coverage
+        .iter()
+        .any(|coverage| !coverage.complete_within_bound)
+    {
+        admission_response!(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+            "bounded account-history coverage is incomplete for pre-mutation risk".to_owned(),
+            true,
+        ));
+    }
+
+    let configured_leverage = if plan.action.is_risk_increasing() {
+        let margin_mode = match plan.trade_mode {
+            TradeMode::Cross => MarginMode::Cross,
+            TradeMode::Isolated => MarginMode::Isolated,
+        };
+        match observer
+            .configured_leverage(
+                &plan.instrument_id,
+                margin_mode,
+                plan.position_side.as_str(),
+            )
+            .await
+        {
+            Ok(value) => Some(value),
+            Err(error) => {
+                admission_response!(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
+                    format!("configured leverage is not uniquely available: {error}"),
+                    true,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    match private_ws.convergence_window(risk_cursor).await {
+        Ok(window) if window.events.is_empty() => {}
+        Ok(window) => {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!(
+                    "{} private account event(s) arrived while pre-mutation risk evidence was read",
+                    window.events.len()
+                ),
+                true,
+            ));
+        }
+        Err(error) => {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!("private account coherence changed during pre-mutation risk read: {error}"),
+                true,
+            ));
+        }
+    }
+
+    let Some(rules_after_risk) = current_rules(context, &plan.instrument_id).await else {
+        admission_response!(reference_not_fresh(request, generated_at));
+    };
+    if rules_after_risk.reference_generation != rules.reference_generation {
+        admission_response!(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_REFERENCE_NOT_FRESH_CODE,
+            format!(
+                "reference generation changed during pre-mutation risk read: expected {}, observed {}",
+                rules.reference_generation, rules_after_risk.reference_generation
+            ),
+            true,
+        ));
+    }
+
+    let risk_candidate = if plan.action.is_risk_increasing() {
+        let Some(open_risk) = plan.open_risk.as_ref() else {
+            admission_response!(validation_failure(
+                request,
+                generated_at,
+                okx_execution::ExecutionValidationError::MissingOpenRiskEvidence,
+            ));
+        };
+        let settle_currency = rules
+            .instrument
+            .settle_currency
+            .as_deref()
+            .unwrap_or_default();
+        if !matches!(settle_currency, "USD" | "USDT" | "USDC" | "USDG") {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
+                format!(
+                    "pre-mutation candidate USD equivalence is unsupported for settlement currency '{settle_currency}'"
+                ),
+                false,
+            ));
+        }
+        Some(PortfolioCandidate {
+            instrument: plan.instrument_id.clone(),
+            direction: match plan.position_side {
+                ExecutionPositionSide::Long => PositionDirection::Long,
+                ExecutionPositionSide::Short => PositionDirection::Short,
+            },
+            notional_usd: open_risk.entry_settle_notional.clone(),
+            worst_case_loss_usd: open_risk.stop_loss_settle.clone(),
+            leverage: configured_leverage
+                .clone()
+                .expect("risk-increasing execution acquired configured leverage"),
+        })
+    } else {
+        None
+    };
+
+    let risk_analysis = match analyze_portfolio_risk(
+        &account,
+        &risk_facts.summary,
+        risk_binding.mandate.clone(),
+        risk_binding.policy.clone(),
+        risk_candidate,
+        true,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            admission_response!(analysis_failure(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                error,
+            ));
+        }
+    };
+    if let Err(error) = revalidate_hard_risk_policy(
+        &plan,
+        &risk_analysis,
+        &account.account_generation,
+        configured_leverage.as_deref(),
+    ) {
+        admission_response!(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RISK_POLICY_REJECTED_CODE,
+            error.to_string(),
+            false,
+        ));
+    }
+
+    let Some(public_ws) = context.public_ws else {
+        admission_response!(reference_not_fresh(request, generated_at));
+    };
+    let public_state = public_ws.state();
+    if public_state.read().await.connection_state() != okx_runtime::PublicConnectionState::Connected
+    {
+        admission_response!(reference_not_fresh(request, generated_at));
+    }
+
+    let venue = match execution.venue_execution_evidence(&plan, &rules).await {
+        Ok(value) => value,
+        Err(crate::AgentError::Okx(error)) => {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_VENUE_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+        Err(crate::AgentError::Reference(error)) => {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_INPUT_INCONSISTENT_CODE,
+                error.to_string(),
+                false,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+
+    // Venue REST evidence can take long enough to consume the clock-evidence age budget.
+    // Sample exchange time only after all pre-mutation venue I/O is complete.
+    let clock = match execution.clock_evidence().await {
+        Ok(value) => value,
+        Err(error) => {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_CLOCK_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+
+    let timing = match clock.mutation_timing(MUTATION_REQUEST_TTL_MS) {
+        Ok(value) => value,
+        Err(error) => {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_CLOCK_UNSAFE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+    if let Err(error) = revalidate_venue_execution(&plan, &rules, &venue, timing.exp_time_ms()) {
+        admission_response!(validation_failure(request, generated_at, error));
+    }
+
+    // Risk evidence must still be current after all pre-mutation venue/clock I/O.
+    match private_ws.convergence_window(risk_cursor).await {
+        Ok(window) if window.events.is_empty() => {}
+        Ok(window) => {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!(
+                    "{} private account event(s) arrived after risk evaluation and before mutation",
+                    window.events.len()
+                ),
+                true,
+            ));
+        }
+        Err(error) => {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!(
+                    "private account coherence changed after risk evaluation and before mutation: {error}"
+                ),
+                true,
+            ));
+        }
+    }
+    let Some(final_rules) = current_rules(context, &plan.instrument_id).await else {
+        admission_response!(reference_not_fresh(request, generated_at));
+    };
+    if final_rules.reference_generation != rules.reference_generation {
+        admission_response!(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_REFERENCE_NOT_FRESH_CODE,
+            format!(
+                "reference generation changed after risk evaluation and before mutation: expected {}, observed {}",
+                rules.reference_generation, final_rules.reference_generation
+            ),
+            true,
+        ));
+    }
+
+
+    Ok(PreMutationAdmissionResult::Ready(PreMutationAdmission {
+        preflight,
+        timing,
+    }))
 }
 
 enum FreshAccount {
