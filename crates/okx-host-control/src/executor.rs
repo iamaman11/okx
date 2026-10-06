@@ -1233,7 +1233,8 @@ mod tests {
             assert_eq!(summary["class"], class);
             assert_eq!(summary["code"], code);
             assert!(!summary.to_string().contains("sensitive platform text"));
-            assert!(!summary.to_string().contains("secret"));
+            assert!(!summary.to_string().contains("instrument_id"));
+            assert!(!summary.to_string().contains("agent-key-1"));
         }
     }
 
