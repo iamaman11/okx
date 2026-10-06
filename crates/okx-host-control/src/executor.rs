@@ -24,7 +24,9 @@ use crate::{
 
 const CANONICAL_ROOT: &str = r"C:\okx";
 const RUNTIME_ROOT: &str = r"C:\okx-runtime";
+const DEMO_RUNTIME_ROOT: &str = r"C:\okx-runtime\demo";
 const AGENT_MAILBOX_ISSUE: &str = "10";
+const DEMO_ACCEPTANCE_MAILBOX_ISSUE: &str = "234";
 const AGENT_CLOUDFLARE_WS_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime";
 const AGENT_CLOUDFLARE_RUNTIME_ID: &str = "windows-primary";
 const HOST_CONTROL_CAPABILITIES_SCHEMA_V1: &str = "okx.host-control.capabilities/v1";
@@ -38,10 +40,18 @@ const ALLOWED_REMOTES: &[&str] = &[
     "git@github.com:iamaman11/okx.git",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum AgentRunMode {
+    Production,
+    DemoAcceptance,
+}
+
 pub struct HostExecutor {
     repo_root: PathBuf,
     agent_child: Option<Child>,
     agent_started_at: Option<Instant>,
+    agent_mode: Option<AgentRunMode>,
     agent_job: AgentJob,
     desired_store: DesiredStateStore,
     desired_agent: AgentDesired,
@@ -63,6 +73,7 @@ impl HostExecutor {
             repo_root: PathBuf::from(CANONICAL_ROOT),
             agent_child: None,
             agent_started_at: None,
+            agent_mode: None,
             agent_job: AgentJob::new()?,
             desired_store,
             desired_agent,
@@ -98,6 +109,8 @@ impl HostExecutor {
             HostControlOperation::StartAgent => self.start_agent(),
             HostControlOperation::StopAgent => self.stop_agent(),
             HostControlOperation::RestartAgent => self.restart_agent(),
+            HostControlOperation::StartDemoAcceptance => self.start_demo_acceptance(),
+            HostControlOperation::ExitDemoAcceptance => self.exit_demo_acceptance(),
             HostControlOperation::InstallAutostart => autostart::install(),
             HostControlOperation::AutostartStatus => autostart::status_value(),
             HostControlOperation::HandoffToAutostart
@@ -211,6 +224,7 @@ impl HostExecutor {
             "installed_agent": installed_agent,
             "agent_binary_present": agent_binary.is_file(),
             "agent_owned_running": running,
+            "agent_mode": self.agent_mode,
             "agent_desired": self.desired_agent,
             "desired_state_path": self.desired_store.path(),
             "desired_state_error": self.desired_error.clone(),
@@ -463,6 +477,55 @@ impl HostExecutor {
         Ok(json!({
             "disposition": "RESTARTED",
             "pid": pid,
+            "mode": self.agent_mode,
+            "desired": self.desired_agent
+        }))
+    }
+
+    fn start_demo_acceptance(&mut self) -> HostControlResult<Value> {
+        self.require_agent_binary()?;
+        let _ = self.terminate_agent_owned();
+
+        let pid = match self.start_demo_agent_process() {
+            Ok(pid) => pid,
+            Err(error) => {
+                let _ = self.start_agent_process();
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.persist_desired(AgentDesired::Running) {
+            let _ = self.terminate_agent_owned();
+            let _ = self.start_agent_process();
+            return Err(error);
+        }
+        self.restart_attempt = 0;
+        self.next_restart_at = None;
+
+        Ok(json!({
+            "disposition": "DEMO_ACCEPTANCE_STARTED",
+            "pid": pid,
+            "mode": self.agent_mode,
+            "root": DEMO_RUNTIME_ROOT,
+            "mailbox_issue": 234,
+            "cloudflare_attached": false,
+            "desired": self.desired_agent
+        }))
+    }
+
+    fn exit_demo_acceptance(&mut self) -> HostControlResult<Value> {
+        let _ = self.terminate_agent_owned();
+        let pid = self.start_agent_process()?;
+        if let Err(error) = self.persist_desired(AgentDesired::Running) {
+            let _ = self.terminate_agent_owned();
+            return Err(error);
+        }
+        self.restart_attempt = 0;
+        self.next_restart_at = None;
+
+        Ok(json!({
+            "disposition": "PRODUCTION_READ_ONLY_RESTORED",
+            "pid": pid,
+            "mode": self.agent_mode,
             "desired": self.desired_agent
         }))
     }
@@ -583,20 +646,44 @@ impl HostExecutor {
     }
 
     fn start_agent_process(&mut self) -> HostControlResult<u32> {
+        self.spawn_agent_process(
+            production_agent_args(),
+            self.runtime_dir(),
+            "okx-agent",
+            AgentRunMode::Production,
+        )
+    }
+
+    fn start_demo_agent_process(&mut self) -> HostControlResult<u32> {
+        self.spawn_agent_process(
+            demo_acceptance_agent_args(),
+            PathBuf::from(DEMO_RUNTIME_ROOT),
+            "okx-agent-demo",
+            AgentRunMode::DemoAcceptance,
+        )
+    }
+
+    fn spawn_agent_process(
+        &mut self,
+        args: Vec<String>,
+        log_dir: PathBuf,
+        log_prefix: &str,
+        mode: AgentRunMode,
+    ) -> HostControlResult<u32> {
         self.require_agent_binary()?;
-        fs::create_dir_all(self.runtime_dir())?;
+        fs::create_dir_all(&log_dir)?;
 
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.runtime_dir().join("okx-agent.stdout.log"))?;
+            .open(log_dir.join(format!("{log_prefix}.stdout.log")))?;
         let stderr = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.runtime_dir().join("okx-agent.stderr.log"))?;
+            .open(log_dir.join(format!("{log_prefix}.stderr.log")))?;
 
         let mut child = hidden_command(self.agent_binary())
-            .args(production_agent_args())
+            .args(args)
             .current_dir(&self.repo_root)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
@@ -606,6 +693,7 @@ impl HostExecutor {
         let pid = child.id();
         self.agent_child = Some(child);
         self.agent_started_at = Some(Instant::now());
+        self.agent_mode = Some(mode);
         self.next_restart_at = None;
         Ok(pid)
     }
@@ -613,6 +701,7 @@ impl HostExecutor {
     fn terminate_agent_owned(&mut self) -> HostControlResult<()> {
         let Some(mut child) = self.agent_child.take() else {
             self.agent_started_at = None;
+            self.agent_mode = None;
             return Ok(());
         };
 
@@ -621,6 +710,7 @@ impl HostExecutor {
             child.wait()?;
         }
         self.agent_started_at = None;
+        self.agent_mode = None;
         Ok(())
     }
 
@@ -763,7 +853,7 @@ impl HostExecutor {
     }
 }
 
-fn production_agent_args() -> [&'static str; 7] {
+fn production_agent_args() -> Vec<String> {
     [
         "run",
         "--mailbox-issue",
@@ -773,6 +863,24 @@ fn production_agent_args() -> [&'static str; 7] {
         "--cloudflare-runtime-id",
         AGENT_CLOUDFLARE_RUNTIME_ID,
     ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn demo_acceptance_agent_args() -> Vec<String> {
+    [
+        "--root",
+        DEMO_RUNTIME_ROOT,
+        "--demo",
+        "run",
+        "--mailbox-issue",
+        DEMO_ACCEPTANCE_MAILBOX_ISSUE,
+        "--demo-mutation-acceptance",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn bounded_utf8(value: &str, max_bytes: usize) -> String {
@@ -858,9 +966,27 @@ mod tests {
     #[test]
     fn production_agent_launch_uses_agent_owned_data_poll_default() {
         let args = production_agent_args();
-        assert!(!args.contains(&"--poll-seconds"));
-        assert!(args.contains(&"--cloudflare-ws-url"));
-        assert!(args.contains(&"--mailbox-issue"));
+        assert!(!args.iter().any(|arg| arg == "--poll-seconds"));
+        assert!(args.iter().any(|arg| arg == "--cloudflare-ws-url"));
+        assert!(args.iter().any(|arg| arg == "--mailbox-issue"));
+        assert!(!args.iter().any(|arg| arg == "--demo"));
+        assert!(!args.iter().any(|arg| arg == "--demo-mutation-acceptance"));
+    }
+
+    #[test]
+    fn demo_acceptance_launch_is_isolated_and_has_no_cloudflare_transport() {
+        let args = demo_acceptance_agent_args();
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--root" && pair[1] == DEMO_RUNTIME_ROOT
+        }));
+        assert!(args.iter().any(|arg| arg == "--demo"));
+        assert!(args.iter().any(|arg| arg == "--demo-mutation-acceptance"));
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--mailbox-issue" && pair[1] == DEMO_ACCEPTANCE_MAILBOX_ISSUE
+        }));
+        assert!(!args.iter().any(|arg| arg == "--cloudflare-ws-url"));
+        assert_ne!(DEMO_RUNTIME_ROOT, RUNTIME_ROOT);
+        assert_ne!(DEMO_ACCEPTANCE_MAILBOX_ISSUE, AGENT_MAILBOX_ISSUE);
     }
 
     #[test]
