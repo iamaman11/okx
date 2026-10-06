@@ -554,13 +554,13 @@ where
             .cloned()
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
 
-        if !matches!(
+        if !(matches!(
             entry.record.state,
             ExecutionState::Acknowledged
                 | ExecutionState::UnknownSubmission
                 | ExecutionState::Live
                 | ExecutionState::PartiallyFilled
-        ) && !(entry.record.state.is_terminal()
+        ) || entry.record.state.is_terminal()
             && entry.record.protection_requires_reconciliation())
         {
             return Err(OrderExecutorError::NotReconcilable(entry.record.state));
