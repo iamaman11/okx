@@ -238,6 +238,34 @@ impl AccountHistoryApi {
         .await
     }
 
+    pub async fn fills_history_for_order(
+        &self,
+        instrument_type: InstrumentType,
+        instrument_id: &str,
+        order_id: &str,
+    ) -> Result<BoundedHistory<FillHistory>, OkxError> {
+        if instrument_id.trim().is_empty() {
+            return Err(OkxError::Config(
+                "fills-history instrument_id must be non-empty".to_owned(),
+            ));
+        }
+        if order_id.trim().is_empty() {
+            return Err(OkxError::Config(
+                "fills-history order_id must be non-empty".to_owned(),
+            ));
+        }
+        self.bounded_history(
+            "/api/v5/trade/fills-history",
+            vec![
+                ("instType", instrument_type.to_string()),
+                ("instId", instrument_id.to_owned()),
+                ("ordId", order_id.to_owned()),
+            ],
+            |row: &FillHistory| row.bill_id.as_str(),
+        )
+        .await
+    }
+
     pub async fn bills_history(&self) -> Result<BoundedHistory<AccountBill>, OkxError> {
         self.bounded_history(
             "/api/v5/account/bills-archive",
@@ -361,6 +389,12 @@ mod tests {
         assert_eq!(bill.bill_sub_type, "173");
         assert_eq!(bill.position_balance_change, "-0.05");
         assert_eq!(bill.timestamp_ms, "1790884800000");
+    }
+
+    #[test]
+    fn order_filtered_fill_history_remains_one_bounded_page() {
+        assert_eq!(HISTORY_PAGE_LIMIT, 100);
+        assert_eq!(HISTORY_MAX_PAGES, 1);
     }
 
     #[test]
