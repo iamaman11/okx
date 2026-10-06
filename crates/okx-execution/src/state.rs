@@ -437,13 +437,13 @@ impl ExecutionRecord {
         protection_resolution: Option<ProtectiveOrderResolution>,
     ) -> Result<(), ExecutionTransitionError> {
         let target = execution_state(exchange_state);
-        if !matches!(
+        if !(matches!(
             self.state,
             ExecutionState::Acknowledged
                 | ExecutionState::UnknownSubmission
                 | ExecutionState::Live
                 | ExecutionState::PartiallyFilled
-        ) && !(self.state.is_terminal() && self.state == target)
+        ) || self.state.is_terminal() && self.state == target)
         {
             return Err(ExecutionTransitionError::InvalidTransition {
                 from: self.state,
