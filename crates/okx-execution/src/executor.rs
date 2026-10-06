@@ -578,8 +578,9 @@ where
 
         let state = map_exchange_state(&order.state)?;
         let mutation_resolution = validate_order_identity(&entry.record, &order, state)?;
-        let protection_resolution =
-            self.protection_resolution(&entry.record, &order, state).await?;
+        let protection_resolution = self
+            .protection_resolution(&entry.record, &order, state)
+            .await?;
         let entry = self.ledger.reconcile_found_with_resolutions(
             intent_id,
             order.order_id,
@@ -1394,10 +1395,16 @@ mod tests {
         let attached = &request.attached_algo_orders[0];
         assert_eq!(attached.client_order_id, protection.algo_client_order_id);
         assert_eq!(attached.take_profit_trigger_price, "0.12");
-        assert_eq!(attached.take_profit_trigger_price_type, ApiTriggerPriceType::Mark);
+        assert_eq!(
+            attached.take_profit_trigger_price_type,
+            ApiTriggerPriceType::Mark
+        );
         assert_eq!(attached.take_profit_order_price, "-1");
         assert_eq!(attached.stop_loss_trigger_price, "0.09");
-        assert_eq!(attached.stop_loss_trigger_price_type, ApiTriggerPriceType::Mark);
+        assert_eq!(
+            attached.stop_loss_trigger_price_type,
+            ApiTriggerPriceType::Mark
+        );
         assert_eq!(attached.stop_loss_order_price, "-1");
     }
 
@@ -1455,13 +1462,15 @@ mod tests {
             ),
             Err(OrderExecutorError::ProtectedOrderAmendUnsupported)
         ));
-        assert!(executor
-            .ledger()
-            .get(&plan.intent_id)
-            .expect("entry")
-            .record
-            .mutations
-            .is_empty());
+        assert!(
+            executor
+                .ledger()
+                .get(&plan.intent_id)
+                .expect("entry")
+                .record
+                .mutations
+                .is_empty()
+        );
         assert_eq!(
             executor
                 .ledger()
