@@ -9,6 +9,7 @@ const PLACE_ORDER_PATH: &str = "/api/v5/trade/order";
 const CANCEL_ORDER_PATH: &str = "/api/v5/trade/cancel-order";
 const AMEND_ORDER_PATH: &str = "/api/v5/trade/amend-order";
 const ORDER_DETAILS_PATH: &str = "/api/v5/trade/order";
+const ALGO_ORDER_DETAILS_PATH: &str = "/api/v5/trade/order-algo";
 const ACCOUNT_RATE_LIMIT_PATH: &str = "/api/v5/trade/account-rate-limit";
 pub const ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1: &str = "okx.account-rate-limit/v1";
 
@@ -42,6 +43,33 @@ pub enum ApiOrderType {
     Ioc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiTriggerPriceType {
+    Last,
+    Index,
+    Mark,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachedAlgoOrderRequest {
+    #[serde(rename = "attachAlgoClOrdId")]
+    pub client_order_id: String,
+    #[serde(rename = "tpTriggerPx")]
+    pub take_profit_trigger_price: String,
+    #[serde(rename = "tpTriggerPxType")]
+    pub take_profit_trigger_price_type: ApiTriggerPriceType,
+    #[serde(rename = "tpOrdPx")]
+    pub take_profit_order_price: String,
+    #[serde(rename = "slTriggerPx")]
+    pub stop_loss_trigger_price: String,
+    #[serde(rename = "slTriggerPxType")]
+    pub stop_loss_trigger_price_type: ApiTriggerPriceType,
+    #[serde(rename = "slOrdPx")]
+    pub stop_loss_order_price: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlaceOrderRequest {
@@ -60,6 +88,8 @@ pub struct PlaceOrderRequest {
     pub size: String,
     #[serde(rename = "px")]
     pub price: String,
+    #[serde(rename = "attachAlgoOrds", default, skip_serializing_if = "Vec::is_empty")]
+    pub attached_algo_orders: Vec<AttachedAlgoOrderRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +221,32 @@ pub struct TradeOrderDetails {
     pub creation_time_ms: String,
     #[serde(rename = "uTime", default)]
     pub update_time_ms: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TradeAlgoOrderDetails {
+    #[serde(rename = "instId", default)]
+    pub instrument_id: String,
+    #[serde(rename = "algoId", default)]
+    pub algo_order_id: String,
+    #[serde(rename = "algoClOrdId", default)]
+    pub client_order_id: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(rename = "tpTriggerPx", default)]
+    pub take_profit_trigger_price: String,
+    #[serde(rename = "tpTriggerPxType", default)]
+    pub take_profit_trigger_price_type: String,
+    #[serde(rename = "tpOrdPx", default)]
+    pub take_profit_order_price: String,
+    #[serde(rename = "slTriggerPx", default)]
+    pub stop_loss_trigger_price: String,
+    #[serde(rename = "slTriggerPxType", default)]
+    pub stop_loss_trigger_price_type: String,
+    #[serde(rename = "slOrdPx", default)]
+    pub stop_loss_order_price: String,
+    #[serde(rename = "failCode", default)]
+    pub failure_code: String,
 }
 
 #[derive(Clone)]
@@ -414,6 +470,35 @@ impl TradeApi {
         }
         Ok(order)
     }
+
+    pub async fn algo_order_by_client_id(
+        &self,
+        client_order_id: &str,
+    ) -> Result<TradeAlgoOrderDetails, OkxError> {
+        validate_client_id("algoClOrdId", client_order_id)?;
+
+        let mut orders: Vec<TradeAlgoOrderDetails> = self
+            .client
+            .private_get(
+                ALGO_ORDER_DETAILS_PATH,
+                &[("algoClOrdId", client_order_id.to_owned())],
+            )
+            .await?;
+
+        if orders.len() != 1 {
+            return Err(OkxError::Response(format!(
+                "expected exactly one algo order detail, found {}",
+                orders.len()
+            )));
+        }
+        let order = orders.remove(0);
+        if order.client_order_id != client_order_id {
+            return Err(OkxError::Response(
+                "algo order detail identity does not match requested algoClOrdId".to_owned(),
+            ));
+        }
+        Ok(order)
+    }
 }
 
 fn parse_positive_u32(field: &str, value: &str) -> Result<u32, OkxError> {
@@ -464,7 +549,15 @@ fn validate_place(request: &PlaceOrderRequest) -> Result<(), OkxError> {
     validate_instrument_id(&request.instrument_id)?;
     validate_client_id("clOrdId", &request.client_order_id)?;
     validate_nonempty("sz", &request.size)?;
-    validate_nonempty("px", &request.price)
+    validate_nonempty("px", &request.price)?;
+    for attached in &request.attached_algo_orders {
+        validate_client_id("attachAlgoClOrdId", &attached.client_order_id)?;
+        validate_nonempty("tpTriggerPx", &attached.take_profit_trigger_price)?;
+        validate_nonempty("tpOrdPx", &attached.take_profit_order_price)?;
+        validate_nonempty("slTriggerPx", &attached.stop_loss_trigger_price)?;
+        validate_nonempty("slOrdPx", &attached.stop_loss_order_price)?;
+    }
+    Ok(())
 }
 
 fn validate_amend(request: &AmendOrderRequest) -> Result<(), OkxError> {
@@ -529,6 +622,7 @@ mod tests {
             order_type: ApiOrderType::Limit,
             size: "1.25".to_owned(),
             price: "0.10000".to_owned(),
+            attached_algo_orders: Vec::new(),
         }
     }
 
@@ -543,6 +637,61 @@ mod tests {
         assert_eq!(encoded["sz"], "1.25");
         assert_eq!(encoded["px"], "0.10000");
         assert!(encoded.get("reduceOnly").is_none());
+    }
+
+    #[test]
+    fn attached_tp_sl_payload_is_exact_and_explicit() {
+        let mut request = place();
+        request.attached_algo_orders = vec![AttachedAlgoOrderRequest {
+            client_order_id: "prx01234567890123456789012345678".to_owned(),
+            take_profit_trigger_price: "0.12000".to_owned(),
+            take_profit_trigger_price_type: ApiTriggerPriceType::Mark,
+            take_profit_order_price: "-1".to_owned(),
+            stop_loss_trigger_price: "0.09000".to_owned(),
+            stop_loss_trigger_price_type: ApiTriggerPriceType::Mark,
+            stop_loss_order_price: "-1".to_owned(),
+        }];
+
+        validate_place(&request).expect("valid attached protection");
+        let encoded = serde_json::to_value(request).expect("serialize");
+        let attached = &encoded["attachAlgoOrds"][0];
+        assert_eq!(
+            attached["attachAlgoClOrdId"],
+            "prx01234567890123456789012345678"
+        );
+        assert_eq!(attached["tpTriggerPx"], "0.12000");
+        assert_eq!(attached["tpTriggerPxType"], "mark");
+        assert_eq!(attached["tpOrdPx"], "-1");
+        assert_eq!(attached["slTriggerPx"], "0.09000");
+        assert_eq!(attached["slTriggerPxType"], "mark");
+        assert_eq!(attached["slOrdPx"], "-1");
+    }
+
+    #[test]
+    fn algo_detail_preserves_protective_identity_and_terms() {
+        let detail: TradeAlgoOrderDetails = serde_json::from_str(
+            r#"{
+                "instId":"DOGE-USDT-SWAP",
+                "algoId":"123456",
+                "algoClOrdId":"prx01234567890123456789012345678",
+                "state":"effective",
+                "tpTriggerPx":"0.12",
+                "tpTriggerPxType":"mark",
+                "tpOrdPx":"-1",
+                "slTriggerPx":"0.09",
+                "slTriggerPxType":"mark",
+                "slOrdPx":"-1",
+                "failCode":""
+            }"#,
+        )
+        .expect("decode");
+        assert_eq!(detail.instrument_id, "DOGE-USDT-SWAP");
+        assert_eq!(detail.algo_order_id, "123456");
+        assert_eq!(
+            detail.client_order_id,
+            "prx01234567890123456789012345678"
+        );
+        assert_eq!(detail.state, "effective");
     }
 
     #[test]
