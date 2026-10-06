@@ -12,7 +12,8 @@ use thiserror::Error;
 
 use crate::{
     DurableExecutionLedger, ExchangeOrderState, ExecutionLedgerEntry, ExecutionLedgerError,
-    ExecutionPlan, ExecutionRecord, ExecutionState, ExecutionTransitionError,
+    ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
+    ExecutionTransitionError,
     MutationPrepareDisposition, OrderMutationKind, OrderMutationRecord, OrderMutationResolution,
     OrderMutationState, OrderSide, OrderType, PositionSide, PrepareOutcome,
     ProtectiveOrderResolution, ProtectiveTriggerPriceBasis, TradeMode, classify_prepare_result,
@@ -263,8 +264,18 @@ where
         plan: ExecutionPlan,
         observed_at_ms: u64,
     ) -> Result<PrepareOutcome, OrderExecutorError> {
+        self.prepare_with_lineage(plan, None, observed_at_ms)
+    }
+
+    pub fn prepare_with_lineage(
+        &mut self,
+        plan: ExecutionPlan,
+        lineage: Option<ExecutionLineageBinding>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
         Ok(classify_prepare_result(
-            self.ledger.prepare(plan, observed_at_ms),
+            self.ledger
+                .prepare_with_lineage(plan, lineage, observed_at_ms),
         )?)
     }
 
@@ -274,11 +285,29 @@ where
         target_position_side: PositionSide,
         observed_at_ms: u64,
     ) -> Result<PrepareOutcome, OrderExecutorError> {
-        Ok(classify_prepare_result(self.ledger.prepare_reverse_close(
+        self.prepare_reverse_close_with_lineage(
             plan,
             target_position_side,
+            None,
             observed_at_ms,
-        ))?)
+        )
+    }
+
+    pub fn prepare_reverse_close_with_lineage(
+        &mut self,
+        plan: ExecutionPlan,
+        target_position_side: PositionSide,
+        lineage: Option<ExecutionLineageBinding>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
+        Ok(classify_prepare_result(
+            self.ledger.prepare_reverse_close_with_lineage(
+                plan,
+                target_position_side,
+                lineage,
+                observed_at_ms,
+            ),
+        )?)
     }
 
     pub fn prepare_reverse_open(
