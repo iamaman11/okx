@@ -356,9 +356,7 @@ impl ExecutionRuntime {
             Ok(okx_execution::ReconcileDisposition::Unavailable(_)) => {
                 Ok(ExecutionReconciliation::Unavailable)
             }
-            Err(OrderExecutorError::NotReconcilable(_)) => {
-                Ok(ExecutionReconciliation::NotRequired)
-            }
+            Err(OrderExecutorError::NotReconcilable(_)) => Ok(ExecutionReconciliation::NotRequired),
             Err(error) => Err(error),
         }
     }
