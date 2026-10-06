@@ -1162,12 +1162,7 @@ mod tests {
             .acknowledge(&plan.intent_id, "ord-1", 103)
             .expect("ack");
         ledger
-            .reconcile_found(
-                &plan.intent_id,
-                "ord-1",
-                ExchangeOrderState::Live,
-                104,
-            )
+            .reconcile_found(&plan.intent_id, "ord-1", ExchangeOrderState::Live, 104)
             .expect("live");
         (root, ledger)
     }
@@ -1524,13 +1519,15 @@ mod tests {
             error,
             OrderExecutorError::InvalidMutationInput("amend must change size and/or price")
         ));
-        assert!(executor
-            .ledger()
-            .get(&plan.intent_id)
-            .expect("entry")
-            .record
-            .mutations
-            .is_empty());
+        assert!(
+            executor
+                .ledger()
+                .get(&plan.intent_id)
+                .expect("entry")
+                .record
+                .mutations
+                .is_empty()
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1667,11 +1664,8 @@ mod tests {
         let mutation_id = "mutation_cancel_012345";
         let mut filled = order_details(&plan, "filled");
         filled.accumulated_fill_size = plan.size.clone();
-        let gateway = MutationGateway::new(
-            vec![],
-            vec![Ok(mutation_ack(&plan, ""))],
-            vec![Ok(filled)],
-        );
+        let gateway =
+            MutationGateway::new(vec![], vec![Ok(mutation_ack(&plan, ""))], vec![Ok(filled)]);
         let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
         executor
             .prepare_cancel(&plan.intent_id, mutation_id, 105)
