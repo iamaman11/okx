@@ -30,6 +30,13 @@ use crate::{
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionReconciliation {
+    NotRequired,
+    Reconciled,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionRuntimeMode {
     ReadOnly,
     DemoAcceptance,
@@ -331,6 +338,29 @@ impl ExecutionRuntime {
 
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {
         self.executor.lock().await.ledger().get(intent_id).cloned()
+    }
+
+    pub async fn reconcile_once(
+        &self,
+        intent_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionReconciliation, OrderExecutorError> {
+        let mut executor = self.executor.lock().await;
+        if executor.ledger().get(intent_id).is_none() {
+            return Err(ExecutionLedgerError::IntentNotFound(intent_id.to_owned()).into());
+        }
+        match executor.reconcile(intent_id, observed_at_ms).await {
+            Ok(okx_execution::ReconcileDisposition::Found(_)) => {
+                Ok(ExecutionReconciliation::Reconciled)
+            }
+            Ok(okx_execution::ReconcileDisposition::Unavailable(_)) => {
+                Ok(ExecutionReconciliation::Unavailable)
+            }
+            Err(OrderExecutorError::NotReconcilable(_)) => {
+                Ok(ExecutionReconciliation::NotRequired)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn status(&self, intent_id: &str) -> AgentResult<Option<ExecutionStatusEnvelope>> {
