@@ -7,8 +7,10 @@ mod state;
 mod validation;
 
 pub use contract::{
-    EXECUTION_STATUS_SCHEMA_V1, ExecutionStatusSnapshot, PrepareDeferral, PrepareFailure,
-    PrepareOutcome, PrepareRejection, classify_prepare_result, execution_status,
+    EXECUTION_STATUS_SCHEMA_V1, EXECUTION_STATUS_SCHEMA_V2, ExecutionStatusEnvelope,
+    ExecutionStatusSnapshot, PrepareDeferral, PrepareFailure, PrepareOutcome, PrepareRejection,
+    ReverseExecutionStage, ReverseExecutionStatus, classify_prepare_result, execution_status,
+    execution_status_with_ledger,
 };
 pub use executor::{
     ExecutionGateway, MutationSubmitDisposition, OrderExecutor, OrderExecutorError,
