@@ -1826,7 +1826,17 @@ mod tests {
             execution: okx_execution::execution_status(&entry).expect("status"),
             reverse: None,
             lineage: entry.record.lineage.clone(),
-            protection: entry.record.protection.clone(),
+            protection: entry.record.protection.as_ref().map(|value| {
+                okx_execution::ProtectiveExecutionStatus {
+                    policy_version: value.policy_version.clone(),
+                    algo_client_order_id: value.algo_client_order_id.clone(),
+                    trigger_price_basis: value.trigger_price_basis,
+                    status: value.status,
+                    algo_order_id_present: value.algo_order_id.is_some(),
+                    covered_size: value.covered_size.clone(),
+                    failure_code: value.failure_code.clone(),
+                }
+            }),
             submission_timing: entry
                 .record
                 .submission_timing
