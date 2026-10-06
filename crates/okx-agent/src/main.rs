@@ -22,8 +22,10 @@ use okx_agent::{
     },
     market_bootstrap::MarketBootstrapper,
     okx_credentials::{
-        load_native_executor_okx_credentials, load_native_okx_credentials,
-        store_native_executor_okx_credentials, store_native_okx_credentials,
+        load_native_executor_okx_credentials_for_environment,
+        load_native_okx_credentials_for_environment, store_native_demo_executor_okx_credentials,
+        store_native_demo_okx_credentials, store_native_executor_okx_credentials,
+        store_native_okx_credentials,
     },
     once::{ObservationQueryContext, process_once_now},
     reference_bootstrap::bootstrap_reference,
@@ -76,6 +78,12 @@ enum Command {
     /// Store the separate Read + Trade OKX executor credential payload from stdin.
     SetExecutorOkxCredentials,
 
+    /// Store the read-only OKX Demo observer credential payload from stdin.
+    SetDemoOkxCredentials,
+
+    /// Store the separate Read + Trade OKX Demo executor credential payload from stdin.
+    SetDemoExecutorOkxCredentials,
+
     /// Process one encrypted mailbox envelope from a file or stdin.
     Once {
         #[arg(long)]
@@ -96,6 +104,10 @@ enum Command {
 
         #[arg(long, default_value = "windows-primary")]
         cloudflare_runtime_id: String,
+
+        /// Explicitly admit bounded OKX Demo mutation acceptance. Requires --demo.
+        #[arg(long)]
+        demo_mutation_acceptance: bool,
     },
 }
 
@@ -176,6 +188,32 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 })
             );
         }
+        Command::SetDemoOkxCredentials => {
+            let mut payload = read_stdin()?;
+            let result = store_native_demo_okx_credentials(&payload);
+            payload.zeroize();
+            result?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.agent.demo-okx-credentials/v1",
+                    "stored": true
+                })
+            );
+        }
+        Command::SetDemoExecutorOkxCredentials => {
+            let mut payload = read_stdin()?;
+            let result = store_native_demo_executor_okx_credentials(&payload);
+            payload.zeroize();
+            result?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.agent.demo-executor-okx-credentials/v1",
+                    "stored": true
+                })
+            );
+        }
         Command::Once { input } => {
             let payload = read_input(input)?;
             let envelope: MailboxEnvelope = serde_json::from_str(&payload)?;
@@ -205,7 +243,11 @@ async fn run(cli: Cli) -> AgentResult<()> {
             poll_seconds,
             cloudflare_ws_url,
             cloudflare_runtime_id,
+            demo_mutation_acceptance,
         } => {
+            if demo_mutation_acceptance && !environment.demo {
+                return Err(AgentError::DemoMutationAcceptanceRequiresDemoEnvironment);
+            }
             let identity = load_native_identity(&config.key_id)?;
             if let Some(mailbox_issue) = mailbox_issue {
                 let token = load_native_github_token()?;
@@ -227,8 +269,12 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     reference,
                     rate_budget.clone(),
                 );
-                let execution =
-                    optional_execution_runtime(&config, environment, rate_budget.clone());
+                let execution = optional_execution_runtime(
+                    &config,
+                    environment,
+                    rate_budget.clone(),
+                    demo_mutation_acceptance,
+                );
                 let cloudflare = cloudflare_ws_url.and_then(|ws_url| {
                     match load_native_cloudflare_token() {
                         Ok(token) => match CloudflareTransportConfig::new(
@@ -287,12 +333,16 @@ fn optional_execution_runtime(
     config: &AgentConfig,
     environment: OkxEnvironment,
     rate_budget: RateBudget,
+    demo_mutation_acceptance: bool,
 ) -> Option<ExecutionRuntime> {
-    let credentials = match load_native_executor_okx_credentials() {
+    let credentials = match load_native_executor_okx_credentials_for_environment(environment) {
         Ok(value) => value,
-        Err(AgentError::ExecutorOkxCredentialsNotFound) => {
+        Err(
+            AgentError::ExecutorOkxCredentialsNotFound
+            | AgentError::DemoExecutorOkxCredentialsNotFound,
+        ) => {
             eprintln!(
-                "OKX executor credential not provisioned; execution operations are NOT_READY"
+                "OKX executor credential for the selected environment is not provisioned; execution operations are NOT_READY"
             );
             return None;
         }
@@ -303,13 +353,24 @@ fn optional_execution_runtime(
     };
 
     let observed_at_ms = Utc::now().timestamp_millis().max(1) as u64;
-    match ExecutionRuntime::new(
-        &config.root,
-        environment,
-        credentials,
-        observed_at_ms,
-        rate_budget,
-    ) {
+    let runtime = if demo_mutation_acceptance {
+        ExecutionRuntime::new_demo_acceptance(
+            &config.root,
+            environment,
+            credentials,
+            observed_at_ms,
+            rate_budget,
+        )
+    } else {
+        ExecutionRuntime::new(
+            &config.root,
+            environment,
+            credentials,
+            observed_at_ms,
+            rate_budget,
+        )
+    };
+    match runtime {
         Ok(value) => Some(value),
         Err(error) => {
             eprintln!("execution runtime unavailable: {error}");
@@ -326,7 +387,7 @@ fn optional_private_components(
     Option<PrivateWsCoordinator>,
     Option<PrivateWsHandle>,
 ) {
-    match load_native_okx_credentials() {
+    match load_native_okx_credentials_for_environment(environment) {
         Ok(credentials) => match OkxRestClient::with_rate_budget(
             environment,
             credentials.clone(),
@@ -351,8 +412,10 @@ fn optional_private_components(
                 (None, None, None)
             }
         },
-        Err(AgentError::OkxCredentialsNotFound) => {
-            eprintln!("OKX observer credential not provisioned; private queries are NOT_READY");
+        Err(AgentError::OkxCredentialsNotFound | AgentError::DemoOkxCredentialsNotFound) => {
+            eprintln!(
+                "OKX observer credential for the selected environment is not provisioned; private queries are NOT_READY"
+            );
             (None, None, None)
         }
         Err(error) => {
@@ -366,7 +429,7 @@ fn optional_account_bootstrapper(
     environment: OkxEnvironment,
     rate_budget: RateBudget,
 ) -> Option<AccountBootstrapper> {
-    match load_native_okx_credentials() {
+    match load_native_okx_credentials_for_environment(environment) {
         Ok(credentials) => {
             match OkxRestClient::with_rate_budget(environment, credentials, rate_budget) {
                 Ok(client) => Some(AccountBootstrapper::new(client)),
@@ -376,8 +439,10 @@ fn optional_account_bootstrapper(
                 }
             }
         }
-        Err(AgentError::OkxCredentialsNotFound) => {
-            eprintln!("OKX observer credential not provisioned; private queries are NOT_READY");
+        Err(AgentError::OkxCredentialsNotFound | AgentError::DemoOkxCredentialsNotFound) => {
+            eprintln!(
+                "OKX observer credential for the selected environment is not provisioned; private queries are NOT_READY"
+            );
             None
         }
         Err(error) => {
