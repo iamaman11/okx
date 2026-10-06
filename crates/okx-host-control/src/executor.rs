@@ -17,7 +17,7 @@ use crate::{
     autostart,
     background_process::hidden_command,
     controller_update,
-    desired::{AgentDesired, DesiredStateStore},
+    desired::{AgentDesired, AgentDesiredState, AgentProfile, DesiredStateStore},
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
 };
@@ -25,6 +25,8 @@ use crate::{
 const CANONICAL_ROOT: &str = r"C:\okx";
 const RUNTIME_ROOT: &str = r"C:\okx-runtime";
 const AGENT_MAILBOX_ISSUE: &str = "10";
+const DEMO_MAILBOX_ISSUE: &str = "234";
+const DEMO_RUNTIME_ROOT: &str = r"C:\okx-runtime\demo";
 const AGENT_CLOUDFLARE_WS_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime";
 const AGENT_CLOUDFLARE_RUNTIME_ID: &str = "windows-primary";
 const HOST_CONTROL_CAPABILITIES_SCHEMA_V1: &str = "okx.host-control.capabilities/v1";
@@ -45,6 +47,8 @@ pub struct HostExecutor {
     agent_job: AgentJob,
     desired_store: DesiredStateStore,
     desired_agent: AgentDesired,
+    desired_profile: AgentProfile,
+    running_profile: Option<AgentProfile>,
     desired_error: Option<String>,
     restart_attempt: usize,
     next_restart_at: Option<Instant>,
@@ -54,9 +58,9 @@ pub struct HostExecutor {
 impl HostExecutor {
     pub fn canonical() -> HostControlResult<Self> {
         let desired_store = DesiredStateStore::canonical();
-        let (desired_agent, desired_error) = match desired_store.load() {
+        let (desired_state, desired_error) = match desired_store.load() {
             Ok(desired) => (desired, None),
-            Err(error) => (AgentDesired::Stopped, Some(error.to_string())),
+            Err(error) => (AgentDesiredState::stopped(), Some(error.to_string())),
         };
 
         Ok(Self {
@@ -65,7 +69,9 @@ impl HostExecutor {
             agent_started_at: None,
             agent_job: AgentJob::new()?,
             desired_store,
-            desired_agent,
+            desired_agent: desired_state.agent,
+            desired_profile: desired_state.profile,
+            running_profile: None,
             desired_error,
             restart_attempt: 0,
             next_restart_at: None,
@@ -96,6 +102,8 @@ impl HostExecutor {
                 self.provision_cloudflare_runtime_token()
             }
             HostControlOperation::StartAgent => self.start_agent(),
+            HostControlOperation::StartDemoAcceptance => self.start_demo_acceptance(),
+            HostControlOperation::RestoreProductionAgent => self.restore_production_agent(),
             HostControlOperation::StopAgent => self.stop_agent(),
             HostControlOperation::RestartAgent => self.restart_agent(),
             HostControlOperation::InstallAutostart => autostart::install(),
@@ -141,7 +149,20 @@ impl HostExecutor {
                 }
             }
             AgentDesired::Running => {
-                if running {
+                if running && self.running_profile != Some(self.desired_profile) {
+                    self.terminate_agent_owned()?;
+                    match self.start_agent_process(self.desired_profile) {
+                        Ok(pid) => {
+                            self.last_reconcile =
+                                format!("SWITCHED_{:?}_AGENT_PID_{pid}", self.desired_profile);
+                        }
+                        Err(error) => {
+                            self.schedule_restart();
+                            self.last_reconcile = format!("PROFILE_SWITCH_FAILED_{}", error.code());
+                            return Err(error);
+                        }
+                    }
+                } else if running {
                     if self.agent_started_at.is_some_and(|started| {
                         started.elapsed() >= Duration::from_secs(HEALTHY_AGENT_SECS)
                     }) {
@@ -150,9 +171,10 @@ impl HostExecutor {
                     }
                     self.last_reconcile = "READY_RUNNING".to_owned();
                 } else if self.restart_due() {
-                    match self.start_agent_process() {
+                    match self.start_agent_process(self.desired_profile) {
                         Ok(pid) => {
-                            self.last_reconcile = format!("RESTORED_AGENT_PID_{pid}");
+                            self.last_reconcile =
+                                format!("RESTORED_{:?}_AGENT_PID_{pid}", self.desired_profile);
                         }
                         Err(error) => {
                             self.schedule_restart();
@@ -212,6 +234,8 @@ impl HostExecutor {
             "agent_binary_present": agent_binary.is_file(),
             "agent_owned_running": running,
             "agent_desired": self.desired_agent,
+            "desired_profile": self.desired_profile,
+            "running_profile": self.running_profile,
             "desired_state_path": self.desired_store.path(),
             "desired_state_error": self.desired_error.clone(),
             "job_object_owned": true,
@@ -410,33 +434,72 @@ impl HostExecutor {
     }
 
     fn start_agent(&mut self) -> HostControlResult<Value> {
+        self.switch_agent_profile(AgentProfile::Production)
+    }
+
+    fn start_demo_acceptance(&mut self) -> HostControlResult<Value> {
+        self.switch_agent_profile(AgentProfile::DemoAcceptance)
+    }
+
+    fn restore_production_agent(&mut self) -> HostControlResult<Value> {
+        self.switch_agent_profile(AgentProfile::Production)
+    }
+
+    fn switch_agent_profile(&mut self, profile: AgentProfile) -> HostControlResult<Value> {
         self.require_agent_binary()?;
-        if self.agent_is_running()? {
-            self.persist_desired(AgentDesired::Running)?;
+        if self.agent_is_running()? && self.running_profile == Some(profile) {
+            self.persist_desired(AgentDesiredState {
+                agent: AgentDesired::Running,
+                profile,
+            })?;
             return Ok(json!({
                 "disposition": "ALREADY_RUNNING",
-                "desired": self.desired_agent
+                "desired": self.desired_agent,
+                "profile": profile,
+                "mailbox_issue": mailbox_issue(profile),
+                "runtime_root": runtime_dir(profile),
+                "cloudflare_attached": profile == AgentProfile::Production
             }));
         }
 
-        let pid = self.start_agent_process()?;
-        if let Err(error) = self.persist_desired(AgentDesired::Running) {
-            let _ = self.terminate_agent_owned();
-            return Err(error);
+        self.persist_desired(AgentDesiredState {
+            agent: AgentDesired::Running,
+            profile,
+        })?;
+        if self.agent_is_running()? {
+            self.terminate_agent_owned()?;
         }
+
+        let pid = match self.start_agent_process(profile) {
+            Ok(pid) => pid,
+            Err(error) if profile == AgentProfile::DemoAcceptance => {
+                let _ = self.persist_desired(AgentDesiredState::production_running());
+                if self.start_agent_process(AgentProfile::Production).is_err() {
+                    self.schedule_restart();
+                }
+                return Err(error);
+            }
+            Err(error) => {
+                self.schedule_restart();
+                return Err(error);
+            }
+        };
         self.restart_attempt = 0;
         self.next_restart_at = None;
 
         Ok(json!({
             "disposition": "STARTED",
             "pid": pid,
-            "mailbox_issue": 10,
-            "desired": self.desired_agent
+            "desired": self.desired_agent,
+            "profile": profile,
+            "mailbox_issue": mailbox_issue(profile),
+            "runtime_root": runtime_dir(profile),
+            "cloudflare_attached": profile == AgentProfile::Production
         }))
     }
 
     fn stop_agent(&mut self) -> HostControlResult<Value> {
-        self.persist_desired(AgentDesired::Stopped)?;
+        self.persist_desired(AgentDesiredState::stopped())?;
         let was_running = self.agent_is_running()?;
         if was_running {
             self.terminate_agent_owned()?;
@@ -446,24 +509,40 @@ impl HostExecutor {
 
         Ok(json!({
             "disposition": if was_running { "STOPPED" } else { "ALREADY_STOPPED" },
-            "desired": self.desired_agent
+            "desired": self.desired_agent,
+            "profile": self.desired_profile
         }))
     }
 
     fn restart_agent(&mut self) -> HostControlResult<Value> {
+        let profile = if self.desired_agent == AgentDesired::Running {
+            self.desired_profile
+        } else {
+            AgentProfile::Production
+        };
+        self.persist_desired(AgentDesiredState {
+            agent: AgentDesired::Running,
+            profile,
+        })?;
         let _ = self.terminate_agent_owned();
-        let pid = self.start_agent_process()?;
-        if let Err(error) = self.persist_desired(AgentDesired::Running) {
-            let _ = self.terminate_agent_owned();
-            return Err(error);
-        }
+        let pid = match self.start_agent_process(profile) {
+            Ok(pid) => pid,
+            Err(error) => {
+                self.schedule_restart();
+                return Err(error);
+            }
+        };
         self.restart_attempt = 0;
         self.next_restart_at = None;
 
         Ok(json!({
             "disposition": "RESTARTED",
             "pid": pid,
-            "desired": self.desired_agent
+            "desired": self.desired_agent,
+            "profile": profile,
+            "mailbox_issue": mailbox_issue(profile),
+            "runtime_root": runtime_dir(profile),
+            "cloudflare_attached": profile == AgentProfile::Production
         }))
     }
 
@@ -516,6 +595,20 @@ impl HostExecutor {
                     "runtime_id": AGENT_CLOUDFLARE_RUNTIME_ID,
                     "ws_url": AGENT_CLOUDFLARE_WS_URL,
                     "github_fallback_preserved": true
+                },
+                "agent_profiles": {
+                    "production": {
+                        "runtime_root": RUNTIME_ROOT,
+                        "mailbox_issue": 10,
+                        "cloudflare_attached": true
+                    },
+                    "demo_acceptance": {
+                        "runtime_root": DEMO_RUNTIME_ROOT,
+                        "mailbox_issue": 234,
+                        "cloudflare_attached": false,
+                        "mutation_acceptance_explicit": true
+                    },
+                    "single_owner": true
                 }
             }
         }))
@@ -574,7 +667,7 @@ impl HostExecutor {
             return Err(error.into());
         }
 
-        if should_restore && let Err(error) = self.start_agent_process() {
+        if should_restore && let Err(error) = self.start_agent_process(self.desired_profile) {
             self.schedule_restart();
             return Err(error);
         }
@@ -582,21 +675,22 @@ impl HostExecutor {
         Ok(())
     }
 
-    fn start_agent_process(&mut self) -> HostControlResult<u32> {
+    fn start_agent_process(&mut self, profile: AgentProfile) -> HostControlResult<u32> {
         self.require_agent_binary()?;
-        fs::create_dir_all(self.runtime_dir())?;
+        let runtime_dir = runtime_dir(profile);
+        fs::create_dir_all(&runtime_dir)?;
 
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.runtime_dir().join("okx-agent.stdout.log"))?;
+            .open(runtime_dir.join("okx-agent.stdout.log"))?;
         let stderr = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.runtime_dir().join("okx-agent.stderr.log"))?;
+            .open(runtime_dir.join("okx-agent.stderr.log"))?;
 
         let mut child = hidden_command(self.agent_binary())
-            .args(production_agent_args())
+            .args(agent_args(profile))
             .current_dir(&self.repo_root)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
@@ -606,6 +700,7 @@ impl HostExecutor {
         let pid = child.id();
         self.agent_child = Some(child);
         self.agent_started_at = Some(Instant::now());
+        self.running_profile = Some(profile);
         self.next_restart_at = None;
         Ok(pid)
     }
@@ -621,12 +716,14 @@ impl HostExecutor {
             child.wait()?;
         }
         self.agent_started_at = None;
+        self.running_profile = None;
         Ok(())
     }
 
-    fn persist_desired(&mut self, desired: AgentDesired) -> HostControlResult<()> {
-        self.desired_store.save(desired)?;
-        self.desired_agent = desired;
+    fn persist_desired(&mut self, state: AgentDesiredState) -> HostControlResult<()> {
+        self.desired_store.save(state)?;
+        self.desired_agent = state.agent;
+        self.desired_profile = state.profile;
         self.desired_error = None;
         Ok(())
     }
@@ -706,6 +803,7 @@ impl HostExecutor {
         if child.try_wait()?.is_some() {
             self.agent_child = None;
             self.agent_started_at = None;
+            self.running_profile = None;
             if self.desired_agent == AgentDesired::Running {
                 self.schedule_restart();
             }
@@ -763,16 +861,45 @@ impl HostExecutor {
     }
 }
 
-fn production_agent_args() -> [&'static str; 7] {
-    [
-        "run",
-        "--mailbox-issue",
-        AGENT_MAILBOX_ISSUE,
-        "--cloudflare-ws-url",
-        AGENT_CLOUDFLARE_WS_URL,
-        "--cloudflare-runtime-id",
-        AGENT_CLOUDFLARE_RUNTIME_ID,
-    ]
+const PRODUCTION_AGENT_ARGS: &[&str] = &[
+    "run",
+    "--mailbox-issue",
+    AGENT_MAILBOX_ISSUE,
+    "--cloudflare-ws-url",
+    AGENT_CLOUDFLARE_WS_URL,
+    "--cloudflare-runtime-id",
+    AGENT_CLOUDFLARE_RUNTIME_ID,
+];
+
+const DEMO_ACCEPTANCE_AGENT_ARGS: &[&str] = &[
+    "--root",
+    DEMO_RUNTIME_ROOT,
+    "--demo",
+    "run",
+    "--mailbox-issue",
+    DEMO_MAILBOX_ISSUE,
+    "--demo-mutation-acceptance",
+];
+
+fn agent_args(profile: AgentProfile) -> &'static [&'static str] {
+    match profile {
+        AgentProfile::Production => PRODUCTION_AGENT_ARGS,
+        AgentProfile::DemoAcceptance => DEMO_ACCEPTANCE_AGENT_ARGS,
+    }
+}
+
+fn mailbox_issue(profile: AgentProfile) -> u64 {
+    match profile {
+        AgentProfile::Production => 10,
+        AgentProfile::DemoAcceptance => 234,
+    }
+}
+
+fn runtime_dir(profile: AgentProfile) -> PathBuf {
+    match profile {
+        AgentProfile::Production => PathBuf::from(RUNTIME_ROOT),
+        AgentProfile::DemoAcceptance => PathBuf::from(DEMO_RUNTIME_ROOT),
+    }
 }
 
 fn bounded_utf8(value: &str, max_bytes: usize) -> String {
@@ -857,10 +984,37 @@ mod tests {
 
     #[test]
     fn production_agent_launch_uses_agent_owned_data_poll_default() {
-        let args = production_agent_args();
+        let args = agent_args(AgentProfile::Production);
         assert!(!args.contains(&"--poll-seconds"));
         assert!(args.contains(&"--cloudflare-ws-url"));
         assert!(args.contains(&"--mailbox-issue"));
+        assert!(!args.contains(&"--demo"));
+        assert_eq!(mailbox_issue(AgentProfile::Production), 10);
+        assert_eq!(
+            runtime_dir(AgentProfile::Production),
+            PathBuf::from(RUNTIME_ROOT)
+        );
+    }
+
+    #[test]
+    fn demo_acceptance_launch_isolated_from_production_transport_and_state() {
+        let args = agent_args(AgentProfile::DemoAcceptance);
+        assert!(args.contains(&"--demo"));
+        assert!(args.contains(&"--demo-mutation-acceptance"));
+        assert!(args.contains(&"--root"));
+        assert!(args.contains(&DEMO_RUNTIME_ROOT));
+        assert!(args.contains(&DEMO_MAILBOX_ISSUE));
+        assert!(!args.contains(&"--cloudflare-ws-url"));
+        assert!(!args.contains(&AGENT_CLOUDFLARE_WS_URL));
+        assert_eq!(mailbox_issue(AgentProfile::DemoAcceptance), 234);
+        assert_eq!(
+            runtime_dir(AgentProfile::DemoAcceptance),
+            PathBuf::from(DEMO_RUNTIME_ROOT)
+        );
+        assert_ne!(
+            runtime_dir(AgentProfile::DemoAcceptance),
+            runtime_dir(AgentProfile::Production)
+        );
     }
 
     #[test]
