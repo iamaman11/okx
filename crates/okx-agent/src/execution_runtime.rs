@@ -374,3 +374,69 @@ impl ExecutionRuntime {
             .await
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs, process,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use okx_api::Region;
+
+    use super::*;
+
+    fn credentials() -> Credentials {
+        Credentials::new("demo-key", "demo-secret", "demo-pass").expect("credentials")
+    }
+
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("okx-{label}-{}-{nonce}", process::id()))
+    }
+
+    #[test]
+    fn demo_acceptance_runtime_rejects_production_environment_before_construction() {
+        let result = ExecutionRuntime::new_demo_acceptance(
+            Path::new("."),
+            OkxEnvironment::new(Region::Global, false),
+            credentials(),
+            1,
+            RateBudget::new(),
+        );
+        assert!(matches!(
+            result,
+            Err(AgentError::OrderExecutor(
+                OrderExecutorError::DemoAuthorityRequiresDemoEnvironment
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn demo_acceptance_runtime_starts_with_exchange_mutation_disabled() {
+        let root = temp_root("demo-runtime-disabled");
+        fs::create_dir_all(&root).expect("root");
+        let runtime = ExecutionRuntime::new_demo_acceptance(
+            &root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            1,
+            RateBudget::new(),
+        )
+        .expect("demo runtime");
+
+        assert_eq!(runtime.mode(), ExecutionRuntimeMode::DemoAcceptance);
+        assert!(runtime.demo_mutation_acceptance_requested());
+        assert_eq!(
+            runtime.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
+        assert!(!runtime.live_trading_enabled().await);
+
+        let _ = fs::remove_dir_all(root);
+    }
+}
