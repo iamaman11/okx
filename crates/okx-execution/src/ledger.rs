@@ -571,10 +571,10 @@ fn validate_order_mutations(record: &ExecutionRecord) -> Result<(), ExecutionLed
             nonterminal += 1;
         }
         if mutation.state == OrderMutationState::Rejected {
-            if !mutation
+            if mutation
                 .rejection_code
                 .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
+                .is_none_or(|value| value.trim().is_empty())
             {
                 return Err(ExecutionLedgerError::Corrupt(
                     "rejected order mutation is missing rejection code",
@@ -588,10 +588,10 @@ fn validate_order_mutations(record: &ExecutionRecord) -> Result<(), ExecutionLed
 
         match mutation.kind {
             OrderMutationKind::Amend => {
-                if !mutation
+                if mutation
                     .request_id
                     .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
+                    .is_none_or(|value| value.trim().is_empty())
                     || (mutation.new_size.is_none() && mutation.new_price.is_none())
                 {
                     return Err(ExecutionLedgerError::Corrupt(
