@@ -2,11 +2,13 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    ExchangeOrderState, ExecutionAction, ExecutionLedgerEntry, ExecutionLedgerError, ExecutionPlan,
-    ExecutionState, OrderSide, OrderType, PositionSide, PrepareDisposition, TradeMode,
+    DurableExecutionLedger, ExchangeOrderState, ExecutionAction, ExecutionLedgerEntry,
+    ExecutionLedgerError, ExecutionPlan, ExecutionState, OrderSide, OrderType, PositionSide,
+    PrepareDisposition, ReverseContinuation, ReverseLeg, TradeMode,
 };
 
 pub const EXECUTION_STATUS_SCHEMA_V1: &str = "okx.execution-status/v1";
+pub const EXECUTION_STATUS_SCHEMA_V2: &str = "okx.execution-status/v2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrepareOutcome {
@@ -88,6 +90,36 @@ pub struct ExecutionStatusSnapshot {
     pub updated_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReverseExecutionStage {
+    Closing,
+    AwaitingFreshOpen,
+    Opening,
+    Completed,
+    Aborted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReverseExecutionStatus {
+    pub root_intent_id: String,
+    pub open_intent_id: String,
+    pub target_position_side: PositionSide,
+    pub stage: ReverseExecutionStage,
+    pub close_state: ExecutionState,
+    pub open_state: Option<ExecutionState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionStatusEnvelope {
+    pub schema: &'static str,
+    pub execution: ExecutionStatusSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<ReverseExecutionStatus>,
+}
+
 pub fn execution_status(
     entry: &ExecutionLedgerEntry,
 ) -> Result<ExecutionStatusSnapshot, serde_json::Error> {
@@ -115,6 +147,60 @@ pub fn execution_status(
         rejection_code: entry.record.rejection_code.clone(),
         created_at_ms: entry.created_at_ms,
         updated_at_ms: entry.updated_at_ms,
+    })
+}
+
+pub fn execution_status_with_ledger(
+    ledger: &DurableExecutionLedger,
+    intent_id: &str,
+) -> Result<Option<ExecutionStatusEnvelope>, serde_json::Error> {
+    let Some(entry) = ledger.get(intent_id) else {
+        return Ok(None);
+    };
+    let reverse = reverse_status(ledger, entry);
+    Ok(Some(ExecutionStatusEnvelope {
+        schema: EXECUTION_STATUS_SCHEMA_V2,
+        execution: execution_status(entry)?,
+        reverse,
+    }))
+}
+
+fn reverse_status(
+    ledger: &DurableExecutionLedger,
+    entry: &ExecutionLedgerEntry,
+) -> Option<ReverseExecutionStatus> {
+    let link = entry.record.reverse.as_ref()?;
+    let (root, open) = match link.leg {
+        ReverseLeg::Close => (entry, ledger.get(&link.open_intent_id)),
+        ReverseLeg::Open => (ledger.get(&link.root_intent_id)?, Some(entry)),
+    };
+    let root_link = root.record.reverse.as_ref()?;
+    let open_state = open.map(|value| value.record.state);
+    let stage = if root_link.continuation == ReverseContinuation::Aborted {
+        ReverseExecutionStage::Aborted
+    } else if root.record.state != ExecutionState::Filled {
+        if root.record.state.is_terminal() {
+            ReverseExecutionStage::Aborted
+        } else {
+            ReverseExecutionStage::Closing
+        }
+    } else {
+        match open_state {
+            None => ReverseExecutionStage::AwaitingFreshOpen,
+            Some(ExecutionState::Filled) => ReverseExecutionStage::Completed,
+            Some(ExecutionState::Canceled | ExecutionState::Rejected) => {
+                ReverseExecutionStage::Aborted
+            }
+            Some(_) => ReverseExecutionStage::Opening,
+        }
+    };
+    Some(ReverseExecutionStatus {
+        root_intent_id: root_link.root_intent_id.clone(),
+        open_intent_id: root_link.open_intent_id.clone(),
+        target_position_side: root_link.target_position_side,
+        stage,
+        close_state: root.record.state,
+        open_state,
     })
 }
 
