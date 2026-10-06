@@ -2270,10 +2270,29 @@ mod tests {
         };
         assert!(!prepare.direct_transport_read_only());
 
+        let generic = AgentOperation::PrepareExecution {
+            intent_id: "intent_generic_01234567".to_owned(),
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            trade_mode: ExecutionTradeMode::Cross,
+            order_type: ExecutionOrderType::Limit,
+            spec: ExecutionPrepareSpec::Reverse {
+                position_side: PositionSide::Long,
+                size: "1".to_owned(),
+                price: "0.1".to_owned(),
+            },
+            risk: None,
+        };
+        assert!(!generic.direct_transport_read_only());
+
         let submit = AgentOperation::SubmitPreparedExecution {
             intent_id: "intent_0123456789abcdef".to_owned(),
         };
         assert!(!submit.direct_transport_read_only());
+
+        let abort = AgentOperation::AbortReverseExecution {
+            intent_id: "intent_0123456789abcdef".to_owned(),
+        };
+        assert!(!abort.direct_transport_read_only());
     }
 
     #[test]
@@ -2565,6 +2584,74 @@ mod tests {
                 price: "0.1".to_owned(),
                 risk: None,
             },
+        };
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn generic_execution_prepare_contract_is_tagged_strict_and_round_trips() {
+        let entry = ExecutionEntryRequest {
+            entry_price: "0.1".to_owned(),
+            stop_price: "0.09".to_owned(),
+            max_settle_notional: "100".to_owned(),
+            max_loss_settle: "5".to_owned(),
+            target_rr: "2".to_owned(),
+            entry_liquidity_role: LiquidityRole::Taker,
+            exit_liquidity_role: LiquidityRole::Taker,
+        };
+        let operations = [
+            AgentOperation::PrepareExecution {
+                intent_id: "intent_generic_open_012345".to_owned(),
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                trade_mode: ExecutionTradeMode::Cross,
+                order_type: ExecutionOrderType::Limit,
+                spec: ExecutionPrepareSpec::Open {
+                    position_side: PositionSide::Long,
+                    entry: entry.clone(),
+                },
+                risk: Some(Box::new(execution_risk_request())),
+            },
+            AgentOperation::PrepareExecution {
+                intent_id: "intent_generic_reverse_01".to_owned(),
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                trade_mode: ExecutionTradeMode::Cross,
+                order_type: ExecutionOrderType::Limit,
+                spec: ExecutionPrepareSpec::Reverse {
+                    position_side: PositionSide::Long,
+                    size: "1".to_owned(),
+                    price: "0.1".to_owned(),
+                },
+                risk: None,
+            },
+            AgentOperation::PrepareExecution {
+                intent_id: "intent_generic_reverse_01".to_owned(),
+                instrument: "DOGE-USDT-SWAP".to_owned(),
+                trade_mode: ExecutionTradeMode::Cross,
+                order_type: ExecutionOrderType::Limit,
+                spec: ExecutionPrepareSpec::ContinueReverse { entry },
+                risk: Some(Box::new(execution_risk_request())),
+            },
+        ];
+
+        for operation in operations {
+            operation.validate().expect("valid generic execution");
+            assert!(!operation.direct_transport_read_only());
+            let json = serde_json::to_string(&operation).expect("serialize");
+            let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, operation);
+        }
+
+        let invalid = AgentOperation::PrepareExecution {
+            intent_id: "intent_generic_invalid_01".to_owned(),
+            instrument: "DOGE-USDT-SWAP".to_owned(),
+            trade_mode: ExecutionTradeMode::Cross,
+            order_type: ExecutionOrderType::Limit,
+            spec: ExecutionPrepareSpec::Reverse {
+                position_side: PositionSide::Long,
+                size: "0".to_owned(),
+                price: "0.1".to_owned(),
+            },
+            risk: None,
         };
         assert!(invalid.validate().is_err());
     }
