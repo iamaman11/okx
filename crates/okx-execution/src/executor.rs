@@ -3,9 +3,9 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use okx_api::{
     AmendOrderRequest, ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode,
-    ApiTriggerPriceType, AttachedAlgoOrderRequest, CancelOrderRequest, MutationTiming, OkxEnvironment,
-    OkxError, OrderOperationAck, PlaceOrderRequest, RateDecision, RateRequestPlan, RateThrottleEvidence,
-    TradeAlgoOrderDetails, TradeApi, TradeOrderDetails, TradeResponse,
+    ApiTriggerPriceType, AttachedAlgoOrderRequest, CancelOrderRequest, MutationTiming,
+    OkxEnvironment, OkxError, OrderOperationAck, PlaceOrderRequest, RateDecision, RateRequestPlan,
+    RateThrottleEvidence, TradeAlgoOrderDetails, TradeApi, TradeOrderDetails, TradeResponse,
 };
 use rust_decimal::Decimal;
 use thiserror::Error;
