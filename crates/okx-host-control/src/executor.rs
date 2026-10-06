@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, Stdio},
     time::{Duration, Instant},
@@ -34,6 +34,7 @@ const HEALTHY_AGENT_SECS: u64 = 30;
 const RESTART_BACKOFF_SECS: [u64; 5] = [1, 5, 15, 30, 60];
 const WORKSPACE_STATUS_MAX_CHANGES: usize = 16;
 const WORKSPACE_STATUS_MAX_CHANGE_BYTES: usize = 512;
+const RUNTIME_DIAGNOSTIC_TAIL_BYTES: u64 = 64 * 1024;
 const ALLOWED_REMOTES: &[&str] = &[
     "https://github.com/iamaman11/okx",
     "https://github.com/iamaman11/okx.git",
@@ -241,7 +242,11 @@ impl HostExecutor {
             "job_object_owned": true,
             "restart_attempt": self.restart_attempt,
             "retry_in_ms": self.retry_in_ms(),
-            "last_reconcile": self.last_reconcile.clone()
+            "last_reconcile": self.last_reconcile.clone(),
+            "runtime_diagnostics": {
+                "production": runtime_log_summary(AgentProfile::Production),
+                "demo_acceptance": runtime_log_summary(AgentProfile::DemoAcceptance)
+            }
         }))
     }
 
@@ -888,6 +893,90 @@ fn agent_args(profile: AgentProfile) -> &'static [&'static str] {
     }
 }
 
+fn read_log_tail(path: &Path) -> std::io::Result<(u64, String)> {
+    let mut file = File::open(path)?;
+    let size = file.metadata()?.len();
+    let start = size.saturating_sub(RUNTIME_DIAGNOSTIC_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity((size - start) as usize);
+    file.read_to_end(&mut bytes)?;
+    Ok((size, String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+fn last_runtime_event(stdout: &str) -> Option<Value> {
+    stdout.lines().rev().find_map(|line| {
+        let value: Value = serde_json::from_str(line).ok()?;
+        if value.get("schema")?.as_str()? != "okx.agent.runtime/v1" {
+            return None;
+        }
+        Some(json!({
+            "state": value.get("state").and_then(Value::as_str),
+            "root": value.get("root").and_then(Value::as_str),
+            "mailbox_issue": value.get("mailbox_issue")
+        }))
+    })
+}
+
+fn extract_okx_api_code(line: &str) -> Option<String> {
+    if let Some(rest) = line.split("OKX API error ").nth(1) {
+        return rest.split(':').next().map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
+    }
+    let rest = line.split("code:").nth(1)?;
+    let trimmed = rest.trim_start().trim_start_matches('"');
+    let end = trimmed.find(['"', ',', '}']).unwrap_or(trimmed.len());
+    let code = trimmed[..end].trim();
+    (!code.is_empty()).then(|| code.to_owned())
+}
+
+fn fatal_error_summary(stderr: &str) -> Option<Value> {
+    let line = stderr.lines().rev().find(|line| line.contains("Error:"))?;
+    let class = if line.contains("OKX API error") || line.contains("Api { code:") {
+        "okx_api"
+    } else if line.contains("HTTP error") || line.contains("Http(") {
+        "http"
+    } else if line.contains("JSON error") || line.contains("Json(") {
+        "json"
+    } else if line.contains("Github") || line.contains("GitHub") {
+        "github"
+    } else if line.contains("ResearchSession") || line.contains("research session") {
+        "research_session"
+    } else if line.contains("Identity") || line.contains("identity") {
+        "identity"
+    } else {
+        "other"
+    };
+    Some(json!({
+        "class": class,
+        "okx_api_code": if class == "okx_api" { extract_okx_api_code(line) } else { None }
+    }))
+}
+
+fn runtime_log_summary(profile: AgentProfile) -> Value {
+    let root = runtime_dir(profile);
+    let stdout_path = root.join("okx-agent.stdout.log");
+    let stderr_path = root.join("okx-agent.stderr.log");
+    let stdout = read_log_tail(&stdout_path).ok();
+    let stderr = read_log_tail(&stderr_path).ok();
+    let stdout_text = stdout.as_ref().map(|(_, text)| text.as_str()).unwrap_or("");
+    let stderr_text = stderr.as_ref().map(|(_, text)| text.as_str()).unwrap_or("");
+
+    json!({
+        "root": root,
+        "stdout_present": stdout.is_some(),
+        "stdout_bytes": stdout.as_ref().map(|(size, _)| *size),
+        "stderr_present": stderr.is_some(),
+        "stderr_bytes": stderr.as_ref().map(|(size, _)| *size),
+        "last_runtime_event": last_runtime_event(stdout_text),
+        "startup_markers": {
+            "reference_registry_ready": stderr_text.contains("reference registry ready"),
+            "mailbox_repository_verified": stderr_text.contains("mailbox repository identity verified"),
+            "observer_credential_missing": stderr_text.contains("OKX observer credential for the selected environment is not provisioned"),
+            "executor_credential_missing": stderr_text.contains("OKX executor credential for the selected environment is not provisioned")
+        },
+        "fatal_error": fatal_error_summary(stderr_text)
+    })
+}
+
 fn mailbox_issue(profile: AgentProfile) -> u64 {
     match profile {
         AgentProfile::Production => 10,
@@ -994,6 +1083,47 @@ mod tests {
             runtime_dir(AgentProfile::Production),
             PathBuf::from(RUNTIME_ROOT)
         );
+    }
+
+    #[test]
+    fn runtime_log_summary_returns_only_structured_bounded_diagnostics() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-runtime-diagnostics-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("root");
+        let stdout = root.join("stdout.log");
+        let stderr = root.join("stderr.log");
+        fs::write(
+            &stdout,
+            concat!(
+                "noise\n",
+                "{\"schema\":\"okx.agent.runtime/v1\",\"state\":\"DEGRADED_MAILBOX\",",
+                "\"root\":\"C:\\\\okx-runtime\\\\demo\",\"key_id\":\"agent-key-1\",",
+                "\"public_key\":\"public\",\"mailbox_issue\":234}\n"
+            ),
+        )
+        .expect("stdout");
+        fs::write(
+            &stderr,
+            "reference registry ready generation=x instruments=1\nError: Okx(Api { code: \"50101\", message: \"redacted in summary\" })\n",
+        )
+        .expect("stderr");
+
+        let (_, stdout_tail) = read_log_tail(&stdout).expect("tail");
+        let (_, stderr_tail) = read_log_tail(&stderr).expect("tail");
+        let event = last_runtime_event(&stdout_tail).expect("event");
+        assert_eq!(event["state"], "DEGRADED_MAILBOX");
+        assert_eq!(event["mailbox_issue"], 234);
+        assert!(event.get("public_key").is_none());
+
+        let fatal = fatal_error_summary(&stderr_tail).expect("fatal");
+        assert_eq!(fatal["class"], "okx_api");
+        assert_eq!(fatal["okx_api_code"], "50101");
+        assert!(!fatal.to_string().contains("redacted in summary"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
