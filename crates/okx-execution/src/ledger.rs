@@ -838,6 +838,87 @@ mod tests {
     }
 
     #[test]
+    fn inflight_order_mutation_recovers_as_unknown_without_replay_authority() {
+        let root = temp_root("mutation-recovery");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent_id = "intent_mutation_recovery_01";
+
+        {
+            let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+            ledger.prepare(plan(intent_id), 101).expect("prepare");
+            ledger
+                .begin_submission(intent_id, 102)
+                .expect("submit");
+            ledger
+                .acknowledge(intent_id, "ord-1", 103)
+                .expect("ack");
+            ledger
+                .reconcile_found(intent_id, "ord-1", ExchangeOrderState::Live, 104)
+                .expect("live");
+            ledger
+                .prepare_order_mutation(
+                    intent_id,
+                    OrderMutationRecord::cancel("mutation_cancel_restart_01").expect("cancel"),
+                    105,
+                )
+                .expect("prepare cancel");
+            let submitting = ledger
+                .begin_order_mutation_submission(
+                    intent_id,
+                    "mutation_cancel_restart_01",
+                    106,
+                )
+                .expect("persist mutation submitting");
+            assert_eq!(
+                submitting
+                    .record
+                    .active_mutation()
+                    .expect("active mutation")
+                    .state,
+                OrderMutationState::Submitting
+            );
+        }
+
+        let mut reopened =
+            DurableExecutionLedger::open(store.clone(), 200).expect("recovery open");
+        let recovered = reopened.get(intent_id).expect("entry");
+        assert_eq!(recovered.record.state, ExecutionState::Live);
+        assert_eq!(
+            recovered
+                .record
+                .active_mutation()
+                .expect("active mutation")
+                .state,
+            OrderMutationState::Unknown
+        );
+        assert!(matches!(
+            reopened.begin_order_mutation_submission(
+                intent_id,
+                "mutation_cancel_restart_01",
+                201,
+            ),
+            Err(ExecutionLedgerError::Transition(
+                ExecutionTransitionError::InvalidMutationTransition { .. }
+            ))
+        ));
+
+        let again = DurableExecutionLedger::open(store, 202).expect("second reopen");
+        assert_eq!(
+            again
+                .get(intent_id)
+                .expect("persisted entry")
+                .record
+                .active_mutation()
+                .expect("mutation")
+                .state,
+            OrderMutationState::Unknown
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn acknowledgement_and_exchange_reconciliation_survive_restart() {
         let root = temp_root("reconcile");
         let _ = fs::remove_dir_all(&root);
