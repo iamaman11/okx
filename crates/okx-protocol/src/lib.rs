@@ -1441,6 +1441,8 @@ pub enum HostControlOperation {
     StartAgent,
     StopAgent,
     RestartAgent,
+    StartDemoAcceptance,
+    ExitDemoAcceptance,
     InstallAutostart,
     AutostartStatus,
     HandoffToAutostart,
@@ -2746,6 +2748,27 @@ mod tests {
         decoded.validate().expect("valid decoded control request");
 
         let arbitrary = r#"{"schema":"okx.windows.control/v1","request_id":"ctl_0123456789abcdef","operation":{"type":"run_shell","command":"whoami"}}"#;
+        assert!(serde_json::from_str::<HostControlRequest>(arbitrary).is_err());
+    }
+
+    #[test]
+    fn demo_acceptance_host_controls_are_fixed_shape_and_typed() {
+        for operation in [
+            HostControlOperation::StartDemoAcceptance,
+            HostControlOperation::ExitDemoAcceptance,
+        ] {
+            let request = HostControlRequest {
+                schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
+                request_id: "ctl_stage4c_demo_012345".to_owned(),
+                operation: operation.clone(),
+            };
+            request.validate().expect("valid fixed-shape demo control");
+            let json = serde_json::to_string(&request).expect("serialize");
+            let decoded: HostControlRequest = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, request);
+        }
+
+        let arbitrary = r#"{"schema":"okx.windows.control/v1","request_id":"ctl_stage4c_demo_012345","operation":{"type":"start_demo_acceptance","root":"C:\\other","mailbox_issue":10}}"#;
         assert!(serde_json::from_str::<HostControlRequest>(arbitrary).is_err());
     }
 
