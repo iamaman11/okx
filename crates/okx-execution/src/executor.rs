@@ -3,8 +3,8 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use okx_api::{
     AmendOrderRequest, ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode,
-    ApiTriggerPriceType, AttachedAlgoOrderRequest, CancelOrderRequest, MutationTiming, OkxError,
-    OrderOperationAck, PlaceOrderRequest, RateDecision, RateRequestPlan, RateThrottleEvidence,
+    ApiTriggerPriceType, AttachedAlgoOrderRequest, CancelOrderRequest, MutationTiming, OkxEnvironment,
+    OkxError, OrderOperationAck, PlaceOrderRequest, RateDecision, RateRequestPlan, RateThrottleEvidence,
     TradeAlgoOrderDetails, TradeApi, TradeOrderDetails, TradeResponse,
 };
 use rust_decimal::Decimal;
@@ -196,6 +196,18 @@ pub enum ReconcileDisposition {
     Unavailable(ExecutionLedgerEntry),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationAuthority {
+    Disabled,
+    DemoAcceptance,
+}
+
+impl MutationAuthority {
+    pub const fn allows_exchange_mutation(self) -> bool {
+        matches!(self, Self::DemoAcceptance)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum OrderExecutorError {
     #[error(transparent)]
@@ -230,12 +242,15 @@ pub enum OrderExecutorError {
 
     #[error("exchange protective algo does not match the durable execution identity")]
     ProtectionIdentityMismatch,
+
+    #[error("demo mutation authority requires an OKX Demo environment")]
+    DemoAuthorityRequiresDemoEnvironment,
 }
 
 pub struct OrderExecutor<G> {
     ledger: DurableExecutionLedger,
     gateway: G,
-    live_trading_enabled: bool,
+    mutation_authority: MutationAuthority,
 }
 
 impl<G> OrderExecutor<G>
@@ -246,7 +261,7 @@ where
         Self {
             ledger,
             gateway,
-            live_trading_enabled: false,
+            mutation_authority: MutationAuthority::Disabled,
         }
     }
 
@@ -254,8 +269,29 @@ where
         &self.ledger
     }
 
+    pub const fn mutation_authority(&self) -> MutationAuthority {
+        self.mutation_authority
+    }
+
+    // Demo acceptance is exchange mutation, but it is not production live trading.
+    // Keep this legacy safety signal false until the final production-live gate exists.
     pub const fn live_trading_enabled(&self) -> bool {
-        self.live_trading_enabled
+        false
+    }
+
+    pub fn enable_demo_acceptance(
+        &mut self,
+        environment: OkxEnvironment,
+    ) -> Result<(), OrderExecutorError> {
+        if !environment.demo {
+            return Err(OrderExecutorError::DemoAuthorityRequiresDemoEnvironment);
+        }
+        self.mutation_authority = MutationAuthority::DemoAcceptance;
+        Ok(())
+    }
+
+    pub fn disable_mutations(&mut self) {
+        self.mutation_authority = MutationAuthority::Disabled;
     }
 
     pub fn prepare(
@@ -390,7 +426,7 @@ where
         // The production constructor is intentionally fail-closed. The hard
         // gate is the first operation: disabled execution must not validate,
         // persist SUBMITTING, or call the exchange gateway.
-        require_live_trading_enabled(self.live_trading_enabled)?;
+        require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
 
         let entry = self
             .ledger
@@ -480,7 +516,7 @@ where
         timing: MutationTiming,
         observed_at_ms: u64,
     ) -> Result<MutationSubmitDisposition, OrderExecutorError> {
-        require_live_trading_enabled(self.live_trading_enabled)?;
+        require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
 
         let entry = self
             .ledger
@@ -701,7 +737,7 @@ where
         Self {
             ledger,
             gateway,
-            live_trading_enabled: true,
+            mutation_authority: MutationAuthority::DemoAcceptance,
         }
     }
 
@@ -1712,6 +1748,80 @@ mod tests {
                 .state,
             ExecutionState::Prepared
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn production_environment_cannot_enable_demo_authority_or_send() {
+        let (root, mut ledger) = ledger("demo-authority-production-reject");
+        let plan = plan();
+        ledger.prepare(plan.clone(), 101).expect("prepare");
+        let gateway = MockGateway::new(vec![Ok(accepted_response(&plan))], vec![]);
+        let mut executor = OrderExecutor::new(ledger, gateway);
+        let production = OkxEnvironment::new(okx_api::Region::Global, false);
+
+        let error = executor
+            .enable_demo_acceptance(production)
+            .expect_err("production environment must reject demo authority");
+        assert!(matches!(
+            error,
+            OrderExecutorError::DemoAuthorityRequiresDemoEnvironment
+        ));
+        assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
+
+        let error = executor
+            .submit_prepared(&plan.intent_id, timing(), 102)
+            .await
+            .expect_err("mutation must remain disabled");
+        assert!(matches!(
+            error,
+            OrderExecutorError::Transition(ExecutionTransitionError::LiveTradingDisabled)
+        ));
+        assert_eq!(executor.gateway().place_calls(), 0);
+        assert_eq!(
+            executor
+                .ledger()
+                .get(&plan.intent_id)
+                .expect("entry")
+                .record
+                .state,
+            ExecutionState::Prepared
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn demo_authority_uses_the_same_submit_path_without_enabling_production_live() {
+        let (root, mut ledger) = ledger("demo-authority-submit");
+        let plan = plan();
+        ledger.prepare(plan.clone(), 101).expect("prepare");
+        let gateway = MockGateway::new(vec![Ok(accepted_response(&plan))], vec![]);
+        let mut executor = OrderExecutor::new(ledger, gateway);
+        let demo = OkxEnvironment::new(okx_api::Region::Global, true);
+
+        executor
+            .enable_demo_acceptance(demo)
+            .expect("demo authority");
+        assert_eq!(
+            executor.mutation_authority(),
+            MutationAuthority::DemoAcceptance
+        );
+        assert!(
+            !executor.live_trading_enabled(),
+            "Demo acceptance must never report production live trading enabled"
+        );
+
+        let result = executor
+            .submit_prepared(&plan.intent_id, timing(), 102)
+            .await
+            .expect("same production-intended submit path");
+        assert!(matches!(result, SubmitDisposition::Acknowledged(_)));
+        assert_eq!(executor.gateway().place_calls(), 1);
+
+        executor.disable_mutations();
+        assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
 
         let _ = fs::remove_dir_all(root);
     }
