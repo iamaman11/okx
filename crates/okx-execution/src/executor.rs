@@ -265,8 +265,14 @@ where
                 "new_size/new_price",
             ));
         }
-        if new_size.as_deref() == Some(entry.record.effective_size())
-            && new_price.as_deref() == Some(entry.record.effective_price())
+        let target_size = new_size
+            .as_deref()
+            .unwrap_or_else(|| entry.record.effective_size());
+        let target_price = new_price
+            .as_deref()
+            .unwrap_or_else(|| entry.record.effective_price());
+        if target_size == entry.record.effective_size()
+            && target_price == entry.record.effective_price()
         {
             return Err(OrderExecutorError::InvalidMutationInput(
                 "amend must change size and/or price",
