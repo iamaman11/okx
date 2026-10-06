@@ -119,6 +119,7 @@ pub struct ReverseExecutionStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionSubmissionTimingStatus {
+    pub basis: &'static str,
     pub request_exchange_time_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub okx_in_time_us: Option<u64>,
@@ -135,6 +136,7 @@ impl From<&ExecutionSubmissionTimingEvidence> for ExecutionSubmissionTimingStatu
             .zip(value.okx_out_time_us)
             .map(|(incoming, outgoing)| outgoing - incoming);
         Self {
+            basis: "exchange_adjusted_request_ms+okx_gateway_in_out_us",
             request_exchange_time_ms: value.request_exchange_time_ms,
             okx_in_time_us: value.okx_in_time_us,
             okx_out_time_us: value.okx_out_time_us,
