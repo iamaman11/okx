@@ -418,7 +418,11 @@ where
             Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
         };
 
-        self.ledger.begin_submission(intent_id, observed_at_ms)?;
+        self.ledger.begin_submission_with_timing(
+            intent_id,
+            Some(timing.request_time_ms()),
+            observed_at_ms,
+        )?;
 
         match self.gateway.place_order(request, timing, rate_plan).await {
             Err(OkxError::RateLimited { evidence }) if evidence.request_sent => {
@@ -440,24 +444,37 @@ where
                     .mark_unknown_submission(intent_id, observed_at_ms)?;
                 Ok(SubmitDisposition::UnknownSubmission(entry))
             }
-            Ok(response) => match classify_place_response(&entry.record.plan, response) {
-                PlaceResponse::Acknowledged(order_id) => {
-                    let entry = self
-                        .ledger
-                        .acknowledge(intent_id, order_id, observed_at_ms)?;
-                    Ok(SubmitDisposition::Acknowledged(entry))
+            Ok(response) => {
+                let gateway_timing_us = okx_gateway_timing(&response);
+                match classify_place_response(&entry.record.plan, response) {
+                    PlaceResponse::Acknowledged(order_id) => {
+                        let entry = self.ledger.acknowledge_with_gateway_timing(
+                            intent_id,
+                            order_id,
+                            gateway_timing_us,
+                            observed_at_ms,
+                        )?;
+                        Ok(SubmitDisposition::Acknowledged(entry))
+                    }
+                    PlaceResponse::Rejected(code) => {
+                        let entry = self.ledger.reject_known_with_gateway_timing(
+                            intent_id,
+                            code,
+                            gateway_timing_us,
+                            observed_at_ms,
+                        )?;
+                        Ok(SubmitDisposition::Rejected(entry))
+                    }
+                    PlaceResponse::Ambiguous => {
+                        let entry = self.ledger.mark_unknown_submission_with_gateway_timing(
+                            intent_id,
+                            gateway_timing_us,
+                            observed_at_ms,
+                        )?;
+                        Ok(SubmitDisposition::UnknownSubmission(entry))
+                    }
                 }
-                PlaceResponse::Rejected(code) => {
-                    let entry = self.ledger.reject_known(intent_id, code, observed_at_ms)?;
-                    Ok(SubmitDisposition::Rejected(entry))
-                }
-                PlaceResponse::Ambiguous => {
-                    let entry = self
-                        .ledger
-                        .mark_unknown_submission(intent_id, observed_at_ms)?;
-                    Ok(SubmitDisposition::UnknownSubmission(entry))
-                }
-            },
+            }
         }
     }
 
@@ -697,6 +714,12 @@ where
     fn gateway(&self) -> &G {
         &self.gateway
     }
+}
+
+fn okx_gateway_timing<T>(response: &TradeResponse<T>) -> Option<(u64, u64)> {
+    let in_time_us = response.in_time_us.trim().parse::<u64>().ok()?;
+    let out_time_us = response.out_time_us.trim().parse::<u64>().ok()?;
+    (in_time_us > 0 && out_time_us >= in_time_us).then_some((in_time_us, out_time_us))
 }
 
 enum PlaceResponse {
