@@ -8,8 +8,8 @@ use okx_execution::{
     EXECUTION_STATUS_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionRiskBinding,
     ExecutionTransitionError, OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide,
     PrepareDeferral, PrepareFailure, PrepareOutcome, PrepareRejection, TradeMode,
-    prepare_execution,
-    revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
+    prepare_execution, revalidate_execution_plan, revalidate_hard_risk_policy,
+    revalidate_venue_execution,
 };
 use okx_protocol::{
     ExecutionOrderType, ExecutionRiskBindingRequest, ExecutionTradeMode,
