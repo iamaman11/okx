@@ -15,15 +15,17 @@ use crate::{
     EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_PLAN_SCHEMA_V1, ExchangeOrderState, ExecutionAction,
     ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
     ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
-    OrderMutationRecord, OrderMutationResolution, OrderMutationState, PositionSide,
+    OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
+    PositionSide, ProtectiveOrderResolution, ProtectiveOrderStatus, ProtectiveTriggerPriceBasis,
     ReverseContinuation, ReverseExecutionLink, ReverseLeg, derive_client_order_id,
-    derive_reverse_open_intent_id,
+    derive_protective_algo_client_id, derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
 pub const EXECUTION_LEDGER_SCHEMA_V1: &str = "okx.execution-ledger/v1";
 pub const EXECUTION_LEDGER_SCHEMA_V2: &str = "okx.execution-ledger/v2";
 pub const EXECUTION_LEDGER_SCHEMA_V3: &str = "okx.execution-ledger/v3";
+pub const EXECUTION_LEDGER_SCHEMA_V4: &str = "okx.execution-ledger/v4";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
 const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.json";
 
@@ -67,7 +69,9 @@ pub enum ExecutionLedgerError {
     #[error("execution ledger client_order_id collision")]
     ClientOrderIdCollision,
 
-    #[error("another nonterminal managed execution or pending reverse owns this instrument")]
+    #[error(
+        "another nonterminal managed execution, unresolved protection, or pending reverse owns this instrument"
+    )]
     InstrumentBusy,
 
     #[error("reverse execution linkage does not match the requested continuation")]
@@ -138,7 +142,10 @@ impl ExecutionLedgerStore {
         let file: ExecutionLedgerFile = serde_json::from_slice(&bytes)?;
         if !matches!(
             file.schema.as_str(),
-            EXECUTION_LEDGER_SCHEMA_V1 | EXECUTION_LEDGER_SCHEMA_V2 | EXECUTION_LEDGER_SCHEMA_V3
+            EXECUTION_LEDGER_SCHEMA_V1
+                | EXECUTION_LEDGER_SCHEMA_V2
+                | EXECUTION_LEDGER_SCHEMA_V3
+                | EXECUTION_LEDGER_SCHEMA_V4
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
@@ -192,7 +199,7 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V3.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V4.to_owned(),
             records: entries.values().cloned().collect(),
         })?;
 
@@ -429,6 +436,9 @@ impl DurableExecutionLedger {
             if !entry.record.state.is_terminal() {
                 return true;
             }
+            if entry.record.protection_blocks_new_managed_intent() {
+                return true;
+            }
             let Some(reverse) = entry.record.reverse.as_ref() else {
                 return false;
             };
@@ -589,9 +599,32 @@ impl DurableExecutionLedger {
         mutation_resolution: OrderMutationResolution,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.reconcile_found_with_resolutions(
+            intent_id,
+            order_id,
+            exchange_state,
+            mutation_resolution,
+            None,
+            observed_at_ms,
+        )
+    }
+
+    pub fn reconcile_found_with_resolutions(
+        &mut self,
+        intent_id: &str,
+        order_id: impl Into<String>,
+        exchange_state: ExchangeOrderState,
+        mutation_resolution: OrderMutationResolution,
+        protection_resolution: Option<ProtectiveOrderResolution>,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
         let order_id = order_id.into();
         self.mutate(intent_id, observed_at_ms, move |record| {
-            record.reconcile_found(order_id, exchange_state)?;
+            record.reconcile_found_with_protection(
+                order_id,
+                exchange_state,
+                protection_resolution,
+            )?;
             record.resolve_active_mutation(mutation_resolution)
         })
     }
@@ -652,6 +685,7 @@ impl DurableExecutionLedger {
 fn validate_entry(entry: &ExecutionLedgerEntry) -> Result<(), ExecutionLedgerError> {
     validate_plan_identity(&entry.record.plan)?;
     validate_execution_lineage(&entry.record)?;
+    validate_protection_link(&entry.record)?;
     validate_order_mutations(&entry.record)?;
     validate_reverse_link(&entry.record)?;
     if entry.created_at_ms == 0
@@ -748,6 +782,98 @@ fn validate_execution_lineage(record: &ExecutionRecord) -> Result<(), ExecutionL
     }
 
     Ok(())
+}
+
+fn validate_protection_link(record: &ExecutionRecord) -> Result<(), ExecutionLedgerError> {
+    let Some(protection) = record.protection.as_ref() else {
+        return Ok(());
+    };
+    if !record.plan.action.is_risk_increasing()
+        || record.plan.open_risk.is_none()
+        || protection.policy_version != PROTECTIVE_ORDER_POLICY_V1
+        || protection.algo_client_order_id
+            != derive_protective_algo_client_id(&record.plan.intent_id)
+        || protection.trigger_price_basis != ProtectiveTriggerPriceBasis::Mark
+    {
+        return Err(ExecutionLedgerError::Corrupt(
+            "protective linkage does not match execution plan",
+        ));
+    }
+
+    match protection.status {
+        ProtectiveOrderStatus::Pending | ProtectiveOrderStatus::NotActivated => {
+            if protection.algo_order_id.is_some()
+                || protection.covered_size.is_some()
+                || protection.failure_code.is_some()
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "protective status metadata is inconsistent",
+                ));
+            }
+        }
+        ProtectiveOrderStatus::Active => {
+            if protection
+                .algo_order_id
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+                || protection
+                    .covered_size
+                    .as_deref()
+                    .and_then(positive_decimal)
+                    .is_none()
+                || protection.failure_code.is_some()
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "active protective metadata is inconsistent",
+                ));
+            }
+        }
+        ProtectiveOrderStatus::Failed => {
+            if protection
+                .failure_code
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+                || protection.algo_order_id.is_some()
+                || protection.covered_size.is_some()
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "failed protective metadata is inconsistent",
+                ));
+            }
+        }
+    }
+
+    if record.state == ExecutionState::Rejected
+        && protection.status != ProtectiveOrderStatus::NotActivated
+    {
+        return Err(ExecutionLedgerError::Corrupt(
+            "rejected parent has invalid protective status",
+        ));
+    }
+    if record.state == ExecutionState::Filled
+        && protection.status == ProtectiveOrderStatus::NotActivated
+    {
+        return Err(ExecutionLedgerError::Corrupt(
+            "filled parent cannot have not-activated protection",
+        ));
+    }
+    if matches!(
+        record.state,
+        ExecutionState::Live | ExecutionState::PartiallyFilled
+    ) && protection.status != ProtectiveOrderStatus::Pending
+    {
+        return Err(ExecutionLedgerError::Corrupt(
+            "nonterminal parent has resolved protective state",
+        ));
+    }
+
+    Ok(())
+}
+
+fn positive_decimal(value: &str) -> Option<Decimal> {
+    Decimal::from_str(value.trim())
+        .ok()
+        .filter(|value| *value > Decimal::ZERO)
 }
 
 fn valid_sha256_artifact_id(value: &str) -> bool {
@@ -1008,6 +1134,22 @@ mod tests {
         }
     }
 
+    fn protected_plan(intent_id: &str) -> ExecutionPlan {
+        let mut value = plan(intent_id);
+        value.open_risk = Some(crate::OpenRiskEvidence {
+            fee_generation: "sha256:fee".to_owned(),
+            requested_max_settle_notional: "10".to_owned(),
+            requested_max_loss_settle: "1".to_owned(),
+            requested_target_rr: "2".to_owned(),
+            stop_price: "0.09".to_owned(),
+            target_price: "0.12".to_owned(),
+            entry_settle_notional: "10".to_owned(),
+            stop_loss_settle: "1".to_owned(),
+            actual_target_rr: "2".to_owned(),
+        });
+        value
+    }
+
     fn close_plan(intent_id: &str, position_side: PositionSide) -> ExecutionPlan {
         let mut value = plan(intent_id);
         value.action = ExecutionAction::Close;
@@ -1162,6 +1304,105 @@ mod tests {
     }
 
     #[test]
+    fn terminal_pending_protection_reserves_across_restart_until_matching_proof() {
+        let root = temp_root("protective-reservation");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent_id = "intent_protected_01234567";
+
+        {
+            let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+            ledger
+                .prepare(protected_plan(intent_id), 101)
+                .expect("prepare");
+            ledger.begin_submission(intent_id, 102).expect("submit");
+            ledger.acknowledge(intent_id, "ord-1", 103).expect("ack");
+            let terminal = ledger
+                .reconcile_found_with_resolutions(
+                    intent_id,
+                    "ord-1",
+                    ExchangeOrderState::Canceled,
+                    OrderMutationResolution::Pending,
+                    Some(ProtectiveOrderResolution::Pending),
+                    104,
+                )
+                .expect("terminal pending");
+            assert_eq!(terminal.record.state, ExecutionState::Canceled);
+            assert!(terminal.record.protection_requires_reconciliation());
+        }
+
+        let mut restarted = DurableExecutionLedger::open(store.clone(), 200).expect("restart");
+        assert!(matches!(
+            restarted.prepare(plan("intent_blocked_01234567"), 201),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
+
+        let resolved = restarted
+            .reconcile_found_with_resolutions(
+                intent_id,
+                "ord-1",
+                ExchangeOrderState::Canceled,
+                OrderMutationResolution::Pending,
+                Some(ProtectiveOrderResolution::Active {
+                    algo_order_id: "algo-1".to_owned(),
+                    covered_size: "0.4".to_owned(),
+                }),
+                202,
+            )
+            .expect("active protection");
+        assert_eq!(
+            resolved
+                .record
+                .protection
+                .as_ref()
+                .expect("protection")
+                .status,
+            ProtectiveOrderStatus::Active
+        );
+        assert!(matches!(
+            restarted
+                .prepare(plan("intent_released_0123456"), 203)
+                .expect("released"),
+            PrepareDisposition::Created(_)
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_protection_keeps_instrument_reserved() {
+        let root = temp_root("protective-failed");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent_id = "intent_protected_76543210";
+        let mut ledger = DurableExecutionLedger::open(store, 100).expect("open");
+        ledger
+            .prepare(protected_plan(intent_id), 101)
+            .expect("prepare");
+        ledger.begin_submission(intent_id, 102).expect("submit");
+        ledger.acknowledge(intent_id, "ord-1", 103).expect("ack");
+        ledger
+            .reconcile_found_with_resolutions(
+                intent_id,
+                "ord-1",
+                ExchangeOrderState::Filled,
+                OrderMutationResolution::Pending,
+                Some(ProtectiveOrderResolution::Failed {
+                    code: "51008".to_owned(),
+                }),
+                104,
+            )
+            .expect("failed protection");
+
+        assert!(matches!(
+            ledger.prepare(plan("intent_blocked_76543210"), 105),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn reverse_reserves_instrument_across_restart_until_fresh_open_is_prepared() {
         let root = temp_root("reverse-reservation");
         let _ = fs::remove_dir_all(&root);
@@ -1306,10 +1547,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v1_v2_ledgers_load_and_next_write_upgrades_to_v3() {
-        for (index, schema) in [EXECUTION_LEDGER_SCHEMA_V1, EXECUTION_LEDGER_SCHEMA_V2]
-            .into_iter()
-            .enumerate()
+    fn legacy_v1_v2_v3_ledgers_load_and_next_write_upgrades_to_v4() {
+        for (index, schema) in [
+            EXECUTION_LEDGER_SCHEMA_V1,
+            EXECUTION_LEDGER_SCHEMA_V2,
+            EXECUTION_LEDGER_SCHEMA_V3,
+        ]
+        .into_iter()
+        .enumerate()
         {
             let root = temp_root(&format!("schema-upgrade-{index}"));
             let _ = fs::remove_dir_all(&root);
@@ -1334,11 +1579,11 @@ mod tests {
             let store = ExecutionLedgerStore::at(&path);
             let mut ledger = DurableExecutionLedger::open(store, 101).expect("load legacy");
             assert_eq!(ledger.len(), 1);
-            ledger.begin_submission(&intent_id, 102).expect("write v3");
+            ledger.begin_submission(&intent_id, 102).expect("write v4");
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V3);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V4);
 
             let _ = fs::remove_dir_all(root);
         }

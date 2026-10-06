@@ -3,9 +3,9 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use okx_api::{
     AmendOrderRequest, ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode,
-    CancelOrderRequest, MutationTiming, OkxError, OrderOperationAck, PlaceOrderRequest,
-    RateDecision, RateRequestPlan, RateThrottleEvidence, TradeApi, TradeOrderDetails,
-    TradeResponse,
+    ApiTriggerPriceType, AttachedAlgoOrderRequest, CancelOrderRequest, MutationTiming, OkxError,
+    OrderOperationAck, PlaceOrderRequest, RateDecision, RateRequestPlan, RateThrottleEvidence,
+    TradeAlgoOrderDetails, TradeApi, TradeOrderDetails, TradeResponse,
 };
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -14,8 +14,9 @@ use crate::{
     DurableExecutionLedger, ExchangeOrderState, ExecutionLedgerEntry, ExecutionLedgerError,
     ExecutionPlan, ExecutionRecord, ExecutionState, ExecutionTransitionError,
     MutationPrepareDisposition, OrderMutationKind, OrderMutationRecord, OrderMutationResolution,
-    OrderMutationState, OrderSide, OrderType, PositionSide, PrepareOutcome, TradeMode,
-    classify_prepare_result, derive_amend_request_id, require_live_trading_enabled,
+    OrderMutationState, OrderSide, OrderType, PositionSide, PrepareOutcome,
+    ProtectiveOrderResolution, ProtectiveTriggerPriceBasis, TradeMode, classify_prepare_result,
+    derive_amend_request_id, require_live_trading_enabled,
 };
 
 #[async_trait]
@@ -75,6 +76,15 @@ pub trait ExecutionGateway: Send + Sync {
         instrument_id: String,
         client_order_id: String,
     ) -> Result<TradeOrderDetails, OkxError>;
+
+    async fn algo_order_by_client_id(
+        &self,
+        _client_order_id: String,
+    ) -> Result<TradeAlgoOrderDetails, OkxError> {
+        Err(OkxError::Config(
+            "execution gateway does not support algo_order_by_client_id".to_owned(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -149,6 +159,13 @@ impl ExecutionGateway for TradeApi {
     ) -> Result<TradeOrderDetails, OkxError> {
         TradeApi::order_by_client_id(self, &instrument_id, &client_order_id).await
     }
+
+    async fn algo_order_by_client_id(
+        &self,
+        client_order_id: String,
+    ) -> Result<TradeAlgoOrderDetails, OkxError> {
+        TradeApi::algo_order_by_client_id(self, &client_order_id).await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +224,12 @@ pub enum OrderExecutorError {
 
     #[error("order mutation input '{0}' is invalid")]
     InvalidMutationInput(&'static str),
+
+    #[error("amending a parent order with attached protection is not supported")]
+    ProtectedOrderAmendUnsupported,
+
+    #[error("exchange protective algo does not match the durable execution identity")]
+    ProtectionIdentityMismatch,
 }
 
 pub struct OrderExecutor<G> {
@@ -292,6 +315,9 @@ where
             .get(intent_id)
             .cloned()
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        if entry.record.protection.is_some() {
+            return Err(OrderExecutorError::ProtectedOrderAmendUnsupported);
+        }
         let new_size = normalize_optional_positive_decimal("new_size", new_size)?;
         let new_price = normalize_optional_positive_decimal("new_price", new_price)?;
         if new_size.is_none() && new_price.is_none() {
@@ -352,7 +378,7 @@ where
             return Err(OrderExecutorError::NotPrepared(entry.record.state));
         }
 
-        let request = place_request(&entry.record.plan);
+        let request = place_request(&entry.record);
         let rate_plan = match self.gateway.admit_place_order(&request) {
             Ok(value) => value,
             Err(OkxError::RateLimited { evidence }) if !evidence.request_sent => {
@@ -528,13 +554,15 @@ where
             .cloned()
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
 
-        if !matches!(
+        if !(matches!(
             entry.record.state,
             ExecutionState::Acknowledged
                 | ExecutionState::UnknownSubmission
                 | ExecutionState::Live
                 | ExecutionState::PartiallyFilled
-        ) {
+        ) || entry.record.state.is_terminal()
+            && entry.record.protection_requires_reconciliation())
+        {
             return Err(OrderExecutorError::NotReconcilable(entry.record.state));
         }
 
@@ -550,14 +578,81 @@ where
 
         let state = map_exchange_state(&order.state)?;
         let mutation_resolution = validate_order_identity(&entry.record, &order, state)?;
-        let entry = self.ledger.reconcile_found_with_mutation_resolution(
+        let protection_resolution = self
+            .protection_resolution(&entry.record, &order, state)
+            .await?;
+        let entry = self.ledger.reconcile_found_with_resolutions(
             intent_id,
             order.order_id,
             state,
             mutation_resolution,
+            protection_resolution,
             observed_at_ms,
         )?;
         Ok(ReconcileDisposition::Found(entry))
+    }
+
+    async fn protection_resolution(
+        &self,
+        record: &ExecutionRecord,
+        order: &TradeOrderDetails,
+        exchange_state: ExchangeOrderState,
+    ) -> Result<Option<ProtectiveOrderResolution>, OrderExecutorError> {
+        let Some(protection) = record.protection.as_ref() else {
+            return Ok(None);
+        };
+        let filled = Decimal::from_str(&order.accumulated_fill_size)
+            .map_err(|_| OrderExecutorError::ProtectionIdentityMismatch)?;
+        if filled < Decimal::ZERO {
+            return Err(OrderExecutorError::ProtectionIdentityMismatch);
+        }
+
+        if matches!(
+            exchange_state,
+            ExchangeOrderState::Live | ExchangeOrderState::PartiallyFilled
+        ) {
+            return Ok(Some(ProtectiveOrderResolution::Pending));
+        }
+        if exchange_state == ExchangeOrderState::Canceled && filled == Decimal::ZERO {
+            return Ok(Some(ProtectiveOrderResolution::NotActivated));
+        }
+        if filled <= Decimal::ZERO {
+            return Err(OrderExecutorError::ProtectionIdentityMismatch);
+        }
+
+        let algo = match self
+            .gateway
+            .algo_order_by_client_id(protection.algo_client_order_id.clone())
+            .await
+        {
+            Ok(algo) => algo,
+            Err(_) => return Ok(Some(ProtectiveOrderResolution::Pending)),
+        };
+        validate_protective_algo(record, &algo)?;
+
+        match algo.state.as_str() {
+            "live" | "effective" | "partially_effective" => {
+                if algo.algo_order_id.trim().is_empty() {
+                    return Err(OrderExecutorError::ProtectionIdentityMismatch);
+                }
+                Ok(Some(ProtectiveOrderResolution::Active {
+                    algo_order_id: algo.algo_order_id,
+                    covered_size: filled.normalize().to_string(),
+                }))
+            }
+            "canceled" => Ok(Some(ProtectiveOrderResolution::Failed {
+                code: "ALGO_CANCELED".to_owned(),
+            })),
+            "order_failed" | "partially_failed" => {
+                let code = if algo.failure_code.trim().is_empty() {
+                    format!("ALGO_{}", algo.state.to_ascii_uppercase())
+                } else {
+                    algo.failure_code
+                };
+                Ok(Some(ProtectiveOrderResolution::Failed { code }))
+            }
+            _ => Err(OrderExecutorError::ProtectionIdentityMismatch),
+        }
     }
 
     #[cfg(test)]
@@ -697,7 +792,26 @@ fn normalize_optional_positive_decimal(
         .transpose()
 }
 
-fn place_request(plan: &ExecutionPlan) -> PlaceOrderRequest {
+fn place_request(record: &ExecutionRecord) -> PlaceOrderRequest {
+    let plan = &record.plan;
+    let attached_algo_orders = match (record.protection.as_ref(), plan.open_risk.as_ref()) {
+        (Some(protection), Some(risk)) => {
+            let trigger_type = match protection.trigger_price_basis {
+                ProtectiveTriggerPriceBasis::Mark => ApiTriggerPriceType::Mark,
+            };
+            vec![AttachedAlgoOrderRequest {
+                client_order_id: protection.algo_client_order_id.clone(),
+                take_profit_trigger_price: risk.target_price.clone(),
+                take_profit_trigger_price_type: trigger_type,
+                take_profit_order_price: "-1".to_owned(),
+                stop_loss_trigger_price: risk.stop_price.clone(),
+                stop_loss_trigger_price_type: trigger_type,
+                stop_loss_order_price: "-1".to_owned(),
+            }]
+        }
+        _ => Vec::new(),
+    };
+
     PlaceOrderRequest {
         instrument_id: plan.instrument_id.clone(),
         trade_mode: match plan.trade_mode {
@@ -721,7 +835,42 @@ fn place_request(plan: &ExecutionPlan) -> PlaceOrderRequest {
         },
         size: plan.size.clone(),
         price: plan.price.clone(),
+        attached_algo_orders,
     }
+}
+
+fn validate_protective_algo(
+    record: &ExecutionRecord,
+    algo: &TradeAlgoOrderDetails,
+) -> Result<(), OrderExecutorError> {
+    let protection = record
+        .protection
+        .as_ref()
+        .ok_or(OrderExecutorError::ProtectionIdentityMismatch)?;
+    let risk = record
+        .plan
+        .open_risk
+        .as_ref()
+        .ok_or(OrderExecutorError::ProtectionIdentityMismatch)?;
+    if algo.instrument_id != record.plan.instrument_id
+        || algo.client_order_id != protection.algo_client_order_id
+        || algo.take_profit_trigger_price_type != protection.trigger_price_basis.as_str()
+        || algo.stop_loss_trigger_price_type != protection.trigger_price_basis.as_str()
+        || !decimal_equal(&algo.take_profit_trigger_price, &risk.target_price)
+        || !decimal_equal(&algo.take_profit_order_price, "-1")
+        || !decimal_equal(&algo.stop_loss_trigger_price, &risk.stop_price)
+        || !decimal_equal(&algo.stop_loss_order_price, "-1")
+    {
+        return Err(OrderExecutorError::ProtectionIdentityMismatch);
+    }
+    Ok(())
+}
+
+fn decimal_equal(left: &str, right: &str) -> bool {
+    Decimal::from_str(left)
+        .ok()
+        .zip(Decimal::from_str(right).ok())
+        .is_some_and(|(left, right)| left == right)
 }
 
 fn validate_order_identity(
@@ -882,12 +1031,13 @@ mod tests {
     use okx_api::{
         GENERAL_RATE_LIMIT_CODE, OrderOperationAck, RateDecision, RateDomainEvidence,
         RateDomainKind, RateOperationClass, RateThrottleEvidence, RateThrottleSource,
-        TradeOrderDetails, TradeResponse,
+        TradeAlgoOrderDetails, TradeOrderDetails, TradeResponse,
     };
 
     use super::*;
     use crate::{
-        EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionLedgerStore, OrderSide, PositionSide,
+        EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionLedgerStore, OpenRiskEvidence,
+        OrderSide, PositionSide, ProtectiveOrderStatus,
     };
 
     struct MockGateway {
@@ -946,6 +1096,49 @@ mod tests {
                 .expect("lookup queue")
                 .pop_front()
                 .expect("lookup result")
+        }
+    }
+
+    struct ProtectiveLookupGateway {
+        result: Mutex<Option<Result<TradeAlgoOrderDetails, OkxError>>>,
+    }
+
+    impl ProtectiveLookupGateway {
+        fn new(result: Result<TradeAlgoOrderDetails, OkxError>) -> Self {
+            Self {
+                result: Mutex::new(Some(result)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ExecutionGateway for ProtectiveLookupGateway {
+        async fn place_order(
+            &self,
+            _request: PlaceOrderRequest,
+            _timing: MutationTiming,
+            _rate_plan: Option<RateRequestPlan>,
+        ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+            panic!("place is not used by protective lookup tests")
+        }
+
+        async fn order_by_client_id(
+            &self,
+            _instrument_id: String,
+            _client_order_id: String,
+        ) -> Result<TradeOrderDetails, OkxError> {
+            panic!("parent lookup is not used by protective resolution tests")
+        }
+
+        async fn algo_order_by_client_id(
+            &self,
+            _client_order_id: String,
+        ) -> Result<TradeAlgoOrderDetails, OkxError> {
+            self.result
+                .lock()
+                .expect("algo result")
+                .take()
+                .expect("single algo lookup")
         }
     }
 
@@ -1148,6 +1341,22 @@ mod tests {
         }
     }
 
+    fn protected_plan() -> ExecutionPlan {
+        let mut value = plan();
+        value.open_risk = Some(OpenRiskEvidence {
+            fee_generation: "sha256:fee".to_owned(),
+            requested_max_settle_notional: "10".to_owned(),
+            requested_max_loss_settle: "1".to_owned(),
+            requested_target_rr: "2".to_owned(),
+            stop_price: "0.09".to_owned(),
+            target_price: "0.12".to_owned(),
+            entry_settle_notional: "10".to_owned(),
+            stop_loss_settle: "1".to_owned(),
+            actual_target_rr: "2".to_owned(),
+        });
+        value
+    }
+
     fn timing() -> MutationTiming {
         MutationTiming::from_exchange_time_ms(1790000000000, 5_000).expect("timing")
     }
@@ -1218,6 +1427,215 @@ mod tests {
             creation_time_ms: "1790000000000".to_owned(),
             update_time_ms: "1790000001000".to_owned(),
         }
+    }
+
+    #[test]
+    fn protected_place_request_uses_existing_risk_prices_and_deterministic_identity() {
+        let record = ExecutionRecord::new(protected_plan());
+        let request = place_request(&record);
+        let protection = record.protection.as_ref().expect("protection");
+        assert_eq!(request.attached_algo_orders.len(), 1);
+        let attached = &request.attached_algo_orders[0];
+        assert_eq!(attached.client_order_id, protection.algo_client_order_id);
+        assert_eq!(attached.take_profit_trigger_price, "0.12");
+        assert_eq!(
+            attached.take_profit_trigger_price_type,
+            ApiTriggerPriceType::Mark
+        );
+        assert_eq!(attached.take_profit_order_price, "-1");
+        assert_eq!(attached.stop_loss_trigger_price, "0.09");
+        assert_eq!(
+            attached.stop_loss_trigger_price_type,
+            ApiTriggerPriceType::Mark
+        );
+        assert_eq!(attached.stop_loss_order_price, "-1");
+    }
+
+    #[test]
+    fn protective_algo_identity_is_checked_against_plan_and_policy() {
+        let record = ExecutionRecord::new(protected_plan());
+        let protection = record.protection.as_ref().expect("protection");
+        let algo = TradeAlgoOrderDetails {
+            instrument_id: record.plan.instrument_id.clone(),
+            algo_order_id: "algo-1".to_owned(),
+            client_order_id: protection.algo_client_order_id.clone(),
+            state: "effective".to_owned(),
+            take_profit_trigger_price: "0.12".to_owned(),
+            take_profit_trigger_price_type: "mark".to_owned(),
+            take_profit_order_price: "-1".to_owned(),
+            stop_loss_trigger_price: "0.09".to_owned(),
+            stop_loss_trigger_price_type: "mark".to_owned(),
+            stop_loss_order_price: "-1".to_owned(),
+            failure_code: String::new(),
+        };
+        validate_protective_algo(&record, &algo).expect("matching algo");
+
+        let mut wrong = algo;
+        wrong.stop_loss_trigger_price = "0.08".to_owned();
+        assert!(matches!(
+            validate_protective_algo(&record, &wrong),
+            Err(OrderExecutorError::ProtectionIdentityMismatch)
+        ));
+    }
+
+    #[tokio::test]
+    async fn zero_fill_cancel_resolves_not_activated_without_algo_evidence() {
+        let (root, ledger) = ledger("protective-zero-fill");
+        let record = ExecutionRecord::new(protected_plan());
+        let mut order = order_details(&record.plan, "canceled");
+        order.accumulated_fill_size = "0".to_owned();
+        let gateway = MockGateway::new(vec![], vec![]);
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let resolution = executor
+            .protection_resolution(&record, &order, ExchangeOrderState::Canceled)
+            .await
+            .expect("resolution");
+        assert_eq!(resolution, Some(ProtectiveOrderResolution::NotActivated));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn partial_fill_cancel_without_algo_evidence_stays_pending() {
+        let (root, ledger) = ledger("protective-missing-evidence");
+        let record = ExecutionRecord::new(protected_plan());
+        let mut order = order_details(&record.plan, "canceled");
+        order.accumulated_fill_size = "0.4".to_owned();
+        let gateway = MockGateway::new(vec![], vec![]);
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let resolution = executor
+            .protection_resolution(&record, &order, ExchangeOrderState::Canceled)
+            .await
+            .expect("resolution");
+        assert_eq!(resolution, Some(ProtectiveOrderResolution::Pending));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn partial_fill_cancel_with_matching_algo_uses_exact_filled_size() {
+        let (root, ledger) = ledger("protective-matching-evidence");
+        let record = ExecutionRecord::new(protected_plan());
+        let protection = record.protection.as_ref().expect("protection");
+        let mut order = order_details(&record.plan, "canceled");
+        order.accumulated_fill_size = "0.40".to_owned();
+        let algo = TradeAlgoOrderDetails {
+            instrument_id: record.plan.instrument_id.clone(),
+            algo_order_id: "algo-1".to_owned(),
+            client_order_id: protection.algo_client_order_id.clone(),
+            state: "live".to_owned(),
+            take_profit_trigger_price: "0.12".to_owned(),
+            take_profit_trigger_price_type: "mark".to_owned(),
+            take_profit_order_price: "-1".to_owned(),
+            stop_loss_trigger_price: "0.09".to_owned(),
+            stop_loss_trigger_price_type: "mark".to_owned(),
+            stop_loss_order_price: "-1".to_owned(),
+            failure_code: String::new(),
+        };
+        let gateway = ProtectiveLookupGateway::new(Ok(algo));
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let resolution = executor
+            .protection_resolution(&record, &order, ExchangeOrderState::Canceled)
+            .await
+            .expect("resolution");
+        assert_eq!(
+            resolution,
+            Some(ProtectiveOrderResolution::Active {
+                algo_order_id: "algo-1".to_owned(),
+                covered_size: "0.4".to_owned(),
+            })
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explicit_algo_failure_is_durable_failed_resolution() {
+        let (root, ledger) = ledger("protective-failure-evidence");
+        let record = ExecutionRecord::new(protected_plan());
+        let protection = record.protection.as_ref().expect("protection");
+        let mut order = order_details(&record.plan, "filled");
+        order.accumulated_fill_size = "1".to_owned();
+        let algo = TradeAlgoOrderDetails {
+            instrument_id: record.plan.instrument_id.clone(),
+            algo_order_id: String::new(),
+            client_order_id: protection.algo_client_order_id.clone(),
+            state: "order_failed".to_owned(),
+            take_profit_trigger_price: "0.12".to_owned(),
+            take_profit_trigger_price_type: "mark".to_owned(),
+            take_profit_order_price: "-1".to_owned(),
+            stop_loss_trigger_price: "0.09".to_owned(),
+            stop_loss_trigger_price_type: "mark".to_owned(),
+            stop_loss_order_price: "-1".to_owned(),
+            failure_code: "51008".to_owned(),
+        };
+        let gateway = ProtectiveLookupGateway::new(Ok(algo));
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let resolution = executor
+            .protection_resolution(&record, &order, ExchangeOrderState::Filled)
+            .await
+            .expect("resolution");
+        assert_eq!(
+            resolution,
+            Some(ProtectiveOrderResolution::Failed {
+                code: "51008".to_owned(),
+            })
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protected_parent_amend_is_rejected_before_creating_mutation() {
+        let (root, mut ledger) = ledger("protected-amend");
+        let plan = protected_plan();
+        ledger.prepare(plan.clone(), 101).expect("prepare");
+        ledger
+            .begin_submission(&plan.intent_id, 102)
+            .expect("submitting");
+        ledger
+            .acknowledge(&plan.intent_id, "ord-1", 103)
+            .expect("ack");
+        ledger
+            .reconcile_found(&plan.intent_id, "ord-1", ExchangeOrderState::Live, 104)
+            .expect("live");
+        let gateway = MockGateway::new(vec![], vec![]);
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        assert!(matches!(
+            executor.prepare_amend(
+                &plan.intent_id,
+                "mutation_protected_01",
+                None,
+                Some("0.11".to_owned()),
+                105,
+            ),
+            Err(OrderExecutorError::ProtectedOrderAmendUnsupported)
+        ));
+        assert!(
+            executor
+                .ledger()
+                .get(&plan.intent_id)
+                .expect("entry")
+                .record
+                .mutations
+                .is_empty()
+        );
+        assert_eq!(
+            executor
+                .ledger()
+                .get(&plan.intent_id)
+                .and_then(|entry| entry.record.protection.as_ref())
+                .expect("protection")
+                .status,
+            ProtectiveOrderStatus::Pending
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
