@@ -492,11 +492,7 @@ pub fn normalize_execution_fill_history(
     let mut fills = Vec::with_capacity(history.rows.len());
     for row in &history.rows {
         let fill = normalize_fill_identity(expected_type, row)?;
-        require_execution_fill_identity(
-            "instId",
-            expected_instrument_id,
-            &fill.instrument_id,
-        )?;
+        require_execution_fill_identity("instId", expected_instrument_id, &fill.instrument_id)?;
         require_execution_fill_identity(
             "ordId",
             expected_order_id,
