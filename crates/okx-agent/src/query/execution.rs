@@ -1655,9 +1655,7 @@ async fn execution_tca_status(
                 Some(report.into()),
                 Some("filled_state_completion_mismatch"),
             ),
-            vec![
-                "filled execution does not reconcile to the effective requested size".to_owned(),
-            ],
+            vec!["filled execution does not reconcile to the effective requested size".to_owned()],
         );
     }
 
