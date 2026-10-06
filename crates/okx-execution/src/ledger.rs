@@ -1617,11 +1617,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v1_v2_v3_ledgers_load_and_next_write_upgrades_to_v4() {
+    fn legacy_v1_v2_v3_v4_ledgers_load_and_next_write_upgrades_to_v5() {
         for (index, schema) in [
             EXECUTION_LEDGER_SCHEMA_V1,
             EXECUTION_LEDGER_SCHEMA_V2,
             EXECUTION_LEDGER_SCHEMA_V3,
+            EXECUTION_LEDGER_SCHEMA_V4,
         ]
         .into_iter()
         .enumerate()
@@ -1649,14 +1650,85 @@ mod tests {
             let store = ExecutionLedgerStore::at(&path);
             let mut ledger = DurableExecutionLedger::open(store, 101).expect("load legacy");
             assert_eq!(ledger.len(), 1);
-            ledger.begin_submission(&intent_id, 102).expect("write v4");
+            ledger.begin_submission(&intent_id, 102).expect("write v5");
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V4);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V5);
 
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn submission_timing_is_durable_before_send_and_survives_unknown_recovery() {
+        let root = temp_root("submission-timing-recovery");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent_id = "intent_submission_timing_01";
+
+        {
+            let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+            ledger.prepare(plan(intent_id), 101).expect("prepare");
+            let submitting = ledger
+                .begin_submission_with_timing(intent_id, Some(1_791_300_000_000), 102)
+                .expect("submitting");
+            let timing = submitting
+                .record
+                .submission_timing
+                .as_ref()
+                .expect("request timing");
+            assert_eq!(timing.request_exchange_time_ms, 1_791_300_000_000);
+            assert_eq!(timing.okx_in_time_us, None);
+            assert_eq!(timing.okx_out_time_us, None);
+        }
+
+        let recovered = DurableExecutionLedger::open(store.clone(), 200).expect("recover");
+        let entry = recovered.get(intent_id).expect("entry");
+        assert_eq!(entry.record.state, ExecutionState::UnknownSubmission);
+        let timing = entry.record.submission_timing.as_ref().expect("timing");
+        assert_eq!(timing.request_exchange_time_ms, 1_791_300_000_000);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gateway_timing_is_committed_atomically_with_acknowledgement() {
+        let root = temp_root("gateway-timing");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent_id = "intent_gateway_timing_0123";
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+        ledger.prepare(plan(intent_id), 101).expect("prepare");
+        ledger
+            .begin_submission_with_timing(intent_id, Some(1_791_300_000_000), 102)
+            .expect("submitting");
+        let acknowledged = ledger
+            .acknowledge_with_gateway_timing(
+                intent_id,
+                "ord-1",
+                Some((1_791_300_000_100_000, 1_791_300_000_100_900)),
+                103,
+            )
+            .expect("ack");
+        let timing = acknowledged
+            .record
+            .submission_timing
+            .as_ref()
+            .expect("timing");
+        assert_eq!(timing.okx_in_time_us, Some(1_791_300_000_100_000));
+        assert_eq!(timing.okx_out_time_us, Some(1_791_300_000_100_900));
+
+        let reopened = DurableExecutionLedger::open(store, 200).expect("reopen");
+        assert_eq!(
+            reopened
+                .get(intent_id)
+                .and_then(|entry| entry.record.submission_timing.as_ref())
+                .and_then(|timing| timing.okx_out_time_us),
+            Some(1_791_300_000_100_900)
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
