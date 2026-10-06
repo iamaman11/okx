@@ -2523,6 +2523,7 @@ mod tests {
                     },
                 },
                 risk: Some(Box::new(execution_risk_request())),
+                lineage: None,
             },
         };
         open.validate().expect("valid open execution request");
@@ -2541,6 +2542,7 @@ mod tests {
                     price: "0.1".to_owned(),
                 },
                 risk: None,
+                lineage: None,
             },
         };
         close.validate().expect("valid close execution request");
@@ -2577,6 +2579,7 @@ mod tests {
                     price: "0.1".to_owned(),
                 },
                 risk: None,
+                lineage: None,
             },
         };
         assert!(invalid.validate().is_err());
@@ -2604,6 +2607,7 @@ mod tests {
                     entry: entry.clone(),
                 },
                 risk: Some(Box::new(execution_risk_request())),
+                lineage: None,
             },
             AgentOperation::PrepareExecution {
                 intent_id: "intent_generic_reverse_01".to_owned(),
@@ -2616,6 +2620,7 @@ mod tests {
                     price: "0.1".to_owned(),
                 },
                 risk: None,
+                lineage: None,
             },
             AgentOperation::PrepareExecution {
                 intent_id: "intent_generic_reverse_01".to_owned(),
@@ -2624,6 +2629,7 @@ mod tests {
                 order_type: ExecutionOrderType::Limit,
                 spec: ExecutionPrepareSpec::ContinueReverse { entry },
                 risk: Some(Box::new(execution_risk_request())),
+                lineage: None,
             },
         ];
 
