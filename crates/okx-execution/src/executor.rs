@@ -2290,13 +2290,15 @@ mod tests {
 
     #[tokio::test]
     async fn amend_ack_is_applied_only_after_exact_reconciliation() {
-        let plan = plan();
+        let mut plan = plan();
+        plan.action = ExecutionAction::Close;
+        plan.side = OrderSide::Sell;
         let (root, ledger) = live_ledger("amend-apply", &plan);
         let mutation_id = "mutation_amend_012345";
         let request_id = derive_amend_request_id(&plan.intent_id, mutation_id);
         let mut amended = order_details(&plan, "live");
         amended.price = "0.11".to_owned();
-        amended.size = "2".to_owned();
+        amended.size = "0.5".to_owned();
         let gateway = MutationGateway::new(
             vec![Ok(mutation_ack(&plan, &request_id))],
             vec![],
@@ -2309,7 +2311,7 @@ mod tests {
                 .prepare_amend(
                     &plan.intent_id,
                     mutation_id,
-                    Some("2".to_owned()),
+                    Some("0.5".to_owned()),
                     Some("0.11".to_owned()),
                     105,
                 )
@@ -2348,7 +2350,7 @@ mod tests {
             after.record.mutations.last().expect("mutation").state,
             OrderMutationState::Applied
         );
-        assert_eq!(after.record.effective_size(), "2");
+        assert_eq!(after.record.effective_size(), "0.5");
         assert_eq!(after.record.effective_price(), "0.11");
         assert_eq!(after.record.plan.size, "1");
         assert_eq!(after.record.plan.price, "0.1");
@@ -2359,7 +2361,9 @@ mod tests {
 
     #[tokio::test]
     async fn uncertain_amend_is_durable_unknown_and_never_blindly_replayed() {
-        let plan = plan();
+        let mut plan = plan();
+        plan.action = ExecutionAction::Close;
+        plan.side = OrderSide::Sell;
         let (root, ledger) = live_ledger("amend-unknown", &plan);
         let mutation_id = "mutation_amend_unknown_01";
         let gateway = MutationGateway::new(
