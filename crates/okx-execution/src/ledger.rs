@@ -833,12 +833,7 @@ mod tests {
             .acknowledge(&first.intent_id, "ord-1", 104)
             .expect("ack first");
         ledger
-            .reconcile_found(
-                &first.intent_id,
-                "ord-1",
-                ExchangeOrderState::Filled,
-                105,
-            )
+            .reconcile_found(&first.intent_id, "ord-1", ExchangeOrderState::Filled, 105)
             .expect("first terminal");
 
         assert!(matches!(
@@ -897,12 +892,8 @@ mod tests {
         {
             let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
             ledger.prepare(plan(intent_id), 101).expect("prepare");
-            ledger
-                .begin_submission(intent_id, 102)
-                .expect("submit");
-            ledger
-                .acknowledge(intent_id, "ord-1", 103)
-                .expect("ack");
+            ledger.begin_submission(intent_id, 102).expect("submit");
+            ledger.acknowledge(intent_id, "ord-1", 103).expect("ack");
             ledger
                 .reconcile_found(intent_id, "ord-1", ExchangeOrderState::Live, 104)
                 .expect("live");
@@ -914,11 +905,7 @@ mod tests {
                 )
                 .expect("prepare cancel");
             let submitting = ledger
-                .begin_order_mutation_submission(
-                    intent_id,
-                    "mutation_cancel_restart_01",
-                    106,
-                )
+                .begin_order_mutation_submission(intent_id, "mutation_cancel_restart_01", 106)
                 .expect("persist mutation submitting");
             assert_eq!(
                 submitting
@@ -930,8 +917,7 @@ mod tests {
             );
         }
 
-        let mut reopened =
-            DurableExecutionLedger::open(store.clone(), 200).expect("recovery open");
+        let mut reopened = DurableExecutionLedger::open(store.clone(), 200).expect("recovery open");
         let recovered = reopened.get(intent_id).expect("entry");
         assert_eq!(recovered.record.state, ExecutionState::Live);
         assert_eq!(
@@ -943,11 +929,7 @@ mod tests {
             OrderMutationState::Unknown
         );
         assert!(matches!(
-            reopened.begin_order_mutation_submission(
-                intent_id,
-                "mutation_cancel_restart_01",
-                201,
-            ),
+            reopened.begin_order_mutation_submission(intent_id, "mutation_cancel_restart_01", 201,),
             Err(ExecutionLedgerError::Transition(
                 ExecutionTransitionError::InvalidMutationTransition { .. }
             ))
