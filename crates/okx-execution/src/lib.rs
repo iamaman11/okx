@@ -11,7 +11,8 @@ pub use contract::{
     PrepareRejection, classify_prepare_result, execution_status,
 };
 pub use executor::{
-    ExecutionGateway, OrderExecutor, OrderExecutorError, ReconcileDisposition, SubmitDisposition,
+    ExecutionGateway, MutationSubmitDisposition, OrderExecutor, OrderExecutorError,
+    ReconcileDisposition, SubmitDisposition,
 };
 pub use ledger::{
     DurableExecutionLedger, EXECUTION_LEDGER_SCHEMA_V1, ExecutionLedgerEntry, ExecutionLedgerError,
