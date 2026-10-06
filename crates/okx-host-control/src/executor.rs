@@ -939,15 +939,24 @@ fn fixed_error_code(line: &str) -> Option<&'static str> {
         ("UnsupportedInstrumentType", "unsupported_instrument_type"),
         ("MissingRequiredField", "missing_required_field"),
         ("DuplicateInstrument", "duplicate_instrument"),
-        ("UnsupportedUpcomingParameter", "unsupported_upcoming_parameter"),
+        (
+            "UnsupportedUpcomingParameter",
+            "unsupported_upcoming_parameter",
+        ),
         ("MalformedUpcomingParameter", "malformed_upcoming_parameter"),
         ("Serialization(", "serialization"),
         ("IdentityNotFound", "identity_not_found"),
         ("InvalidPrivateKeyLength", "invalid_private_key_length"),
         ("GithubTokenNotFound", "github_token_not_found"),
         ("InvalidGithubToken", "invalid_github_token"),
-        ("DemoOkxCredentialsNotFound", "demo_observer_credential_not_found"),
-        ("InvalidDemoOkxCredentials", "invalid_demo_observer_credential"),
+        (
+            "DemoOkxCredentialsNotFound",
+            "demo_observer_credential_not_found",
+        ),
+        (
+            "InvalidDemoOkxCredentials",
+            "invalid_demo_observer_credential",
+        ),
         (
             "DemoExecutorOkxCredentialsNotFound",
             "demo_executor_credential_not_found",
@@ -984,7 +993,10 @@ fn fatal_error_summary(stderr: &str) -> Option<Value> {
         ("github_token", fixed_error_code(line))
     } else if line.contains("Github(") || line.contains("GitHub transport error") {
         ("github", None)
-    } else if line.contains("Okx(Api") || line.contains("OKX API error") || line.contains("Api { code:") {
+    } else if line.contains("Okx(Api")
+        || line.contains("OKX API error")
+        || line.contains("Api { code:")
+    {
         ("okx_api", None)
     } else if line.contains("Okx(Config") || line.contains("configuration error") {
         ("okx_config", None)
