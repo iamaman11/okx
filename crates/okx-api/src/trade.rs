@@ -88,7 +88,11 @@ pub struct PlaceOrderRequest {
     pub size: String,
     #[serde(rename = "px")]
     pub price: String,
-    #[serde(rename = "attachAlgoOrds", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "attachAlgoOrds",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub attached_algo_orders: Vec<AttachedAlgoOrderRequest>,
 }
 
@@ -687,10 +691,7 @@ mod tests {
         .expect("decode");
         assert_eq!(detail.instrument_id, "DOGE-USDT-SWAP");
         assert_eq!(detail.algo_order_id, "123456");
-        assert_eq!(
-            detail.client_order_id,
-            "prx01234567890123456789012345678"
-        );
+        assert_eq!(detail.client_order_id, "prx01234567890123456789012345678");
         assert_eq!(detail.state, "effective");
     }
 
