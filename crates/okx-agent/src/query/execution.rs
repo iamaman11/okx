@@ -1076,7 +1076,7 @@ async fn submit_prepared(
     let demo_acceptance = execution.demo_mutation_acceptance_requested();
     let submit_result = if demo_acceptance {
         match execution
-            .submit_prepared_demo_authorized(&account, intent_id, timing, observed_at_ms)
+            .submit_prepared_demo_authorized(&preflight, intent_id, timing, observed_at_ms)
             .await?
         {
             Some(result) => result,
