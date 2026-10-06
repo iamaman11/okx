@@ -1,0 +1,17 @@
+[package]
+name = "okx-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+okx-api = { path = "../okx-api" }
+okx-observation = { path = "../okx-observation" }
+okx-ws = { path = "../okx-ws" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "sync", "time"] }

@@ -1,0 +1,5 @@
+{
+  "schema": "okx.production-recovery.request/v1",
+  "promote": true,
+  "purpose": "Final production baseline after immutable no-window launcher acceptance; promote this exact tested merged tree."
+}

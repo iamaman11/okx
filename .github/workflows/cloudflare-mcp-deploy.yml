@@ -1,0 +1,54 @@
+name: Cloudflare MCP Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "cloudflare/okx-mcp/**"
+      - ".github/workflows/cloudflare-mcp-deploy.yml"
+
+concurrency:
+  group: cloudflare-mcp-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy-okx-cloudflare-mcp
+    runs-on: ubuntu-latest
+    environment: okx-succession-global-executor
+    defaults:
+      run:
+        working-directory: cloudflare/okx-mcp
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Secret preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN missing"; exit 20; }
+
+      - name: Install locked package surface
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run check
+
+      - name: Deploy Worker
+        run: npx wrangler deploy --config wrangler.jsonc
+
+      - name: Health check
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --retry 8 --retry-delay 2 --retry-all-errors \
+            https://okx-cloudflare-mcp.okx-794.workers.dev/health |
+            jq -e '.status == "ok" and .service == "okx-cloudflare-mcp"'
