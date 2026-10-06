@@ -59,6 +59,9 @@ pub enum ExecutionLedgerError {
     #[error("execution ledger client_order_id collision")]
     ClientOrderIdCollision,
 
+    #[error("another nonterminal managed execution already owns this instrument")]
+    InstrumentBusy,
+
     #[error("execution ledger capacity of {0} records is exhausted")]
     CapacityExceeded(usize),
 
@@ -252,6 +255,13 @@ impl DurableExecutionLedger {
             } else {
                 Err(ExecutionLedgerError::IntentConflict)
             };
+        }
+
+        if self.entries.values().any(|entry| {
+            entry.record.plan.instrument_id == plan.instrument_id
+                && !entry.record.state.is_terminal()
+        }) {
+            return Err(ExecutionLedgerError::InstrumentBusy);
         }
 
         if self.entries.len() >= self.store.max_records {
