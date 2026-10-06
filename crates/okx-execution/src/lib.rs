@@ -18,7 +18,8 @@ pub use executor::{
 };
 pub use ledger::{
     DurableExecutionLedger, EXECUTION_LEDGER_SCHEMA_V1, EXECUTION_LEDGER_SCHEMA_V2,
-    ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, MAX_EXECUTION_LEDGER_RECORDS,
+    EXECUTION_LEDGER_SCHEMA_V3, ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore,
+    MAX_EXECUTION_LEDGER_RECORDS,
     MutationPrepareDisposition, PrepareDisposition,
 };
 pub use model::{

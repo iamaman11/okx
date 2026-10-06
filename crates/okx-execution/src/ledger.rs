@@ -23,6 +23,7 @@ use crate::{
 
 pub const EXECUTION_LEDGER_SCHEMA_V1: &str = "okx.execution-ledger/v1";
 pub const EXECUTION_LEDGER_SCHEMA_V2: &str = "okx.execution-ledger/v2";
+pub const EXECUTION_LEDGER_SCHEMA_V3: &str = "okx.execution-ledger/v3";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
 const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.json";
 
@@ -137,7 +138,9 @@ impl ExecutionLedgerStore {
         let file: ExecutionLedgerFile = serde_json::from_slice(&bytes)?;
         if !matches!(
             file.schema.as_str(),
-            EXECUTION_LEDGER_SCHEMA_V1 | EXECUTION_LEDGER_SCHEMA_V2
+            EXECUTION_LEDGER_SCHEMA_V1
+                | EXECUTION_LEDGER_SCHEMA_V2
+                | EXECUTION_LEDGER_SCHEMA_V3
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
@@ -191,7 +194,7 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V2.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V3.to_owned(),
             records: entries.values().cloned().collect(),
         })?;
 
@@ -1305,38 +1308,47 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v1_ledger_loads_and_next_write_upgrades_to_v2() {
-        let root = temp_root("schema-upgrade");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("root");
-        let path = root.join("ledger.json");
-        let entry = ExecutionLedgerEntry {
-            record: ExecutionRecord::new(plan("intent_legacy_0123456789")),
-            created_at_ms: 100,
-            updated_at_ms: 100,
-        };
-        fs::write(
-            &path,
-            serde_json::to_vec_pretty(&ExecutionLedgerFile {
-                schema: EXECUTION_LEDGER_SCHEMA_V1.to_owned(),
-                records: vec![entry],
-            })
-            .expect("legacy json"),
-        )
-        .expect("write legacy");
+    fn legacy_v1_v2_ledgers_load_and_next_write_upgrades_to_v3() {
+        for (index, schema) in [
+            EXECUTION_LEDGER_SCHEMA_V1,
+            EXECUTION_LEDGER_SCHEMA_V2,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = temp_root(&format!("schema-upgrade-{index}"));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).expect("root");
+            let path = root.join("ledger.json");
+            let intent_id = format!("intent_legacy_{index}_0123456789");
+            let entry = ExecutionLedgerEntry {
+                record: ExecutionRecord::new(plan(&intent_id)),
+                created_at_ms: 100,
+                updated_at_ms: 100,
+            };
+            fs::write(
+                &path,
+                serde_json::to_vec_pretty(&ExecutionLedgerFile {
+                    schema: schema.to_owned(),
+                    records: vec![entry],
+                })
+                .expect("legacy json"),
+            )
+            .expect("write legacy");
 
-        let store = ExecutionLedgerStore::at(&path);
-        let mut ledger = DurableExecutionLedger::open(store, 101).expect("load v1");
-        assert_eq!(ledger.len(), 1);
-        ledger
-            .begin_submission("intent_legacy_0123456789", 102)
-            .expect("write v2");
+            let store = ExecutionLedgerStore::at(&path);
+            let mut ledger = DurableExecutionLedger::open(store, 101).expect("load legacy");
+            assert_eq!(ledger.len(), 1);
+            ledger
+                .begin_submission(&intent_id, 102)
+                .expect("write v3");
 
-        let file: ExecutionLedgerFile =
-            serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-        assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V2);
+            let file: ExecutionLedgerFile =
+                serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V3);
 
-        let _ = fs::remove_dir_all(root);
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
