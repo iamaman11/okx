@@ -207,10 +207,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let store = DesiredStateStore::at(root.join("desired.json"));
 
-        assert_eq!(
-            store.load().expect("load"),
-            AgentDesiredState::stopped()
-        );
+        assert_eq!(store.load().expect("load"), AgentDesiredState::stopped());
     }
 
     #[test]
