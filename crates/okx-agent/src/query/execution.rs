@@ -1791,6 +1791,100 @@ mod tests {
     }
 
     #[test]
+    fn full_execution_status_v3_stays_within_compact_transport_budget() {
+        let mut entry = entry();
+        entry.record.lineage = Some(okx_execution::ExecutionLineageBinding {
+            schema: EXECUTION_LINEAGE_SCHEMA_V1.to_owned(),
+            origin_evidence_id: format!("sha256:{}", "a".repeat(64)),
+            origin_schema: "o".repeat(128),
+            origin_version: "v".repeat(128),
+            authority_evidence_id: Some(format!("sha256:{}", "b".repeat(64))),
+            decision_reference: okx_execution::ExecutionDecisionReference {
+                decision_time_ms: 1_791_300_000_000,
+                price: "0.123456789012345678901234567890".to_owned(),
+                price_basis: okx_execution::TcaReferencePriceBasis::DecisionPrice,
+                price_policy_version: "p".repeat(128),
+            },
+        });
+        entry.record.protection = Some(okx_execution::ProtectiveOrderLink {
+            policy_version: "okx.protective-order/mark-market-v1".to_owned(),
+            algo_client_order_id: "prx01234567890123456789012345678".to_owned(),
+            trigger_price_basis: okx_execution::ProtectiveTriggerPriceBasis::Mark,
+            status: okx_execution::ProtectiveOrderStatus::Active,
+            algo_order_id: Some("12345678901234567890".to_owned()),
+            covered_size: Some("1234567890.123456789012345678".to_owned()),
+            failure_code: None,
+        });
+        entry.record.submission_timing = Some(okx_execution::ExecutionSubmissionTimingEvidence {
+            request_exchange_time_ms: 1_791_300_000_000,
+            okx_in_time_us: Some(1_791_300_000_100_000),
+            okx_out_time_us: Some(1_791_300_000_100_999),
+        });
+
+        let status = okx_execution::ExecutionStatusEnvelope {
+            schema: EXECUTION_STATUS_SCHEMA_V3,
+            execution: okx_execution::execution_status(&entry).expect("status"),
+            reverse: None,
+            lineage: entry.record.lineage.clone(),
+            protection: entry.record.protection.clone(),
+            submission_timing: entry
+                .record
+                .submission_timing
+                .as_ref()
+                .map(okx_execution::ExecutionSubmissionTimingStatus::from),
+        };
+        let tca = ExecutionTcaStatus::with_history(
+            ExecutionTcaAvailability::Available,
+            "final",
+            1,
+            true,
+            100,
+            Some(ExecutionTcaSummary {
+                requested_contracts: "1234567890.123456789012345678".to_owned(),
+                filled_contracts: "1234567890.123456789012345678".to_owned(),
+                unfilled_contracts: "0".to_owned(),
+                fill_ratio: "1".to_owned(),
+                fill_outcome: TcaFillOutcome::Complete,
+                fill_vwap: Some("1234567890.123456789012345678".to_owned()),
+                maker_contracts: Some("617283945.061728394506172839".to_owned()),
+                taker_contracts: Some("617283945.061728394506172839".to_owned()),
+                slippage_bps: Some("-1234567890.123456789012345678".to_owned()),
+                gross_slippage_settle: Some("-1234567890.123456789012345678".to_owned()),
+                settle_fee_cost: Some("1234567890.123456789012345678".to_owned()),
+                net_execution_cost_settle: Some("1234567890.123456789012345678".to_owned()),
+                reference_to_first_fill_ms: Some(u64::MAX),
+                reference_to_last_fill_ms: Some(u64::MAX),
+                implementation_shortfall_settle: Some(
+                    "1234567890.123456789012345678".to_owned(),
+                ),
+                implementation_shortfall_unavailable_reason: None,
+            }),
+            None,
+        );
+        let response = completed(
+            &request(),
+            GENERATED_AT,
+            EXECUTION_STATUS_SCHEMA_V3,
+            serde_json::to_value(ExecutionStatusResult {
+                status,
+                tca,
+                unattributed_analytics: ExecutionUnattributedAnalytics {
+                    post_fill_markout: "unavailable_no_versioned_post_fill_market_evidence",
+                    funding: "unavailable_no_per_intent_funding_attribution",
+                    counterfactual: "unavailable_no_versioned_counterfactual_evidence",
+                },
+            })
+            .expect("result"),
+        );
+        let bytes = serde_json::to_vec(&response).expect("response");
+        assert!(
+            bytes.len() < 8 * 1024,
+            "execution status response must stay below compact budget, got {} bytes",
+            bytes.len()
+        );
+    }
+
+    #[test]
     fn every_prepare_domain_outcome_maps_to_terminal_response() {
         let cases = [
             (
