@@ -933,25 +933,89 @@ fn extract_okx_api_code(line: &str) -> Option<String> {
     (!code.is_empty()).then(|| code.to_owned())
 }
 
+fn fixed_error_code(line: &str) -> Option<&'static str> {
+    const CODES: &[(&str, &str)] = &[
+        ("EmptySourceTimestamp", "empty_source_timestamp"),
+        ("UnsupportedInstrumentType", "unsupported_instrument_type"),
+        ("MissingRequiredField", "missing_required_field"),
+        ("DuplicateInstrument", "duplicate_instrument"),
+        ("UnsupportedUpcomingParameter", "unsupported_upcoming_parameter"),
+        ("MalformedUpcomingParameter", "malformed_upcoming_parameter"),
+        ("Serialization(", "serialization"),
+        ("IdentityNotFound", "identity_not_found"),
+        ("InvalidPrivateKeyLength", "invalid_private_key_length"),
+        ("GithubTokenNotFound", "github_token_not_found"),
+        ("InvalidGithubToken", "invalid_github_token"),
+        ("DemoOkxCredentialsNotFound", "demo_observer_credential_not_found"),
+        ("InvalidDemoOkxCredentials", "invalid_demo_observer_credential"),
+        (
+            "DemoExecutorOkxCredentialsNotFound",
+            "demo_executor_credential_not_found",
+        ),
+        (
+            "InvalidDemoExecutorOkxCredentials",
+            "invalid_demo_executor_credential",
+        ),
+        (
+            "DemoMutationAcceptanceRequiresDemoEnvironment",
+            "demo_mutation_requires_demo",
+        ),
+        ("InvalidMailboxIssue", "invalid_mailbox_issue"),
+        ("InvalidPollInterval", "invalid_poll_interval"),
+    ];
+    CODES
+        .iter()
+        .find_map(|(needle, code)| line.contains(needle).then_some(*code))
+}
+
 fn fatal_error_summary(stderr: &str) -> Option<Value> {
     let line = stderr.lines().rev().find(|line| line.contains("Error:"))?;
-    let class = if line.contains("OKX API error") || line.contains("Api { code:") {
-        "okx_api"
-    } else if line.contains("HTTP error") || line.contains("Http(") {
-        "http"
-    } else if line.contains("JSON error") || line.contains("Json(") {
-        "json"
-    } else if line.contains("Github") || line.contains("GitHub") {
-        "github"
+
+    let (class, code) = if line.contains("Reference(") || line.contains("reference data error") {
+        ("reference_data", fixed_error_code(line))
+    } else if line.contains("SecretStore(") || line.contains("native secret store error") {
+        ("native_secret_store", Some("secret_store"))
+    } else if line.contains("IdentityNotFound")
+        || line.contains("InvalidPrivateKeyLength")
+        || line.contains("agent identity")
+    {
+        ("identity", fixed_error_code(line))
+    } else if line.contains("GithubTokenNotFound") || line.contains("InvalidGithubToken") {
+        ("github_token", fixed_error_code(line))
+    } else if line.contains("Github(") || line.contains("GitHub transport error") {
+        ("github", None)
+    } else if line.contains("Okx(Api") || line.contains("OKX API error") || line.contains("Api { code:") {
+        ("okx_api", None)
+    } else if line.contains("Okx(Config") || line.contains("configuration error") {
+        ("okx_config", None)
+    } else if line.contains("Okx(Response") || line.contains("OKX response error") {
+        ("okx_response", None)
+    } else if line.contains("Okx(Http") || line.contains("HTTP error") || line.contains("Http(") {
+        ("http", None)
+    } else if line.contains("Json(") || line.contains("JSON error") {
+        ("json", None)
+    } else if line.contains("Io(") || line.contains("I/O error") {
+        ("io", None)
+    } else if line.contains("DemoOkxCredentialsNotFound")
+        || line.contains("InvalidDemoOkxCredentials")
+        || line.contains("DemoExecutorOkxCredentialsNotFound")
+        || line.contains("InvalidDemoExecutorOkxCredentials")
+    {
+        ("demo_credentials", fixed_error_code(line))
+    } else if line.contains("DemoMutationAcceptanceRequiresDemoEnvironment")
+        || line.contains("InvalidMailboxIssue")
+        || line.contains("InvalidPollInterval")
+    {
+        ("startup_config", fixed_error_code(line))
     } else if line.contains("ResearchSession") || line.contains("research session") {
-        "research_session"
-    } else if line.contains("Identity") || line.contains("identity") {
-        "identity"
+        ("research_session", None)
     } else {
-        "other"
+        ("other", fixed_error_code(line))
     };
+
     Some(json!({
         "class": class,
+        "code": code,
         "okx_api_code": if class == "okx_api" { extract_okx_api_code(line) } else { None }
     }))
 }
@@ -1127,6 +1191,50 @@ mod tests {
         assert!(!fatal.to_string().contains("redacted in summary"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fatal_error_summary_classifies_early_startup_variants_without_messages() {
+        let cases = [
+            (
+                "Error: Reference(MissingRequiredField { instrument_id: \"secret\", field: \"ctVal\" })",
+                "reference_data",
+                Some("missing_required_field"),
+            ),
+            (
+                "Error: SecretStore(\"sensitive platform text\")",
+                "native_secret_store",
+                Some("secret_store"),
+            ),
+            (
+                "Error: IdentityNotFound(\"agent-key-1\")",
+                "identity",
+                Some("identity_not_found"),
+            ),
+            (
+                "Error: GithubTokenNotFound",
+                "github_token",
+                Some("github_token_not_found"),
+            ),
+            (
+                "Error: DemoExecutorOkxCredentialsNotFound",
+                "demo_credentials",
+                Some("demo_executor_credential_not_found"),
+            ),
+            (
+                "Error: DemoMutationAcceptanceRequiresDemoEnvironment",
+                "startup_config",
+                Some("demo_mutation_requires_demo"),
+            ),
+        ];
+
+        for (line, class, code) in cases {
+            let summary = fatal_error_summary(line).expect("summary");
+            assert_eq!(summary["class"], class);
+            assert_eq!(summary["code"], code);
+            assert!(!summary.to_string().contains("sensitive platform text"));
+            assert!(!summary.to_string().contains("secret"));
+        }
     }
 
     #[test]
