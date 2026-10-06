@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ExecutionPlan, model::valid_mutation_id};
+use crate::{
+    ExecutionPlan, PositionSide,
+    model::{valid_intent_id, valid_mutation_id},
+};
 
 pub const ALLOW_LIVE_TRADING_DEFAULT: bool = false;
 pub const MAX_ORDER_MUTATIONS_PER_EXECUTION: usize = 64;
@@ -129,6 +132,57 @@ impl OrderMutationRecord {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReverseLeg {
+    Close,
+    Open,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReverseExecutionLink {
+    pub root_intent_id: String,
+    pub open_intent_id: String,
+    pub target_position_side: PositionSide,
+    pub leg: ReverseLeg,
+}
+
+impl ReverseExecutionLink {
+    pub fn close(
+        root_intent_id: impl Into<String>,
+        open_intent_id: impl Into<String>,
+        target_position_side: PositionSide,
+    ) -> Result<Self, ExecutionTransitionError> {
+        let root_intent_id = root_intent_id.into();
+        let open_intent_id = open_intent_id.into();
+        if !valid_intent_id(&root_intent_id)
+            || !valid_intent_id(&open_intent_id)
+            || root_intent_id == open_intent_id
+        {
+            return Err(ExecutionTransitionError::InvalidReverseLink);
+        }
+        Ok(Self {
+            root_intent_id,
+            open_intent_id,
+            target_position_side,
+            leg: ReverseLeg::Close,
+        })
+    }
+
+    pub fn open_from(close: &Self) -> Result<Self, ExecutionTransitionError> {
+        if close.leg != ReverseLeg::Close {
+            return Err(ExecutionTransitionError::InvalidReverseLink);
+        }
+        Ok(Self {
+            root_intent_id: close.root_intent_id.clone(),
+            open_intent_id: close.open_intent_id.clone(),
+            target_position_side: close.target_position_side,
+            leg: ReverseLeg::Open,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionRecord {
@@ -139,6 +193,8 @@ pub struct ExecutionRecord {
     pub rejection_code: Option<String>,
     #[serde(default)]
     pub mutations: Vec<OrderMutationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<ReverseExecutionLink>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -187,6 +243,9 @@ pub enum ExecutionTransitionError {
         from: OrderMutationState,
         to: OrderMutationState,
     },
+
+    #[error("reverse execution linkage is invalid")]
+    InvalidReverseLink,
 }
 
 impl ExecutionRecord {
@@ -198,6 +257,7 @@ impl ExecutionRecord {
             exchange_state: None,
             rejection_code: None,
             mutations: Vec::new(),
+            reverse: None,
         }
     }
 
@@ -278,6 +338,17 @@ impl ExecutionRecord {
         self.order_id = Some(incoming);
         self.exchange_state = Some(exchange_state);
         self.state = execution_state(exchange_state);
+        Ok(())
+    }
+
+    pub fn attach_reverse(
+        &mut self,
+        reverse: ReverseExecutionLink,
+    ) -> Result<(), ExecutionTransitionError> {
+        if self.reverse.as_ref().is_some_and(|existing| existing != &reverse) {
+            return Err(ExecutionTransitionError::InvalidReverseLink);
+        }
+        self.reverse = Some(reverse);
         Ok(())
     }
 
@@ -548,6 +619,23 @@ mod tests {
             open_risk: None,
             risk_binding: None,
         }
+    }
+
+    #[test]
+    fn reverse_link_is_validated_and_idempotent() {
+        let mut record = ExecutionRecord::new(plan());
+        let link = ReverseExecutionLink::close(
+            "intent_reverse_01234567",
+            "rvx00000000000000000000000000001",
+            PositionSide::Short,
+        )
+        .expect("reverse link");
+        record.attach_reverse(link.clone()).expect("attach");
+        record.attach_reverse(link).expect("idempotent");
+        assert_eq!(
+            record.reverse.as_ref().expect("reverse").leg,
+            ReverseLeg::Close
+        );
     }
 
     #[test]
