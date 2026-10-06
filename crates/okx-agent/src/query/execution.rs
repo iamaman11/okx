@@ -64,12 +64,14 @@ pub(super) async fn dispatch(
                 request,
                 context,
                 generated_at,
-                intent_id,
-                instrument,
-                *trade_mode,
-                *order_type,
+                PrepareCommon {
+                    intent_id,
+                    instrument,
+                    trade_mode: *trade_mode,
+                    order_type: *order_type,
+                    risk: risk.as_deref(),
+                },
                 spec,
-                risk.as_deref(),
             )
             .await
         }
@@ -101,15 +103,19 @@ pub(super) async fn dispatch(
                 request,
                 context,
                 generated_at,
-                intent_id,
-                instrument,
-                *trade_mode,
-                *position_side,
-                *order_type,
-                &entry,
-                ExecutionAction::Open,
-                risk.as_deref(),
-                PrepareTarget::Normal,
+                EntryPrepare {
+                    common: PrepareCommon {
+                        intent_id,
+                        instrument,
+                        trade_mode: *trade_mode,
+                        order_type: *order_type,
+                        risk: risk.as_deref(),
+                    },
+                    position_side: *position_side,
+                    entry: &entry,
+                    action: ExecutionAction::Open,
+                    target: PrepareTarget::Normal,
+                },
             )
             .await
         }
@@ -127,16 +133,20 @@ pub(super) async fn dispatch(
                 request,
                 context,
                 generated_at,
-                intent_id,
-                instrument,
-                *trade_mode,
-                *position_side,
-                *order_type,
-                size,
-                price,
-                ExecutionAction::Close,
-                risk.as_deref(),
-                PrepareTarget::Normal,
+                SizedPrepare {
+                    common: PrepareCommon {
+                        intent_id,
+                        instrument,
+                        trade_mode: *trade_mode,
+                        order_type: *order_type,
+                        risk: risk.as_deref(),
+                    },
+                    position_side: *position_side,
+                    size,
+                    price,
+                    action: ExecutionAction::Close,
+                    target: PrepareTarget::Normal,
+                },
             )
             .await
         }
@@ -164,16 +174,38 @@ enum PrepareTarget {
     },
 }
 
+#[derive(Clone, Copy)]
+struct PrepareCommon<'a> {
+    intent_id: &'a str,
+    instrument: &'a str,
+    trade_mode: ExecutionTradeMode,
+    order_type: ExecutionOrderType,
+    risk: Option<&'a ExecutionRiskBindingRequest>,
+}
+
+struct EntryPrepare<'a> {
+    common: PrepareCommon<'a>,
+    position_side: ProtocolPositionSide,
+    entry: &'a ExecutionEntryRequest,
+    action: ExecutionAction,
+    target: PrepareTarget,
+}
+
+struct SizedPrepare<'a> {
+    common: PrepareCommon<'a>,
+    position_side: ProtocolPositionSide,
+    size: &'a str,
+    price: &'a str,
+    action: ExecutionAction,
+    target: PrepareTarget,
+}
+
 async fn prepare_generic_execution(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
     generated_at: &str,
-    intent_id: &str,
-    instrument: &str,
-    trade_mode: ExecutionTradeMode,
-    order_type: ExecutionOrderType,
+    common: PrepareCommon<'_>,
     spec: &ExecutionPrepareSpec,
-    risk: Option<&ExecutionRiskBindingRequest>,
 ) -> AgentResult<AgentResponse> {
     match spec {
         ExecutionPrepareSpec::Open {
@@ -184,15 +216,13 @@ async fn prepare_generic_execution(
                 request,
                 context,
                 generated_at,
-                intent_id,
-                instrument,
-                trade_mode,
-                *position_side,
-                order_type,
-                entry,
-                ExecutionAction::Open,
-                risk,
-                PrepareTarget::Normal,
+                EntryPrepare {
+                    common,
+                    position_side: *position_side,
+                    entry,
+                    action: ExecutionAction::Open,
+                    target: PrepareTarget::Normal,
+                },
             )
             .await
         }
@@ -204,15 +234,13 @@ async fn prepare_generic_execution(
                 request,
                 context,
                 generated_at,
-                intent_id,
-                instrument,
-                trade_mode,
-                *position_side,
-                order_type,
-                entry,
-                ExecutionAction::Add,
-                risk,
-                PrepareTarget::Normal,
+                EntryPrepare {
+                    common,
+                    position_side: *position_side,
+                    entry,
+                    action: ExecutionAction::Add,
+                    target: PrepareTarget::Normal,
+                },
             )
             .await
         }
@@ -224,15 +252,13 @@ async fn prepare_generic_execution(
                 request,
                 context,
                 generated_at,
-                intent_id,
-                instrument,
-                trade_mode,
-                *position_side,
-                order_type,
-                entry,
-                ExecutionAction::Hedge,
-                risk,
-                PrepareTarget::Normal,
+                EntryPrepare {
+                    common,
+                    position_side: *position_side,
+                    entry,
+                    action: ExecutionAction::Hedge,
+                    target: PrepareTarget::Normal,
+                },
             )
             .await
         }
@@ -245,16 +271,14 @@ async fn prepare_generic_execution(
                 request,
                 context,
                 generated_at,
-                intent_id,
-                instrument,
-                trade_mode,
-                *position_side,
-                order_type,
-                size,
-                price,
-                ExecutionAction::Reduce,
-                risk,
-                PrepareTarget::Normal,
+                SizedPrepare {
+                    common,
+                    position_side: *position_side,
+                    size,
+                    price,
+                    action: ExecutionAction::Reduce,
+                    target: PrepareTarget::Normal,
+                },
             )
             .await
         }
@@ -267,16 +291,14 @@ async fn prepare_generic_execution(
                 request,
                 context,
                 generated_at,
-                intent_id,
-                instrument,
-                trade_mode,
-                *position_side,
-                order_type,
-                size,
-                price,
-                ExecutionAction::Close,
-                risk,
-                PrepareTarget::Normal,
+                SizedPrepare {
+                    common,
+                    position_side: *position_side,
+                    size,
+                    price,
+                    action: ExecutionAction::Close,
+                    target: PrepareTarget::Normal,
+                },
             )
             .await
         }
@@ -293,34 +315,21 @@ async fn prepare_generic_execution(
                 request,
                 context,
                 generated_at,
-                intent_id,
-                instrument,
-                trade_mode,
-                *position_side,
-                order_type,
-                size,
-                price,
-                ExecutionAction::Close,
-                risk,
-                PrepareTarget::ReverseClose {
-                    target_position_side,
+                SizedPrepare {
+                    common,
+                    position_side: *position_side,
+                    size,
+                    price,
+                    action: ExecutionAction::Close,
+                    target: PrepareTarget::ReverseClose {
+                        target_position_side,
+                    },
                 },
             )
             .await
         }
         ExecutionPrepareSpec::ContinueReverse { entry } => {
-            prepare_reverse_open(
-                request,
-                context,
-                generated_at,
-                intent_id,
-                instrument,
-                trade_mode,
-                order_type,
-                entry,
-                risk,
-            )
-            .await
+            prepare_reverse_open(request, context, generated_at, common, entry).await
         }
     }
 }
@@ -329,16 +338,15 @@ async fn prepare_risk_increasing(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
     generated_at: &str,
-    intent_id: &str,
-    instrument: &str,
-    trade_mode: ExecutionTradeMode,
-    position_side: ProtocolPositionSide,
-    order_type: ExecutionOrderType,
-    entry: &ExecutionEntryRequest,
-    action: ExecutionAction,
-    risk: Option<&ExecutionRiskBindingRequest>,
-    target: PrepareTarget,
+    input: EntryPrepare<'_>,
 ) -> AgentResult<AgentResponse> {
+    let EntryPrepare {
+        common,
+        position_side,
+        entry,
+        action,
+        target,
+    } = input;
     debug_assert!(action.is_risk_increasing());
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
@@ -355,7 +363,7 @@ async fn prepare_risk_increasing(
     if !preflight.accepted {
         return Ok(preflight_rejected(request, generated_at));
     }
-    let Some(rules) = current_rules(context, instrument).await else {
+    let Some(rules) = current_rules(context, common.instrument).await else {
         return Ok(reference_not_found(request, generated_at, instrument));
     };
     let Some(observer) = context.account_fallback else {
@@ -394,14 +402,14 @@ async fn prepare_risk_increasing(
         }
     };
     let intent = ExecutionIntent {
-        intent_id: intent_id.to_owned(),
+        intent_id: common.intent_id.to_owned(),
         expected_reference_generation: rules.reference_generation.clone(),
         expected_account_generation: account.account_generation.clone(),
-        instrument_id: instrument.to_owned(),
-        trade_mode: execution_trade_mode(trade_mode),
+        instrument_id: common.instrument.to_owned(),
+        trade_mode: execution_trade_mode(common.trade_mode),
         position_side: execution_position_side(position_side),
         action,
-        order_type: execution_order_type(order_type),
+        order_type: execution_order_type(common.order_type),
         size: candidate.contracts.clone(),
         price: candidate.entry_price.clone(),
     };
@@ -409,7 +417,7 @@ async fn prepare_risk_increasing(
         Ok(value) => value,
         Err(error) => return Ok(validation_failure(request, generated_at, error)),
     };
-    plan.risk_binding = risk.map(execution_risk_binding);
+    plan.risk_binding = common.risk.map(execution_risk_binding);
     commit_prepared(request, generated_at, execution, plan, target).await
 }
 
@@ -417,17 +425,16 @@ async fn prepare_risk_reducing(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
     generated_at: &str,
-    intent_id: &str,
-    instrument: &str,
-    trade_mode: ExecutionTradeMode,
-    position_side: ProtocolPositionSide,
-    order_type: ExecutionOrderType,
-    size: &str,
-    price: &str,
-    action: ExecutionAction,
-    risk: Option<&ExecutionRiskBindingRequest>,
-    target: PrepareTarget,
+    input: SizedPrepare<'_>,
 ) -> AgentResult<AgentResponse> {
+    let SizedPrepare {
+        common,
+        position_side,
+        size,
+        price,
+        action,
+        target,
+    } = input;
     debug_assert!(action.is_risk_reducing());
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
@@ -444,18 +451,18 @@ async fn prepare_risk_reducing(
     if !preflight.accepted {
         return Ok(preflight_rejected(request, generated_at));
     }
-    let Some(rules) = current_rules(context, instrument).await else {
+    let Some(rules) = current_rules(context, common.instrument).await else {
         return Ok(reference_not_found(request, generated_at, instrument));
     };
     let intent = ExecutionIntent {
-        intent_id: intent_id.to_owned(),
+        intent_id: common.intent_id.to_owned(),
         expected_reference_generation: rules.reference_generation.clone(),
         expected_account_generation: account.account_generation.clone(),
-        instrument_id: instrument.to_owned(),
-        trade_mode: execution_trade_mode(trade_mode),
+        instrument_id: common.instrument.to_owned(),
+        trade_mode: execution_trade_mode(common.trade_mode),
         position_side: execution_position_side(position_side),
         action,
-        order_type: execution_order_type(order_type),
+        order_type: execution_order_type(common.order_type),
         size: size.to_owned(),
         price: price.to_owned(),
     };
@@ -463,7 +470,7 @@ async fn prepare_risk_reducing(
         Ok(value) => value,
         Err(error) => return Ok(validation_failure(request, generated_at, error)),
     };
-    plan.risk_binding = risk.map(execution_risk_binding);
+    plan.risk_binding = common.risk.map(execution_risk_binding);
     commit_prepared(request, generated_at, execution, plan, target).await
 }
 
@@ -471,13 +478,10 @@ async fn prepare_reverse_open(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
     generated_at: &str,
-    root_intent_id: &str,
-    instrument: &str,
-    trade_mode: ExecutionTradeMode,
-    order_type: ExecutionOrderType,
+    common: PrepareCommon<'_>,
     entry: &ExecutionEntryRequest,
-    risk: Option<&ExecutionRiskBindingRequest>,
 ) -> AgentResult<AgentResponse> {
+    let root_intent_id = common.intent_id;
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
@@ -504,8 +508,8 @@ async fn prepare_reverse_open(
     if reverse.leg != ReverseLeg::Close
         || reverse.continuation != ReverseContinuation::Required
         || root.record.state != ExecutionState::Filled
-        || root.record.plan.instrument_id != instrument
-        || root.record.plan.trade_mode != execution_trade_mode(trade_mode)
+        || root.record.plan.instrument_id != common.instrument
+        || root.record.plan.trade_mode != execution_trade_mode(common.trade_mode)
     {
         return Ok(failure_response(
             request,
@@ -524,16 +528,17 @@ async fn prepare_reverse_open(
         request,
         context,
         generated_at,
-        &reverse.open_intent_id,
-        instrument,
-        trade_mode,
-        protocol_side,
-        order_type,
-        entry,
-        ExecutionAction::Open,
-        risk,
-        PrepareTarget::ReverseOpen {
-            root_intent_id: root_intent_id.to_owned(),
+        EntryPrepare {
+            common: PrepareCommon {
+                intent_id: &reverse.open_intent_id,
+                ..common
+            },
+            position_side: protocol_side,
+            entry,
+            action: ExecutionAction::Open,
+            target: PrepareTarget::ReverseOpen {
+                root_intent_id: root_intent_id.to_owned(),
+            },
         },
     )
     .await
