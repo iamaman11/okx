@@ -214,8 +214,7 @@ pub fn derive_reverse_open_intent_id(root_intent_id: &str) -> String {
 }
 
 pub fn derive_protective_algo_client_id(intent_id: &str) -> String {
-    let digest =
-        Sha256::digest(format!("okx-execution-protective-v1:{intent_id}").as_bytes());
+    let digest = Sha256::digest(format!("okx-execution-protective-v1:{intent_id}").as_bytes());
     let hex = format!("{digest:x}");
     format!(
         "{PROTECTIVE_ALGO_CLIENT_ID_PREFIX}{}",
