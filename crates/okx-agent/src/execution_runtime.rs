@@ -9,8 +9,9 @@ use okx_api::{
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
     ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
-    ExecutionPlan, ExecutionStatusEnvelope, OrderExecutor, OrderExecutorError, PositionSide,
-    PrepareOutcome, SubmitDisposition, execution_status_with_ledger, reconcile_account_ledger,
+    ExecutionPlan, ExecutionStatusEnvelope, MutationAuthority, OrderExecutor, OrderExecutorError,
+    PositionSide, PrepareOutcome, SubmitDisposition, execution_status_with_ledger,
+    reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -21,7 +22,8 @@ use tokio::sync::Mutex;
 use crate::{
     AgentError, AgentResult,
     execution_preflight::{
-        ExecutorCredentialPreflight, evaluate_executor_preflight_against_snapshot,
+        ExecutorCredentialPreflight, evaluate_demo_executor_preflight_against_snapshot,
+        evaluate_executor_preflight_against_snapshot,
     },
 };
 
@@ -96,6 +98,36 @@ impl ExecutionRuntime {
             observer,
             &executor,
         ))
+    }
+
+    pub async fn demo_acceptance_preflight(
+        &self,
+        observer: &AccountSnapshot,
+    ) -> AgentResult<ExecutorCredentialPreflight> {
+        let executor = self.executor_account.config().await?;
+        Ok(evaluate_demo_executor_preflight_against_snapshot(
+            self.environment,
+            observer,
+            &executor,
+        ))
+    }
+
+    pub async fn authorize_demo_acceptance(
+        &self,
+        observer: &AccountSnapshot,
+    ) -> AgentResult<ExecutorCredentialPreflight> {
+        let evidence = self.demo_acceptance_preflight(observer).await?;
+        let mut executor = self.executor.lock().await;
+        if evidence.accepted {
+            executor.enable_demo_acceptance(self.environment)?;
+        } else {
+            executor.disable_mutations();
+        }
+        Ok(evidence)
+    }
+
+    pub async fn mutation_authority(&self) -> MutationAuthority {
+        self.executor.lock().await.mutation_authority()
     }
 
     pub async fn venue_execution_evidence(
