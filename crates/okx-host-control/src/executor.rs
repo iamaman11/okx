@@ -160,10 +160,8 @@ impl HostExecutor {
                 } else if self.restart_due() {
                     match self.start_agent_process(self.desired_profile) {
                         Ok(pid) => {
-                            self.last_reconcile = format!(
-                                "RESTORED_{:?}_AGENT_PID_{pid}",
-                                self.desired_profile
-                            );
+                            self.last_reconcile =
+                                format!("RESTORED_{:?}_AGENT_PID_{pid}", self.desired_profile);
                         }
                         Err(error) => {
                             self.schedule_restart();
