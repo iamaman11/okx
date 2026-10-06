@@ -145,7 +145,9 @@ pub enum ExecutionValidationError {
     #[error("hedge execution requires an existing opposite-side position")]
     HedgeRequiresOppositePosition,
 
-    #[error("reduce execution must leave a positive unreserved position; use close for the full amount")]
+    #[error(
+        "reduce execution must leave a positive unreserved position; use close for the full amount"
+    )]
     ReduceWouldFullyClose,
 
     #[error("prepared execution is missing an immutable hard-risk policy binding")]
@@ -258,7 +260,10 @@ pub fn revalidate_hard_risk_policy(
         _ => return Err(ExecutionValidationError::RiskAnalysisInconsistent),
     }
 
-    match (plan.action.is_risk_increasing(), analysis.candidate.as_ref()) {
+    match (
+        plan.action.is_risk_increasing(),
+        analysis.candidate.as_ref(),
+    ) {
         (true, Some(candidate)) => {
             let open_risk = plan
                 .open_risk
