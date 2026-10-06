@@ -61,8 +61,17 @@ pub enum ExecutionLedgerError {
     #[error("execution ledger client_order_id collision")]
     ClientOrderIdCollision,
 
-    #[error("another nonterminal managed execution already owns this instrument")]
+    #[error("another nonterminal managed execution or pending reverse owns this instrument")]
     InstrumentBusy,
+
+    #[error("reverse execution linkage does not match the requested continuation")]
+    ReverseMismatch,
+
+    #[error("reverse execution is not ready for the opposite open leg")]
+    ReverseNotReady,
+
+    #[error("reverse execution continuation was explicitly aborted")]
+    ReverseAborted,
 
     #[error("execution ledger capacity of {0} records is exhausted")]
     CapacityExceeded(usize),
@@ -261,9 +270,7 @@ impl DurableExecutionLedger {
         observed_at_ms: u64,
     ) -> Result<PrepareDisposition, ExecutionLedgerError> {
         if plan.action != ExecutionAction::Close {
-            return Err(ExecutionLedgerError::Corrupt(
-                "reverse close leg must use close action",
-            ));
+            return Err(ExecutionLedgerError::ReverseMismatch);
         }
         let root_intent_id = plan.intent_id.clone();
         let open_intent_id = derive_reverse_open_intent_id(&root_intent_id);
@@ -291,19 +298,21 @@ impl DurableExecutionLedger {
             .record
             .reverse
             .as_ref()
-            .ok_or(ExecutionLedgerError::Corrupt("reverse root linkage missing"))?;
+            .ok_or(ExecutionLedgerError::ReverseMismatch)?;
         if reverse.leg != ReverseLeg::Close
-            || reverse.continuation != ReverseContinuation::Required
-            || root.record.state != ExecutionState::Filled
             || plan.action != ExecutionAction::Open
             || plan.intent_id != reverse.open_intent_id
             || plan.instrument_id != root.record.plan.instrument_id
             || plan.trade_mode != root.record.plan.trade_mode
             || plan.position_side != reverse.target_position_side
         {
-            return Err(ExecutionLedgerError::Corrupt(
-                "reverse open leg does not match completed close root",
-            ));
+            return Err(ExecutionLedgerError::ReverseMismatch);
+        }
+        if reverse.continuation == ReverseContinuation::Aborted {
+            return Err(ExecutionLedgerError::ReverseAborted);
+        }
+        if root.record.state != ExecutionState::Filled {
+            return Err(ExecutionLedgerError::ReverseNotReady);
         }
 
         let mut record = ExecutionRecord::new(plan);
