@@ -219,18 +219,22 @@ pub fn execution_status_with_ledger(
         execution: execution_status(entry)?,
         reverse,
         lineage: entry.record.lineage.clone(),
-        protection: entry.record.protection.as_ref().map(|value| ProtectiveExecutionStatus {
-            policy_version: value.policy_version.clone(),
-            algo_client_order_id: value.algo_client_order_id.clone(),
-            trigger_price_basis: value.trigger_price_basis,
-            status: value.status,
-            algo_order_id_present: value
-                .algo_order_id
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()),
-            covered_size: value.covered_size.clone(),
-            failure_code: value.failure_code.clone(),
-        }),
+        protection: entry
+            .record
+            .protection
+            .as_ref()
+            .map(|value| ProtectiveExecutionStatus {
+                policy_version: value.policy_version.clone(),
+                algo_client_order_id: value.algo_client_order_id.clone(),
+                trigger_price_basis: value.trigger_price_basis,
+                status: value.status,
+                algo_order_id_present: value
+                    .algo_order_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                covered_size: value.covered_size.clone(),
+                failure_code: value.failure_code.clone(),
+            }),
         submission_timing: entry
             .record
             .submission_timing
