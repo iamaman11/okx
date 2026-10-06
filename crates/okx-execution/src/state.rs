@@ -1,10 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
-    ExecutionPlan,
-    model::{valid_mutation_id},
-};
+use crate::{ExecutionPlan, model::valid_mutation_id};
 
 pub const ALLOW_LIVE_TRADING_DEFAULT: bool = false;
 pub const MAX_ORDER_MUTATIONS_PER_EXECUTION: usize = 64;
@@ -115,9 +112,7 @@ impl OrderMutationRecord {
         })
     }
 
-    pub fn cancel(
-        mutation_id: impl Into<String>,
-    ) -> Result<Self, ExecutionTransitionError> {
+    pub fn cancel(mutation_id: impl Into<String>) -> Result<Self, ExecutionTransitionError> {
         let mutation_id = mutation_id.into();
         if !valid_mutation_id(&mutation_id) {
             return Err(ExecutionTransitionError::InvalidMutationId);
@@ -343,7 +338,10 @@ impl ExecutionRecord {
         if self.active_mutation().is_some() {
             return Err(ExecutionTransitionError::MutationAlreadyActive);
         }
-        if !matches!(self.state, ExecutionState::Live | ExecutionState::PartiallyFilled) {
+        if !matches!(
+            self.state,
+            ExecutionState::Live | ExecutionState::PartiallyFilled
+        ) {
             return Err(ExecutionTransitionError::MutationNotAllowed(self.state));
         }
         if self.mutations.len() >= MAX_ORDER_MUTATIONS_PER_EXECUTION {
