@@ -58,6 +58,9 @@ pub fn classify_prepare_result(
         Err(error @ ExecutionLedgerError::Corrupt(_)) => Err(error),
         Err(error @ ExecutionLedgerError::InvalidTimestamp) => Err(error),
         Err(error @ ExecutionLedgerError::IntentNotFound(_)) => Err(error),
+        Err(error @ ExecutionLedgerError::ReverseMismatch) => Err(error),
+        Err(error @ ExecutionLedgerError::ReverseNotReady) => Err(error),
+        Err(error @ ExecutionLedgerError::ReverseAborted) => Err(error),
         Err(error @ ExecutionLedgerError::Transition(_)) => Err(error),
     }
 }
