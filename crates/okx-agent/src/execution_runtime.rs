@@ -10,8 +10,8 @@ use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
     ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
     ExecutionPlan, ExecutionStatusEnvelope, MutationAuthority, OrderExecutor, OrderExecutorError,
-    PositionSide, PrepareOutcome, SubmitDisposition, execution_status_with_ledger,
-    reconcile_account_ledger,
+    PositionSide, PrepareOutcome, ReconcileDisposition, SubmitDisposition,
+    execution_status_with_ledger, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -331,6 +331,18 @@ impl ExecutionRuntime {
 
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {
         self.executor.lock().await.ledger().get(intent_id).cloned()
+    }
+
+    pub async fn reconcile_execution(
+        &self,
+        intent_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ReconcileDisposition, OrderExecutorError> {
+        self.executor
+            .lock()
+            .await
+            .reconcile(intent_id, observed_at_ms)
+            .await
     }
 
     pub async fn status(&self, intent_id: &str) -> AgentResult<Option<ExecutionStatusEnvelope>> {
