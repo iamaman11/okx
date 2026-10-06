@@ -1,13 +1,17 @@
+use std::str::FromStr;
+
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ExecutionLineageBinding, ExecutionPlan, PositionSide,
+    ExecutionLineageBinding, ExecutionPlan, PositionSide, derive_protective_algo_client_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
 pub const ALLOW_LIVE_TRADING_DEFAULT: bool = false;
 pub const MAX_ORDER_MUTATIONS_PER_EXECUTION: usize = 64;
+pub const PROTECTIVE_ORDER_POLICY_V1: &str = "okx.protective-order/mark-market-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -134,6 +138,85 @@ impl OrderMutationRecord {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ProtectiveTriggerPriceBasis {
+    Mark,
+}
+
+impl ProtectiveTriggerPriceBasis {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mark => "mark",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProtectiveOrderStatus {
+    Pending,
+    Active,
+    NotActivated,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectiveOrderLink {
+    pub policy_version: String,
+    pub algo_client_order_id: String,
+    pub trigger_price_basis: ProtectiveTriggerPriceBasis,
+    pub status: ProtectiveOrderStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub algo_order_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covered_size: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+}
+
+impl ProtectiveOrderLink {
+    fn from_plan(plan: &ExecutionPlan) -> Option<Self> {
+        if !plan.action.is_risk_increasing() || plan.open_risk.is_none() {
+            return None;
+        }
+        Some(Self {
+            policy_version: PROTECTIVE_ORDER_POLICY_V1.to_owned(),
+            algo_client_order_id: derive_protective_algo_client_id(&plan.intent_id),
+            trigger_price_basis: ProtectiveTriggerPriceBasis::Mark,
+            status: ProtectiveOrderStatus::Pending,
+            algo_order_id: None,
+            covered_size: None,
+            failure_code: None,
+        })
+    }
+
+    pub const fn blocks_new_managed_intent(&self) -> bool {
+        matches!(
+            self.status,
+            ProtectiveOrderStatus::Pending | ProtectiveOrderStatus::Failed
+        )
+    }
+
+    pub const fn requires_reconciliation(&self) -> bool {
+        matches!(self.status, ProtectiveOrderStatus::Pending)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtectiveOrderResolution {
+    Pending,
+    Active {
+        algo_order_id: String,
+        covered_size: String,
+    },
+    NotActivated,
+    Failed {
+        code: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReverseLeg {
     Close,
     Open,
@@ -206,6 +289,8 @@ pub struct ExecutionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<ExecutionLineageBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<ProtectiveOrderLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<ReverseExecutionLink>,
 }
 
@@ -259,6 +344,12 @@ pub enum ExecutionTransitionError {
     #[error("execution lineage can only be bound idempotently while PREPARED")]
     InvalidLineageTransition,
 
+    #[error("protective order linkage is invalid")]
+    InvalidProtectionLink,
+
+    #[error("protective order transition is invalid")]
+    InvalidProtectionTransition,
+
     #[error("reverse execution linkage is invalid")]
     InvalidReverseLink,
 
@@ -268,6 +359,7 @@ pub enum ExecutionTransitionError {
 
 impl ExecutionRecord {
     pub fn new(plan: ExecutionPlan) -> Self {
+        let protection = ProtectiveOrderLink::from_plan(&plan);
         Self {
             plan,
             state: ExecutionState::Prepared,
@@ -276,6 +368,7 @@ impl ExecutionRecord {
             rejection_code: None,
             mutations: Vec::new(),
             lineage: None,
+            protection,
             reverse: None,
         }
     }
@@ -321,6 +414,9 @@ impl ExecutionRecord {
         if code.trim().is_empty() {
             return Err(ExecutionTransitionError::EmptyRejectionCode);
         }
+        if self.protection.is_some() {
+            self.resolve_protection(ProtectiveOrderResolution::NotActivated)?;
+        }
         self.rejection_code = Some(code);
         self.state = ExecutionState::Rejected;
         Ok(())
@@ -331,16 +427,27 @@ impl ExecutionRecord {
         order_id: impl Into<String>,
         exchange_state: ExchangeOrderState,
     ) -> Result<(), ExecutionTransitionError> {
+        self.reconcile_found_with_protection(order_id, exchange_state, None)
+    }
+
+    pub fn reconcile_found_with_protection(
+        &mut self,
+        order_id: impl Into<String>,
+        exchange_state: ExchangeOrderState,
+        protection_resolution: Option<ProtectiveOrderResolution>,
+    ) -> Result<(), ExecutionTransitionError> {
+        let target = execution_state(exchange_state);
         if !matches!(
             self.state,
             ExecutionState::Acknowledged
                 | ExecutionState::UnknownSubmission
                 | ExecutionState::Live
                 | ExecutionState::PartiallyFilled
-        ) {
+        ) && !(self.state.is_terminal() && self.state == target)
+        {
             return Err(ExecutionTransitionError::InvalidTransition {
                 from: self.state,
-                to: execution_state(exchange_state),
+                to: target,
             });
         }
 
@@ -354,9 +461,103 @@ impl ExecutionRecord {
             });
         }
 
+        if let Some(resolution) = protection_resolution {
+            self.resolve_protection(resolution)?;
+        }
+
         self.order_id = Some(incoming);
         self.exchange_state = Some(exchange_state);
-        self.state = execution_state(exchange_state);
+        self.state = target;
+        Ok(())
+    }
+
+    pub fn protection_requires_reconciliation(&self) -> bool {
+        self.protection
+            .as_ref()
+            .is_some_and(ProtectiveOrderLink::requires_reconciliation)
+    }
+
+    pub fn protection_blocks_new_managed_intent(&self) -> bool {
+        self.protection
+            .as_ref()
+            .is_some_and(ProtectiveOrderLink::blocks_new_managed_intent)
+    }
+
+    pub fn resolve_protection(
+        &mut self,
+        resolution: ProtectiveOrderResolution,
+    ) -> Result<(), ExecutionTransitionError> {
+        let protection = self
+            .protection
+            .as_mut()
+            .ok_or(ExecutionTransitionError::InvalidProtectionLink)?;
+
+        match resolution {
+            ProtectiveOrderResolution::Pending => {
+                if protection.status != ProtectiveOrderStatus::Pending {
+                    return Err(ExecutionTransitionError::InvalidProtectionTransition);
+                }
+            }
+            ProtectiveOrderResolution::NotActivated => {
+                if !matches!(
+                    protection.status,
+                    ProtectiveOrderStatus::Pending | ProtectiveOrderStatus::NotActivated
+                ) {
+                    return Err(ExecutionTransitionError::InvalidProtectionTransition);
+                }
+                protection.status = ProtectiveOrderStatus::NotActivated;
+                protection.algo_order_id = None;
+                protection.covered_size = None;
+                protection.failure_code = None;
+            }
+            ProtectiveOrderResolution::Failed { code } => {
+                if code.trim().is_empty()
+                    || !matches!(
+                        protection.status,
+                        ProtectiveOrderStatus::Pending | ProtectiveOrderStatus::Failed
+                    )
+                {
+                    return Err(ExecutionTransitionError::InvalidProtectionTransition);
+                }
+                if protection.status == ProtectiveOrderStatus::Failed
+                    && protection.failure_code.as_deref() != Some(code.as_str())
+                {
+                    return Err(ExecutionTransitionError::InvalidProtectionTransition);
+                }
+                protection.status = ProtectiveOrderStatus::Failed;
+                protection.algo_order_id = None;
+                protection.covered_size = None;
+                protection.failure_code = Some(code);
+            }
+            ProtectiveOrderResolution::Active {
+                algo_order_id,
+                covered_size,
+            } => {
+                let covered = Decimal::from_str(covered_size.trim())
+                    .ok()
+                    .filter(|value| *value > Decimal::ZERO)
+                    .ok_or(ExecutionTransitionError::InvalidProtectionLink)?;
+                if algo_order_id.trim().is_empty() {
+                    return Err(ExecutionTransitionError::InvalidProtectionLink);
+                }
+                let covered_size = covered.normalize().to_string();
+                if protection.status == ProtectiveOrderStatus::Active {
+                    if protection.algo_order_id.as_deref() != Some(algo_order_id.as_str())
+                        || protection.covered_size.as_deref() != Some(covered_size.as_str())
+                    {
+                        return Err(ExecutionTransitionError::InvalidProtectionTransition);
+                    }
+                    return Ok(());
+                }
+                if protection.status != ProtectiveOrderStatus::Pending {
+                    return Err(ExecutionTransitionError::InvalidProtectionTransition);
+                }
+                protection.status = ProtectiveOrderStatus::Active;
+                protection.algo_order_id = Some(algo_order_id);
+                protection.covered_size = Some(covered_size);
+                protection.failure_code = None;
+            }
+        }
         Ok(())
     }
 
@@ -653,7 +854,8 @@ const fn execution_state(exchange_state: ExchangeOrderState) -> ExecutionState {
 mod tests {
     use super::*;
     use crate::{
-        EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, OrderSide, OrderType, PositionSide, TradeMode,
+        EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, OpenRiskEvidence, OrderSide, OrderType,
+        PositionSide, TradeMode, derive_protective_algo_client_id,
     };
 
     fn plan() -> ExecutionPlan {
@@ -675,6 +877,70 @@ mod tests {
             open_risk: None,
             risk_binding: None,
         }
+    }
+
+    fn protected_plan() -> ExecutionPlan {
+        let mut value = plan();
+        value.open_risk = Some(OpenRiskEvidence {
+            fee_generation: "sha256:fee".to_owned(),
+            requested_max_settle_notional: "10".to_owned(),
+            requested_max_loss_settle: "1".to_owned(),
+            requested_target_rr: "2".to_owned(),
+            stop_price: "0.09".to_owned(),
+            target_price: "0.12".to_owned(),
+            entry_settle_notional: "10".to_owned(),
+            stop_loss_settle: "1".to_owned(),
+            actual_target_rr: "2".to_owned(),
+        });
+        value
+    }
+
+    #[test]
+    fn protection_is_derived_without_copying_stop_or_target_prices() {
+        let record = ExecutionRecord::new(protected_plan());
+        let protection = record.protection.as_ref().expect("protection");
+        assert_eq!(
+            protection.algo_client_order_id,
+            derive_protective_algo_client_id(&record.plan.intent_id)
+        );
+        assert_eq!(protection.policy_version, PROTECTIVE_ORDER_POLICY_V1);
+        assert_eq!(
+            protection.trigger_price_basis,
+            ProtectiveTriggerPriceBasis::Mark
+        );
+        assert_eq!(protection.status, ProtectiveOrderStatus::Pending);
+    }
+
+    #[test]
+    fn terminal_pending_protection_can_resolve_later_idempotently() {
+        let mut record = ExecutionRecord::new(protected_plan());
+        record.begin_submission().expect("submit");
+        record.acknowledge("ord-1").expect("ack");
+        record
+            .reconcile_found_with_protection(
+                "ord-1",
+                ExchangeOrderState::Canceled,
+                Some(ProtectiveOrderResolution::Pending),
+            )
+            .expect("terminal pending");
+        assert!(record.state.is_terminal());
+        assert!(record.protection_requires_reconciliation());
+
+        record
+            .reconcile_found_with_protection(
+                "ord-1",
+                ExchangeOrderState::Canceled,
+                Some(ProtectiveOrderResolution::Active {
+                    algo_order_id: "algo-1".to_owned(),
+                    covered_size: "0.4".to_owned(),
+                }),
+            )
+            .expect("late active proof");
+        assert_eq!(
+            record.protection.as_ref().expect("protection").status,
+            ProtectiveOrderStatus::Active
+        );
+        assert!(!record.protection_requires_reconciliation());
     }
 
     #[test]
