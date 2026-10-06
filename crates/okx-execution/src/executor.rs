@@ -915,6 +915,93 @@ mod tests {
         }
     }
 
+    struct MutationGateway {
+        amend_calls: AtomicUsize,
+        cancel_calls: AtomicUsize,
+        lookup_calls: AtomicUsize,
+        amend_results: Mutex<VecDeque<Result<TradeResponse<OrderOperationAck>, OkxError>>>,
+        cancel_results: Mutex<VecDeque<Result<TradeResponse<OrderOperationAck>, OkxError>>>,
+        lookup_results: Mutex<VecDeque<Result<TradeOrderDetails, OkxError>>>,
+    }
+
+    impl MutationGateway {
+        fn new(
+            amend_results: Vec<Result<TradeResponse<OrderOperationAck>, OkxError>>,
+            cancel_results: Vec<Result<TradeResponse<OrderOperationAck>, OkxError>>,
+            lookup_results: Vec<Result<TradeOrderDetails, OkxError>>,
+        ) -> Self {
+            Self {
+                amend_calls: AtomicUsize::new(0),
+                cancel_calls: AtomicUsize::new(0),
+                lookup_calls: AtomicUsize::new(0),
+                amend_results: Mutex::new(amend_results.into()),
+                cancel_results: Mutex::new(cancel_results.into()),
+                lookup_results: Mutex::new(lookup_results.into()),
+            }
+        }
+
+        fn amend_calls(&self) -> usize {
+            self.amend_calls.load(Ordering::SeqCst)
+        }
+
+        fn cancel_calls(&self) -> usize {
+            self.cancel_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ExecutionGateway for MutationGateway {
+        async fn place_order(
+            &self,
+            _request: PlaceOrderRequest,
+            _timing: MutationTiming,
+            _rate_plan: Option<RateRequestPlan>,
+        ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+            panic!("place is not used by mutation tests")
+        }
+
+        async fn amend_order(
+            &self,
+            _request: AmendOrderRequest,
+            _timing: MutationTiming,
+            _rate_plan: Option<RateRequestPlan>,
+        ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+            self.amend_calls.fetch_add(1, Ordering::SeqCst);
+            self.amend_results
+                .lock()
+                .expect("amend queue")
+                .pop_front()
+                .expect("amend result")
+        }
+
+        async fn cancel_order(
+            &self,
+            _request: CancelOrderRequest,
+            _timing: MutationTiming,
+            _rate_plan: Option<RateRequestPlan>,
+        ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+            self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+            self.cancel_results
+                .lock()
+                .expect("cancel queue")
+                .pop_front()
+                .expect("cancel result")
+        }
+
+        async fn order_by_client_id(
+            &self,
+            _instrument_id: String,
+            _client_order_id: String,
+        ) -> Result<TradeOrderDetails, OkxError> {
+            self.lookup_calls.fetch_add(1, Ordering::SeqCst);
+            self.lookup_results
+                .lock()
+                .expect("lookup queue")
+                .pop_front()
+                .expect("lookup result")
+        }
+    }
+
     struct LocalDeferredGateway {
         place_calls: AtomicUsize,
     }
@@ -1046,6 +1133,43 @@ mod tests {
             in_time_us: "1790000000000000".to_owned(),
             out_time_us: "1790000000001000".to_owned(),
         }
+    }
+
+    fn mutation_ack(plan: &ExecutionPlan, request_id: &str) -> TradeResponse<OrderOperationAck> {
+        TradeResponse {
+            code: "0".to_owned(),
+            message: String::new(),
+            data: vec![OrderOperationAck {
+                order_id: "ord-1".to_owned(),
+                client_order_id: plan.client_order_id.clone(),
+                request_id: request_id.to_owned(),
+                timestamp_ms: "1790000000000".to_owned(),
+                status_code: "0".to_owned(),
+                status_message: String::new(),
+            }],
+            in_time_us: "1790000000000000".to_owned(),
+            out_time_us: "1790000000001000".to_owned(),
+        }
+    }
+
+    fn live_ledger(name: &str, plan: &ExecutionPlan) -> (PathBuf, DurableExecutionLedger) {
+        let (root, mut ledger) = ledger(name);
+        ledger.prepare(plan.clone(), 101).expect("prepare");
+        ledger
+            .begin_submission(&plan.intent_id, 102)
+            .expect("submitting");
+        ledger
+            .acknowledge(&plan.intent_id, "ord-1", 103)
+            .expect("ack");
+        ledger
+            .reconcile_found(
+                &plan.intent_id,
+                "ord-1",
+                ExchangeOrderState::Live,
+                104,
+            )
+            .expect("live");
+        (root, ledger)
     }
 
     fn order_details(plan: &ExecutionPlan, state: &str) -> TradeOrderDetails {
@@ -1375,6 +1499,235 @@ mod tests {
             .await
             .expect("numeric equivalence");
         assert!(matches!(outcome, ReconcileDisposition::Found(_)));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn semantic_noop_amend_is_rejected_before_durable_mutation() {
+        let plan = plan();
+        let (root, ledger) = live_ledger("noop-amend", &plan);
+        let gateway = MutationGateway::new(vec![], vec![], vec![]);
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let error = executor
+            .prepare_amend(
+                &plan.intent_id,
+                "mutation_noop_012345",
+                None,
+                Some(plan.price.clone()),
+                105,
+            )
+            .expect_err("no-op");
+
+        assert!(matches!(
+            error,
+            OrderExecutorError::InvalidMutationInput("amend must change size and/or price")
+        ));
+        assert!(executor
+            .ledger()
+            .get(&plan.intent_id)
+            .expect("entry")
+            .record
+            .mutations
+            .is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn amend_ack_is_applied_only_after_exact_reconciliation() {
+        let plan = plan();
+        let (root, ledger) = live_ledger("amend-apply", &plan);
+        let mutation_id = "mutation_amend_012345";
+        let request_id = derive_amend_request_id(&plan.intent_id, mutation_id);
+        let mut amended = order_details(&plan, "live");
+        amended.price = "0.11".to_owned();
+        amended.size = "2".to_owned();
+        let gateway = MutationGateway::new(
+            vec![Ok(mutation_ack(&plan, &request_id))],
+            vec![],
+            vec![Ok(amended)],
+        );
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        assert!(matches!(
+            executor
+                .prepare_amend(
+                    &plan.intent_id,
+                    mutation_id,
+                    Some("2".to_owned()),
+                    Some("0.11".to_owned()),
+                    105,
+                )
+                .expect("prepare amend"),
+            MutationPrepareDisposition::Created(_)
+        ));
+        assert!(matches!(
+            executor
+                .submit_order_mutation(&plan.intent_id, mutation_id, timing(), 106)
+                .await
+                .expect("submit amend"),
+            MutationSubmitDisposition::Acknowledged(_)
+        ));
+        let before = executor
+            .ledger()
+            .get(&plan.intent_id)
+            .expect("before reconcile");
+        assert_eq!(before.record.effective_size(), "1");
+        assert_eq!(before.record.effective_price(), "0.1");
+
+        assert!(matches!(
+            executor
+                .reconcile(&plan.intent_id, 107)
+                .await
+                .expect("reconcile amend"),
+            ReconcileDisposition::Found(_)
+        ));
+        let after = executor.ledger().get(&plan.intent_id).expect("after");
+        assert_eq!(after.record.state, ExecutionState::Live);
+        assert_eq!(
+            after.record.active_mutation(),
+            None,
+            "applied mutation is terminal"
+        );
+        assert_eq!(
+            after.record.mutations.last().expect("mutation").state,
+            OrderMutationState::Applied
+        );
+        assert_eq!(after.record.effective_size(), "2");
+        assert_eq!(after.record.effective_price(), "0.11");
+        assert_eq!(after.record.plan.size, "1");
+        assert_eq!(after.record.plan.price, "0.1");
+        assert_eq!(executor.gateway().amend_calls(), 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn uncertain_amend_is_durable_unknown_and_never_blindly_replayed() {
+        let plan = plan();
+        let (root, ledger) = live_ledger("amend-unknown", &plan);
+        let mutation_id = "mutation_amend_unknown_01";
+        let gateway = MutationGateway::new(
+            vec![Err(OkxError::Response("transport uncertain".to_owned()))],
+            vec![],
+            vec![],
+        );
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        executor
+            .prepare_amend(
+                &plan.intent_id,
+                mutation_id,
+                None,
+                Some("0.11".to_owned()),
+                105,
+            )
+            .expect("prepare amend");
+
+        assert!(matches!(
+            executor
+                .submit_order_mutation(&plan.intent_id, mutation_id, timing(), 106)
+                .await
+                .expect("unknown amend"),
+            MutationSubmitDisposition::Unknown(_)
+        ));
+        assert_eq!(executor.gateway().amend_calls(), 1);
+        assert_eq!(
+            executor
+                .ledger()
+                .get(&plan.intent_id)
+                .expect("entry")
+                .record
+                .active_mutation()
+                .expect("mutation")
+                .state,
+            OrderMutationState::Unknown
+        );
+
+        let replay = executor
+            .submit_order_mutation(&plan.intent_id, mutation_id, timing(), 107)
+            .await
+            .expect_err("must not replay unknown amend");
+        assert!(matches!(
+            replay,
+            OrderExecutorError::Transition(
+                ExecutionTransitionError::InvalidMutationTransition { .. }
+            )
+        ));
+        assert_eq!(executor.gateway().amend_calls(), 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cancel_fill_race_terminalizes_order_and_supersedes_cancel() {
+        let plan = plan();
+        let (root, ledger) = live_ledger("cancel-fill-race", &plan);
+        let mutation_id = "mutation_cancel_012345";
+        let mut filled = order_details(&plan, "filled");
+        filled.accumulated_fill_size = plan.size.clone();
+        let gateway = MutationGateway::new(
+            vec![],
+            vec![Ok(mutation_ack(&plan, ""))],
+            vec![Ok(filled)],
+        );
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        executor
+            .prepare_cancel(&plan.intent_id, mutation_id, 105)
+            .expect("prepare cancel");
+        assert!(matches!(
+            executor
+                .submit_order_mutation(&plan.intent_id, mutation_id, timing(), 106)
+                .await
+                .expect("submit cancel"),
+            MutationSubmitDisposition::Acknowledged(_)
+        ));
+
+        executor
+            .reconcile(&plan.intent_id, 107)
+            .await
+            .expect("reconcile fill race");
+        let entry = executor.ledger().get(&plan.intent_id).expect("entry");
+        assert_eq!(entry.record.state, ExecutionState::Filled);
+        assert_eq!(
+            entry.record.mutations.last().expect("cancel").state,
+            OrderMutationState::Superseded
+        );
+        assert_eq!(executor.gateway().cancel_calls(), 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn acknowledged_cancel_becomes_applied_only_when_exchange_is_canceled() {
+        let plan = plan();
+        let (root, ledger) = live_ledger("cancel-applied", &plan);
+        let mutation_id = "mutation_cancel_applied_01";
+        let gateway = MutationGateway::new(
+            vec![],
+            vec![Ok(mutation_ack(&plan, ""))],
+            vec![Ok(order_details(&plan, "canceled"))],
+        );
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        executor
+            .prepare_cancel(&plan.intent_id, mutation_id, 105)
+            .expect("prepare cancel");
+        executor
+            .submit_order_mutation(&plan.intent_id, mutation_id, timing(), 106)
+            .await
+            .expect("submit cancel");
+
+        executor
+            .reconcile(&plan.intent_id, 107)
+            .await
+            .expect("reconcile cancel");
+        let entry = executor.ledger().get(&plan.intent_id).expect("entry");
+        assert_eq!(entry.record.state, ExecutionState::Canceled);
+        assert_eq!(
+            entry.record.mutations.last().expect("cancel").state,
+            OrderMutationState::Applied
+        );
 
         let _ = fs::remove_dir_all(root);
     }
