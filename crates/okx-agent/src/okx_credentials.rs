@@ -235,12 +235,8 @@ mod tests {
 
         assert!(validate_payload(CredentialProfile::Observer, &observer_stored).is_ok());
         assert!(validate_payload(CredentialProfile::Executor, &executor_stored).is_ok());
-        assert!(
-            validate_payload(CredentialProfile::DemoObserver, &demo_observer_stored).is_ok()
-        );
-        assert!(
-            validate_payload(CredentialProfile::DemoExecutor, &demo_executor_stored).is_ok()
-        );
+        assert!(validate_payload(CredentialProfile::DemoObserver, &demo_observer_stored).is_ok());
+        assert!(validate_payload(CredentialProfile::DemoExecutor, &demo_executor_stored).is_ok());
 
         assert!(matches!(
             validate_payload(CredentialProfile::Observer, &demo_observer_stored),
