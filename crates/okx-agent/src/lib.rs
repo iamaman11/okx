@@ -109,6 +109,21 @@ pub enum AgentError {
     #[error("stored OKX executor credential payload is invalid")]
     InvalidExecutorOkxCredentials,
 
+    #[error("OKX Demo observer credential was not found in native secret storage")]
+    DemoOkxCredentialsNotFound,
+
+    #[error("stored OKX Demo observer credential payload is invalid")]
+    InvalidDemoOkxCredentials,
+
+    #[error("OKX Demo executor credential was not found in native secret storage")]
+    DemoExecutorOkxCredentialsNotFound,
+
+    #[error("stored OKX Demo executor credential payload is invalid")]
+    InvalidDemoExecutorOkxCredentials,
+
+    #[error("Demo mutation acceptance requires --demo")]
+    DemoMutationAcceptanceRequiresDemoEnvironment,
+
     #[error("mailbox issue number must be non-zero")]
     InvalidMailboxIssue,
 
