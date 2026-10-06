@@ -810,6 +810,46 @@ mod tests {
     }
 
     #[test]
+    fn same_instrument_arbitration_defers_until_existing_execution_is_terminal() {
+        let root = temp_root("instrument-arbitration");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = DurableExecutionLedger::open(store, 100).expect("open");
+
+        let first = plan("intent_first_0123456789");
+        ledger.prepare(first.clone(), 101).expect("first");
+        let mut second = plan("intent_second_012345678");
+        second.client_order_id = derive_client_order_id(&second.intent_id);
+
+        assert!(matches!(
+            ledger.prepare(second.clone(), 102),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
+
+        ledger
+            .begin_submission(&first.intent_id, 103)
+            .expect("submit first");
+        ledger
+            .acknowledge(&first.intent_id, "ord-1", 104)
+            .expect("ack first");
+        ledger
+            .reconcile_found(
+                &first.intent_id,
+                "ord-1",
+                ExchangeOrderState::Filled,
+                105,
+            )
+            .expect("first terminal");
+
+        assert!(matches!(
+            ledger.prepare(second, 106).expect("second after terminal"),
+            PrepareDisposition::Created(_)
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn submitting_is_durable_before_send_and_recovers_as_unknown() {
         let root = temp_root("submitting");
         let _ = fs::remove_dir_all(&root);
