@@ -1864,9 +1864,7 @@ mod tests {
                 net_execution_cost_settle: Some("1234567890.123456789012345678".to_owned()),
                 reference_to_first_fill_ms: Some(u64::MAX),
                 reference_to_last_fill_ms: Some(u64::MAX),
-                implementation_shortfall_settle: Some(
-                    "1234567890.123456789012345678".to_owned(),
-                ),
+                implementation_shortfall_settle: Some("1234567890.123456789012345678".to_owned()),
                 implementation_shortfall_unavailable_reason: None,
             }),
             None,
