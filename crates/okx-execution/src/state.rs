@@ -139,6 +139,13 @@ pub enum ReverseLeg {
     Open,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReverseContinuation {
+    Required,
+    Aborted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReverseExecutionLink {
@@ -146,6 +153,7 @@ pub struct ReverseExecutionLink {
     pub open_intent_id: String,
     pub target_position_side: PositionSide,
     pub leg: ReverseLeg,
+    pub continuation: ReverseContinuation,
 }
 
 impl ReverseExecutionLink {
@@ -167,6 +175,7 @@ impl ReverseExecutionLink {
             open_intent_id,
             target_position_side,
             leg: ReverseLeg::Close,
+            continuation: ReverseContinuation::Required,
         })
     }
 
@@ -179,6 +188,7 @@ impl ReverseExecutionLink {
             open_intent_id: close.open_intent_id.clone(),
             target_position_side: close.target_position_side,
             leg: ReverseLeg::Open,
+            continuation: ReverseContinuation::Required,
         })
     }
 }
@@ -246,6 +256,9 @@ pub enum ExecutionTransitionError {
 
     #[error("reverse execution linkage is invalid")]
     InvalidReverseLink,
+
+    #[error("reverse execution transition is invalid")]
+    InvalidReverseTransition,
 }
 
 impl ExecutionRecord {
@@ -349,6 +362,21 @@ impl ExecutionRecord {
             return Err(ExecutionTransitionError::InvalidReverseLink);
         }
         self.reverse = Some(reverse);
+        Ok(())
+    }
+
+    pub fn abort_reverse_continuation(&mut self) -> Result<(), ExecutionTransitionError> {
+        let reverse = self
+            .reverse
+            .as_mut()
+            .ok_or(ExecutionTransitionError::InvalidReverseLink)?;
+        if reverse.leg != ReverseLeg::Close
+            || self.state != ExecutionState::Filled
+            || reverse.continuation != ReverseContinuation::Required
+        {
+            return Err(ExecutionTransitionError::InvalidReverseTransition);
+        }
+        reverse.continuation = ReverseContinuation::Aborted;
         Ok(())
     }
 
