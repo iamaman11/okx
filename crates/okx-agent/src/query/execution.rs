@@ -11,8 +11,8 @@ use okx_execution::{
     ExecutionLineageBinding, ExecutionRiskBinding, ExecutionState, ExecutionTcaInstrumentType,
     ExecutionTcaMechanicsBinding, ExecutionTransitionError, OrderExecutorError,
     OrderSide as ExecutionOrderSide, OrderType, PositionSide as ExecutionPositionSide,
-    PrepareDeferral, PrepareFailure, PrepareOutcome, PrepareRejection, ReverseContinuation,
-    ReverseLeg, TradeMode, prepare_execution, revalidate_execution_plan,
+    PrepareDeferral, PrepareFailure, PrepareOutcome, PrepareRejection, ReconcileDisposition,
+    ReverseContinuation, ReverseLeg, TradeMode, prepare_execution, revalidate_execution_plan,
     revalidate_hard_risk_policy, revalidate_venue_execution,
 };
 use okx_protocol::{
@@ -36,6 +36,7 @@ pub const EXECUTION_REFERENCE_NOT_FRESH_CODE: &str = "EXECUTION_REFERENCE_NOT_FR
 pub const EXECUTION_VENUE_UNAVAILABLE_CODE: &str = "EXECUTION_VENUE_UNAVAILABLE";
 pub const EXECUTION_INPUT_INCONSISTENT_CODE: &str = "EXECUTION_INPUT_INCONSISTENT";
 pub const EXECUTION_RECORD_NOT_FOUND_CODE: &str = "EXECUTION_RECORD_NOT_FOUND";
+pub const EXECUTION_RECONCILIATION_FAILED_CODE: &str = "EXECUTION_RECONCILIATION_FAILED";
 pub const EXECUTION_INTENT_CONFLICT_CODE: &str = "EXECUTION_INTENT_CONFLICT";
 pub const EXECUTION_IDEMPOTENCY_COLLISION_CODE: &str = "EXECUTION_IDEMPOTENCY_COLLISION";
 pub const EXECUTION_INSTRUMENT_BUSY_CODE: &str = "EXECUTION_INSTRUMENT_BUSY";
@@ -1448,6 +1449,48 @@ async fn execution_status_response(
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
+    if execution.entry(intent_id).await.is_none() {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RECORD_NOT_FOUND_CODE,
+            "execution record was not found".to_owned(),
+            false,
+        ));
+    }
+
+    let reconciliation_warning = match execution
+        .reconcile_execution(intent_id, utc_now_ms())
+        .await
+    {
+        Ok(ReconcileDisposition::Found(_)) => None,
+        Ok(ReconcileDisposition::Unavailable(_)) => {
+            Some("execution_reconciliation_unavailable".to_owned())
+        }
+        Err(OrderExecutorError::NotReconcilable(_)) => None,
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::IntentNotFound(_))) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RECORD_NOT_FOUND_CODE,
+                "execution record was not found".to_owned(),
+                false,
+            ));
+        }
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_RECONCILIATION_FAILED_CODE,
+                error.to_string(),
+                false,
+            ));
+        }
+    };
+
     let Some((entry, status)) = execution.status_with_entry(intent_id).await? else {
         return Ok(failure_response(
             request,
@@ -1459,7 +1502,10 @@ async fn execution_status_response(
         ));
     };
 
-    let (tca, warnings) = execution_tca_status(context, &entry).await;
+    let (tca, mut warnings) = execution_tca_status(context, &entry).await;
+    if let Some(warning) = reconciliation_warning {
+        warnings.push(warning);
+    }
     let result = ExecutionStatusResult {
         status,
         tca,
