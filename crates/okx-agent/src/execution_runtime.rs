@@ -387,7 +387,12 @@ mod tests {
     use super::*;
 
     fn credentials() -> Credentials {
-        Credentials::new("demo-key", "demo-secret", "demo-pass").expect("credentials")
+        Credentials::new(
+            "demo-key".to_owned(),
+            "demo-secret".to_owned(),
+            "demo-pass".to_owned(),
+        )
+        .expect("credentials")
     }
 
     fn temp_root(label: &str) -> std::path::PathBuf {
