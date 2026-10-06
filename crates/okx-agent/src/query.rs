@@ -354,9 +354,11 @@ pub(crate) async fn dispatch(
             account::dispatch(request, context, generated_at).await
         }
         AgentOperation::ExecutorPreflight
+        | AgentOperation::PrepareExecution { .. }
         | AgentOperation::PrepareOpenExecution { .. }
         | AgentOperation::PrepareCloseExecution { .. }
         | AgentOperation::SubmitPreparedExecution { .. }
+        | AgentOperation::AbortReverseExecution { .. }
         | AgentOperation::ExecutionStatus { .. } => {
             execution::dispatch(request, context, generated_at).await
         }
