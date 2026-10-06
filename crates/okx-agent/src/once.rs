@@ -158,6 +158,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         AgentOperation::InstrumentRules { .. }
         | AgentOperation::ExecutorPreflight
         | AgentOperation::SubmitPreparedExecution { .. }
+        | AgentOperation::AbortReverseExecution { .. }
         | AgentOperation::ExecutionStatus { .. }
         | AgentOperation::HistoryBehavior { .. }
         | AgentOperation::SnapshotQuality { .. }
@@ -172,6 +173,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         AgentOperation::MarketSnapshot { .. }
         | AgentOperation::MarketOverview { .. }
         | AgentOperation::MarketIntelligence { .. }
+        | AgentOperation::PrepareExecution { .. }
         | AgentOperation::PrepareOpenExecution { .. }
         | AgentOperation::PrepareCloseExecution { .. }
         | AgentOperation::PortfolioRisk { .. }
