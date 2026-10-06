@@ -174,8 +174,6 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         | AgentOperation::MarketOverview { .. }
         | AgentOperation::MarketIntelligence { .. }
         | AgentOperation::PrepareExecution { .. }
-        | AgentOperation::PrepareOpenExecution { .. }
-        | AgentOperation::PrepareCloseExecution { .. }
         | AgentOperation::PortfolioRisk { .. }
         | AgentOperation::AnalyzeCandidateOrder { .. }
         | AgentOperation::TradingCapabilities { .. }

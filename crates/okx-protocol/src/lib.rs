@@ -908,31 +908,6 @@ pub enum AgentOperation {
         spec: ExecutionPrepareSpec,
         risk: Option<Box<ExecutionRiskBindingRequest>>,
     },
-    PrepareOpenExecution {
-        intent_id: String,
-        instrument: String,
-        trade_mode: ExecutionTradeMode,
-        position_side: PositionSide,
-        order_type: ExecutionOrderType,
-        entry_price: String,
-        stop_price: String,
-        max_settle_notional: String,
-        max_loss_settle: String,
-        target_rr: String,
-        entry_liquidity_role: LiquidityRole,
-        exit_liquidity_role: LiquidityRole,
-        risk: Option<Box<ExecutionRiskBindingRequest>>,
-    },
-    PrepareCloseExecution {
-        intent_id: String,
-        instrument: String,
-        trade_mode: ExecutionTradeMode,
-        position_side: PositionSide,
-        order_type: ExecutionOrderType,
-        size: String,
-        price: String,
-        risk: Option<Box<ExecutionRiskBindingRequest>>,
-    },
     SubmitPreparedExecution {
         intent_id: String,
     },
@@ -990,8 +965,6 @@ impl AgentOperation {
         !matches!(
             self,
             Self::PrepareExecution { .. }
-                | Self::PrepareOpenExecution { .. }
-                | Self::PrepareCloseExecution { .. }
                 | Self::SubmitPreparedExecution { .. }
                 | Self::AbortReverseExecution { .. }
         )
@@ -1133,46 +1106,6 @@ impl AgentOperation {
                 validate_request_id(intent_id)?;
                 validate_instrument(instrument)?;
                 validate_execution_prepare_spec(spec)?;
-                if let Some(risk) = risk {
-                    validate_execution_risk_binding(risk)?;
-                }
-                Ok(())
-            }
-            Self::PrepareOpenExecution {
-                intent_id,
-                instrument,
-                entry_price,
-                stop_price,
-                max_settle_notional,
-                max_loss_settle,
-                target_rr,
-                risk,
-                ..
-            } => {
-                validate_request_id(intent_id)?;
-                validate_instrument(instrument)?;
-                validate_decimal_text(entry_price, "entry_price")?;
-                validate_decimal_text(stop_price, "stop_price")?;
-                validate_decimal_text(max_settle_notional, "max_settle_notional")?;
-                validate_decimal_text(max_loss_settle, "max_loss_settle")?;
-                validate_decimal_text(target_rr, "target_rr")?;
-                if let Some(risk) = risk {
-                    validate_execution_risk_binding(risk)?;
-                }
-                Ok(())
-            }
-            Self::PrepareCloseExecution {
-                intent_id,
-                instrument,
-                size,
-                price,
-                risk,
-                ..
-            } => {
-                validate_request_id(intent_id)?;
-                validate_instrument(instrument)?;
-                validate_decimal_text(size, "size")?;
-                validate_decimal_text(price, "price")?;
                 if let Some(risk) = risk {
                     validate_execution_risk_binding(risk)?;
                 }
@@ -2258,18 +2191,6 @@ mod tests {
         };
         assert!(read.direct_transport_read_only());
 
-        let prepare = AgentOperation::PrepareCloseExecution {
-            intent_id: "intent_0123456789abcdef".to_owned(),
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            trade_mode: ExecutionTradeMode::Cross,
-            position_side: PositionSide::Long,
-            order_type: ExecutionOrderType::Limit,
-            size: "1".to_owned(),
-            price: "0.1".to_owned(),
-            risk: None,
-        };
-        assert!(!prepare.direct_transport_read_only());
-
         let generic = AgentOperation::PrepareExecution {
             intent_id: "intent_generic_01234567".to_owned(),
             instrument: "DOGE-USDT-SWAP".to_owned(),
@@ -2519,19 +2440,23 @@ mod tests {
         let open = AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: request_id(),
-            operation: AgentOperation::PrepareOpenExecution {
+            operation: AgentOperation::PrepareExecution {
                 intent_id: "intent_open_0123456789".to_owned(),
                 instrument: "DOGE-USDT-SWAP".to_owned(),
                 trade_mode: ExecutionTradeMode::Cross,
-                position_side: PositionSide::Long,
                 order_type: ExecutionOrderType::Limit,
-                entry_price: "0.1".to_owned(),
-                stop_price: "0.09".to_owned(),
-                max_settle_notional: "100".to_owned(),
-                max_loss_settle: "5".to_owned(),
-                target_rr: "2".to_owned(),
-                entry_liquidity_role: LiquidityRole::Taker,
-                exit_liquidity_role: LiquidityRole::Taker,
+                spec: ExecutionPrepareSpec::Open {
+                    position_side: PositionSide::Long,
+                    entry: ExecutionEntryRequest {
+                        entry_price: "0.1".to_owned(),
+                        stop_price: "0.09".to_owned(),
+                        max_settle_notional: "100".to_owned(),
+                        max_loss_settle: "5".to_owned(),
+                        target_rr: "2".to_owned(),
+                        entry_liquidity_role: LiquidityRole::Taker,
+                        exit_liquidity_role: LiquidityRole::Taker,
+                    },
+                },
                 risk: Some(Box::new(execution_risk_request())),
             },
         };
@@ -2540,14 +2465,16 @@ mod tests {
         let close = AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_close_0123456789".to_owned(),
-            operation: AgentOperation::PrepareCloseExecution {
+            operation: AgentOperation::PrepareExecution {
                 intent_id: "intent_close_0123456789".to_owned(),
                 instrument: "DOGE-USDT-SWAP".to_owned(),
                 trade_mode: ExecutionTradeMode::Cross,
-                position_side: PositionSide::Long,
                 order_type: ExecutionOrderType::Limit,
-                size: "1".to_owned(),
-                price: "0.1".to_owned(),
+                spec: ExecutionPrepareSpec::Close {
+                    position_side: PositionSide::Long,
+                    size: "1".to_owned(),
+                    price: "0.1".to_owned(),
+                },
                 risk: None,
             },
         };
@@ -2574,14 +2501,16 @@ mod tests {
         let invalid = AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_invalid_exec_012345".to_owned(),
-            operation: AgentOperation::PrepareCloseExecution {
+            operation: AgentOperation::PrepareExecution {
                 intent_id: "short".to_owned(),
                 instrument: "DOGE-USDT-SWAP".to_owned(),
                 trade_mode: ExecutionTradeMode::Cross,
-                position_side: PositionSide::Long,
                 order_type: ExecutionOrderType::Limit,
-                size: "1".to_owned(),
-                price: "0.1".to_owned(),
+                spec: ExecutionPrepareSpec::Close {
+                    position_side: PositionSide::Long,
+                    size: "1".to_owned(),
+                    price: "0.1".to_owned(),
+                },
                 risk: None,
             },
         };
