@@ -215,6 +215,54 @@ pub enum ProtectiveOrderResolution {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionSubmissionTimingEvidence {
+    pub request_exchange_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub okx_in_time_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub okx_out_time_us: Option<u64>,
+}
+
+impl ExecutionSubmissionTimingEvidence {
+    fn new(request_exchange_time_ms: u64) -> Result<Self, ExecutionTransitionError> {
+        if request_exchange_time_ms == 0 {
+            return Err(ExecutionTransitionError::InvalidSubmissionTiming);
+        }
+        Ok(Self {
+            request_exchange_time_ms,
+            okx_in_time_us: None,
+            okx_out_time_us: None,
+        })
+    }
+
+    fn record_okx_gateway_timing(
+        &mut self,
+        in_time_us: u64,
+        out_time_us: u64,
+    ) -> Result<(), ExecutionTransitionError> {
+        if in_time_us == 0 || out_time_us < in_time_us {
+            return Err(ExecutionTransitionError::InvalidSubmissionTiming);
+        }
+        if let (Some(existing_in), Some(existing_out)) =
+            (self.okx_in_time_us, self.okx_out_time_us)
+        {
+            return if existing_in == in_time_us && existing_out == out_time_us {
+                Ok(())
+            } else {
+                Err(ExecutionTransitionError::InvalidSubmissionTiming)
+            };
+        }
+        if self.okx_in_time_us.is_some() || self.okx_out_time_us.is_some() {
+            return Err(ExecutionTransitionError::InvalidSubmissionTiming);
+        }
+        self.okx_in_time_us = Some(in_time_us);
+        self.okx_out_time_us = Some(out_time_us);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReverseLeg {
@@ -289,6 +337,8 @@ pub struct ExecutionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<ExecutionLineageBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_timing: Option<ExecutionSubmissionTimingEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection: Option<ProtectiveOrderLink>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<ReverseExecutionLink>,
@@ -344,6 +394,9 @@ pub enum ExecutionTransitionError {
     #[error("execution lineage can only be bound idempotently while PREPARED")]
     InvalidLineageTransition,
 
+    #[error("execution submission timing evidence is invalid")]
+    InvalidSubmissionTiming,
+
     #[error("protective order linkage is invalid")]
     InvalidProtectionLink,
 
@@ -368,13 +421,48 @@ impl ExecutionRecord {
             rejection_code: None,
             mutations: Vec::new(),
             lineage: None,
+            submission_timing: None,
             protection,
             reverse: None,
         }
     }
 
     pub fn begin_submission(&mut self) -> Result<(), ExecutionTransitionError> {
-        self.transition(ExecutionState::Prepared, ExecutionState::Submitting)
+        self.begin_submission_with_timing(None)
+    }
+
+    pub fn begin_submission_with_timing(
+        &mut self,
+        request_exchange_time_ms: Option<u64>,
+    ) -> Result<(), ExecutionTransitionError> {
+        if self.state != ExecutionState::Prepared {
+            return Err(ExecutionTransitionError::InvalidTransition {
+                from: self.state,
+                to: ExecutionState::Submitting,
+            });
+        }
+        if self.submission_timing.is_some() {
+            return Err(ExecutionTransitionError::InvalidSubmissionTiming);
+        }
+        self.submission_timing = request_exchange_time_ms
+            .map(ExecutionSubmissionTimingEvidence::new)
+            .transpose()?;
+        self.state = ExecutionState::Submitting;
+        Ok(())
+    }
+
+    pub fn record_okx_gateway_timing(
+        &mut self,
+        in_time_us: u64,
+        out_time_us: u64,
+    ) -> Result<(), ExecutionTransitionError> {
+        if self.state != ExecutionState::Submitting {
+            return Err(ExecutionTransitionError::InvalidSubmissionTiming);
+        }
+        self.submission_timing
+            .as_mut()
+            .ok_or(ExecutionTransitionError::InvalidSubmissionTiming)?
+            .record_okx_gateway_timing(in_time_us, out_time_us)
     }
 
     pub fn acknowledge(
