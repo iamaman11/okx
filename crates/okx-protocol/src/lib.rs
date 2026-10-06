@@ -804,6 +804,36 @@ pub enum ExecutionOrderType {
     Ioc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionReferencePriceBasis {
+    DecisionPrice,
+    ArrivalMid,
+    Mark,
+    Index,
+    Last,
+    LimitPrice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionDecisionReferenceRequest {
+    pub decision_time_ms: u64,
+    pub price: String,
+    pub price_basis: ExecutionReferencePriceBasis,
+    pub price_policy_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionLineageRequest {
+    pub origin_evidence_id: String,
+    pub origin_schema: String,
+    pub origin_version: String,
+    pub authority_evidence_id: Option<String>,
+    pub decision_reference: ExecutionDecisionReferenceRequest,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionEntryRequest {
@@ -907,6 +937,7 @@ pub enum AgentOperation {
         order_type: ExecutionOrderType,
         spec: ExecutionPrepareSpec,
         risk: Option<Box<ExecutionRiskBindingRequest>>,
+        lineage: Option<Box<ExecutionLineageRequest>>,
     },
     SubmitPreparedExecution {
         intent_id: String,
@@ -1101,6 +1132,7 @@ impl AgentOperation {
                 instrument,
                 spec,
                 risk,
+                lineage,
                 ..
             } => {
                 validate_request_id(intent_id)?;
@@ -1108,6 +1140,14 @@ impl AgentOperation {
                 validate_execution_prepare_spec(spec)?;
                 if let Some(risk) = risk {
                     validate_execution_risk_binding(risk)?;
+                }
+                if let Some(lineage) = lineage {
+                    if matches!(spec, ExecutionPrepareSpec::ContinueReverse { .. }) {
+                        return Err(ProtocolError::InvalidAnalyticalQuery(
+                            "continue_reverse inherits root lineage",
+                        ));
+                    }
+                    validate_execution_lineage(lineage)?;
                 }
                 Ok(())
             }
@@ -1657,6 +1697,27 @@ fn validate_execution_entry_request(entry: &ExecutionEntryRequest) -> Result<(),
     validate_decimal_text(&entry.max_settle_notional, "entry.max_settle_notional")?;
     validate_decimal_text(&entry.max_loss_settle, "entry.max_loss_settle")?;
     validate_decimal_text(&entry.target_rr, "entry.target_rr")
+}
+
+fn validate_execution_lineage(value: &ExecutionLineageRequest) -> Result<(), ProtocolError> {
+    validate_sha256_artifact_id(&value.origin_evidence_id, "lineage.origin_evidence_id")?;
+    if let Some(authority) = value.authority_evidence_id.as_deref() {
+        validate_sha256_artifact_id(authority, "lineage.authority_evidence_id")?;
+    }
+    if value.origin_schema.trim().is_empty()
+        || value.origin_schema.len() > 128
+        || value.origin_version.trim().is_empty()
+        || value.origin_version.len() > 128
+        || value.decision_reference.decision_time_ms == 0
+        || value.decision_reference.price_policy_version.trim().is_empty()
+        || value.decision_reference.price_policy_version.len() > 128
+    {
+        return Err(ProtocolError::InvalidAnalyticalQuery("execution lineage"));
+    }
+    validate_positive_decimal_text(
+        &value.decision_reference.price,
+        "lineage.decision_reference.price",
+    )
 }
 
 fn validate_execution_prepare_spec(spec: &ExecutionPrepareSpec) -> Result<(), ProtocolError> {
