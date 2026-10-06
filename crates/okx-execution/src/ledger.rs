@@ -257,17 +257,17 @@ impl DurableExecutionLedger {
             };
         }
 
+        if self.entries.len() >= self.store.max_records {
+            return Err(ExecutionLedgerError::CapacityExceeded(
+                self.store.max_records,
+            ));
+        }
+
         if self.entries.values().any(|entry| {
             entry.record.plan.instrument_id == plan.instrument_id
                 && !entry.record.state.is_terminal()
         }) {
             return Err(ExecutionLedgerError::InstrumentBusy);
-        }
-
-        if self.entries.len() >= self.store.max_records {
-            return Err(ExecutionLedgerError::CapacityExceeded(
-                self.store.max_records,
-            ));
         }
 
         if self
