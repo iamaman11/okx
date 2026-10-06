@@ -149,7 +149,20 @@ impl HostExecutor {
                 }
             }
             AgentDesired::Running => {
-                if running {
+                if running && self.running_profile != Some(self.desired_profile) {
+                    self.terminate_agent_owned()?;
+                    match self.start_agent_process(self.desired_profile) {
+                        Ok(pid) => {
+                            self.last_reconcile =
+                                format!("SWITCHED_{:?}_AGENT_PID_{pid}", self.desired_profile);
+                        }
+                        Err(error) => {
+                            self.schedule_restart();
+                            self.last_reconcile = format!("PROFILE_SWITCH_FAILED_{}", error.code());
+                            return Err(error);
+                        }
+                    }
+                } else if running {
                     if self.agent_started_at.is_some_and(|started| {
                         started.elapsed() >= Duration::from_secs(HEALTHY_AGENT_SECS)
                     }) {
