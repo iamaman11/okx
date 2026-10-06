@@ -29,6 +29,12 @@ use crate::{
 
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionRuntimeMode {
+    ReadOnly,
+    DemoAcceptance,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreparedDisposition {
@@ -45,6 +51,7 @@ pub struct PreparedExecutionResult {
 
 pub struct ExecutionRuntime {
     environment: OkxEnvironment,
+    mode: ExecutionRuntimeMode,
     executor_clock: OkxRestClient,
     executor_account: AccountApi,
     public_data: PublicDataApi,
@@ -58,6 +65,44 @@ impl ExecutionRuntime {
         executor_credentials: Credentials,
         observed_at_ms: u64,
         rate_budget: RateBudget,
+    ) -> AgentResult<Self> {
+        Self::new_with_mode(
+            root,
+            environment,
+            executor_credentials,
+            observed_at_ms,
+            rate_budget,
+            ExecutionRuntimeMode::ReadOnly,
+        )
+    }
+
+    pub fn new_demo_acceptance(
+        root: &Path,
+        environment: OkxEnvironment,
+        executor_credentials: Credentials,
+        observed_at_ms: u64,
+        rate_budget: RateBudget,
+    ) -> AgentResult<Self> {
+        if !environment.demo {
+            return Err(OrderExecutorError::DemoAuthorityRequiresDemoEnvironment.into());
+        }
+        Self::new_with_mode(
+            root,
+            environment,
+            executor_credentials,
+            observed_at_ms,
+            rate_budget,
+            ExecutionRuntimeMode::DemoAcceptance,
+        )
+    }
+
+    fn new_with_mode(
+        root: &Path,
+        environment: OkxEnvironment,
+        executor_credentials: Credentials,
+        observed_at_ms: u64,
+        rate_budget: RateBudget,
+        mode: ExecutionRuntimeMode,
     ) -> AgentResult<Self> {
         let public_data = PublicDataApi::new(OkxPublicClient::with_rate_budget(
             environment,
@@ -73,11 +118,20 @@ impl ExecutionRuntime {
         )?;
         Ok(Self {
             environment,
+            mode,
             executor_clock,
             executor_account,
             public_data,
             executor: Mutex::new(OrderExecutor::new(ledger, trade)),
         })
+    }
+
+    pub const fn mode(&self) -> ExecutionRuntimeMode {
+        self.mode
+    }
+
+    pub const fn demo_mutation_acceptance_requested(&self) -> bool {
+        matches!(self.mode, ExecutionRuntimeMode::DemoAcceptance)
     }
 
     pub async fn reconcile_account_ledger(
@@ -112,22 +166,44 @@ impl ExecutionRuntime {
         ))
     }
 
-    pub async fn authorize_demo_acceptance(
+    pub async fn preflight_for_runtime(
         &self,
         observer: &AccountSnapshot,
     ) -> AgentResult<ExecutorCredentialPreflight> {
-        let evidence = self.demo_acceptance_preflight(observer).await?;
-        let mut executor = self.executor.lock().await;
-        if evidence.accepted {
-            executor.enable_demo_acceptance(self.environment)?;
-        } else {
-            executor.disable_mutations();
+        match self.mode {
+            ExecutionRuntimeMode::ReadOnly => self.preflight(observer).await,
+            ExecutionRuntimeMode::DemoAcceptance => self.demo_acceptance_preflight(observer).await,
         }
-        Ok(evidence)
     }
 
     pub async fn mutation_authority(&self) -> MutationAuthority {
         self.executor.lock().await.mutation_authority()
+    }
+
+    pub async fn submit_prepared_demo_authorized(
+        &self,
+        observer: &AccountSnapshot,
+        intent_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+    ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance {
+            return Ok(None);
+        }
+
+        let evidence = self.demo_acceptance_preflight(observer).await?;
+        if !evidence.accepted {
+            self.executor.lock().await.disable_mutations();
+            return Ok(None);
+        }
+
+        let mut executor = self.executor.lock().await;
+        executor.enable_demo_acceptance(self.environment)?;
+        let result = executor
+            .submit_prepared(intent_id, timing, observed_at_ms)
+            .await;
+        executor.disable_mutations();
+        Ok(Some(result))
     }
 
     pub async fn venue_execution_evidence(
