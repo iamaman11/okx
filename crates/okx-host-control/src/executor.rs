@@ -1243,7 +1243,7 @@ mod tests {
         for (line, class, code) in cases {
             let summary = fatal_error_summary(line).expect("summary");
             assert_eq!(summary["class"], class);
-            assert_eq!(summary["code"], code);
+            assert_eq!(summary["code"].as_str(), code);
             assert!(!summary.to_string().contains("sensitive platform text"));
             assert!(!summary.to_string().contains("instrument_id"));
             assert!(!summary.to_string().contains("agent-key-1"));
