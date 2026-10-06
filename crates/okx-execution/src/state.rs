@@ -358,7 +358,11 @@ impl ExecutionRecord {
         &mut self,
         reverse: ReverseExecutionLink,
     ) -> Result<(), ExecutionTransitionError> {
-        if self.reverse.as_ref().is_some_and(|existing| existing != &reverse) {
+        if self
+            .reverse
+            .as_ref()
+            .is_some_and(|existing| existing != &reverse)
+        {
             return Err(ExecutionTransitionError::InvalidReverseLink);
         }
         self.reverse = Some(reverse);
