@@ -364,7 +364,7 @@ async fn prepare_risk_increasing(
         return Ok(preflight_rejected(request, generated_at));
     }
     let Some(rules) = current_rules(context, common.instrument).await else {
-        return Ok(reference_not_found(request, generated_at, instrument));
+        return Ok(reference_not_found(request, generated_at, common.instrument));
     };
     let Some(observer) = context.account_fallback else {
         return Ok(execution_unavailable(request, generated_at));
@@ -452,7 +452,7 @@ async fn prepare_risk_reducing(
         return Ok(preflight_rejected(request, generated_at));
     }
     let Some(rules) = current_rules(context, common.instrument).await else {
-        return Ok(reference_not_found(request, generated_at, instrument));
+        return Ok(reference_not_found(request, generated_at, common.instrument));
     };
     let intent = ExecutionIntent {
         intent_id: common.intent_id.to_owned(),
