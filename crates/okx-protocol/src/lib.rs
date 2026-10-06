@@ -2764,8 +2764,7 @@ mod tests {
             };
             request.validate().expect("typed demo lifecycle request");
             let json = serde_json::to_string(&request).expect("serialize");
-            let decoded: HostControlRequest =
-                serde_json::from_str(&json).expect("deserialize");
+            let decoded: HostControlRequest = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(decoded, request);
         }
     }
