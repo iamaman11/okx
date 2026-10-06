@@ -139,6 +139,15 @@ pub enum ExecutionValidationError {
         available: String,
     },
 
+    #[error("add execution requires an existing same-side position")]
+    AddRequiresExistingPosition,
+
+    #[error("hedge execution requires an existing opposite-side position")]
+    HedgeRequiresOppositePosition,
+
+    #[error("reduce execution must leave a positive unreserved position; use close for the full amount")]
+    ReduceWouldFullyClose,
+
     #[error("prepared execution is missing an immutable hard-risk policy binding")]
     MissingRiskBinding,
 
@@ -187,21 +196,24 @@ pub fn prepare_execution(
     let (size, price) = validate_order_mechanics(&intent.size, &intent.price, rules)?;
 
     let side = order_side(intent.action, intent.position_side);
-    let open_risk = match intent.action {
-        ExecutionAction::Open => Some(validate_candidate(
+    let open_risk = if intent.action.is_risk_increasing() {
+        validate_risk_increasing_position_semantics(intent, account)?;
+        Some(validate_candidate(
             intent,
             rules,
             candidate.ok_or(ExecutionValidationError::MissingOpenRiskEvidence)?,
             size,
             price,
-        )?),
-        ExecutionAction::Close => {
-            if candidate.is_some() {
-                return Err(ExecutionValidationError::UnexpectedOpenRiskEvidence);
-            }
-            validate_close_capacity(intent, account, size, side)?;
-            None
+        )?)
+    } else {
+        if candidate.is_some() {
+            return Err(ExecutionValidationError::UnexpectedOpenRiskEvidence);
         }
+        let available = validate_close_capacity(intent, account, size, side)?;
+        if intent.action == ExecutionAction::Reduce && size >= available {
+            return Err(ExecutionValidationError::ReduceWouldFullyClose);
+        }
+        None
     };
 
     Ok(ExecutionPlan {
@@ -246,8 +258,8 @@ pub fn revalidate_hard_risk_policy(
         _ => return Err(ExecutionValidationError::RiskAnalysisInconsistent),
     }
 
-    match (plan.action, analysis.candidate.as_ref()) {
-        (ExecutionAction::Open, Some(candidate)) => {
+    match (plan.action.is_risk_increasing(), analysis.candidate.as_ref()) {
+        (true, Some(candidate)) => {
             let open_risk = plan
                 .open_risk
                 .as_ref()
@@ -277,7 +289,7 @@ pub fn revalidate_hard_risk_policy(
                 return Err(ExecutionValidationError::RiskCandidateMismatch);
             }
         }
-        (ExecutionAction::Close, None) => {}
+        (false, None) => {}
         _ => return Err(ExecutionValidationError::RiskCandidateMismatch),
     }
 
@@ -295,12 +307,16 @@ fn hard_risk_disposition(
     decision: RiskPolicyDecision,
     violation_codes: String,
 ) -> Result<PreMutationRiskDisposition, ExecutionValidationError> {
-    match action {
-        ExecutionAction::Open if decision == RiskPolicyDecision::Rejected => Err(
-            ExecutionValidationError::HardRiskPolicyRejected(violation_codes),
-        ),
-        ExecutionAction::Open => Ok(PreMutationRiskDisposition::Accepted),
-        ExecutionAction::Close => Ok(PreMutationRiskDisposition::AcceptedRiskReducingClose),
+    if action.is_risk_increasing() {
+        if decision == RiskPolicyDecision::Rejected {
+            Err(ExecutionValidationError::HardRiskPolicyRejected(
+                violation_codes,
+            ))
+        } else {
+            Ok(PreMutationRiskDisposition::Accepted)
+        }
+    } else {
+        Ok(PreMutationRiskDisposition::AcceptedRiskReducingClose)
     }
 }
 
@@ -325,36 +341,49 @@ pub fn revalidate_execution_plan(
 
     let (size, _) = validate_order_mechanics(&plan.size, &plan.price, rules)?;
 
-    match plan.action {
-        ExecutionAction::Open => {
-            let evidence = plan
-                .open_risk
-                .as_ref()
-                .ok_or(ExecutionValidationError::MissingOpenRiskEvidence)?;
-            let current_fee_generation = current_fee_generation
-                .filter(|value| !value.trim().is_empty())
-                .ok_or(ExecutionValidationError::CurrentFeeEvidenceUnavailable)?;
-            if evidence.fee_generation != current_fee_generation {
-                return Err(ExecutionValidationError::FeeGenerationMismatch);
-            }
+    if plan.action.is_risk_increasing() {
+        let evidence = plan
+            .open_risk
+            .as_ref()
+            .ok_or(ExecutionValidationError::MissingOpenRiskEvidence)?;
+        let current_fee_generation = current_fee_generation
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(ExecutionValidationError::CurrentFeeEvidenceUnavailable)?;
+        if evidence.fee_generation != current_fee_generation {
+            return Err(ExecutionValidationError::FeeGenerationMismatch);
         }
-        ExecutionAction::Close => {
-            if plan.open_risk.is_some() {
-                return Err(ExecutionValidationError::UnexpectedOpenRiskEvidence);
-            }
-            let intent = ExecutionIntent {
-                intent_id: plan.intent_id.clone(),
-                expected_reference_generation: plan.reference_generation.clone(),
-                expected_account_generation: plan.account_generation.clone(),
-                instrument_id: plan.instrument_id.clone(),
-                trade_mode: plan.trade_mode,
-                position_side: plan.position_side,
-                action: plan.action,
-                order_type: plan.order_type,
-                size: plan.size.clone(),
-                price: plan.price.clone(),
-            };
-            validate_close_capacity(&intent, account, size, plan.side)?;
+        let intent = ExecutionIntent {
+            intent_id: plan.intent_id.clone(),
+            expected_reference_generation: plan.reference_generation.clone(),
+            expected_account_generation: plan.account_generation.clone(),
+            instrument_id: plan.instrument_id.clone(),
+            trade_mode: plan.trade_mode,
+            position_side: plan.position_side,
+            action: plan.action,
+            order_type: plan.order_type,
+            size: plan.size.clone(),
+            price: plan.price.clone(),
+        };
+        validate_risk_increasing_position_semantics(&intent, account)?;
+    } else {
+        if plan.open_risk.is_some() {
+            return Err(ExecutionValidationError::UnexpectedOpenRiskEvidence);
+        }
+        let intent = ExecutionIntent {
+            intent_id: plan.intent_id.clone(),
+            expected_reference_generation: plan.reference_generation.clone(),
+            expected_account_generation: plan.account_generation.clone(),
+            instrument_id: plan.instrument_id.clone(),
+            trade_mode: plan.trade_mode,
+            position_side: plan.position_side,
+            action: plan.action,
+            order_type: plan.order_type,
+            size: plan.size.clone(),
+            price: plan.price.clone(),
+        };
+        let available = validate_close_capacity(&intent, account, size, plan.side)?;
+        if plan.action == ExecutionAction::Reduce && size >= available {
+            return Err(ExecutionValidationError::ReduceWouldFullyClose);
         }
     }
 
@@ -433,7 +462,7 @@ pub fn revalidate_venue_execution(
         }
     }
 
-    if plan.action == ExecutionAction::Open {
+    if plan.action.is_risk_increasing() {
         let size = positive_decimal("size", &plan.size)?;
         let max_order_size = evidence
             .max_order_size
@@ -620,7 +649,7 @@ fn validate_close_capacity(
     account: &AccountSnapshot,
     requested: Decimal,
     closing_side: OrderSide,
-) -> Result<(), ExecutionValidationError> {
+) -> Result<Decimal, ExecutionValidationError> {
     let matching_positions = account
         .positions
         .iter()
@@ -665,7 +694,61 @@ fn validate_close_capacity(
             available: normalized(available),
         });
     }
+    Ok(available)
+}
+
+fn validate_risk_increasing_position_semantics(
+    intent: &ExecutionIntent,
+    account: &AccountSnapshot,
+) -> Result<(), ExecutionValidationError> {
+    match intent.action {
+        ExecutionAction::Add => {
+            if matching_position_quantity(account, intent, intent.position_side)? <= Decimal::ZERO {
+                return Err(ExecutionValidationError::AddRequiresExistingPosition);
+            }
+        }
+        ExecutionAction::Hedge => {
+            let opposite = match intent.position_side {
+                PositionSide::Long => PositionSide::Short,
+                PositionSide::Short => PositionSide::Long,
+            };
+            if matching_position_quantity(account, intent, opposite)? <= Decimal::ZERO {
+                return Err(ExecutionValidationError::HedgeRequiresOppositePosition);
+            }
+        }
+        ExecutionAction::Open => {}
+        ExecutionAction::Reduce | ExecutionAction::Close => {
+            unreachable!("risk-reducing action cannot enter risk-increasing validation")
+        }
+    }
     Ok(())
+}
+
+fn matching_position_quantity(
+    account: &AccountSnapshot,
+    intent: &ExecutionIntent,
+    position_side: PositionSide,
+) -> Result<Decimal, ExecutionValidationError> {
+    let matching = account
+        .positions
+        .iter()
+        .filter(|position| {
+            position.instrument_id == intent.instrument_id
+                && position.position_side == position_side.as_str()
+                && position.margin_mode == intent.trade_mode.as_str()
+        })
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return Ok(Decimal::ZERO);
+    }
+    if matching.len() != 1 {
+        return Err(ExecutionValidationError::InvalidPositionValue);
+    }
+    let value = decimal("position", &matching[0].position)?;
+    if value < Decimal::ZERO {
+        return Err(ExecutionValidationError::InvalidPositionValue);
+    }
+    Ok(value)
 }
 
 fn decimal(field: &'static str, value: &str) -> Result<Decimal, ExecutionValidationError> {
