@@ -165,9 +165,8 @@ pub fn derive_client_order_id(intent_id: &str) -> String {
 }
 
 pub fn derive_amend_request_id(intent_id: &str, mutation_id: &str) -> String {
-    let digest = Sha256::digest(
-        format!("okx-execution-amend-v1:{intent_id}:{mutation_id}").as_bytes(),
-    );
+    let digest =
+        Sha256::digest(format!("okx-execution-amend-v1:{intent_id}:{mutation_id}").as_bytes());
     let hex = format!("{digest:x}");
     format!(
         "{AMEND_REQUEST_ID_PREFIX}{}",
@@ -202,18 +201,9 @@ mod tests {
 
     #[test]
     fn amend_request_id_is_stable_alphanumeric_and_bounded() {
-        let first = derive_amend_request_id(
-            "intent_0123456789abcdef",
-            "mutation_01234567",
-        );
-        let again = derive_amend_request_id(
-            "intent_0123456789abcdef",
-            "mutation_01234567",
-        );
-        let other = derive_amend_request_id(
-            "intent_0123456789abcdef",
-            "mutation_76543210",
-        );
+        let first = derive_amend_request_id("intent_0123456789abcdef", "mutation_01234567");
+        let again = derive_amend_request_id("intent_0123456789abcdef", "mutation_01234567");
+        let other = derive_amend_request_id("intent_0123456789abcdef", "mutation_76543210");
 
         assert_eq!(first, again);
         assert_ne!(first, other);
