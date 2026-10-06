@@ -182,17 +182,12 @@ impl ExecutionRuntime {
 
     pub async fn submit_prepared_demo_authorized(
         &self,
-        observer: &AccountSnapshot,
+        preflight: &ExecutorCredentialPreflight,
         intent_id: &str,
         timing: MutationTiming,
         observed_at_ms: u64,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance {
-            return Ok(None);
-        }
-
-        let evidence = self.demo_acceptance_preflight(observer).await?;
-        if !evidence.accepted {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !preflight.accepted {
             self.executor.lock().await.disable_mutations();
             return Ok(None);
         }
