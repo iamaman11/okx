@@ -2,17 +2,20 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use okx_api::{
-    ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, MutationTiming, OkxError,
-    OrderOperationAck, PlaceOrderRequest, RateDecision, RateRequestPlan, RateThrottleEvidence,
-    TradeApi, TradeOrderDetails, TradeResponse,
+    AmendOrderRequest, ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode,
+    CancelOrderRequest, MutationTiming, OkxError, OrderOperationAck, PlaceOrderRequest,
+    RateDecision, RateRequestPlan, RateThrottleEvidence, TradeApi, TradeOrderDetails,
+    TradeResponse,
 };
 use rust_decimal::Decimal;
 use thiserror::Error;
 
 use crate::{
     DurableExecutionLedger, ExchangeOrderState, ExecutionLedgerEntry, ExecutionLedgerError,
-    ExecutionPlan, ExecutionState, ExecutionTransitionError, OrderSide, OrderType, PositionSide,
-    PrepareOutcome, TradeMode, classify_prepare_result, require_live_trading_enabled,
+    ExecutionPlan, ExecutionRecord, ExecutionState, ExecutionTransitionError,
+    MutationPrepareDisposition, OrderMutationKind, OrderMutationRecord, OrderMutationResolution,
+    OrderMutationState, OrderSide, OrderType, PositionSide, PrepareOutcome, TradeMode,
+    classify_prepare_result, derive_amend_request_id, require_live_trading_enabled,
 };
 
 #[async_trait]
@@ -30,6 +33,42 @@ pub trait ExecutionGateway: Send + Sync {
         timing: MutationTiming,
         rate_plan: Option<RateRequestPlan>,
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError>;
+
+    fn admit_amend_order(
+        &self,
+        _request: &AmendOrderRequest,
+    ) -> Result<Option<RateRequestPlan>, OkxError> {
+        Ok(None)
+    }
+
+    async fn amend_order(
+        &self,
+        _request: AmendOrderRequest,
+        _timing: MutationTiming,
+        _rate_plan: Option<RateRequestPlan>,
+    ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+        Err(OkxError::Config(
+            "execution gateway does not support amend_order".to_owned(),
+        ))
+    }
+
+    fn admit_cancel_order(
+        &self,
+        _request: &CancelOrderRequest,
+    ) -> Result<Option<RateRequestPlan>, OkxError> {
+        Ok(None)
+    }
+
+    async fn cancel_order(
+        &self,
+        _request: CancelOrderRequest,
+        _timing: MutationTiming,
+        _rate_plan: Option<RateRequestPlan>,
+    ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+        Err(OkxError::Config(
+            "execution gateway does not support cancel_order".to_owned(),
+        ))
+    }
 
     async fn order_by_client_id(
         &self,
@@ -61,6 +100,48 @@ impl ExecutionGateway for TradeApi {
         }
     }
 
+    fn admit_amend_order(
+        &self,
+        request: &AmendOrderRequest,
+    ) -> Result<Option<RateRequestPlan>, OkxError> {
+        TradeApi::admit_amend_order(self, request).map(Some)
+    }
+
+    async fn amend_order(
+        &self,
+        request: AmendOrderRequest,
+        timing: MutationTiming,
+        rate_plan: Option<RateRequestPlan>,
+    ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+        match rate_plan {
+            Some(rate_plan) => {
+                TradeApi::amend_order_after_admission(self, &request, &timing, &rate_plan).await
+            }
+            None => TradeApi::amend_order(self, &request, &timing).await,
+        }
+    }
+
+    fn admit_cancel_order(
+        &self,
+        request: &CancelOrderRequest,
+    ) -> Result<Option<RateRequestPlan>, OkxError> {
+        TradeApi::admit_cancel_order(self, request).map(Some)
+    }
+
+    async fn cancel_order(
+        &self,
+        request: CancelOrderRequest,
+        timing: MutationTiming,
+        rate_plan: Option<RateRequestPlan>,
+    ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+        match rate_plan {
+            Some(rate_plan) => {
+                TradeApi::cancel_order_after_admission(self, &request, &timing, &rate_plan).await
+            }
+            None => TradeApi::cancel_order(self, &request, &timing).await,
+        }
+    }
+
     async fn order_by_client_id(
         &self,
         instrument_id: String,
@@ -79,6 +160,17 @@ pub enum SubmitDisposition {
         evidence: RateThrottleEvidence,
     },
     UnknownSubmission(ExecutionLedgerEntry),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationSubmitDisposition {
+    Acknowledged(ExecutionLedgerEntry),
+    Rejected(ExecutionLedgerEntry),
+    RateRejected {
+        entry: ExecutionLedgerEntry,
+        evidence: RateThrottleEvidence,
+    },
+    Unknown(ExecutionLedgerEntry),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +204,9 @@ pub enum OrderExecutorError {
 
     #[error("pre-submit exchange request admission failed: {0}")]
     PreSubmit(OkxError),
+
+    #[error("order mutation input '{0}' is invalid")]
+    InvalidMutationInput(&'static str),
 }
 
 pub struct OrderExecutor<G> {
@@ -148,6 +243,57 @@ where
         Ok(classify_prepare_result(
             self.ledger.prepare(plan, observed_at_ms),
         )?)
+    }
+
+    pub fn prepare_amend(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        new_size: Option<String>,
+        new_price: Option<String>,
+        observed_at_ms: u64,
+    ) -> Result<MutationPrepareDisposition, OrderExecutorError> {
+        let entry = self
+            .ledger
+            .get(intent_id)
+            .cloned()
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        let new_size = normalize_optional_positive_decimal("new_size", new_size)?;
+        let new_price = normalize_optional_positive_decimal("new_price", new_price)?;
+        if new_size.is_none() && new_price.is_none() {
+            return Err(OrderExecutorError::InvalidMutationInput(
+                "new_size/new_price",
+            ));
+        }
+        if new_size.as_deref() == Some(entry.record.effective_size())
+            && new_price.as_deref() == Some(entry.record.effective_price())
+        {
+            return Err(OrderExecutorError::InvalidMutationInput(
+                "amend must change size and/or price",
+            ));
+        }
+        let request_id = derive_amend_request_id(intent_id, mutation_id);
+        let mutation = OrderMutationRecord::amend(
+            mutation_id,
+            request_id,
+            new_size,
+            new_price,
+        )?;
+        Ok(self
+            .ledger
+            .prepare_order_mutation(intent_id, mutation, observed_at_ms)?)
+    }
+
+    pub fn prepare_cancel(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<MutationPrepareDisposition, OrderExecutorError> {
+        let mutation = OrderMutationRecord::cancel(mutation_id)?;
+        Ok(self
+            .ledger
+            .prepare_order_mutation(intent_id, mutation, observed_at_ms)?)
     }
 
     pub async fn submit_prepared(
@@ -225,6 +371,120 @@ where
         }
     }
 
+    pub async fn submit_order_mutation(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+    ) -> Result<MutationSubmitDisposition, OrderExecutorError> {
+        require_live_trading_enabled(self.live_trading_enabled)?;
+
+        let entry = self
+            .ledger
+            .get(intent_id)
+            .cloned()
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        let mutation = entry
+            .record
+            .mutations
+            .iter()
+            .find(|mutation| mutation.mutation_id == mutation_id)
+            .cloned()
+            .ok_or_else(|| ExecutionTransitionError::MutationNotFound(mutation_id.to_owned()))?;
+        if mutation.state != OrderMutationState::Prepared {
+            return Err(ExecutionTransitionError::InvalidMutationTransition {
+                from: mutation.state,
+                to: OrderMutationState::Submitting,
+            }
+            .into());
+        }
+
+        let request = order_mutation_request(&entry.record, &mutation)?;
+        let rate_plan = match &request {
+            OrderMutationRequest::Amend(request) => self.gateway.admit_amend_order(request),
+            OrderMutationRequest::Cancel(request) => self.gateway.admit_cancel_order(request),
+        };
+        let rate_plan = match rate_plan {
+            Ok(value) => value,
+            Err(OkxError::RateLimited { evidence }) if !evidence.request_sent => {
+                return Err(OrderExecutorError::RateDeferred {
+                    evidence: *evidence,
+                });
+            }
+            Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
+        };
+
+        self.ledger.begin_order_mutation_submission(
+            intent_id,
+            mutation_id,
+            observed_at_ms,
+        )?;
+
+        let result = match request {
+            OrderMutationRequest::Amend(request) => {
+                self.gateway.amend_order(request, timing, rate_plan).await
+            }
+            OrderMutationRequest::Cancel(request) => {
+                self.gateway.cancel_order(request, timing, rate_plan).await
+            }
+        };
+
+        match result {
+            Err(OkxError::RateLimited { evidence }) if evidence.request_sent => {
+                let mut evidence = *evidence;
+                evidence.decision = RateDecision::Rejected;
+                evidence.retryable = false;
+                let rejection_code = evidence
+                    .exchange_code
+                    .clone()
+                    .unwrap_or_else(|| "RATE_LIMIT".to_owned());
+                let entry = self.ledger.reject_order_mutation(
+                    intent_id,
+                    mutation_id,
+                    rejection_code,
+                    observed_at_ms,
+                )?;
+                Ok(MutationSubmitDisposition::RateRejected { entry, evidence })
+            }
+            Err(_) => {
+                let entry = self.ledger.mark_order_mutation_unknown(
+                    intent_id,
+                    mutation_id,
+                    observed_at_ms,
+                )?;
+                Ok(MutationSubmitDisposition::Unknown(entry))
+            }
+            Ok(response) => match classify_mutation_response(&entry.record, &mutation, response) {
+                MutationResponse::Acknowledged => {
+                    let entry = self.ledger.acknowledge_order_mutation(
+                        intent_id,
+                        mutation_id,
+                        observed_at_ms,
+                    )?;
+                    Ok(MutationSubmitDisposition::Acknowledged(entry))
+                }
+                MutationResponse::Rejected(code) => {
+                    let entry = self.ledger.reject_order_mutation(
+                        intent_id,
+                        mutation_id,
+                        code,
+                        observed_at_ms,
+                    )?;
+                    Ok(MutationSubmitDisposition::Rejected(entry))
+                }
+                MutationResponse::Ambiguous => {
+                    let entry = self.ledger.mark_order_mutation_unknown(
+                        intent_id,
+                        mutation_id,
+                        observed_at_ms,
+                    )?;
+                    Ok(MutationSubmitDisposition::Unknown(entry))
+                }
+            },
+        }
+    }
+
     pub async fn reconcile(
         &mut self,
         intent_id: &str,
@@ -256,12 +516,15 @@ where
             Err(_) => return Ok(ReconcileDisposition::Unavailable(entry)),
         };
 
-        validate_order_identity(plan, &order)?;
-
         let state = map_exchange_state(&order.state)?;
-        let entry =
-            self.ledger
-                .reconcile_found(intent_id, order.order_id, state, observed_at_ms)?;
+        let mutation_resolution = validate_order_identity(&entry.record, &order, state)?;
+        let entry = self.ledger.reconcile_found_with_mutation_resolution(
+            intent_id,
+            order.order_id,
+            state,
+            mutation_resolution,
+            observed_at_ms,
+        )?;
         Ok(ReconcileDisposition::Found(entry))
     }
 
@@ -319,6 +582,90 @@ fn classify_place_response(
     PlaceResponse::Acknowledged(item.order_id.clone())
 }
 
+enum OrderMutationRequest {
+    Amend(AmendOrderRequest),
+    Cancel(CancelOrderRequest),
+}
+
+enum MutationResponse {
+    Acknowledged,
+    Rejected(String),
+    Ambiguous,
+}
+
+fn order_mutation_request(
+    record: &ExecutionRecord,
+    mutation: &OrderMutationRecord,
+) -> Result<OrderMutationRequest, OrderExecutorError> {
+    match mutation.kind {
+        OrderMutationKind::Amend => Ok(OrderMutationRequest::Amend(AmendOrderRequest {
+            instrument_id: record.plan.instrument_id.clone(),
+            client_order_id: record.plan.client_order_id.clone(),
+            request_id: mutation
+                .request_id
+                .clone()
+                .ok_or(OrderExecutorError::InvalidMutationInput("request_id"))?,
+            cancel_on_fail: false,
+            new_size: mutation.new_size.clone(),
+            new_price: mutation.new_price.clone(),
+        })),
+        OrderMutationKind::Cancel => Ok(OrderMutationRequest::Cancel(CancelOrderRequest {
+            instrument_id: record.plan.instrument_id.clone(),
+            client_order_id: record.plan.client_order_id.clone(),
+        })),
+    }
+}
+
+fn classify_mutation_response(
+    record: &ExecutionRecord,
+    mutation: &OrderMutationRecord,
+    response: TradeResponse<OrderOperationAck>,
+) -> MutationResponse {
+    if !response.top_level_success() {
+        return if response.code.trim().is_empty() {
+            MutationResponse::Ambiguous
+        } else {
+            MutationResponse::Rejected(response.code)
+        };
+    }
+    let [item] = response.data.as_slice() else {
+        return MutationResponse::Ambiguous;
+    };
+    if item.client_order_id != record.plan.client_order_id {
+        return MutationResponse::Ambiguous;
+    }
+    if mutation.kind == OrderMutationKind::Amend
+        && item.request_id
+            != mutation.request_id.as_deref().unwrap_or_default()
+    {
+        return MutationResponse::Ambiguous;
+    }
+    if !item.accepted() {
+        return if item.status_code.trim().is_empty() {
+            MutationResponse::Ambiguous
+        } else {
+            MutationResponse::Rejected(item.status_code.clone())
+        };
+    }
+    MutationResponse::Acknowledged
+}
+
+fn normalize_optional_positive_decimal(
+    field: &'static str,
+    value: Option<String>,
+) -> Result<Option<String>, OrderExecutorError> {
+    value
+        .map(|value| {
+            let parsed = Decimal::from_str(value.trim())
+                .map_err(|_| OrderExecutorError::InvalidMutationInput(field))?;
+            if parsed <= Decimal::ZERO {
+                return Err(OrderExecutorError::InvalidMutationInput(field));
+            }
+            Ok(parsed.normalize().to_string())
+        })
+        .transpose()
+}
+
 fn place_request(plan: &ExecutionPlan) -> PlaceOrderRequest {
     PlaceOrderRequest {
         instrument_id: plan.instrument_id.clone(),
@@ -347,9 +694,11 @@ fn place_request(plan: &ExecutionPlan) -> PlaceOrderRequest {
 }
 
 fn validate_order_identity(
-    plan: &ExecutionPlan,
+    record: &ExecutionRecord,
     order: &TradeOrderDetails,
-) -> Result<(), OrderExecutorError> {
+    exchange_state: ExchangeOrderState,
+) -> Result<OrderMutationResolution, OrderExecutorError> {
+    let plan = &record.plan;
     if order.order_id.trim().is_empty()
         || order.instrument_id != plan.instrument_id
         || order.client_order_id != plan.client_order_id
@@ -363,24 +712,82 @@ fn validate_order_identity(
 
     let order_price = Decimal::from_str(&order.price)
         .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
-    let plan_price = Decimal::from_str(&plan.price)
-        .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
     let order_size = Decimal::from_str(&order.size)
-        .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
-    let plan_size = Decimal::from_str(&plan.size)
         .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
     let filled = Decimal::from_str(&order.accumulated_fill_size)
         .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
 
-    if order_price != plan_price
-        || order_size != plan_size
-        || filled < Decimal::ZERO
-        || filled > order_size
-    {
+    let current_price = Decimal::from_str(record.effective_price())
+        .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
+    let current_size = Decimal::from_str(record.effective_size())
+        .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?;
+    if filled < Decimal::ZERO || filled > order_size {
         return Err(OrderExecutorError::ReconciliationIdentityMismatch);
     }
 
-    Ok(())
+    let Some(mutation) = record.active_mutation() else {
+        if order_price != current_price || order_size != current_size {
+            return Err(OrderExecutorError::ReconciliationIdentityMismatch);
+        }
+        return Ok(OrderMutationResolution::Pending);
+    };
+
+    if mutation.kind == OrderMutationKind::Cancel {
+        if order_price != current_price || order_size != current_size {
+            return Err(OrderExecutorError::ReconciliationIdentityMismatch);
+        }
+        return Ok(match exchange_state {
+            ExchangeOrderState::Canceled => OrderMutationResolution::Applied,
+            ExchangeOrderState::Filled => OrderMutationResolution::Superseded,
+            ExchangeOrderState::Live | ExchangeOrderState::PartiallyFilled => {
+                OrderMutationResolution::Pending
+            }
+        });
+    }
+
+    if mutation.state == OrderMutationState::Prepared {
+        if order_price != current_price || order_size != current_size {
+            return Err(OrderExecutorError::ReconciliationIdentityMismatch);
+        }
+        return Ok(if matches!(
+            exchange_state,
+            ExchangeOrderState::Filled | ExchangeOrderState::Canceled
+        ) {
+            OrderMutationResolution::Superseded
+        } else {
+            OrderMutationResolution::Pending
+        });
+    }
+
+    let requested_price = mutation
+        .new_price
+        .as_deref()
+        .map(Decimal::from_str)
+        .transpose()
+        .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?
+        .unwrap_or(current_price);
+    let requested_size = mutation
+        .new_size
+        .as_deref()
+        .map(Decimal::from_str)
+        .transpose()
+        .map_err(|_| OrderExecutorError::ReconciliationIdentityMismatch)?
+        .unwrap_or(current_size);
+
+    if order_price == requested_price && order_size == requested_size {
+        Ok(OrderMutationResolution::Applied)
+    } else if order_price == current_price && order_size == current_size {
+        Ok(if matches!(
+            exchange_state,
+            ExchangeOrderState::Filled | ExchangeOrderState::Canceled
+        ) {
+            OrderMutationResolution::Superseded
+        } else {
+            OrderMutationResolution::Pending
+        })
+    } else {
+        Err(OrderExecutorError::ReconciliationIdentityMismatch)
+    }
 }
 
 const fn order_side_text(value: OrderSide) -> &'static str {
