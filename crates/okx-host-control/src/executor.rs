@@ -584,6 +584,20 @@ impl HostExecutor {
                     "runtime_id": AGENT_CLOUDFLARE_RUNTIME_ID,
                     "ws_url": AGENT_CLOUDFLARE_WS_URL,
                     "github_fallback_preserved": true
+                },
+                "agent_profiles": {
+                    "production": {
+                        "runtime_root": RUNTIME_ROOT,
+                        "mailbox_issue": 10,
+                        "cloudflare_attached": true
+                    },
+                    "demo_acceptance": {
+                        "runtime_root": DEMO_RUNTIME_ROOT,
+                        "mailbox_issue": 234,
+                        "cloudflare_attached": false,
+                        "mutation_acceptance_explicit": true
+                    },
+                    "single_owner": true
                 }
             }
         }))
@@ -778,6 +792,7 @@ impl HostExecutor {
         if child.try_wait()?.is_some() {
             self.agent_child = None;
             self.agent_started_at = None;
+            self.running_profile = None;
             if self.desired_agent == AgentDesired::Running {
                 self.schedule_restart();
             }
@@ -835,16 +850,45 @@ impl HostExecutor {
     }
 }
 
-fn production_agent_args() -> [&'static str; 7] {
-    [
-        "run",
-        "--mailbox-issue",
-        AGENT_MAILBOX_ISSUE,
-        "--cloudflare-ws-url",
-        AGENT_CLOUDFLARE_WS_URL,
-        "--cloudflare-runtime-id",
-        AGENT_CLOUDFLARE_RUNTIME_ID,
-    ]
+const PRODUCTION_AGENT_ARGS: &[&str] = &[
+    "run",
+    "--mailbox-issue",
+    AGENT_MAILBOX_ISSUE,
+    "--cloudflare-ws-url",
+    AGENT_CLOUDFLARE_WS_URL,
+    "--cloudflare-runtime-id",
+    AGENT_CLOUDFLARE_RUNTIME_ID,
+];
+
+const DEMO_ACCEPTANCE_AGENT_ARGS: &[&str] = &[
+    "--root",
+    DEMO_RUNTIME_ROOT,
+    "--demo",
+    "run",
+    "--mailbox-issue",
+    DEMO_MAILBOX_ISSUE,
+    "--demo-mutation-acceptance",
+];
+
+fn agent_args(profile: AgentProfile) -> &'static [&'static str] {
+    match profile {
+        AgentProfile::Production => PRODUCTION_AGENT_ARGS,
+        AgentProfile::DemoAcceptance => DEMO_ACCEPTANCE_AGENT_ARGS,
+    }
+}
+
+fn mailbox_issue(profile: AgentProfile) -> u64 {
+    match profile {
+        AgentProfile::Production => 10,
+        AgentProfile::DemoAcceptance => 234,
+    }
+}
+
+fn runtime_dir(profile: AgentProfile) -> PathBuf {
+    match profile {
+        AgentProfile::Production => PathBuf::from(RUNTIME_ROOT),
+        AgentProfile::DemoAcceptance => PathBuf::from(DEMO_RUNTIME_ROOT),
+    }
 }
 
 fn bounded_utf8(value: &str, max_bytes: usize) -> String {
@@ -929,10 +973,37 @@ mod tests {
 
     #[test]
     fn production_agent_launch_uses_agent_owned_data_poll_default() {
-        let args = production_agent_args();
+        let args = agent_args(AgentProfile::Production);
         assert!(!args.contains(&"--poll-seconds"));
         assert!(args.contains(&"--cloudflare-ws-url"));
         assert!(args.contains(&"--mailbox-issue"));
+        assert!(!args.contains(&"--demo"));
+        assert_eq!(mailbox_issue(AgentProfile::Production), 10);
+        assert_eq!(
+            runtime_dir(AgentProfile::Production),
+            PathBuf::from(RUNTIME_ROOT)
+        );
+    }
+
+    #[test]
+    fn demo_acceptance_launch_isolated_from_production_transport_and_state() {
+        let args = agent_args(AgentProfile::DemoAcceptance);
+        assert!(args.contains(&"--demo"));
+        assert!(args.contains(&"--demo-mutation-acceptance"));
+        assert!(args.contains(&"--root"));
+        assert!(args.contains(&DEMO_RUNTIME_ROOT));
+        assert!(args.contains(&DEMO_MAILBOX_ISSUE));
+        assert!(!args.contains(&"--cloudflare-ws-url"));
+        assert!(!args.contains(&AGENT_CLOUDFLARE_WS_URL));
+        assert_eq!(mailbox_issue(AgentProfile::DemoAcceptance), 234);
+        assert_eq!(
+            runtime_dir(AgentProfile::DemoAcceptance),
+            PathBuf::from(DEMO_RUNTIME_ROOT)
+        );
+        assert_ne!(
+            runtime_dir(AgentProfile::DemoAcceptance),
+            runtime_dir(AgentProfile::Production)
+        );
     }
 
     #[test]
