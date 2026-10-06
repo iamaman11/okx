@@ -362,6 +362,71 @@ where
         Ok(self.ledger.abort_reverse(root_intent_id, observed_at_ms)?)
     }
 
+    pub fn amend_revalidation_plan(
+        &self,
+        intent_id: &str,
+        new_size: Option<String>,
+        new_price: Option<String>,
+    ) -> Result<ExecutionPlan, OrderExecutorError> {
+        let entry = self
+            .ledger
+            .get(intent_id)
+            .cloned()
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        if entry.record.protection.is_some() {
+            return Err(OrderExecutorError::ProtectedOrderAmendUnsupported);
+        }
+
+        let new_size = normalize_optional_positive_decimal("new_size", new_size)?;
+        let new_price = normalize_optional_positive_decimal("new_price", new_price)?;
+        if new_size.is_none() && new_price.is_none() {
+            return Err(OrderExecutorError::InvalidMutationInput(
+                "new_size/new_price",
+            ));
+        }
+
+        let current_size = Decimal::from_str(entry.record.effective_size())
+            .map_err(|_| OrderExecutorError::InvalidMutationInput("current_size"))?;
+        let current_price = Decimal::from_str(entry.record.effective_price())
+            .map_err(|_| OrderExecutorError::InvalidMutationInput("current_price"))?;
+        let target_size = new_size
+            .as_deref()
+            .map(Decimal::from_str)
+            .transpose()
+            .map_err(|_| OrderExecutorError::InvalidMutationInput("new_size"))?
+            .unwrap_or(current_size);
+        let target_price = new_price
+            .as_deref()
+            .map(Decimal::from_str)
+            .transpose()
+            .map_err(|_| OrderExecutorError::InvalidMutationInput("new_price"))?
+            .unwrap_or(current_price);
+
+        if target_size == current_size && target_price == current_price {
+            return Err(OrderExecutorError::InvalidMutationInput(
+                "amend must change size and/or price",
+            ));
+        }
+
+        if entry.record.plan.action.is_risk_increasing() {
+            if target_size > current_size {
+                return Err(OrderExecutorError::InvalidMutationInput(
+                    "risk-increasing amend cannot increase size without rebuilt risk evidence",
+                ));
+            }
+            if target_price != current_price {
+                return Err(OrderExecutorError::InvalidMutationInput(
+                    "risk-increasing amend cannot change price without rebuilt risk evidence",
+                ));
+            }
+        }
+
+        let mut plan = entry.record.plan.clone();
+        plan.size = target_size.normalize().to_string();
+        plan.price = target_price.normalize().to_string();
+        Ok(plan)
+    }
+
     pub fn prepare_amend(
         &mut self,
         intent_id: &str,
@@ -370,6 +435,7 @@ where
         new_price: Option<String>,
         observed_at_ms: u64,
     ) -> Result<MutationPrepareDisposition, OrderExecutorError> {
+        let _ = self.amend_revalidation_plan(intent_id, new_size.clone(), new_price.clone())?;
         let entry = self
             .ledger
             .get(intent_id)
@@ -1498,10 +1564,10 @@ mod tests {
             instrument_id: plan.instrument_id.clone(),
             order_id: "ord-1".to_owned(),
             client_order_id: plan.client_order_id.clone(),
-            side: "buy".to_owned(),
-            position_side: "long".to_owned(),
-            trade_mode: "cross".to_owned(),
-            order_type: "limit".to_owned(),
+            side: order_side_text(plan.side).to_owned(),
+            position_side: position_side_text(plan.position_side).to_owned(),
+            trade_mode: trade_mode_text(plan.trade_mode).to_owned(),
+            order_type: order_type_text(plan.order_type).to_owned(),
             price: plan.price.clone(),
             size: plan.size.clone(),
             accumulated_fill_size: "0".to_owned(),
@@ -2108,6 +2174,87 @@ mod tests {
     }
 
     #[test]
+    fn risk_increasing_amend_cannot_increase_size_or_change_price_without_new_risk_evidence() {
+        let plan = plan();
+        let (root, ledger) = live_ledger("risk-increasing-amend-guard", &plan);
+        let gateway = MockGateway::new(vec![], vec![]);
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let size_error = executor
+            .amend_revalidation_plan(&plan.intent_id, Some("2".to_owned()), None)
+            .expect_err("size increase must fail closed");
+        assert!(matches!(
+            size_error,
+            OrderExecutorError::InvalidMutationInput(
+                "risk-increasing amend cannot increase size without rebuilt risk evidence"
+            )
+        ));
+
+        let price_error = executor
+            .amend_revalidation_plan(&plan.intent_id, None, Some("0.11".to_owned()))
+            .expect_err("price change must fail closed");
+        assert!(matches!(
+            price_error,
+            OrderExecutorError::InvalidMutationInput(
+                "risk-increasing amend cannot change price without rebuilt risk evidence"
+            )
+        ));
+
+        assert!(
+            executor
+                .ledger()
+                .get(&plan.intent_id)
+                .expect("entry")
+                .record
+                .mutations
+                .is_empty(),
+            "rejected shadow-plan checks must not persist a mutation"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn risk_increasing_amend_allows_only_size_reduction_shadow_plan() {
+        let plan = plan();
+        let (root, ledger) = live_ledger("risk-increasing-amend-reduce", &plan);
+        let gateway = MockGateway::new(vec![], vec![]);
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let shadow = executor
+            .amend_revalidation_plan(&plan.intent_id, Some("0.5".to_owned()), None)
+            .expect("size reduction shadow plan");
+        assert_eq!(shadow.size, "0.5");
+        assert_eq!(shadow.price, plan.price);
+        assert_eq!(shadow.action, ExecutionAction::Open);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn risk_reducing_amend_shadow_plan_can_change_size_and_price_for_full_revalidation() {
+        let mut plan = plan();
+        plan.action = ExecutionAction::Close;
+        plan.side = OrderSide::Sell;
+        let (root, ledger) = live_ledger("risk-reducing-amend-shadow", &plan);
+        let gateway = MockGateway::new(vec![], vec![]);
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let shadow = executor
+            .amend_revalidation_plan(
+                &plan.intent_id,
+                Some("0.5".to_owned()),
+                Some("0.11".to_owned()),
+            )
+            .expect("risk-reducing shadow plan");
+        assert_eq!(shadow.size, "0.5");
+        assert_eq!(shadow.price, "0.11");
+        assert_eq!(shadow.action, ExecutionAction::Close);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn semantic_noop_amend_is_rejected_before_durable_mutation() {
         let plan = plan();
         let (root, ledger) = live_ledger("noop-amend", &plan);
@@ -2143,13 +2290,15 @@ mod tests {
 
     #[tokio::test]
     async fn amend_ack_is_applied_only_after_exact_reconciliation() {
-        let plan = plan();
+        let mut plan = plan();
+        plan.action = ExecutionAction::Close;
+        plan.side = OrderSide::Sell;
         let (root, ledger) = live_ledger("amend-apply", &plan);
         let mutation_id = "mutation_amend_012345";
         let request_id = derive_amend_request_id(&plan.intent_id, mutation_id);
         let mut amended = order_details(&plan, "live");
         amended.price = "0.11".to_owned();
-        amended.size = "2".to_owned();
+        amended.size = "0.5".to_owned();
         let gateway = MutationGateway::new(
             vec![Ok(mutation_ack(&plan, &request_id))],
             vec![],
@@ -2162,7 +2311,7 @@ mod tests {
                 .prepare_amend(
                     &plan.intent_id,
                     mutation_id,
-                    Some("2".to_owned()),
+                    Some("0.5".to_owned()),
                     Some("0.11".to_owned()),
                     105,
                 )
@@ -2201,7 +2350,7 @@ mod tests {
             after.record.mutations.last().expect("mutation").state,
             OrderMutationState::Applied
         );
-        assert_eq!(after.record.effective_size(), "2");
+        assert_eq!(after.record.effective_size(), "0.5");
         assert_eq!(after.record.effective_price(), "0.11");
         assert_eq!(after.record.plan.size, "1");
         assert_eq!(after.record.plan.price, "0.1");
@@ -2212,7 +2361,9 @@ mod tests {
 
     #[tokio::test]
     async fn uncertain_amend_is_durable_unknown_and_never_blindly_replayed() {
-        let plan = plan();
+        let mut plan = plan();
+        plan.action = ExecutionAction::Close;
+        plan.side = OrderSide::Sell;
         let (root, ledger) = live_ledger("amend-unknown", &plan);
         let mutation_id = "mutation_amend_unknown_01";
         let gateway = MutationGateway::new(

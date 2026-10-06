@@ -9,9 +9,9 @@ use okx_api::{
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
     ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
-    ExecutionPlan, ExecutionStatusEnvelope, MutationAuthority, OrderExecutor, OrderExecutorError,
-    PositionSide, PrepareOutcome, SubmitDisposition, execution_status_with_ledger,
-    reconcile_account_ledger,
+    ExecutionPlan, ExecutionStatusEnvelope, MutationAuthority, MutationPrepareDisposition,
+    MutationSubmitDisposition, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
+    SubmitDisposition, execution_status_with_ledger, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -389,6 +389,69 @@ impl ExecutionRuntime {
         self.executor.lock().await.live_trading_enabled()
     }
 
+    pub async fn amend_revalidation_plan(
+        &self,
+        intent_id: &str,
+        new_size: Option<String>,
+        new_price: Option<String>,
+    ) -> Result<ExecutionPlan, OrderExecutorError> {
+        self.executor
+            .lock()
+            .await
+            .amend_revalidation_plan(intent_id, new_size, new_price)
+    }
+
+    pub async fn prepare_amend(
+        &self,
+        intent_id: &str,
+        mutation_id: &str,
+        new_size: Option<String>,
+        new_price: Option<String>,
+        observed_at_ms: u64,
+    ) -> Result<MutationPrepareDisposition, OrderExecutorError> {
+        self.executor.lock().await.prepare_amend(
+            intent_id,
+            mutation_id,
+            new_size,
+            new_price,
+            observed_at_ms,
+        )
+    }
+
+    pub async fn prepare_cancel(
+        &self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<MutationPrepareDisposition, OrderExecutorError> {
+        self.executor
+            .lock()
+            .await
+            .prepare_cancel(intent_id, mutation_id, observed_at_ms)
+    }
+
+    pub async fn submit_order_mutation_demo_authorized(
+        &self,
+        preflight: &ExecutorCredentialPreflight,
+        intent_id: &str,
+        mutation_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+    ) -> AgentResult<Option<Result<MutationSubmitDisposition, OrderExecutorError>>> {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !preflight.accepted {
+            self.executor.lock().await.disable_mutations();
+            return Ok(None);
+        }
+
+        let mut executor = self.executor.lock().await;
+        executor.enable_demo_acceptance(self.environment)?;
+        let result = executor
+            .submit_order_mutation(intent_id, mutation_id, timing, observed_at_ms)
+            .await;
+        executor.disable_mutations();
+        Ok(Some(result))
+    }
+
     pub async fn submit_prepared(
         &self,
         intent_id: &str,
@@ -431,6 +494,29 @@ mod tests {
         std::env::temp_dir().join(format!("okx-{label}-{}-{nonce}", process::id()))
     }
 
+    fn preflight(accepted: bool) -> ExecutorCredentialPreflight {
+        ExecutorCredentialPreflight {
+            schema: crate::execution_preflight::EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1,
+            accepted,
+            observer_read_only: true,
+            observer_private_ws_converged: true,
+            executor_read_permission: true,
+            executor_trade_permission: true,
+            executor_withdraw_permission: false,
+            executor_ip_bound: true,
+            account_identity_match: true,
+            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            futures_mode: true,
+            long_short_mode: true,
+            subaccount: true,
+            production_environment: false,
+        }
+    }
+
+    fn timing() -> MutationTiming {
+        MutationTiming::from_exchange_time_ms(1_790_000_000_000, 5_000).expect("timing")
+    }
+
     #[test]
     fn demo_acceptance_runtime_rejects_production_environment_before_construction() {
         let result = ExecutionRuntime::new_demo_acceptance(
@@ -468,6 +554,70 @@ mod tests {
             MutationAuthority::Disabled
         );
         assert!(!runtime.live_trading_enabled().await);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn read_only_runtime_cannot_authorize_order_mutation_even_with_accepted_preflight() {
+        let root = temp_root("read-only-mutation-disabled");
+        fs::create_dir_all(&root).expect("root");
+        let runtime = ExecutionRuntime::new(
+            &root,
+            OkxEnvironment::new(Region::Global, false),
+            credentials(),
+            1,
+            RateBudget::new(),
+        )
+        .expect("read-only runtime");
+
+        let result = runtime
+            .submit_order_mutation_demo_authorized(
+                &preflight(true),
+                "intent_0123456789abcdef",
+                "mutation_01234567",
+                timing(),
+                2,
+            )
+            .await
+            .expect("fail-closed result");
+        assert!(result.is_none());
+        assert_eq!(
+            runtime.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn rejected_demo_preflight_cannot_authorize_order_mutation() {
+        let root = temp_root("demo-mutation-rejected-preflight");
+        fs::create_dir_all(&root).expect("root");
+        let runtime = ExecutionRuntime::new_demo_acceptance(
+            &root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            1,
+            RateBudget::new(),
+        )
+        .expect("demo runtime");
+
+        let result = runtime
+            .submit_order_mutation_demo_authorized(
+                &preflight(false),
+                "intent_0123456789abcdef",
+                "mutation_01234567",
+                timing(),
+                2,
+            )
+            .await
+            .expect("fail-closed result");
+        assert!(result.is_none());
+        assert_eq!(
+            runtime.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
 
         let _ = fs::remove_dir_all(root);
     }
