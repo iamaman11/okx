@@ -46,6 +46,7 @@ pub const EXECUTION_RISK_POLICY_REQUIRED_CODE: &str = "EXECUTION_RISK_POLICY_REQ
 pub const EXECUTION_RISK_POLICY_REJECTED_CODE: &str = "EXECUTION_RISK_POLICY_REJECTED";
 pub const EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE: &str = "EXECUTION_RISK_EVIDENCE_UNAVAILABLE";
 pub const EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE: &str = "EXECUTION_RISK_EVIDENCE_NOT_FRESH";
+pub const EXECUTION_RECONCILIATION_FAILED_CODE: &str = "EXECUTION_RECONCILIATION_FAILED";
 
 pub(super) async fn dispatch(
     request: &AgentRequest,
@@ -1448,6 +1449,44 @@ async fn execution_status_response(
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
+
+    let mut warnings = Vec::new();
+    match execution.reconcile_once(intent_id, utc_now_ms()).await {
+        Ok(crate::execution_runtime::ExecutionReconciliation::NotRequired)
+        | Ok(crate::execution_runtime::ExecutionReconciliation::Reconciled) => {}
+        Ok(crate::execution_runtime::ExecutionReconciliation::Unavailable) => {
+            warnings.push(
+                "exact OKX order reconciliation was unavailable; durable execution state is returned without inventing venue progress"
+                    .to_owned(),
+            );
+        }
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::IntentNotFound(_))) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RECORD_NOT_FOUND_CODE,
+                "execution record was not found".to_owned(),
+                false,
+            ));
+        }
+        Err(
+            error @ (OrderExecutorError::ReconciliationIdentityMismatch
+            | OrderExecutorError::ProtectionIdentityMismatch
+            | OrderExecutorError::UnsupportedExchangeState(_)),
+        ) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_RECONCILIATION_FAILED_CODE,
+                error.to_string(),
+                false,
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+
     let Some((entry, status)) = execution.status_with_entry(intent_id).await? else {
         return Ok(failure_response(
             request,
@@ -1459,7 +1498,8 @@ async fn execution_status_response(
         ));
     };
 
-    let (tca, warnings) = execution_tca_status(context, &entry).await;
+    let (tca, tca_warnings) = execution_tca_status(context, &entry).await;
+    warnings.extend(tca_warnings);
     let result = ExecutionStatusResult {
         status,
         tca,
