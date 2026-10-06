@@ -8,8 +8,9 @@ use okx_api::{
 };
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
-    ExecutionLedgerEntry, ExecutionLedgerStore, ExecutionPlan, ExecutionStatusEnvelope,
-    OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome, SubmitDisposition,
+    ExecutionLedgerEntry, ExecutionLedgerStore, ExecutionLineageBinding, ExecutionPlan,
+    ExecutionStatusEnvelope, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
+    SubmitDisposition,
     execution_status_with_ledger, reconcile_account_ledger,
 };
 use okx_observation::{
@@ -165,7 +166,19 @@ impl ExecutionRuntime {
         plan: ExecutionPlan,
         observed_at_ms: u64,
     ) -> Result<PrepareOutcome, OrderExecutorError> {
-        self.executor.lock().await.prepare(plan, observed_at_ms)
+        self.prepare_with_lineage(plan, None, observed_at_ms).await
+    }
+
+    pub async fn prepare_with_lineage(
+        &self,
+        plan: ExecutionPlan,
+        lineage: Option<ExecutionLineageBinding>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
+        self.executor
+            .lock()
+            .await
+            .prepare_with_lineage(plan, lineage, observed_at_ms)
     }
 
     pub async fn prepare_reverse_close(
@@ -174,10 +187,31 @@ impl ExecutionRuntime {
         target_position_side: PositionSide,
         observed_at_ms: u64,
     ) -> Result<PrepareOutcome, OrderExecutorError> {
+        self.prepare_reverse_close_with_lineage(
+            plan,
+            target_position_side,
+            None,
+            observed_at_ms,
+        )
+        .await
+    }
+
+    pub async fn prepare_reverse_close_with_lineage(
+        &self,
+        plan: ExecutionPlan,
+        target_position_side: PositionSide,
+        lineage: Option<ExecutionLineageBinding>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
         self.executor
             .lock()
             .await
-            .prepare_reverse_close(plan, target_position_side, observed_at_ms)
+            .prepare_reverse_close_with_lineage(
+                plan,
+                target_position_side,
+                lineage,
+                observed_at_ms,
+            )
     }
 
     pub async fn prepare_reverse_open(
