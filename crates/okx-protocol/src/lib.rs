@@ -2267,6 +2267,7 @@ mod tests {
                 price: "0.1".to_owned(),
             },
             risk: None,
+            lineage: None,
         };
         assert!(!generic.direct_transport_read_only());
 
@@ -2652,6 +2653,7 @@ mod tests {
                 price: "0.1".to_owned(),
             },
             risk: None,
+            lineage: None,
         };
         assert!(invalid.validate().is_err());
     }
