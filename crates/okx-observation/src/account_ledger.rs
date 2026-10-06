@@ -330,10 +330,7 @@ impl AccountLedgerFacts {
                     let fee = decimal_required("fills_history.fee", &row.fee)?;
                     let currency = required("fills_history.feeCcy", &row.fee_currency)?;
                     add_aggregate(&mut fees, currency, fee);
-                    (
-                        Some(fee.normalize().to_string()),
-                        Some(currency.to_owned()),
-                    )
+                    (Some(fee.normalize().to_string()), Some(currency.to_owned()))
                 };
 
                 let order_id = optional(&row.order_id).map(str::to_owned);

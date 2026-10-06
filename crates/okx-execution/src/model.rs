@@ -1,4 +1,4 @@
-use okx_analysis::{HardRiskPolicy, TradingMandate};
+use okx_analysis::{HardRiskPolicy, TcaReferencePriceBasis, TradingMandate};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -99,21 +99,13 @@ impl OrderSide {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionReferencePriceBasis {
-    DecisionPrice,
-    ArrivalMid,
-    Mark,
-    LimitPrice,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionDecisionReference {
-    pub observed_at_ms: u64,
+    pub decision_time_ms: u64,
     pub price: String,
-    pub price_basis: ExecutionReferencePriceBasis,
+    pub price_basis: TcaReferencePriceBasis,
+    pub price_policy_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

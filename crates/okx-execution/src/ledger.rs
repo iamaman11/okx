@@ -13,8 +13,8 @@ use thiserror::Error;
 
 use crate::{
     EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_PLAN_SCHEMA_V1, ExchangeOrderState, ExecutionAction,
-    ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionReferencePriceBasis,
-    ExecutionState, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
+    ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
+    ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
     OrderMutationRecord, OrderMutationResolution, OrderMutationState, PositionSide,
     ReverseContinuation, ReverseExecutionLink, ReverseLeg, derive_client_order_id,
     derive_reverse_open_intent_id,
@@ -287,12 +287,7 @@ impl DurableExecutionLedger {
         target_position_side: PositionSide,
         observed_at_ms: u64,
     ) -> Result<PrepareDisposition, ExecutionLedgerError> {
-        self.prepare_reverse_close_with_lineage(
-            plan,
-            target_position_side,
-            None,
-            observed_at_ms,
-        )
+        self.prepare_reverse_close_with_lineage(plan, target_position_side, None, observed_at_ms)
     }
 
     pub fn prepare_reverse_close_with_lineage(
@@ -737,7 +732,9 @@ fn validate_execution_lineage(record: &ExecutionRecord) -> Result<(), ExecutionL
             .authority_evidence_id
             .as_deref()
             .is_some_and(|value| !valid_sha256_artifact_id(value))
-        || lineage.decision_reference.observed_at_ms == 0
+        || lineage.decision_reference.decision_time_ms == 0
+        || lineage.decision_reference.price_policy_version.trim().is_empty()
+        || lineage.decision_reference.price_policy_version.len() > 128
         || price.is_none()
     {
         return Err(ExecutionLedgerError::Corrupt(
@@ -745,12 +742,6 @@ fn validate_execution_lineage(record: &ExecutionRecord) -> Result<(), ExecutionL
         ));
     }
 
-    match lineage.decision_reference.price_basis {
-        ExecutionReferencePriceBasis::DecisionPrice
-        | ExecutionReferencePriceBasis::ArrivalMid
-        | ExecutionReferencePriceBasis::Mark
-        | ExecutionReferencePriceBasis::LimitPrice => {}
-    }
     Ok(())
 }
 
@@ -964,8 +955,8 @@ mod tests {
     use super::*;
     use crate::{
         EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_PLAN_SCHEMA_V1, ExecutionAction,
-        ExecutionDecisionReference, ExecutionLineageBinding, ExecutionReferencePriceBasis,
-        OrderSide, OrderType, PositionSide, TradeMode,
+        ExecutionDecisionReference, ExecutionLineageBinding, OrderSide, OrderType, PositionSide,
+        TcaReferencePriceBasis, TradeMode,
     };
 
     fn temp_root(name: &str) -> PathBuf {
@@ -1004,9 +995,10 @@ mod tests {
             origin_version: "okx.research.live-decision/2026-10-05.1".to_owned(),
             authority_evidence_id: Some(format!("sha256:{}", "f".repeat(64))),
             decision_reference: ExecutionDecisionReference {
-                observed_at_ms: 100,
+                decision_time_ms: 100,
                 price: "0.1".to_owned(),
-                price_basis: ExecutionReferencePriceBasis::DecisionPrice,
+                price_basis: TcaReferencePriceBasis::DecisionPrice,
+                price_policy_version: "decision-reference/v1".to_owned(),
             },
         }
     }

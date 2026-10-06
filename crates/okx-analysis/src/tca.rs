@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use okx_observation::ExchangeFillIdentity;
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{AnalysisError, decimal, positive_decimal};
 
@@ -24,20 +24,23 @@ impl TcaSide {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TcaReferencePriceBasis {
     DecisionPrice,
     ArrivalMid,
     Mark,
+    Index,
+    Last,
     LimitPrice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TcaReference {
     pub price: String,
-    pub observed_at_ms: u64,
+    pub reference_time_ms: u64,
     pub price_basis: TcaReferencePriceBasis,
+    pub price_policy_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -53,11 +56,12 @@ pub struct ExecutionTcaAnalysis {
     pub side: TcaSide,
     pub reference_price: String,
     pub reference_price_basis: TcaReferencePriceBasis,
-    pub reference_observed_at_ms: u64,
+    pub reference_price_policy_version: String,
+    pub reference_time_ms: u64,
     pub first_fill_time_ms: u64,
     pub last_fill_time_ms: u64,
-    pub decision_to_first_fill_ms: u64,
-    pub decision_to_last_fill_ms: u64,
+    pub reference_to_first_fill_ms: u64,
+    pub reference_to_last_fill_ms: u64,
     pub filled_contracts: String,
     pub maker_contracts: String,
     pub taker_contracts: String,
@@ -80,8 +84,13 @@ pub fn analyze_execution_tca(
     if fills.is_empty() {
         return Err(AnalysisError::EmptyTcaFills);
     }
-    if reference.observed_at_ms == 0 {
+    if reference.reference_time_ms == 0 {
         return Err(AnalysisError::InvalidTcaReferenceTimestamp);
+    }
+    if reference.price_policy_version.trim().is_empty()
+        || reference.price_policy_version.len() > 128
+    {
+        return Err(AnalysisError::InvalidTcaReferencePolicy);
     }
     let reference_price = positive_decimal("tca.reference_price", &reference.price)?;
     let contract_value = positive_decimal("tca.contract_value", contract_value)?;
@@ -106,10 +115,10 @@ pub fn analyze_execution_tca(
         if !trade_ids.insert(fill.trade_id.clone()) {
             return Err(AnalysisError::DuplicateTcaFill(fill.trade_id.clone()));
         }
-        if fill.fill_time_ms < reference.observed_at_ms {
+        if fill.fill_time_ms < reference.reference_time_ms {
             return Err(AnalysisError::TcaFillBeforeReference {
                 fill_time_ms: fill.fill_time_ms,
-                reference_time_ms: reference.observed_at_ms,
+                reference_time_ms: reference.reference_time_ms,
             });
         }
 
@@ -122,9 +131,7 @@ pub fn analyze_execution_tca(
             Some("M") => maker_contracts += size,
             Some("T") => taker_contracts += size,
             Some(other) => {
-                return Err(AnalysisError::UnsupportedTcaExecutionType(
-                    other.to_owned(),
-                ));
+                return Err(AnalysisError::UnsupportedTcaExecutionType(other.to_owned()));
             }
             None => {
                 return Err(AnalysisError::UnsupportedTcaExecutionType(
@@ -140,10 +147,14 @@ pub fn analyze_execution_tca(
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
                 .ok_or(AnalysisError::MissingTcaFeeCurrency)?;
-            *fee_totals.entry(currency.to_owned()).or_insert(Decimal::ZERO) += fee;
+            *fee_totals
+                .entry(currency.to_owned())
+                .or_insert(Decimal::ZERO) += fee;
             if currency != settle_currency {
                 all_fees_in_settle = false;
             }
+        } else {
+            all_fees_in_settle = false;
         }
 
         first_fill_time_ms = first_fill_time_ms.min(fill.fill_time_ms);
@@ -189,11 +200,12 @@ pub fn analyze_execution_tca(
         side,
         reference_price: reference_price.normalize().to_string(),
         reference_price_basis: reference.price_basis,
-        reference_observed_at_ms: reference.observed_at_ms,
+        reference_price_policy_version: reference.price_policy_version.clone(),
+        reference_time_ms: reference.reference_time_ms,
         first_fill_time_ms,
         last_fill_time_ms,
-        decision_to_first_fill_ms: first_fill_time_ms - reference.observed_at_ms,
-        decision_to_last_fill_ms: last_fill_time_ms - reference.observed_at_ms,
+        reference_to_first_fill_ms: first_fill_time_ms - reference.reference_time_ms,
+        reference_to_last_fill_ms: last_fill_time_ms - reference.reference_time_ms,
         filled_contracts: filled_contracts.normalize().to_string(),
         maker_contracts: maker_contracts.normalize().to_string(),
         taker_contracts: taker_contracts.normalize().to_string(),
@@ -248,7 +260,8 @@ mod tests {
             "USDT",
             &TcaReference {
                 price: "100".to_owned(),
-                observed_at_ms: 1_000,
+                reference_time_ms: 1_000,
+                price_policy_version: "tca-reference/v1".to_owned(),
                 price_basis: TcaReferencePriceBasis::DecisionPrice,
             },
             &fills,
@@ -263,8 +276,8 @@ mod tests {
         assert_eq!(result.gross_slippage_settle, "1");
         assert_eq!(result.settle_fee_cost.as_deref(), Some("0.2"));
         assert_eq!(result.net_execution_cost_settle.as_deref(), Some("1.2"));
-        assert_eq!(result.decision_to_first_fill_ms, 100);
-        assert_eq!(result.decision_to_last_fill_ms, 200);
+        assert_eq!(result.reference_to_first_fill_ms, 100);
+        assert_eq!(result.reference_to_last_fill_ms, 200);
     }
 
     #[test]
@@ -278,7 +291,8 @@ mod tests {
             "USDT",
             &TcaReference {
                 price: "100".to_owned(),
-                observed_at_ms: 1_000,
+                reference_time_ms: 1_000,
+                price_policy_version: "tca-reference/v1".to_owned(),
                 price_basis: TcaReferencePriceBasis::ArrivalMid,
             },
             &[row],
@@ -300,7 +314,8 @@ mod tests {
                 "USDT",
                 &TcaReference {
                     price: "100".to_owned(),
-                    observed_at_ms: 1_000,
+                    reference_time_ms: 1_000,
+                price_policy_version: "tca-reference/v1".to_owned(),
                     price_basis: TcaReferencePriceBasis::DecisionPrice,
                 },
                 &[unknown.clone()],
@@ -318,7 +333,8 @@ mod tests {
                 "USDT",
                 &TcaReference {
                     price: "100".to_owned(),
-                    observed_at_ms: 1_000,
+                    reference_time_ms: 1_000,
+                price_policy_version: "tca-reference/v1".to_owned(),
                     price_basis: TcaReferencePriceBasis::DecisionPrice,
                 },
                 &[unknown],

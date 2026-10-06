@@ -6,6 +6,7 @@ mod reconciliation;
 mod state;
 mod validation;
 
+pub use okx_analysis::TcaReferencePriceBasis;
 pub use contract::{
     EXECUTION_STATUS_SCHEMA_V1, EXECUTION_STATUS_SCHEMA_V2, ExecutionStatusEnvelope,
     ExecutionStatusSnapshot, PrepareDeferral, PrepareFailure, PrepareOutcome, PrepareRejection,
@@ -24,8 +25,7 @@ pub use ledger::{
 pub use model::{
     EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_PLAN_SCHEMA_V1, ExecutionAction,
     ExecutionDecisionReference, ExecutionIntent, ExecutionLineageBinding, ExecutionPlan,
-    ExecutionReferencePriceBasis, ExecutionRiskBinding, OpenRiskEvidence, OrderSide, OrderType,
-    PositionSide, TradeMode,
+    ExecutionRiskBinding, OpenRiskEvidence, OrderSide, OrderType, PositionSide, TradeMode,
     derive_amend_request_id, derive_client_order_id, derive_reverse_open_intent_id,
 };
 pub use reconciliation::{

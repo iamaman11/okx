@@ -286,15 +286,15 @@ pub enum AnalysisError {
     DuplicateTcaFill(String),
     #[error("execution TCA fill execution type '{0}' is unsupported")]
     UnsupportedTcaExecutionType(String),
-    #[error(
-        "execution TCA fill time {fill_time_ms} precedes reference time {reference_time_ms}"
-    )]
+    #[error("execution TCA fill time {fill_time_ms} precedes reference time {reference_time_ms}")]
     TcaFillBeforeReference {
         fill_time_ms: u64,
         reference_time_ms: u64,
     },
     #[error("execution TCA reference timestamp must be non-zero")]
     InvalidTcaReferenceTimestamp,
+    #[error("execution TCA reference-price policy version is invalid")]
+    InvalidTcaReferencePolicy,
     #[error("execution TCA fee is missing its currency")]
     MissingTcaFeeCurrency,
 }
