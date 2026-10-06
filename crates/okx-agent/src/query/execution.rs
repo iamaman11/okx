@@ -923,11 +923,10 @@ async fn mutate_execution(
         ));
     }
 
-    let entry =
-        match reconcile_for_mutation(request, generated_at, execution, intent_id).await? {
-            MutationReconciliationCheck::Ready(value) => value,
-            MutationReconciliationCheck::Response(response) => return Ok(*response),
-        };
+    let entry = match reconcile_for_mutation(request, generated_at, execution, intent_id).await? {
+        MutationReconciliationCheck::Ready(value) => value,
+        MutationReconciliationCheck::Response(response) => return Ok(*response),
+    };
 
     let (mutation_id, admission) = match mutation {
         ExecutionMutationRequest::Amend {
