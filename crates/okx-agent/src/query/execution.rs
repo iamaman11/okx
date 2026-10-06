@@ -606,7 +606,7 @@ async fn executor_preflight_check(
     execution: &crate::execution_runtime::ExecutionRuntime,
     account: &AccountSnapshot,
 ) -> AgentResult<ExecutorPreflightCheck> {
-    match execution.preflight(account).await {
+    match execution.preflight_for_runtime(account).await {
         Ok(value) => Ok(ExecutorPreflightCheck::Ready(value)),
         Err(crate::AgentError::Okx(error)) => Ok(ExecutorPreflightCheck::Response(Box::new(
             failure_response(
@@ -1073,10 +1073,25 @@ async fn submit_prepared(
     }
 
     let observed_at_ms = timing.request_time_ms();
-    match execution
-        .submit_prepared(intent_id, timing, observed_at_ms)
-        .await
-    {
+    let demo_acceptance = execution.demo_mutation_acceptance_requested();
+    let submit_result = if demo_acceptance {
+        match execution
+            .submit_prepared_demo_authorized(&account, intent_id, timing, observed_at_ms)
+            .await?
+        {
+            Some(result) => result,
+            None => return Ok(preflight_rejected(request, generated_at)),
+        }
+    } else {
+        execution
+            .submit_prepared(intent_id, timing, observed_at_ms)
+            .await
+    };
+
+    match submit_result {
+        Ok(_) if demo_acceptance => {
+            execution_status_response(request, context, generated_at, intent_id).await
+        }
         Err(OrderExecutorError::Transition(ExecutionTransitionError::LiveTradingDisabled)) => {
             Ok(failure_response(
                 request,
