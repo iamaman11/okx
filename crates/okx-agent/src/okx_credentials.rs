@@ -1,4 +1,4 @@
-use okx_api::Credentials;
+use okx_api::{Credentials, OkxEnvironment};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -6,6 +6,8 @@ use crate::{AgentError, AgentResult};
 
 pub const OKX_OBSERVER_CREDENTIAL_SCHEMA_V1: &str = "okx.observer-credentials/v1";
 pub const OKX_EXECUTOR_CREDENTIAL_SCHEMA_V1: &str = "okx.executor-credentials/v1";
+pub const OKX_DEMO_OBSERVER_CREDENTIAL_SCHEMA_V1: &str = "okx.demo-observer-credentials/v1";
+pub const OKX_DEMO_EXECUTOR_CREDENTIAL_SCHEMA_V1: &str = "okx.demo-executor-credentials/v1";
 
 #[cfg(windows)]
 const WINDOWS_OBSERVER_CREDENTIAL_SERVICE: &str = "iamaman11.okx-agent.okx";
@@ -15,6 +17,14 @@ const WINDOWS_OBSERVER_CREDENTIAL_ACCOUNT: &str = "observer-read-only";
 const WINDOWS_EXECUTOR_CREDENTIAL_SERVICE: &str = "iamaman11.okx-agent.okx-executor";
 #[cfg(windows)]
 const WINDOWS_EXECUTOR_CREDENTIAL_ACCOUNT: &str = "executor-read-trade";
+#[cfg(windows)]
+const WINDOWS_DEMO_OBSERVER_CREDENTIAL_SERVICE: &str = "iamaman11.okx-agent.okx-demo";
+#[cfg(windows)]
+const WINDOWS_DEMO_OBSERVER_CREDENTIAL_ACCOUNT: &str = "observer-read-only";
+#[cfg(windows)]
+const WINDOWS_DEMO_EXECUTOR_CREDENTIAL_SERVICE: &str = "iamaman11.okx-agent.okx-demo-executor";
+#[cfg(windows)]
+const WINDOWS_DEMO_EXECUTOR_CREDENTIAL_ACCOUNT: &str = "executor-read-trade";
 
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +39,8 @@ struct StoredOkxCredentials {
 enum CredentialProfile {
     Observer,
     Executor,
+    DemoObserver,
+    DemoExecutor,
 }
 
 impl CredentialProfile {
@@ -36,6 +48,8 @@ impl CredentialProfile {
         match self {
             Self::Observer => OKX_OBSERVER_CREDENTIAL_SCHEMA_V1,
             Self::Executor => OKX_EXECUTOR_CREDENTIAL_SCHEMA_V1,
+            Self::DemoObserver => OKX_DEMO_OBSERVER_CREDENTIAL_SCHEMA_V1,
+            Self::DemoExecutor => OKX_DEMO_EXECUTOR_CREDENTIAL_SCHEMA_V1,
         }
     }
 
@@ -44,6 +58,8 @@ impl CredentialProfile {
         match self {
             Self::Observer => WINDOWS_OBSERVER_CREDENTIAL_SERVICE,
             Self::Executor => WINDOWS_EXECUTOR_CREDENTIAL_SERVICE,
+            Self::DemoObserver => WINDOWS_DEMO_OBSERVER_CREDENTIAL_SERVICE,
+            Self::DemoExecutor => WINDOWS_DEMO_EXECUTOR_CREDENTIAL_SERVICE,
         }
     }
 
@@ -52,6 +68,8 @@ impl CredentialProfile {
         match self {
             Self::Observer => WINDOWS_OBSERVER_CREDENTIAL_ACCOUNT,
             Self::Executor => WINDOWS_EXECUTOR_CREDENTIAL_ACCOUNT,
+            Self::DemoObserver => WINDOWS_DEMO_OBSERVER_CREDENTIAL_ACCOUNT,
+            Self::DemoExecutor => WINDOWS_DEMO_EXECUTOR_CREDENTIAL_ACCOUNT,
         }
     }
 
@@ -59,6 +77,8 @@ impl CredentialProfile {
         match self {
             Self::Observer => AgentError::InvalidOkxCredentials,
             Self::Executor => AgentError::InvalidExecutorOkxCredentials,
+            Self::DemoObserver => AgentError::InvalidDemoOkxCredentials,
+            Self::DemoExecutor => AgentError::InvalidDemoExecutorOkxCredentials,
         }
     }
 
@@ -66,6 +86,8 @@ impl CredentialProfile {
         match self {
             Self::Observer => AgentError::OkxCredentialsNotFound,
             Self::Executor => AgentError::ExecutorOkxCredentialsNotFound,
+            Self::DemoObserver => AgentError::DemoOkxCredentialsNotFound,
+            Self::DemoExecutor => AgentError::DemoExecutorOkxCredentialsNotFound,
         }
     }
 }
@@ -84,6 +106,42 @@ pub fn store_native_executor_okx_credentials(payload: &str) -> AgentResult<()> {
 
 pub fn load_native_executor_okx_credentials() -> AgentResult<Credentials> {
     load_native_credentials(CredentialProfile::Executor)
+}
+
+pub fn store_native_demo_okx_credentials(payload: &str) -> AgentResult<()> {
+    store_native_credentials(CredentialProfile::DemoObserver, payload)
+}
+
+pub fn load_native_demo_okx_credentials() -> AgentResult<Credentials> {
+    load_native_credentials(CredentialProfile::DemoObserver)
+}
+
+pub fn store_native_demo_executor_okx_credentials(payload: &str) -> AgentResult<()> {
+    store_native_credentials(CredentialProfile::DemoExecutor, payload)
+}
+
+pub fn load_native_demo_executor_okx_credentials() -> AgentResult<Credentials> {
+    load_native_credentials(CredentialProfile::DemoExecutor)
+}
+
+pub fn load_native_okx_credentials_for_environment(
+    environment: OkxEnvironment,
+) -> AgentResult<Credentials> {
+    if environment.demo {
+        load_native_demo_okx_credentials()
+    } else {
+        load_native_okx_credentials()
+    }
+}
+
+pub fn load_native_executor_okx_credentials_for_environment(
+    environment: OkxEnvironment,
+) -> AgentResult<Credentials> {
+    if environment.demo {
+        load_native_demo_executor_okx_credentials()
+    } else {
+        load_native_executor_okx_credentials()
+    }
 }
 
 fn store_native_credentials(profile: CredentialProfile, payload: &str) -> AgentResult<()> {
@@ -160,24 +218,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn observer_and_executor_schemas_are_not_interchangeable() {
+    fn production_and_demo_credential_schemas_are_not_interchangeable() {
         let observer = r#"{"schema":"okx.observer-credentials/v1","api_key":"key","secret_key":"secret","passphrase":"pass"}"#;
         let executor = r#"{"schema":"okx.executor-credentials/v1","api_key":"key","secret_key":"secret","passphrase":"pass"}"#;
+        let demo_observer = r#"{"schema":"okx.demo-observer-credentials/v1","api_key":"key","secret_key":"secret","passphrase":"pass"}"#;
+        let demo_executor = r#"{"schema":"okx.demo-executor-credentials/v1","api_key":"key","secret_key":"secret","passphrase":"pass"}"#;
 
         let observer_stored: StoredOkxCredentials =
             serde_json::from_str(observer).expect("observer");
         let executor_stored: StoredOkxCredentials =
             serde_json::from_str(executor).expect("executor");
+        let demo_observer_stored: StoredOkxCredentials =
+            serde_json::from_str(demo_observer).expect("demo observer");
+        let demo_executor_stored: StoredOkxCredentials =
+            serde_json::from_str(demo_executor).expect("demo executor");
 
         assert!(validate_payload(CredentialProfile::Observer, &observer_stored).is_ok());
         assert!(validate_payload(CredentialProfile::Executor, &executor_stored).is_ok());
+        assert!(
+            validate_payload(CredentialProfile::DemoObserver, &demo_observer_stored).is_ok()
+        );
+        assert!(
+            validate_payload(CredentialProfile::DemoExecutor, &demo_executor_stored).is_ok()
+        );
+
         assert!(matches!(
-            validate_payload(CredentialProfile::Observer, &executor_stored),
+            validate_payload(CredentialProfile::Observer, &demo_observer_stored),
             Err(AgentError::InvalidOkxCredentials)
         ));
         assert!(matches!(
-            validate_payload(CredentialProfile::Executor, &observer_stored),
+            validate_payload(CredentialProfile::Executor, &demo_executor_stored),
             Err(AgentError::InvalidExecutorOkxCredentials)
+        ));
+        assert!(matches!(
+            validate_payload(CredentialProfile::DemoObserver, &observer_stored),
+            Err(AgentError::InvalidDemoOkxCredentials)
+        ));
+        assert!(matches!(
+            validate_payload(CredentialProfile::DemoExecutor, &executor_stored),
+            Err(AgentError::InvalidDemoExecutorOkxCredentials)
         ));
     }
 
