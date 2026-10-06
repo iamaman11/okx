@@ -44,7 +44,20 @@ impl PositionSide {
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionAction {
     Open,
+    Add,
+    Hedge,
+    Reduce,
     Close,
+}
+
+impl ExecutionAction {
+    pub const fn is_risk_increasing(self) -> bool {
+        matches!(self, Self::Open | Self::Add | Self::Hedge)
+    }
+
+    pub const fn is_risk_reducing(self) -> bool {
+        matches!(self, Self::Reduce | Self::Close)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,11 +188,9 @@ pub fn derive_amend_request_id(intent_id: &str, mutation_id: &str) -> String {
 }
 
 pub(crate) const fn order_side(action: ExecutionAction, position_side: PositionSide) -> OrderSide {
-    match (action, position_side) {
-        (ExecutionAction::Open, PositionSide::Long)
-        | (ExecutionAction::Close, PositionSide::Short) => OrderSide::Buy,
-        (ExecutionAction::Open, PositionSide::Short)
-        | (ExecutionAction::Close, PositionSide::Long) => OrderSide::Sell,
+    match (action.is_risk_increasing(), position_side) {
+        (true, PositionSide::Long) | (false, PositionSide::Short) => OrderSide::Buy,
+        (true, PositionSide::Short) | (false, PositionSide::Long) => OrderSide::Sell,
     }
 }
 
@@ -229,5 +240,20 @@ mod tests {
             order_side(ExecutionAction::Close, PositionSide::Short),
             OrderSide::Buy
         );
+        assert_eq!(
+            order_side(ExecutionAction::Add, PositionSide::Long),
+            OrderSide::Buy
+        );
+        assert_eq!(
+            order_side(ExecutionAction::Hedge, PositionSide::Short),
+            OrderSide::Sell
+        );
+        assert_eq!(
+            order_side(ExecutionAction::Reduce, PositionSide::Long),
+            OrderSide::Sell
+        );
+        assert!(ExecutionAction::Add.is_risk_increasing());
+        assert!(ExecutionAction::Hedge.is_risk_increasing());
+        assert!(ExecutionAction::Reduce.is_risk_reducing());
     }
 }
