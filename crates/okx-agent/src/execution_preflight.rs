@@ -75,6 +75,29 @@ pub fn evaluate_executor_preflight_against_snapshot(
         &observer.position_mode,
         &executor_permissions,
         executor,
+        false,
+    )
+}
+
+pub fn evaluate_demo_executor_preflight_against_snapshot(
+    environment: OkxEnvironment,
+    observer: &AccountSnapshot,
+    executor: &AccountConfig,
+) -> ExecutorCredentialPreflight {
+    let observer_read_only = observer.api_key_permissions == ["read_only"];
+    let observer_private_ws_converged =
+        observer.schema == ACCOUNT_SNAPSHOT_SCHEMA_V2 && observer.private_ws_connected;
+    let executor_permissions = permissions(&executor.perm);
+    evaluate_common(
+        environment,
+        observer_read_only,
+        observer_private_ws_converged,
+        &observer.account_uid_fingerprint,
+        &observer.account_level,
+        &observer.position_mode,
+        &executor_permissions,
+        executor,
+        true,
     )
 }
 
@@ -97,6 +120,30 @@ pub fn evaluate_executor_preflight(
         &observer.position_mode,
         &executor_permissions,
         executor,
+        false,
+    )
+}
+
+pub fn evaluate_demo_executor_preflight(
+    environment: OkxEnvironment,
+    observer: &AccountConfig,
+    executor: &AccountConfig,
+) -> ExecutorCredentialPreflight {
+    let observer_permissions = permissions(&observer.perm);
+    let observer_read_only = observer_permissions == ["read_only"];
+    let observer_fingerprint = account_uid_fingerprint(&observer.uid);
+    let executor_permissions = permissions(&executor.perm);
+
+    evaluate_common(
+        environment,
+        observer_read_only,
+        true,
+        &observer_fingerprint,
+        &observer.account_level,
+        &observer.position_mode,
+        &executor_permissions,
+        executor,
+        true,
     )
 }
 
@@ -110,6 +157,7 @@ fn evaluate_common(
     observer_position_mode: &str,
     executor_permissions: &[String],
     executor: &AccountConfig,
+    require_demo_environment: bool,
 ) -> ExecutorCredentialPreflight {
     let executor_read_permission = executor_permissions
         .iter()
@@ -132,6 +180,7 @@ fn evaluate_common(
         && !executor.main_uid.is_empty()
         && executor.uid != executor.main_uid;
     let production_environment = !environment.demo;
+    let environment_matches_authority = environment.demo == require_demo_environment;
 
     let accepted = observer_read_only
         && observer_private_ws_converged
@@ -141,7 +190,7 @@ fn evaluate_common(
         && futures_mode
         && long_short_mode
         && subaccount
-        && production_environment;
+        && environment_matches_authority;
 
     ExecutorCredentialPreflight {
         schema: EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1,
@@ -362,6 +411,30 @@ mod tests {
         executor.account_level = "2".to_owned();
         executor.position_mode = "net_mode".to_owned();
         assert!(!evaluate_executor_preflight(environment(), &observer, &executor).accepted);
+    }
+
+    #[test]
+    fn demo_acceptance_preflight_requires_demo_and_preserves_production_rejection() {
+        let observer = config("sub-uid", "main-uid", "read_only", "");
+        let executor = config("sub-uid", "main-uid", "read_only,trade", "203.0.113.10");
+        let demo = OkxEnvironment::new(Region::Global, true);
+        let production = OkxEnvironment::new(Region::Global, false);
+
+        let accepted = evaluate_demo_executor_preflight(demo, &observer, &executor);
+        assert!(accepted.accepted);
+        assert!(
+            !accepted.production_environment,
+            "production_environment is raw evidence, not the Demo authority decision"
+        );
+
+        let rejected = evaluate_demo_executor_preflight(production, &observer, &executor);
+        assert!(!rejected.accepted);
+        assert!(rejected.production_environment);
+
+        assert!(
+            !evaluate_executor_preflight(demo, &observer, &executor).accepted,
+            "the existing production preflight must stay fail-closed in Demo"
+        );
     }
 
     #[test]
