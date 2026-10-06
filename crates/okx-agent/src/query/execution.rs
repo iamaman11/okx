@@ -7,8 +7,9 @@ use okx_api::{MUTATION_REQUEST_TTL_MS, MarginMode};
 use okx_execution::{
     EXECUTION_STATUS_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionRiskBinding,
     ExecutionTransitionError, OrderExecutorError, OrderType, PositionSide as ExecutionPositionSide,
-    PrepareFailure, PrepareOutcome, PrepareRejection, TradeMode, prepare_execution,
-    revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
+    PrepareDeferral, PrepareFailure, PrepareOutcome, PrepareRejection, TradeMode,
+    prepare_execution, revalidate_execution_plan, revalidate_hard_risk_policy,
+    revalidate_venue_execution,
 };
 use okx_protocol::{
     ExecutionOrderType, ExecutionRiskBindingRequest, ExecutionTradeMode,
@@ -32,6 +33,7 @@ pub const EXECUTION_INPUT_INCONSISTENT_CODE: &str = "EXECUTION_INPUT_INCONSISTEN
 pub const EXECUTION_RECORD_NOT_FOUND_CODE: &str = "EXECUTION_RECORD_NOT_FOUND";
 pub const EXECUTION_INTENT_CONFLICT_CODE: &str = "EXECUTION_INTENT_CONFLICT";
 pub const EXECUTION_IDEMPOTENCY_COLLISION_CODE: &str = "EXECUTION_IDEMPOTENCY_COLLISION";
+pub const EXECUTION_INSTRUMENT_BUSY_CODE: &str = "EXECUTION_INSTRUMENT_BUSY";
 pub const EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE: &str = "EXECUTION_LEDGER_CAPACITY_EXHAUSTED";
 pub const LIVE_TRADING_DISABLED_CODE: &str = "LIVE_TRADING_DISABLED";
 pub const EXECUTION_GATE_INVARIANT_CODE: &str = "EXECUTION_GATE_INVARIANT_VIOLATION";
@@ -852,6 +854,14 @@ fn prepare_outcome_response(
                 disposition: PreparedDisposition::Existing,
                 entry,
             })?,
+        )),
+        PrepareOutcome::Deferred(PrepareDeferral::InstrumentBusy) => Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_INSTRUMENT_BUSY_CODE,
+            "another nonterminal managed execution already owns this instrument".to_owned(),
+            true,
         )),
         PrepareOutcome::Rejected(PrepareRejection::IntentConflict) => Ok(failure_response(
             request,

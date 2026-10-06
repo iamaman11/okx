@@ -250,11 +250,10 @@ impl TradeApi {
             .await
     }
 
-    pub async fn cancel_order(
+    pub fn admit_cancel_order(
         &self,
         request: &CancelOrderRequest,
-        timing: &MutationTiming,
-    ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+    ) -> Result<RateRequestPlan, OkxError> {
         validate_instrument_id(&request.instrument_id)?;
         validate_client_id("clOrdId", &request.client_order_id)?;
         let rate_plan = self.client.rate_budget().trade_rest_plan(
@@ -262,14 +261,76 @@ impl TradeApi {
             &request.instrument_id,
             None,
         );
+        self.client
+            .rate_budget()
+            .admit(&rate_plan)
+            .map_err(|evidence| OkxError::RateLimited { evidence })?;
+        Ok(rate_plan)
+    }
+
+    pub async fn cancel_order_after_admission(
+        &self,
+        request: &CancelOrderRequest,
+        timing: &MutationTiming,
+        rate_plan: &RateRequestPlan,
+    ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+        validate_instrument_id(&request.instrument_id)?;
+        validate_client_id("clOrdId", &request.client_order_id)?;
         Ok(self
             .client
-            .private_post(
+            .private_post_after_admission(
                 CANCEL_ORDER_PATH,
                 request,
                 timing.request_timestamp(),
                 None,
-                &rate_plan,
+                rate_plan,
+            )
+            .await?
+            .into())
+    }
+
+    pub async fn cancel_order(
+        &self,
+        request: &CancelOrderRequest,
+        timing: &MutationTiming,
+    ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+        let rate_plan = self.admit_cancel_order(request)?;
+        self.cancel_order_after_admission(request, timing, &rate_plan)
+            .await
+    }
+
+    pub fn admit_amend_order(
+        &self,
+        request: &AmendOrderRequest,
+    ) -> Result<RateRequestPlan, OkxError> {
+        validate_amend(request)?;
+        let rate_plan = self.client.rate_budget().trade_rest_plan(
+            RateOperationClass::AmendOrder,
+            &request.instrument_id,
+            None,
+        );
+        self.client
+            .rate_budget()
+            .admit(&rate_plan)
+            .map_err(|evidence| OkxError::RateLimited { evidence })?;
+        Ok(rate_plan)
+    }
+
+    pub async fn amend_order_after_admission(
+        &self,
+        request: &AmendOrderRequest,
+        timing: &MutationTiming,
+        rate_plan: &RateRequestPlan,
+    ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+        validate_amend(request)?;
+        Ok(self
+            .client
+            .private_post_after_admission(
+                AMEND_ORDER_PATH,
+                request,
+                timing.request_timestamp(),
+                Some(timing.exp_time_ms()),
+                rate_plan,
             )
             .await?
             .into())
@@ -280,23 +341,9 @@ impl TradeApi {
         request: &AmendOrderRequest,
         timing: &MutationTiming,
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
-        validate_amend(request)?;
-        let rate_plan = self.client.rate_budget().trade_rest_plan(
-            RateOperationClass::AmendOrder,
-            &request.instrument_id,
-            None,
-        );
-        Ok(self
-            .client
-            .private_post(
-                AMEND_ORDER_PATH,
-                request,
-                timing.request_timestamp(),
-                Some(timing.exp_time_ms()),
-                &rate_plan,
-            )
-            .await?
-            .into())
+        let rate_plan = self.admit_amend_order(request)?;
+        self.amend_order_after_admission(request, timing, &rate_plan)
+            .await
     }
 
     pub async fn account_rate_limit(&self) -> Result<AccountRateLimitEvidence, OkxError> {

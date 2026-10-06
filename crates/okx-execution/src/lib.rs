@@ -7,20 +7,22 @@ mod state;
 mod validation;
 
 pub use contract::{
-    EXECUTION_STATUS_SCHEMA_V1, ExecutionStatusSnapshot, PrepareFailure, PrepareOutcome,
-    PrepareRejection, classify_prepare_result, execution_status,
+    EXECUTION_STATUS_SCHEMA_V1, ExecutionStatusSnapshot, PrepareDeferral, PrepareFailure,
+    PrepareOutcome, PrepareRejection, classify_prepare_result, execution_status,
 };
 pub use executor::{
-    ExecutionGateway, OrderExecutor, OrderExecutorError, ReconcileDisposition, SubmitDisposition,
+    ExecutionGateway, MutationSubmitDisposition, OrderExecutor, OrderExecutorError,
+    ReconcileDisposition, SubmitDisposition,
 };
 pub use ledger::{
     DurableExecutionLedger, EXECUTION_LEDGER_SCHEMA_V1, ExecutionLedgerEntry, ExecutionLedgerError,
-    ExecutionLedgerStore, MAX_EXECUTION_LEDGER_RECORDS, PrepareDisposition,
+    ExecutionLedgerStore, MAX_EXECUTION_LEDGER_RECORDS, MutationPrepareDisposition,
+    PrepareDisposition,
 };
 pub use model::{
     EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionIntent, ExecutionPlan,
     ExecutionRiskBinding, OpenRiskEvidence, OrderSide, OrderType, PositionSide, TradeMode,
-    derive_client_order_id,
+    derive_amend_request_id, derive_client_order_id,
 };
 pub use reconciliation::{
     ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1, AccountLedgerReconciliation,
@@ -28,7 +30,8 @@ pub use reconciliation::{
 };
 pub use state::{
     ALLOW_LIVE_TRADING_DEFAULT, ExchangeOrderState, ExecutionRecord, ExecutionState,
-    ExecutionTransitionError, require_live_trading_enabled,
+    ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
+    OrderMutationRecord, OrderMutationResolution, OrderMutationState, require_live_trading_enabled,
 };
 pub use validation::{
     ExecutionValidationError, PreMutationRiskDisposition, prepare_execution,

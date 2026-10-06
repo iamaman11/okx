@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 pub const EXECUTION_PLAN_SCHEMA_V1: &str = "okx.execution-plan/v1";
 const CLIENT_ORDER_ID_PREFIX: &str = "okx";
 const CLIENT_ORDER_ID_HASH_CHARS: usize = 29;
+const AMEND_REQUEST_ID_PREFIX: &str = "amx";
+const AMEND_REQUEST_ID_HASH_CHARS: usize = 29;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,7 +44,20 @@ impl PositionSide {
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionAction {
     Open,
+    Add,
+    Hedge,
+    Reduce,
     Close,
+}
+
+impl ExecutionAction {
+    pub const fn is_risk_increasing(self) -> bool {
+        matches!(self, Self::Open | Self::Add | Self::Hedge)
+    }
+
+    pub const fn is_risk_reducing(self) -> bool {
+        matches!(self, Self::Reduce | Self::Close)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +161,13 @@ pub(crate) fn valid_intent_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+pub(crate) fn valid_mutation_id(value: &str) -> bool {
+    (8..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 pub fn derive_client_order_id(intent_id: &str) -> String {
     let digest = Sha256::digest(format!("okx-execution-v1:{intent_id}").as_bytes());
     let hex = format!("{digest:x}");
@@ -155,12 +177,20 @@ pub fn derive_client_order_id(intent_id: &str) -> String {
     )
 }
 
+pub fn derive_amend_request_id(intent_id: &str, mutation_id: &str) -> String {
+    let digest =
+        Sha256::digest(format!("okx-execution-amend-v1:{intent_id}:{mutation_id}").as_bytes());
+    let hex = format!("{digest:x}");
+    format!(
+        "{AMEND_REQUEST_ID_PREFIX}{}",
+        &hex[..AMEND_REQUEST_ID_HASH_CHARS]
+    )
+}
+
 pub(crate) const fn order_side(action: ExecutionAction, position_side: PositionSide) -> OrderSide {
-    match (action, position_side) {
-        (ExecutionAction::Open, PositionSide::Long)
-        | (ExecutionAction::Close, PositionSide::Short) => OrderSide::Buy,
-        (ExecutionAction::Open, PositionSide::Short)
-        | (ExecutionAction::Close, PositionSide::Long) => OrderSide::Sell,
+    match (action.is_risk_increasing(), position_side) {
+        (true, PositionSide::Long) | (false, PositionSide::Short) => OrderSide::Buy,
+        (true, PositionSide::Short) | (false, PositionSide::Long) => OrderSide::Sell,
     }
 }
 
@@ -173,6 +203,18 @@ mod tests {
         let first = derive_client_order_id("intent_0123456789abcdef");
         let again = derive_client_order_id("intent_0123456789abcdef");
         let other = derive_client_order_id("intent_fedcba9876543210");
+
+        assert_eq!(first, again);
+        assert_ne!(first, other);
+        assert_eq!(first.len(), 32);
+        assert!(first.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn amend_request_id_is_stable_alphanumeric_and_bounded() {
+        let first = derive_amend_request_id("intent_0123456789abcdef", "mutation_01234567");
+        let again = derive_amend_request_id("intent_0123456789abcdef", "mutation_01234567");
+        let other = derive_amend_request_id("intent_0123456789abcdef", "mutation_76543210");
 
         assert_eq!(first, again);
         assert_ne!(first, other);
@@ -198,5 +240,20 @@ mod tests {
             order_side(ExecutionAction::Close, PositionSide::Short),
             OrderSide::Buy
         );
+        assert_eq!(
+            order_side(ExecutionAction::Add, PositionSide::Long),
+            OrderSide::Buy
+        );
+        assert_eq!(
+            order_side(ExecutionAction::Hedge, PositionSide::Short),
+            OrderSide::Sell
+        );
+        assert_eq!(
+            order_side(ExecutionAction::Reduce, PositionSide::Long),
+            OrderSide::Sell
+        );
+        assert!(ExecutionAction::Add.is_risk_increasing());
+        assert!(ExecutionAction::Hedge.is_risk_increasing());
+        assert!(ExecutionAction::Reduce.is_risk_reducing());
     }
 }
