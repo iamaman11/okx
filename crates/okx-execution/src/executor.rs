@@ -1099,6 +1099,49 @@ mod tests {
         }
     }
 
+    struct ProtectiveLookupGateway {
+        result: Mutex<Option<Result<TradeAlgoOrderDetails, OkxError>>>,
+    }
+
+    impl ProtectiveLookupGateway {
+        fn new(result: Result<TradeAlgoOrderDetails, OkxError>) -> Self {
+            Self {
+                result: Mutex::new(Some(result)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ExecutionGateway for ProtectiveLookupGateway {
+        async fn place_order(
+            &self,
+            _request: PlaceOrderRequest,
+            _timing: MutationTiming,
+            _rate_plan: Option<RateRequestPlan>,
+        ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+            panic!("place is not used by protective lookup tests")
+        }
+
+        async fn order_by_client_id(
+            &self,
+            _instrument_id: String,
+            _client_order_id: String,
+        ) -> Result<TradeOrderDetails, OkxError> {
+            panic!("parent lookup is not used by protective resolution tests")
+        }
+
+        async fn algo_order_by_client_id(
+            &self,
+            _client_order_id: String,
+        ) -> Result<TradeAlgoOrderDetails, OkxError> {
+            self.result
+                .lock()
+                .expect("algo result")
+                .take()
+                .expect("single algo lookup")
+        }
+    }
+
     struct MutationGateway {
         amend_calls: AtomicUsize,
         cancel_calls: AtomicUsize,
@@ -1433,6 +1476,117 @@ mod tests {
             validate_protective_algo(&record, &wrong),
             Err(OrderExecutorError::ProtectionIdentityMismatch)
         ));
+    }
+
+    #[tokio::test]
+    async fn zero_fill_cancel_resolves_not_activated_without_algo_evidence() {
+        let (root, ledger) = ledger("protective-zero-fill");
+        let record = ExecutionRecord::new(protected_plan());
+        let mut order = order_details(&record.plan, "canceled");
+        order.accumulated_fill_size = "0".to_owned();
+        let gateway = MockGateway::new(vec![], vec![]);
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let resolution = executor
+            .protection_resolution(&record, &order, ExchangeOrderState::Canceled)
+            .await
+            .expect("resolution");
+        assert_eq!(resolution, Some(ProtectiveOrderResolution::NotActivated));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn partial_fill_cancel_without_algo_evidence_stays_pending() {
+        let (root, ledger) = ledger("protective-missing-evidence");
+        let record = ExecutionRecord::new(protected_plan());
+        let mut order = order_details(&record.plan, "canceled");
+        order.accumulated_fill_size = "0.4".to_owned();
+        let gateway = MockGateway::new(vec![], vec![]);
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let resolution = executor
+            .protection_resolution(&record, &order, ExchangeOrderState::Canceled)
+            .await
+            .expect("resolution");
+        assert_eq!(resolution, Some(ProtectiveOrderResolution::Pending));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn partial_fill_cancel_with_matching_algo_uses_exact_filled_size() {
+        let (root, ledger) = ledger("protective-matching-evidence");
+        let record = ExecutionRecord::new(protected_plan());
+        let protection = record.protection.as_ref().expect("protection");
+        let mut order = order_details(&record.plan, "canceled");
+        order.accumulated_fill_size = "0.40".to_owned();
+        let algo = TradeAlgoOrderDetails {
+            instrument_id: record.plan.instrument_id.clone(),
+            algo_order_id: "algo-1".to_owned(),
+            client_order_id: protection.algo_client_order_id.clone(),
+            state: "live".to_owned(),
+            take_profit_trigger_price: "0.12".to_owned(),
+            take_profit_trigger_price_type: "mark".to_owned(),
+            take_profit_order_price: "-1".to_owned(),
+            stop_loss_trigger_price: "0.09".to_owned(),
+            stop_loss_trigger_price_type: "mark".to_owned(),
+            stop_loss_order_price: "-1".to_owned(),
+            failure_code: String::new(),
+        };
+        let gateway = ProtectiveLookupGateway::new(Ok(algo));
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let resolution = executor
+            .protection_resolution(&record, &order, ExchangeOrderState::Canceled)
+            .await
+            .expect("resolution");
+        assert_eq!(
+            resolution,
+            Some(ProtectiveOrderResolution::Active {
+                algo_order_id: "algo-1".to_owned(),
+                covered_size: "0.4".to_owned(),
+            })
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explicit_algo_failure_is_durable_failed_resolution() {
+        let (root, ledger) = ledger("protective-failure-evidence");
+        let record = ExecutionRecord::new(protected_plan());
+        let protection = record.protection.as_ref().expect("protection");
+        let mut order = order_details(&record.plan, "filled");
+        order.accumulated_fill_size = "1".to_owned();
+        let algo = TradeAlgoOrderDetails {
+            instrument_id: record.plan.instrument_id.clone(),
+            algo_order_id: String::new(),
+            client_order_id: protection.algo_client_order_id.clone(),
+            state: "order_failed".to_owned(),
+            take_profit_trigger_price: "0.12".to_owned(),
+            take_profit_trigger_price_type: "mark".to_owned(),
+            take_profit_order_price: "-1".to_owned(),
+            stop_loss_trigger_price: "0.09".to_owned(),
+            stop_loss_trigger_price_type: "mark".to_owned(),
+            stop_loss_order_price: "-1".to_owned(),
+            failure_code: "51008".to_owned(),
+        };
+        let gateway = ProtectiveLookupGateway::new(Ok(algo));
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+
+        let resolution = executor
+            .protection_resolution(&record, &order, ExchangeOrderState::Filled)
+            .await
+            .expect("resolution");
+        assert_eq!(
+            resolution,
+            Some(ProtectiveOrderResolution::Failed {
+                code: "51008".to_owned(),
+            })
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
