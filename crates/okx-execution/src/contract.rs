@@ -12,8 +12,14 @@ pub const EXECUTION_STATUS_SCHEMA_V1: &str = "okx.execution-status/v1";
 pub enum PrepareOutcome {
     Created(ExecutionLedgerEntry),
     Existing(ExecutionLedgerEntry),
+    Deferred(PrepareDeferral),
     Rejected(PrepareRejection),
     Failed(PrepareFailure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareDeferral {
+    InstrumentBusy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +41,9 @@ pub fn classify_prepare_result(
         Ok(PrepareDisposition::Existing(entry)) => Ok(PrepareOutcome::Existing(entry)),
         Err(ExecutionLedgerError::IntentConflict) => {
             Ok(PrepareOutcome::Rejected(PrepareRejection::IntentConflict))
+        }
+        Err(ExecutionLedgerError::InstrumentBusy) => {
+            Ok(PrepareOutcome::Deferred(PrepareDeferral::InstrumentBusy))
         }
         Err(ExecutionLedgerError::ClientOrderIdCollision) => Ok(PrepareOutcome::Rejected(
             PrepareRejection::ClientOrderIdCollision,
