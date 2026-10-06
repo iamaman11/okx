@@ -936,6 +936,9 @@ pub enum AgentOperation {
     SubmitPreparedExecution {
         intent_id: String,
     },
+    AbortReverseExecution {
+        intent_id: String,
+    },
     ExecutionStatus {
         intent_id: String,
     },
@@ -990,6 +993,7 @@ impl AgentOperation {
                 | Self::PrepareOpenExecution { .. }
                 | Self::PrepareCloseExecution { .. }
                 | Self::SubmitPreparedExecution { .. }
+                | Self::AbortReverseExecution { .. }
         )
     }
 
@@ -1174,9 +1178,9 @@ impl AgentOperation {
                 }
                 Ok(())
             }
-            Self::SubmitPreparedExecution { intent_id } | Self::ExecutionStatus { intent_id } => {
-                validate_request_id(intent_id)
-            }
+            Self::SubmitPreparedExecution { intent_id }
+            | Self::AbortReverseExecution { intent_id }
+            | Self::ExecutionStatus { intent_id } => validate_request_id(intent_id),
             Self::CurrentCost {
                 instrument,
                 contracts,
@@ -1714,15 +1718,10 @@ fn validate_history_request(
     Ok(())
 }
 
-fn validate_execution_entry_request(
-    entry: &ExecutionEntryRequest,
-) -> Result<(), ProtocolError> {
+fn validate_execution_entry_request(entry: &ExecutionEntryRequest) -> Result<(), ProtocolError> {
     validate_decimal_text(&entry.entry_price, "entry.entry_price")?;
     validate_decimal_text(&entry.stop_price, "entry.stop_price")?;
-    validate_decimal_text(
-        &entry.max_settle_notional,
-        "entry.max_settle_notional",
-    )?;
+    validate_decimal_text(&entry.max_settle_notional, "entry.max_settle_notional")?;
     validate_decimal_text(&entry.max_loss_settle, "entry.max_loss_settle")?;
     validate_decimal_text(&entry.target_rr, "entry.target_rr")
 }
