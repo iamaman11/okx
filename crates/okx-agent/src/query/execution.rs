@@ -1,20 +1,24 @@
 use okx_analysis::{
-    CandidateOrderAssumptions, HARD_RISK_POLICY_SCHEMA_V1, LiquidityRole as AnalysisLiquidityRole,
-    PortfolioCandidate, PositionDirection, TRADING_MANDATE_SCHEMA_V1, analyze_candidate_order,
-    analyze_portfolio_risk,
+    CandidateOrderAssumptions, ExecutionTcaReport, HARD_RISK_POLICY_SCHEMA_V1,
+    LiquidityRole as AnalysisLiquidityRole, PortfolioCandidate, PositionDirection,
+    TRADING_MANDATE_SCHEMA_V1, TcaFillOutcome, TcaReference, TcaSide, analyze_candidate_order,
+    analyze_execution_tca_report, analyze_portfolio_risk,
 };
-use okx_api::{MUTATION_REQUEST_TTL_MS, MarginMode};
+use okx_api::{InstrumentType, MUTATION_REQUEST_TTL_MS, MarginMode};
 use okx_execution::{
-    EXECUTION_STATUS_SCHEMA_V2, ExecutionAction, ExecutionIntent, ExecutionLedgerError,
-    ExecutionRiskBinding, ExecutionState, ExecutionTransitionError, OrderExecutorError, OrderType,
-    PositionSide as ExecutionPositionSide, PrepareDeferral, PrepareFailure, PrepareOutcome,
-    PrepareRejection, ReverseContinuation, ReverseLeg, TradeMode, prepare_execution,
-    revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
+    EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_STATUS_SCHEMA_V3, ExecutionAction,
+    ExecutionDecisionReference, ExecutionIntent, ExecutionLedgerEntry, ExecutionLedgerError,
+    ExecutionLineageBinding, ExecutionRiskBinding, ExecutionState, ExecutionTcaInstrumentType,
+    ExecutionTcaMechanicsBinding, ExecutionTransitionError, OrderExecutorError,
+    OrderSide as ExecutionOrderSide, OrderType, PositionSide as ExecutionPositionSide,
+    PrepareDeferral, PrepareFailure, PrepareOutcome, PrepareRejection, ReverseContinuation,
+    ReverseLeg, TradeMode, prepare_execution, revalidate_execution_plan,
+    revalidate_hard_risk_policy, revalidate_venue_execution,
 };
 use okx_protocol::{
-    ExecutionEntryRequest, ExecutionOrderType, ExecutionPrepareSpec, ExecutionRiskBindingRequest,
-    ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
-    PositionSide as ProtocolPositionSide,
+    ExecutionEntryRequest, ExecutionLineageRequest, ExecutionOrderType, ExecutionPrepareSpec,
+    ExecutionReferencePriceBasis, ExecutionRiskBindingRequest, ExecutionTradeMode,
+    LiquidityRole as ProtocolLiquidityRole, PositionSide as ProtocolPositionSide,
 };
 
 use super::*;
@@ -59,6 +63,7 @@ pub(super) async fn dispatch(
             order_type,
             spec,
             risk,
+            lineage,
         } => {
             prepare_generic_execution(
                 request,
@@ -70,6 +75,7 @@ pub(super) async fn dispatch(
                     trade_mode: *trade_mode,
                     order_type: *order_type,
                     risk: risk.as_deref(),
+                    lineage: lineage.as_deref(),
                 },
                 spec,
             )
@@ -106,6 +112,7 @@ struct PrepareCommon<'a> {
     trade_mode: ExecutionTradeMode,
     order_type: ExecutionOrderType,
     risk: Option<&'a ExecutionRiskBindingRequest>,
+    lineage: Option<&'a ExecutionLineageRequest>,
 }
 
 struct EntryPrepare<'a> {
@@ -347,7 +354,10 @@ async fn prepare_risk_increasing(
         Err(error) => return Ok(validation_failure(request, generated_at, error)),
     };
     plan.risk_binding = common.risk.map(execution_risk_binding);
-    commit_prepared(request, generated_at, execution, plan, target).await
+    let lineage = common
+        .lineage
+        .map(|value| execution_lineage_binding(value, &rules));
+    commit_prepared(request, generated_at, execution, plan, lineage, target).await
 }
 
 async fn prepare_risk_reducing(
@@ -404,7 +414,10 @@ async fn prepare_risk_reducing(
         Err(error) => return Ok(validation_failure(request, generated_at, error)),
     };
     plan.risk_binding = common.risk.map(execution_risk_binding);
-    commit_prepared(request, generated_at, execution, plan, target).await
+    let lineage = common
+        .lineage
+        .map(|value| execution_lineage_binding(value, &rules));
+    commit_prepared(request, generated_at, execution, plan, lineage, target).await
 }
 
 async fn prepare_reverse_open(
@@ -482,19 +495,30 @@ async fn commit_prepared(
     generated_at: &str,
     execution: &crate::execution_runtime::ExecutionRuntime,
     plan: okx_execution::ExecutionPlan,
+    lineage: Option<ExecutionLineageBinding>,
     target: PrepareTarget,
 ) -> AgentResult<AgentResponse> {
     let observed_at_ms = utc_now_ms();
     let result = match target {
-        PrepareTarget::Normal => execution.prepare(plan, observed_at_ms).await,
+        PrepareTarget::Normal => {
+            execution
+                .prepare_with_lineage(plan, lineage, observed_at_ms)
+                .await
+        }
         PrepareTarget::ReverseClose {
             target_position_side,
         } => {
             execution
-                .prepare_reverse_close(plan, target_position_side, observed_at_ms)
+                .prepare_reverse_close_with_lineage(
+                    plan,
+                    target_position_side,
+                    lineage,
+                    observed_at_ms,
+                )
                 .await
         }
         PrepareTarget::ReverseOpen { root_intent_id } => {
+            debug_assert!(lineage.is_none());
             execution
                 .prepare_reverse_open(&root_intent_id, plan, observed_at_ms)
                 .await
@@ -1263,6 +1287,143 @@ fn prepare_outcome_response(
     }
 }
 
+const EXECUTION_TCA_SOURCE_V1: &str = "okx.trade.fills-history/exact-order/v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ExecutionTcaAvailability {
+    Available,
+    Provisional,
+    Unavailable,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ExecutionTcaSummary {
+    requested_contracts: String,
+    filled_contracts: String,
+    unfilled_contracts: String,
+    fill_ratio: String,
+    fill_outcome: TcaFillOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fill_vwap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maker_contracts: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    taker_contracts: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slippage_bps: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gross_slippage_settle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settle_fee_cost: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    net_execution_cost_settle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reference_to_first_fill_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reference_to_last_fill_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    implementation_shortfall_settle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    implementation_shortfall_unavailable_reason: Option<&'static str>,
+}
+
+impl From<ExecutionTcaReport> for ExecutionTcaSummary {
+    fn from(value: ExecutionTcaReport) -> Self {
+        let observed = value.observed_execution.as_ref();
+        Self {
+            requested_contracts: value.requested_contracts,
+            filled_contracts: value.filled_contracts,
+            unfilled_contracts: value.unfilled_contracts,
+            fill_ratio: value.fill_ratio,
+            fill_outcome: value.fill_outcome,
+            fill_vwap: observed.map(|item| item.fill_vwap.clone()),
+            maker_contracts: observed.map(|item| item.maker_contracts.clone()),
+            taker_contracts: observed.map(|item| item.taker_contracts.clone()),
+            slippage_bps: observed.map(|item| item.slippage_bps.clone()),
+            gross_slippage_settle: observed.map(|item| item.gross_slippage_settle.clone()),
+            settle_fee_cost: observed.and_then(|item| item.settle_fee_cost.clone()),
+            net_execution_cost_settle: observed
+                .and_then(|item| item.net_execution_cost_settle.clone()),
+            reference_to_first_fill_ms: observed.map(|item| item.reference_to_first_fill_ms),
+            reference_to_last_fill_ms: observed.map(|item| item.reference_to_last_fill_ms),
+            implementation_shortfall_settle: value.implementation_shortfall_settle,
+            implementation_shortfall_unavailable_reason: value
+                .implementation_shortfall_unavailable_reason,
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ExecutionTcaStatus {
+    availability: ExecutionTcaAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finality: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_pages: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_complete_within_bound: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fill_rows: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<ExecutionTcaSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<&'static str>,
+}
+
+impl ExecutionTcaStatus {
+    fn unavailable(reason: &'static str) -> Self {
+        Self {
+            availability: ExecutionTcaAvailability::Unavailable,
+            finality: None,
+            source: None,
+            history_pages: None,
+            history_complete_within_bound: None,
+            fill_rows: None,
+            summary: None,
+            unavailable_reason: Some(reason),
+        }
+    }
+
+    fn with_history(
+        availability: ExecutionTcaAvailability,
+        finality: &'static str,
+        pages: usize,
+        complete: bool,
+        fill_rows: usize,
+        summary: Option<ExecutionTcaSummary>,
+        unavailable_reason: Option<&'static str>,
+    ) -> Self {
+        Self {
+            availability,
+            finality: Some(finality),
+            source: Some(EXECUTION_TCA_SOURCE_V1),
+            history_pages: Some(pages),
+            history_complete_within_bound: Some(complete),
+            fill_rows: Some(fill_rows),
+            summary,
+            unavailable_reason,
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ExecutionUnattributedAnalytics {
+    post_fill_markout: &'static str,
+    funding: &'static str,
+    counterfactual: &'static str,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ExecutionStatusResult {
+    #[serde(flatten)]
+    status: okx_execution::ExecutionStatusEnvelope,
+    tca: ExecutionTcaStatus,
+    unattributed_analytics: ExecutionUnattributedAnalytics,
+}
+
 async fn execution_status_response(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
@@ -1272,7 +1433,7 @@ async fn execution_status_response(
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
-    let Some(status) = execution.status(intent_id).await? else {
+    let Some((entry, status)) = execution.status_with_entry(intent_id).await? else {
         return Ok(failure_response(
             request,
             generated_at,
@@ -1283,12 +1444,274 @@ async fn execution_status_response(
         ));
     };
 
-    Ok(completed(
+    let (tca, warnings) = execution_tca_status(context, &entry).await;
+    let result = ExecutionStatusResult {
+        status,
+        tca,
+        unattributed_analytics: ExecutionUnattributedAnalytics {
+            post_fill_markout: "unavailable_no_versioned_post_fill_market_evidence",
+            funding: "unavailable_no_per_intent_funding_attribution",
+            counterfactual: "unavailable_no_versioned_counterfactual_evidence",
+        },
+    };
+    let mut response = completed(
         request,
         generated_at,
-        EXECUTION_STATUS_SCHEMA_V2,
-        serde_json::to_value(status)?,
-    ))
+        EXECUTION_STATUS_SCHEMA_V3,
+        serde_json::to_value(result)?,
+    );
+    if !warnings.is_empty() {
+        response.quality = DataQuality::Degraded;
+        response.warnings = warnings;
+    }
+    Ok(response)
+}
+
+async fn execution_tca_status(
+    context: ObservationQueryContext<'_>,
+    entry: &ExecutionLedgerEntry,
+) -> (ExecutionTcaStatus, Vec<String>) {
+    let record = &entry.record;
+    let Some(lineage) = record.lineage.as_ref() else {
+        return (
+            ExecutionTcaStatus::unavailable("lineage_missing"),
+            Vec::new(),
+        );
+    };
+    let Some(order_id) = record.order_id.as_deref() else {
+        return (
+            ExecutionTcaStatus::unavailable("exchange_order_id_missing"),
+            Vec::new(),
+        );
+    };
+    let Some(mechanics) = lineage.tca_mechanics.as_ref() else {
+        return (
+            ExecutionTcaStatus::unavailable("tca_mechanics_unavailable"),
+            Vec::new(),
+        );
+    };
+    if mechanics.source_reference_generation != record.plan.reference_generation
+        || mechanics.contract_type != "linear"
+    {
+        return (
+            ExecutionTcaStatus::unavailable("tca_mechanics_inconsistent"),
+            Vec::new(),
+        );
+    }
+    let instrument_type = match mechanics.instrument_type {
+        ExecutionTcaInstrumentType::Swap => InstrumentType::Swap,
+        ExecutionTcaInstrumentType::Futures => InstrumentType::Futures,
+    };
+    let Some(observer) = context.account_fallback else {
+        return (
+            ExecutionTcaStatus::unavailable("account_observer_unavailable"),
+            Vec::new(),
+        );
+    };
+
+    let evidence = match observer
+        .execution_fills(
+            instrument_type,
+            &record.plan.instrument_id,
+            order_id,
+            &record.plan.client_order_id,
+        )
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                ExecutionTcaStatus::unavailable("fills_history_unavailable"),
+                vec![format!("execution TCA fill evidence unavailable: {error}")],
+            );
+        }
+    };
+    let finality = if record.state.is_terminal() {
+        "final"
+    } else {
+        "provisional"
+    };
+    if !evidence.complete_within_bound {
+        return (
+            ExecutionTcaStatus::with_history(
+                ExecutionTcaAvailability::Unavailable,
+                finality,
+                evidence.pages,
+                false,
+                evidence.fills.len(),
+                None,
+                Some("fills_history_bound_incomplete"),
+            ),
+            Vec::new(),
+        );
+    }
+    if evidence
+        .fills
+        .iter()
+        .any(|fill| fill.position_side != record.plan.position_side.as_str())
+    {
+        return (
+            ExecutionTcaStatus::with_history(
+                ExecutionTcaAvailability::Unavailable,
+                finality,
+                evidence.pages,
+                true,
+                evidence.fills.len(),
+                None,
+                Some("position_side_mismatch"),
+            ),
+            vec!["execution TCA fill position side does not match the durable plan".to_owned()],
+        );
+    }
+    if evidence.fills.is_empty() && record.state == ExecutionState::Filled {
+        return (
+            ExecutionTcaStatus::with_history(
+                ExecutionTcaAvailability::Unavailable,
+                finality,
+                evidence.pages,
+                true,
+                0,
+                None,
+                Some("filled_order_has_no_fills"),
+            ),
+            vec!["filled execution has no exact fills in complete bounded history".to_owned()],
+        );
+    }
+    if evidence.fills.is_empty() && !record.state.is_terminal() {
+        return (
+            ExecutionTcaStatus::with_history(
+                ExecutionTcaAvailability::Provisional,
+                finality,
+                evidence.pages,
+                true,
+                0,
+                None,
+                Some("no_fill_observed_yet"),
+            ),
+            Vec::new(),
+        );
+    }
+
+    let report = match analyze_execution_tca_report(
+        &record.plan.instrument_id,
+        match record.plan.side {
+            ExecutionOrderSide::Buy => TcaSide::Buy,
+            ExecutionOrderSide::Sell => TcaSide::Sell,
+        },
+        &mechanics.contract_value,
+        &mechanics.settle_currency,
+        record.effective_size(),
+        &TcaReference {
+            price: lineage.decision_reference.price.clone(),
+            reference_time_ms: lineage.decision_reference.decision_time_ms,
+            price_basis: lineage.decision_reference.price_basis,
+            price_policy_version: lineage.decision_reference.price_policy_version.clone(),
+        },
+        &evidence.fills,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                ExecutionTcaStatus::with_history(
+                    ExecutionTcaAvailability::Unavailable,
+                    finality,
+                    evidence.pages,
+                    true,
+                    evidence.fills.len(),
+                    None,
+                    Some("tca_analysis_inconsistent"),
+                ),
+                vec![format!("execution TCA analysis rejected evidence: {error}")],
+            );
+        }
+    };
+
+    if record.state == ExecutionState::Filled && report.fill_outcome != TcaFillOutcome::Complete {
+        return (
+            ExecutionTcaStatus::with_history(
+                ExecutionTcaAvailability::Unavailable,
+                finality,
+                evidence.pages,
+                true,
+                evidence.fills.len(),
+                Some(report.into()),
+                Some("filled_state_completion_mismatch"),
+            ),
+            vec!["filled execution does not reconcile to the effective requested size".to_owned()],
+        );
+    }
+
+    (
+        ExecutionTcaStatus::with_history(
+            if record.state.is_terminal() {
+                ExecutionTcaAvailability::Available
+            } else {
+                ExecutionTcaAvailability::Provisional
+            },
+            finality,
+            evidence.pages,
+            true,
+            evidence.fills.len(),
+            Some(report.into()),
+            None,
+        ),
+        Vec::new(),
+    )
+}
+
+fn execution_lineage_binding(
+    value: &ExecutionLineageRequest,
+    rules: &InstrumentRulesSnapshot,
+) -> ExecutionLineageBinding {
+    let instrument = &rules.instrument;
+    let tca_mechanics = match (
+        instrument.contract_type.as_deref(),
+        instrument.contract_value.as_deref(),
+        instrument.settle_currency.as_deref(),
+    ) {
+        (Some("linear"), Some(contract_value), Some(settle_currency))
+            if !contract_value.trim().is_empty() && !settle_currency.trim().is_empty() =>
+        {
+            Some(ExecutionTcaMechanicsBinding {
+                source_reference_generation: rules.reference_generation.clone(),
+                instrument_type: match instrument.instrument_type {
+                    InstrumentType::Swap => ExecutionTcaInstrumentType::Swap,
+                    InstrumentType::Futures => ExecutionTcaInstrumentType::Futures,
+                },
+                contract_type: "linear".to_owned(),
+                contract_value: contract_value.to_owned(),
+                settle_currency: settle_currency.to_owned(),
+            })
+        }
+        _ => None,
+    };
+    ExecutionLineageBinding {
+        schema: EXECUTION_LINEAGE_SCHEMA_V2.to_owned(),
+        origin_evidence_id: value.origin_evidence_id.clone(),
+        origin_schema: value.origin_schema.clone(),
+        origin_version: value.origin_version.clone(),
+        authority_evidence_id: value.authority_evidence_id.clone(),
+        decision_reference: ExecutionDecisionReference {
+            decision_time_ms: value.decision_reference.decision_time_ms,
+            price: value.decision_reference.price.clone(),
+            price_basis: match value.decision_reference.price_basis {
+                ExecutionReferencePriceBasis::DecisionPrice => {
+                    okx_execution::TcaReferencePriceBasis::DecisionPrice
+                }
+                ExecutionReferencePriceBasis::ArrivalMid => {
+                    okx_execution::TcaReferencePriceBasis::ArrivalMid
+                }
+                ExecutionReferencePriceBasis::Mark => okx_execution::TcaReferencePriceBasis::Mark,
+                ExecutionReferencePriceBasis::Index => okx_execution::TcaReferencePriceBasis::Index,
+                ExecutionReferencePriceBasis::Last => okx_execution::TcaReferencePriceBasis::Last,
+                ExecutionReferencePriceBasis::LimitPrice => {
+                    okx_execution::TcaReferencePriceBasis::LimitPrice
+                }
+            },
+            price_policy_version: value.decision_reference.price_policy_version.clone(),
+        },
+        tca_mechanics,
+    }
 }
 
 fn execution_risk_binding(value: &ExecutionRiskBindingRequest) -> ExecutionRiskBinding {
@@ -1373,6 +1796,115 @@ mod tests {
             created_at_ms: 100,
             updated_at_ms: 100,
         }
+    }
+
+    #[test]
+    fn full_execution_status_v3_stays_within_compact_transport_budget() {
+        let mut entry = entry();
+        entry.record.lineage = Some(okx_execution::ExecutionLineageBinding {
+            schema: EXECUTION_LINEAGE_SCHEMA_V2.to_owned(),
+            origin_evidence_id: format!("sha256:{}", "a".repeat(64)),
+            origin_schema: "o".repeat(128),
+            origin_version: "v".repeat(128),
+            authority_evidence_id: Some(format!("sha256:{}", "b".repeat(64))),
+            decision_reference: okx_execution::ExecutionDecisionReference {
+                decision_time_ms: 1_791_300_000_000,
+                price: "0.123456789012345678901234567890".to_owned(),
+                price_basis: okx_execution::TcaReferencePriceBasis::DecisionPrice,
+                price_policy_version: "p".repeat(128),
+            },
+            tca_mechanics: Some(okx_execution::ExecutionTcaMechanicsBinding {
+                source_reference_generation: "sha256:reference".to_owned(),
+                instrument_type: okx_execution::ExecutionTcaInstrumentType::Swap,
+                contract_type: "linear".to_owned(),
+                contract_value: "0.001".to_owned(),
+                settle_currency: "USDT".to_owned(),
+            }),
+        });
+        entry.record.protection = Some(okx_execution::ProtectiveOrderLink {
+            policy_version: "okx.protective-order/mark-market-v1".to_owned(),
+            algo_client_order_id: "prx01234567890123456789012345678".to_owned(),
+            trigger_price_basis: okx_execution::ProtectiveTriggerPriceBasis::Mark,
+            status: okx_execution::ProtectiveOrderStatus::Active,
+            algo_order_id: Some("12345678901234567890".to_owned()),
+            covered_size: Some("1234567890.123456789012345678".to_owned()),
+            failure_code: None,
+        });
+        entry.record.submission_timing = Some(okx_execution::ExecutionSubmissionTimingEvidence {
+            request_exchange_time_ms: 1_791_300_000_000,
+            okx_in_time_us: Some(1_791_300_000_100_000),
+            okx_out_time_us: Some(1_791_300_000_100_999),
+        });
+
+        let status = okx_execution::ExecutionStatusEnvelope {
+            schema: EXECUTION_STATUS_SCHEMA_V3,
+            execution: okx_execution::execution_status(&entry).expect("status"),
+            reverse: None,
+            lineage: entry.record.lineage.clone(),
+            protection: entry.record.protection.as_ref().map(|value| {
+                okx_execution::ProtectiveExecutionStatus {
+                    policy_version: value.policy_version.clone(),
+                    algo_client_order_id: value.algo_client_order_id.clone(),
+                    trigger_price_basis: value.trigger_price_basis,
+                    status: value.status,
+                    algo_order_id_present: value.algo_order_id.is_some(),
+                    covered_size: value.covered_size.clone(),
+                    failure_code: value.failure_code.clone(),
+                }
+            }),
+            submission_timing: entry
+                .record
+                .submission_timing
+                .as_ref()
+                .map(okx_execution::ExecutionSubmissionTimingStatus::from),
+        };
+        let tca = ExecutionTcaStatus::with_history(
+            ExecutionTcaAvailability::Available,
+            "final",
+            1,
+            true,
+            100,
+            Some(ExecutionTcaSummary {
+                requested_contracts: "1234567890.123456789012345678".to_owned(),
+                filled_contracts: "1234567890.123456789012345678".to_owned(),
+                unfilled_contracts: "0".to_owned(),
+                fill_ratio: "1".to_owned(),
+                fill_outcome: TcaFillOutcome::Complete,
+                fill_vwap: Some("1234567890.123456789012345678".to_owned()),
+                maker_contracts: Some("617283945.061728394506172839".to_owned()),
+                taker_contracts: Some("617283945.061728394506172839".to_owned()),
+                slippage_bps: Some("-1234567890.123456789012345678".to_owned()),
+                gross_slippage_settle: Some("-1234567890.123456789012345678".to_owned()),
+                settle_fee_cost: Some("1234567890.123456789012345678".to_owned()),
+                net_execution_cost_settle: Some("1234567890.123456789012345678".to_owned()),
+                reference_to_first_fill_ms: Some(u64::MAX),
+                reference_to_last_fill_ms: Some(u64::MAX),
+                implementation_shortfall_settle: Some("1234567890.123456789012345678".to_owned()),
+                implementation_shortfall_unavailable_reason: None,
+            }),
+            None,
+        );
+        let response = completed(
+            &request(),
+            GENERATED_AT,
+            EXECUTION_STATUS_SCHEMA_V3,
+            serde_json::to_value(ExecutionStatusResult {
+                status,
+                tca,
+                unattributed_analytics: ExecutionUnattributedAnalytics {
+                    post_fill_markout: "unavailable_no_versioned_post_fill_market_evidence",
+                    funding: "unavailable_no_per_intent_funding_attribution",
+                    counterfactual: "unavailable_no_versioned_counterfactual_evidence",
+                },
+            })
+            .expect("result"),
+        );
+        let bytes = serde_json::to_vec(&response).expect("response");
+        assert!(
+            bytes.len() < 8 * 1024,
+            "execution status response must stay below compact budget, got {} bytes",
+            bytes.len()
+        );
     }
 
     #[test]

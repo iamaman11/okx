@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 
 pub const EXECUTION_PLAN_SCHEMA_V1: &str = "okx.execution-plan/v1";
 pub const EXECUTION_LINEAGE_SCHEMA_V1: &str = "okx.execution-lineage/v1";
+pub const EXECUTION_LINEAGE_SCHEMA_V2: &str = "okx.execution-lineage/v2";
 const CLIENT_ORDER_ID_PREFIX: &str = "okx";
 const CLIENT_ORDER_ID_HASH_CHARS: usize = 29;
 const AMEND_REQUEST_ID_PREFIX: &str = "amx";
@@ -110,6 +111,23 @@ pub struct ExecutionDecisionReference {
     pub price_policy_version: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ExecutionTcaInstrumentType {
+    Swap,
+    Futures,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionTcaMechanicsBinding {
+    pub source_reference_generation: String,
+    pub instrument_type: ExecutionTcaInstrumentType,
+    pub contract_type: String,
+    pub contract_value: String,
+    pub settle_currency: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionLineageBinding {
@@ -120,6 +138,8 @@ pub struct ExecutionLineageBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority_evidence_id: Option<String>,
     pub decision_reference: ExecutionDecisionReference,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tca_mechanics: Option<ExecutionTcaMechanicsBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

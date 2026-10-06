@@ -12,11 +12,11 @@ use thiserror::Error;
 
 use crate::{
     DurableExecutionLedger, ExchangeOrderState, ExecutionLedgerEntry, ExecutionLedgerError,
-    ExecutionPlan, ExecutionRecord, ExecutionState, ExecutionTransitionError,
-    MutationPrepareDisposition, OrderMutationKind, OrderMutationRecord, OrderMutationResolution,
-    OrderMutationState, OrderSide, OrderType, PositionSide, PrepareOutcome,
-    ProtectiveOrderResolution, ProtectiveTriggerPriceBasis, TradeMode, classify_prepare_result,
-    derive_amend_request_id, require_live_trading_enabled,
+    ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
+    ExecutionTransitionError, MutationPrepareDisposition, OrderMutationKind, OrderMutationRecord,
+    OrderMutationResolution, OrderMutationState, OrderSide, OrderType, PositionSide,
+    PrepareOutcome, ProtectiveOrderResolution, ProtectiveTriggerPriceBasis, TradeMode,
+    classify_prepare_result, derive_amend_request_id, require_live_trading_enabled,
 };
 
 #[async_trait]
@@ -263,9 +263,20 @@ where
         plan: ExecutionPlan,
         observed_at_ms: u64,
     ) -> Result<PrepareOutcome, OrderExecutorError> {
-        Ok(classify_prepare_result(
-            self.ledger.prepare(plan, observed_at_ms),
-        )?)
+        self.prepare_with_lineage(plan, None, observed_at_ms)
+    }
+
+    pub fn prepare_with_lineage(
+        &mut self,
+        plan: ExecutionPlan,
+        lineage: Option<ExecutionLineageBinding>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
+        Ok(classify_prepare_result(self.ledger.prepare_with_lineage(
+            plan,
+            lineage,
+            observed_at_ms,
+        ))?)
     }
 
     pub fn prepare_reverse_close(
@@ -274,11 +285,24 @@ where
         target_position_side: PositionSide,
         observed_at_ms: u64,
     ) -> Result<PrepareOutcome, OrderExecutorError> {
-        Ok(classify_prepare_result(self.ledger.prepare_reverse_close(
-            plan,
-            target_position_side,
-            observed_at_ms,
-        ))?)
+        self.prepare_reverse_close_with_lineage(plan, target_position_side, None, observed_at_ms)
+    }
+
+    pub fn prepare_reverse_close_with_lineage(
+        &mut self,
+        plan: ExecutionPlan,
+        target_position_side: PositionSide,
+        lineage: Option<ExecutionLineageBinding>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
+        Ok(classify_prepare_result(
+            self.ledger.prepare_reverse_close_with_lineage(
+                plan,
+                target_position_side,
+                lineage,
+                observed_at_ms,
+            ),
+        )?)
     }
 
     pub fn prepare_reverse_open(
@@ -389,7 +413,11 @@ where
             Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
         };
 
-        self.ledger.begin_submission(intent_id, observed_at_ms)?;
+        self.ledger.begin_submission_with_timing(
+            intent_id,
+            Some(timing.request_time_ms()),
+            observed_at_ms,
+        )?;
 
         match self.gateway.place_order(request, timing, rate_plan).await {
             Err(OkxError::RateLimited { evidence }) if evidence.request_sent => {
@@ -411,24 +439,37 @@ where
                     .mark_unknown_submission(intent_id, observed_at_ms)?;
                 Ok(SubmitDisposition::UnknownSubmission(entry))
             }
-            Ok(response) => match classify_place_response(&entry.record.plan, response) {
-                PlaceResponse::Acknowledged(order_id) => {
-                    let entry = self
-                        .ledger
-                        .acknowledge(intent_id, order_id, observed_at_ms)?;
-                    Ok(SubmitDisposition::Acknowledged(entry))
+            Ok(response) => {
+                let gateway_timing_us = okx_gateway_timing(&response);
+                match classify_place_response(&entry.record.plan, response) {
+                    PlaceResponse::Acknowledged(order_id) => {
+                        let entry = self.ledger.acknowledge_with_gateway_timing(
+                            intent_id,
+                            order_id,
+                            gateway_timing_us,
+                            observed_at_ms,
+                        )?;
+                        Ok(SubmitDisposition::Acknowledged(entry))
+                    }
+                    PlaceResponse::Rejected(code) => {
+                        let entry = self.ledger.reject_known_with_gateway_timing(
+                            intent_id,
+                            code,
+                            gateway_timing_us,
+                            observed_at_ms,
+                        )?;
+                        Ok(SubmitDisposition::Rejected(entry))
+                    }
+                    PlaceResponse::Ambiguous => {
+                        let entry = self.ledger.mark_unknown_submission_with_gateway_timing(
+                            intent_id,
+                            gateway_timing_us,
+                            observed_at_ms,
+                        )?;
+                        Ok(SubmitDisposition::UnknownSubmission(entry))
+                    }
                 }
-                PlaceResponse::Rejected(code) => {
-                    let entry = self.ledger.reject_known(intent_id, code, observed_at_ms)?;
-                    Ok(SubmitDisposition::Rejected(entry))
-                }
-                PlaceResponse::Ambiguous => {
-                    let entry = self
-                        .ledger
-                        .mark_unknown_submission(intent_id, observed_at_ms)?;
-                    Ok(SubmitDisposition::UnknownSubmission(entry))
-                }
-            },
+            }
         }
     }
 
@@ -668,6 +709,12 @@ where
     fn gateway(&self) -> &G {
         &self.gateway
     }
+}
+
+fn okx_gateway_timing<T>(response: &TradeResponse<T>) -> Option<(u64, u64)> {
+    let in_time_us = response.in_time_us.trim().parse::<u64>().ok()?;
+    let out_time_us = response.out_time_us.trim().parse::<u64>().ok()?;
+    (in_time_us > 0 && out_time_us >= in_time_us).then_some((in_time_us, out_time_us))
 }
 
 enum PlaceResponse {

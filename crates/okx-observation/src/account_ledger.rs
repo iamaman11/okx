@@ -99,6 +99,13 @@ pub struct ExchangeOrderIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionFillEvidence {
+    pub fills: Vec<ExchangeFillIdentity>,
+    pub pages: usize,
+    pub complete_within_bound: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExchangeFillIdentity {
     pub instrument_type: String,
     pub instrument_id: String,
@@ -313,28 +320,25 @@ impl AccountLedgerFacts {
                 |row| row.instrument_id.as_str(),
             )?);
             for row in &history.rows {
-                require_expected_type(expected_type, &row.instrument_type)?;
-                let instrument_id = required("fills_history.instId", &row.instrument_id)?;
-                let fill_time = timestamp_required("fills_history.fillTime", &row.fill_time_ms)?;
-                let trade_id = required("fills_history.tradeId", &row.trade_id)?;
-                let identity = format!("{instrument_id}:{trade_id}");
+                let fill = normalize_fill_identity(expected_type, row)?;
+                let identity = format!("{}:{}", fill.instrument_id, fill.trade_id);
                 if !fill_ids.insert(identity.clone()) {
                     return Err(AccountLedgerError::DuplicateIdentity(format!(
                         "fill:{identity}"
                     )));
                 }
 
-                let (fee, fee_currency) = if row.fee.trim().is_empty() {
-                    (None, None)
-                } else {
-                    let fee = decimal_required("fills_history.fee", &row.fee)?;
-                    let currency = required("fills_history.feeCcy", &row.fee_currency)?;
-                    add_aggregate(&mut fees, currency, fee);
-                    (Some(fee.normalize().to_string()), Some(currency.to_owned()))
-                };
+                if let (Some(fee), Some(currency)) =
+                    (fill.fee.as_deref(), fill.fee_currency.as_deref())
+                {
+                    add_aggregate(
+                        &mut fees,
+                        currency,
+                        decimal_required("fills_history.fee", fee)?,
+                    );
+                }
 
-                let order_id = optional(&row.order_id).map(str::to_owned);
-                if let Some(order_id) = order_id.as_deref() {
+                if let Some(order_id) = fill.order_id.as_deref() {
                     fill_order_links_checked += 1;
                     if !order_ids.contains(order_id) {
                         if order_history_complete
@@ -345,46 +349,14 @@ impl AccountLedgerFacts {
                             return Err(AccountLedgerError::FillOrderMissing {
                                 instrument_type: expected_type.clone(),
                                 order_id: order_id.to_owned(),
-                                trade_id: trade_id.to_owned(),
+                                trade_id: fill.trade_id.clone(),
                             });
                         }
                         unresolved_due_to_truncation += 1;
                     }
                 }
 
-                let side = required("fills_history.side", &row.side)?.to_owned();
-                let position_side =
-                    required("fills_history.posSide", &row.position_side)?.to_owned();
-                let fill_price = decimal_required("fills_history.fillPx", &row.fill_price)?;
-                if fill_price <= Decimal::ZERO {
-                    return Err(AccountLedgerError::InvalidDecimal {
-                        field: "fills_history.fillPx",
-                        value: row.fill_price.clone(),
-                    });
-                }
-                let fill_size = decimal_required("fills_history.fillSz", &row.fill_size)?;
-                if fill_size <= Decimal::ZERO {
-                    return Err(AccountLedgerError::InvalidDecimal {
-                        field: "fills_history.fillSz",
-                        value: row.fill_size.clone(),
-                    });
-                }
-
-                exchange_fills.push(ExchangeFillIdentity {
-                    instrument_type: row.instrument_type.clone(),
-                    instrument_id: instrument_id.to_owned(),
-                    order_id,
-                    client_order_id: row.client_order_id.clone(),
-                    trade_id: trade_id.to_owned(),
-                    side,
-                    position_side,
-                    fill_price: fill_price.normalize().to_string(),
-                    fill_size: fill_size.normalize().to_string(),
-                    fee,
-                    fee_currency,
-                    execution_type: optional(&row.execution_type).map(str::to_owned),
-                    fill_time_ms: fill_time,
-                });
+                exchange_fills.push(fill);
             }
         }
 
@@ -476,6 +448,15 @@ pub enum AccountLedgerError {
     DuplicateIdentity(String),
 
     #[error(
+        "execution fill identity field '{field}' mismatch: expected '{expected}', actual '{actual}'"
+    )]
+    ExecutionFillIdentityMismatch {
+        field: &'static str,
+        expected: String,
+        actual: String,
+    },
+
+    #[error(
         "position '{position_id}' realized PnL '{realized}' does not reconcile to components '{components}'"
     )]
     PositionPnlIdentityMismatch {
@@ -498,6 +479,108 @@ pub enum AccountLedgerError {
 struct Aggregate {
     amount: Decimal,
     events: usize,
+}
+
+pub fn normalize_execution_fill_history(
+    expected_type: &str,
+    expected_instrument_id: &str,
+    expected_order_id: &str,
+    expected_client_order_id: &str,
+    history: &BoundedHistory<FillHistory>,
+) -> Result<ExecutionFillEvidence, AccountLedgerError> {
+    let mut seen = BTreeSet::new();
+    let mut fills = Vec::with_capacity(history.rows.len());
+    for row in &history.rows {
+        let fill = normalize_fill_identity(expected_type, row)?;
+        require_execution_fill_identity("instId", expected_instrument_id, &fill.instrument_id)?;
+        require_execution_fill_identity(
+            "ordId",
+            expected_order_id,
+            fill.order_id.as_deref().unwrap_or_default(),
+        )?;
+        require_execution_fill_identity(
+            "clOrdId",
+            expected_client_order_id,
+            &fill.client_order_id,
+        )?;
+
+        let identity = format!("{}:{}", fill.instrument_id, fill.trade_id);
+        if !seen.insert(identity.clone()) {
+            return Err(AccountLedgerError::DuplicateIdentity(format!(
+                "fill:{identity}"
+            )));
+        }
+        fills.push(fill);
+    }
+
+    Ok(ExecutionFillEvidence {
+        fills,
+        pages: history.pages,
+        complete_within_bound: history.complete,
+    })
+}
+
+fn require_execution_fill_identity(
+    field: &'static str,
+    expected: &str,
+    actual: &str,
+) -> Result<(), AccountLedgerError> {
+    if !expected.trim().is_empty() && expected == actual {
+        Ok(())
+    } else {
+        Err(AccountLedgerError::ExecutionFillIdentityMismatch {
+            field,
+            expected: expected.to_owned(),
+            actual: actual.to_owned(),
+        })
+    }
+}
+
+fn normalize_fill_identity(
+    expected_type: &str,
+    row: &FillHistory,
+) -> Result<ExchangeFillIdentity, AccountLedgerError> {
+    require_expected_type(expected_type, &row.instrument_type)?;
+    let instrument_id = required("fills_history.instId", &row.instrument_id)?;
+    let fill_time = timestamp_required("fills_history.fillTime", &row.fill_time_ms)?;
+    let trade_id = required("fills_history.tradeId", &row.trade_id)?;
+    let (fee, fee_currency) = if row.fee.trim().is_empty() {
+        (None, None)
+    } else {
+        let fee = decimal_required("fills_history.fee", &row.fee)?;
+        let currency = required("fills_history.feeCcy", &row.fee_currency)?;
+        (Some(fee.normalize().to_string()), Some(currency.to_owned()))
+    };
+    let fill_price = decimal_required("fills_history.fillPx", &row.fill_price)?;
+    if fill_price <= Decimal::ZERO {
+        return Err(AccountLedgerError::InvalidDecimal {
+            field: "fills_history.fillPx",
+            value: row.fill_price.clone(),
+        });
+    }
+    let fill_size = decimal_required("fills_history.fillSz", &row.fill_size)?;
+    if fill_size <= Decimal::ZERO {
+        return Err(AccountLedgerError::InvalidDecimal {
+            field: "fills_history.fillSz",
+            value: row.fill_size.clone(),
+        });
+    }
+
+    Ok(ExchangeFillIdentity {
+        instrument_type: row.instrument_type.clone(),
+        instrument_id: instrument_id.to_owned(),
+        order_id: optional(&row.order_id).map(str::to_owned),
+        client_order_id: row.client_order_id.clone(),
+        trade_id: trade_id.to_owned(),
+        side: required("fills_history.side", &row.side)?.to_owned(),
+        position_side: required("fills_history.posSide", &row.position_side)?.to_owned(),
+        fill_price: fill_price.normalize().to_string(),
+        fill_size: fill_size.normalize().to_string(),
+        fee,
+        fee_currency,
+        execution_type: optional(&row.execution_type).map(str::to_owned),
+        fill_time_ms: fill_time,
+    })
 }
 
 fn current_account_as_of(snapshot: &AccountSnapshot) -> Result<Option<String>, AccountLedgerError> {
@@ -886,6 +969,41 @@ mod tests {
             pages: 1,
             complete: true,
         }
+    }
+
+    #[test]
+    fn exact_execution_fill_history_preserves_bound_and_rejects_identity_drift() {
+        let history = BoundedHistory {
+            rows: vec![fill_history()],
+            pages: 1,
+            complete: false,
+        };
+        let evidence = normalize_execution_fill_history(
+            "SWAP",
+            "DOGE-USDT-SWAP",
+            "ord-1",
+            "okx-managed",
+            &history,
+        )
+        .expect("exact fill evidence");
+        assert_eq!(evidence.fills.len(), 1);
+        assert_eq!(evidence.pages, 1);
+        assert!(!evidence.complete_within_bound);
+
+        let mismatch = normalize_execution_fill_history(
+            "SWAP",
+            "DOGE-USDT-SWAP",
+            "ord-1",
+            "different-client",
+            &history,
+        );
+        assert!(matches!(
+            mismatch,
+            Err(AccountLedgerError::ExecutionFillIdentityMismatch {
+                field: "clOrdId",
+                ..
+            })
+        ));
     }
 
     #[test]

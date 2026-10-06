@@ -7,10 +7,11 @@ mod state;
 mod validation;
 
 pub use contract::{
-    EXECUTION_STATUS_SCHEMA_V1, EXECUTION_STATUS_SCHEMA_V2, ExecutionStatusEnvelope,
-    ExecutionStatusSnapshot, PrepareDeferral, PrepareFailure, PrepareOutcome, PrepareRejection,
-    ReverseExecutionStage, ReverseExecutionStatus, classify_prepare_result, execution_status,
-    execution_status_with_ledger,
+    EXECUTION_STATUS_CORE_SCHEMA_V2, EXECUTION_STATUS_SCHEMA_V1, EXECUTION_STATUS_SCHEMA_V2,
+    EXECUTION_STATUS_SCHEMA_V3, ExecutionStatusEnvelope, ExecutionStatusSnapshot,
+    ExecutionSubmissionTimingStatus, PrepareDeferral, PrepareFailure, PrepareOutcome,
+    PrepareRejection, ProtectiveExecutionStatus, ReverseExecutionStage, ReverseExecutionStatus,
+    classify_prepare_result, execution_status, execution_status_with_ledger,
 };
 pub use executor::{
     ExecutionGateway, MutationSubmitDisposition, OrderExecutor, OrderExecutorError,
@@ -18,16 +19,16 @@ pub use executor::{
 };
 pub use ledger::{
     DurableExecutionLedger, EXECUTION_LEDGER_SCHEMA_V1, EXECUTION_LEDGER_SCHEMA_V2,
-    EXECUTION_LEDGER_SCHEMA_V3, EXECUTION_LEDGER_SCHEMA_V4, ExecutionLedgerEntry,
-    ExecutionLedgerError, ExecutionLedgerStore, MAX_EXECUTION_LEDGER_RECORDS,
+    EXECUTION_LEDGER_SCHEMA_V3, EXECUTION_LEDGER_SCHEMA_V4, EXECUTION_LEDGER_SCHEMA_V5,
+    ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, MAX_EXECUTION_LEDGER_RECORDS,
     MutationPrepareDisposition, PrepareDisposition,
 };
 pub use model::{
-    EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_PLAN_SCHEMA_V1, ExecutionAction,
-    ExecutionDecisionReference, ExecutionIntent, ExecutionLineageBinding, ExecutionPlan,
-    ExecutionRiskBinding, OpenRiskEvidence, OrderSide, OrderType, PositionSide, TradeMode,
-    derive_amend_request_id, derive_client_order_id, derive_protective_algo_client_id,
-    derive_reverse_open_intent_id,
+    EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_PLAN_SCHEMA_V1,
+    ExecutionAction, ExecutionDecisionReference, ExecutionIntent, ExecutionLineageBinding,
+    ExecutionPlan, ExecutionRiskBinding, ExecutionTcaInstrumentType, ExecutionTcaMechanicsBinding,
+    OpenRiskEvidence, OrderSide, OrderType, PositionSide, TradeMode, derive_amend_request_id,
+    derive_client_order_id, derive_protective_algo_client_id, derive_reverse_open_intent_id,
 };
 pub use okx_analysis::TcaReferencePriceBasis;
 pub use reconciliation::{
@@ -36,11 +37,11 @@ pub use reconciliation::{
 };
 pub use state::{
     ALLOW_LIVE_TRADING_DEFAULT, ExchangeOrderState, ExecutionRecord, ExecutionState,
-    ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
-    OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
-    ProtectiveOrderLink, ProtectiveOrderResolution, ProtectiveOrderStatus,
-    ProtectiveTriggerPriceBasis, ReverseContinuation, ReverseExecutionLink, ReverseLeg,
-    require_live_trading_enabled,
+    ExecutionSubmissionTimingEvidence, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION,
+    OrderMutationKind, OrderMutationRecord, OrderMutationResolution, OrderMutationState,
+    PROTECTIVE_ORDER_POLICY_V1, ProtectiveOrderLink, ProtectiveOrderResolution,
+    ProtectiveOrderStatus, ProtectiveTriggerPriceBasis, ReverseContinuation, ReverseExecutionLink,
+    ReverseLeg, require_live_trading_enabled,
 };
 pub use validation::{
     ExecutionValidationError, PreMutationRiskDisposition, prepare_execution,

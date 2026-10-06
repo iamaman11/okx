@@ -5,9 +5,10 @@ use okx_api::{
     PositionBuilderSnapshot,
 };
 use okx_observation::{
-    AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, FeeScheduleError,
-    FeeScheduleInput, FeeScheduleSnapshot, InstrumentRulesSnapshot, TradingCapabilitiesError,
-    TradingCapabilitiesInput, TradingCapabilitiesSnapshot,
+    AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, ExecutionFillEvidence,
+    FeeScheduleError, FeeScheduleInput, FeeScheduleSnapshot, InstrumentRulesSnapshot,
+    TradingCapabilitiesError, TradingCapabilitiesInput, TradingCapabilitiesSnapshot,
+    normalize_execution_fill_history,
 };
 use thiserror::Error;
 
@@ -246,6 +247,29 @@ impl AccountBootstrapper {
         let config = self.api.config().await?;
         strict_read_only_permissions(&config.perm)?;
         Ok(self.api.account_position_risk().await?)
+    }
+
+    pub async fn execution_fills(
+        &self,
+        instrument_type: InstrumentType,
+        instrument_id: &str,
+        order_id: &str,
+        client_order_id: &str,
+    ) -> Result<ExecutionFillEvidence, AccountLedgerBootstrapError> {
+        let config = self.api.config().await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
+        let history = self
+            .history
+            .fills_history_for_order(instrument_type, instrument_id, order_id)
+            .await?;
+        Ok(normalize_execution_fill_history(
+            &instrument_type.to_string(),
+            instrument_id,
+            order_id,
+            client_order_id,
+            &history,
+        )?)
     }
 
     pub async fn ledger_facts(

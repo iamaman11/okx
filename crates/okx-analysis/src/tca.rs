@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::{AnalysisError, decimal, positive_decimal};
 
 pub const EXECUTION_TCA_SCHEMA_V1: &str = "okx.execution-tca/v1";
+pub const EXECUTION_TCA_REPORT_SCHEMA_V2: &str = "okx.execution-tca/v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +74,111 @@ pub struct ExecutionTcaAnalysis {
     pub net_execution_cost_settle: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TcaFillOutcome {
+    Missed,
+    Partial,
+    Complete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionTcaReport {
+    pub schema: String,
+    pub requested_contracts: String,
+    pub filled_contracts: String,
+    pub unfilled_contracts: String,
+    pub fill_ratio: String,
+    pub fill_outcome: TcaFillOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_execution: Option<ExecutionTcaAnalysis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implementation_shortfall_settle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implementation_shortfall_unavailable_reason: Option<&'static str>,
+}
+
+pub fn analyze_execution_tca_report(
+    instrument_id: &str,
+    side: TcaSide,
+    contract_value: &str,
+    settle_currency: &str,
+    requested_contracts: &str,
+    reference: &TcaReference,
+    fills: &[ExchangeFillIdentity],
+) -> Result<ExecutionTcaReport, AnalysisError> {
+    let requested = positive_decimal("tca.requested_contracts", requested_contracts)?;
+    validate_tca_context(contract_value, reference)?;
+    let observed_execution = if fills.is_empty() {
+        None
+    } else {
+        Some(analyze_execution_tca(
+            instrument_id,
+            side,
+            contract_value,
+            settle_currency,
+            reference,
+            fills,
+        )?)
+    };
+    let filled = observed_execution
+        .as_ref()
+        .map(|analysis| decimal("tca.filled_contracts", &analysis.filled_contracts))
+        .transpose()?
+        .unwrap_or(Decimal::ZERO);
+    if filled > requested {
+        return Err(AnalysisError::TcaFilledExceedsRequested {
+            filled: filled.normalize().to_string(),
+            requested: requested.normalize().to_string(),
+        });
+    }
+
+    let unfilled = requested - filled;
+    let fill_ratio = filled / requested;
+    let fill_outcome = if filled.is_zero() {
+        TcaFillOutcome::Missed
+    } else if filled == requested {
+        TcaFillOutcome::Complete
+    } else {
+        TcaFillOutcome::Partial
+    };
+
+    let (implementation_shortfall_settle, implementation_shortfall_unavailable_reason) =
+        match (fill_outcome, observed_execution.as_ref()) {
+            (TcaFillOutcome::Complete, Some(observed))
+                if reference.price_basis == TcaReferencePriceBasis::DecisionPrice =>
+            {
+                if let Some(cost) = observed.net_execution_cost_settle.clone() {
+                    (Some(cost), None)
+                } else {
+                    (None, Some("settle_fee_cost_unavailable"))
+                }
+            }
+            (TcaFillOutcome::Complete, Some(_)) => {
+                (None, Some("decision_price_reference_required"))
+            }
+            (TcaFillOutcome::Partial, _) => (None, Some("unfilled_opportunity_cost_not_observed")),
+            (TcaFillOutcome::Missed, _) => {
+                (None, Some("missed_fill_opportunity_cost_not_observed"))
+            }
+            (TcaFillOutcome::Complete, None) => {
+                return Err(AnalysisError::EmptyTcaFills);
+            }
+        };
+
+    Ok(ExecutionTcaReport {
+        schema: EXECUTION_TCA_REPORT_SCHEMA_V2.to_owned(),
+        requested_contracts: requested.normalize().to_string(),
+        filled_contracts: filled.normalize().to_string(),
+        unfilled_contracts: unfilled.normalize().to_string(),
+        fill_ratio: fill_ratio.normalize().to_string(),
+        fill_outcome,
+        observed_execution,
+        implementation_shortfall_settle,
+        implementation_shortfall_unavailable_reason,
+    })
+}
+
 pub fn analyze_execution_tca(
     instrument_id: &str,
     side: TcaSide,
@@ -84,16 +190,7 @@ pub fn analyze_execution_tca(
     if fills.is_empty() {
         return Err(AnalysisError::EmptyTcaFills);
     }
-    if reference.reference_time_ms == 0 {
-        return Err(AnalysisError::InvalidTcaReferenceTimestamp);
-    }
-    if reference.price_policy_version.trim().is_empty()
-        || reference.price_policy_version.len() > 128
-    {
-        return Err(AnalysisError::InvalidTcaReferencePolicy);
-    }
-    let reference_price = positive_decimal("tca.reference_price", &reference.price)?;
-    let contract_value = positive_decimal("tca.contract_value", contract_value)?;
+    let (reference_price, contract_value) = validate_tca_context(contract_value, reference)?;
 
     let mut trade_ids = BTreeSet::new();
     let mut filled_contracts = Decimal::ZERO;
@@ -218,6 +315,23 @@ pub fn analyze_execution_tca(
     })
 }
 
+fn validate_tca_context(
+    contract_value: &str,
+    reference: &TcaReference,
+) -> Result<(Decimal, Decimal), AnalysisError> {
+    if reference.reference_time_ms == 0 {
+        return Err(AnalysisError::InvalidTcaReferenceTimestamp);
+    }
+    if reference.price_policy_version.trim().is_empty()
+        || reference.price_policy_version.len() > 128
+    {
+        return Err(AnalysisError::InvalidTcaReferencePolicy);
+    }
+    let reference_price = positive_decimal("tca.reference_price", &reference.price)?;
+    let contract_value = positive_decimal("tca.contract_value", contract_value)?;
+    Ok((reference_price, contract_value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +359,175 @@ mod tests {
             execution_type: Some(execution_type.to_owned()),
             fill_time_ms,
         }
+    }
+
+    #[test]
+    fn tca_report_distinguishes_complete_partial_and_missed_without_inventing_opportunity_cost() {
+        let reference = TcaReference {
+            price: "100".to_owned(),
+            reference_time_ms: 1_000,
+            price_policy_version: "decision-price/v1".to_owned(),
+            price_basis: TcaReferencePriceBasis::DecisionPrice,
+        };
+        let complete = analyze_execution_tca_report(
+            "BTC-USDT-SWAP",
+            TcaSide::Buy,
+            "1",
+            "USDT",
+            "2",
+            &reference,
+            &[
+                fill("trade-1", "100", "1", "M", "-0.1", 1_100),
+                fill("trade-2", "101", "1", "T", "-0.1", 1_200),
+            ],
+        )
+        .expect("complete");
+        assert_eq!(complete.fill_outcome, TcaFillOutcome::Complete);
+        assert_eq!(complete.fill_ratio, "1");
+        assert_eq!(complete.unfilled_contracts, "0");
+        assert_eq!(
+            complete.implementation_shortfall_settle.as_deref(),
+            Some("1.2")
+        );
+        assert!(
+            complete
+                .implementation_shortfall_unavailable_reason
+                .is_none()
+        );
+
+        let partial = analyze_execution_tca_report(
+            "BTC-USDT-SWAP",
+            TcaSide::Buy,
+            "1",
+            "USDT",
+            "2",
+            &reference,
+            &[fill("trade-3", "100", "1", "T", "-0.1", 1_100)],
+        )
+        .expect("partial");
+        assert_eq!(partial.fill_outcome, TcaFillOutcome::Partial);
+        assert_eq!(partial.fill_ratio, "0.5");
+        assert_eq!(partial.unfilled_contracts, "1");
+        assert!(partial.implementation_shortfall_settle.is_none());
+        assert_eq!(
+            partial.implementation_shortfall_unavailable_reason,
+            Some("unfilled_opportunity_cost_not_observed")
+        );
+
+        let missed = analyze_execution_tca_report(
+            "BTC-USDT-SWAP",
+            TcaSide::Buy,
+            "1",
+            "USDT",
+            "2",
+            &reference,
+            &[],
+        )
+        .expect("missed");
+        assert_eq!(missed.fill_outcome, TcaFillOutcome::Missed);
+        assert_eq!(missed.fill_ratio, "0");
+        assert_eq!(missed.filled_contracts, "0");
+        assert!(missed.observed_execution.is_none());
+        assert_eq!(
+            missed.implementation_shortfall_unavailable_reason,
+            Some("missed_fill_opportunity_cost_not_observed")
+        );
+    }
+
+    #[test]
+    fn missed_tca_still_validates_reference_and_contract_mechanics() {
+        let invalid_reference = TcaReference {
+            price: "0".to_owned(),
+            reference_time_ms: 0,
+            price_policy_version: String::new(),
+            price_basis: TcaReferencePriceBasis::DecisionPrice,
+        };
+        assert!(matches!(
+            analyze_execution_tca_report(
+                "BTC-USDT-SWAP",
+                TcaSide::Buy,
+                "1",
+                "USDT",
+                "1",
+                &invalid_reference,
+                &[],
+            ),
+            Err(AnalysisError::InvalidTcaReferenceTimestamp)
+        ));
+
+        let valid_reference = TcaReference {
+            price: "100".to_owned(),
+            reference_time_ms: 1_000,
+            price_policy_version: "decision-price/v1".to_owned(),
+            price_basis: TcaReferencePriceBasis::DecisionPrice,
+        };
+        assert!(matches!(
+            analyze_execution_tca_report(
+                "BTC-USDT-SWAP",
+                TcaSide::Buy,
+                "0",
+                "USDT",
+                "1",
+                &valid_reference,
+                &[],
+            ),
+            Err(AnalysisError::NonPositive("tca.contract_value"))
+        ));
+    }
+
+    #[test]
+    fn complete_non_decision_benchmark_does_not_claim_implementation_shortfall() {
+        let report = analyze_execution_tca_report(
+            "BTC-USDT-SWAP",
+            TcaSide::Buy,
+            "1",
+            "USDT",
+            "1",
+            &TcaReference {
+                price: "100".to_owned(),
+                reference_time_ms: 1_000,
+                price_policy_version: "mark-reference/v1".to_owned(),
+                price_basis: TcaReferencePriceBasis::Mark,
+            },
+            &[fill("trade-mark", "101", "1", "T", "-0.1", 1_100)],
+        )
+        .expect("complete benchmark report");
+
+        assert_eq!(report.fill_outcome, TcaFillOutcome::Complete);
+        assert_eq!(
+            report
+                .observed_execution
+                .as_ref()
+                .and_then(|value| value.net_execution_cost_settle.as_deref()),
+            Some("1.1")
+        );
+        assert!(report.implementation_shortfall_settle.is_none());
+        assert_eq!(
+            report.implementation_shortfall_unavailable_reason,
+            Some("decision_price_reference_required")
+        );
+    }
+
+    #[test]
+    fn tca_report_rejects_fills_above_requested_size() {
+        let result = analyze_execution_tca_report(
+            "BTC-USDT-SWAP",
+            TcaSide::Buy,
+            "1",
+            "USDT",
+            "1",
+            &TcaReference {
+                price: "100".to_owned(),
+                reference_time_ms: 1_000,
+                price_policy_version: "decision-price/v1".to_owned(),
+                price_basis: TcaReferencePriceBasis::DecisionPrice,
+            },
+            &[fill("trade-1", "100", "2", "T", "-0.1", 1_100)],
+        );
+        assert!(matches!(
+            result,
+            Err(AnalysisError::TcaFilledExceedsRequested { .. })
+        ));
     }
 
     #[test]

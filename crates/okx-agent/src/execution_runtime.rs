@@ -8,9 +8,9 @@ use okx_api::{
 };
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
-    ExecutionLedgerEntry, ExecutionLedgerStore, ExecutionPlan, ExecutionStatusEnvelope,
-    OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome, SubmitDisposition,
-    execution_status_with_ledger, reconcile_account_ledger,
+    ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
+    ExecutionPlan, ExecutionStatusEnvelope, OrderExecutor, OrderExecutorError, PositionSide,
+    PrepareOutcome, SubmitDisposition, execution_status_with_ledger, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -165,7 +165,19 @@ impl ExecutionRuntime {
         plan: ExecutionPlan,
         observed_at_ms: u64,
     ) -> Result<PrepareOutcome, OrderExecutorError> {
-        self.executor.lock().await.prepare(plan, observed_at_ms)
+        self.prepare_with_lineage(plan, None, observed_at_ms).await
+    }
+
+    pub async fn prepare_with_lineage(
+        &self,
+        plan: ExecutionPlan,
+        lineage: Option<ExecutionLineageBinding>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
+        self.executor
+            .lock()
+            .await
+            .prepare_with_lineage(plan, lineage, observed_at_ms)
     }
 
     pub async fn prepare_reverse_close(
@@ -174,10 +186,21 @@ impl ExecutionRuntime {
         target_position_side: PositionSide,
         observed_at_ms: u64,
     ) -> Result<PrepareOutcome, OrderExecutorError> {
+        self.prepare_reverse_close_with_lineage(plan, target_position_side, None, observed_at_ms)
+            .await
+    }
+
+    pub async fn prepare_reverse_close_with_lineage(
+        &self,
+        plan: ExecutionPlan,
+        target_position_side: PositionSide,
+        lineage: Option<ExecutionLineageBinding>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareOutcome, OrderExecutorError> {
         self.executor
             .lock()
             .await
-            .prepare_reverse_close(plan, target_position_side, observed_at_ms)
+            .prepare_reverse_close_with_lineage(plan, target_position_side, lineage, observed_at_ms)
     }
 
     pub async fn prepare_reverse_open(
@@ -208,8 +231,27 @@ impl ExecutionRuntime {
     }
 
     pub async fn status(&self, intent_id: &str) -> AgentResult<Option<ExecutionStatusEnvelope>> {
+        Ok(self
+            .status_with_entry(intent_id)
+            .await?
+            .map(|(_, status)| status))
+    }
+
+    pub async fn status_with_entry(
+        &self,
+        intent_id: &str,
+    ) -> AgentResult<Option<(ExecutionLedgerEntry, ExecutionStatusEnvelope)>> {
         let executor = self.executor.lock().await;
-        execution_status_with_ledger(executor.ledger(), intent_id).map_err(AgentError::from)
+        let Some(entry) = executor.ledger().get(intent_id).cloned() else {
+            return Ok(None);
+        };
+        let status =
+            execution_status_with_ledger(executor.ledger(), intent_id)?.ok_or_else(|| {
+                AgentError::ExecutionLedger(ExecutionLedgerError::IntentNotFound(
+                    intent_id.to_owned(),
+                ))
+            })?;
+        Ok(Some((entry, status)))
     }
 
     pub async fn live_trading_enabled(&self) -> bool {

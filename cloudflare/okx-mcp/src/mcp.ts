@@ -375,6 +375,23 @@ export const mcpApi = {
             inputSchema: { type: "object", properties: {}, additionalProperties: false },
           },
           {
+            name: "execution_status",
+            description: "Get one compact read-only durable execution status with lineage, protective state, gateway timing and exact-fill TCA evidence when available.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                intent_id: {
+                  type: "string",
+                  minLength: 16,
+                  maxLength: 128,
+                  pattern: "^[A-Za-z0-9_-]+$",
+                },
+              },
+              required: ["intent_id"],
+              additionalProperties: false,
+            },
+          },
+          {
             name: "portfolio_risk",
             description: "Evaluate coherent read-only portfolio risk against an explicit versioned mandate and hard-risk policy, with OKX account-position-risk oracle comparison.",
             inputSchema: {
@@ -1310,6 +1327,25 @@ export const mcpApi = {
           schema: "okx.agent.request/v1",
           request_id: requestId(),
           operation: { type: "account_summary" },
+        };
+        return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+      }
+      if (name === "execution_status") {
+        const intentId = typeof args.intent_id === "string" ? args.intent_id : "";
+        if (
+          intentId.length < 16 ||
+          intentId.length > 128 ||
+          !/^[A-Za-z0-9_-]+$/.test(intentId)
+        ) {
+          return jsonRpcError(id, -32602, "invalid intent_id");
+        }
+        const agentRequest = {
+          schema: "okx.agent.request/v1",
+          request_id: requestId(),
+          operation: {
+            type: "execution_status",
+            intent_id: intentId,
+          },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }
