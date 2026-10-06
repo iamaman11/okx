@@ -245,10 +245,12 @@ impl ExecutionRuntime {
         let Some(entry) = executor.ledger().get(intent_id).cloned() else {
             return Ok(None);
         };
-        let status = execution_status_with_ledger(executor.ledger(), intent_id)?
-            .ok_or_else(|| AgentError::ExecutionLedger(ExecutionLedgerError::IntentNotFound(
-                intent_id.to_owned(),
-            )))?;
+        let status =
+            execution_status_with_ledger(executor.ledger(), intent_id)?.ok_or_else(|| {
+                AgentError::ExecutionLedger(ExecutionLedgerError::IntentNotFound(
+                    intent_id.to_owned(),
+                ))
+            })?;
         Ok(Some((entry, status)))
     }
 
