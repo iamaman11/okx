@@ -71,8 +71,9 @@ pub use strategy::{
     baseline_strategy_research_metadata, baseline_strategy_version, evaluate_baseline_strategy,
 };
 pub use tca::{
-    EXECUTION_TCA_SCHEMA_V1, ExecutionTcaAnalysis, TcaFeeTotal, TcaReference,
-    TcaReferencePriceBasis, TcaSide, analyze_execution_tca,
+    EXECUTION_TCA_REPORT_SCHEMA_V2, EXECUTION_TCA_SCHEMA_V1, ExecutionTcaAnalysis,
+    ExecutionTcaReport, TcaFeeTotal, TcaFillOutcome, TcaReference, TcaReferencePriceBasis, TcaSide,
+    analyze_execution_tca, analyze_execution_tca_report,
 };
 pub use validation::{
     VALIDATION_COST_STRESS_ALGORITHM_V1, VALIDATION_COST_STRESS_SCHEMA_V1,
@@ -297,6 +298,8 @@ pub enum AnalysisError {
     InvalidTcaReferencePolicy,
     #[error("execution TCA fee is missing its currency")]
     MissingTcaFeeCurrency,
+    #[error("execution TCA filled contracts '{filled}' exceed requested contracts '{requested}'")]
+    TcaFilledExceedsRequested { filled: String, requested: String },
 }
 
 pub fn analyze_cost(
