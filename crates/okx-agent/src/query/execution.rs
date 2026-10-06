@@ -1428,7 +1428,7 @@ async fn execution_status_response(
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
-    let Some(entry) = execution.entry(intent_id).await else {
+    let Some((entry, status)) = execution.status_with_entry(intent_id).await? else {
         return Ok(failure_response(
             request,
             generated_at,
@@ -1436,16 +1436,6 @@ async fn execution_status_response(
             EXECUTION_RECORD_NOT_FOUND_CODE,
             "execution record was not found".to_owned(),
             false,
-        ));
-    };
-    let Some(status) = execution.status(intent_id).await? else {
-        return Ok(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Failed,
-            EXECUTION_GATE_INVARIANT_CODE,
-            "execution status disappeared while building read-only explanation".to_owned(),
-            true,
         ));
     };
 
