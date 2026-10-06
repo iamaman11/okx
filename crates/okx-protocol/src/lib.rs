@@ -805,6 +805,53 @@ pub enum ExecutionOrderType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionEntryRequest {
+    pub entry_price: String,
+    pub stop_price: String,
+    pub max_settle_notional: String,
+    pub max_loss_settle: String,
+    pub target_rr: String,
+    pub entry_liquidity_role: LiquidityRole,
+    pub exit_liquidity_role: LiquidityRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionPrepareSpec {
+    Open {
+        position_side: PositionSide,
+        entry: ExecutionEntryRequest,
+    },
+    Add {
+        position_side: PositionSide,
+        entry: ExecutionEntryRequest,
+    },
+    Hedge {
+        position_side: PositionSide,
+        entry: ExecutionEntryRequest,
+    },
+    Reduce {
+        position_side: PositionSide,
+        size: String,
+        price: String,
+    },
+    Close {
+        position_side: PositionSide,
+        size: String,
+        price: String,
+    },
+    Reverse {
+        position_side: PositionSide,
+        size: String,
+        price: String,
+    },
+    ContinueReverse {
+        entry: ExecutionEntryRequest,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentOperation {
     MarketSnapshot {
@@ -853,6 +900,14 @@ pub enum AgentOperation {
         instrument: String,
     },
     ExecutorPreflight,
+    PrepareExecution {
+        intent_id: String,
+        instrument: String,
+        trade_mode: ExecutionTradeMode,
+        order_type: ExecutionOrderType,
+        spec: ExecutionPrepareSpec,
+        risk: Option<Box<ExecutionRiskBindingRequest>>,
+    },
     PrepareOpenExecution {
         intent_id: String,
         instrument: String,
@@ -931,7 +986,8 @@ impl AgentOperation {
     pub const fn direct_transport_read_only(&self) -> bool {
         !matches!(
             self,
-            Self::PrepareOpenExecution { .. }
+            Self::PrepareExecution { .. }
+                | Self::PrepareOpenExecution { .. }
                 | Self::PrepareCloseExecution { .. }
                 | Self::SubmitPreparedExecution { .. }
         )
@@ -1063,6 +1119,21 @@ impl AgentOperation {
                 Ok(())
             }
             Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
+            Self::PrepareExecution {
+                intent_id,
+                instrument,
+                spec,
+                risk,
+                ..
+            } => {
+                validate_request_id(intent_id)?;
+                validate_instrument(instrument)?;
+                validate_execution_prepare_spec(spec)?;
+                if let Some(risk) = risk {
+                    validate_execution_risk_binding(risk)?;
+                }
+                Ok(())
+            }
             Self::PrepareOpenExecution {
                 intent_id,
                 instrument,
@@ -1641,6 +1712,36 @@ fn validate_history_request(
         return Err(ProtocolError::InvalidHistoryLimit);
     }
     Ok(())
+}
+
+fn validate_execution_entry_request(
+    entry: &ExecutionEntryRequest,
+) -> Result<(), ProtocolError> {
+    validate_decimal_text(&entry.entry_price, "entry.entry_price")?;
+    validate_decimal_text(&entry.stop_price, "entry.stop_price")?;
+    validate_decimal_text(
+        &entry.max_settle_notional,
+        "entry.max_settle_notional",
+    )?;
+    validate_decimal_text(&entry.max_loss_settle, "entry.max_loss_settle")?;
+    validate_decimal_text(&entry.target_rr, "entry.target_rr")
+}
+
+fn validate_execution_prepare_spec(spec: &ExecutionPrepareSpec) -> Result<(), ProtocolError> {
+    match spec {
+        ExecutionPrepareSpec::Open { entry, .. }
+        | ExecutionPrepareSpec::Add { entry, .. }
+        | ExecutionPrepareSpec::Hedge { entry, .. }
+        | ExecutionPrepareSpec::ContinueReverse { entry } => {
+            validate_execution_entry_request(entry)
+        }
+        ExecutionPrepareSpec::Reduce { size, price, .. }
+        | ExecutionPrepareSpec::Close { size, price, .. }
+        | ExecutionPrepareSpec::Reverse { size, price, .. } => {
+            validate_positive_decimal_text(size, "size")?;
+            validate_positive_decimal_text(price, "price")
+        }
+    }
 }
 
 fn validate_execution_risk_binding(
