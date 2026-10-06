@@ -440,10 +440,7 @@ mod tests {
             .expect("root");
         let completed_reverse = completed.reverse.expect("reverse");
         assert_eq!(completed_reverse.stage, ReverseExecutionStage::Completed);
-        assert_eq!(
-            completed_reverse.open_state,
-            Some(ExecutionState::Filled)
-        );
+        assert_eq!(completed_reverse.open_state, Some(ExecutionState::Filled));
 
         let _ = fs::remove_dir_all(root);
     }
