@@ -8,9 +8,8 @@ use okx_execution::{
     EXECUTION_STATUS_SCHEMA_V2, ExecutionAction, ExecutionIntent, ExecutionLedgerError,
     ExecutionRiskBinding, ExecutionState, ExecutionTransitionError, OrderExecutorError, OrderType,
     PositionSide as ExecutionPositionSide, PrepareDeferral, PrepareFailure, PrepareOutcome,
-    PrepareRejection, ReverseContinuation, ReverseLeg, TradeMode,
-    prepare_execution, revalidate_execution_plan, revalidate_hard_risk_policy,
-    revalidate_venue_execution,
+    PrepareRejection, ReverseContinuation, ReverseLeg, TradeMode, prepare_execution,
+    revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
 };
 use okx_protocol::{
     ExecutionEntryRequest, ExecutionOrderType, ExecutionPrepareSpec, ExecutionRiskBindingRequest,
@@ -153,7 +152,6 @@ pub(super) async fn dispatch(
         _ => unreachable!("execution dispatcher received unsupported operation"),
     }
 }
-
 
 #[derive(Debug, Clone)]
 enum PrepareTarget {
@@ -566,36 +564,36 @@ async fn commit_prepared(
     };
     match result {
         Ok(outcome) => prepare_outcome_response(request, generated_at, outcome),
-        Err(OrderExecutorError::Ledger(ExecutionLedgerError::ReverseNotReady)) => Ok(
-            failure_response(
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::ReverseNotReady)) => {
+            Ok(failure_response(
                 request,
                 generated_at,
                 AgentResponseStatus::Rejected,
                 EXECUTION_INPUT_INCONSISTENT_CODE,
                 "reverse execution is not ready for its next leg".to_owned(),
                 true,
-            ),
-        ),
-        Err(OrderExecutorError::Ledger(ExecutionLedgerError::ReverseMismatch)) => Ok(
-            failure_response(
+            ))
+        }
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::ReverseMismatch)) => {
+            Ok(failure_response(
                 request,
                 generated_at,
                 AgentResponseStatus::Rejected,
                 EXECUTION_INPUT_INCONSISTENT_CODE,
                 "reverse continuation does not match the durable root".to_owned(),
                 false,
-            ),
-        ),
-        Err(OrderExecutorError::Ledger(ExecutionLedgerError::ReverseAborted)) => Ok(
-            failure_response(
+            ))
+        }
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::ReverseAborted)) => {
+            Ok(failure_response(
                 request,
                 generated_at,
                 AgentResponseStatus::Rejected,
                 EXECUTION_INPUT_INCONSISTENT_CODE,
                 "reverse continuation was explicitly aborted".to_owned(),
                 false,
-            ),
-        ),
+            ))
+        }
         Err(error) => Err(error.into()),
     }
 }
