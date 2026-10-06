@@ -49,6 +49,7 @@ pub use rate::{
 
 pub use trade::{
     ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1, AccountRateLimitEvidence, AmendOrderRequest,
-    ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, CancelOrderRequest,
-    OrderOperationAck, PlaceOrderRequest, TradeApi, TradeOrderDetails, TradeResponse,
+    ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, ApiTriggerPriceType,
+    AttachedAlgoOrderRequest, CancelOrderRequest, OrderOperationAck, PlaceOrderRequest, TradeApi,
+    TradeAlgoOrderDetails, TradeOrderDetails, TradeResponse,
 };
