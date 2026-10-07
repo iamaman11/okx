@@ -46,3 +46,10 @@ assert(
   !text.includes("payload-that-must-not-be-duplicated"),
   "toolResult text fallback must not leak nested structured payload content",
 );
+
+const structuredBytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+const wrappedBytes = new TextEncoder().encode(JSON.stringify(wrapped)).byteLength;
+assert(
+  wrappedBytes - structuredBytes <= 256,
+  `toolResult wrapper overhead exceeds 256-byte budget: ${wrappedBytes - structuredBytes} bytes`,
+);
