@@ -977,6 +977,15 @@ fn fixed_error_code(line: &str) -> Option<&'static str> {
         .find_map(|(needle, code)| line.contains(needle).then_some(*code))
 }
 
+fn missing_required_field(line: &str) -> Option<&'static str> {
+    ["instId", "state", "tickSz", "lotSz", "minSz"]
+        .into_iter()
+        .find(|field| {
+            line.contains(&format!(r#"field: "{field}""#))
+                || line.contains(&format!("required field '{field}'"))
+        })
+}
+
 fn fatal_error_summary(stderr: &str) -> Option<Value> {
     let line = stderr.lines().rev().find(|line| line.contains("Error:"))?;
 
@@ -1028,6 +1037,11 @@ fn fatal_error_summary(stderr: &str) -> Option<Value> {
     Some(json!({
         "class": class,
         "code": code,
+        "missing_field": if code == Some("missing_required_field") {
+            missing_required_field(line)
+        } else {
+            None
+        },
         "okx_api_code": if class == "okx_api" { extract_okx_api_code(line) } else { None }
     }))
 }
@@ -1248,6 +1262,26 @@ mod tests {
             assert!(!summary.to_string().contains("instrument_id"));
             assert!(!summary.to_string().contains("agent-key-1"));
         }
+    }
+
+    #[test]
+    fn missing_required_field_diagnostic_exposes_only_allowlisted_schema_field() {
+        let summary = fatal_error_summary(
+            r#"Error: Reference(MissingRequiredField { instrument_id: "SENSITIVE-ID", field: "tickSz" })"#,
+        )
+        .expect("summary");
+
+        assert_eq!(summary["class"], "reference_data");
+        assert_eq!(summary["code"], "missing_required_field");
+        assert_eq!(summary["missing_field"], "tickSz");
+        assert!(!summary.to_string().contains("SENSITIVE-ID"));
+
+        let unknown = fatal_error_summary(
+            r#"Error: Reference(MissingRequiredField { instrument_id: "SENSITIVE-ID", field: "futureField" })"#,
+        )
+        .expect("summary");
+        assert!(unknown["missing_field"].is_null());
+        assert!(!unknown.to_string().contains("futureField"));
     }
 
     #[test]
