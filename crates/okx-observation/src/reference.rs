@@ -255,6 +255,9 @@ impl ReferenceRegistry {
         let mut normalized = BTreeMap::new();
         let mut seen = BTreeSet::new();
         for instrument in instruments {
+            if is_incomplete_preopen_future_listing(&instrument) {
+                continue;
+            }
             let instrument_id = require(
                 &instrument.instrument_id,
                 &instrument.instrument_id,
@@ -295,6 +298,9 @@ impl ReferenceRegistry {
         let mut preopen_ids = BTreeSet::new();
         let mut seen = BTreeSet::new();
         for update in updates {
+            if is_incomplete_preopen_future_listing(&update) {
+                continue;
+            }
             let instrument_id =
                 require(&update.instrument_id, &update.instrument_id, "instId")?.to_owned();
             if !seen.insert(instrument_id.clone()) {
@@ -491,6 +497,13 @@ fn normalize_upcoming_changes(
 
 fn is_preopen(instrument: &PublicInstrument) -> bool {
     instrument.state.trim() == "preopen"
+}
+
+fn is_incomplete_preopen_future_listing(instrument: &PublicInstrument) -> bool {
+    instrument.instrument_type.trim() == "FUTURES"
+        && is_preopen(instrument)
+        && instrument.instrument_id.trim().is_empty()
+        && !instrument.instrument_family.trim().is_empty()
 }
 
 fn funding_requirement(
@@ -701,6 +714,86 @@ mod tests {
         );
         assert_eq!(registry.generation().as_str(), before);
         assert!(registry.get("BTC-USDT-SWAP").is_none());
+    }
+
+    #[test]
+    fn preopen_future_listing_without_instrument_id_is_excluded_from_snapshot() {
+        let mut announcement = swap("");
+        announcement.instrument_type = "FUTURES".to_owned();
+        announcement.instrument_family = "XDP-USDT".to_owned();
+        announcement.state = "preopen".to_owned();
+        announcement.underlying.clear();
+        announcement.settle_currency.clear();
+        announcement.tick_size.clear();
+        announcement.lot_size.clear();
+        announcement.min_size.clear();
+        announcement.contract_type.clear();
+        announcement.contract_value.clear();
+        announcement.contract_value_currency.clear();
+
+        let registry = ReferenceRegistry::from_public(
+            "2026-10-07T00:00:00.000Z",
+            vec![swap("DOGE-USDT-SWAP"), announcement],
+        )
+        .expect("documented preopen FUTURES listing row must not block trade-ready bootstrap");
+
+        assert_eq!(registry.len(), 1);
+        assert!(registry.get("DOGE-USDT-SWAP").is_some());
+    }
+
+    #[test]
+    fn preopen_future_listing_without_instrument_id_is_ignored_as_update() {
+        let mut registry = ReferenceRegistry::from_public(
+            "2026-10-07T00:00:00.000Z",
+            vec![swap("DOGE-USDT-SWAP")],
+        )
+        .expect("registry");
+        let generation = registry.generation().as_str().to_owned();
+
+        let mut announcement = swap("");
+        announcement.instrument_type = "FUTURES".to_owned();
+        announcement.instrument_family = "XDP-USDT".to_owned();
+        announcement.state = "preopen".to_owned();
+        announcement.tick_size.clear();
+        announcement.lot_size.clear();
+        announcement.min_size.clear();
+
+        assert!(
+            !registry
+                .apply_public_updates("2026-10-07T00:01:00.000Z", vec![announcement])
+                .expect("preopen announcement update")
+        );
+        assert_eq!(registry.generation().as_str(), generation);
+        assert_eq!(registry.source_received_at(), "2026-10-07T00:01:00.000Z");
+    }
+
+    #[test]
+    fn empty_instrument_id_still_fails_outside_documented_preopen_future_shape() {
+        let mut live_future = swap("");
+        live_future.instrument_type = "FUTURES".to_owned();
+        let live_error =
+            ReferenceRegistry::from_public("2026-10-07T00:00:00.000Z", vec![live_future])
+                .expect_err("live FUTURES row without instId must fail closed");
+        assert!(matches!(
+            live_error,
+            ReferenceError::MissingRequiredField {
+                field: "instId",
+                ..
+            }
+        ));
+
+        let mut preopen_swap = swap("");
+        preopen_swap.state = "preopen".to_owned();
+        let swap_error =
+            ReferenceRegistry::from_public("2026-10-07T00:00:00.000Z", vec![preopen_swap])
+                .expect_err("SWAP preopen row without instId is not the documented FUTURES shape");
+        assert!(matches!(
+            swap_error,
+            ReferenceError::MissingRequiredField {
+                field: "instId",
+                ..
+            }
+        ));
     }
 
     #[test]
