@@ -9,6 +9,8 @@ export const MAX_INFLIGHT = 8;
 export const PONG_DEADLINE_MS = 2_000;
 export const ACK_DEADLINE_MS = 2_000;
 export const RESPONSE_DEADLINE_MS = 20_000;
+export const TOOL_TEXT_FALLBACK = "Structured result attached; use structuredContent for the typed payload.";
+export const TOOL_TEXT_FALLBACK_MAX_BYTES = 96;
 export const RUNTIME_NAME = "windows-primary";
 export const PUBLIC_ORIGIN = "https://okx-cloudflare-mcp.okx-794.workers.dev";
 
@@ -48,7 +50,7 @@ export function jsonRpcError(id: Json, code: number, message: string): Response 
 
 export function toolResult(value: Json): Json {
   return {
-    content: [{ type: "text", text: JSON.stringify(value) }],
+    content: [{ type: "text", text: TOOL_TEXT_FALLBACK }],
     structuredContent: value,
   };
 }
