@@ -12,9 +12,11 @@ try {
     [tsc, "--rootDir", "src", "--outDir", output, "--noEmit", "false"],
     { stdio: "inherit" },
   );
-  execFileSync(process.execPath, [join(output, "shared.test.js")], {
-    stdio: "inherit",
-  });
+  for (const test of ["shared.test.js", "mcp.test.js"]) {
+    execFileSync(process.execPath, [join(output, test)], {
+      stdio: "inherit",
+    });
+  }
 } finally {
   rmSync(output, { recursive: true, force: true });
 }
