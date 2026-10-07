@@ -34,7 +34,9 @@ const rpc = JSON.parse(body) as {
   result?: { tools?: unknown[] };
 };
 const tools = rpc.result?.tools;
-assert(Array.isArray(tools), "tools/list must return a tools array");
+if (!Array.isArray(tools)) {
+  throw new Error("tools/list must return a tools array");
+}
 assert(
   tools.length <= 16,
   `coarse MCP surface exceeded 16-tool budget: ${tools.length} tools`,
