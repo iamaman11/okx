@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MutationTiming, OkxRestClient, RateOperationClass, RateRequestPlan, client::ApiEnvelope,
-    error::OkxError,
+    DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S, MutationTiming, OkxRestClient, RateOperationClass,
+    RateRequestPlan, client::ApiEnvelope, error::OkxError,
 };
 
 const PLACE_ORDER_PATH: &str = "/api/v5/trade/order";
@@ -12,6 +12,7 @@ const ORDER_DETAILS_PATH: &str = "/api/v5/trade/order";
 const ALGO_ORDER_DETAILS_PATH: &str = "/api/v5/trade/order-algo";
 const ACCOUNT_RATE_LIMIT_PATH: &str = "/api/v5/trade/account-rate-limit";
 pub const ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1: &str = "okx.account-rate-limit/v1";
+pub const ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V2: &str = "okx.account-rate-limit/v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -144,9 +145,17 @@ impl OrderOperationAck {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountRateLimitSource {
+    Exchange,
+    DemoBaseFallback,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AccountRateLimitEvidence {
     pub schema: &'static str,
+    pub source: AccountRateLimitSource,
     pub current_orders_per_2s: u32,
     pub next_orders_per_2s: Option<u32>,
     pub fill_ratio: Option<String>,
@@ -418,21 +427,32 @@ impl TradeApi {
             )));
         };
 
-        let current_orders_per_2s = parse_positive_u32("accRateLimit", &row.current_orders_per_2s)?;
-        let next_orders_per_2s =
-            parse_optional_positive_u32("nextAccRateLimit", &row.next_orders_per_2s)?;
+        let demo = self.client.environment().demo;
+        let (current_orders_per_2s, source) =
+            parse_current_account_rate_limit(demo, &row.current_orders_per_2s)?;
+        let next_orders_per_2s = if demo
+            && source == AccountRateLimitSource::DemoBaseFallback
+            && row.next_orders_per_2s.trim() == "0"
+        {
+            None
+        } else {
+            parse_optional_positive_u32("nextAccRateLimit", &row.next_orders_per_2s)?
+        };
         let updated_at_ms = parse_positive_u64("account-rate-limit ts", &row.updated_at_ms)?;
         let fill_ratio = parse_optional_ratio("fillRatio", &row.fill_ratio)?;
         let main_fill_ratio = parse_optional_ratio("mainFillRatio", &row.main_fill_ratio)?;
 
-        self.client.rate_budget().update_subaccount_rate_limit(
-            current_orders_per_2s,
-            next_orders_per_2s,
-            updated_at_ms,
-        );
+        if source == AccountRateLimitSource::Exchange {
+            self.client.rate_budget().update_subaccount_rate_limit(
+                current_orders_per_2s,
+                next_orders_per_2s,
+                updated_at_ms,
+            );
+        }
 
         Ok(AccountRateLimitEvidence {
-            schema: ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1,
+            schema: ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V2,
+            source,
             current_orders_per_2s,
             next_orders_per_2s,
             fill_ratio,
@@ -503,6 +523,21 @@ impl TradeApi {
         }
         Ok(order)
     }
+}
+
+fn parse_current_account_rate_limit(
+    demo: bool,
+    value: &str,
+) -> Result<(u32, AccountRateLimitSource), OkxError> {
+    let raw = value.trim();
+    if demo && matches!(raw, "" | "0") {
+        return Ok((
+            DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S,
+            AccountRateLimitSource::DemoBaseFallback,
+        ));
+    }
+    parse_positive_u32("accRateLimit", value)
+        .map(|value| (value, AccountRateLimitSource::Exchange))
 }
 
 fn parse_positive_u32(field: &str, value: &str) -> Result<u32, OkxError> {
@@ -801,22 +836,34 @@ mod tests {
     }
 
     #[test]
-    fn account_rate_limit_rejects_malformed_exchange_evidence_with_bounded_raw_value() {
-        let zero = parse_positive_u32("accRateLimit", "0")
-            .expect_err("zero must remain rejected")
-            .to_string();
-        assert!(zero.contains("raw="));
-        assert!(zero.contains('0'));
+    fn account_rate_limit_demo_sentinel_uses_explicit_base_fallback() {
+        for raw in ["", "0"] {
+            let (current, source) =
+                parse_current_account_rate_limit(true, raw).expect("known Demo sentinel");
+            assert_eq!(current, DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S);
+            assert_eq!(source, AccountRateLimitSource::DemoBaseFallback);
+        }
 
-        let malformed = parse_positive_u32("accRateLimit", "abc")
-            .expect_err("malformed must remain rejected")
+        let (current, source) =
+            parse_current_account_rate_limit(true, "1500").expect("positive Demo limit");
+        assert_eq!(current, 1500);
+        assert_eq!(source, AccountRateLimitSource::Exchange);
+    }
+
+    #[test]
+    fn account_rate_limit_production_and_malformed_evidence_remain_fail_closed() {
+        assert!(parse_current_account_rate_limit(false, "").is_err());
+        assert!(parse_current_account_rate_limit(false, "0").is_err());
+
+        let malformed = parse_current_account_rate_limit(true, "abc")
+            .expect_err("malformed Demo value must remain rejected")
             .to_string();
         assert!(malformed.contains("raw="));
         assert!(malformed.contains("abc"));
 
         let oversized = "x".repeat(65);
-        let bounded = parse_positive_u32("accRateLimit", &oversized)
-            .expect_err("oversized must remain rejected")
+        let bounded = parse_current_account_rate_limit(true, &oversized)
+            .expect_err("oversized Demo value must remain rejected")
             .to_string();
         assert!(bounded.contains("<non-ascii-or-oversized>"));
         assert!(!bounded.contains(&oversized));
