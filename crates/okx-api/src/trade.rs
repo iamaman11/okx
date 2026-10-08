@@ -915,9 +915,7 @@ mod tests {
             .expect("positive timestamp"),
             Some(1_790_884_800_000)
         );
-        assert!(
-            parse_account_rate_limit_timestamp(AccountRateLimitSource::Exchange, "").is_err()
-        );
+        assert!(parse_account_rate_limit_timestamp(AccountRateLimitSource::Exchange, "").is_err());
         assert!(
             parse_account_rate_limit_timestamp(AccountRateLimitSource::DemoBaseFallback, "0")
                 .is_err()
