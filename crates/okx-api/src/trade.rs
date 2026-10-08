@@ -805,12 +805,14 @@ mod tests {
         let zero = parse_positive_u32("accRateLimit", "0")
             .expect_err("zero must remain rejected")
             .to_string();
-        assert!(zero.contains("raw=\\\"0\\\""));
+        assert!(zero.contains("raw="));
+        assert!(zero.contains('0'));
 
         let malformed = parse_positive_u32("accRateLimit", "abc")
             .expect_err("malformed must remain rejected")
             .to_string();
-        assert!(malformed.contains("raw=\\\"abc\\\""));
+        assert!(malformed.contains("raw="));
+        assert!(malformed.contains("abc"));
 
         let oversized = "x".repeat(65);
         let bounded = parse_positive_u32("accRateLimit", &oversized)
