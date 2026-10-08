@@ -511,7 +511,17 @@ fn parse_positive_u32(field: &str, value: &str) -> Result<u32, OkxError> {
         .parse::<u32>()
         .ok()
         .filter(|value| *value > 0)
-        .ok_or_else(|| OkxError::Response(format!("{field} is not a positive integer")))
+        .ok_or_else(|| {
+            let raw = value.trim();
+            let bounded_raw = if raw.len() <= 64 && raw.is_ascii() {
+                raw
+            } else {
+                "<non-ascii-or-oversized>"
+            };
+            OkxError::Response(format!(
+                "{field} is not a positive integer (raw={bounded_raw:?})"
+            ))
+        })
 }
 
 fn parse_optional_positive_u32(field: &str, value: &str) -> Result<Option<u32>, OkxError> {
@@ -791,9 +801,24 @@ mod tests {
     }
 
     #[test]
-    fn account_rate_limit_rejects_malformed_exchange_evidence() {
-        assert!(parse_positive_u32("accRateLimit", "0").is_err());
-        assert!(parse_positive_u32("accRateLimit", "abc").is_err());
+    fn account_rate_limit_rejects_malformed_exchange_evidence_with_bounded_raw_value() {
+        let zero = parse_positive_u32("accRateLimit", "0")
+            .expect_err("zero must remain rejected")
+            .to_string();
+        assert!(zero.contains("raw=\\\"0\\\""));
+
+        let malformed = parse_positive_u32("accRateLimit", "abc")
+            .expect_err("malformed must remain rejected")
+            .to_string();
+        assert!(malformed.contains("raw=\\\"abc\\\""));
+
+        let oversized = "x".repeat(65);
+        let bounded = parse_positive_u32("accRateLimit", &oversized)
+            .expect_err("oversized must remain rejected")
+            .to_string();
+        assert!(bounded.contains("<non-ascii-or-oversized>"));
+        assert!(!bounded.contains(&oversized));
+
         assert!(parse_optional_ratio("fillRatio", "1.2.3").is_err());
     }
 }
