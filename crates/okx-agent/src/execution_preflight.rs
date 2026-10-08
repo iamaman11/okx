@@ -69,13 +69,16 @@ fn account_rate_limit_accepted(
 
     match account_rate_limit.source {
         AccountRateLimitSource::Exchange => {
-            rate_budget.exchange_rate_limit_observed_at_ms == Some(account_rate_limit.updated_at_ms)
+            account_rate_limit.updated_at_ms.is_some()
+                && rate_budget.exchange_rate_limit_observed_at_ms
+                    == account_rate_limit.updated_at_ms
                 && rate_budget.current_subaccount_limit_per_2s
                     == account_rate_limit.current_orders_per_2s
         }
         AccountRateLimitSource::DemoBaseFallback => {
             !credential.production_environment
                 && account_rate_limit.current_orders_per_2s == DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S
+                && account_rate_limit.updated_at_ms.is_none()
                 && rate_budget.current_subaccount_limit_per_2s
                     == DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S
                 && rate_budget.exchange_rate_limit_observed_at_ms.is_none()
@@ -290,13 +293,13 @@ mod tests {
         };
 
         let account_rate_limit = AccountRateLimitEvidence {
-            schema: okx_api::ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V2,
+            schema: okx_api::ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V3,
             source: AccountRateLimitSource::Exchange,
             current_orders_per_2s: 1000,
             next_orders_per_2s: None,
             fill_ratio: None,
             main_fill_ratio: None,
-            updated_at_ms: 1_790_000_000_000,
+            updated_at_ms: Some(1_790_000_000_000),
         };
         let rate_budget_owner = okx_api::RateBudget::new();
         rate_budget_owner.update_subaccount_rate_limit(1000, None, 1_790_000_000_000);
@@ -335,13 +338,13 @@ mod tests {
         assert!(demo_credential.accepted);
 
         let fallback = AccountRateLimitEvidence {
-            schema: okx_api::ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V2,
+            schema: okx_api::ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V3,
             source: AccountRateLimitSource::DemoBaseFallback,
             current_orders_per_2s: DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S,
             next_orders_per_2s: None,
             fill_ratio: None,
             main_fill_ratio: None,
-            updated_at_ms: 1_790_000_000_000,
+            updated_at_ms: None,
         };
         let budget = okx_api::RateBudget::new().snapshot();
         assert!(account_rate_limit_accepted(
@@ -359,6 +362,14 @@ mod tests {
         assert!(!account_rate_limit_accepted(
             &production_credential,
             &fallback,
+            &budget
+        ));
+
+        let mut invalid_exchange = fallback.clone();
+        invalid_exchange.source = AccountRateLimitSource::Exchange;
+        assert!(!account_rate_limit_accepted(
+            &production_credential,
+            &invalid_exchange,
             &budget
         ));
     }
