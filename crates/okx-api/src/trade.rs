@@ -572,7 +572,17 @@ fn parse_positive_u64(field: &str, value: &str) -> Result<u64, OkxError> {
         .parse::<u64>()
         .ok()
         .filter(|value| *value > 0)
-        .ok_or_else(|| OkxError::Response(format!("{field} is not a positive integer")))
+        .ok_or_else(|| {
+            let raw = value.trim();
+            let bounded_raw = if raw.len() <= 64 && raw.is_ascii() {
+                raw
+            } else {
+                "<non-ascii-or-oversized>"
+            };
+            OkxError::Response(format!(
+                "{field} is not a positive integer (raw={bounded_raw:?})"
+            ))
+        })
 }
 
 fn parse_optional_ratio(field: &str, value: &str) -> Result<Option<String>, OkxError> {
@@ -868,5 +878,27 @@ mod tests {
         assert!(!bounded.contains(&oversized));
 
         assert!(parse_optional_ratio("fillRatio", "1.2.3").is_err());
+    }
+
+    #[test]
+    fn account_rate_limit_timestamp_error_preserves_bounded_raw_evidence() {
+        let zero = parse_positive_u64("account-rate-limit ts", "0")
+            .expect_err("zero timestamp must remain rejected")
+            .to_string();
+        assert!(zero.contains("raw="));
+        assert!(zero.contains('0'));
+
+        let malformed = parse_positive_u64("account-rate-limit ts", "abc")
+            .expect_err("malformed timestamp must remain rejected")
+            .to_string();
+        assert!(malformed.contains("raw="));
+        assert!(malformed.contains("abc"));
+
+        let oversized = "x".repeat(65);
+        let bounded = parse_positive_u64("account-rate-limit ts", &oversized)
+            .expect_err("oversized timestamp must remain rejected")
+            .to_string();
+        assert!(bounded.contains("<non-ascii-or-oversized>"));
+        assert!(!bounded.contains(&oversized));
     }
 }
