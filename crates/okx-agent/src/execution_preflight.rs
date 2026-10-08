@@ -70,7 +70,8 @@ fn account_rate_limit_accepted(
     match account_rate_limit.source {
         AccountRateLimitSource::Exchange => {
             account_rate_limit.updated_at_ms.is_some()
-                && rate_budget.exchange_rate_limit_observed_at_ms == account_rate_limit.updated_at_ms
+                && rate_budget.exchange_rate_limit_observed_at_ms
+                    == account_rate_limit.updated_at_ms
                 && rate_budget.current_subaccount_limit_per_2s
                     == account_rate_limit.current_orders_per_2s
         }
