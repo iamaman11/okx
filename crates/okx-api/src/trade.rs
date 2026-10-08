@@ -901,3 +901,4 @@ mod tests {
         assert!(bounded.contains("<non-ascii-or-oversized>"));
         assert!(!bounded.contains(&oversized));
     }
+}
