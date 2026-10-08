@@ -1,6 +1,7 @@
 use okx_api::{
-    AccountConfig, AccountRateLimitEvidence, ClockEvidenceSnapshot, OkxEnvironment,
-    RateBudgetSnapshot, account_uid_fingerprint,
+    AccountConfig, AccountRateLimitEvidence, AccountRateLimitSource, ClockEvidenceSnapshot,
+    DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S, OkxEnvironment, RateBudgetSnapshot,
+    account_uid_fingerprint,
 };
 use okx_observation::{ACCOUNT_SNAPSHOT_SCHEMA_V2, AccountSnapshot};
 use serde::Serialize;
@@ -44,15 +45,42 @@ impl ExecutorPreflightSnapshot {
         account_rate_limit: AccountRateLimitEvidence,
         rate_budget: RateBudgetSnapshot,
     ) -> Self {
+        let account_rate_limit_accepted =
+            account_rate_limit_accepted(&credential, &account_rate_limit, &rate_budget);
         Self {
             schema: EXECUTOR_PREFLIGHT_SCHEMA_V3,
-            accepted: credential.accepted
-                && clock.accepted
-                && account_rate_limit.current_orders_per_2s > 0,
+            accepted: credential.accepted && clock.accepted && account_rate_limit_accepted,
             credential,
             clock,
             account_rate_limit,
             rate_budget,
+        }
+    }
+}
+
+fn account_rate_limit_accepted(
+    credential: &ExecutorCredentialPreflight,
+    account_rate_limit: &AccountRateLimitEvidence,
+    rate_budget: &RateBudgetSnapshot,
+) -> bool {
+    if account_rate_limit.current_orders_per_2s == 0 {
+        return false;
+    }
+
+    match account_rate_limit.source {
+        AccountRateLimitSource::Exchange => {
+            rate_budget.exchange_rate_limit_observed_at_ms
+                == Some(account_rate_limit.updated_at_ms)
+                && rate_budget.current_subaccount_limit_per_2s
+                    == account_rate_limit.current_orders_per_2s
+        }
+        AccountRateLimitSource::DemoBaseFallback => {
+            !credential.production_environment
+                && account_rate_limit.current_orders_per_2s
+                    == DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S
+                && rate_budget.current_subaccount_limit_per_2s
+                    == DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S
+                && rate_budget.exchange_rate_limit_observed_at_ms.is_none()
         }
     }
 }
@@ -264,14 +292,17 @@ mod tests {
         };
 
         let account_rate_limit = AccountRateLimitEvidence {
-            schema: okx_api::ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1,
+            schema: okx_api::ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V2,
+            source: AccountRateLimitSource::Exchange,
             current_orders_per_2s: 1000,
             next_orders_per_2s: None,
             fill_ratio: None,
             main_fill_ratio: None,
             updated_at_ms: 1_790_000_000_000,
         };
-        let rate_budget = okx_api::RateBudget::new().snapshot();
+        let rate_budget_owner = okx_api::RateBudget::new();
+        rate_budget_owner.update_subaccount_rate_limit(1000, None, 1_790_000_000_000);
+        let rate_budget = rate_budget_owner.snapshot();
 
         let accepted = ExecutorPreflightSnapshot::new(
             credential.clone(),
@@ -292,6 +323,46 @@ mod tests {
             rate_budget,
         );
         assert!(!rejected_clock.accepted);
+    }
+
+    #[test]
+    fn demo_base_rate_limit_fallback_is_accepted_only_for_demo_preflight() {
+        let observer = config("sub-uid", "main-uid", "read_only", "");
+        let executor = config("sub-uid", "main-uid", "read_only,trade", "");
+        let demo_credential = evaluate_demo_executor_preflight(
+            OkxEnvironment::new(Region::Global, true),
+            &observer,
+            &executor,
+        );
+        assert!(demo_credential.accepted);
+
+        let fallback = AccountRateLimitEvidence {
+            schema: okx_api::ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V2,
+            source: AccountRateLimitSource::DemoBaseFallback,
+            current_orders_per_2s: DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S,
+            next_orders_per_2s: None,
+            fill_ratio: None,
+            main_fill_ratio: None,
+            updated_at_ms: 1_790_000_000_000,
+        };
+        let budget = okx_api::RateBudget::new().snapshot();
+        assert!(account_rate_limit_accepted(
+            &demo_credential,
+            &fallback,
+            &budget
+        ));
+
+        let production_credential = evaluate_executor_preflight(
+            OkxEnvironment::new(Region::Global, false),
+            &observer,
+            &executor,
+        );
+        assert!(production_credential.accepted);
+        assert!(!account_rate_limit_accepted(
+            &production_credential,
+            &fallback,
+            &budget
+        ));
     }
 
     #[test]
