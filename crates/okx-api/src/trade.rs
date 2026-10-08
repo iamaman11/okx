@@ -13,6 +13,7 @@ const ALGO_ORDER_DETAILS_PATH: &str = "/api/v5/trade/order-algo";
 const ACCOUNT_RATE_LIMIT_PATH: &str = "/api/v5/trade/account-rate-limit";
 pub const ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1: &str = "okx.account-rate-limit/v1";
 pub const ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V2: &str = "okx.account-rate-limit/v2";
+pub const ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V3: &str = "okx.account-rate-limit/v3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -160,7 +161,7 @@ pub struct AccountRateLimitEvidence {
     pub next_orders_per_2s: Option<u32>,
     pub fill_ratio: Option<String>,
     pub main_fill_ratio: Option<String>,
-    pub updated_at_ms: u64,
+    pub updated_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -438,20 +439,28 @@ impl TradeApi {
         } else {
             parse_optional_positive_u32("nextAccRateLimit", &row.next_orders_per_2s)?
         };
-        let updated_at_ms = parse_positive_u64("account-rate-limit ts", &row.updated_at_ms)?;
+        let updated_at_ms = parse_account_rate_limit_timestamp(source, &row.updated_at_ms)?;
         let fill_ratio = parse_optional_ratio("fillRatio", &row.fill_ratio)?;
         let main_fill_ratio = parse_optional_ratio("mainFillRatio", &row.main_fill_ratio)?;
 
-        if source == AccountRateLimitSource::Exchange {
-            self.client.rate_budget().update_subaccount_rate_limit(
-                current_orders_per_2s,
-                next_orders_per_2s,
-                updated_at_ms,
-            );
+        match (source, updated_at_ms) {
+            (AccountRateLimitSource::Exchange, Some(exchange_updated_at_ms)) => {
+                self.client.rate_budget().update_subaccount_rate_limit(
+                    current_orders_per_2s,
+                    next_orders_per_2s,
+                    exchange_updated_at_ms,
+                );
+            }
+            (AccountRateLimitSource::Exchange, None) => {
+                return Err(OkxError::Response(
+                    "exchange account-rate-limit timestamp is unavailable".to_owned(),
+                ));
+            }
+            (AccountRateLimitSource::DemoBaseFallback, _) => {}
         }
 
         Ok(AccountRateLimitEvidence {
-            schema: ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V2,
+            schema: ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V3,
             source,
             current_orders_per_2s,
             next_orders_per_2s,
@@ -563,6 +572,17 @@ fn parse_optional_positive_u32(field: &str, value: &str) -> Result<Option<u32>, 
         Ok(None)
     } else {
         parse_positive_u32(field, value).map(Some)
+    }
+}
+
+fn parse_account_rate_limit_timestamp(
+    source: AccountRateLimitSource,
+    value: &str,
+) -> Result<Option<u64>, OkxError> {
+    if source == AccountRateLimitSource::DemoBaseFallback && value.trim().is_empty() {
+        Ok(None)
+    } else {
+        parse_positive_u64("account-rate-limit ts", value).map(Some)
     }
 }
 
@@ -878,6 +898,30 @@ mod tests {
         assert!(!bounded.contains(&oversized));
 
         assert!(parse_optional_ratio("fillRatio", "1.2.3").is_err());
+    }
+
+    #[test]
+    fn demo_base_rate_limit_allows_only_missing_exchange_timestamp() {
+        assert_eq!(
+            parse_account_rate_limit_timestamp(AccountRateLimitSource::DemoBaseFallback, "")
+                .expect("Demo fallback timestamp"),
+            None
+        );
+        assert_eq!(
+            parse_account_rate_limit_timestamp(
+                AccountRateLimitSource::DemoBaseFallback,
+                "1790884800000",
+            )
+            .expect("positive timestamp"),
+            Some(1_790_884_800_000)
+        );
+        assert!(
+            parse_account_rate_limit_timestamp(AccountRateLimitSource::Exchange, "").is_err()
+        );
+        assert!(
+            parse_account_rate_limit_timestamp(AccountRateLimitSource::DemoBaseFallback, "0")
+                .is_err()
+        );
     }
 
     #[test]
