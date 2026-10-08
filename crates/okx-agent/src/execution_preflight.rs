@@ -69,15 +69,13 @@ fn account_rate_limit_accepted(
 
     match account_rate_limit.source {
         AccountRateLimitSource::Exchange => {
-            rate_budget.exchange_rate_limit_observed_at_ms
-                == Some(account_rate_limit.updated_at_ms)
+            rate_budget.exchange_rate_limit_observed_at_ms == Some(account_rate_limit.updated_at_ms)
                 && rate_budget.current_subaccount_limit_per_2s
                     == account_rate_limit.current_orders_per_2s
         }
         AccountRateLimitSource::DemoBaseFallback => {
             !credential.production_environment
-                && account_rate_limit.current_orders_per_2s
-                    == DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S
+                && account_rate_limit.current_orders_per_2s == DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S
                 && rate_budget.current_subaccount_limit_per_2s
                     == DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S
                 && rate_budget.exchange_rate_limit_observed_at_ms.is_none()
