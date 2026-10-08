@@ -536,8 +536,7 @@ fn parse_current_account_rate_limit(
             AccountRateLimitSource::DemoBaseFallback,
         ));
     }
-    parse_positive_u32("accRateLimit", value)
-        .map(|value| (value, AccountRateLimitSource::Exchange))
+    parse_positive_u32("accRateLimit", value).map(|value| (value, AccountRateLimitSource::Exchange))
 }
 
 fn parse_positive_u32(field: &str, value: &str) -> Result<u32, OkxError> {
