@@ -1,7 +1,8 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
     AccountApi, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate, InstrumentType,
-    LeverageInfo, MarginMode, OkxError, OkxRestClient, PositionBuilderRequest,
+    LeverageInfo, MarginMode, OkxError, OkxRestClient, PendingProtectiveAlgoInventory,
+    TradeApi, PositionBuilderRequest,
     PositionBuilderSnapshot,
 };
 use okx_observation::{
@@ -96,6 +97,7 @@ pub struct AccountBootstrapper {
     api: AccountApi,
     history: AccountHistoryApi,
     asset: AssetApi,
+    trade: TradeApi,
 }
 
 impl AccountBootstrapper {
@@ -103,7 +105,8 @@ impl AccountBootstrapper {
         Self {
             api: AccountApi::new(client.clone()),
             history: AccountHistoryApi::new(client.clone()),
-            asset: AssetApi::new(client),
+            asset: AssetApi::new(client.clone()),
+            trade: TradeApi::new(client),
         }
     }
 
@@ -270,6 +273,15 @@ impl AccountBootstrapper {
             client_order_id,
             &history,
         )?)
+    }
+
+    pub async fn pending_protective_algos(
+        &self,
+    ) -> Result<PendingProtectiveAlgoInventory, AccountLedgerBootstrapError> {
+        let config = self.api.config().await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
+        Ok(self.trade.pending_protective_algos().await?)
     }
 
     pub async fn ledger_facts(
