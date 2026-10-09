@@ -1571,7 +1571,9 @@ mod tests {
         let mutation = "cleanup_0123456789abcdef";
         {
             let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
-            ledger.prepare(protected_plan(intent), 101).expect("prepare");
+            ledger
+                .prepare(protected_plan(intent), 101)
+                .expect("prepare");
             ledger.begin_submission(intent, 102).expect("submit");
             ledger.acknowledge(intent, "parent123", 103).expect("ack");
             ledger
