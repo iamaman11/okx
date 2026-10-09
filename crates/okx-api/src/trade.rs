@@ -300,7 +300,9 @@ fn normalize_protective_algo_inventory(
     let mut samples = Vec::new();
     for (instrument_type, rows) in batches {
         if rows.len() > PROTECTIVE_ALGO_PAGE_LIMIT {
-            return Err(OkxError::Response("pending protective algo page exceeded hard bound".to_owned()));
+            return Err(OkxError::Response(
+                "pending protective algo page exceeded hard bound".to_owned(),
+            ));
         }
         complete &= rows.len() < PROTECTIVE_ALGO_PAGE_LIMIT;
         for item in rows {
@@ -796,41 +798,62 @@ mod tests {
             "instId": "BTC-USDT-SWAP",
             "ordType": kind,
             "state": "live"
-        })).expect("fixture")
+        }))
+        .expect("fixture")
     }
 
     #[test]
     fn bounded_protective_algo_inventory_reconciles_both_instrument_types() {
         assert_eq!(ALGO_PENDING_PATH, "/api/v5/trade/orders-algo-pending");
         let inv = normalize_protective_algo_inventory(vec![
-            ("SWAP".to_owned(), vec![pending_algo("111", "conditional", "SWAP")]),
-            ("FUTURES".to_owned(), vec![pending_algo("222", "oco", "FUTURES")]),
-        ]).expect("valid protection inventory");
+            (
+                "SWAP".to_owned(),
+                vec![pending_algo("111", "conditional", "SWAP")],
+            ),
+            (
+                "FUTURES".to_owned(),
+                vec![pending_algo("222", "oco", "FUTURES")],
+            ),
+        ])
+        .expect("valid protection inventory");
         assert_eq!(inv.rows, 2);
         assert!(inv.complete_within_bound);
         assert_eq!(inv.samples.len(), 2);
         let empty = normalize_protective_algo_inventory(vec![
-            ("SWAP".to_owned(), vec![]), ("FUTURES".to_owned(), vec![]),
-        ]).expect("zero pending");
+            ("SWAP".to_owned(), vec![]),
+            ("FUTURES".to_owned(), vec![]),
+        ])
+        .expect("zero pending");
         assert_eq!(empty.rows, 0);
         assert!(empty.complete_within_bound);
     }
 
     #[test]
     fn pending_algo_inventory_rejects_identity_mismatch_and_page_limit_truncation() {
-        assert!(normalize_protective_algo_inventory(vec![
-            ("SWAP".to_owned(), vec![pending_algo("111", "oco", "FUTURES")]),
-        ]).is_err());
-        assert!(normalize_protective_algo_inventory(vec![
-            ("SWAP".to_owned(), vec![
-                pending_algo("111", "conditional", "SWAP"),
-                pending_algo("111", "oco", "SWAP"),
-            ]),
-        ]).is_err());
-        let full = normalize_protective_algo_inventory(vec![
-            ("SWAP".to_owned(), (0..PROTECTIVE_ALGO_PAGE_LIMIT).map(|n|
-                pending_algo(&format!("{n}"), "conditional", "SWAP")).collect()),
-        ]).expect("bounded");
+        assert!(
+            normalize_protective_algo_inventory(vec![(
+                "SWAP".to_owned(),
+                vec![pending_algo("111", "oco", "FUTURES")]
+            ),])
+            .is_err()
+        );
+        assert!(
+            normalize_protective_algo_inventory(vec![(
+                "SWAP".to_owned(),
+                vec![
+                    pending_algo("111", "conditional", "SWAP"),
+                    pending_algo("111", "oco", "SWAP"),
+                ]
+            ),])
+            .is_err()
+        );
+        let full = normalize_protective_algo_inventory(vec![(
+            "SWAP".to_owned(),
+            (0..PROTECTIVE_ALGO_PAGE_LIMIT)
+                .map(|n| pending_algo(&format!("{n}"), "conditional", "SWAP"))
+                .collect(),
+        )])
+        .expect("bounded");
         assert_eq!(full.rows, PROTECTIVE_ALGO_PAGE_LIMIT);
         assert!(!full.complete_within_bound);
         assert_eq!(full.samples.len(), PROTECTIVE_ALGO_SAMPLE_LIMIT);
