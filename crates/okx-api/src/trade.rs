@@ -243,10 +243,6 @@ pub struct TradeOrderDetails {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TradeAlgoOrderDetails {
-    #[serde(rename = "instType", default)]
-    pub instrument_type: String,
-    #[serde(rename = "ordType", default)]
-    pub order_type: String,
     #[serde(rename = "instId", default)]
     pub instrument_id: String,
     #[serde(rename = "algoId", default)]
@@ -271,6 +267,22 @@ pub struct TradeAlgoOrderDetails {
     pub failure_code: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PendingAlgoOrderDetails {
+    #[serde(rename = "instType", default)]
+    pub instrument_type: String,
+    #[serde(rename = "ordType", default)]
+    pub order_type: String,
+    #[serde(rename = "instId", default)]
+    pub instrument_id: String,
+    #[serde(rename = "algoId", default)]
+    pub algo_order_id: String,
+    #[serde(rename = "algoClOrdId", default)]
+    pub client_order_id: String,
+    #[serde(default)]
+    pub state: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingProtectiveAlgoSample {
     pub instrument_id: String,
@@ -292,7 +304,7 @@ pub struct PendingProtectiveAlgoInventory {
 }
 
 fn normalize_protective_algo_inventory(
-    batches: Vec<(String, Vec<TradeAlgoOrderDetails>)>,
+    batches: Vec<(String, Vec<PendingAlgoOrderDetails>)>,
 ) -> Result<PendingProtectiveAlgoInventory, OkxError> {
     let mut ids = BTreeSet::<String>::new();
     let mut total = 0_usize;
@@ -357,7 +369,7 @@ impl TradeApi {
     ) -> Result<PendingProtectiveAlgoInventory, OkxError> {
         let mut batches = Vec::with_capacity(2);
         for instrument_type in ["SWAP", "FUTURES"] {
-            let rows: Vec<TradeAlgoOrderDetails> = self
+            let rows: Vec<PendingAlgoOrderDetails> = self
                 .client
                 .private_get(
                     ALGO_PENDING_PATH,
@@ -790,7 +802,7 @@ fn validate_nonempty(field: &str, value: &str) -> Result<(), OkxError> {
 mod tests {
     use super::*;
 
-    fn pending_algo(id: &str, kind: &str, inst_type: &str) -> TradeAlgoOrderDetails {
+    fn pending_algo(id: &str, kind: &str, inst_type: &str) -> PendingAlgoOrderDetails {
         serde_json::from_value(serde_json::json!({
             "algoId": id,
             "algoClOrdId": "okx1234567",
