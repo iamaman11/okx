@@ -598,9 +598,7 @@ impl ExecutionRecord {
         &mut self,
         mutation_id: &str,
     ) -> Result<bool, ExecutionTransitionError> {
-        if !valid_mutation_id(mutation_id)
-            || !self.state.is_terminal()
-        {
+        if !valid_mutation_id(mutation_id) || !self.state.is_terminal() {
             return Err(ExecutionTransitionError::InvalidProtectiveCleanup);
         }
         let protection = self
@@ -1281,24 +1279,43 @@ mod tests {
         let mut record = ExecutionRecord::new(protected_plan());
         record.begin_submission().expect("submit parent");
         record.acknowledge("parent123").expect("ack parent");
-        record.reconcile_found_with_protection(
-            "parent123",
-            ExchangeOrderState::Filled,
-            Some(ProtectiveOrderResolution::Active {
-                algo_order_id: "123456789".to_owned(),
-                covered_size: "1".to_owned(),
-            }),
-        ).expect("exact protective parent");
+        record
+            .reconcile_found_with_protection(
+                "parent123",
+                ExchangeOrderState::Filled,
+                Some(ProtectiveOrderResolution::Active {
+                    algo_order_id: "123456789".to_owned(),
+                    covered_size: "1".to_owned(),
+                }),
+            )
+            .expect("exact protective parent");
         let mid = "cleanup_0123456789abcdef";
         assert!(record.prepare_protective_cleanup(mid).expect("prepared"));
-        assert!(!record.prepare_protective_cleanup(mid).expect("same idempotent"));
-        assert!(record.prepare_protective_cleanup("another_0123456789ab").is_err());
-        record.begin_protective_cleanup(mid).expect("sent exactly once");
-        record.mark_protective_cleanup_unknown(mid).expect("ambiguous");
-        assert!(record.begin_protective_cleanup(mid).is_err(), "NEVER replay unknown POST");
+        assert!(
+            !record
+                .prepare_protective_cleanup(mid)
+                .expect("same idempotent")
+        );
+        assert!(
+            record
+                .prepare_protective_cleanup("another_0123456789ab")
+                .is_err()
+        );
+        record
+            .begin_protective_cleanup(mid)
+            .expect("sent exactly once");
+        record
+            .mark_protective_cleanup_unknown(mid)
+            .expect("ambiguous");
+        assert!(
+            record.begin_protective_cleanup(mid).is_err(),
+            "NEVER replay unknown POST"
+        );
         assert!(record.acknowledge_protective_cleanup(mid).is_err());
         assert!(record.protection_blocks_new_managed_intent());
-        record.confirm_protective_cleanup_absent(mid).expect("independent absence");
+        record
+            .confirm_protective_cleanup_absent(mid)
+            .expect("independent absence");
         assert!(!record.protection_blocks_new_managed_intent());
         assert!(record.confirm_protective_cleanup_absent(mid).is_err());
     }
