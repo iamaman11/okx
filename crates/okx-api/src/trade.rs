@@ -835,7 +835,11 @@ mod tests {
         swap_oco: Vec<PendingAlgoOrderDetails>,
     ) -> Vec<(String, String, Vec<PendingAlgoOrderDetails>)> {
         vec![
-            ("SWAP".to_owned(), "conditional".to_owned(), swap_conditional),
+            (
+                "SWAP".to_owned(),
+                "conditional".to_owned(),
+                swap_conditional,
+            ),
             ("SWAP".to_owned(), "oco".to_owned(), swap_oco),
             ("FUTURES".to_owned(), "conditional".to_owned(), vec![]),
             ("FUTURES".to_owned(), "oco".to_owned(), vec![]),
@@ -858,16 +862,15 @@ mod tests {
         assert_eq!(empty.rows, 0);
         assert!(empty.complete_within_bound);
         let missing = all_protective_scopes(vec![], vec![])
-            .into_iter().take(3).collect();
+            .into_iter()
+            .take(3)
+            .collect();
         assert!(normalize_protective_algo_inventory(missing).is_err());
     }
 
     #[test]
     fn pending_algo_inventory_rejects_cross_type_and_duplicate_scope() {
-        let bad = all_protective_scopes(
-            vec![pending_algo("111", "oco", "SWAP")],
-            vec![],
-        );
+        let bad = all_protective_scopes(vec![pending_algo("111", "oco", "SWAP")], vec![]);
         assert!(normalize_protective_algo_inventory(bad).is_err());
         let mut duplicate = all_protective_scopes(vec![], vec![]);
         duplicate.push(("SWAP".to_owned(), "conditional".to_owned(), vec![]));
@@ -883,17 +886,16 @@ mod tests {
     fn pending_algo_inventory_paused_orders_and_full_pages_are_not_empty() {
         let mut paused = pending_algo("111", "conditional", "SWAP");
         paused.state = "pause".to_owned();
-        let inv = normalize_protective_algo_inventory(all_protective_scopes(
-            vec![paused],
-            vec![],
-        )).expect("paused is still pending");
+        let inv = normalize_protective_algo_inventory(all_protective_scopes(vec![paused], vec![]))
+            .expect("paused is still pending");
         assert_eq!(inv.rows, 1);
         let full = normalize_protective_algo_inventory(all_protective_scopes(
             (0..PROTECTIVE_ALGO_PAGE_LIMIT)
                 .map(|n| pending_algo(&format!("{n}"), "conditional", "SWAP"))
                 .collect(),
             vec![],
-        )).expect("page bound");
+        ))
+        .expect("page bound");
         assert_eq!(full.rows, PROTECTIVE_ALGO_PAGE_LIMIT);
         assert!(!full.complete_within_bound);
         assert_eq!(full.samples.len(), PROTECTIVE_ALGO_SAMPLE_LIMIT);
