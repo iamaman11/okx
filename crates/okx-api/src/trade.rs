@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 use crate::{
     DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S, MutationTiming, OkxRestClient, RateOperationClass,
@@ -10,6 +11,9 @@ const CANCEL_ORDER_PATH: &str = "/api/v5/trade/cancel-order";
 const AMEND_ORDER_PATH: &str = "/api/v5/trade/amend-order";
 const ORDER_DETAILS_PATH: &str = "/api/v5/trade/order";
 const ALGO_ORDER_DETAILS_PATH: &str = "/api/v5/trade/order-algo";
+const ALGO_PENDING_PATH: &str = "/api/v5/trade/orders-algo-pending";
+const PROTECTIVE_ALGO_PAGE_LIMIT: usize = 100;
+const PROTECTIVE_ALGO_SAMPLE_LIMIT: usize = 8;
 const ACCOUNT_RATE_LIMIT_PATH: &str = "/api/v5/trade/account-rate-limit";
 pub const ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1: &str = "okx.account-rate-limit/v1";
 pub const ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V2: &str = "okx.account-rate-limit/v2";
@@ -239,6 +243,10 @@ pub struct TradeOrderDetails {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TradeAlgoOrderDetails {
+    #[serde(rename = "instType", default)]
+    pub instrument_type: String,
+    #[serde(rename = "ordType", default)]
+    pub order_type: String,
     #[serde(rename = "instId", default)]
     pub instrument_id: String,
     #[serde(rename = "algoId", default)]
@@ -263,6 +271,73 @@ pub struct TradeAlgoOrderDetails {
     pub failure_code: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingProtectiveAlgoSample {
+    pub instrument_id: String,
+    pub algo_order_id: String,
+    pub client_order_id: String,
+    pub order_type: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingProtectiveAlgoInventory {
+    pub schema: &'static str,
+    pub scope: &'static str,
+    pub order_types: &'static str,
+    pub instrument_types: &'static str,
+    pub rows: usize,
+    pub complete_within_bound: bool,
+    pub samples: Vec<PendingProtectiveAlgoSample>,
+}
+
+fn normalize_protective_algo_inventory(
+    batches: Vec<(String, Vec<TradeAlgoOrderDetails>)>,
+) -> Result<PendingProtectiveAlgoInventory, OkxError> {
+    let mut ids = BTreeSet::<String>::new();
+    let mut total = 0_usize;
+    let mut complete = true;
+    let mut samples = Vec::new();
+    for (instrument_type, rows) in batches {
+        if rows.len() > PROTECTIVE_ALGO_PAGE_LIMIT {
+            return Err(OkxError::Response("pending protective algo page exceeded hard bound".to_owned()));
+        }
+        complete &= rows.len() < PROTECTIVE_ALGO_PAGE_LIMIT;
+        for item in rows {
+            if item.instrument_type != instrument_type
+                || !matches!(item.order_type.as_str(), "conditional" | "oco")
+                || item.algo_order_id.trim().is_empty()
+                || item.instrument_id.trim().is_empty()
+                || !matches!(item.state.as_str(), "live" | "effective")
+                || !ids.insert(item.algo_order_id.clone())
+            {
+                return Err(OkxError::Response(
+                    "pending protective algo has invalid exchange identity/type/state or duplicate algoId".to_owned(),
+                ));
+            }
+            total += 1;
+            if samples.len() < PROTECTIVE_ALGO_SAMPLE_LIMIT {
+                samples.push(PendingProtectiveAlgoSample {
+                    instrument_id: item.instrument_id,
+                    algo_order_id: item.algo_order_id,
+                    client_order_id: item.client_order_id,
+                    order_type: item.order_type,
+                    state: item.state,
+                });
+            }
+        }
+    }
+    Ok(PendingProtectiveAlgoInventory {
+        schema: "okx.pending-protective-algo-inventory/v1",
+        scope: "authenticated_account",
+        order_types: "conditional,oco",
+        instrument_types: "SWAP,FUTURES",
+        rows: total,
+        complete_within_bound: complete,
+        samples,
+    })
+}
+
 #[derive(Clone)]
 pub struct TradeApi {
     client: OkxRestClient,
@@ -271,6 +346,29 @@ pub struct TradeApi {
 impl TradeApi {
     pub fn new(client: OkxRestClient) -> Self {
         Self { client }
+    }
+
+    /// Read-only, bounded account-wide inventory of Futures/SWAP attached
+    /// conditional/OCO protection. Never claim account-wide ALL algo types.
+    pub async fn pending_protective_algos(
+        &self,
+    ) -> Result<PendingProtectiveAlgoInventory, OkxError> {
+        let mut batches = Vec::with_capacity(2);
+        for instrument_type in ["SWAP", "FUTURES"] {
+            let rows: Vec<TradeAlgoOrderDetails> = self
+                .client
+                .private_get(
+                    ALGO_PENDING_PATH,
+                    &[
+                        ("ordType", "conditional,oco".to_owned()),
+                        ("instType", instrument_type.to_owned()),
+                        ("limit", PROTECTIVE_ALGO_PAGE_LIMIT.to_string()),
+                    ],
+                )
+                .await?;
+            batches.push((instrument_type.to_owned(), rows));
+        }
+        normalize_protective_algo_inventory(batches)
     }
 
     pub fn admit_place_order(
@@ -689,6 +787,54 @@ fn validate_nonempty(field: &str, value: &str) -> Result<(), OkxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_algo(id: &str, kind: &str, inst_type: &str) -> TradeAlgoOrderDetails {
+        serde_json::from_value(serde_json::json!({
+            "algoId": id,
+            "algoClOrdId": "okx1234567",
+            "instType": inst_type,
+            "instId": "BTC-USDT-SWAP",
+            "ordType": kind,
+            "state": "live"
+        })).expect("fixture")
+    }
+
+    #[test]
+    fn bounded_protective_algo_inventory_reconciles_both_instrument_types() {
+        assert_eq!(ALGO_PENDING_PATH, "/api/v5/trade/orders-algo-pending");
+        let inv = normalize_protective_algo_inventory(vec![
+            ("SWAP".to_owned(), vec![pending_algo("111", "conditional", "SWAP")]),
+            ("FUTURES".to_owned(), vec![pending_algo("222", "oco", "FUTURES")]),
+        ]).expect("valid protection inventory");
+        assert_eq!(inv.rows, 2);
+        assert!(inv.complete_within_bound);
+        assert_eq!(inv.samples.len(), 2);
+        let empty = normalize_protective_algo_inventory(vec![
+            ("SWAP".to_owned(), vec![]), ("FUTURES".to_owned(), vec![]),
+        ]).expect("zero pending");
+        assert_eq!(empty.rows, 0);
+        assert!(empty.complete_within_bound);
+    }
+
+    #[test]
+    fn pending_algo_inventory_rejects_identity_mismatch_and_page_limit_truncation() {
+        assert!(normalize_protective_algo_inventory(vec![
+            ("SWAP".to_owned(), vec![pending_algo("111", "oco", "FUTURES")]),
+        ]).is_err());
+        assert!(normalize_protective_algo_inventory(vec![
+            ("SWAP".to_owned(), vec![
+                pending_algo("111", "conditional", "SWAP"),
+                pending_algo("111", "oco", "SWAP"),
+            ]),
+        ]).is_err());
+        let full = normalize_protective_algo_inventory(vec![
+            ("SWAP".to_owned(), (0..PROTECTIVE_ALGO_PAGE_LIMIT).map(|n|
+                pending_algo(&format!("{n}"), "conditional", "SWAP")).collect()),
+        ]).expect("bounded");
+        assert_eq!(full.rows, PROTECTIVE_ALGO_PAGE_LIMIT);
+        assert!(!full.complete_within_bound);
+        assert_eq!(full.samples.len(), PROTECTIVE_ALGO_SAMPLE_LIMIT);
+    }
 
     fn place() -> PlaceOrderRequest {
         PlaceOrderRequest {
