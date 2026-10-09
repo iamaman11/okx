@@ -16,7 +16,8 @@ use crate::{
     ExchangeOrderState, ExecutionAction, ExecutionLineageBinding, ExecutionPlan, ExecutionRecord,
     ExecutionState, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
     OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
-    PositionSide, ProtectiveOrderResolution, ProtectiveOrderStatus, ProtectiveTriggerPriceBasis,
+    PositionSide, ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveOrderStatus,
+    ProtectiveTriggerPriceBasis,
     ReverseContinuation, ReverseExecutionLink, ReverseLeg, derive_client_order_id,
     derive_protective_algo_client_id, derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
@@ -581,6 +582,61 @@ impl DurableExecutionLedger {
         Ok(MutationPrepareDisposition::Created(entry))
     }
 
+    pub fn prepare_protective_cleanup(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.prepare_protective_cleanup(mutation_id).map(|_| ())
+        })
+    }
+
+    pub fn begin_protective_cleanup(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.begin_protective_cleanup(mutation_id)
+        })
+    }
+
+    pub fn acknowledge_protective_cleanup(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.acknowledge_protective_cleanup(mutation_id)
+        })
+    }
+
+    pub fn mark_protective_cleanup_unknown(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.mark_protective_cleanup_unknown(mutation_id)
+        })
+    }
+
+    pub fn confirm_protective_cleanup_absent(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.confirm_protective_cleanup_absent(mutation_id)
+        })
+    }
+
     pub fn begin_order_mutation_submission(
         &mut self,
         intent_id: &str,
@@ -901,7 +957,7 @@ fn validate_protection_link(record: &ExecutionRecord) -> Result<(), ExecutionLed
                 ));
             }
         }
-        ProtectiveOrderStatus::Active => {
+        ProtectiveOrderStatus::Active | ProtectiveOrderStatus::CleanedUp => {
             if protection
                 .algo_order_id
                 .as_deref()
@@ -931,6 +987,32 @@ fn validate_protection_link(record: &ExecutionRecord) -> Result<(), ExecutionLed
                 ));
             }
         }
+    }
+
+    if let Some(cleanup) = protection.cleanup.as_ref() {
+        if !valid_mutation_id(&cleanup.mutation_id)
+            || protection.algo_order_id.as_deref() != Some(cleanup.algo_order_id.as_str())
+            || !record.state.is_terminal()
+            || !matches!(
+                (protection.status, cleanup.state),
+                (ProtectiveOrderStatus::Active, ProtectiveCleanupState::Prepared)
+                    | (ProtectiveOrderStatus::Active, ProtectiveCleanupState::Submitting)
+                    | (ProtectiveOrderStatus::Active, ProtectiveCleanupState::Unknown)
+                    | (ProtectiveOrderStatus::Active, ProtectiveCleanupState::Acknowledged)
+                    | (
+                        ProtectiveOrderStatus::CleanedUp,
+                        ProtectiveCleanupState::ConfirmedAbsent
+                    )
+            )
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "protective cleanup state does not match durable exchange ownership",
+            ));
+        }
+    } else if protection.status == ProtectiveOrderStatus::CleanedUp {
+        return Err(ExecutionLedgerError::Corrupt(
+            "cleaned protective order lacks durable cleanup evidence",
+        ));
     }
 
     if record.state == ExecutionState::Rejected
