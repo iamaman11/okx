@@ -1250,7 +1250,10 @@ mod tests {
         .expect("stderr");
 
         let summary = runtime_log_summary_from_root(root.clone());
-        assert_eq!(summary["log_evidence"]["scope"], "retained_profile_file_tail");
+        assert_eq!(
+            summary["log_evidence"]["scope"],
+            "retained_profile_file_tail"
+        );
         assert_eq!(summary["log_evidence"]["current_process_scoped"], false);
         assert_eq!(summary["log_evidence"]["current_startup_attributed"], false);
         assert_eq!(summary["last_runtime_event"]["state"], "READY");
