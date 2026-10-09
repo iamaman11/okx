@@ -39,7 +39,8 @@ pub use state::{
     ALLOW_LIVE_TRADING_DEFAULT, ExchangeOrderState, ExecutionRecord, ExecutionState,
     ExecutionSubmissionTimingEvidence, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION,
     OrderMutationKind, OrderMutationRecord, OrderMutationResolution, OrderMutationState,
-    PROTECTIVE_ORDER_POLICY_V1, ProtectiveOrderLink, ProtectiveOrderResolution,
+    PROTECTIVE_ORDER_POLICY_V1, ProtectiveCleanupRecord, ProtectiveCleanupState,
+    ProtectiveOrderLink, ProtectiveOrderResolution,
     ProtectiveOrderStatus, ProtectiveTriggerPriceBasis, ReverseContinuation, ReverseExecutionLink,
     ReverseLeg, require_live_trading_enabled,
 };
