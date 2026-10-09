@@ -157,6 +157,25 @@ pub enum ProtectiveOrderStatus {
     Active,
     NotActivated,
     Failed,
+    CleanedUp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProtectiveCleanupState {
+    Prepared,
+    Submitting,
+    Unknown,
+    Acknowledged,
+    ConfirmedAbsent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectiveCleanupRecord {
+    pub mutation_id: String,
+    pub algo_order_id: String,
+    pub state: ProtectiveCleanupState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +191,8 @@ pub struct ProtectiveOrderLink {
     pub covered_size: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<ProtectiveCleanupRecord>,
 }
 
 impl ProtectiveOrderLink {
@@ -187,6 +208,7 @@ impl ProtectiveOrderLink {
             algo_order_id: None,
             covered_size: None,
             failure_code: None,
+            cleanup: None,
         })
     }
 
@@ -404,6 +426,15 @@ pub enum ExecutionTransitionError {
     #[error("protective order transition is invalid")]
     InvalidProtectionTransition,
 
+    #[error("protective cleanup requires exact active owned protection and terminal parent")]
+    InvalidProtectiveCleanup,
+
+    #[error("protective cleanup is already present under another mutation id")]
+    ProtectiveCleanupConflict,
+
+    #[error("protective cleanup transition is invalid or replay was attempted")]
+    InvalidProtectiveCleanupTransition,
+
     #[error("reverse execution linkage is invalid")]
     InvalidReverseLink,
 
@@ -557,6 +588,123 @@ impl ExecutionRecord {
         self.order_id = Some(incoming);
         self.exchange_state = Some(exchange_state);
         self.state = target;
+        Ok(())
+    }
+
+    /// A uniquely identified attached algo can only be cleaned up after the
+    /// parent is terminal. The agent additionally requires a coherent flat
+    /// account and exact pending algo identity before admitting this step.
+    pub fn prepare_protective_cleanup(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<bool, ExecutionTransitionError> {
+        if !valid_mutation_id(mutation_id) || !self.state.is_terminal() {
+            return Err(ExecutionTransitionError::InvalidProtectiveCleanup);
+        }
+        let protection = self
+            .protection
+            .as_mut()
+            .ok_or(ExecutionTransitionError::InvalidProtectiveCleanup)?;
+        if let Some(existing) = protection.cleanup.as_ref() {
+            if existing.mutation_id == mutation_id {
+                return Ok(false);
+            }
+            return Err(ExecutionTransitionError::ProtectiveCleanupConflict);
+        }
+        if protection.status != ProtectiveOrderStatus::Active {
+            return Err(ExecutionTransitionError::InvalidProtectiveCleanup);
+        }
+        let algo_order_id = protection
+            .algo_order_id
+            .as_deref()
+            .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+            .ok_or(ExecutionTransitionError::InvalidProtectiveCleanup)?
+            .to_owned();
+        protection.cleanup = Some(ProtectiveCleanupRecord {
+            mutation_id: mutation_id.to_owned(),
+            algo_order_id,
+            state: ProtectiveCleanupState::Prepared,
+        });
+        Ok(true)
+    }
+
+    pub fn begin_protective_cleanup(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        self.transition_protective_cleanup(
+            mutation_id,
+            ProtectiveCleanupState::Prepared,
+            ProtectiveCleanupState::Submitting,
+        )
+    }
+
+    pub fn acknowledge_protective_cleanup(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        self.transition_protective_cleanup(
+            mutation_id,
+            ProtectiveCleanupState::Submitting,
+            ProtectiveCleanupState::Acknowledged,
+        )
+    }
+
+    pub fn mark_protective_cleanup_unknown(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        self.transition_protective_cleanup(
+            mutation_id,
+            ProtectiveCleanupState::Submitting,
+            ProtectiveCleanupState::Unknown,
+        )
+    }
+
+    /// Only a separately verified absence from the full relevant exchange
+    /// pending algo inventory can retire this protection. ACK alone cannot.
+    pub fn confirm_protective_cleanup_absent(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        let protection = self
+            .protection
+            .as_mut()
+            .ok_or(ExecutionTransitionError::InvalidProtectiveCleanup)?;
+        let cleanup = protection
+            .cleanup
+            .as_mut()
+            .ok_or(ExecutionTransitionError::InvalidProtectiveCleanup)?;
+        if cleanup.mutation_id != mutation_id
+            || !matches!(
+                cleanup.state,
+                ProtectiveCleanupState::Acknowledged | ProtectiveCleanupState::Unknown
+            )
+            || protection.status != ProtectiveOrderStatus::Active
+            || protection.algo_order_id.as_deref() != Some(cleanup.algo_order_id.as_str())
+        {
+            return Err(ExecutionTransitionError::InvalidProtectiveCleanupTransition);
+        }
+        cleanup.state = ProtectiveCleanupState::ConfirmedAbsent;
+        protection.status = ProtectiveOrderStatus::CleanedUp;
+        Ok(())
+    }
+
+    fn transition_protective_cleanup(
+        &mut self,
+        mutation_id: &str,
+        from: ProtectiveCleanupState,
+        to: ProtectiveCleanupState,
+    ) -> Result<(), ExecutionTransitionError> {
+        let cleanup = self
+            .protection
+            .as_mut()
+            .and_then(|protection| protection.cleanup.as_mut())
+            .ok_or(ExecutionTransitionError::InvalidProtectiveCleanup)?;
+        if cleanup.mutation_id != mutation_id || cleanup.state != from {
+            return Err(ExecutionTransitionError::InvalidProtectiveCleanupTransition);
+        }
+        cleanup.state = to;
         Ok(())
     }
 
@@ -1124,6 +1272,52 @@ mod tests {
             require_live_trading_enabled(ALLOW_LIVE_TRADING_DEFAULT),
             Err(ExecutionTransitionError::LiveTradingDisabled)
         );
+    }
+
+    #[test]
+    fn protective_cleanup_unknown_ack_and_independent_confirmation_are_one_shot() {
+        let mut record = ExecutionRecord::new(protected_plan());
+        record.begin_submission().expect("submit parent");
+        record.acknowledge("parent123").expect("ack parent");
+        record
+            .reconcile_found_with_protection(
+                "parent123",
+                ExchangeOrderState::Filled,
+                Some(ProtectiveOrderResolution::Active {
+                    algo_order_id: "123456789".to_owned(),
+                    covered_size: "1".to_owned(),
+                }),
+            )
+            .expect("exact protective parent");
+        let mid = "cleanup_0123456789abcdef";
+        assert!(record.prepare_protective_cleanup(mid).expect("prepared"));
+        assert!(
+            !record
+                .prepare_protective_cleanup(mid)
+                .expect("same idempotent")
+        );
+        assert!(
+            record
+                .prepare_protective_cleanup("another_0123456789ab")
+                .is_err()
+        );
+        record
+            .begin_protective_cleanup(mid)
+            .expect("sent exactly once");
+        record
+            .mark_protective_cleanup_unknown(mid)
+            .expect("ambiguous");
+        assert!(
+            record.begin_protective_cleanup(mid).is_err(),
+            "NEVER replay unknown POST"
+        );
+        assert!(record.acknowledge_protective_cleanup(mid).is_err());
+        assert!(record.protection_blocks_new_managed_intent());
+        record
+            .confirm_protective_cleanup_absent(mid)
+            .expect("independent absence");
+        assert!(!record.protection_blocks_new_managed_intent());
+        assert!(record.confirm_protective_cleanup_absent(mid).is_err());
     }
 
     #[test]

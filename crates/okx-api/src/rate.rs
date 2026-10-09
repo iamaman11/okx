@@ -519,7 +519,7 @@ fn public_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Optio
 fn private_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Option<String>) {
     let scope = if path == "/api/v5/account/instruments" {
         param(params, "instType").map(|value| format!("authenticated_user+inst_type:{value}"))
-    } else if path == "/api/v5/trade/order" {
+    } else if matches!(path, "/api/v5/trade/order" | "/api/v5/trade/cancel-algos") {
         param(params, "instId").map(|value| format!("authenticated_user+instrument:{value}"))
     } else {
         Some("authenticated_user".to_owned())
@@ -538,6 +538,7 @@ fn private_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Opti
         "/api/v5/asset/balances" => (6, 1_000),
         "/api/v5/trade/orders-pending" => (60, 2_000),
         "/api/v5/trade/orders-algo-pending" => (20, 2_000),
+        "/api/v5/trade/cancel-algos" => (20, 2_000),
         "/api/v5/trade/order-algo" => (20, 2_000),
         "/api/v5/trade/orders-history" => (40, 2_000),
         "/api/v5/trade/orders-history-archive" => (20, 2_000),

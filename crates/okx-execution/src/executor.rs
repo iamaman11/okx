@@ -3,9 +3,10 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use okx_api::{
     AmendOrderRequest, ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode,
-    ApiTriggerPriceType, AttachedAlgoOrderRequest, CancelOrderRequest, MutationTiming,
-    OkxEnvironment, OkxError, OrderOperationAck, PlaceOrderRequest, RateDecision, RateRequestPlan,
-    RateThrottleEvidence, TradeAlgoOrderDetails, TradeApi, TradeOrderDetails, TradeResponse,
+    ApiTriggerPriceType, AttachedAlgoOrderRequest, CancelAlgoOrderAck, CancelAlgoOrderRequest,
+    CancelOrderRequest, MutationTiming, OkxEnvironment, OkxError, OrderOperationAck,
+    PlaceOrderRequest, RateDecision, RateRequestPlan, RateThrottleEvidence, TradeAlgoOrderDetails,
+    TradeApi, TradeOrderDetails, TradeResponse,
 };
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -15,8 +16,8 @@ use crate::{
     ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
     ExecutionTransitionError, MutationPrepareDisposition, OrderMutationKind, OrderMutationRecord,
     OrderMutationResolution, OrderMutationState, OrderSide, OrderType, PositionSide,
-    PrepareOutcome, ProtectiveOrderResolution, ProtectiveTriggerPriceBasis, TradeMode,
-    classify_prepare_result, derive_amend_request_id, require_live_trading_enabled,
+    PrepareOutcome, ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveTriggerPriceBasis,
+    TradeMode, classify_prepare_result, derive_amend_request_id, require_live_trading_enabled,
 };
 
 #[async_trait]
@@ -68,6 +69,24 @@ pub trait ExecutionGateway: Send + Sync {
     ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
         Err(OkxError::Config(
             "execution gateway does not support cancel_order".to_owned(),
+        ))
+    }
+
+    fn admit_cancel_algo_order(
+        &self,
+        _request: &CancelAlgoOrderRequest,
+    ) -> Result<Option<RateRequestPlan>, OkxError> {
+        Ok(None)
+    }
+
+    async fn cancel_algo_order(
+        &self,
+        _request: CancelAlgoOrderRequest,
+        _timing: MutationTiming,
+        _rate_plan: Option<RateRequestPlan>,
+    ) -> Result<TradeResponse<CancelAlgoOrderAck>, OkxError> {
+        Err(OkxError::Config(
+            "execution gateway does not support cancel_algo_order".to_owned(),
         ))
     }
 
@@ -150,6 +169,25 @@ impl ExecutionGateway for TradeApi {
             }
             None => TradeApi::cancel_order(self, &request, &timing).await,
         }
+    }
+
+    fn admit_cancel_algo_order(
+        &self,
+        request: &CancelAlgoOrderRequest,
+    ) -> Result<Option<RateRequestPlan>, OkxError> {
+        TradeApi::admit_cancel_algo_order(self, request).map(Some)
+    }
+
+    async fn cancel_algo_order(
+        &self,
+        request: CancelAlgoOrderRequest,
+        timing: MutationTiming,
+        rate_plan: Option<RateRequestPlan>,
+    ) -> Result<TradeResponse<CancelAlgoOrderAck>, OkxError> {
+        let plan = rate_plan.ok_or_else(|| {
+            OkxError::Config("cancel-algos must have pre-admitted exact rate plan".to_owned())
+        })?;
+        TradeApi::cancel_algo_order_after_admission(self, &request, &timing, &plan).await
     }
 
     async fn order_by_client_id(
@@ -481,6 +519,113 @@ where
         Ok(self
             .ledger
             .prepare_order_mutation(intent_id, mutation, observed_at_ms)?)
+    }
+
+    pub fn prepare_protective_cleanup(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        Ok(self
+            .ledger
+            .prepare_protective_cleanup(intent_id, mutation_id, observed_at_ms)?)
+    }
+
+    /// No implicit retries. Journal SUBMITTING before the only HTTP POST;
+    /// unknown outcome stays UNKNOWN until independent exchange reconciliation.
+    pub async fn submit_prepared_protective_cleanup(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+    ) -> Result<MutationSubmitDisposition, OrderExecutorError> {
+        require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
+        let entry = self
+            .ledger
+            .get(intent_id)
+            .cloned()
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        let cleanup = entry
+            .record
+            .protection
+            .as_ref()
+            .and_then(|protection| protection.cleanup.as_ref())
+            .ok_or(OrderExecutorError::InvalidMutationInput(
+                "protective_cleanup",
+            ))?;
+        if cleanup.mutation_id != mutation_id || cleanup.state != ProtectiveCleanupState::Prepared {
+            return Err(OrderExecutorError::InvalidMutationInput(
+                "protective_cleanup_state",
+            ));
+        }
+        let request = CancelAlgoOrderRequest {
+            instrument_id: entry.record.plan.instrument_id.clone(),
+            algo_order_id: cleanup.algo_order_id.clone(),
+        };
+        let rate_plan = match self.gateway.admit_cancel_algo_order(&request) {
+            Ok(plan) => plan,
+            Err(OkxError::RateLimited { evidence }) if !evidence.request_sent => {
+                return Err(OrderExecutorError::RateDeferred {
+                    evidence: *evidence,
+                });
+            }
+            Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
+        };
+        self.ledger
+            .begin_protective_cleanup(intent_id, mutation_id, observed_at_ms)?;
+        let response = self
+            .gateway
+            .cancel_algo_order(request.clone(), timing, rate_plan)
+            .await;
+        match response {
+            Ok(reply)
+                if reply.code == "0"
+                    && reply.data.len() == 1
+                    && reply.data[0].algo_order_id == request.algo_order_id
+                    && reply.data[0].status_code == "0" =>
+            {
+                Ok(MutationSubmitDisposition::Acknowledged(
+                    self.ledger.acknowledge_protective_cleanup(
+                        intent_id,
+                        mutation_id,
+                        observed_at_ms,
+                    )?,
+                ))
+            }
+            _ => Ok(MutationSubmitDisposition::Unknown(
+                self.ledger.mark_protective_cleanup_unknown(
+                    intent_id,
+                    mutation_id,
+                    observed_at_ms,
+                )?,
+            )),
+        }
+    }
+
+    pub fn mark_protective_cleanup_unknown_after_restart(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        Ok(self
+            .ledger
+            .mark_protective_cleanup_unknown(intent_id, mutation_id, observed_at_ms)?)
+    }
+
+    /// Caller independently proves same-account flat and exact algo absence
+    /// in complete SWAP/FUTURES conditional+OCO pending inventory.
+    pub fn confirm_protective_cleanup_absent(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        Ok(self
+            .ledger
+            .confirm_protective_cleanup_absent(intent_id, mutation_id, observed_at_ms)?)
     }
 
     pub async fn submit_prepared(

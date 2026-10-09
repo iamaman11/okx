@@ -8,6 +8,7 @@ use crate::{
 
 const PLACE_ORDER_PATH: &str = "/api/v5/trade/order";
 const CANCEL_ORDER_PATH: &str = "/api/v5/trade/cancel-order";
+const CANCEL_ALGO_PATH: &str = "/api/v5/trade/cancel-algos";
 const AMEND_ORDER_PATH: &str = "/api/v5/trade/amend-order";
 const ORDER_DETAILS_PATH: &str = "/api/v5/trade/order";
 const ALGO_ORDER_DETAILS_PATH: &str = "/api/v5/trade/order-algo";
@@ -109,6 +110,27 @@ pub struct CancelOrderRequest {
     pub instrument_id: String,
     #[serde(rename = "clOrdId")]
     pub client_order_id: String,
+}
+
+/// Exchange accepts an array of cancellation entries; this typed operation
+/// deliberately sends only one exact owned algoId, never bulk/cancel-all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelAlgoOrderRequest {
+    #[serde(rename = "instId")]
+    pub instrument_id: String,
+    #[serde(rename = "algoId")]
+    pub algo_order_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CancelAlgoOrderAck {
+    #[serde(rename = "algoId", default)]
+    pub algo_order_id: String,
+    #[serde(rename = "sCode", default)]
+    pub status_code: String,
+    #[serde(rename = "sMsg", default)]
+    pub status_message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,6 +517,61 @@ impl TradeApi {
         let rate_plan = self.admit_cancel_order(request)?;
         self.cancel_order_after_admission(request, timing, &rate_plan)
             .await
+    }
+
+    pub fn admit_cancel_algo_order(
+        &self,
+        request: &CancelAlgoOrderRequest,
+    ) -> Result<RateRequestPlan, OkxError> {
+        validate_instrument_id(&request.instrument_id)?;
+        if request.algo_order_id.is_empty()
+            || request.algo_order_id.len() > 64
+            || !request
+                .algo_order_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return Err(OkxError::Config(
+                "algoId must be a numeric exchange order ID".to_owned(),
+            ));
+        }
+        let plan = self.client.rate_budget().private_rest_plan(
+            CANCEL_ALGO_PATH,
+            &[("instId", request.instrument_id.clone())],
+        );
+        self.client
+            .rate_budget()
+            .admit(&plan)
+            .map_err(|evidence| OkxError::RateLimited { evidence })?;
+        Ok(plan)
+    }
+
+    pub async fn cancel_algo_order_after_admission(
+        &self,
+        request: &CancelAlgoOrderRequest,
+        timing: &MutationTiming,
+        plan: &RateRequestPlan,
+    ) -> Result<TradeResponse<CancelAlgoOrderAck>, OkxError> {
+        validate_instrument_id(&request.instrument_id)?;
+        if request.algo_order_id.is_empty()
+            || !request
+                .algo_order_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return Err(OkxError::Config("invalid exact algoId".to_owned()));
+        }
+        Ok(self
+            .client
+            .private_post_after_admission(
+                CANCEL_ALGO_PATH,
+                std::slice::from_ref(request),
+                timing.request_timestamp(),
+                None,
+                plan,
+            )
+            .await?
+            .into())
     }
 
     pub fn admit_amend_order(
@@ -899,6 +976,24 @@ mod tests {
         assert_eq!(full.rows, PROTECTIVE_ALGO_PAGE_LIMIT);
         assert!(!full.complete_within_bound);
         assert_eq!(full.samples.len(), PROTECTIVE_ALGO_SAMPLE_LIMIT);
+    }
+
+    #[test]
+    fn one_exact_algo_cancel_wire_contract_is_an_array_and_not_a_bulk_request() {
+        let one = CancelAlgoOrderRequest {
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            algo_order_id: "1234567890".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(std::slice::from_ref(&one)).expect("JSON"),
+            r#"[{"instId":"BTC-USDT-SWAP","algoId":"1234567890"}]"#
+        );
+        let ack: CancelAlgoOrderAck = serde_json::from_value(serde_json::json!({
+            "algoId":"1234567890", "sCode":"0", "sMsg":""
+        }))
+        .expect("ack");
+        assert_eq!(ack.algo_order_id, one.algo_order_id);
+        assert_eq!(ack.status_code, "0");
     }
 
     fn place() -> PlaceOrderRequest {

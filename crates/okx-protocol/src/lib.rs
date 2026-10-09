@@ -895,6 +895,9 @@ pub enum ExecutionMutationRequest {
     Cancel {
         mutation_id: String,
     },
+    CancelProtection {
+        mutation_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1200,7 +1203,8 @@ impl AgentOperation {
                         }
                         Ok(())
                     }
-                    ExecutionMutationRequest::Cancel { mutation_id } => {
+                    ExecutionMutationRequest::Cancel { mutation_id }
+                    | ExecutionMutationRequest::CancelProtection { mutation_id } => {
                         validate_mutation_id(mutation_id)
                     }
                 }

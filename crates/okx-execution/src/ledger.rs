@@ -16,9 +16,9 @@ use crate::{
     ExchangeOrderState, ExecutionAction, ExecutionLineageBinding, ExecutionPlan, ExecutionRecord,
     ExecutionState, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
     OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
-    PositionSide, ProtectiveOrderResolution, ProtectiveOrderStatus, ProtectiveTriggerPriceBasis,
-    ReverseContinuation, ReverseExecutionLink, ReverseLeg, derive_client_order_id,
-    derive_protective_algo_client_id, derive_reverse_open_intent_id,
+    PositionSide, ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveOrderStatus,
+    ProtectiveTriggerPriceBasis, ReverseContinuation, ReverseExecutionLink, ReverseLeg,
+    derive_client_order_id, derive_protective_algo_client_id, derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
@@ -581,6 +581,61 @@ impl DurableExecutionLedger {
         Ok(MutationPrepareDisposition::Created(entry))
     }
 
+    pub fn prepare_protective_cleanup(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.prepare_protective_cleanup(mutation_id).map(|_| ())
+        })
+    }
+
+    pub fn begin_protective_cleanup(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.begin_protective_cleanup(mutation_id)
+        })
+    }
+
+    pub fn acknowledge_protective_cleanup(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.acknowledge_protective_cleanup(mutation_id)
+        })
+    }
+
+    pub fn mark_protective_cleanup_unknown(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.mark_protective_cleanup_unknown(mutation_id)
+        })
+    }
+
+    pub fn confirm_protective_cleanup_absent(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.confirm_protective_cleanup_absent(mutation_id)
+        })
+    }
+
     pub fn begin_order_mutation_submission(
         &mut self,
         intent_id: &str,
@@ -901,7 +956,7 @@ fn validate_protection_link(record: &ExecutionRecord) -> Result<(), ExecutionLed
                 ));
             }
         }
-        ProtectiveOrderStatus::Active => {
+        ProtectiveOrderStatus::Active | ProtectiveOrderStatus::CleanedUp => {
             if protection
                 .algo_order_id
                 .as_deref()
@@ -931,6 +986,40 @@ fn validate_protection_link(record: &ExecutionRecord) -> Result<(), ExecutionLed
                 ));
             }
         }
+    }
+
+    if let Some(cleanup) = protection.cleanup.as_ref() {
+        if !valid_mutation_id(&cleanup.mutation_id)
+            || protection.algo_order_id.as_deref() != Some(cleanup.algo_order_id.as_str())
+            || !record.state.is_terminal()
+            || !matches!(
+                (protection.status, cleanup.state),
+                (
+                    ProtectiveOrderStatus::Active,
+                    ProtectiveCleanupState::Prepared
+                ) | (
+                    ProtectiveOrderStatus::Active,
+                    ProtectiveCleanupState::Submitting
+                ) | (
+                    ProtectiveOrderStatus::Active,
+                    ProtectiveCleanupState::Unknown
+                ) | (
+                    ProtectiveOrderStatus::Active,
+                    ProtectiveCleanupState::Acknowledged
+                ) | (
+                    ProtectiveOrderStatus::CleanedUp,
+                    ProtectiveCleanupState::ConfirmedAbsent
+                )
+            )
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "protective cleanup state does not match durable exchange ownership",
+            ));
+        }
+    } else if protection.status == ProtectiveOrderStatus::CleanedUp {
+        return Err(ExecutionLedgerError::Corrupt(
+            "cleaned protective order lacks durable cleanup evidence",
+        ));
     }
 
     if record.state == ExecutionState::Rejected
@@ -1470,6 +1559,79 @@ mod tests {
             PrepareDisposition::Created(_)
         ));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protective_cleanup_unknown_persists_and_blocks_replay_after_restart() {
+        let root = temp_root("protective-cleanup-unknown");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent = "intent_protection_cleanup_012345";
+        let mutation = "cleanup_0123456789abcdef";
+        {
+            let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+            ledger
+                .prepare(protected_plan(intent), 101)
+                .expect("prepare");
+            ledger.begin_submission(intent, 102).expect("submit");
+            ledger.acknowledge(intent, "parent123", 103).expect("ack");
+            ledger
+                .reconcile_found_with_resolutions(
+                    intent,
+                    "parent123",
+                    ExchangeOrderState::Filled,
+                    OrderMutationResolution::Pending,
+                    Some(ProtectiveOrderResolution::Active {
+                        algo_order_id: "123456789012".to_owned(),
+                        covered_size: "1".to_owned(),
+                    }),
+                    104,
+                )
+                .expect("active protection");
+            ledger
+                .prepare_protective_cleanup(intent, mutation, 105)
+                .expect("persist PREPARED");
+            ledger
+                .begin_protective_cleanup(intent, mutation, 106)
+                .expect("persist SUBMITTING before HTTP");
+        }
+        {
+            let mut restarted = DurableExecutionLedger::open(store.clone(), 200).expect("restart");
+            assert!(matches!(
+                restarted.begin_protective_cleanup(intent, mutation, 201),
+                Err(ExecutionLedgerError::Transition(
+                    ExecutionTransitionError::InvalidProtectiveCleanupTransition
+                ))
+            ));
+            assert!(matches!(
+                restarted.prepare(plan("intent_cleanup_blocked_012345"), 202),
+                Err(ExecutionLedgerError::InstrumentBusy)
+            ));
+            restarted
+                .mark_protective_cleanup_unknown(intent, mutation, 203)
+                .expect("mark post-crash UNKNOWN; never replay");
+        }
+        let mut recovered = DurableExecutionLedger::open(store, 300).expect("restart again");
+        assert!(matches!(
+            recovered.begin_protective_cleanup(intent, mutation, 301),
+            Err(ExecutionLedgerError::Transition(
+                ExecutionTransitionError::InvalidProtectiveCleanupTransition
+            ))
+        ));
+        let cleaned = recovered
+            .confirm_protective_cleanup_absent(intent, mutation, 302)
+            .expect("only independently verified absent");
+        assert_eq!(
+            cleaned.record.protection.as_ref().expect("link").status,
+            ProtectiveOrderStatus::CleanedUp
+        );
+        assert!(matches!(
+            recovered
+                .prepare(plan("intent_cleanup_released_01234"), 303)
+                .expect("flat and algo absent"),
+            PrepareDisposition::Created(_)
+        ));
         let _ = fs::remove_dir_all(root);
     }
 

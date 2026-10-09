@@ -923,6 +923,18 @@ async fn mutate_execution(
         ));
     }
 
+    if let ExecutionMutationRequest::CancelProtection { mutation_id } = mutation {
+        return cancel_owned_protection(
+            request,
+            context,
+            generated_at,
+            execution,
+            intent_id,
+            mutation_id,
+        )
+        .await;
+    }
+
     let entry = match reconcile_for_mutation(request, generated_at, execution, intent_id).await? {
         MutationReconciliationCheck::Ready(value) => value,
         MutationReconciliationCheck::Response(response) => return Ok(*response),
@@ -964,6 +976,9 @@ async fn mutate_execution(
             };
             (mutation_id.as_str(), admission)
         }
+        ExecutionMutationRequest::CancelProtection { .. } => {
+            unreachable!("protective cleanup is routed before ordinary order mutation")
+        }
         ExecutionMutationRequest::Cancel { mutation_id } => {
             let admission =
                 match cancel_mutation_admission(request, context, generated_at, execution).await? {
@@ -994,6 +1009,9 @@ async fn mutate_execution(
                     observed_at_ms,
                 )
                 .await
+        }
+        ExecutionMutationRequest::CancelProtection { .. } => {
+            unreachable!("protective cleanup has a distinct durable state")
         }
         ExecutionMutationRequest::Cancel { .. } => {
             execution
@@ -1043,6 +1061,250 @@ async fn mutate_execution(
             generated_at,
             AgentResponseStatus::Rejected,
             EXECUTION_INPUT_INCONSISTENT_CODE,
+            error.to_string(),
+            false,
+        )),
+    }
+}
+
+async fn cancel_owned_protection(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+    intent_id: &str,
+    mutation_id: &str,
+) -> AgentResult<AgentResponse> {
+    let Some(mut entry) = execution.entry(intent_id).await else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RECORD_NOT_FOUND_CODE,
+            "managed parent intent does not exist".to_owned(),
+            false,
+        ));
+    };
+    let admission =
+        match cancel_mutation_admission(request, context, generated_at, execution).await? {
+            PreMutationAdmissionResult::Ready(value) => value,
+            PreMutationAdmissionResult::Response(value) => return Ok(*value),
+        };
+    // Re-read the account after admission: flat means no exchange positions,
+    // ordinary pending orders, or non-owning residual risk. This is Demo only.
+    let account = match fresh_account(request, context, generated_at).await? {
+        FreshAccount::Ready(value) => value,
+        FreshAccount::Response(value) => return Ok(*value),
+    };
+    if !account
+        .positions
+        .iter()
+        .all(|position| position.position.trim() == "0")
+        || !account.pending_orders.is_empty()
+    {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            "protective cleanup requires fresh flat account and zero ordinary pending orders"
+                .to_owned(),
+            false,
+        ));
+    }
+    let Some(observer) = context.account_fallback else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    let inventory = match observer.pending_protective_algos().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+    if !inventory.complete_within_bound {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+            "pending protective algo inventory is truncated; no absence or cancel proof".to_owned(),
+            true,
+        ));
+    }
+    let Some(protection) = entry.record.protection.as_ref() else {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            "parent has no managed protection".to_owned(),
+            false,
+        ));
+    };
+    let owned_algo = protection.algo_order_id.clone().unwrap_or_default();
+    let owned_client = protection.algo_client_order_id.clone();
+
+    if let Some(previous) = protection.cleanup.as_ref() {
+        if previous.mutation_id != mutation_id {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_MUTATION_UNSAFE_CODE,
+                "a different durable protective cleanup owns this parent".to_owned(),
+                false,
+            ));
+        }
+        if previous.state == okx_execution::ProtectiveCleanupState::ConfirmedAbsent {
+            return Ok(completed(
+                request,
+                generated_at,
+                "okx.protective-cleanup/v1",
+                serde_json::json!({
+                    "intent_id": intent_id,
+                    "mutation_id": mutation_id,
+                    "state": "CONFIRMED_ABSENT",
+                    "exchange_post_replayed": false,
+                }),
+            ));
+        }
+        if previous.state == okx_execution::ProtectiveCleanupState::Submitting {
+            // The process may have died after writing SUBMITTING. This is
+            // uncertain exchange effect; NEVER send the cancellation again.
+            entry = execution
+                .mark_protective_cleanup_unknown_after_restart(
+                    intent_id,
+                    mutation_id,
+                    utc_now_ms().max(entry.updated_at_ms),
+                )
+                .await?;
+        }
+        if matches!(
+            entry
+                .record
+                .protection
+                .as_ref()
+                .and_then(|p| p.cleanup.as_ref())
+                .map(|c| c.state),
+            Some(okx_execution::ProtectiveCleanupState::Unknown)
+                | Some(okx_execution::ProtectiveCleanupState::Acknowledged)
+        ) {
+            if inventory.rows == 0 {
+                let confirmed = execution
+                    .confirm_protective_cleanup_absent(
+                        intent_id,
+                        mutation_id,
+                        utc_now_ms().max(entry.updated_at_ms),
+                    )
+                    .await?;
+                return Ok(completed(
+                    request,
+                    generated_at,
+                    "okx.protective-cleanup/v1",
+                    serde_json::json!({
+                        "intent_id": intent_id,
+                        "mutation_id": mutation_id,
+                        "state": "CONFIRMED_ABSENT",
+                        "exchange_post_replayed": false,
+                        "record_updated_at_ms": confirmed.updated_at_ms,
+                    }),
+                ));
+            }
+            return Ok(failure_response(
+                request, generated_at, AgentResponseStatus::Rejected,
+                EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+                "previous protective cancel result remains uncertain or pending; POST must not be replayed".to_owned(),
+                true,
+            ));
+        }
+    }
+
+    // At the time of a first one-shot cancel, this acceptance path requires
+    // exactly one pending protective algo across its explicitly bounded scope.
+    if inventory.rows != 1
+        || inventory.samples.len() != 1
+        || inventory.samples[0].instrument_id != entry.record.plan.instrument_id
+        || inventory.samples[0].algo_order_id != owned_algo
+        || inventory.samples[0].client_order_id != owned_client
+    {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            "single pending exchange algo does not exactly match managed parent ownership"
+                .to_owned(),
+            false,
+        ));
+    }
+    let observed_at_ms = utc_now_ms().max(entry.updated_at_ms);
+    if let Err(error) = execution
+        .prepare_protective_cleanup(intent_id, mutation_id, observed_at_ms)
+        .await
+    {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            error.to_string(),
+            false,
+        ));
+    }
+    let outcome = match execution
+        .submit_protective_cleanup_demo_authorized(
+            &admission.preflight,
+            intent_id,
+            mutation_id,
+            admission.timing,
+            observed_at_ms,
+        )
+        .await?
+    {
+        Some(result) => result,
+        None => return Ok(preflight_rejected(request, generated_at)),
+    };
+    match outcome {
+        Ok(result) => {
+            let state = match result {
+                okx_execution::MutationSubmitDisposition::Acknowledged(_) => "ACKNOWLEDGED",
+                okx_execution::MutationSubmitDisposition::Unknown(_) => "UNKNOWN",
+                okx_execution::MutationSubmitDisposition::Rejected(_) => "REJECTED",
+                okx_execution::MutationSubmitDisposition::RateRejected { .. } => "RATE_REJECTED",
+            };
+            let response = completed(
+                request,
+                generated_at,
+                "okx.protective-cleanup/v1",
+                serde_json::json!({
+                    "intent_id": intent_id,
+                    "mutation_id": mutation_id,
+                    "state": state,
+                    "exchange_effect_terminally_verified": false,
+                    "exchange_post_replayed": false,
+                }),
+            );
+            Ok(AgentResponse {
+                quality: DataQuality::Degraded,
+                warnings: vec![
+                    "protective cancellation is not terminally verified; independently reconcile exact algo absence before accepting flat"
+                        .to_owned(),
+                ],
+                ..response
+            })
+        }
+        Err(error) => Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MUTATION_UNSAFE_CODE,
             error.to_string(),
             false,
         )),
@@ -2210,6 +2472,7 @@ mod tests {
             algo_order_id: Some("12345678901234567890".to_owned()),
             covered_size: Some("1234567890.123456789012345678".to_owned()),
             failure_code: None,
+            cleanup: None,
         });
         entry.record.submission_timing = Some(okx_execution::ExecutionSubmissionTimingEvidence {
             request_exchange_time_ms: 1_791_300_000_000,
