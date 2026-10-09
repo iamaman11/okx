@@ -3,10 +3,10 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use okx_api::{
     AmendOrderRequest, ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode,
-    ApiTriggerPriceType, AttachedAlgoOrderRequest, CancelAlgoOrderAck,
-    CancelAlgoOrderRequest, CancelOrderRequest, MutationTiming,
-    OkxEnvironment, OkxError, OrderOperationAck, PlaceOrderRequest, RateDecision, RateRequestPlan,
-    RateThrottleEvidence, TradeAlgoOrderDetails, TradeApi, TradeOrderDetails, TradeResponse,
+    ApiTriggerPriceType, AttachedAlgoOrderRequest, CancelAlgoOrderAck, CancelAlgoOrderRequest,
+    CancelOrderRequest, MutationTiming, OkxEnvironment, OkxError, OrderOperationAck,
+    PlaceOrderRequest, RateDecision, RateRequestPlan, RateThrottleEvidence, TradeAlgoOrderDetails,
+    TradeApi, TradeOrderDetails, TradeResponse,
 };
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -16,9 +16,8 @@ use crate::{
     ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
     ExecutionTransitionError, MutationPrepareDisposition, OrderMutationKind, OrderMutationRecord,
     OrderMutationResolution, OrderMutationState, OrderSide, OrderType, PositionSide,
-    PrepareOutcome, ProtectiveCleanupState, ProtectiveOrderResolution,
-    ProtectiveTriggerPriceBasis, TradeMode,
-    classify_prepare_result, derive_amend_request_id, require_live_trading_enabled,
+    PrepareOutcome, ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveTriggerPriceBasis,
+    TradeMode, classify_prepare_result, derive_amend_request_id, require_live_trading_enabled,
 };
 
 #[async_trait]
@@ -528,11 +527,9 @@ where
         mutation_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
-        Ok(self.ledger.prepare_protective_cleanup(
-            intent_id,
-            mutation_id,
-            observed_at_ms,
-        )?)
+        Ok(self
+            .ledger
+            .prepare_protective_cleanup(intent_id, mutation_id, observed_at_ms)?)
     }
 
     /// No implicit retries. Journal SUBMITTING before the only HTTP POST;
@@ -555,9 +552,13 @@ where
             .protection
             .as_ref()
             .and_then(|protection| protection.cleanup.as_ref())
-            .ok_or(OrderExecutorError::InvalidMutationInput("protective_cleanup"))?;
+            .ok_or(OrderExecutorError::InvalidMutationInput(
+                "protective_cleanup",
+            ))?;
         if cleanup.mutation_id != mutation_id || cleanup.state != ProtectiveCleanupState::Prepared {
-            return Err(OrderExecutorError::InvalidMutationInput("protective_cleanup_state"));
+            return Err(OrderExecutorError::InvalidMutationInput(
+                "protective_cleanup_state",
+            ));
         }
         let request = CancelAlgoOrderRequest {
             instrument_id: entry.record.plan.instrument_id.clone(),
@@ -566,7 +567,9 @@ where
         let rate_plan = match self.gateway.admit_cancel_algo_order(&request) {
             Ok(plan) => plan,
             Err(OkxError::RateLimited { evidence }) if !evidence.request_sent => {
-                return Err(OrderExecutorError::RateDeferred { evidence: *evidence });
+                return Err(OrderExecutorError::RateDeferred {
+                    evidence: *evidence,
+                });
             }
             Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
         };
@@ -607,11 +610,9 @@ where
         mutation_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
-        Ok(self.ledger.mark_protective_cleanup_unknown(
-            intent_id,
-            mutation_id,
-            observed_at_ms,
-        )?)
+        Ok(self
+            .ledger
+            .mark_protective_cleanup_unknown(intent_id, mutation_id, observed_at_ms)?)
     }
 
     /// Caller independently proves same-account flat and exact algo absence
@@ -622,11 +623,9 @@ where
         mutation_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
-        Ok(self.ledger.confirm_protective_cleanup_absent(
-            intent_id,
-            mutation_id,
-            observed_at_ms,
-        )?)
+        Ok(self
+            .ledger
+            .confirm_protective_cleanup_absent(intent_id, mutation_id, observed_at_ms)?)
     }
 
     pub async fn submit_prepared(
