@@ -601,6 +601,19 @@ where
         }
     }
 
+    pub fn mark_protective_cleanup_unknown_after_restart(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        Ok(self.ledger.mark_protective_cleanup_unknown(
+            intent_id,
+            mutation_id,
+            observed_at_ms,
+        )?)
+    }
+
     /// Caller independently proves same-account flat and exact algo absence
     /// in complete SWAP/FUTURES conditional+OCO pending inventory.
     pub fn confirm_protective_cleanup_absent(
