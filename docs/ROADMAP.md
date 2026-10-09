@@ -44,6 +44,31 @@ This compact snapshot reconciles the latest **physical evidence** with canonical
 
 Acceptance classification: this entry is a **documented operator audit and readiness cursor**, not Stage-3/4C/5 acceptance and not authorization for orders.
 
+## Code-complete track (product engineering independent of strategy profitability)
+
+**Current objective:** achieve **CODE_COMPLETE as an engineering candidate** on the existing Rust/Tokio product, as soon as testable, without waiting for a profitable strategy, new 96-hour holdout or successful positive H2 promotion. The Stage-3 research *engine* is implemented; the H2 *candidate* is not promotable on the observed validation lineage. Do not fabricate scientific acceptance.
+
+Four different statuses must never be conflated:
+
+- `CODE_COMPLETE`: all approved product workflows and safety policies are implemented in accepted owners with T1/T2 deterministic and integration tests, exact-head CI, no missing internal executable capability. Can be evaluated without a promising strategy or OKX trading access.
+- `VENUE_ACCEPTED`: separately require physical OKX Demo intent -> place -> reconcile -> cancel/fill/flat/protection/restart/TCA evidence on the **same** execution owner. It is not obtained by CI or old preflight.
+- `STRATEGY_APPROVED`: one independently frozen hypothesis passes the locked scientific criteria and is authorized through positive BACKTESTED -> PAPER/SHADOW. This is a *strategy-instance authority*, not a prerequisite to compiling, testing or completing the product. Failed/insufficient candidates stay recorded and must not be rebranded as profitable.
+- `LIVE_AUTHORIZED`: stages and safety accepted, separate least-privilege production Trade credential and **explicit** owner approval. Current production live authority remains disabled.
+
+**Same-day code-work critical path, no clock-time guarantee and no architecture expansion:**
+
+1. **Freeze scope / verify already accepted foundation.** Stage 1–2, Stage 3A–3D *research infrastructure*, Stage 4A/4B execution kernel, Stage 4D transport/context are retained. CI/source-tree/installed artifact are authoritative; do not reopen implemented features merely to add activity. H2 validation 22 < 30 is an independent scientific failure of evidence, not a missing Rust feature.
+2. **Stage 5A: operator/governance gate** in existing `okx-analysis`/sole `okx-execution` owner. Reuse `HardRiskPolicy`, `CandidateRiskGate`, the existing durable ledger and mutation revalidation: fail-closed `STOP_NEW_RISK`, cancel-entry policy, preserving protected exits and controlled close, default-disabled production live. Test stale/unknown mode, daily loss/drawdown persistence/rollover, crash/restart and operator stops. Do **not** introduce a second policy/calculation/executor/daemon/transport or a generic `ALLOW_LIVE_TRADING` endpoint.
+3. **Stage 5B: audit + attribution + review** using existing read-only account/fill/bill/TCA/research artifact identities. A bounded, versioned immutable scorecard and `KEEP | DEMOTE | RETIRE | NEW_VERSION` review with explicit insufficient-evidence/drift reasons; external/manual effects must be labelled unattributed. No auto-promotion or self-modifying strategy. Test synthetic/negative/no-trade inputs without requiring positive H2 edge.
+4. **Stage 5C: operation/recovery/canary-readiness**. Review exchange-native Cancel All After (CAA) for protective-exit compatibility; implement only if a provably safe policy requires it, otherwise document a tested alternative. Reuse current Windows supervisor, Cloudflare primary, GitHub fallback and exact artifact provenance; T1/T2 fault tests, T3 CI, T4 read-only product/operability checks, T5 shutdown/recovery. No new scheduler, mutable DB, process, MCP mutation tool or raw-RPC escape hatch.
+5. **Code-complete decision:** one explicit reviewed checklist maps each Stage-3/4/5 software deliverable to accepted code, tests and exact source tree. `CODE_COMPLETE=PASS` only with no unimplemented required software behavior. `BLOCKED_EXTERNAL` / `NOT_ACCEPTED` remain visible for real Demo venue tests, PAPER/SHADOW scientific promotion and production canary. An unfinished CI or still-missing kill/review kernel is **not** CODE_COMPLETE.
+
+**Immediate execution order:** implement the missing Stage 5A/5B/5C code/fixtures in coherent slices, then test and document each tested tree; pursue physical Stage 4C and new strategy research *independently* when their data/transport is available. Do not stall software delivery waiting for H3. Do not weaken or prematurely close the existing Stage 3 scientific or Stage 4C venue acceptance requirements.
+
+**Trader/ChatGPT product check at each slice:** ordinary market/account/risk/research/execution inspection works through coarse read-only primary Cloudflare MCP packets; preserve ≤12,288-byte normal response and typed quality/provenance, supported tool schemas, operator-readable failed-gate reasons, and immutable ids across chats. No chat-context state owner or low-level MCP micro-tool proliferation.
+
+---
+
 ## Accepted Stages 1–2 and current Stage 3 cursor
 
 Canonical execution order inside Stage 1:
