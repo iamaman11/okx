@@ -537,6 +537,8 @@ fn private_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Opti
         "/api/v5/account/positions-history" => (10, 2_000),
         "/api/v5/asset/balances" => (6, 1_000),
         "/api/v5/trade/orders-pending" => (60, 2_000),
+        "/api/v5/trade/orders-algo-pending" => (20, 2_000),
+        "/api/v5/trade/order-algo" => (20, 2_000),
         "/api/v5/trade/orders-history" => (40, 2_000),
         "/api/v5/trade/orders-history-archive" => (20, 2_000),
         "/api/v5/trade/fills-history" => (10, 2_000),
@@ -609,6 +611,25 @@ mod tests {
         budget
             .admit(&futures)
             .expect("second recent order read admitted");
+    }
+
+    #[test]
+    fn protective_algo_reads_share_named_per_user_budget() {
+        let budget = RateBudget::new();
+        let swap = budget.private_rest_plan(
+            "/api/v5/trade/orders-algo-pending",
+            &[("instType", "SWAP".to_owned())],
+        );
+        let futures = budget.private_rest_plan(
+            "/api/v5/trade/orders-algo-pending",
+            &[("instType", "FUTURES".to_owned())],
+        );
+        assert_eq!(swap.domains[0].max_requests, 20);
+        assert_eq!(swap.domains[0].window_ms, 2_000);
+        assert_eq!(swap.domains[0].key, futures.domains[0].key);
+        assert_eq!(budget.private_rest_plan("/api/v5/trade/order-algo", &[]).domains[0].max_requests, 20);
+        budget.admit(&swap).expect("SWAP pending algo read admitted");
+        budget.admit(&futures).expect("FUTURES pending algo read admitted");
     }
 
     #[test]
