@@ -1047,7 +1047,10 @@ fn fatal_error_summary(stderr: &str) -> Option<Value> {
 }
 
 fn runtime_log_summary(profile: AgentProfile) -> Value {
-    let root = runtime_dir(profile);
+    runtime_log_summary_from_root(runtime_dir(profile))
+}
+
+fn runtime_log_summary_from_root(root: PathBuf) -> Value {
     let stdout_path = root.join("okx-agent.stdout.log");
     let stderr_path = root.join("okx-agent.stderr.log");
     let stdout = read_log_tail(&stdout_path).ok();
@@ -1057,6 +1060,14 @@ fn runtime_log_summary(profile: AgentProfile) -> Value {
 
     json!({
         "root": root,
+        // These retained per-profile files are append-only across agent restarts.
+        // They are not scoped to the current PID/launch. Never treat a prior
+        // fatal error or startup marker as proof of a current runtime failure.
+        "log_evidence": {
+            "scope": "retained_profile_file_tail",
+            "current_process_scoped": false,
+            "current_startup_attributed": false
+        },
         "stdout_present": stdout.is_some(),
         "stdout_bytes": stdout.as_ref().map(|(size, _)| *size),
         "stderr_present": stderr.is_some(),
@@ -1215,6 +1226,40 @@ mod tests {
         assert_eq!(fatal["class"], "okx_api");
         assert_eq!(fatal["okx_api_code"], "50101");
         assert!(!fatal.to_string().contains("redacted in summary"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retained_log_error_cannot_be_misreported_as_current_runtime_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-retained-log-provenance-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(
+            root.join("okx-agent.stdout.log"),
+            "{\"schema\":\"okx.agent.runtime/v1\",\"state\":\"READY\"}\n",
+        )
+        .expect("stdout");
+        fs::write(
+            root.join("okx-agent.stderr.log"),
+            "Error: Reference(MissingRequiredField { instrument_id: \"NO_EXCHANGE_MUTATION\", field: \"instId\" })\n",
+        )
+        .expect("stderr");
+
+        let summary = runtime_log_summary_from_root(root.clone());
+        assert_eq!(
+            summary["log_evidence"]["scope"],
+            "retained_profile_file_tail"
+        );
+        assert_eq!(summary["log_evidence"]["current_process_scoped"], false);
+        assert_eq!(summary["log_evidence"]["current_startup_attributed"], false);
+        assert_eq!(summary["last_runtime_event"]["state"], "READY");
+        assert_eq!(summary["fatal_error"]["code"], "missing_required_field");
+        assert_eq!(summary["fatal_error"]["missing_field"], "instId");
+        assert!(!summary.to_string().contains("NO_EXCHANGE_MUTATION"));
 
         let _ = fs::remove_dir_all(root);
     }
