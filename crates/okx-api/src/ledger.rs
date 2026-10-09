@@ -1,9 +1,13 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{OkxError, OkxRestClient, instrument::InstrumentType};
 
 const HISTORY_PAGE_LIMIT: usize = 100;
 const HISTORY_MAX_PAGES: usize = 1;
+const RECENT_ORDER_HISTORY_PATH: &str = "/api/v5/trade/orders-history";
+const ARCHIVE_ORDER_HISTORY_PATH: &str = "/api/v5/trade/orders-history-archive";
 
 #[derive(Debug, Clone)]
 pub struct BoundedHistory<T> {
@@ -218,12 +222,24 @@ impl AccountHistoryApi {
         &self,
         instrument_type: InstrumentType,
     ) -> Result<BoundedHistory<HistoricalOrder>, OkxError> {
-        self.bounded_history(
-            "/api/v5/trade/orders-history-archive",
-            vec![("instType", instrument_type.to_string())],
-            |row: &HistoricalOrder| row.order_id.as_str(),
-        )
-        .await
+        // The archive alone can omit recently canceled, unfilled orders. Both
+        // independently bounded reads must succeed; never treat missing data
+        // from either endpoint as authoritative evidence of absence.
+        let recent = self
+            .bounded_history(
+                RECENT_ORDER_HISTORY_PATH,
+                vec![("instType", instrument_type.to_string())],
+                |row: &HistoricalOrder| row.order_id.as_str(),
+            )
+            .await?;
+        let archive = self
+            .bounded_history(
+                ARCHIVE_ORDER_HISTORY_PATH,
+                vec![("instType", instrument_type.to_string())],
+                |row: &HistoricalOrder| row.order_id.as_str(),
+            )
+            .await?;
+        merge_order_histories(recent, archive)
     }
 
     pub async fn fills_history(
@@ -341,9 +357,213 @@ impl AccountHistoryApi {
     }
 }
 
+fn merge_order_histories(
+    recent: BoundedHistory<HistoricalOrder>,
+    archive: BoundedHistory<HistoricalOrder>,
+) -> Result<BoundedHistory<HistoricalOrder>, OkxError> {
+    let pages = recent.pages + archive.pages;
+    let complete = recent.complete && archive.complete;
+    let mut orders = BTreeMap::<String, HistoricalOrder>::new();
+
+    for (source, rows) in [("archive", archive.rows), ("recent", recent.rows)] {
+        let mut source_ids = BTreeSet::new();
+        for order in rows {
+            let order_id = order.order_id.trim();
+            if order_id.is_empty() {
+                return Err(OkxError::Response(format!(
+                    "{source} order history contains a missing ordId"
+                )));
+            }
+            if !source_ids.insert(order_id.to_owned()) {
+                return Err(OkxError::Response(format!(
+                    "{source} order history repeats ordId {order_id}"
+                )));
+            }
+            let timestamp = order
+                .update_time_ms
+                .parse::<u64>()
+                .ok()
+                .filter(|ts| *ts > 0)
+                .ok_or_else(|| {
+                    OkxError::Response(format!(
+                        "{source} order history contains invalid uTime for ordId {order_id}"
+                    ))
+                })?;
+
+            if let Some(previous) = orders.get(order_id) {
+                // Overlapping venue windows must never silently join another
+                // instrument or client-order identity to this order ID.
+                if previous.instrument_type != order.instrument_type
+                    || previous.instrument_id != order.instrument_id
+                    || previous.client_order_id != order.client_order_id
+                    || previous.side != order.side
+                    || previous.position_side != order.position_side
+                    || previous.trade_mode != order.trade_mode
+                {
+                    return Err(OkxError::Response(format!(
+                        "recent/archive order identity mismatch for ordId {order_id}"
+                    )));
+                }
+                let prior = previous.update_time_ms.parse::<u64>().map_err(|_| {
+                    OkxError::Response(format!(
+                        "archive order history contains invalid uTime for ordId {order_id}"
+                    ))
+                })?;
+                if timestamp >= prior {
+                    orders.insert(order_id.to_owned(), order);
+                }
+            } else {
+                orders.insert(order_id.to_owned(), order);
+            }
+        }
+    }
+
+    // Complete means both endpoint pages were nontruncated, not that OKX
+    // retains older or canceled-unfilled orders beyond documented windows.
+    Ok(BoundedHistory {
+        rows: orders.into_values().collect(),
+        pages,
+        complete,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn canceled_demo_order(id: &str, update_time_ms: &str) -> HistoricalOrder {
+        serde_json::from_value(serde_json::json!({
+            "instType": "SWAP",
+            "instId": "BTC-USDT-SWAP",
+            "ordId": id,
+            "clOrdId": "okx1234567890",
+            "side": "buy",
+            "posSide": "long",
+            "tdMode": "cross",
+            "ordType": "post_only",
+            "state": "canceled",
+            "accFillSz": "0",
+            "cTime": "1791579300000",
+            "uTime": update_time_ms
+        }))
+        .expect("canceled Demo order fixture")
+    }
+
+    #[test]
+    fn recent_history_covers_canceled_unfilled_order_missing_from_archive() {
+        assert_eq!(RECENT_ORDER_HISTORY_PATH, "/api/v5/trade/orders-history");
+        assert_eq!(
+            ARCHIVE_ORDER_HISTORY_PATH,
+            "/api/v5/trade/orders-history-archive"
+        );
+        let recent = BoundedHistory {
+            rows: vec![canceled_demo_order("ord-1", "1791579500000")],
+            pages: 1,
+            complete: true,
+        };
+        let archive = BoundedHistory {
+            rows: vec![],
+            pages: 1,
+            complete: true,
+        };
+        let merged = merge_order_histories(recent, archive).expect("merge recent history");
+        assert_eq!(merged.rows.len(), 1);
+        assert_eq!(merged.rows[0].state, "canceled");
+        assert_eq!(merged.rows[0].accumulated_fill_size, "0");
+        assert_eq!(merged.pages, 2);
+        assert!(merged.complete);
+    }
+
+    #[test]
+    fn deduplicates_recent_and_archive_by_exact_order_id_preferring_newer_update() {
+        let mut older = canceled_demo_order("ord-1", "1791579400000");
+        older.state = "partially_filled".to_owned();
+        let recent = BoundedHistory {
+            rows: vec![canceled_demo_order("ord-1", "1791579500000")],
+            pages: 1,
+            complete: true,
+        };
+        let archive = BoundedHistory {
+            rows: vec![older],
+            pages: 1,
+            complete: true,
+        };
+        let merged = merge_order_histories(recent, archive).expect("merge same order");
+        assert_eq!(merged.rows.len(), 1);
+        assert_eq!(merged.rows[0].state, "canceled");
+    }
+
+    #[test]
+    fn conflicts_and_intra_source_duplicates_fail_closed() {
+        let mut different_instrument = canceled_demo_order("ord-1", "1791579500000");
+        different_instrument.instrument_id = "ETH-USDT-SWAP".to_owned();
+        let error = merge_order_histories(
+            BoundedHistory {
+                rows: vec![different_instrument],
+                pages: 1,
+                complete: true,
+            },
+            BoundedHistory {
+                rows: vec![canceled_demo_order("ord-1", "1791579400000")],
+                pages: 1,
+                complete: true,
+            },
+        )
+        .expect_err("identity mismatch must reject");
+        assert!(error.to_string().contains("identity mismatch"));
+
+        let error = merge_order_histories(
+            BoundedHistory {
+                rows: vec![
+                    canceled_demo_order("ord-1", "1791579500000"),
+                    canceled_demo_order("ord-1", "1791579500000"),
+                ],
+                pages: 1,
+                complete: true,
+            },
+            BoundedHistory {
+                rows: vec![],
+                pages: 1,
+                complete: true,
+            },
+        )
+        .expect_err("duplicate recent row must reject");
+        assert!(error.to_string().contains("repeats ordId"));
+    }
+
+    #[test]
+    fn truncation_or_unknown_timestamp_never_claims_complete_coverage() {
+        let merged = merge_order_histories(
+            BoundedHistory {
+                rows: vec![canceled_demo_order("ord-1", "1791579500000")],
+                pages: 1,
+                complete: false,
+            },
+            BoundedHistory {
+                rows: vec![],
+                pages: 1,
+                complete: true,
+            },
+        )
+        .expect("bounded merge");
+        assert!(!merged.complete);
+        assert_eq!(merged.rows.len(), 1);
+
+        let error = merge_order_histories(
+            BoundedHistory {
+                rows: vec![canceled_demo_order("ord-2", "")],
+                pages: 1,
+                complete: true,
+            },
+            BoundedHistory {
+                rows: vec![],
+                pages: 1,
+                complete: true,
+            },
+        )
+        .expect_err("invalid historical timestamp must reject");
+        assert!(error.to_string().contains("invalid uTime"));
+    }
 
     #[test]
     fn parses_fill_and_bill_event_time_fields() {
