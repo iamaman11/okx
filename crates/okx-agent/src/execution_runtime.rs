@@ -471,9 +471,11 @@ impl ExecutionRuntime {
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
         let mut executor = self.executor.lock().await;
-        Ok(executor
-            .ledger_mut()
-            .mark_protective_cleanup_unknown(intent_id, mutation_id, observed_at_ms)?)
+        executor.mark_protective_cleanup_unknown_after_restart(
+            intent_id,
+            mutation_id,
+            observed_at_ms,
+        )
     }
 
     pub async fn confirm_protective_cleanup_absent(
