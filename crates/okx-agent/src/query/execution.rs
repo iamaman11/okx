@@ -2472,6 +2472,7 @@ mod tests {
             algo_order_id: Some("12345678901234567890".to_owned()),
             covered_size: Some("1234567890.123456789012345678".to_owned()),
             failure_code: None,
+            cleanup: None,
         });
         entry.record.submission_timing = Some(okx_execution::ExecutionSubmissionTimingEvidence {
             request_exchange_time_ms: 1_791_300_000_000,
