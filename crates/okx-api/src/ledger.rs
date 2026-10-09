@@ -357,7 +357,6 @@ impl AccountHistoryApi {
     }
 }
 
-
 fn merge_order_histories(
     recent: BoundedHistory<HistoricalOrder>,
     archive: BoundedHistory<HistoricalOrder>,
@@ -432,7 +431,6 @@ fn merge_order_histories(
 mod tests {
     use super::*;
 
-
     fn canceled_demo_order(id: &str, update_time_ms: &str) -> HistoricalOrder {
         serde_json::from_value(serde_json::json!({
             "instType": "SWAP",
@@ -454,7 +452,10 @@ mod tests {
     #[test]
     fn recent_history_covers_canceled_unfilled_order_missing_from_archive() {
         assert_eq!(RECENT_ORDER_HISTORY_PATH, "/api/v5/trade/orders-history");
-        assert_eq!(ARCHIVE_ORDER_HISTORY_PATH, "/api/v5/trade/orders-history-archive");
+        assert_eq!(
+            ARCHIVE_ORDER_HISTORY_PATH,
+            "/api/v5/trade/orders-history-archive"
+        );
         let recent = BoundedHistory {
             rows: vec![canceled_demo_order("ord-1", "1791579500000")],
             pages: 1,
