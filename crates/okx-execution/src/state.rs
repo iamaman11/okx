@@ -193,7 +193,9 @@ impl ProtectiveOrderLink {
     pub const fn blocks_new_managed_intent(&self) -> bool {
         matches!(
             self.status,
-            ProtectiveOrderStatus::Pending | ProtectiveOrderStatus::Failed
+            ProtectiveOrderStatus::Pending
+                | ProtectiveOrderStatus::Active
+                | ProtectiveOrderStatus::Failed
         )
     }
 
