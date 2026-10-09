@@ -17,9 +17,8 @@ use crate::{
     ExecutionState, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
     OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
     PositionSide, ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveOrderStatus,
-    ProtectiveTriggerPriceBasis,
-    ReverseContinuation, ReverseExecutionLink, ReverseLeg, derive_client_order_id,
-    derive_protective_algo_client_id, derive_reverse_open_intent_id,
+    ProtectiveTriggerPriceBasis, ReverseContinuation, ReverseExecutionLink, ReverseLeg,
+    derive_client_order_id, derive_protective_algo_client_id, derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
@@ -995,14 +994,22 @@ fn validate_protection_link(record: &ExecutionRecord) -> Result<(), ExecutionLed
             || !record.state.is_terminal()
             || !matches!(
                 (protection.status, cleanup.state),
-                (ProtectiveOrderStatus::Active, ProtectiveCleanupState::Prepared)
-                    | (ProtectiveOrderStatus::Active, ProtectiveCleanupState::Submitting)
-                    | (ProtectiveOrderStatus::Active, ProtectiveCleanupState::Unknown)
-                    | (ProtectiveOrderStatus::Active, ProtectiveCleanupState::Acknowledged)
-                    | (
-                        ProtectiveOrderStatus::CleanedUp,
-                        ProtectiveCleanupState::ConfirmedAbsent
-                    )
+                (
+                    ProtectiveOrderStatus::Active,
+                    ProtectiveCleanupState::Prepared
+                ) | (
+                    ProtectiveOrderStatus::Active,
+                    ProtectiveCleanupState::Submitting
+                ) | (
+                    ProtectiveOrderStatus::Active,
+                    ProtectiveCleanupState::Unknown
+                ) | (
+                    ProtectiveOrderStatus::Active,
+                    ProtectiveCleanupState::Acknowledged
+                ) | (
+                    ProtectiveOrderStatus::CleanedUp,
+                    ProtectiveCleanupState::ConfirmedAbsent
+                )
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
