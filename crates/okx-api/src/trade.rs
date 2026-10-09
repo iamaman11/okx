@@ -304,13 +304,22 @@ pub struct PendingProtectiveAlgoInventory {
 }
 
 fn normalize_protective_algo_inventory(
-    batches: Vec<(String, Vec<PendingAlgoOrderDetails>)>,
+    batches: Vec<(String, String, Vec<PendingAlgoOrderDetails>)>,
 ) -> Result<PendingProtectiveAlgoInventory, OkxError> {
     let mut ids = BTreeSet::<String>::new();
+    let mut seen_scopes = BTreeSet::<(String, String)>::new();
     let mut total = 0_usize;
     let mut complete = true;
     let mut samples = Vec::new();
-    for (instrument_type, rows) in batches {
+    for (instrument_type, order_type, rows) in batches {
+        if !matches!(instrument_type.as_str(), "SWAP" | "FUTURES")
+            || !matches!(order_type.as_str(), "conditional" | "oco")
+            || !seen_scopes.insert((instrument_type.clone(), order_type.clone()))
+        {
+            return Err(OkxError::Response(
+                "invalid or duplicate pending protective algo query scope".to_owned(),
+            ));
+        }
         if rows.len() > PROTECTIVE_ALGO_PAGE_LIMIT {
             return Err(OkxError::Response(
                 "pending protective algo page exceeded hard bound".to_owned(),
@@ -319,10 +328,10 @@ fn normalize_protective_algo_inventory(
         complete &= rows.len() < PROTECTIVE_ALGO_PAGE_LIMIT;
         for item in rows {
             if item.instrument_type != instrument_type
-                || !matches!(item.order_type.as_str(), "conditional" | "oco")
+                || item.order_type != order_type
                 || item.algo_order_id.trim().is_empty()
                 || item.instrument_id.trim().is_empty()
-                || !matches!(item.state.as_str(), "live" | "effective")
+                || !matches!(item.state.as_str(), "live" | "pause")
                 || !ids.insert(item.algo_order_id.clone())
             {
                 return Err(OkxError::Response(
@@ -340,6 +349,11 @@ fn normalize_protective_algo_inventory(
                 });
             }
         }
+    }
+    if seen_scopes.len() != 4 {
+        return Err(OkxError::Response(
+            "pending protective algo inventory lacks one or more required scopes".to_owned(),
+        ));
     }
     Ok(PendingProtectiveAlgoInventory {
         schema: "okx.pending-protective-algo-inventory/v1",
@@ -367,20 +381,22 @@ impl TradeApi {
     pub async fn pending_protective_algos(
         &self,
     ) -> Result<PendingProtectiveAlgoInventory, OkxError> {
-        let mut batches = Vec::with_capacity(2);
+        let mut batches = Vec::with_capacity(4);
         for instrument_type in ["SWAP", "FUTURES"] {
-            let rows: Vec<PendingAlgoOrderDetails> = self
-                .client
-                .private_get(
-                    ALGO_PENDING_PATH,
-                    &[
-                        ("ordType", "conditional,oco".to_owned()),
-                        ("instType", instrument_type.to_owned()),
-                        ("limit", PROTECTIVE_ALGO_PAGE_LIMIT.to_string()),
-                    ],
-                )
-                .await?;
-            batches.push((instrument_type.to_owned(), rows));
+            for order_type in ["conditional", "oco"] {
+                let rows: Vec<PendingAlgoOrderDetails> = self
+                    .client
+                    .private_get(
+                        ALGO_PENDING_PATH,
+                        &[
+                            ("ordType", order_type.to_owned()),
+                            ("instType", instrument_type.to_owned()),
+                            ("limit", PROTECTIVE_ALGO_PAGE_LIMIT.to_string()),
+                        ],
+                    )
+                    .await?;
+                batches.push((instrument_type.to_owned(), order_type.to_owned(), rows));
+            }
         }
         normalize_protective_algo_inventory(batches)
     }
@@ -814,58 +830,72 @@ mod tests {
         .expect("fixture")
     }
 
-    #[test]
-    fn bounded_protective_algo_inventory_reconciles_both_instrument_types() {
-        assert_eq!(ALGO_PENDING_PATH, "/api/v5/trade/orders-algo-pending");
-        let inv = normalize_protective_algo_inventory(vec![
+    fn all_protective_scopes(
+        swap_conditional: Vec<PendingAlgoOrderDetails>,
+        swap_oco: Vec<PendingAlgoOrderDetails>,
+    ) -> Vec<(String, String, Vec<PendingAlgoOrderDetails>)> {
+        vec![
             (
                 "SWAP".to_owned(),
-                vec![pending_algo("111", "conditional", "SWAP")],
+                "conditional".to_owned(),
+                swap_conditional,
             ),
-            (
-                "FUTURES".to_owned(),
-                vec![pending_algo("222", "oco", "FUTURES")],
-            ),
-        ])
-        .expect("valid protection inventory");
-        assert_eq!(inv.rows, 2);
-        assert!(inv.complete_within_bound);
-        assert_eq!(inv.samples.len(), 2);
-        let empty = normalize_protective_algo_inventory(vec![
-            ("SWAP".to_owned(), vec![]),
-            ("FUTURES".to_owned(), vec![]),
-        ])
-        .expect("zero pending");
-        assert_eq!(empty.rows, 0);
-        assert!(empty.complete_within_bound);
+            ("SWAP".to_owned(), "oco".to_owned(), swap_oco),
+            ("FUTURES".to_owned(), "conditional".to_owned(), vec![]),
+            ("FUTURES".to_owned(), "oco".to_owned(), vec![]),
+        ]
     }
 
     #[test]
-    fn pending_algo_inventory_rejects_identity_mismatch_and_page_limit_truncation() {
-        assert!(
-            normalize_protective_algo_inventory(vec![(
-                "SWAP".to_owned(),
-                vec![pending_algo("111", "oco", "FUTURES")]
-            ),])
-            .is_err()
+    fn pending_protection_inventory_requires_all_four_exact_query_scopes() {
+        assert_eq!(ALGO_PENDING_PATH, "/api/v5/trade/orders-algo-pending");
+        let inv = normalize_protective_algo_inventory(all_protective_scopes(
+            vec![pending_algo("111", "conditional", "SWAP")],
+            vec![pending_algo("222", "oco", "SWAP")],
+        ))
+        .expect("every scope checked");
+        assert_eq!(inv.rows, 2);
+        assert_eq!(inv.samples.len(), 2);
+        assert!(inv.complete_within_bound);
+        let empty = normalize_protective_algo_inventory(all_protective_scopes(vec![], vec![]))
+            .expect("explicitly queried all four scopes");
+        assert_eq!(empty.rows, 0);
+        assert!(empty.complete_within_bound);
+        let missing = all_protective_scopes(vec![], vec![])
+            .into_iter()
+            .take(3)
+            .collect();
+        assert!(normalize_protective_algo_inventory(missing).is_err());
+    }
+
+    #[test]
+    fn pending_algo_inventory_rejects_cross_type_and_duplicate_scope() {
+        let bad = all_protective_scopes(vec![pending_algo("111", "oco", "SWAP")], vec![]);
+        assert!(normalize_protective_algo_inventory(bad).is_err());
+        let mut duplicate = all_protective_scopes(vec![], vec![]);
+        duplicate.push(("SWAP".to_owned(), "conditional".to_owned(), vec![]));
+        assert!(normalize_protective_algo_inventory(duplicate).is_err());
+        let dup_algo = all_protective_scopes(
+            vec![pending_algo("111", "conditional", "SWAP")],
+            vec![pending_algo("111", "oco", "SWAP")],
         );
-        assert!(
-            normalize_protective_algo_inventory(vec![(
-                "SWAP".to_owned(),
-                vec![
-                    pending_algo("111", "conditional", "SWAP"),
-                    pending_algo("111", "oco", "SWAP"),
-                ]
-            ),])
-            .is_err()
-        );
-        let full = normalize_protective_algo_inventory(vec![(
-            "SWAP".to_owned(),
+        assert!(normalize_protective_algo_inventory(dup_algo).is_err());
+    }
+
+    #[test]
+    fn pending_algo_inventory_paused_orders_and_full_pages_are_not_empty() {
+        let mut paused = pending_algo("111", "conditional", "SWAP");
+        paused.state = "pause".to_owned();
+        let inv = normalize_protective_algo_inventory(all_protective_scopes(vec![paused], vec![]))
+            .expect("paused is still pending");
+        assert_eq!(inv.rows, 1);
+        let full = normalize_protective_algo_inventory(all_protective_scopes(
             (0..PROTECTIVE_ALGO_PAGE_LIMIT)
                 .map(|n| pending_algo(&format!("{n}"), "conditional", "SWAP"))
                 .collect(),
-        )])
-        .expect("bounded");
+            vec![],
+        ))
+        .expect("page bound");
         assert_eq!(full.rows, PROTECTIVE_ALGO_PAGE_LIMIT);
         assert!(!full.complete_within_bound);
         assert_eq!(full.samples.len(), PROTECTIVE_ALGO_SAMPLE_LIMIT);
