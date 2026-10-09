@@ -526,9 +526,14 @@ impl TradeApi {
         validate_instrument_id(&request.instrument_id)?;
         if request.algo_order_id.is_empty()
             || request.algo_order_id.len() > 64
-            || !request.algo_order_id.bytes().all(|byte| byte.is_ascii_digit())
+            || !request
+                .algo_order_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
         {
-            return Err(OkxError::Config("algoId must be a numeric exchange order ID".to_owned()));
+            return Err(OkxError::Config(
+                "algoId must be a numeric exchange order ID".to_owned(),
+            ));
         }
         let plan = self.client.rate_budget().private_rest_plan(
             CANCEL_ALGO_PATH,
@@ -549,7 +554,10 @@ impl TradeApi {
     ) -> Result<TradeResponse<CancelAlgoOrderAck>, OkxError> {
         validate_instrument_id(&request.instrument_id)?;
         if request.algo_order_id.is_empty()
-            || !request.algo_order_id.bytes().all(|byte| byte.is_ascii_digit())
+            || !request
+                .algo_order_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
         {
             return Err(OkxError::Config("invalid exact algoId".to_owned()));
         }
@@ -976,11 +984,14 @@ mod tests {
             instrument_id: "BTC-USDT-SWAP".to_owned(),
             algo_order_id: "1234567890".to_owned(),
         };
-        assert_eq!(serde_json::to_string(std::slice::from_ref(&one)).expect("JSON"),
-            r#"[{"instId":"BTC-USDT-SWAP","algoId":"1234567890"}]"#);
+        assert_eq!(
+            serde_json::to_string(std::slice::from_ref(&one)).expect("JSON"),
+            r#"[{"instId":"BTC-USDT-SWAP","algoId":"1234567890"}]"#
+        );
         let ack: CancelAlgoOrderAck = serde_json::from_value(serde_json::json!({
             "algoId":"1234567890", "sCode":"0", "sMsg":""
-        })).expect("ack");
+        }))
+        .expect("ack");
         assert_eq!(ack.algo_order_id, one.algo_order_id);
         assert_eq!(ack.status_code, "0");
     }
