@@ -1299,7 +1299,7 @@ async fn cancel_owned_protection(
                 ],
                 ..response
             })
-        },
+        }
         Err(error) => Ok(failure_response(
             request,
             generated_at,
