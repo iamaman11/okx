@@ -1077,27 +1077,38 @@ async fn cancel_owned_protection(
 ) -> AgentResult<AgentResponse> {
     let Some(mut entry) = execution.entry(intent_id).await else {
         return Ok(failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
-            EXECUTION_RECORD_NOT_FOUND_CODE, "managed parent intent does not exist".to_owned(), false,
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RECORD_NOT_FOUND_CODE,
+            "managed parent intent does not exist".to_owned(),
+            false,
         ));
     };
-    let admission = match cancel_mutation_admission(request, context, generated_at, execution).await? {
-        PreMutationAdmissionResult::Ready(value) => value,
-        PreMutationAdmissionResult::Response(value) => return Ok(*value),
-    };
+    let admission =
+        match cancel_mutation_admission(request, context, generated_at, execution).await? {
+            PreMutationAdmissionResult::Ready(value) => value,
+            PreMutationAdmissionResult::Response(value) => return Ok(*value),
+        };
     // Re-read the account after admission: flat means no exchange positions,
     // ordinary pending orders, or non-owning residual risk. This is Demo only.
     let account = match fresh_account(request, context, generated_at).await? {
         FreshAccount::Ready(value) => value,
         FreshAccount::Response(value) => return Ok(*value),
     };
-    if !account.positions.iter().all(|position| position.position.trim() == "0")
+    if !account
+        .positions
+        .iter()
+        .all(|position| position.position.trim() == "0")
         || !account.pending_orders.is_empty()
     {
         return Ok(failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
             EXECUTION_MUTATION_UNSAFE_CODE,
-            "protective cleanup requires fresh flat account and zero ordinary pending orders".to_owned(),
+            "protective cleanup requires fresh flat account and zero ordinary pending orders"
+                .to_owned(),
             false,
         ));
     }
@@ -1106,15 +1117,22 @@ async fn cancel_owned_protection(
     };
     let inventory = match observer.pending_protective_algos().await {
         Ok(value) => value,
-        Err(error) => return Ok(failure_response(
-            request, generated_at, AgentResponseStatus::Failed,
-            EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
-            error.to_string(), true,
-        )),
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
     };
     if !inventory.complete_within_bound {
         return Ok(failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
             EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
             "pending protective algo inventory is truncated; no absence or cancel proof".to_owned(),
             true,
@@ -1122,8 +1140,12 @@ async fn cancel_owned_protection(
     }
     let Some(protection) = entry.record.protection.as_ref() else {
         return Ok(failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
-            EXECUTION_MUTATION_UNSAFE_CODE, "parent has no managed protection".to_owned(), false,
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            "parent has no managed protection".to_owned(),
+            false,
         ));
     };
     let owned_algo = protection.algo_order_id.clone().unwrap_or_default();
@@ -1132,44 +1154,68 @@ async fn cancel_owned_protection(
     if let Some(previous) = protection.cleanup.as_ref() {
         if previous.mutation_id != mutation_id {
             return Ok(failure_response(
-                request, generated_at, AgentResponseStatus::Rejected,
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
                 EXECUTION_MUTATION_UNSAFE_CODE,
-                "a different durable protective cleanup owns this parent".to_owned(), false,
+                "a different durable protective cleanup owns this parent".to_owned(),
+                false,
             ));
         }
         if previous.state == okx_execution::ProtectiveCleanupState::ConfirmedAbsent {
-            return Ok(completed(request, generated_at, "okx.protective-cleanup/v1", serde_json::json!({
-                "intent_id": intent_id,
-                "mutation_id": mutation_id,
-                "state": "CONFIRMED_ABSENT",
-                "exchange_post_replayed": false,
-            })));
+            return Ok(completed(
+                request,
+                generated_at,
+                "okx.protective-cleanup/v1",
+                serde_json::json!({
+                    "intent_id": intent_id,
+                    "mutation_id": mutation_id,
+                    "state": "CONFIRMED_ABSENT",
+                    "exchange_post_replayed": false,
+                }),
+            ));
         }
         if previous.state == okx_execution::ProtectiveCleanupState::Submitting {
             // The process may have died after writing SUBMITTING. This is
             // uncertain exchange effect; NEVER send the cancellation again.
             entry = execution
                 .mark_protective_cleanup_unknown_after_restart(
-                    intent_id, mutation_id, utc_now_ms().max(entry.updated_at_ms),
+                    intent_id,
+                    mutation_id,
+                    utc_now_ms().max(entry.updated_at_ms),
                 )
                 .await?;
         }
         if matches!(
-            entry.record.protection.as_ref().and_then(|p| p.cleanup.as_ref()).map(|c| c.state),
+            entry
+                .record
+                .protection
+                .as_ref()
+                .and_then(|p| p.cleanup.as_ref())
+                .map(|c| c.state),
             Some(okx_execution::ProtectiveCleanupState::Unknown)
                 | Some(okx_execution::ProtectiveCleanupState::Acknowledged)
         ) {
             if inventory.rows == 0 {
-                let confirmed = execution.confirm_protective_cleanup_absent(
-                    intent_id, mutation_id, utc_now_ms().max(entry.updated_at_ms),
-                ).await?;
-                return Ok(completed(request, generated_at, "okx.protective-cleanup/v1", serde_json::json!({
-                    "intent_id": intent_id,
-                    "mutation_id": mutation_id,
-                    "state": "CONFIRMED_ABSENT",
-                    "exchange_post_replayed": false,
-                    "record_updated_at_ms": confirmed.updated_at_ms,
-                })));
+                let confirmed = execution
+                    .confirm_protective_cleanup_absent(
+                        intent_id,
+                        mutation_id,
+                        utc_now_ms().max(entry.updated_at_ms),
+                    )
+                    .await?;
+                return Ok(completed(
+                    request,
+                    generated_at,
+                    "okx.protective-cleanup/v1",
+                    serde_json::json!({
+                        "intent_id": intent_id,
+                        "mutation_id": mutation_id,
+                        "state": "CONFIRMED_ABSENT",
+                        "exchange_post_replayed": false,
+                        "record_updated_at_ms": confirmed.updated_at_ms,
+                    }),
+                ));
             }
             return Ok(failure_response(
                 request, generated_at, AgentResponseStatus::Rejected,
@@ -1189,9 +1235,12 @@ async fn cancel_owned_protection(
         || inventory.samples[0].client_order_id != owned_client
     {
         return Ok(failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
             EXECUTION_MUTATION_UNSAFE_CODE,
-            "single pending exchange algo does not exactly match managed parent ownership".to_owned(),
+            "single pending exchange algo does not exactly match managed parent ownership"
+                .to_owned(),
             false,
         ));
     }
@@ -1201,8 +1250,12 @@ async fn cancel_owned_protection(
         .await
     {
         return Ok(failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
-            EXECUTION_MUTATION_UNSAFE_CODE, error.to_string(), false,
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            error.to_string(),
+            false,
         ));
     }
     let outcome = match execution
@@ -1232,8 +1285,12 @@ async fn cancel_owned_protection(
             }),
         )),
         Err(error) => Ok(failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
-            EXECUTION_MUTATION_UNSAFE_CODE, error.to_string(), false,
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            error.to_string(),
+            false,
         )),
     }
 }
