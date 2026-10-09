@@ -15,6 +15,7 @@ struct AccountSummaryCoherence {
 struct AccountSummaryResult {
     schema: &'static str,
     account_ledger: okx_observation::AccountLedgerSummary,
+    pending_protective_algos: okx_api::PendingProtectiveAlgoInventory,
     reconciliation: Option<okx_execution::AccountLedgerReconciliation>,
     coherence: AccountSummaryCoherence,
 }
@@ -170,10 +171,31 @@ pub(super) async fn dispatch(
                 }
             };
 
+            let pending_protective_algos = match account.pending_protective_algos().await {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(account_ledger_failure(request, generated_at, error));
+                }
+            };
+
             let history_read_duration_ms =
                 u64::try_from(history_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let mut quality = assembled.quality;
             let mut warnings = assembled.warnings;
+            if !pending_protective_algos.complete_within_bound {
+                quality = DataQuality::Degraded;
+                warnings.push(
+                    "pending conditional/OCO protective algo order inventory reached its bounded one-page limit; orphan absence is not proven"
+                        .to_owned(),
+                );
+            }
+            if pending_protective_algos.rows > 0 && facts.summary.open_positions == 0 {
+                quality = DataQuality::Degraded;
+                warnings.push(format!(
+                    "{} pending conditional/OCO algo order(s) remain with zero observed positions; flat/orphan-free is NOT proven",
+                    pending_protective_algos.rows
+                ));
+            }
             if facts
                 .summary
                 .history_coverage
@@ -313,6 +335,7 @@ pub(super) async fn dispatch(
                 result: Some(serde_json::to_value(AccountSummaryResult {
                     schema: ACCOUNT_SUMMARY_SCHEMA_V1,
                     account_ledger: facts.summary,
+                    pending_protective_algos,
                     reconciliation,
                     coherence,
                 })?),
