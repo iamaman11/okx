@@ -52,7 +52,7 @@ pub use trade::{
     ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V3, AccountRateLimitEvidence, AccountRateLimitSource,
     AmendOrderRequest, ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode,
     ApiTriggerPriceType, AttachedAlgoOrderRequest, CancelAlgoOrderAck, CancelAlgoOrderRequest,
-    CancelOrderRequest, OrderOperationAck,
-    PendingProtectiveAlgoInventory, PendingProtectiveAlgoSample, PlaceOrderRequest,
-    TradeAlgoOrderDetails, TradeApi, TradeOrderDetails, TradeResponse,
+    CancelOrderRequest, OrderOperationAck, PendingProtectiveAlgoInventory,
+    PendingProtectiveAlgoSample, PlaceOrderRequest, TradeAlgoOrderDetails, TradeApi,
+    TradeOrderDetails, TradeResponse,
 };
