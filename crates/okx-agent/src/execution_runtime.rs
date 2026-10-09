@@ -452,6 +452,56 @@ impl ExecutionRuntime {
         Ok(Some(result))
     }
 
+    pub async fn prepare_protective_cleanup(
+        &self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        self.executor
+            .lock()
+            .await
+            .prepare_protective_cleanup(intent_id, mutation_id, observed_at_ms)
+    }
+
+    pub async fn confirm_protective_cleanup_absent(
+        &self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        self.executor
+            .lock()
+            .await
+            .confirm_protective_cleanup_absent(intent_id, mutation_id, observed_at_ms)
+    }
+
+    pub async fn submit_protective_cleanup_demo_authorized(
+        &self,
+        preflight: &ExecutorCredentialPreflight,
+        intent_id: &str,
+        mutation_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+    ) -> AgentResult<Option<Result<MutationSubmitDisposition, OrderExecutorError>>> {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !preflight.accepted {
+            self.executor.lock().await.disable_mutations();
+            return Ok(None);
+        }
+        let mut executor = self.executor.lock().await;
+        executor.enable_demo_acceptance(self.environment)?;
+        let result = executor
+            .submit_prepared_protective_cleanup(
+                intent_id,
+                mutation_id,
+                timing,
+                observed_at_ms,
+            )
+            .await;
+        executor.disable_mutations();
+        Ok(Some(result))
+    }
+
     pub async fn submit_prepared(
         &self,
         intent_id: &str,
