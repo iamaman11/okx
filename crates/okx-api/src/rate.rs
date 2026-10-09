@@ -627,9 +627,19 @@ mod tests {
         assert_eq!(swap.domains[0].max_requests, 20);
         assert_eq!(swap.domains[0].window_ms, 2_000);
         assert_eq!(swap.domains[0].key, futures.domains[0].key);
-        assert_eq!(budget.private_rest_plan("/api/v5/trade/order-algo", &[]).domains[0].max_requests, 20);
-        budget.admit(&swap).expect("SWAP pending algo read admitted");
-        budget.admit(&futures).expect("FUTURES pending algo read admitted");
+        assert_eq!(
+            budget
+                .private_rest_plan("/api/v5/trade/order-algo", &[])
+                .domains[0]
+                .max_requests,
+            20
+        );
+        budget
+            .admit(&swap)
+            .expect("SWAP pending algo read admitted");
+        budget
+            .admit(&futures)
+            .expect("FUTURES pending algo read admitted");
     }
 
     #[test]
