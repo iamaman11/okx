@@ -1272,18 +1272,34 @@ async fn cancel_owned_protection(
         None => return Ok(preflight_rejected(request, generated_at)),
     };
     match outcome {
-        Ok(result) => Ok(completed(
-            request,
-            generated_at,
-            "okx.protective-cleanup/v1",
-            serde_json::json!({
-                "intent_id": intent_id,
-                "mutation_id": mutation_id,
-                "status": format!("{result:?}"),
-                "exchange_effect_terminally_verified": false,
-                "exchange_post_replayed": false,
-            }),
-        )),
+        Ok(result) => {
+            let state = match result {
+                okx_execution::MutationSubmitDisposition::Acknowledged(_) => "ACKNOWLEDGED",
+                okx_execution::MutationSubmitDisposition::Unknown(_) => "UNKNOWN",
+                okx_execution::MutationSubmitDisposition::Rejected(_) => "REJECTED",
+                okx_execution::MutationSubmitDisposition::RateRejected { .. } => "RATE_REJECTED",
+            };
+            let response = completed(
+                request,
+                generated_at,
+                "okx.protective-cleanup/v1",
+                serde_json::json!({
+                    "intent_id": intent_id,
+                    "mutation_id": mutation_id,
+                    "state": state,
+                    "exchange_effect_terminally_verified": false,
+                    "exchange_post_replayed": false,
+                }),
+            );
+            Ok(AgentResponse {
+                quality: DataQuality::Degraded,
+                warnings: vec![
+                    "protective cancellation is not terminally verified; independently reconcile exact algo absence before accepting flat"
+                        .to_owned(),
+                ],
+                ..response
+            })
+        },
         Err(error) => Ok(failure_response(
             request,
             generated_at,
