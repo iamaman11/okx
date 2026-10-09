@@ -401,6 +401,7 @@ impl DurableExecutionLedger {
         if self.instrument_reserved(
             &record.plan.instrument_id,
             &record.plan.intent_id,
+            record.plan.action,
             reverse_root_bypass,
         ) {
             return Err(ExecutionLedgerError::InstrumentBusy);
@@ -429,6 +430,7 @@ impl DurableExecutionLedger {
         &self,
         instrument_id: &str,
         incoming_intent_id: &str,
+        incoming_action: ExecutionAction,
         reverse_root_bypass: Option<&str>,
     ) -> bool {
         self.entries.values().any(|entry| {
@@ -438,7 +440,12 @@ impl DurableExecutionLedger {
             if !entry.record.state.is_terminal() {
                 return true;
             }
-            if entry.record.protection_blocks_new_managed_intent() {
+            // Attached protection (even active) must reserve the instrument
+            // against new risk. A terminal parent must not trap a separately
+            // validated risk-reducing CLOSE/REDUCE.
+            if entry.record.protection_blocks_new_managed_intent()
+                && incoming_action.is_risk_increasing()
+            {
                 return true;
             }
             let Some(reverse) = entry.record.reverse.as_ref() else {
@@ -1420,6 +1427,12 @@ mod tests {
             restarted.prepare(plan("intent_blocked_01234567"), 201),
             Err(ExecutionLedgerError::InstrumentBusy)
         ));
+        assert!(!restarted.instrument_reserved(
+            "DOGE-USDT-SWAP",
+            "intent_close_pending_012345",
+            ExecutionAction::Close,
+            None,
+        ));
 
         let resolved = restarted
             .reconcile_found_with_resolutions(
@@ -1444,9 +1457,16 @@ mod tests {
             ProtectiveOrderStatus::Active
         );
         assert!(matches!(
+            restarted.prepare(plan("intent_blocked_active_0123456"), 203),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
+        assert!(matches!(
             restarted
-                .prepare(plan("intent_released_0123456"), 203)
-                .expect("released"),
+                .prepare(
+                    close_plan("intent_close_active_01234567", PositionSide::Long),
+                    204,
+                )
+                .expect("close with active protection"),
             PrepareDisposition::Created(_)
         ));
 
@@ -1482,7 +1502,38 @@ mod tests {
             ledger.prepare(plan("intent_blocked_76543210"), 105),
             Err(ExecutionLedgerError::InstrumentBusy)
         ));
+        assert!(matches!(
+            ledger
+                .prepare(
+                    close_plan("intent_close_failed_76543210", PositionSide::Long),
+                    106,
+                )
+                .expect("risk reducing close remains possible"),
+            PrepareDisposition::Created(_)
+        ));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nonterminal_protected_parent_still_blocks_close() {
+        let root = temp_root("live-protected-parent");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent_id = "intent_live_parent_01234567";
+        let mut ledger = DurableExecutionLedger::open(store, 100).expect("open");
+        ledger
+            .prepare(protected_plan(intent_id), 101)
+            .expect("prepare protected");
+        ledger.begin_submission(intent_id, 102).expect("submit");
+        ledger.acknowledge(intent_id, "order-live", 103).expect("ack");
+        assert!(matches!(
+            ledger.prepare(
+                close_plan("intent_close_before_parent_done", PositionSide::Long),
+                104,
+            ),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
         let _ = fs::remove_dir_all(root);
     }
 
