@@ -603,8 +603,12 @@ mod tests {
         assert_eq!(swap.domains[0].window_ms, 2_000);
         assert_eq!(swap.domains[0].key.kind, RateDomainKind::PrivateRestUser);
         assert_eq!(swap.domains[0].key, futures.domains[0].key);
-        budget.admit(&swap).expect("first recent order read admitted");
-        budget.admit(&futures).expect("second recent order read admitted");
+        budget
+            .admit(&swap)
+            .expect("first recent order read admitted");
+        budget
+            .admit(&futures)
+            .expect("second recent order read admitted");
     }
 
     #[test]
