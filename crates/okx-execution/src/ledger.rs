@@ -1526,7 +1526,9 @@ mod tests {
             .prepare(protected_plan(intent_id), 101)
             .expect("prepare protected");
         ledger.begin_submission(intent_id, 102).expect("submit");
-        ledger.acknowledge(intent_id, "order-live", 103).expect("ack");
+        ledger
+            .acknowledge(intent_id, "order-live", 103)
+            .expect("ack");
         assert!(matches!(
             ledger.prepare(
                 close_plan("intent_close_before_parent_done", PositionSide::Long),
