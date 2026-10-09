@@ -690,7 +690,11 @@ fn coverage_for<T>(
 
     Ok(AccountHistoryCoverage {
         resource: resource.to_owned(),
-        documented_window: ACCOUNT_LEDGER_HISTORY_WINDOW,
+        documented_window: if resource.starts_with("orders_history:") {
+            "recent_7_days_plus_archive_3_months;unfilled_canceled_2_hours"
+        } else {
+            ACCOUNT_LEDGER_HISTORY_WINDOW
+        },
         instrument_count,
         sample_instruments,
         rows: history.rows.len(),
