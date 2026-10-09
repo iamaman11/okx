@@ -537,6 +537,7 @@ fn private_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Opti
         "/api/v5/account/positions-history" => (10, 2_000),
         "/api/v5/asset/balances" => (6, 1_000),
         "/api/v5/trade/orders-pending" => (60, 2_000),
+        "/api/v5/trade/orders-history" => (40, 2_000),
         "/api/v5/trade/orders-history-archive" => (20, 2_000),
         "/api/v5/trade/fills-history" => (10, 2_000),
         "/api/v5/account/bills-archive" => (5, 2_000),
@@ -588,13 +589,35 @@ mod tests {
     }
 
     #[test]
+    fn recent_order_history_uses_documented_user_budget_for_both_instrument_types() {
+        let budget = RateBudget::new();
+        let swap = budget.private_rest_plan(
+            "/api/v5/trade/orders-history",
+            &[("instType", "SWAP".to_owned())],
+        );
+        let futures = budget.private_rest_plan(
+            "/api/v5/trade/orders-history",
+            &[("instType", "FUTURES".to_owned())],
+        );
+        assert_eq!(swap.domains[0].max_requests, 40);
+        assert_eq!(swap.domains[0].window_ms, 2_000);
+        assert_eq!(swap.domains[0].key.kind, RateDomainKind::PrivateRestUser);
+        assert_eq!(swap.domains[0].key, futures.domains[0].key);
+        budget.admit(&swap).expect("first recent order read admitted");
+        budget.admit(&futures).expect("second recent order read admitted");
+    }
+
+    #[test]
     fn documented_history_endpoint_budgets_are_not_exceeded() {
         let budget = RateBudget::new();
         let positions = budget.private_rest_plan("/api/v5/account/positions-history", &[]);
+        let recent_orders = budget.private_rest_plan("/api/v5/trade/orders-history", &[]);
         let orders = budget.private_rest_plan("/api/v5/trade/orders-history-archive", &[]);
         let fills = budget.private_rest_plan("/api/v5/trade/fills-history", &[]);
         let bills = budget.private_rest_plan("/api/v5/account/bills-archive", &[]);
         assert_eq!(positions.domains[0].max_requests, 10);
+        assert_eq!(recent_orders.domains[0].max_requests, 40);
+        assert_eq!(recent_orders.domains[0].window_ms, 2_000);
         assert_eq!(orders.domains[0].max_requests, 20);
         assert_eq!(fills.domains[0].max_requests, 10);
         assert_eq!(bills.domains[0].max_requests, 5);
