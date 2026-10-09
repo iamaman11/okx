@@ -458,10 +458,11 @@ impl ExecutionRuntime {
         mutation_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
-        self.executor
-            .lock()
-            .await
-            .prepare_protective_cleanup(intent_id, mutation_id, observed_at_ms)
+        self.executor.lock().await.prepare_protective_cleanup(
+            intent_id,
+            mutation_id,
+            observed_at_ms,
+        )
     }
 
     pub async fn mark_protective_cleanup_unknown_after_restart(
@@ -505,12 +506,7 @@ impl ExecutionRuntime {
         let mut executor = self.executor.lock().await;
         executor.enable_demo_acceptance(self.environment)?;
         let result = executor
-            .submit_prepared_protective_cleanup(
-                intent_id,
-                mutation_id,
-                timing,
-                observed_at_ms,
-            )
+            .submit_prepared_protective_cleanup(intent_id, mutation_id, timing, observed_at_ms)
             .await;
         executor.disable_mutations();
         Ok(Some(result))
