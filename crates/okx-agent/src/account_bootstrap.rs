@@ -2,8 +2,7 @@ use chrono::{SecondsFormat, Utc};
 use okx_api::{
     AccountApi, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate, InstrumentType,
     LeverageInfo, MarginMode, OkxError, OkxRestClient, PendingProtectiveAlgoInventory,
-    TradeApi, PositionBuilderRequest,
-    PositionBuilderSnapshot,
+    PositionBuilderRequest, PositionBuilderSnapshot, TradeApi,
 };
 use okx_observation::{
     AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, ExecutionFillEvidence,
