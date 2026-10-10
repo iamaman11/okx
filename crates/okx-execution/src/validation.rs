@@ -133,6 +133,14 @@ pub enum ExecutionValidationError {
     #[error("pending close order state is invalid")]
     InvalidPendingCloseOrder,
 
+    #[error(
+        "amend requires exactly one live pending order matching the durable exchange order id and client order id"
+    )]
+    AmendOwnedCloseIdentityMismatch,
+
+    #[error("amend of a partially filled close must be independently reconciled before resizing")]
+    AmendPartiallyFilledCloseUnsupported,
+
     #[error("requested close size '{requested}' exceeds unreserved position size '{available}'")]
     CloseSizeExceedsAvailable {
         requested: String,
@@ -393,6 +401,62 @@ pub fn revalidate_execution_plan(
     }
 
     Ok(())
+}
+
+/// Amend of a LIVE risk-reducing CLOSE must not double-count its own
+/// outstanding exchange order as a *different* reservation. Match both
+/// immutable order IDs plus side/mode/position before excluding exactly this
+/// one order. Every unrelated pending close remains reserved. Partially filled
+/// amendments are intentionally denied until their total-vs-leaves semantics
+/// have a separately proved exchange contract.
+pub fn revalidate_amend_execution_plan(
+    plan: &ExecutionPlan,
+    rules: &InstrumentRulesSnapshot,
+    account: &AccountSnapshot,
+    current_fee_generation: Option<&str>,
+    own_exchange_order_id: &str,
+) -> Result<(), ExecutionValidationError> {
+    if plan.action.is_risk_increasing() {
+        return revalidate_execution_plan(plan, rules, account, current_fee_generation);
+    }
+    let matching = account
+        .pending_orders
+        .iter()
+        .enumerate()
+        .filter(|(_, order)| {
+            order.order_id == own_exchange_order_id
+                || order.client_order_id.as_deref() == Some(plan.client_order_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(ExecutionValidationError::AmendOwnedCloseIdentityMismatch);
+    }
+    let (index, order) = matching[0];
+    if own_exchange_order_id.is_empty()
+        || order.order_id != own_exchange_order_id
+        || order.client_order_id.as_deref() != Some(plan.client_order_id.as_str())
+        || order.instrument_id != plan.instrument_id
+        || order.side != plan.side.as_str()
+        || order.position_side.as_deref() != Some(plan.position_side.as_str())
+        || order.trade_mode != plan.trade_mode.as_str()
+        || order.state != "live"
+    {
+        return Err(ExecutionValidationError::AmendOwnedCloseIdentityMismatch);
+    }
+    let filled = decimal(
+        "pending_order.accumulated_fill_size",
+        &order.accumulated_fill_size,
+    )?;
+    let size = decimal("pending_order.size", &order.size)?;
+    if size <= Decimal::ZERO || filled < Decimal::ZERO || filled > size {
+        return Err(ExecutionValidationError::InvalidPendingCloseOrder);
+    }
+    if filled != Decimal::ZERO {
+        return Err(ExecutionValidationError::AmendPartiallyFilledCloseUnsupported);
+    }
+    let mut remaining_view = account.clone();
+    remaining_view.pending_orders.remove(index);
+    revalidate_execution_plan(plan, rules, &remaining_view, current_fee_generation)
 }
 
 pub fn revalidate_venue_execution(
@@ -1450,6 +1514,129 @@ mod tests {
             prepare_execution(&intent, &rules, &account, Some(&candidate)),
             Err(ExecutionValidationError::BelowMinimumSize { .. })
         ));
+    }
+
+    #[test]
+    fn amend_exact_owned_close_releases_only_self_reservation_and_rejects_conflicts() {
+        let rules = rules();
+        let mut account = account();
+        account.positions.push(AccountPositionState {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            position: "5".to_owned(),
+            position_side: "long".to_owned(),
+            margin_mode: "cross".to_owned(),
+            average_price: Some("0.1".to_owned()),
+            mark_price: Some("0.1".to_owned()),
+            liquidation_price: None,
+            unrealized_pnl: Some("0".to_owned()),
+            unrealized_pnl_ratio: Some("0".to_owned()),
+            leverage: Some("5".to_owned()),
+            margin: Some("100".to_owned()),
+            initial_margin_requirement: Some("100".to_owned()),
+            maintenance_margin_requirement: Some("50".to_owned()),
+            margin_ratio: None,
+            notional_usd: Some("500".to_owned()),
+            margin_currency: Some("USDT".to_owned()),
+            creation_time_ms: Some("1790000000000".to_owned()),
+            update_time_ms: Some("1790000001000".to_owned()),
+        });
+        let intent = ExecutionIntent {
+            intent_id: "intent_amend_owned_close_012345".to_owned(),
+            expected_reference_generation: rules.reference_generation.clone(),
+            expected_account_generation: account.account_generation.clone(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            trade_mode: TradeMode::Cross,
+            position_side: PositionSide::Long,
+            action: ExecutionAction::Close,
+            order_type: OrderType::Limit,
+            size: "4".to_owned(),
+            price: "0.1".to_owned(),
+        };
+        let plan = prepare_execution(&intent, &rules, &account, None).expect("initial close");
+        let own = PendingOrderState {
+            order_id: "exact-venue-order-1".to_owned(),
+            client_order_id: Some(plan.client_order_id.clone()),
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            side: "sell".to_owned(),
+            position_side: Some("long".to_owned()),
+            trade_mode: "cross".to_owned(),
+            order_type: "limit".to_owned(),
+            price: Some("0.1".to_owned()),
+            size: "4".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
+            average_fill_price: None,
+            state: "live".to_owned(),
+            reduce_only: None,
+            creation_time_ms: "1790000000000".to_owned(),
+            update_time_ms: "1790000001000".to_owned(),
+        };
+        account.pending_orders.push(own.clone());
+        let mut other = own.clone();
+        other.order_id = "different-order-id".to_owned();
+        other.client_order_id = Some("independent-close".to_owned());
+        other.size = "1".to_owned();
+        account.pending_orders.push(other);
+
+        assert!(matches!(
+            revalidate_execution_plan(&plan, &rules, &account, None),
+            Err(ExecutionValidationError::CloseSizeExceedsAvailable { .. })
+        ));
+        revalidate_amend_execution_plan(&plan, &rules, &account, None, "exact-venue-order-1")
+            .expect("own 4 can replace itself, independent order 1 remains reserved");
+
+        let mut oversized = plan.clone();
+        oversized.size = "4.01".to_owned();
+        assert_eq!(
+            revalidate_amend_execution_plan(
+                &oversized,
+                &rules,
+                &account,
+                None,
+                "exact-venue-order-1"
+            ),
+            Err(ExecutionValidationError::CloseSizeExceedsAvailable {
+                requested: "4.01".to_owned(),
+                available: "4".to_owned()
+            })
+        );
+        for wrong in ["different-order-id", "not-on-account"] {
+            assert_eq!(
+                revalidate_amend_execution_plan(&plan, &rules, &account, None, wrong),
+                Err(ExecutionValidationError::AmendOwnedCloseIdentityMismatch)
+            );
+        }
+        let mut duplicate = account.clone();
+        duplicate.pending_orders[1].client_order_id = Some(plan.client_order_id.clone());
+        assert_eq!(
+            revalidate_amend_execution_plan(&plan, &rules, &duplicate, None, "exact-venue-order-1"),
+            Err(ExecutionValidationError::AmendOwnedCloseIdentityMismatch)
+        );
+        let mut partial = account.clone();
+        partial.pending_orders[0].accumulated_fill_size = "0.1".to_owned();
+        assert_eq!(
+            revalidate_amend_execution_plan(&plan, &rules, &partial, None, "exact-venue-order-1"),
+            Err(ExecutionValidationError::AmendPartiallyFilledCloseUnsupported)
+        );
+        let mut wrong_side = account.clone();
+        wrong_side.pending_orders[0].side = "buy".to_owned();
+        assert_eq!(
+            revalidate_amend_execution_plan(
+                &plan,
+                &rules,
+                &wrong_side,
+                None,
+                "exact-venue-order-1"
+            ),
+            Err(ExecutionValidationError::AmendOwnedCloseIdentityMismatch)
+        );
+        let mut gone = account;
+        gone.pending_orders.remove(0);
+        assert_eq!(
+            revalidate_amend_execution_plan(&plan, &rules, &gone, None, "exact-venue-order-1"),
+            Err(ExecutionValidationError::AmendOwnedCloseIdentityMismatch)
+        );
     }
 
     #[test]
