@@ -91,7 +91,7 @@ export const EXECUTION_TOOLS: Json[] = [
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
-        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","abort_reverse"] },
+        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","abort_reverse","abandon_prepared"] },
         intent_id: ID, instrument: INSTRUMENT,
         trade_mode: { type: "string", enum: ["cross","isolated"] },
         order_type: { type: "string", enum: ["limit","post_only","fok","ioc"] },
@@ -172,7 +172,7 @@ function lineageInput(v: unknown): boolean {
 export function isExecutionMutation(operationType: unknown): boolean {
   return [
     "prepare_execution", "submit_prepared_execution",
-    "mutate_execution", "abort_reverse_execution",
+    "mutate_execution", "abort_reverse_execution", "abandon_prepared_execution",
   ].includes(String(operationType));
 }
 
@@ -199,8 +199,10 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
     }
     case "submit":
     case "abort_reverse":
+    case "abandon_prepared":
       if (!exactKeys(args,["action","intent_id"])) return null;
-      return {type:args.action==="submit"?"submit_prepared_execution":"abort_reverse_execution",intent_id};
+      return {type:args.action==="submit"?"submit_prepared_execution"
+        :args.action==="abort_reverse"?"abort_reverse_execution":"abandon_prepared_execution",intent_id};
     case "amend":
       if (!exactKeys(args,["action","intent_id","mutation_id","new_size","new_price"])
         || !token(args.mutation_id,8,128)

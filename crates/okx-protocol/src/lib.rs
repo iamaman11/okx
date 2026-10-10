@@ -968,6 +968,9 @@ pub enum AgentOperation {
     AbortReverseExecution {
         intent_id: String,
     },
+    AbandonPreparedExecution {
+        intent_id: String,
+    },
     ExecutionStatus {
         intent_id: String,
     },
@@ -1025,6 +1028,7 @@ impl AgentOperation {
                 | Self::SubmitPreparedExecution { .. }
                 | Self::MutateExecution { .. }
                 | Self::AbortReverseExecution { .. }
+                | Self::AbandonPreparedExecution { .. }
         )
     }
 
@@ -1035,6 +1039,7 @@ impl AgentOperation {
                 | Self::SubmitPreparedExecution { .. }
                 | Self::MutateExecution { .. }
                 | Self::AbortReverseExecution { .. }
+                | Self::AbandonPreparedExecution { .. }
         )
     }
 
@@ -1190,6 +1195,7 @@ impl AgentOperation {
             }
             Self::SubmitPreparedExecution { intent_id }
             | Self::AbortReverseExecution { intent_id }
+            | Self::AbandonPreparedExecution { intent_id }
             | Self::ExecutionStatus { intent_id } => validate_request_id(intent_id),
             Self::MutateExecution {
                 intent_id,
@@ -3449,6 +3455,12 @@ mod direct_transport_tests {
             }
             .direct_transport_demo_execution()
         );
+        let abandon = AgentOperation::AbandonPreparedExecution {
+            intent_id: "intent_test_01234567".to_owned(),
+        };
+        abandon.validate().expect("strict abandon intent");
+        assert!(abandon.direct_transport_demo_execution());
+        assert!(!abandon.direct_transport_read_only());
         assert!(
             !AgentOperation::ExecutionStatus {
                 intent_id: "intent_test_01234567".to_owned(),

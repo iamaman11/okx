@@ -10,6 +10,9 @@ use crate::{
 };
 
 pub const ALLOW_LIVE_TRADING_DEFAULT: bool = false;
+/// Terminal local outcome. No order was submitted to OKX. Unlike exchange
+/// REJECTED, this code is produced only by the PREPARED-only ledger transition.
+pub const LOCAL_PREPARED_ABANDONED_CODE: &str = "LOCAL_PREPARED_ABANDONED_UNSENT";
 pub const MAX_ORDER_MUTATIONS_PER_EXECUTION: usize = 64;
 pub const PROTECTIVE_ORDER_POLICY_V1: &str = "okx.protective-order/mark-market-v1";
 
@@ -457,6 +460,30 @@ impl ExecutionRecord {
             protection,
             reverse: None,
         }
+    }
+
+    /// Release a *strictly unsent* local preparation. Never call a gateway,
+    /// infer exchange cancellation or clear an UNKNOWN/SUBMITTING intent.
+    pub fn abandon_prepared(&mut self) -> Result<(), ExecutionTransitionError> {
+        if self.state != ExecutionState::Prepared
+            || self.order_id.is_some()
+            || self.exchange_state.is_some()
+            || self.submission_timing.is_some()
+            || self.rejection_code.is_some()
+            || !self.mutations.is_empty()
+            || self.reverse.is_some()
+        {
+            return Err(ExecutionTransitionError::InvalidTransition {
+                from: self.state,
+                to: ExecutionState::Rejected,
+            });
+        }
+        if self.protection.is_some() {
+            self.resolve_protection(ProtectiveOrderResolution::NotActivated)?;
+        }
+        self.rejection_code = Some(LOCAL_PREPARED_ABANDONED_CODE.to_owned());
+        self.state = ExecutionState::Rejected;
+        Ok(())
     }
 
     pub fn begin_submission(&mut self) -> Result<(), ExecutionTransitionError> {

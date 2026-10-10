@@ -40,6 +40,7 @@ assert(buildExecutionOperation(uidAction("prepare",{
 }))?.type==="prepare_execution","risk-bound reduce/close must be typed");
 assert(buildExecutionOperation(uidAction("submit"))?.type==="submit_prepared_execution","submit must be typed");
 assert(buildExecutionOperation(uidAction("abort_reverse"))?.type==="abort_reverse_execution","reverse abort must be typed");
+assert(buildExecutionOperation(uidAction("abandon_prepared"))?.type==="abandon_prepared_execution","only local unsent abandonment admitted");
 assert(buildExecutionOperation(uidAction("amend",{mutation_id:"mutation_demo_012345",new_price:"79999"}))?.type==="mutate_execution","amend must be typed");
 assert(buildExecutionOperation(uidAction("cancel",{mutation_id:"mutation_demo_012345"}))?.type==="mutate_execution","cancel must be typed");
 assert(buildExecutionOperation(uidAction("cancel_protection",{mutation_id:"mutation_demo_012345"}))?.type==="mutate_execution","protection cancel must be typed");
@@ -50,6 +51,8 @@ for(const x of [
   uidAction("prepare",{...basePrepare,spec:{action:"close",position_side:"long",size:"0.02",price:"80000"}, unexpected:"value"}),
   uidAction("prepare",{...basePrepare,spec:{action:"close",position_side:"long",size:"0.02",price:"80000"}, risk:{mandate,policy:{...policy,minimum_quality:"unknown"}}}),
   uidAction("submit",{new_price:"90000"}),
+  uidAction("abandon_prepared",{mutation_id:"mutation_demo_012345"}),
+  uidAction("abandon_prepared",{new_price:"90000"}),
   uidAction("amend",{mutation_id:"mutation_demo_012345"}),
   uidAction("cancel",{mutation_id:"invalid!"}),
   uidAction("submit",{intent_id:"bad"}),
@@ -60,7 +63,7 @@ for(const x of [
   // malformed or foreign fields before sending a corresponding native request.
   if(result!==null)throw Error("malformed execution action reached runtime: "+JSON.stringify(x));
 }
-for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution"]) {
+for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution","abandon_prepared_execution"]) {
   assert(isExecutionMutation(op), "all trading writes classify as uncertain on lost ACK");
   assert(executionProfilePermitsOperation("demo_acceptance",op), "verified Demo write allowed");
   for (const profile of ["production","unverified","",undefined]) {

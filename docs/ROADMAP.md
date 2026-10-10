@@ -29,6 +29,24 @@ explicit optional live activation gate
 The final live activation gate is not a sixth development stage. Production live trading remains fail-closed until separately authorized after Stages 1–5 pass.
 
 
+## Current 4C-G1 unblock: strictly unsent PREPARED — 2026-10-10
+
+**Status: SOURCE CANDIDATE, NOT MERGED/DEPLOYED/PHYSICALLY ACCEPTED.** One Demo BTC-USDT-SWAP long remains open and has exchange-visible ACTIVE OCO. The previous CLOSE `intent_stage4c_close_long_20261010a` is durable `PREPARED` with null exchange_order_id and holds the instrument reservation. A coherent account ledger is **not** terminal flat. This is a local state-lifecycle defect, not evidence that a venue CLOSE was sent. Keep the parent OCO intact.
+
+**Single fix owner:** `ExecutionRecord::abandon_prepared` → `DurableExecutionLedger::abandon_prepared` → existing `OrderExecutor` and `ExecutionRuntime` → closed Demo-only `AgentOperation::AbandonPreparedExecution` → existing Cloudflare MCP `execution_action(action=abandon_prepared)`. No second executor, mutation transport, SQL edit, ledger deletion, daemon, polling loop or automatic retry. The persisted original intent becomes `REJECTED` with exact reason `LOCAL_PREPARED_ABANDONED_UNSENT`, **never** an exchange order cancellation. Strictly no `SUBMITTING`, `UNKNOWN_SUBMISSION`, prior ordId, mutation, reverse or unresolved protective effect. Same-ID duplicate yields the identical persisted record.
+
+**Gate tests and acceptance (serial, not independent parallel tasks):**
+
+| Test | Stimulus / observable PASS | Fail-closed condition |
+| --- | --- | --- |
+| T1 State and ledger | PREPARED-only → atomic terminal marker; retained original ID; after restart new **reducing** CLOSE can be prepared, original ACTIVE parent OCO unchanged | SUBMITTING/UNKNOWN/reverse/non-PREPARED refuse, no state or timestamp changed |
+| T2 Protocol and Worker | Unknown field and invalid ID rejected; `abandon_prepared` is one closed typed Demo mutation, authenticated generation/profile fenced | production/unverified profile refuses; never substitute encrypted GitHub after connector refusal |
+| T3 Source/provenance | Full exact-head six-job Rust/TypeScript CI, tested tree equality, no-rebuild promotion, exact binary and Worker deployed | source-only passing is not installation PASS |
+| T4 Physical original-intent repair | Fresh correct-Demo-UID Cloudflare account/ledger/status, exact old intent PREPARED and zero exchange identity; **one** authorized local abandonment; persistent readback REJECTED with local marker and parent OCO still ACTIVE | No trade send, no unsafe alternate mutation channel; unresolved effect -> NOT_ACCEPTED |
+| T5 Terminal G1 safety | New CLOSE allowed only after independent fresh preflight; one explicitly authorized reducing order and exact order/fill/bill/position/ordinary and all 4 protective pending scope proof, no orphan; compare runtime generation and unchanged UID | unknown ACK never replayed; if position/OCO still live, G1 stays OPEN and Stage 5 cannot start |
+
+**NEXT only:** finish candidate CI/provenance and installed proof, perform precisely supported Demo abandonment once and re-query both the original intent and parent protection. Do not assume that local reservation release closes the venue position. The further G1 risk-reducing CLOSE and protection cleanup are **separate**, safety-gated physical steps before G2/G3/G4. Live account hard OFF.
+
 ## CURRENT: one sequential stage gate and verified acceptance — 2026-10-10
 
 **Canonical authority #160; this is its operative summary, not another plan.** Exactly ONE active work ID, completed and evidenced before opening the next. Historical CURRENT/NEXT or "parallel" instructions elsewhere are superseded. A blocked step remains blocked; do not jump to Stage 5B/C, an independent research task or optional Stage-4D feature. Safety restoration is part of the same step. An OpenAI/connector safety refusal must NOT be bypassed by renaming the request or using another tool/transport. No new daemon, scheduler, executor, arbitrary RPC or mutation MCP endpoint.
