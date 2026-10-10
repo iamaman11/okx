@@ -3,7 +3,7 @@ import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 export const FRAME_SCHEMA = "okx.direct-transport.frame/v1";
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
 export const MCP_SERVER_VERSION = "0.7.0";
-export const TOOL_CONTRACT_VERSION = "okx.mcp.tools/2026-10-06.1";
+export const TOOL_CONTRACT_VERSION = "okx.mcp.tools/2026-10-10.1";
 export const MAX_BODY_BYTES = 64 * 1024;
 export const MAX_INFLIGHT = 8;
 export const PONG_DEADLINE_MS = 2_000;
