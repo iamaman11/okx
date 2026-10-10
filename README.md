@@ -25,11 +25,11 @@ Accepted:
 - H2 `two_bar_momentum` — development screen PASS, frozen for a fresh independent 96h FINAL_OOS tracked in #216;
 - Stage 3D immutable promotion gate — ACCEPTED;
 - Stage 3D causal live-decision parity kernel — ACCEPTED;
-- Stage 3D bounded event-driven PAPER/SHADOW session owner — current implementation cursor.
+- Stage 3D bounded event-driven PAPER/SHADOW session owner — research implementation; independent H2 promotion remains gated by #216.
 
-Current canonical roadmap: **#160**. Current development cursor: **Stage 3D — bounded event-driven PAPER/SHADOW session owner**.
+Current canonical roadmap: **#160**. Operational cursor: **Stage 4C physical Demo exchange acceptance and Stage 5 governance/recovery**; see `docs/ROADMAP.md` and `docs/STAGE5_IMPLEMENTATION.md`. Source on 2026-10-10 is `8c7ccf7c` (merged #264), while the last physically verified Windows installation is the earlier #260 build; do not equate merged code with deployed or exchange-accepted behavior.
 
-Live trading is **not enabled**. Production construction of the executor remains disabled before SUBMITTING persistence and before any exchange mutation.
+Live trading is **not enabled**. The production executor remains `ReadOnly` with no approved real-money mutation authority; isolated Demo acceptance uses the shared executor with a separate, temporary admission guard. Stage 4C filled-position/terminal-flat exchange acceptance and Stage 5 physical governance proof are not yet complete.
 
 ## Architecture
 
