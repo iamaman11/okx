@@ -136,7 +136,7 @@ function riskInput(v: unknown): boolean {
   const m=v.mandate,p=v.policy;
   if (!exactKeys(m,Object.keys(mandate.properties)) || !exactKeys(p,Object.keys(hardPolicy.properties))) return false;
   const version=(x:unknown)=>typeof x==="string"&&x.length>0&&x.length<=64&&/^[A-Za-z0-9._/-]+$/.test(x);
-  const number=(x:unknown)=>typeof x==="string"&&x.length>0&&x.length<=64&&/^[0-9]+(?:\\.[0-9]+)?$/.test(x);
+  const number=(x:unknown)=>typeof x==="string"&&x.length>0&&x.length<=64&&/^[0-9]+(?:\.[0-9]+)?$/.test(x);
   const instruments=(x:unknown)=>Array.isArray(x)&&x.length<=32
     && x.every(v=>token(v,3,64))&&new Set(x).size===x.length;
   if (!version(m.version)||!version(p.version)
