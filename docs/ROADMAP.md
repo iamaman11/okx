@@ -6,6 +6,8 @@
 
 Issue #160 is the authoritative detailed roadmap and acceptance contract. This file is the repository-side summary/cursor only; it must not become a second competing plan.
 
+**Executable Stage-5 and future live-admission checklist:** [STAGE5_IMPLEMENTATION.md](STAGE5_IMPLEMENTATION.md), subordinate to #160. It maps existing module owners, concrete changes, positive/negative tests, T1–T5 evidence and terminal PASS/FAIL. Stage 4C exchange acceptance stays in #223 and this ROADMAP; it is not replaced by that checklist.
+
 The platform follows exactly five development stages:
 
 ```text
