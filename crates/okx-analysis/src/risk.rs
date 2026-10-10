@@ -779,14 +779,18 @@ pub fn durable_account_stop_reason(
     violations: &[RiskPolicyViolation],
     daily_history_complete: bool,
 ) -> Option<&'static str> {
-    violations.iter().find_map(|violation| match (violation.code, violation.scope.as_str()) {
-        ("MAX_DAILY_REALIZED_LOSS", "utc_day") if daily_history_complete => Some(violation.code),
-        ("MAX_DRAWDOWN" | "MANDATE_MAX_DRAWDOWN", "capital_base")
-        | ("MAX_ACCOUNT_GROSS_NOTIONAL" | "MAX_MARGIN_UTILIZATION", "account") => {
-            Some(violation.code)
-        }
-        _ => None,
-    })
+    violations.iter().find_map(
+        |violation| match (violation.code, violation.scope.as_str()) {
+            ("MAX_DAILY_REALIZED_LOSS", "utc_day") if daily_history_complete => {
+                Some(violation.code)
+            }
+            ("MAX_DRAWDOWN" | "MANDATE_MAX_DRAWDOWN", "capital_base")
+            | ("MAX_ACCOUNT_GROSS_NOTIONAL" | "MAX_MARGIN_UTILIZATION", "account") => {
+                Some(violation.code)
+            }
+            _ => None,
+        },
+    )
 }
 
 pub fn evaluate_candidate_risk(
@@ -1397,10 +1401,10 @@ mod tests {
     fn account_stop_selects_only_proven_account_limits_not_candidate_or_stale_data() {
         fn violation(code: &'static str, scope: &str) -> RiskPolicyViolation {
             RiskPolicyViolation {
-            code,
-            scope: scope.to_owned(),
-            observed: "10".to_owned(),
-            limit: "5".to_owned(),
+                code,
+                scope: scope.to_owned(),
+                observed: "10".to_owned(),
+                limit: "5".to_owned(),
             }
         }
         let rejected_candidate = vec![
@@ -1427,10 +1431,13 @@ mod tests {
             );
         }
         assert_eq!(
-            durable_account_stop_reason(&[
-                violation("MAX_LOSS_PER_TRADE", "BTC-USDT-SWAP"),
-                violation("MAX_DAILY_REALIZED_LOSS", "utc_day")
-            ], true),
+            durable_account_stop_reason(
+                &[
+                    violation("MAX_LOSS_PER_TRADE", "BTC-USDT-SWAP"),
+                    violation("MAX_DAILY_REALIZED_LOSS", "utc_day")
+                ],
+                true
+            ),
             Some("MAX_DAILY_REALIZED_LOSS")
         );
         assert_eq!(
