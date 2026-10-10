@@ -1256,6 +1256,14 @@ impl AgentOperation {
     }
 }
 
+/// The authenticated one-owner Windows process profile, never an order-mutation grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectRuntimeProfile {
+    Production,
+    DemoAcceptance,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DirectTransportFrame {
@@ -1263,6 +1271,10 @@ pub enum DirectTransportFrame {
         schema: String,
         runtime_id: String,
         connection_id: String,
+        /// None is accepted only for rolling upgrades of an older agent.
+        /// It never proves the active execution environment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_profile: Option<DirectRuntimeProfile>,
     },
     HelloAck {
         schema: String,
@@ -1308,6 +1320,7 @@ impl DirectTransportFrame {
                 schema,
                 runtime_id,
                 connection_id,
+                runtime_profile: _,
             } => {
                 validate_direct_schema(schema)?;
                 validate_direct_token(runtime_id, 1, 64)?;
@@ -3365,6 +3378,51 @@ mod direct_transport_tests {
     }
 
     #[test]
+    fn direct_transport_hello_binds_demo_profile_and_rejects_unknown_profile() {
+        let hello = DirectTransportFrame::Hello {
+            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+            runtime_id: "windows-primary".to_owned(),
+            connection_id: "connection_0123456789".to_owned(),
+            runtime_profile: Some(DirectRuntimeProfile::DemoAcceptance),
+        };
+        hello.validate().expect("demo handshake");
+        let json = serde_json::to_string(&hello).expect("serialize");
+        assert!(json.contains("\"runtime_profile\":\"demo_acceptance\""));
+        assert_eq!(
+            serde_json::from_str::<DirectTransportFrame>(&json).expect("deserialize"),
+            hello
+        );
+        let old = r#"{"type":"hello","schema":"okx.direct-transport.frame/v1","runtime_id":"windows-primary","connection_id":"connection_0123456789"}"#;
+        let old_frame: DirectTransportFrame = serde_json::from_str(old).expect("rollout old hello");
+        assert!(matches!(
+            old_frame,
+            DirectTransportFrame::Hello {
+                runtime_profile: None,
+                ..
+            }
+        ));
+        let wrong = json.replace("demo_acceptance", "production-demo-unknown");
+        assert!(serde_json::from_str::<DirectTransportFrame>(&wrong).is_err());
+    }
+
+    #[test]
+    fn active_demo_direct_transport_never_authorizes_order_submission() {
+        assert!(AgentOperation::AccountSummary.direct_transport_read_only());
+        assert!(
+            AgentOperation::ExecutionStatus {
+                intent_id: "intent_test_demo_read_only_01".to_owned(),
+            }
+            .direct_transport_read_only()
+        );
+        assert!(
+            !AgentOperation::SubmitPreparedExecution {
+                intent_id: "intent_test_demo_mutation_01".to_owned(),
+            }
+            .direct_transport_read_only()
+        );
+    }
+
+    #[test]
     fn direct_transport_rejects_zero_generation_and_bad_schema() {
         let bad_generation = DirectTransportFrame::Request {
             schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
@@ -3381,6 +3439,7 @@ mod direct_transport_tests {
             schema: "okx.direct-transport.frame/v0".to_owned(),
             runtime_id: "windows-primary".to_owned(),
             connection_id: "connection_0123456789".to_owned(),
+            runtime_profile: Some(DirectRuntimeProfile::Production),
         };
         assert!(matches!(
             bad_schema.validate(),

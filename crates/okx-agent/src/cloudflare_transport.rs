@@ -5,7 +5,7 @@ use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::Fut
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentResponse, AgentResponseStatus,
     DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DataQuality,
-    DirectTransportFrame,
+    DirectRuntimeProfile, DirectTransportFrame,
 };
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
 use tokio::{
@@ -43,6 +43,7 @@ const DIRECT_TRANSPORT_QUERY_FAILED: &str = "DIRECT_TRANSPORT_QUERY_FAILED";
 pub struct CloudflareTransportConfig {
     ws_url: String,
     runtime_id: String,
+    runtime_profile: DirectRuntimeProfile,
     bearer_token: Zeroizing<String>,
 }
 
@@ -51,12 +52,14 @@ impl CloudflareTransportConfig {
         ws_url: String,
         runtime_id: String,
         bearer_token: Zeroizing<String>,
+        runtime_profile: DirectRuntimeProfile,
     ) -> AgentResult<Self> {
         validate_ws_url(&ws_url)?;
         validate_runtime_id(&runtime_id)?;
         Ok(Self {
             ws_url,
             runtime_id,
+            runtime_profile,
             bearer_token,
         })
     }
@@ -155,6 +158,7 @@ async fn run_session(
             schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
             runtime_id: config.runtime_id.clone(),
             connection_id,
+            runtime_profile: Some(config.runtime_profile),
         },
     )
     .await?;
