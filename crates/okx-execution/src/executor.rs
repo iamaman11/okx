@@ -307,6 +307,14 @@ where
         &self.ledger
     }
 
+    pub fn stop_new_risk(
+        &mut self,
+        reason: impl Into<String>,
+        observed_at_ms: u64,
+    ) -> Result<crate::ExecutionRiskStop, OrderExecutorError> {
+        Ok(self.ledger.stop_new_risk(reason, observed_at_ms)?)
+    }
+
     pub const fn mutation_authority(&self) -> MutationAuthority {
         self.mutation_authority
     }
@@ -649,6 +657,8 @@ where
             return Err(OrderExecutorError::NotPrepared(entry.record.state));
         }
 
+        self.ledger
+            .require_new_risk_allowed(entry.record.plan.action)?;
         let request = place_request(&entry.record);
         let rate_plan = match self.gateway.admit_place_order(&request) {
             Ok(value) => value,
@@ -749,6 +759,10 @@ where
             .into());
         }
 
+        if mutation.kind == OrderMutationKind::Amend {
+            self.ledger
+                .require_new_risk_allowed(entry.record.plan.action)?;
+        }
         let request = order_mutation_request(&entry.record, &mutation)?;
         let rate_plan = match &request {
             OrderMutationRequest::Amend(request) => self.gateway.admit_amend_order(request),
@@ -2034,6 +2048,42 @@ mod tests {
         executor.disable_mutations();
         assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn durable_stop_blocks_existing_prepared_order_before_gateway_admission() {
+        let (root, mut journal) = ledger("durable-executor-stop");
+        let intent = plan();
+        journal.prepare(intent.clone(), 101).expect("prepare");
+        journal
+            .stop_new_risk("daily-loss", 102)
+            .expect("stop persisted");
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("reopen");
+        let gateway = LocalDeferredGateway {
+            place_calls: AtomicUsize::new(0),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(reopened, gateway);
+        let failure = executor
+            .submit_prepared(&intent.intent_id, timing(), 201)
+            .await
+            .expect_err("must stop before gateway admission");
+        assert!(matches!(
+            failure,
+            OrderExecutorError::Ledger(ExecutionLedgerError::NewRiskStopped)
+        ));
+        assert_eq!(executor.gateway().place_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            executor
+                .ledger()
+                .get(&intent.intent_id)
+                .expect("intent")
+                .record
+                .state,
+            ExecutionState::Prepared
+        );
         let _ = fs::remove_dir_all(root);
     }
 

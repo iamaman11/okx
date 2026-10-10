@@ -27,6 +27,8 @@ pub const EXECUTION_LEDGER_SCHEMA_V2: &str = "okx.execution-ledger/v2";
 pub const EXECUTION_LEDGER_SCHEMA_V3: &str = "okx.execution-ledger/v3";
 pub const EXECUTION_LEDGER_SCHEMA_V4: &str = "okx.execution-ledger/v4";
 pub const EXECUTION_LEDGER_SCHEMA_V5: &str = "okx.execution-ledger/v5";
+pub const EXECUTION_LEDGER_SCHEMA_V6: &str = "okx.execution-ledger/v6";
+pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
 const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.json";
 
@@ -84,6 +86,12 @@ pub enum ExecutionLedgerError {
     #[error("reverse execution continuation was explicitly aborted")]
     ReverseAborted,
 
+    #[error("new risk is halted by a durable execution stop")]
+    NewRiskStopped,
+
+    #[error("risk-stop reason must be nonempty and at most 128 bytes")]
+    InvalidRiskStopReason,
+
     #[error("execution ledger capacity of {0} records is exhausted")]
     CapacityExceeded(usize),
 
@@ -94,11 +102,35 @@ pub enum ExecutionLedgerError {
     Transition(#[from] ExecutionTransitionError),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRiskStop {
+    pub schema: String,
+    pub stopped_at_ms: u64,
+    pub reason: String,
+}
+
+fn validate_risk_stop(value: &ExecutionRiskStop) -> Result<(), ExecutionLedgerError> {
+    if value.schema != EXECUTION_RISK_STOP_SCHEMA_V1 || value.stopped_at_ms == 0 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "invalid durable risk-stop metadata",
+        ));
+    }
+    if value.reason.trim().is_empty() || value.reason.len() > 128 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "invalid durable risk-stop reason",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecutionLedgerFile {
     schema: String,
     records: Vec<ExecutionLedgerEntry>,
+    #[serde(default)]
+    risk_stop: Option<ExecutionRiskStop>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,9 +166,17 @@ impl ExecutionLedgerStore {
         &self.path
     }
 
-    fn load(&self) -> Result<BTreeMap<String, ExecutionLedgerEntry>, ExecutionLedgerError> {
+    fn load(
+        &self,
+    ) -> Result<
+        (
+            BTreeMap<String, ExecutionLedgerEntry>,
+            Option<ExecutionRiskStop>,
+        ),
+        ExecutionLedgerError,
+    > {
         if !self.path.exists() {
-            return Ok(BTreeMap::new());
+            return Ok((BTreeMap::new(), None));
         }
 
         let bytes = fs::read(&self.path)?;
@@ -148,8 +188,17 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V3
                 | EXECUTION_LEDGER_SCHEMA_V4
                 | EXECUTION_LEDGER_SCHEMA_V5
+                | EXECUTION_LEDGER_SCHEMA_V6
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
+        }
+        if let Some(stop) = &file.risk_stop {
+            if file.schema != EXECUTION_LEDGER_SCHEMA_V6 {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "risk stop on legacy ledger schema",
+                ));
+            }
+            validate_risk_stop(stop)?;
         }
         if file.records.len() > self.max_records {
             return Err(ExecutionLedgerError::Corrupt(
@@ -170,12 +219,13 @@ impl ExecutionLedgerStore {
             }
         }
 
-        Ok(by_intent)
+        Ok((by_intent, file.risk_stop))
     }
 
     fn save(
         &self,
         entries: &BTreeMap<String, ExecutionLedgerEntry>,
+        risk_stop: Option<&ExecutionRiskStop>,
     ) -> Result<(), ExecutionLedgerError> {
         if entries.len() > self.max_records {
             return Err(ExecutionLedgerError::CapacityExceeded(self.max_records));
@@ -194,6 +244,10 @@ impl ExecutionLedgerStore {
             }
         }
 
+        if let Some(stop) = risk_stop {
+            validate_risk_stop(stop)?;
+        }
+
         let parent = self
             .path
             .parent()
@@ -201,8 +255,9 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V5.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V6.to_owned(),
             records: entries.values().cloned().collect(),
+            risk_stop: risk_stop.cloned(),
         })?;
 
         let temp = temp_path(&self.path);
@@ -220,6 +275,7 @@ impl ExecutionLedgerStore {
 pub struct DurableExecutionLedger {
     store: ExecutionLedgerStore,
     entries: BTreeMap<String, ExecutionLedgerEntry>,
+    risk_stop: Option<ExecutionRiskStop>,
 }
 
 impl DurableExecutionLedger {
@@ -232,7 +288,7 @@ impl DurableExecutionLedger {
         observed_at_ms: u64,
     ) -> Result<Self, ExecutionLedgerError> {
         require_timestamp(observed_at_ms)?;
-        let mut entries = store.load()?;
+        let (mut entries, risk_stop) = store.load()?;
         let mut recovered = false;
 
         for entry in entries.values_mut() {
@@ -248,10 +304,53 @@ impl DurableExecutionLedger {
         }
 
         if recovered {
-            store.save(&entries)?;
+            store.save(&entries, risk_stop.as_ref())?;
         }
 
-        Ok(Self { store, entries })
+        Ok(Self {
+            store,
+            entries,
+            risk_stop,
+        })
+    }
+
+    /// Persist a one-way new-risk stop in the existing atomic execution ledger.
+    /// A future explicit, reviewed authorization is required for any reset.
+    pub fn stop_new_risk(
+        &mut self,
+        reason: impl Into<String>,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionRiskStop, ExecutionLedgerError> {
+        if let Some(existing) = &self.risk_stop {
+            return Ok(existing.clone());
+        }
+        require_timestamp(observed_at_ms)?;
+        let reason = reason.into();
+        if reason.trim().is_empty() || reason.len() > 128 {
+            return Err(ExecutionLedgerError::InvalidRiskStopReason);
+        }
+        let stop = ExecutionRiskStop {
+            schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
+            stopped_at_ms: observed_at_ms,
+            reason,
+        };
+        self.store.save(&self.entries, Some(&stop))?;
+        self.risk_stop = Some(stop.clone());
+        Ok(stop)
+    }
+
+    pub fn risk_stop(&self) -> Option<&ExecutionRiskStop> {
+        self.risk_stop.as_ref()
+    }
+
+    pub fn require_new_risk_allowed(
+        &self,
+        action: ExecutionAction,
+    ) -> Result<(), ExecutionLedgerError> {
+        if self.risk_stop.is_some() && action.is_risk_increasing() {
+            return Err(ExecutionLedgerError::NewRiskStopped);
+        }
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -474,6 +573,13 @@ impl DurableExecutionLedger {
         request_exchange_time_ms: Option<u64>,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        let action = self
+            .get(intent_id)
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?
+            .record
+            .plan
+            .action;
+        self.require_new_risk_allowed(action)?;
         self.mutate(intent_id, observed_at_ms, move |record| {
             record.begin_submission_with_timing(request_exchange_time_ms)
         })
@@ -642,6 +748,22 @@ impl DurableExecutionLedger {
         mutation_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        let entry = self
+            .get(intent_id)
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        let mutation = entry
+            .record
+            .mutations
+            .iter()
+            .find(|item| item.mutation_id == mutation_id)
+            .ok_or_else(|| {
+                ExecutionLedgerError::Transition(ExecutionTransitionError::MutationNotFound(
+                    mutation_id.to_owned(),
+                ))
+            })?;
+        if mutation.kind == OrderMutationKind::Amend {
+            self.require_new_risk_allowed(entry.record.plan.action)?;
+        }
         let mutation_id = mutation_id.to_owned();
         self.mutate(intent_id, observed_at_ms, move |record| {
             record.begin_mutation_submission(&mutation_id)
@@ -746,7 +868,7 @@ impl DurableExecutionLedger {
         entry: ExecutionLedgerEntry,
     ) -> Result<(), ExecutionLedgerError> {
         self.entries.insert(intent_id.clone(), entry);
-        if let Err(error) = self.store.save(&self.entries) {
+        if let Err(error) = self.store.save(&self.entries, self.risk_stop.as_ref()) {
             self.entries.remove(&intent_id);
             return Err(error);
         }
@@ -780,7 +902,7 @@ impl DurableExecutionLedger {
             validate_entry(entry)?;
         }
 
-        if let Err(error) = self.store.save(&self.entries) {
+        if let Err(error) = self.store.save(&self.entries, self.risk_stop.as_ref()) {
             self.entries.insert(intent_id.to_owned(), original);
             return Err(error);
         }
@@ -1871,6 +1993,7 @@ mod tests {
                 serde_json::to_vec_pretty(&ExecutionLedgerFile {
                     schema: schema.to_owned(),
                     records: vec![entry],
+                    risk_stop: None,
                 })
                 .expect("legacy json"),
             )
@@ -1879,11 +2002,11 @@ mod tests {
             let store = ExecutionLedgerStore::at(&path);
             let mut ledger = DurableExecutionLedger::open(store, 101).expect("load legacy");
             assert_eq!(ledger.len(), 1);
-            ledger.begin_submission(&intent_id, 102).expect("write v5");
+            ledger.begin_submission(&intent_id, 102).expect("write v6");
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V5);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V6);
 
             let _ = fs::remove_dir_all(root);
         }
@@ -1957,6 +2080,95 @@ mod tests {
             Some(1_791_300_000_100_900)
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn risk_stop_is_durable_idempotent_and_blocks_new_risk_after_recovery() {
+        let root = temp_root("risk-stop-durable");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent_id = "intent_stop_durable_0123456789";
+        {
+            let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+            ledger.prepare(plan(intent_id), 101).expect("prepare");
+            let stop = ledger.stop_new_risk("account-limit", 102).expect("stop");
+            assert_eq!(stop.stopped_at_ms, 102);
+            assert_eq!(
+                ledger
+                    .stop_new_risk("cannot-reset-by-repeating", 103)
+                    .expect("idempotent stop"),
+                stop,
+            );
+            assert!(matches!(
+                ledger.begin_submission(intent_id, 104),
+                Err(ExecutionLedgerError::NewRiskStopped)
+            ));
+            assert_eq!(
+                ledger.get(intent_id).expect("entry").record.state,
+                ExecutionState::Prepared
+            );
+        }
+        let mut reopened = DurableExecutionLedger::open(store, 200).expect("reopen");
+        assert_eq!(
+            reopened.risk_stop().expect("persisted stop").reason,
+            "account-limit"
+        );
+        assert!(matches!(
+            reopened.begin_submission(intent_id, 201),
+            Err(ExecutionLedgerError::NewRiskStopped)
+        ));
+        assert!(
+            reopened
+                .require_new_risk_allowed(ExecutionAction::Close)
+                .is_ok()
+        );
+        assert!(
+            reopened
+                .require_new_risk_allowed(ExecutionAction::Reduce)
+                .is_ok()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reducing_close_and_cancel_remain_available_after_risk_stop() {
+        let root = temp_root("risk-stop-allow-reduction");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = DurableExecutionLedger::open(store, 100).expect("open");
+        let close = close_plan("intent_risk_stop_close_01", PositionSide::Long);
+        ledger.prepare(close.clone(), 101).expect("prepare close");
+        ledger.stop_new_risk("manual-stop", 102).expect("stop");
+        let submitting = ledger
+            .begin_submission(&close.intent_id, 103)
+            .expect("close allowed");
+        assert_eq!(submitting.record.state, ExecutionState::Submitting);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn risk_stop_cannot_be_cleared_by_corrupt_metadata_or_legacy_recovery() {
+        let root = temp_root("risk-stop-metadata");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+        assert!(matches!(
+            ledger.stop_new_risk("  ", 101),
+            Err(ExecutionLedgerError::InvalidRiskStopReason)
+        ));
+        ledger.stop_new_risk("manual-stop", 102).expect("durable");
+        drop(ledger);
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).expect("read")).expect("json");
+        file["risk_stop"]["schema"] = serde_json::Value::String("wrong-schema".to_owned());
+        fs::write(store.path(), serde_json::to_vec(&file).expect("encode")).expect("corrupt");
+        assert!(matches!(
+            DurableExecutionLedger::open(store, 200),
+            Err(ExecutionLedgerError::Corrupt(
+                "invalid durable risk-stop metadata"
+            ))
+        ));
         let _ = fs::remove_dir_all(root);
     }
 
