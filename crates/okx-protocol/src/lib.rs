@@ -3408,14 +3408,18 @@ mod direct_transport_tests {
     #[test]
     fn active_demo_direct_transport_never_authorizes_order_submission() {
         assert!(AgentOperation::AccountSummary.direct_transport_read_only());
-        assert!(AgentOperation::ExecutionStatus {
-            intent_id: "intent_test_demo_read_only_01".to_owned(),
-        }
-        .direct_transport_read_only());
-        assert!(!AgentOperation::SubmitPreparedExecution {
-            intent_id: "intent_test_demo_mutation_01".to_owned(),
-        }
-        .direct_transport_read_only());
+        assert!(
+            AgentOperation::ExecutionStatus {
+                intent_id: "intent_test_demo_read_only_01".to_owned(),
+            }
+            .direct_transport_read_only()
+        );
+        assert!(
+            !AgentOperation::SubmitPreparedExecution {
+                intent_id: "intent_test_demo_mutation_01".to_owned(),
+            }
+            .direct_transport_read_only()
+        );
     }
 
     #[test]
