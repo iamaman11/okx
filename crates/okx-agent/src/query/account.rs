@@ -284,6 +284,22 @@ pub(super) async fn dispatch(
                                 inventory.shown, inventory.total
                             ));
                         }
+                        // A durable intent from a different authenticated UID is
+                        // never accepted as this account's reconciliation proof.
+                        if inventory.rows.iter().any(|item| {
+                            item.account_uid_fingerprint
+                                != facts.summary.authority.account_uid_fingerprint
+                        }) {
+                            return Ok(failure_response(
+                                request,
+                                generated_at,
+                                AgentResponseStatus::Failed,
+                                ACCOUNT_LEDGER_INCONSISTENT_CODE,
+                                "managed execution intent belongs to another authenticated account"
+                                    .to_owned(),
+                                false,
+                            ));
+                        }
                         if inventory.total != value.managed_intents {
                             return Ok(failure_response(
                                 request,
