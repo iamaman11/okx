@@ -307,8 +307,11 @@ where
         &self.ledger
     }
 
-    pub fn stop_new_risk(&mut self, reason: impl Into<String>, observed_at_ms: u64)
-        -> Result<crate::ExecutionRiskStop, OrderExecutorError> {
+    pub fn stop_new_risk(
+        &mut self,
+        reason: impl Into<String>,
+        observed_at_ms: u64,
+    ) -> Result<crate::ExecutionRiskStop, OrderExecutorError> {
         Ok(self.ledger.stop_new_risk(reason, observed_at_ms)?)
     }
 
@@ -654,7 +657,8 @@ where
             return Err(OrderExecutorError::NotPrepared(entry.record.state));
         }
 
-        self.ledger.require_new_risk_allowed(entry.record.plan.action)?;
+        self.ledger
+            .require_new_risk_allowed(entry.record.plan.action)?;
         let request = place_request(&entry.record);
         let rate_plan = match self.gateway.admit_place_order(&request) {
             Ok(value) => value,
@@ -756,7 +760,8 @@ where
         }
 
         if mutation.kind == OrderMutationKind::Amend {
-            self.ledger.require_new_risk_allowed(entry.record.plan.action)?;
+            self.ledger
+                .require_new_risk_allowed(entry.record.plan.action)?;
         }
         let request = order_mutation_request(&entry.record, &mutation)?;
         let rate_plan = match &request {
@@ -2051,12 +2056,12 @@ mod tests {
         let (root, mut journal) = ledger("durable-executor-stop");
         let intent = plan();
         journal.prepare(intent.clone(), 101).expect("prepare");
-        journal.stop_new_risk("daily-loss", 102).expect("stop persisted");
-        let reopened = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join("ledger.json")),
-            200,
-        )
-        .expect("reopen");
+        journal
+            .stop_new_risk("daily-loss", 102)
+            .expect("stop persisted");
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("reopen");
         let gateway = LocalDeferredGateway {
             place_calls: AtomicUsize::new(0),
         };
@@ -2071,7 +2076,12 @@ mod tests {
         ));
         assert_eq!(executor.gateway().place_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
-            executor.ledger().get(&intent.intent_id).expect("intent").record.state,
+            executor
+                .ledger()
+                .get(&intent.intent_id)
+                .expect("intent")
+                .record
+                .state,
             ExecutionState::Prepared
         );
         let _ = fs::remove_dir_all(root);
