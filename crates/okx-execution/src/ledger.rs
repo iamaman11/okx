@@ -296,6 +296,45 @@ impl DurableExecutionLedger {
         Ok(Self { store, entries, risk_stop })
     }
 
+    /// Persist a one-way new-risk stop in the existing atomic execution ledger.
+    /// A future explicit, reviewed authorization is required for any reset.
+    pub fn stop_new_risk(
+        &mut self,
+        reason: impl Into<String>,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionRiskStop, ExecutionLedgerError> {
+        if let Some(existing) = &self.risk_stop {
+            return Ok(existing.clone());
+        }
+        require_timestamp(observed_at_ms)?;
+        let reason = reason.into();
+        if reason.trim().is_empty() || reason.len() > 128 {
+            return Err(ExecutionLedgerError::InvalidRiskStopReason);
+        }
+        let stop = ExecutionRiskStop {
+            schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
+            stopped_at_ms: observed_at_ms,
+            reason,
+        };
+        self.store.save(&self.entries, Some(&stop))?;
+        self.risk_stop = Some(stop.clone());
+        Ok(stop)
+    }
+
+    pub fn risk_stop(&self) -> Option<&ExecutionRiskStop> {
+        self.risk_stop.as_ref()
+    }
+
+    pub fn require_new_risk_allowed(
+        &self,
+        action: ExecutionAction,
+    ) -> Result<(), ExecutionLedgerError> {
+        if self.risk_stop.is_some() && action.is_risk_increasing() {
+            return Err(ExecutionLedgerError::NewRiskStopped);
+        }
+        Ok(())
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -516,6 +555,13 @@ impl DurableExecutionLedger {
         request_exchange_time_ms: Option<u64>,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        let action = self
+            .get(intent_id)
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?
+            .record
+            .plan
+            .action;
+        self.require_new_risk_allowed(action)?;
         self.mutate(intent_id, observed_at_ms, move |record| {
             record.begin_submission_with_timing(request_exchange_time_ms)
         })
@@ -684,6 +730,16 @@ impl DurableExecutionLedger {
         mutation_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        let entry = self.get(intent_id)
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        let mutation = entry.record.mutations.iter()
+            .find(|item| item.mutation_id == mutation_id)
+            .ok_or_else(|| ExecutionLedgerError::Transition(
+                ExecutionTransitionError::MutationNotFound(mutation_id.to_owned())
+            ))?;
+        if mutation.kind == OrderMutationKind::Amend {
+            self.require_new_risk_allowed(entry.record.plan.action)?;
+        }
         let mutation_id = mutation_id.to_owned();
         self.mutate(intent_id, observed_at_ms, move |record| {
             record.begin_mutation_submission(&mutation_id)
