@@ -47,6 +47,7 @@ pub const EXECUTION_RISK_POLICY_REQUIRED_CODE: &str = "EXECUTION_RISK_POLICY_REQ
 pub const EXECUTION_RISK_POLICY_REJECTED_CODE: &str = "EXECUTION_RISK_POLICY_REJECTED";
 pub const EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE: &str = "EXECUTION_RISK_EVIDENCE_UNAVAILABLE";
 pub const EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE: &str = "EXECUTION_RISK_EVIDENCE_NOT_FRESH";
+pub const EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE: &str = "EXECUTION_RISK_STOP_PERSISTENCE_FAILED";
 pub const EXECUTION_RECONCILIATION_FAILED_CODE: &str = "EXECUTION_RECONCILIATION_FAILED";
 pub const EXECUTION_RECONCILIATION_UNAVAILABLE_CODE: &str = "EXECUTION_RECONCILIATION_UNAVAILABLE";
 pub const EXECUTION_MUTATION_UNSAFE_CODE: &str = "EXECUTION_MUTATION_UNSAFE";
@@ -1576,6 +1577,22 @@ async fn pre_mutation_admission(
             ));
         }
     };
+    // The existing read is account/ledger-converged and generations stayed
+    // stable. Only observed account-wide breaches may latch the durable stop;
+    // candidate projections and incomplete history merely reject this intent.
+    if let Err(error) = execution
+        .latch_account_risk_stop(&risk_analysis, utc_now_ms())
+        .await
+    {
+        admission_response!(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE,
+            format!("unable to persist account risk stop: {error}"),
+            false,
+        ));
+    }
     if let Err(error) = revalidate_hard_risk_policy(
         &plan,
         &risk_analysis,
