@@ -133,7 +133,9 @@ pub enum ExecutionValidationError {
     #[error("pending close order state is invalid")]
     InvalidPendingCloseOrder,
 
-    #[error("amend requires exactly one live pending order matching the durable exchange order id and client order id")]
+    #[error(
+        "amend requires exactly one live pending order matching the durable exchange order id and client order id"
+    )]
     AmendOwnedCloseIdentityMismatch,
 
     #[error("amend of a partially filled close must be independently reconciled before resizing")]
@@ -441,7 +443,10 @@ pub fn revalidate_amend_execution_plan(
     {
         return Err(ExecutionValidationError::AmendOwnedCloseIdentityMismatch);
     }
-    let filled = decimal("pending_order.accumulated_fill_size", &order.accumulated_fill_size)?;
+    let filled = decimal(
+        "pending_order.accumulated_fill_size",
+        &order.accumulated_fill_size,
+    )?;
     let size = decimal("pending_order.size", &order.size)?;
     if size <= Decimal::ZERO || filled < Decimal::ZERO || filled > size {
         return Err(ExecutionValidationError::InvalidPendingCloseOrder);
@@ -1578,16 +1583,18 @@ mod tests {
             revalidate_execution_plan(&plan, &rules, &account, None),
             Err(ExecutionValidationError::CloseSizeExceedsAvailable { .. })
         ));
-        revalidate_amend_execution_plan(
-            &plan, &rules, &account, None, "exact-venue-order-1"
-        )
-        .expect("own 4 can replace itself, independent order 1 remains reserved");
+        revalidate_amend_execution_plan(&plan, &rules, &account, None, "exact-venue-order-1")
+            .expect("own 4 can replace itself, independent order 1 remains reserved");
 
         let mut oversized = plan.clone();
         oversized.size = "4.01".to_owned();
         assert_eq!(
             revalidate_amend_execution_plan(
-                &oversized, &rules, &account, None, "exact-venue-order-1"
+                &oversized,
+                &rules,
+                &account,
+                None,
+                "exact-venue-order-1"
             ),
             Err(ExecutionValidationError::CloseSizeExceedsAvailable {
                 requested: "4.01".to_owned(),
@@ -1615,7 +1622,13 @@ mod tests {
         let mut wrong_side = account.clone();
         wrong_side.pending_orders[0].side = "buy".to_owned();
         assert_eq!(
-            revalidate_amend_execution_plan(&plan, &rules, &wrong_side, None, "exact-venue-order-1"),
+            revalidate_amend_execution_plan(
+                &plan,
+                &rules,
+                &wrong_side,
+                None,
+                "exact-venue-order-1"
+            ),
             Err(ExecutionValidationError::AmendOwnedCloseIdentityMismatch)
         );
         let mut gone = account;
