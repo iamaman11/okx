@@ -3394,9 +3394,28 @@ mod direct_transport_tests {
         );
         let old = r#"{"type":"hello","schema":"okx.direct-transport.frame/v1","runtime_id":"windows-primary","connection_id":"connection_0123456789"}"#;
         let old_frame: DirectTransportFrame = serde_json::from_str(old).expect("rollout old hello");
-        assert!(matches!(old_frame, DirectTransportFrame::Hello { runtime_profile: None, .. }));
+        assert!(matches!(
+            old_frame,
+            DirectTransportFrame::Hello {
+                runtime_profile: None,
+                ..
+            }
+        ));
         let wrong = json.replace("demo_acceptance", "production-demo-unknown");
         assert!(serde_json::from_str::<DirectTransportFrame>(&wrong).is_err());
+    }
+
+    #[test]
+    fn active_demo_direct_transport_never_authorizes_order_submission() {
+        assert!(AgentOperation::AccountSummary.direct_transport_read_only());
+        assert!(AgentOperation::ExecutionStatus {
+            intent_id: "intent_test_demo_read_only_01".to_owned(),
+        }
+        .direct_transport_read_only());
+        assert!(!AgentOperation::SubmitPreparedExecution {
+            intent_id: "intent_test_demo_mutation_01".to_owned(),
+        }
+        .direct_transport_read_only());
     }
 
     #[test]
