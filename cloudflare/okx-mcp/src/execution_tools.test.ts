@@ -1,4 +1,4 @@
-import { buildExecutionOperation, EXECUTION_TOOLS } from "./execution_tools.js";
+import { buildExecutionOperation, EXECUTION_TOOLS, executionProfilePermitsOperation } from "./execution_tools.js";
 function assert(condition: boolean, detail: string): void {
   if (!condition) throw Error(detail);
 }
