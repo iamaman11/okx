@@ -307,6 +307,11 @@ where
         &self.ledger
     }
 
+    pub fn stop_new_risk(&mut self, reason: impl Into<String>, observed_at_ms: u64)
+        -> Result<crate::ExecutionRiskStop, OrderExecutorError> {
+        Ok(self.ledger.stop_new_risk(reason, observed_at_ms)?)
+    }
+
     pub const fn mutation_authority(&self) -> MutationAuthority {
         self.mutation_authority
     }
