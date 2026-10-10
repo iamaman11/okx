@@ -1392,12 +1392,14 @@ mod tests {
 
     #[test]
     fn account_stop_selects_only_proven_account_limits_not_candidate_or_stale_data() {
-        let violation = |code, scope| RiskPolicyViolation {
+        fn violation(code: &'static str, scope: &str) -> RiskPolicyViolation {
+            RiskPolicyViolation {
             code,
             scope: scope.to_owned(),
             observed: "10".to_owned(),
             limit: "5".to_owned(),
-        };
+            }
+        }
         let rejected_candidate = vec![
             violation("MAX_ACCOUNT_GROSS_NOTIONAL_PROJECTED", "account"),
             violation("MAX_LOSS_PER_TRADE", "BTC-USDT-SWAP"),
