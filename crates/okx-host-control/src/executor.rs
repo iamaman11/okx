@@ -1413,7 +1413,7 @@ mod tests {
         // The bounded tail cannot claim to cover the complete startup.
         fs::write(
             &stderr,
-            vec![b'x'; (RUNTIME_DIAGNOSTIC_TAIL_BYTES + 8) as usize],
+            vec![b'x'; (launch.stderr_offset + RUNTIME_DIAGNOSTIC_TAIL_BYTES + 8) as usize],
         )
         .expect("oversized");
         let truncated = current_launch_summary(&root, &launch);
