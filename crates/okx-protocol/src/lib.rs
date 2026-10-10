@@ -3437,18 +3437,24 @@ mod direct_transport_tests {
 
     #[test]
     fn direct_demo_executor_actions_are_an_explicit_closed_set() {
-        assert!(AgentOperation::SubmitPreparedExecution {
-            intent_id: "intent_test_01234567".to_owned(),
-        }
-        .direct_transport_demo_execution());
-        assert!(AgentOperation::AbortReverseExecution {
-            intent_id: "intent_test_01234567".to_owned(),
-        }
-        .direct_transport_demo_execution());
-        assert!(!AgentOperation::ExecutionStatus {
-            intent_id: "intent_test_01234567".to_owned(),
-        }
-        .direct_transport_demo_execution());
+        assert!(
+            AgentOperation::SubmitPreparedExecution {
+                intent_id: "intent_test_01234567".to_owned(),
+            }
+            .direct_transport_demo_execution()
+        );
+        assert!(
+            AgentOperation::AbortReverseExecution {
+                intent_id: "intent_test_01234567".to_owned(),
+            }
+            .direct_transport_demo_execution()
+        );
+        assert!(
+            !AgentOperation::ExecutionStatus {
+                intent_id: "intent_test_01234567".to_owned(),
+            }
+            .direct_transport_demo_execution()
+        );
         assert!(!AgentOperation::AccountSummary.direct_transport_demo_execution());
     }
 
