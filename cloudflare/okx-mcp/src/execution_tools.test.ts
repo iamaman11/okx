@@ -73,4 +73,7 @@ for (const op of ["prepare_execution","submit_prepared_execution","mutate_execut
 assert(executionProfilePermitsOperation("production","account_summary"),"read is allowed");
 assert(!isExecutionMutation("account_summary"),"read must not be misclassified as exchange mutation");
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
+const advertisedActions = (EXECUTION_TOOLS[1] as any).inputSchema.properties.action.enum as string[];
+assert(advertisedActions.includes("abandon_prepared"),"advertised writable action list must include the typed unsent PREPARED release");
+assert(new Set(advertisedActions).size===advertisedActions.length,"advertised actions must be unique");
 assert(EXECUTION_TOOLS[1] !== undefined && (EXECUTION_TOOLS[1] as any).name==="execution_action","typed write name");
