@@ -2047,6 +2047,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_stop_blocks_existing_prepared_order_before_gateway_admission() {
+        let (root, mut journal) = ledger("durable-executor-stop");
+        let intent = plan();
+        journal.prepare(intent.clone(), 101).expect("prepare");
+        journal.stop_new_risk("daily-loss", 102).expect("stop persisted");
+        let reopened = DurableExecutionLedger::open(
+            ExecutionLedgerStore::at(root.join("ledger.json")),
+            200,
+        )
+        .expect("reopen");
+        let gateway = LocalDeferredGateway {
+            place_calls: AtomicUsize::new(0),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(reopened, gateway);
+        let failure = executor
+            .submit_prepared(&intent.intent_id, timing(), 201)
+            .await
+            .expect_err("must stop before gateway admission");
+        assert!(matches!(
+            failure,
+            OrderExecutorError::Ledger(ExecutionLedgerError::NewRiskStopped)
+        ));
+        assert_eq!(executor.gateway().place_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            executor.ledger().get(&intent.intent_id).expect("intent").record.state,
+            ExecutionState::Prepared
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn local_rate_defer_keeps_prepared_and_never_sends() {
         let (root, ledger) = ledger("local-rate-defer");
         let plan = plan();
