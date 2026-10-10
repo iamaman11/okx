@@ -41,10 +41,19 @@ const ALLOWED_REMOTES: &[&str] = &[
     "git@github.com:iamaman11/okx.git",
 ];
 
+#[derive(Clone, Copy, Debug)]
+struct AgentLaunchEvidence {
+    profile: AgentProfile,
+    pid: u32,
+    stdout_offset: u64,
+    stderr_offset: u64,
+}
+
 pub struct HostExecutor {
     repo_root: PathBuf,
     agent_child: Option<Child>,
     agent_started_at: Option<Instant>,
+    agent_launch: Option<AgentLaunchEvidence>,
     agent_job: AgentJob,
     desired_store: DesiredStateStore,
     desired_agent: AgentDesired,
@@ -68,6 +77,7 @@ impl HostExecutor {
             repo_root: PathBuf::from(CANONICAL_ROOT),
             agent_child: None,
             agent_started_at: None,
+            agent_launch: None,
             agent_job: AgentJob::new()?,
             desired_store,
             desired_agent: desired_state.agent,
@@ -219,6 +229,11 @@ impl HostExecutor {
         let agent_binary = self.agent_binary();
         let installed_agent =
             InstalledAgentProvenanceStore::canonical().status_value(&agent_binary);
+        let owned_launch = if running {
+            self.agent_launch.as_ref()
+        } else {
+            None
+        };
 
         Ok(json!({
             "workspace": {
@@ -234,6 +249,7 @@ impl HostExecutor {
             "installed_agent": installed_agent,
             "agent_binary_present": agent_binary.is_file(),
             "agent_owned_running": running,
+            "agent_pid": if running { self.agent_child.as_ref().map(Child::id) } else { None },
             "agent_desired": self.desired_agent,
             "desired_profile": self.desired_profile,
             "running_profile": self.running_profile,
@@ -244,8 +260,8 @@ impl HostExecutor {
             "retry_in_ms": self.retry_in_ms(),
             "last_reconcile": self.last_reconcile.clone(),
             "runtime_diagnostics": {
-                "production": runtime_log_summary(AgentProfile::Production),
-                "demo_acceptance": runtime_log_summary(AgentProfile::DemoAcceptance)
+                "production": runtime_log_summary(AgentProfile::Production, owned_launch),
+                "demo_acceptance": runtime_log_summary(AgentProfile::DemoAcceptance, owned_launch)
             }
         }))
     }
@@ -694,6 +710,10 @@ impl HostExecutor {
             .append(true)
             .open(runtime_dir.join("okx-agent.stderr.log"))?;
 
+        // Capture append-only log boundaries before launching the owned child.
+        // Old profile tails must never be presented as this process's errors.
+        let stdout_offset = stdout.metadata()?.len();
+        let stderr_offset = stderr.metadata()?.len();
         let mut child = hidden_command(self.agent_binary())
             .args(agent_args(profile))
             .current_dir(&self.repo_root)
@@ -705,6 +725,12 @@ impl HostExecutor {
         let pid = child.id();
         self.agent_child = Some(child);
         self.agent_started_at = Some(Instant::now());
+        self.agent_launch = Some(AgentLaunchEvidence {
+            profile,
+            pid,
+            stdout_offset,
+            stderr_offset,
+        });
         self.running_profile = Some(profile);
         self.next_restart_at = None;
         Ok(pid)
@@ -713,6 +739,7 @@ impl HostExecutor {
     fn terminate_agent_owned(&mut self) -> HostControlResult<()> {
         let Some(mut child) = self.agent_child.take() else {
             self.agent_started_at = None;
+            self.agent_launch = None;
             return Ok(());
         };
 
@@ -721,6 +748,7 @@ impl HostExecutor {
             child.wait()?;
         }
         self.agent_started_at = None;
+        self.agent_launch = None;
         self.running_profile = None;
         Ok(())
     }
@@ -808,6 +836,7 @@ impl HostExecutor {
         if child.try_wait()?.is_some() {
             self.agent_child = None;
             self.agent_started_at = None;
+            self.agent_launch = None;
             self.running_profile = None;
             if self.desired_agent == AgentDesired::Running {
                 self.schedule_restart();
@@ -1046,8 +1075,64 @@ fn fatal_error_summary(stderr: &str) -> Option<Value> {
     }))
 }
 
-fn runtime_log_summary(profile: AgentProfile) -> Value {
-    runtime_log_summary_from_root(runtime_dir(profile))
+fn read_owned_launch_tail(path: &Path, start_offset: u64) -> Option<(String, bool)> {
+    let mut file = File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    // Rotation, replacement, deletion, or truncation invalidates the lease.
+    if size < start_offset {
+        return None;
+    }
+    let start = start_offset.max(size.saturating_sub(RUNTIME_DIAGNOSTIC_TAIL_BYTES));
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::with_capacity((size - start) as usize);
+    file.read_to_end(&mut bytes).ok()?;
+    let mut tail = String::from_utf8_lossy(&bytes).into_owned();
+    if start > start_offset {
+        // A tail can start mid-line. Do not parse such a fragment as an event.
+        tail = tail.split_once('\n').map_or(String::new(), |(_, rest)| rest.to_owned());
+    }
+    Some((tail, start == start_offset))
+}
+
+fn current_launch_summary(root: &Path, launch: &AgentLaunchEvidence) -> Value {
+    let stdout = read_owned_launch_tail(&root.join("okx-agent.stdout.log"), launch.stdout_offset);
+    let stderr = read_owned_launch_tail(&root.join("okx-agent.stderr.log"), launch.stderr_offset);
+    let fully_observed = stdout.as_ref().is_some_and(|(_, complete)| *complete)
+        && stderr.as_ref().is_some_and(|(_, complete)| *complete);
+    let stdout_text = stdout.as_ref().map_or("", |(text, _)| text.as_str());
+    let stderr_text = stderr.as_ref().map_or("", |(text, _)| text.as_str());
+    json!({
+        "pid": launch.pid,
+        "profile": launch.profile,
+        "log_evidence": {
+            "scope": "owned_launch_file_offsets",
+            "current_process_scoped": stdout.is_some() && stderr.is_some(),
+            "current_startup_attributed": fully_observed,
+            "complete_since_launch": fully_observed
+        },
+        // A cropped / rotated log cannot establish absence of an earlier error.
+        "last_runtime_event": if fully_observed { last_runtime_event(stdout_text) } else { None },
+        "startup_markers": if fully_observed {
+            Some(json!({
+                "reference_registry_ready": stderr_text.contains("reference registry ready"),
+                "mailbox_repository_verified": stderr_text.contains("mailbox repository identity verified"),
+                "observer_credential_missing": stderr_text.contains("OKX observer credential for the selected environment is not provisioned"),
+                "executor_credential_missing": stderr_text.contains("OKX executor credential for the selected environment is not provisioned")
+            }))
+        } else {
+            None
+        },
+        "fatal_error": if fully_observed { fatal_error_summary(stderr_text) } else { None }
+    })
+}
+
+fn runtime_log_summary(profile: AgentProfile, launch: Option<&AgentLaunchEvidence>) -> Value {
+    let root = runtime_dir(profile);
+    let mut retained = runtime_log_summary_from_root(root.clone());
+    retained["current_process"] = launch
+        .filter(|value| value.profile == profile)
+        .map_or(Value::Null, |value| current_launch_summary(&root, value));
+    retained
 }
 
 fn runtime_log_summary_from_root(root: PathBuf) -> Value {
@@ -1260,6 +1345,74 @@ mod tests {
         assert_eq!(summary["fatal_error"]["code"], "missing_required_field");
         assert_eq!(summary["fatal_error"]["missing_field"], "instId");
         assert!(!summary.to_string().contains("NO_EXCHANGE_MUTATION"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn current_launch_diagnostics_exclude_history_and_fail_closed_on_log_loss() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-owned-launch-diagnostics-{}", std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("root");
+        let stdout = root.join("okx-agent.stdout.log");
+        let stderr = root.join("okx-agent.stderr.log");
+        fs::write(&stdout, "old runtime event\n").expect("stdout");
+        fs::write(
+            &stderr,
+            "Error: Reference(MissingRequiredField { instrument_id: \"OLD\", field: \"instId\" })\n",
+        )
+        .expect("old stderr");
+        let launch = AgentLaunchEvidence {
+            profile: AgentProfile::DemoAcceptance,
+            pid: 321,
+            stdout_offset: fs::metadata(&stdout).expect("stdout metadata").len(),
+            stderr_offset: fs::metadata(&stderr).expect("stderr metadata").len(),
+        };
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&stderr)
+            .expect("stderr append")
+            .write_all(b"reference registry ready\n")
+            .expect("new stderr");
+
+        let fresh = current_launch_summary(&root, &launch);
+        assert_eq!(fresh["pid"], 321);
+        assert_eq!(fresh["log_evidence"]["complete_since_launch"], true);
+        assert_eq!(fresh["startup_markers"]["reference_registry_ready"], true);
+        assert!(fresh["fatal_error"].is_null());
+        assert!(!fresh.to_string().contains("OLD"));
+        // The previously accepted retained profile diagnostics are still visible
+        // as historical, separately labelled evidence.
+        let retained = runtime_log_summary_from_root(root.clone());
+        assert_eq!(retained["fatal_error"]["missing_field"], "instId");
+        assert_eq!(retained["log_evidence"]["current_process_scoped"], false);
+
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&stderr)
+            .expect("stderr append")
+            .write_all(
+                b"Error: Reference(MissingRequiredField { instrument_id: \"PRIVATE\", field: \"tickSz\" })\n",
+            )
+            .expect("new fatal");
+        let failed = current_launch_summary(&root, &launch);
+        assert_eq!(failed["fatal_error"]["missing_field"], "tickSz");
+        assert!(!failed.to_string().contains("PRIVATE"));
+
+        fs::write(&stderr, b"x").expect("rotated");
+        let unavailable = current_launch_summary(&root, &launch);
+        assert_eq!(unavailable["log_evidence"]["complete_since_launch"], false);
+        assert!(unavailable["startup_markers"].is_null());
+        assert!(unavailable["fatal_error"].is_null());
+
+        // The bounded tail cannot claim to cover the complete startup.
+        fs::write(&stderr, vec![b'x'; (RUNTIME_DIAGNOSTIC_TAIL_BYTES + 8) as usize])
+            .expect("oversized");
+        let truncated = current_launch_summary(&root, &launch);
+        assert_eq!(truncated["log_evidence"]["complete_since_launch"], false);
+        assert!(truncated["fatal_error"].is_null());
 
         let _ = fs::remove_dir_all(root);
     }
