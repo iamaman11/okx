@@ -408,6 +408,14 @@ where
         Ok(self.ledger.abort_reverse(root_intent_id, observed_at_ms)?)
     }
 
+    pub fn abandon_prepared(
+        &mut self,
+        intent_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        Ok(self.ledger.abandon_prepared(intent_id, observed_at_ms)?)
+    }
+
     pub fn amend_revalidation_plan(
         &self,
         intent_id: &str,

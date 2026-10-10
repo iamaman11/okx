@@ -473,6 +473,24 @@ impl DurableExecutionLedger {
         })
     }
 
+    /// Terminalize only an unsent PREPARED intent. No exchange gateway exists
+    /// here. SUBMITTING/UNKNOWN cannot be cleared, even after a restart.
+    pub fn abandon_prepared(
+        &mut self,
+        intent_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        let entry = self.get(intent_id)
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        if entry.record.state == ExecutionState::Rejected
+            && entry.record.rejection_code.as_deref()
+                == Some(crate::state::LOCAL_PREPARED_ABANDONED_CODE)
+        {
+            return Ok(entry.clone());
+        }
+        self.mutate(intent_id, observed_at_ms, |record| record.abandon_prepared())
+    }
+
     fn prepare_record(
         &mut self,
         record: ExecutionRecord,
@@ -1542,6 +1560,74 @@ mod tests {
             Some(&expected)
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn abandon_unsent_prepared_close_frees_reservation_and_preserves_parent_protection() {
+        let root = temp_root("abandon-close");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let parent = "intent_abandon_parent_01234567";
+        let old = "intent_abandon_close_old_01234";
+        let fresh = "intent_abandon_close_new_01234";
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+        ledger.prepare(protected_plan(parent), 101).expect("parent");
+        ledger.begin_submission(parent, 102).expect("submit");
+        ledger.acknowledge(parent, "parent123", 103).expect("ack");
+        ledger.reconcile_found_with_resolutions(
+            parent, "parent123", ExchangeOrderState::Filled,
+            OrderMutationResolution::Pending,
+            Some(ProtectiveOrderResolution::Active {
+                algo_order_id: "123456789012".to_owned(), covered_size: "1".to_owned(),
+            }), 104,
+        ).expect("filled with OCO");
+        ledger.prepare(close_plan(old, PositionSide::Long), 105).expect("old close");
+        assert!(matches!(
+            ledger.prepare(close_plan(fresh, PositionSide::Long), 106),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
+        let result = ledger.abandon_prepared(old, 107).expect("strict local release");
+        assert_eq!(result.record.state, ExecutionState::Rejected);
+        assert_eq!(result.record.rejection_code.as_deref(),
+            Some(crate::state::LOCAL_PREPARED_ABANDONED_CODE));
+        assert_eq!(ledger.abandon_prepared(old, 108).expect("idempotent"), result);
+        drop(ledger);
+        let mut restarted = DurableExecutionLedger::open(store, 200).expect("restart");
+        assert_eq!(restarted.get(parent).and_then(|e| e.record.protection.as_ref())
+            .map(|p| p.status), Some(ProtectiveOrderStatus::Active));
+        restarted.prepare(close_plan(fresh, PositionSide::Long), 201)
+            .expect("fresh risk-reducing close, not exchange send");
+        assert!(matches!(
+            restarted.prepare(close_plan(old, PositionSide::Long), 202),
+            Err(ExecutionLedgerError::IntentConflict)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn abandon_fails_closed_for_submitting_and_unknown_submission() {
+        let root = temp_root("abandon-unknown");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let old = "intent_abandon_unknown_0123456";
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+        ledger.prepare(close_plan(old, PositionSide::Long), 101).expect("prepare");
+        ledger.begin_submission(old, 102).expect("pre-send durable fence");
+        assert!(matches!(
+            ledger.abandon_prepared(old, 103),
+            Err(ExecutionLedgerError::Transition(
+                ExecutionTransitionError::InvalidTransition { .. }))
+        ));
+        drop(ledger);
+        let mut restarted = DurableExecutionLedger::open(store, 104).expect("restart");
+        assert_eq!(restarted.get(old).expect("present").record.state,
+            ExecutionState::UnknownSubmission);
+        assert!(restarted.abandon_prepared(old, 105).is_err());
+        assert!(matches!(
+            restarted.prepare(close_plan("intent_after_unknown_01234567", PositionSide::Long), 106),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
         let _ = fs::remove_dir_all(root);
     }
 
