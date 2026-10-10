@@ -100,13 +100,13 @@ This dated checkpoint supersedes the old PR #260-only cursor below; historical n
 
 ## HISTORICAL checkpoint — PR #260 installed; Demo position outcome unverified (2026-10-10)
 
-**Historical snapshot only; the newer CURRENT checkpoint above takes precedence.** #160 remains the acceptance authority and #223 the execution evidence ledger. Older dated sections below are historical and do not override this checkpoint.
+**Historical snapshot only; the dated serial matrix above takes precedence.** #160 remains the acceptance authority and #223 the execution evidence ledger. Older dated sections below are historical and do not override this checkpoint.
 
 - **Source and deployment, accepted:** remote main `b95d39c95a92118b6ccec27fe17ed44d9761cd8d` after merged PR #260; tested PR head `cae27995b6b24a1f8ffa135e39a1851a5e3e0404`; **tested/merged/installed source tree** `2ab5652c8346ebb745b9681690b9fd2c82a05a39`. PR CI run `38004372067` and post-merge `38004988598` each have six passing jobs including native Windows. Verified Windows artifact `11650383653` deployed via CONTROL `ctl_stage4c_big_slice_deploy_20261010a` terminal PASS; installed agent SHA256 `263f87c1ffbaff159e8bff416180378fd5a03e910a2d7a9380411cdab5760985`, persisted provenance.
 - **Actual runtime, not yet closed:** CONTROL `ctl_stage4c_readonly_audit_20261010a` at 2026-10-10 00:20:46 UTC returned PASS, one Job-Object-owned Windows agent, `desired_profile=running_profile=demo_acceptance`, exact deployed binary/hash. In Demo the controller deliberately omits Cloudflare WSS attachment; hence normal primary MCP reports OFFLINE while Demo is selected. This is intentional launch configuration, not evidence of a Cloudflare transport defect.
 - **Safety-critical open evidence:** encrypted Demo #234 has same-request response envelopes for `prepare_long`, `submit_long`, read-only account/order checks, `prepare_close`, `submit_close`. Their existence proves delivery/response correlation, **not** venue fill/CLOSE success or terminal flatness. No authenticated plaintext result/independent post-CLOSE exchange/bill/position/protective-inventory reconciliation for this latest sequence has been accepted here. `EXPOSURE=UNVERIFIED`; **NO blind retry, new OPEN, unconditional profile switch/restore, or Stage-4C PASS** based only on envelopes. First obtain new supported authenticated read-only exact-account exchange/ledger evidence while the existing Demo owner is active, settle uncertain effects through exact IDs, then bounded restore and fresh production MCP/account verification.
 - **Scope:** Stage 4C.1 non-fill accepted historically; #260 is engineering CI/installation accepted, **not yet fully physical filled-position/cleanup acceptance**. Stage 4C.2–4C.3, Stage 5 and Stage 3 scientific strategy promotion remain OPEN. H2 FINAL_OOS remains sealed. Production live authority stays FALSE.
-- **Next structural usability improvement:** profile-aware **read-only** Cloudflare MCP for whichever *single* agent profile is active, including Demo. The architecture/acceptance proposal and its explicit no-mutation first phase are in the next section; implement only after current Demo exposure is safely reconciled. Update this CURRENT on subsequent proofs rather than treating historical snapshots as latest.
+- **Historical optional usability proposal, not active work:** profile-aware **read-only** Cloudflare MCP for whichever *single* agent profile is active, including Demo. The architecture/acceptance proposal and its explicit no-mutation first phase are in the next section; implement only after current Demo exposure is safely reconciled. Update this CURRENT on subsequent proofs rather than treating historical snapshots as latest.
 
 ## Stage 4 scope: production-intended execution, Demo physical proof, operator transport
 
@@ -120,7 +120,7 @@ This dated checkpoint supersedes the old PR #260-only cursor below; historical n
 
 **Not on the critical path — dedicated Demo MCP mutation commands:** do not build these just to replace GitHub #234. An eventual **production-intended** typed operator trading authority should be evaluated only against a concrete user workflow, available connector scopes and platform permissions, complete risk/approval model and reuse of the *same* Rust executor. If not demonstrably useful and supported, leave existing read-only MCP intact and perform Demo physical acceptance through supported encrypted GitHub DATA. Never bypass tool refusals or piggyback mutations onto read-only queries.
 
-**Stage 5 remains mandatory in parallel:** canonical #160 P7/5A risk/governance, P8/5B attribution/learning, P9/5C reliability/recovery/security; they are neither replaced nor deferred by read-only Demo visibility. The only final live activation authority is the independent gate **after** Stages 1–5 PASS. The research H2 promotion status (#216) is separate, and no unsupported strategy may become live merely because the order engine works.
+**Stage 5 remains mandatory but strictly serial after Stage 4C:** canonical #160 P7/5A risk/governance, P8/5B attribution/learning, P9/5C reliability/recovery/security; they are neither replaced nor deferred by read-only Demo visibility. The only final live activation authority is the independent gate **after** Stages 1–5 PASS. The research H2 promotion status (#216) is separate, and no unsupported strategy may become live merely because the order engine works.
 
 **Stage-4D read-only Demo follow-up acceptance:** T1/T2 single owner/isolated Demo credentials and root, unchanged mutation guard, wrong-profile and stale-generation rejection; T3 exact-head artifact/installed provenance; T4 live connected Cloudflare MCP reads in Demo with authenticated account and protected-pending coverage and successful production-return verification; T5 reconnect/restore/cross-profile/no-second-agent negative tests. Record latency, payload bytes, context impact and source quality; no new risk exposure is required for this transport test.
 
@@ -241,7 +241,7 @@ Four different statuses must never be conflated:
 
 ---
 
-## Accepted Stages 1–2 and current Stage 3 cursor
+## Historical Stage-1/2 closure and original Stage-3 cursor — evidence only
 
 Canonical execution order inside Stage 1:
 
@@ -267,7 +267,7 @@ Stage 1 final acceptance is **ACCEPTED/CLOSED** on the exact tested/deployed tre
 
 Stage-1 acceptance scope is the authenticated production execution account and the factual surfaces available through its least-privilege observer credential. A separate Main-account Read-only credential now exists and authenticates, but it is intentionally not connected to the production runtime; full main+subaccounts treasury inventory remains a deferred capability and `multi_account_inventory_complete=false` stays explicit until that capability is deliberately integrated and accepted.
 
-**Stage 2 — INTELLIGENCE + RISK: ACCEPTED/CLOSED. Current roadmap cursor: Stage 3 — SCIENTIFIC RESEARCH + REPLAY.**
+**Stage 2 — INTELLIGENCE + RISK: ACCEPTED/CLOSED. Historical next cursor at that time: Stage 3; current NEXT is 4C-G1 in the serial matrix above.**
 
 Stage 2 progress:
 
@@ -313,7 +313,7 @@ Cross-cutting CONTROL reliability debt discovered during item 5 is **DONE / ACCE
 - controller stage/handoff committed through the immutable launcher, and `acceptance_crash_controller` physically proved durable-terminal-before-exit, automatic Scheduler/launcher recovery, no replay and post-recovery PASS/FRESH runtime;
 - post-recovery production account remained FRESH/coherent with 0 positions, 0 pending orders and consistent ledger reconciliation.
 
-Current operational baseline:
+Historical operational baseline (superseded; source/date retained only for provenance):
 - canonical main `b2688e1c2186e83b9c47cf513668e53a034fe891`;
 - Worker contract `okx.mcp.tools/2026-10-05.9`;
 - research catalog `okx.research.catalog/2026-10-05.8`;
@@ -326,7 +326,7 @@ Current operational baseline:
 - Stage-3D causal live-decision parity kernel ACCEPTED in #218;
 - production live trading remains disabled.
 
-**Stage 3D — bounded event-driven PAPER/SHADOW session owner — is the current implementation cursor.** The admitted delta is exactly one agent-root task, one single-writer session owner and one bounded command/wakeup channel over the existing public observation owner; no second market connection, timer/poller or mutation authority. Stage-3 final acceptance still requires a future BACKTESTED candidate plus real PAPER/SHADOW evidence; Stage 4 remains gated behind that exit.
+**Historical Stage-3D implementation cursor (superseded by CURRENT 4C-G1).** The admitted delta is exactly one agent-root task, one single-writer session owner and one bounded command/wakeup channel over the existing public observation owner; no second market connection, timer/poller or mutation authority. Stage-3 final acceptance still requires a future BACKTESTED candidate plus real PAPER/SHADOW evidence; Stage 4 remains gated behind that exit.
 
 ## Repository Guard v1
 
