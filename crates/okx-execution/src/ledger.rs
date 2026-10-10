@@ -1969,6 +1969,7 @@ mod tests {
                 serde_json::to_vec_pretty(&ExecutionLedgerFile {
                     schema: schema.to_owned(),
                     records: vec![entry],
+                    risk_stop: None,
                 })
                 .expect("legacy json"),
             )
@@ -1977,11 +1978,11 @@ mod tests {
             let store = ExecutionLedgerStore::at(&path);
             let mut ledger = DurableExecutionLedger::open(store, 101).expect("load legacy");
             assert_eq!(ledger.len(), 1);
-            ledger.begin_submission(&intent_id, 102).expect("write v5");
+            ledger.begin_submission(&intent_id, 102).expect("write v6");
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V5);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V6);
 
             let _ = fs::remove_dir_all(root);
         }
@@ -2055,6 +2056,61 @@ mod tests {
             Some(1_791_300_000_100_900)
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn risk_stop_is_durable_idempotent_and_blocks_new_risk_after_recovery() {
+        let root = temp_root("risk-stop-durable");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent_id = "intent_stop_durable_0123456789";
+        {
+            let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+            ledger.prepare(plan(intent_id), 101).expect("prepare");
+            let stop = ledger.stop_new_risk("account-limit", 102).expect("stop");
+            assert_eq!(stop.stopped_at_ms, 102);
+            assert_eq!(
+                ledger.stop_new_risk("cannot-reset-by-repeating", 103).expect("idempotent stop"),
+                stop,
+            );
+            assert!(matches!(
+                ledger.begin_submission(intent_id, 104),
+                Err(ExecutionLedgerError::NewRiskStopped)
+            ));
+            assert_eq!(ledger.get(intent_id).expect("entry").record.state, ExecutionState::Prepared);
+        }
+        let mut reopened = DurableExecutionLedger::open(store, 200).expect("reopen");
+        assert_eq!(reopened.risk_stop().expect("persisted stop").reason, "account-limit");
+        assert!(matches!(
+            reopened.begin_submission(intent_id, 201),
+            Err(ExecutionLedgerError::NewRiskStopped)
+        ));
+        assert!(reopened.require_new_risk_allowed(ExecutionAction::Close).is_ok());
+        assert!(reopened.require_new_risk_allowed(ExecutionAction::Reduce).is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn risk_stop_cannot_be_cleared_by_corrupt_metadata_or_legacy_recovery() {
+        let root = temp_root("risk-stop-metadata");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+        assert!(matches!(
+            ledger.stop_new_risk("  ", 101),
+            Err(ExecutionLedgerError::InvalidRiskStopReason)
+        ));
+        ledger.stop_new_risk("manual-stop", 102).expect("durable");
+        drop(ledger);
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).expect("read")).expect("json");
+        file["risk_stop"]["schema"] = serde_json::Value::String("wrong-schema".to_owned());
+        fs::write(store.path(), serde_json::to_vec(&file).expect("encode")).expect("corrupt");
+        assert!(matches!(
+            DurableExecutionLedger::open(store, 200),
+            Err(ExecutionLedgerError::Corrupt("invalid durable risk-stop metadata"))
+        ));
         let _ = fs::remove_dir_all(root);
     }
 
