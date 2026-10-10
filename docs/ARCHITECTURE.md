@@ -316,6 +316,14 @@ Normal ChatGPT-facing analytical/research responses are **decision packets**, no
 
 A normal user question should usually require one coarse MCP operation after capability discovery is already known. Additional round-trips are evidence-driven (for example `NOT_READY`, `DEGRADED`, explicit forensic inspection or continuation), not a fixed chain of low-level reads.
 
+### Demo profile on primary transport — target, NOT current deployment
+
+The current Windows controller deliberately attaches Cloudflare to its `Production` profile only. `DemoAcceptance` starts a separate-root, single-owned Demo agent with encrypted GitHub issue #234 and no Cloudflare WSS. The Rust direct transport independently rejects mutation-capable requests. This was a bounded venue-acceptance isolation choice; it is **not** an intrinsic OKX Demo or Cloudflare limitation.
+
+The next **read-only** usability delta should attach the *same* Cloudflare WSS to the currently selected Demo agent without adding a parallel runtime/DO/Worker/MCP service. The active profile, demo/production environment, hashed credential-bound UID, session generation and authoritative source freshness must be verifiable and isolated across switches. The direct transport mutation rejection stays intact for this phase. Prove negative stale-generation/cross-account/restart cases, Demo and production account attribution and final production return before declaring primary Demo acceptance.
+
+A possible later **Demo-only** typed mutation flow through primary is a separate security/product decision, not an implicit part of attaching read-only Demo. It must retain explicit authorization, single `okx-execution` owner, fresh venue/risk proof, durable idempotency and independent reconciliation; connector refusal is a hard stop, not an invitation to disguise writes as reads. Actual live trading remains disabled. Canonical detailed work/acceptance matrix: `docs/ROADMAP.md`, #160 and #223.
+
 ### Fallback DATA #10
 
 GitHub encrypted DATA remains an independent fallback/parity/recovery path, not the normal product path:
