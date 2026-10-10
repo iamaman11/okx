@@ -162,9 +162,9 @@ impl ExecutionLedgerStore {
         &self.path
     }
 
-    fn load(&self) -> Result<BTreeMap<String, ExecutionLedgerEntry>, ExecutionLedgerError> {
+    fn load(&self) -> Result<(BTreeMap<String, ExecutionLedgerEntry>, Option<ExecutionRiskStop>), ExecutionLedgerError> {
         if !self.path.exists() {
-            return Ok(BTreeMap::new());
+            return Ok((BTreeMap::new(), None));
         }
 
         let bytes = fs::read(&self.path)?;
@@ -179,6 +179,12 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V6
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
+        }
+        if let Some(stop) = &file.risk_stop {
+            if file.schema != EXECUTION_LEDGER_SCHEMA_V6 {
+                return Err(ExecutionLedgerError::Corrupt("risk stop on legacy ledger schema"));
+            }
+            validate_risk_stop(stop)?;
         }
         if file.records.len() > self.max_records {
             return Err(ExecutionLedgerError::Corrupt(
@@ -199,12 +205,13 @@ impl ExecutionLedgerStore {
             }
         }
 
-        Ok(by_intent)
+        Ok((by_intent, file.risk_stop))
     }
 
     fn save(
         &self,
         entries: &BTreeMap<String, ExecutionLedgerEntry>,
+        risk_stop: Option<&ExecutionRiskStop>,
     ) -> Result<(), ExecutionLedgerError> {
         if entries.len() > self.max_records {
             return Err(ExecutionLedgerError::CapacityExceeded(self.max_records));
@@ -223,6 +230,10 @@ impl ExecutionLedgerStore {
             }
         }
 
+        if let Some(stop) = risk_stop {
+            validate_risk_stop(stop)?;
+        }
+
         let parent = self
             .path
             .parent()
@@ -230,8 +241,9 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V5.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V6.to_owned(),
             records: entries.values().cloned().collect(),
+            risk_stop: risk_stop.cloned(),
         })?;
 
         let temp = temp_path(&self.path);
@@ -249,6 +261,7 @@ impl ExecutionLedgerStore {
 pub struct DurableExecutionLedger {
     store: ExecutionLedgerStore,
     entries: BTreeMap<String, ExecutionLedgerEntry>,
+    risk_stop: Option<ExecutionRiskStop>,
 }
 
 impl DurableExecutionLedger {
@@ -261,7 +274,7 @@ impl DurableExecutionLedger {
         observed_at_ms: u64,
     ) -> Result<Self, ExecutionLedgerError> {
         require_timestamp(observed_at_ms)?;
-        let mut entries = store.load()?;
+        let (mut entries, risk_stop) = store.load()?;
         let mut recovered = false;
 
         for entry in entries.values_mut() {
@@ -277,10 +290,10 @@ impl DurableExecutionLedger {
         }
 
         if recovered {
-            store.save(&entries)?;
+            store.save(&entries, risk_stop.as_ref())?;
         }
 
-        Ok(Self { store, entries })
+        Ok(Self { store, entries, risk_stop })
     }
 
     pub fn len(&self) -> usize {
@@ -775,7 +788,7 @@ impl DurableExecutionLedger {
         entry: ExecutionLedgerEntry,
     ) -> Result<(), ExecutionLedgerError> {
         self.entries.insert(intent_id.clone(), entry);
-        if let Err(error) = self.store.save(&self.entries) {
+        if let Err(error) = self.store.save(&self.entries, self.risk_stop.as_ref()) {
             self.entries.remove(&intent_id);
             return Err(error);
         }
@@ -809,7 +822,7 @@ impl DurableExecutionLedger {
             validate_entry(entry)?;
         }
 
-        if let Err(error) = self.store.save(&self.entries) {
+        if let Err(error) = self.store.save(&self.entries, self.risk_stop.as_ref()) {
             self.entries.insert(intent_id.to_owned(), original);
             return Err(error);
         }
