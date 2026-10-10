@@ -316,6 +316,18 @@ Normal ChatGPT-facing analytical/research responses are **decision packets**, no
 
 A normal user question should usually require one coarse MCP operation after capability discovery is already known. Additional round-trips are evidence-driven (for example `NOT_READY`, `DEGRADED`, explicit forensic inspection or continuation), not a fixed chain of low-level reads.
 
+### One production-intended trading engine; Demo as physical proof environment
+
+**Business target is real-money OKX trading.** A single `okx-execution` owner and identical typed order/intent/risk/ledger/TCA semantics must power both Demo venue acceptance and eventual live trades. Switching `--demo` changes authenticated OKX environment/account binding and isolated persistence/credential policy, **never** the meaning of a trade request or the execution algorithms. Tests for venue mode, permission, risk, quantity/price, partial fill/ACK uncertainty, protection, order edits, fees, cancellation and cleanup must exercise the production-intended code. No independent Demo executor or Demo-only MCP mutation architecture.
+
+**Current code is not yet authorized for real-money submission.** Production `ExecutionRuntime::new` is constructed as `ReadOnly`; the only current mutation wrappers and temporary executor enabling path are explicitly `DemoAcceptance`-bound. The shared `OrderExecutor` core can be the foundation for live, but **production-scoped admission, policy, approvals and T1–T5 proof remain engineering work**, not a simple toggle or a Demo-wrapper reuse. The future approval gate must not confuse equal business semantics with equal privileges.
+
+Live trading is a *separately admitted authority* disabled by default, gated by the entire Stage 1–5 acceptance contract, least-privilege production credentials, distinct operator enablement, fresh policy/risk/venue gates, exchange-side disconnect protection decision and tiny canary. Demo PASS is necessary practical evidence for safe mechanics, **not** permission for live writes or proof of strategy profitability.
+
+The current controller intentionally attaches Cloudflare WSS to production profile only; Demo has encrypted GitHub #234 and currently displaces the sole production observation profile. A narrow noncritical Stage-4D follow-up should attach the **same existing read-only Cloudflare primary transport** to the selected Demo profile (not simultaneously run a second executor). Reuse typed RPC and ensure fresh account identity/environment, source+transport generations and cross-profile fencing. **Do not change the read-only direct mutation rejection**. A real-money account with exposure needing active protection must not lose its safety supervision merely because the operator wants a Demo session; the switch needs explicit preconditions/proof or refusal.
+
+Any later ChatGPT trade submission must be justified by a *production* operator workflow with connector/platform approval and a separate typed authorization boundary into the **existing** Rust owner. No new direct-trading backdoor through read-only MCP and no ChatGPT dependency in the live latency/safety loop. GitHub #234 remains a bounded accepted physical testing channel until replaced by an explicitly supported safer flow, not the target trading API. Stage 5 P7/P8/P9 remain mandatory; canonical tests/route: #160, #223 and `docs/ROADMAP.md`.
+
 ### Fallback DATA #10
 
 GitHub encrypted DATA remains an independent fallback/parity/recovery path, not the normal product path:

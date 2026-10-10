@@ -14,6 +14,20 @@ The goal is to keep queries attributable, context-efficient and fail-closed whil
 - The GitHub DATA cryptographic contract remains X25519 -> HKDF-SHA256 -> ChaCha20-Poly1305.
 - Every new product capability must be black-box accepted through the connected Cloudflare MCP surface first. A healthy runtime or newer Worker contract is not enough; the capability itself must be callable. If the ChatGPT tool list is stale, refresh tools and rerun the primary call before using GitHub fallback as parity evidence.
 
+## Production-intended operator contract; Demo as venue acceptance, not product fork
+
+**The destination is real OKX trading.** Demo is a bounded exchange integration / fault-injection test mode using **the exact same** typed prepare/submit/cancel/amend/close/protective-cleanup contracts, one Rust executor/risk owner, durable ledger, uncertain ACK/restart discipline, fee and bill reconciliation, and TCA intended for eventual live use. No separate Demo strategy, trading state machine, executor or permanent Demo-only mutation MCP API is permitted. The environment, credential-bound account, durable root, margin/position mode and explicit authority gate are different, and are tested for non-interchangeability.
+
+**Currently proven versus targeted:** `ExecutionRuntime::new` is constructed as production `ReadOnly`, while Demo acceptance uses a guarded `DemoAcceptance` mode and `enable_demo_acceptance` around actual mutation sends. The shared `OrderExecutor` is a reusable core; there is **not yet an approved real-money mutation admission path**. Stage-5/live activation must add separate environment-bound policy/permission proof within the same owner; never loosen or reuse the Demo-only mutation guard as a shortcut.
+
+**Live admission is not Demo admission:** production is currently read-only; final live trading requires Stages 1–5 acceptance, separate explicit operator activation, scoped production Trade/no-Withdraw credentials, risk/governance and rollback/canary proof. Demo physical PASS must never enable the real-money write gate.
+
+**Cloudflare is an operator observation plane, not the source of real-time trading safety.** In current code `demo_acceptance` is launched without Cloudflare WSS and uses encrypted GitHub #234; one active agent means production read-only MCP is offline while Demo is selected. The optional narrow Stage-4D improvement is **read-only primary Cloudflare MCP visibility for whichever isolated single agent/profile is active**, with UID fingerprint + environment + session/source generation fencing. Preserve Rust `direct_transport_read_only` mutation rejection. Production exposure requiring ongoing protection must not be blinded by a Demo switch; reject transition or prove an independently accepted safe supervision path before any live risk.
+
+**Trade command surface is a separate, future production-use-case decision.** Do not implement a Demo-only set of MCP mutations just to avoid encrypted GitHub; current accepted Demo physical proof may continue through supported #234 after fresh preflight. A future explicitly authorized typed trader action, if supported by connector/platform and genuinely needed, must invoke the **same** Rust execution authority, with fresh risk, identity, journal, policy and per-intent approval. Never camouflage a mutation as a read or bypass a tool refusal. Autonomous safety and recovery may not depend on ChatGPT being online.
+
+**Current Stage-4C physical proof:** `submit_long`/`submit_close` matched encrypted #234 response envelopes but lack an accepted independent exact-account post-CLOSE venue position, pending ordinary/protective order, fill/bill/fee and ledger reconciliation. Until resolved, exposure status is `UNVERIFIED`, not FLAT; do not blindly retry or abandon the active Demo owner. Stage 5 P7/P8/P9 still mandatory and independently tracked in #160. Exact operational cursor: `docs/ROADMAP.md`, execution evidence: #223.
+
 ## Context-budget invariants
 
 Transport correctness is not enough: normal operation must also protect the ChatGPT context window from avoidable bulk evidence.
