@@ -1339,7 +1339,13 @@ async fn cancel_owned_protection(
     // the same mutation_id can safely finish on the next fresh zero read.
     if inventory.rows == 0 {
         let observed_at_ms = utc_now_ms().max(entry.updated_at_ms);
-        if protection.cleanup.is_none() {
+        if entry
+            .record
+            .protection
+            .as_ref()
+            .and_then(|link| link.cleanup.as_ref())
+            .is_none()
+        {
             if let Err(error) = execution
                 .prepare_protective_cleanup(intent_id, mutation_id, observed_at_ms)
                 .await
