@@ -627,11 +627,11 @@ async fn abandon_prepared_execution(
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
-    if execution.mode()
-        != crate::execution_runtime::ExecutionRuntimeMode::DemoAcceptance
-    {
+    if execution.mode() != crate::execution_runtime::ExecutionRuntimeMode::DemoAcceptance {
         return Ok(failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
             LIVE_TRADING_DISABLED_CODE,
             "local abandonment is not authorized outside the Demo acceptance owner".to_owned(),
             false,
@@ -641,17 +641,23 @@ async fn abandon_prepared_execution(
         Ok(_) => execution_status_response(request, context, generated_at, intent_id).await,
         Err(OrderExecutorError::Ledger(ExecutionLedgerError::IntentNotFound(_))) => {
             Ok(failure_response(
-                request, generated_at, AgentResponseStatus::Rejected,
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
                 EXECUTION_RECORD_NOT_FOUND_CODE,
-                "prepared execution intent not found".to_owned(), false,
+                "prepared execution intent not found".to_owned(),
+                false,
             ))
         }
         Err(OrderExecutorError::Ledger(ExecutionLedgerError::Transition(_))) => {
             Ok(failure_response(
-                request, generated_at, AgentResponseStatus::Rejected,
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
                 EXECUTION_PREPARED_ABANDON_UNSAFE_CODE,
                 "only a strictly unsent PREPARED without pending effects can be abandoned"
-                    .to_owned(), false,
+                    .to_owned(),
+                false,
             ))
         }
         Err(error) => Err(error.into()),

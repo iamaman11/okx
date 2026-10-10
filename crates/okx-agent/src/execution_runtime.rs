@@ -371,7 +371,10 @@ impl ExecutionRuntime {
         intent_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
-        self.executor.lock().await.abandon_prepared(intent_id, observed_at_ms)
+        self.executor
+            .lock()
+            .await
+            .abandon_prepared(intent_id, observed_at_ms)
     }
 
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {
