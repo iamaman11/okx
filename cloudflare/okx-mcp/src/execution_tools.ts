@@ -135,10 +135,32 @@ function riskInput(v: unknown): boolean {
   if (!isObject(v) || !exactKeys(v,["mandate","policy"]) || !isObject(v.mandate) || !isObject(v.policy)) return false;
   const m=v.mandate,p=v.policy;
   if (!exactKeys(m,Object.keys(mandate.properties)) || !exactKeys(p,Object.keys(hardPolicy.properties))) return false;
-  // Rust validates every policy and numerical invariant again, including type,
-  // account UID, leverage, source freshness, history and venue hard limits.
-  return Array.isArray(m.allowed_instruments) && Array.isArray(p.allowed_instruments)
-    && Array.isArray(p.correlated_clusters) && p.correlated_clusters.length <= 16;
+  const version=(x:unknown)=>typeof x==="string"&&x.length>0&&x.length<=64&&/^[A-Za-z0-9._/-]+$/.test(x);
+  const number=(x:unknown)=>typeof x==="string"&&x.length>0&&x.length<=64&&/^[0-9]+(?:\\.[0-9]+)?$/.test(x);
+  const instruments=(x:unknown)=>Array.isArray(x)&&x.length<=32
+    && x.every(v=>token(v,3,64))&&new Set(x).size===x.length;
+  if (!version(m.version)||!version(p.version)
+    || !Number.isInteger(m.decision_horizon_hours)||Number(m.decision_horizon_hours)<1||Number(m.decision_horizon_hours)>8760
+    || (m.benchmark!==undefined&&!version(m.benchmark))
+    || !instruments(m.allowed_instruments)||!instruments(p.allowed_instruments)) return false;
+  for (const key of ["capital_base_usd","max_drawdown_ratio","leverage_ceiling","minimum_liquidity_notional_usd","max_turnover_ratio"]) {
+    if (!number(m[key])) return false;
+  }
+  for (const key of ["max_account_gross_notional_usd","max_instrument_gross_notional_usd",
+    "max_margin_utilization_ratio","max_loss_per_trade_usd","max_daily_realized_loss_usd",
+    "max_drawdown_ratio","max_leverage"]) {
+    if (!number(p[key])) return false;
+  }
+  if (!["fresh","degraded"].includes(String(p.minimum_quality))
+    || !["reject","allow_read_only"].includes(String(p.degraded_mode))
+    || !Array.isArray(p.correlated_clusters)||p.correlated_clusters.length>16) return false;
+  for (const raw of p.correlated_clusters) {
+    if (!isObject(raw)||!exactKeys(raw,["id","instruments","max_gross_notional_usd"])
+      || !version(raw.id)||!instruments(raw.instruments)||!number(raw.max_gross_notional_usd)) return false;
+  }
+  // Native Rust revalidates immutable policy semantics, account UID,
+  // generation, positions, available margin and hard-risk limits again.
+  return true;
 }
 function lineageInput(v: unknown): boolean {
   if (!isObject(v) || !exactKeys(v,["origin_evidence_id","origin_schema","origin_version","authority_evidence_id","decision_reference"]) || !isObject(v.decision_reference)) return false;
