@@ -3,9 +3,9 @@ use std::{path::Path, time::Duration};
 use chrono::{SecondsFormat, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_protocol::{
-    AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentResponse, AgentResponseStatus,
-    DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, AgentOperation,
-    DataQuality, DirectRuntimeProfile, DirectTransportFrame,
+    AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentResponse, AgentResponseStatus,
+    DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DataQuality,
+    DirectRuntimeProfile, DirectTransportFrame,
 };
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
 use tokio::{
@@ -39,7 +39,6 @@ const MAX_INFLIGHT_READ_QUERIES: usize = 8;
 const DIRECT_TRANSPORT_MUTATION_REJECTED: &str = "DIRECT_TRANSPORT_MUTATION_REJECTED";
 const DIRECT_TRANSPORT_BUSY: &str = "DIRECT_TRANSPORT_BUSY";
 const DIRECT_TRANSPORT_QUERY_FAILED: &str = "DIRECT_TRANSPORT_QUERY_FAILED";
-
 
 fn direct_operation_allowed(
     profile: DirectRuntimeProfile,
@@ -629,9 +628,18 @@ mod tests {
             &submit,
         ));
         for (profile, mode) in [
-            (DirectRuntimeProfile::Production, Some(ExecutionRuntimeMode::ReadOnly)),
-            (DirectRuntimeProfile::DemoAcceptance, Some(ExecutionRuntimeMode::ReadOnly)),
-            (DirectRuntimeProfile::Production, Some(ExecutionRuntimeMode::DemoAcceptance)),
+            (
+                DirectRuntimeProfile::Production,
+                Some(ExecutionRuntimeMode::ReadOnly),
+            ),
+            (
+                DirectRuntimeProfile::DemoAcceptance,
+                Some(ExecutionRuntimeMode::ReadOnly),
+            ),
+            (
+                DirectRuntimeProfile::Production,
+                Some(ExecutionRuntimeMode::DemoAcceptance),
+            ),
             (DirectRuntimeProfile::DemoAcceptance, None),
         ] {
             assert!(!direct_operation_allowed(profile, mode, &submit));
