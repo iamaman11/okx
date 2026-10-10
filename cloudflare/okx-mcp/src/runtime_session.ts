@@ -213,11 +213,10 @@ export class RuntimeSession {
     if (!active) return transportFailure("RUNTIME_OFFLINE");
     // OAuth alone never authorizes a trading command; profile identity
     // comes from the single authenticated Windows Hello/generation.
-    const executionMutation = [
-      "prepare_execution", "submit_prepared_execution",
-      "mutate_execution", "abort_reverse_execution",
-    ].includes(String(request.operation?.type));
-    if (executionMutation && active.attachment.runtimeProfile !== "demo_acceptance") {
+    if (!executionProfilePermitsOperation(
+      active.attachment.runtimeProfile,
+      request.operation?.type,
+    )) {
       return transportFailure("DEMO_EXECUTION_PROFILE_REQUIRED", false);
     }
 
