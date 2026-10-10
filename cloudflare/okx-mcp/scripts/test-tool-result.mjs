@@ -31,9 +31,11 @@ try {
     [tsc, "--rootDir", "src", "--outDir", output, "--noEmit", "false"],
     { stdio: "inherit" },
   );
-  execFileSync(process.execPath, [join(output, "shared.test.js")], {
-    stdio: "inherit",
-  });
+  for (const file of ["shared.test.js", "execution_tools.test.js"]) {
+    execFileSync(process.execPath, [join(output, file)], {
+      stdio: "inherit",
+    });
+  }
 } finally {
   rmSync(output, { recursive: true, force: true });
 }
