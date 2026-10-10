@@ -14,6 +14,16 @@ The goal is to keep queries attributable, context-efficient and fail-closed whil
 - The GitHub DATA cryptographic contract remains X25519 -> HKDF-SHA256 -> ChaCha20-Poly1305.
 - Every new product capability must be black-box accepted through the connected Cloudflare MCP surface first. A healthy runtime or newer Worker contract is not enough; the capability itself must be callable. If the ChatGPT tool list is stale, refresh tools and rerun the primary call before using GitHub fallback as parity evidence.
 
+## Profile-aware primary MCP — approved target, NOT yet deployed (2026-10-10)
+
+The active Windows agent is a single-owner profile choice, not two simultaneously live clients: `production` (real money, no live mutations) or `demo_acceptance` (separate Demo keys, state root and isolated execution ledger). Current implementation **does not** pass Cloudflare WSS args to Demo; Demo DATA therefore uses encrypted GitHub #234 during venue acceptance. While Demo is selected, primary MCP reports OFFLINE as an expected consequence of this configuration. Do not diagnose that observation alone as a Cloudflare outage or assume Demo data was available.
+
+**Target P1:** attach the already established read-only primary Cloudflare WSS to whichever profile is active, with explicit hashed account/environment/profile attribution and generation fencing; preserve current direct mutation rejection. All profile-switch, identity, quality and fallback rules from the canonical roadmap apply. GitHub #234 remains encrypted fallback/physical mutation acceptance, #12 remains typed CONTROL. No transparent account switching on a stale status, no double-running agent.
+
+**Potential P2, separate review:** bounded, explicitly authorized Demo trading over primary is not yet approved or implemented. Never send a mutation through a read-only MCP tool or change connector payloads to evade platform guardrails. The sole Rust execution/risk/ledger owner must retain final admission, with independently authenticated Demo environment, same-session preflight, single-shot durable mutation and exact-ID reconciliation. If direct mutation cannot be safely exposed and accepted, retain the currently supported Demo acceptance channel. No production live writes until separate activation.
+
+**Outstanding 2026-10-10 Demo position checkpoint:** encrypted #234 `submit_long` and `submit_close` have ciphertext terminal envelopes but no accepted post-CLOSE account/exchange/ledger proof in the current audit. Their ciphertext existence is not proof of flatness. Keep mutations and unconditional production restore blocked until new authenticated read-only reconciliation of position, pending ordinary/protective algos, order/fill/bill and durable intent state. Latest typed status: one Demo agent running; production primary MCP intentionally offline.
+
 ## Context-budget invariants
 
 Transport correctness is not enough: normal operation must also protect the ChatGPT context window from avoidable bulk evidence.
