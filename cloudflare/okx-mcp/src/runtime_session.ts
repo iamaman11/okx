@@ -1,4 +1,4 @@
-import { executionProfilePermitsOperation } from "./execution_tools.js";
+import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
 import {
   ACK_DEADLINE_MS,
   type Env,
@@ -244,6 +244,13 @@ export class RuntimeSession {
       await ack;
       return await response as Json;
     } catch (error) {
+      // An exchange request may already have reached the one Rust owner
+      // even when this HTTP/WS envelope loses ACK or response. Returning a
+      // retryable failure would tempt blind duplicate sends. Require an exact
+      // read-only intent/ledger reconciliation, never auto-retry the mutation.
+      if (isExecutionMutation(request.operation?.type)) {
+        return transportFailure("MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT", false);
+      }
       return transportFailure(error instanceof Error ? error.message : "TRANSPORT_FAILURE");
     } finally {
       this.inflight -= 1;
