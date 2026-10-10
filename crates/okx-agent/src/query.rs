@@ -358,6 +358,7 @@ pub(crate) async fn dispatch(
         | AgentOperation::SubmitPreparedExecution { .. }
         | AgentOperation::MutateExecution { .. }
         | AgentOperation::AbortReverseExecution { .. }
+        | AgentOperation::AbandonPreparedExecution { .. }
         | AgentOperation::ExecutionStatus { .. } => {
             execution::dispatch(request, context, generated_at).await
         }

@@ -52,6 +52,7 @@ pub const EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE: &str =
 pub const EXECUTION_RECONCILIATION_FAILED_CODE: &str = "EXECUTION_RECONCILIATION_FAILED";
 pub const EXECUTION_RECONCILIATION_UNAVAILABLE_CODE: &str = "EXECUTION_RECONCILIATION_UNAVAILABLE";
 pub const EXECUTION_MUTATION_UNSAFE_CODE: &str = "EXECUTION_MUTATION_UNSAFE";
+pub const EXECUTION_PREPARED_ABANDON_UNSAFE_CODE: &str = "EXECUTION_PREPARED_ABANDON_UNSAFE";
 
 fn daily_history_complete_at(
     coverage: &[okx_observation::AccountHistoryCoverage],
@@ -137,6 +138,9 @@ pub(super) async fn dispatch(
         } => mutate_execution(request, context, generated_at, intent_id, mutation).await,
         AgentOperation::AbortReverseExecution { intent_id } => {
             abort_reverse_execution(request, context, generated_at, intent_id).await
+        }
+        AgentOperation::AbandonPreparedExecution { intent_id } => {
+            abandon_prepared_execution(request, context, generated_at, intent_id).await
         }
         AgentOperation::ExecutionStatus { intent_id } => {
             execution_status_response(request, context, generated_at, intent_id).await
@@ -605,6 +609,49 @@ async fn commit_prepared(
                 EXECUTION_INPUT_INCONSISTENT_CODE,
                 "reverse continuation was explicitly aborted".to_owned(),
                 false,
+            ))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Releasing an unsent PREPARED does not invoke the exchange gateway. The
+/// ledger proves non-submission by a never-entered durable SUBMITTING state;
+/// read-only production and ambiguous intents remain untouched.
+async fn abandon_prepared_execution(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    intent_id: &str,
+) -> AgentResult<AgentResponse> {
+    let Some(execution) = context.execution else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    if execution.mode()
+        != crate::execution_runtime::ExecutionRuntimeMode::DemoAcceptance
+    {
+        return Ok(failure_response(
+            request, generated_at, AgentResponseStatus::Rejected,
+            LIVE_TRADING_DISABLED_CODE,
+            "local abandonment is not authorized outside the Demo acceptance owner".to_owned(),
+            false,
+        ));
+    }
+    match execution.abandon_prepared(intent_id, utc_now_ms()).await {
+        Ok(_) => execution_status_response(request, context, generated_at, intent_id).await,
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::IntentNotFound(_))) => {
+            Ok(failure_response(
+                request, generated_at, AgentResponseStatus::Rejected,
+                EXECUTION_RECORD_NOT_FOUND_CODE,
+                "prepared execution intent not found".to_owned(), false,
+            ))
+        }
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::Transition(_))) => {
+            Ok(failure_response(
+                request, generated_at, AgentResponseStatus::Rejected,
+                EXECUTION_PREPARED_ABANDON_UNSAFE_CODE,
+                "only a strictly unsent PREPARED without pending effects can be abandoned"
+                    .to_owned(), false,
             ))
         }
         Err(error) => Err(error.into()),
