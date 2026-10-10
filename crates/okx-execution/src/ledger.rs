@@ -1886,9 +1886,13 @@ mod tests {
         let mutation = "cleanup_confirmed_absent_012345";
         {
             let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
-            ledger.prepare(protected_plan(intent), 101).expect("prepare parent");
+            ledger
+                .prepare(protected_plan(intent), 101)
+                .expect("prepare parent");
             ledger.begin_submission(intent, 102).expect("submit parent");
-            ledger.acknowledge(intent, "parent123", 103).expect("ack parent");
+            ledger
+                .acknowledge(intent, "parent123", 103)
+                .expect("ack parent");
             ledger
                 .reconcile_found_with_resolutions(
                     intent,
@@ -1922,7 +1926,11 @@ mod tests {
         ));
         let mut recovered = DurableExecutionLedger::open(store, 300).expect("restart again");
         let parent = recovered.get(intent).expect("durable parent");
-        let protection = parent.record.protection.as_ref().expect("durable protection");
+        let protection = parent
+            .record
+            .protection
+            .as_ref()
+            .expect("durable protection");
         assert_eq!(protection.status, ProtectiveOrderStatus::CleanedUp);
         assert_eq!(
             protection.cleanup.as_ref().expect("durable proof").state,
