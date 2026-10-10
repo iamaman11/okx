@@ -1,4 +1,4 @@
-import { isObject, type Json } from "./shared";
+import { isObject, type Json } from "./shared.js";
 
 // This is an explicit, finite product execution contract, not an RPC tunnel.
 // All real order/UID/policy/risk/reconciliation authority stays in okx-execution.
