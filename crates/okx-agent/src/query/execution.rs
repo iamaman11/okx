@@ -1208,6 +1208,16 @@ async fn cancel_owned_protection(
             false,
         ));
     }
+    if entry.record.plan.account_uid_fingerprint != account.account_uid_fingerprint {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            "protective cleanup must match the original parent account identity".to_owned(),
+            false,
+        ));
+    }
     let Some(observer) = context.account_fallback else {
         return Ok(execution_unavailable(request, generated_at));
     };
@@ -1320,6 +1330,51 @@ async fn cancel_owned_protection(
                 true,
             ));
         }
+    }
+
+    // An independently observed flat account with complete empty conditional/OCO
+    // inventory proves the venue protection is already absent. Persist a
+    // terminal local proof, but NEVER send an unnecessary cancel to OKX.
+    // A crash between these two local writes leaves PREPARED (unsent);
+    // the same mutation_id can safely finish on the next fresh zero read.
+    if inventory.rows == 0 {
+        let observed_at_ms = utc_now_ms().max(entry.updated_at_ms);
+        if protection.cleanup.is_none() {
+            if let Err(error) = execution
+                .prepare_protective_cleanup(intent_id, mutation_id, observed_at_ms)
+                .await
+            {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    EXECUTION_MUTATION_UNSAFE_CODE,
+                    error.to_string(),
+                    false,
+                ));
+            }
+        }
+        let confirmed = execution
+            .confirm_protective_cleanup_absent(
+                intent_id,
+                mutation_id,
+                utc_now_ms().max(observed_at_ms),
+            )
+            .await?;
+        return Ok(completed(
+            request,
+            generated_at,
+            "okx.protective-cleanup/v1",
+            serde_json::json!({
+                "intent_id": intent_id,
+                "mutation_id": mutation_id,
+                "state": "CONFIRMED_ABSENT",
+                "proof": "fresh_flat_and_complete_empty_conditional_oco_inventory",
+                "exchange_post_sent": false,
+                "exchange_post_replayed": false,
+                "record_updated_at_ms": confirmed.updated_at_ms,
+            }),
+        ));
     }
 
     // At the time of a first one-shot cancel, this acceptance path requires

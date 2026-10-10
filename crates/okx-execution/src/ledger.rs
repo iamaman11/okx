@@ -1878,6 +1878,64 @@ mod tests {
     }
 
     #[test]
+    fn independently_absent_protection_prepared_cleanup_survives_restart_and_releases_new_risk() {
+        let root = temp_root("protective-already-absent");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent = "intent_protection_already_absent_0123";
+        let mutation = "cleanup_confirmed_absent_012345";
+        {
+            let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+            ledger.prepare(protected_plan(intent), 101).expect("prepare parent");
+            ledger.begin_submission(intent, 102).expect("submit parent");
+            ledger.acknowledge(intent, "parent123", 103).expect("ack parent");
+            ledger
+                .reconcile_found_with_resolutions(
+                    intent,
+                    "parent123",
+                    ExchangeOrderState::Filled,
+                    OrderMutationResolution::Pending,
+                    Some(ProtectiveOrderResolution::Active {
+                        algo_order_id: "123456789012".to_owned(),
+                        covered_size: "1".to_owned(),
+                    }),
+                    104,
+                )
+                .expect("active protection");
+            ledger
+                .prepare_protective_cleanup(intent, mutation, 105)
+                .expect("PREPARED and no exchange cancellation");
+        }
+        let mut restarted = DurableExecutionLedger::open(store.clone(), 200).expect("restart");
+        assert!(matches!(
+            restarted.prepare(plan("intent_blocked_before_confirmation"), 201),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
+        restarted
+            .confirm_protective_cleanup_absent(intent, mutation, 202)
+            .expect("independent full flat and algo-absent observation");
+        assert!(matches!(
+            restarted.begin_protective_cleanup(intent, mutation, 203),
+            Err(ExecutionLedgerError::Transition(
+                ExecutionTransitionError::InvalidProtectiveCleanupTransition
+            ))
+        ));
+        let mut recovered = DurableExecutionLedger::open(store, 300).expect("restart again");
+        let parent = recovered.get(intent).expect("durable parent");
+        let protection = parent.record.protection.as_ref().expect("durable protection");
+        assert_eq!(protection.status, ProtectiveOrderStatus::CleanedUp);
+        assert_eq!(
+            protection.cleanup.as_ref().expect("durable proof").state,
+            ProtectiveCleanupState::ConfirmedAbsent
+        );
+        assert!(matches!(
+            recovered.prepare(plan("intent_allowed_after_confirmation"), 301),
+            Ok(PrepareDisposition::Created(_))
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn failed_protection_keeps_instrument_reserved() {
         let root = temp_root("protective-failed");
         let _ = fs::remove_dir_all(&root);

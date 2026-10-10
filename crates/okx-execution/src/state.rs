@@ -705,7 +705,9 @@ impl ExecutionRecord {
         if cleanup.mutation_id != mutation_id
             || !matches!(
                 cleanup.state,
-                ProtectiveCleanupState::Acknowledged | ProtectiveCleanupState::Unknown
+                ProtectiveCleanupState::Prepared
+                    | ProtectiveCleanupState::Acknowledged
+                    | ProtectiveCleanupState::Unknown
             )
             || protection.status != ProtectiveOrderStatus::Active
             || protection.algo_order_id.as_deref() != Some(cleanup.algo_order_id.as_str())
@@ -1345,6 +1347,38 @@ mod tests {
             .expect("independent absence");
         assert!(!record.protection_blocks_new_managed_intent());
         assert!(record.confirm_protective_cleanup_absent(mid).is_err());
+    }
+
+    #[test]
+    fn independently_absent_protection_can_retire_prepared_cleanup_without_exchange_send() {
+        let mut record = ExecutionRecord::new(protected_plan());
+        record.begin_submission().expect("submit parent");
+        record.acknowledge("parent123").expect("ack parent");
+        record
+            .reconcile_found_with_protection(
+                "parent123",
+                ExchangeOrderState::Filled,
+                Some(ProtectiveOrderResolution::Active {
+                    algo_order_id: "123456789".to_owned(),
+                    covered_size: "1".to_owned(),
+                }),
+            )
+            .expect("exact active parent");
+        let mid = "cleanup_preconfirmed_absent_012345";
+        record
+            .prepare_protective_cleanup(mid)
+            .expect("durable PREPARED before any exchange cancel");
+        assert!(record.protection_blocks_new_managed_intent());
+        record
+            .confirm_protective_cleanup_absent(mid)
+            .expect("caller independently verified complete zero pending algo inventory");
+        assert_eq!(
+            record.protection.as_ref().expect("protected parent").status,
+            ProtectiveOrderStatus::CleanedUp
+        );
+        assert!(!record.protection_blocks_new_managed_intent());
+        assert!(record.confirm_protective_cleanup_absent(mid).is_err());
+        assert!(record.begin_protective_cleanup(mid).is_err());
     }
 
     #[test]
