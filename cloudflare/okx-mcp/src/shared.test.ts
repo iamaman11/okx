@@ -1,5 +1,6 @@
 import {
   TOOL_TEXT_FALLBACK_MAX_BYTES,
+  decodeRuntimeProfile,
   toolResult,
   type Json,
 } from "./shared.js";
@@ -53,3 +54,10 @@ assert(
   wrappedBytes - structuredBytes <= 256,
   `toolResult wrapper overhead exceeds 256-byte budget: ${wrappedBytes - structuredBytes} bytes`,
 );
+
+assert(decodeRuntimeProfile(undefined) === "unverified", "old agent has no trusted profile");
+assert(decodeRuntimeProfile("production") === "production", "production hello must bind");
+assert(decodeRuntimeProfile("demo_acceptance") === "demo_acceptance", "demo hello must bind");
+for (const invalid of ["demo", "main", "PRODUCTION", "", null, 1, {}]) {
+  assert(decodeRuntimeProfile(invalid) === null, "invalid runtime profile rejected");
+}
