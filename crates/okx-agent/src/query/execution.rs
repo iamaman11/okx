@@ -1460,18 +1460,28 @@ async fn pre_mutation_admission(
             ));
         }
     };
-    if risk_facts
-        .summary
-        .history_coverage
-        .iter()
-        .any(|coverage| !coverage.complete_within_bound)
+    let daily_history_complete = daily_history_complete_at(
+        &risk_facts.summary.history_coverage,
+        risk_facts.summary.daily_realized_pnl_utc_day_start_ms.as_deref(),
+        risk_facts.summary.daily_realized_pnl_utc_day_end_ms.as_deref(),
+        utc_now_ms(),
+    );
+    // Opening new exposure requires complete bounded history. Reducing a
+    // verified position must not be trapped by unrelated historical gaps.
+    if plan.action.is_risk_increasing()
+        && (!daily_history_complete
+            || risk_facts
+                .summary
+                .history_coverage
+                .iter()
+                .any(|coverage| !coverage.complete_within_bound))
     {
         admission_response!(failure_response(
             request,
             generated_at,
             AgentResponseStatus::Rejected,
             EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
-            "bounded account-history coverage is incomplete for pre-mutation risk".to_owned(),
+            "UTC-day or bounded account-history coverage is incomplete for new risk".to_owned(),
             true,
         ));
     }
@@ -1612,7 +1622,7 @@ async fn pre_mutation_admission(
     // stable. Only observed account-wide breaches may latch the durable stop;
     // candidate projections and incomplete history merely reject this intent.
     if let Err(error) = execution
-        .latch_account_risk_stop(&risk_analysis, utc_now_ms())
+        .latch_account_risk_stop(&risk_analysis, daily_history_complete, utc_now_ms())
         .await
     {
         admission_response!(failure_response(
