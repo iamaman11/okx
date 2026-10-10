@@ -20,7 +20,8 @@ const toolsListBytes = new TextEncoder().encode(toolsListBlock).byteLength;
 if (toolsListBytes > 24 * 1024) {
   throw new Error(`tools/list source schema exceeds 24 KiB budget: ${toolsListBytes} bytes`);
 }
-const toolCount = (toolsListBlock.match(/\n\s+name: "/g) ?? []).length;
+const toolCount = (toolsListBlock.match(/\n\s+name: "/g) ?? []).length
+  + (toolsListBlock.includes("...EXECUTION_TOOLS") ? 2 : 0);
 if (toolCount > 16) {
   throw new Error(`coarse MCP surface exceeded 16-tool budget: ${toolCount} tools`);
 }
