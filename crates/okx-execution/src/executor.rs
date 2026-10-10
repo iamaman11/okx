@@ -654,6 +654,7 @@ where
             return Err(OrderExecutorError::NotPrepared(entry.record.state));
         }
 
+        self.ledger.require_new_risk_allowed(entry.record.plan.action)?;
         let request = place_request(&entry.record);
         let rate_plan = match self.gateway.admit_place_order(&request) {
             Ok(value) => value,
