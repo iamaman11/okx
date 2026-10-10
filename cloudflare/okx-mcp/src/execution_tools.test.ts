@@ -60,5 +60,12 @@ for(const x of [
   // malformed or foreign fields before sending a corresponding native request.
   if(result!==null)throw Error("malformed execution action reached runtime: "+JSON.stringify(x));
 }
+for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution"]) {
+  assert(executionProfilePermitsOperation("demo_acceptance",op), "verified Demo write allowed");
+  for (const profile of ["production","unverified","",undefined]) {
+    assert(!executionProfilePermitsOperation(profile,op), "non-Demo profile must deny write");
+  }
+}
+assert(executionProfilePermitsOperation("production","account_summary"),"read is allowed");
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
 assert(EXECUTION_TOOLS[1] !== undefined && (EXECUTION_TOOLS[1] as any).name==="execution_action","typed write name");
