@@ -1089,7 +1089,9 @@ fn read_owned_launch_tail(path: &Path, start_offset: u64) -> Option<(String, boo
     let mut tail = String::from_utf8_lossy(&bytes).into_owned();
     if start > start_offset {
         // A tail can start mid-line. Do not parse such a fragment as an event.
-        tail = tail.split_once('\n').map_or(String::new(), |(_, rest)| rest.to_owned());
+        tail = tail
+            .split_once('\n')
+            .map_or(String::new(), |(_, rest)| rest.to_owned());
     }
     Some((tail, start == start_offset))
 }
@@ -1352,7 +1354,8 @@ mod tests {
     #[test]
     fn current_launch_diagnostics_exclude_history_and_fail_closed_on_log_loss() {
         let root = std::env::temp_dir().join(format!(
-            "okx-owned-launch-diagnostics-{}", std::process::id()
+            "okx-owned-launch-diagnostics-{}",
+            std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("root");
@@ -1408,8 +1411,11 @@ mod tests {
         assert!(unavailable["fatal_error"].is_null());
 
         // The bounded tail cannot claim to cover the complete startup.
-        fs::write(&stderr, vec![b'x'; (RUNTIME_DIAGNOSTIC_TAIL_BYTES + 8) as usize])
-            .expect("oversized");
+        fs::write(
+            &stderr,
+            vec![b'x'; (RUNTIME_DIAGNOSTIC_TAIL_BYTES + 8) as usize],
+        )
+        .expect("oversized");
         let truncated = current_launch_summary(&root, &launch);
         assert_eq!(truncated["log_evidence"]["complete_since_launch"], false);
         assert!(truncated["fatal_error"].is_null());
