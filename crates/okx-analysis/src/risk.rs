@@ -1390,6 +1390,46 @@ fn normalized(value: Option<Decimal>) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn account_stop_selects_only_proven_account_limits_not_candidate_or_stale_data() {
+        let violation = |code, scope| RiskPolicyViolation {
+            code,
+            scope: scope.to_owned(),
+            observed: "10".to_owned(),
+            limit: "5".to_owned(),
+        };
+        let rejected_candidate = vec![
+            violation("MAX_ACCOUNT_GROSS_NOTIONAL_PROJECTED", "account"),
+            violation("MAX_LOSS_PER_TRADE", "BTC-USDT-SWAP"),
+            violation("MINIMUM_DATA_QUALITY", "account"),
+            violation("DAILY_REALIZED_LOSS_USD_EQUIVALENT_UNAVAILABLE", "utc_day"),
+        ];
+        assert_eq!(durable_account_stop_reason(&rejected_candidate), None);
+        for (code, scope) in [
+            ("MAX_DAILY_REALIZED_LOSS", "utc_day"),
+            ("MAX_DRAWDOWN", "capital_base"),
+            ("MANDATE_MAX_DRAWDOWN", "capital_base"),
+            ("MAX_ACCOUNT_GROSS_NOTIONAL", "account"),
+            ("MAX_MARGIN_UTILIZATION", "account"),
+        ] {
+            assert_eq!(
+                durable_account_stop_reason(&[violation(code, scope)]),
+                Some(code)
+            );
+            assert_eq!(
+                durable_account_stop_reason(&[violation(code, "wrong-scope")]),
+                None
+            );
+        }
+        assert_eq!(
+            durable_account_stop_reason(&[
+                violation("MAX_LOSS_PER_TRADE", "BTC-USDT-SWAP"),
+                violation("MAX_DAILY_REALIZED_LOSS", "utc_day")
+            ]),
+            Some("MAX_DAILY_REALIZED_LOSS")
+        );
+    }
+
     fn replay_mandate() -> TradingMandate {
         TradingMandate {
             schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
