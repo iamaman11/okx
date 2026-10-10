@@ -1634,20 +1634,18 @@ async fn pre_mutation_admission(
     if matches!(
         &risk_disposition,
         Ok(_) | Err(okx_execution::ExecutionValidationError::HardRiskPolicyRejected(_))
-    ) {
-        if let Err(error) = execution
-            .latch_account_risk_stop(&risk_analysis, daily_history_complete, utc_now_ms())
-            .await
-        {
-            admission_response!(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Failed,
-                EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE,
-                format!("unable to persist account risk stop: {error}"),
-                false,
-            ));
-        }
+    ) && let Err(error) = execution
+        .latch_account_risk_stop(&risk_analysis, daily_history_complete, utc_now_ms())
+        .await
+    {
+        admission_response!(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE,
+            format!("unable to persist account risk stop: {error}"),
+            false,
+        ));
     }
     if let Err(error) = risk_disposition {
         admission_response!(failure_response(
