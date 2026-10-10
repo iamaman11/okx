@@ -316,6 +316,10 @@ Normal ChatGPT-facing analytical/research responses are **decision packets**, no
 
 A normal user question should usually require one coarse MCP operation after capability discovery is already known. Additional round-trips are evidence-driven (for example `NOT_READY`, `DEGRADED`, explicit forensic inspection or continuation), not a fixed chain of low-level reads.
 
+### Explicit primary trading API — sole Rust authority, Demo-gated (2026-10-10 candidate)
+
+The first-party primary MCP `executor_preflight` and `execution_action` are a typed, closed operator surface mapping to existing `AgentOperation` prepare, submit, amend, cancel, protection cleanup and reverse abort. No generic RPC or second engine. Worker independently enforces active Hello `runtime_profile=demo_acceptance`; the Rust direct-transport receiver independently requires matching immutable Demo runtime and one active trade mutation at a time. The existing `ExecutionRuntime::DemoAcceptance` authorizes exchange sends **only** after complete fresh executor preflight, UID/venue/reference/order risk policy revalidation and durable exact intent. Production still constructs `ReadOnly` and all direct mutations remain rejected; a later real-money operator authority requires a separate explicit policy, scope, grant, audit and canary contract. Never treat ChatGPT tool presence as live authority.
+
 ### One production-intended trading engine; Demo as physical proof environment
 
 **Business target is real-money OKX trading.** A single `okx-execution` owner and identical typed order/intent/risk/ledger/TCA semantics must power both Demo venue acceptance and eventual live trades. Switching `--demo` changes authenticated OKX environment/account binding and isolated persistence/credential policy, **never** the meaning of a trade request or the execution algorithms. Tests for venue mode, permission, risk, quantity/price, partial fill/ACK uncertainty, protection, order edits, fees, cancellation and cleanup must exercise the production-intended code. No independent Demo executor or Demo-only MCP mutation architecture.

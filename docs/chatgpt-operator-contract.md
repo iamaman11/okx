@@ -28,6 +28,12 @@ The goal is to keep queries attributable, context-efficient and fail-closed whil
 
 **Current Stage-4C physical proof:** `submit_long`/`submit_close` matched encrypted #234 response envelopes but lack an accepted independent exact-account post-CLOSE venue position, pending ordinary/protective order, fill/bill/fee and ledger reconciliation. Until resolved, exposure status is `UNVERIFIED`, not FLAT; do not blindly retry or abandon the active Demo owner. Stage 5 P7/P8/P9 still mandatory and independently tracked in #160. Exact operational cursor: `docs/ROADMAP.md`, execution evidence: #223.
 
+## First-party typed execution on the primary transport (Stage-4C candidate)
+
+The product-intended `execution_action` MCP surface is deliberately **not** an arbitrary RPC: it admits exactly six named operations on the existing typed Rust execution contract. `executor_preflight` is a separate read-only call; `execution_status` and `account_summary` are read-only acceptance truth. The active one-owner Cloudflare Hello profile is a hard security input, **not** a user-selectable tool argument. The Worker must reject every mutation unless `runtime_profile=demo_acceptance`; Rust independently rechecks the same profile and active Demo mode, and only then passes the request to the same existing credential/UID/freshness/risk/ledger pre-send gate. Production remains hard ReadOnly regardless of API permission, OAuth client or user authorization.
+
+**No opaque batch mutations or automatic retries.** For a complete user-authorized Demo acceptance run, ChatGPT drives the ordered matrix as sequential *durable* intents: one prepare, one submit, one exact-ID readback and independent same-UID venue reconciliation at each checkpoint. A lost tool response is **UNKNOWN**, never a reason to make a fresh request ID or send again. Any platform/connector refusal is respected; GitHub encrypted DATA is not a route around a refused primary write. The admitted Demo operations are mechanical exchange tests and are not strategy-directed live trades. Update tools once after verified Worker schema deployment; absence of the tool is not permission to send via an alternate transport.
+
 ## Context-budget invariants
 
 Transport correctness is not enough: normal operation must also protect the ChatGPT context window from avoidable bulk evidence.

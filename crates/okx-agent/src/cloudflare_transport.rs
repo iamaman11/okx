@@ -3,7 +3,7 @@ use std::{path::Path, time::Duration};
 use chrono::{SecondsFormat, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_protocol::{
-    AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentResponse, AgentResponseStatus,
+    AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentResponse, AgentResponseStatus,
     DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DataQuality,
     DirectRuntimeProfile, DirectTransportFrame,
 };
@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 use crate::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
-    execution_runtime::ExecutionRuntime,
+    execution_runtime::{ExecutionRuntime, ExecutionRuntimeMode},
     market_bootstrap::MarketBootstrapper,
     query::{ObservationQueryContext, dispatch},
     research_session::ResearchSessionHandle,
@@ -39,6 +39,17 @@ const MAX_INFLIGHT_READ_QUERIES: usize = 8;
 const DIRECT_TRANSPORT_MUTATION_REJECTED: &str = "DIRECT_TRANSPORT_MUTATION_REJECTED";
 const DIRECT_TRANSPORT_BUSY: &str = "DIRECT_TRANSPORT_BUSY";
 const DIRECT_TRANSPORT_QUERY_FAILED: &str = "DIRECT_TRANSPORT_QUERY_FAILED";
+
+fn direct_operation_allowed(
+    profile: DirectRuntimeProfile,
+    runtime_mode: Option<ExecutionRuntimeMode>,
+    operation: &AgentOperation,
+) -> bool {
+    operation.direct_transport_read_only()
+        || (profile == DirectRuntimeProfile::DemoAcceptance
+            && runtime_mode == Some(ExecutionRuntimeMode::DemoAcceptance)
+            && operation.direct_transport_demo_execution())
+}
 
 pub struct CloudflareTransportConfig {
     ws_url: String,
@@ -203,6 +214,9 @@ async fn run_session(
     tokio::pin!(heartbeat_deadline);
     let mut in_flight: FuturesUnordered<BoxFuture<'_, (String, AgentResult<AgentResponse>)>> =
         FuturesUnordered::new();
+    // No two exchange-affecting commands may be outstanding on the same
+    // transport generation. Read/status requests remain independently bounded.
+    let mut active_mutation: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -252,6 +266,9 @@ async fn run_session(
                 let Some((request_id, result)) = completed else {
                     continue;
                 };
+                if active_mutation.as_deref() == Some(request_id.as_str()) {
+                    active_mutation = None;
+                }
                 let response = completed_read_response(&request_id, result);
                 response.validate()?;
                 send_frame(
@@ -342,11 +359,21 @@ async fn run_session(
                         )
                         .await?;
 
-                        if !request.operation.direct_transport_read_only() {
+                        // Explicit user-authorized Demo acceptance reuses the same
+                        // immutable Rust prepare/submit/mutate executor and policy.
+                        // Production is denied even if Worker/OAuth sends a write
+                        // through this otherwise authenticated read transport.
+                        let mutating = !request.operation.direct_transport_read_only();
+                        let allowed = direct_operation_allowed(
+                            config.runtime_profile,
+                            context.execution.map(ExecutionRuntime::mode),
+                            &request.operation,
+                        );
+                        if !allowed {
                             let response = direct_rejection(
                                 &request.request_id,
                                 DIRECT_TRANSPORT_MUTATION_REJECTED,
-                                "mutation-capable operations are not accepted on the direct ChatGPT transport",
+                                "executor mutation requires a profile-verified Demo runtime and its existing Rust admission; production remains read-only",
                                 false,
                             );
                             send_frame(
@@ -362,7 +389,9 @@ async fn run_session(
                             continue;
                         }
 
-                        if in_flight.len() >= MAX_INFLIGHT_READ_QUERIES {
+                        if in_flight.len() >= MAX_INFLIGHT_READ_QUERIES
+                            || (mutating && active_mutation.is_some())
+                        {
                             let response = direct_rejection(
                                 &request.request_id,
                                 DIRECT_TRANSPORT_BUSY,
@@ -396,6 +425,9 @@ async fn run_session(
                         let generated_at =
                             Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
                         let response_request_id = request.request_id.clone();
+                        if mutating {
+                            active_mutation = Some(response_request_id.clone());
+                        }
                         in_flight.push(
                             async move {
                                 let result =
@@ -582,6 +614,37 @@ mod tests {
             validate_ws_url("wss://bad host/runtime"),
             Err(AgentError::InvalidCloudflareWsUrl)
         ));
+    }
+
+    #[test]
+    fn main_transport_demonstrates_strict_profile_admission() {
+        let submit = AgentOperation::SubmitPreparedExecution {
+            intent_id: "intent_demo_stage4c_01234567".to_owned(),
+        };
+        let read = AgentOperation::AccountSummary;
+        assert!(direct_operation_allowed(
+            DirectRuntimeProfile::DemoAcceptance,
+            Some(ExecutionRuntimeMode::DemoAcceptance),
+            &submit,
+        ));
+        for (profile, mode) in [
+            (
+                DirectRuntimeProfile::Production,
+                Some(ExecutionRuntimeMode::ReadOnly),
+            ),
+            (
+                DirectRuntimeProfile::DemoAcceptance,
+                Some(ExecutionRuntimeMode::ReadOnly),
+            ),
+            (
+                DirectRuntimeProfile::Production,
+                Some(ExecutionRuntimeMode::DemoAcceptance),
+            ),
+            (DirectRuntimeProfile::DemoAcceptance, None),
+        ] {
+            assert!(!direct_operation_allowed(profile, mode, &submit));
+            assert!(direct_operation_allowed(profile, mode, &read));
+        }
     }
 
     #[test]

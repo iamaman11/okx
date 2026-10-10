@@ -1015,6 +1015,19 @@ pub enum AgentOperation {
 }
 
 impl AgentOperation {
+    /// Exact production-intended typed executor surface. The direct transport
+    /// may admit this ONLY for a profile-verified Demo runtime. Live remains
+    /// disabled, irrespective of OAuth or user-supplied operation fields.
+    pub const fn direct_transport_demo_execution(&self) -> bool {
+        matches!(
+            self,
+            Self::PrepareExecution { .. }
+                | Self::SubmitPreparedExecution { .. }
+                | Self::MutateExecution { .. }
+                | Self::AbortReverseExecution { .. }
+        )
+    }
+
     pub const fn direct_transport_read_only(&self) -> bool {
         !matches!(
             self,
@@ -3420,6 +3433,29 @@ mod direct_transport_tests {
             }
             .direct_transport_read_only()
         );
+    }
+
+    #[test]
+    fn direct_demo_executor_actions_are_an_explicit_closed_set() {
+        assert!(
+            AgentOperation::SubmitPreparedExecution {
+                intent_id: "intent_test_01234567".to_owned(),
+            }
+            .direct_transport_demo_execution()
+        );
+        assert!(
+            AgentOperation::AbortReverseExecution {
+                intent_id: "intent_test_01234567".to_owned(),
+            }
+            .direct_transport_demo_execution()
+        );
+        assert!(
+            !AgentOperation::ExecutionStatus {
+                intent_id: "intent_test_01234567".to_owned(),
+            }
+            .direct_transport_demo_execution()
+        );
+        assert!(!AgentOperation::AccountSummary.direct_transport_demo_execution());
     }
 
     #[test]
