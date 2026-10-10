@@ -1622,28 +1622,34 @@ async fn pre_mutation_admission(
             ));
         }
     };
-    // The existing read is account/ledger-converged and generations stayed
-    // stable. Only observed account-wide breaches may latch the durable stop;
-    // candidate projections and incomplete history merely reject this intent.
-    if let Err(error) = execution
-        .latch_account_risk_stop(&risk_analysis, daily_history_complete, utc_now_ms())
-        .await
-    {
-        admission_response!(failure_response(
-            request,
-            generated_at,
-            AgentResponseStatus::Failed,
-            EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE,
-            format!("unable to persist account risk stop: {error}"),
-            false,
-        ));
-    }
-    if let Err(error) = revalidate_hard_risk_policy(
+    let risk_disposition = revalidate_hard_risk_policy(
         &plan,
         &risk_analysis,
         &account.account_generation,
         configured_leverage.as_deref(),
+    );
+    // Never persist a global stop based on a mismatched immutable mandate,
+    // stale account generation or invalid candidate binding. Actual accepted
+    // risk analyses with an account-wide violation may latch before send.
+    if matches!(
+        &risk_disposition,
+        Ok(_) | Err(okx_execution::ExecutionValidationError::HardRiskPolicyRejected(_))
     ) {
+        if let Err(error) = execution
+            .latch_account_risk_stop(&risk_analysis, daily_history_complete, utc_now_ms())
+            .await
+        {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE,
+                format!("unable to persist account risk stop: {error}"),
+                false,
+            ));
+        }
+    }
+    if let Err(error) = risk_disposition {
         admission_response!(failure_response(
             request,
             generated_at,
