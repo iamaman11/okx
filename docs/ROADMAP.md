@@ -124,7 +124,7 @@ This dated checkpoint supersedes the old PR #260-only cursor below; historical n
 
 **Stage-4D read-only Demo follow-up acceptance:** T1/T2 single owner/isolated Demo credentials and root, unchanged mutation guard, wrong-profile and stale-generation rejection; T3 exact-head artifact/installed provenance; T4 live connected Cloudflare MCP reads in Demo with authenticated account and protected-pending coverage and successful production-return verification; T5 reconnect/restore/cross-profile/no-second-agent negative tests. Record latency, payload bytes, context impact and source quality; no new risk exposure is required for this transport test.
 
-## Stage 5 remains independent: consumer-grade acceptance and critical path (2026-10-10)
+## Stage 5 future acceptance (strictly after Stage 4C, not parallel) — 2026-10-10
 
 **Canonical mapping:** #160 retains exactly **Stage 5 P7 governance/live safety (5A), P8 attributable performance and learning (5B), P9 observable/recoverable operation and release security (5C)**. The previous local labels `P0/P1/P2` were not stages and are retired here because they obscured the live-first product goal. The detailed T1–T5 Stage 5 requirements in #160 and the original Stage 5 section later in this roadmap remain authoritative.
 
