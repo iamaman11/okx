@@ -49,5 +49,6 @@ pub use state::{
 };
 pub use validation::{
     ExecutionValidationError, PreMutationRiskDisposition, prepare_execution,
+    revalidate_amend_execution_plan,
     revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
 };
