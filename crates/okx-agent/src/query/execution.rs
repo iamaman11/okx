@@ -1018,10 +1018,12 @@ async fn cancel_mutation_admission(
             preflight_rejected(request, generated_at),
         )));
     }
-    Ok(PreMutationAdmissionResult::Ready(PreMutationAdmission {
-        preflight: verified,
-        timing,
-    }))
+    Ok(PreMutationAdmissionResult::Ready(Box::new(
+        PreMutationAdmission {
+            preflight: verified,
+            timing,
+        },
+    )))
 }
 
 async fn mutate_execution(
@@ -1499,7 +1501,7 @@ struct PreMutationAdmission {
 }
 
 enum PreMutationAdmissionResult {
-    Ready(PreMutationAdmission),
+    Ready(Box<PreMutationAdmission>),
     Response(Box<AgentResponse>),
 }
 
@@ -1951,10 +1953,12 @@ async fn pre_mutation_admission(
         ));
     }
 
-    Ok(PreMutationAdmissionResult::Ready(PreMutationAdmission {
-        preflight: verified,
-        timing,
-    }))
+    Ok(PreMutationAdmissionResult::Ready(Box::new(
+        PreMutationAdmission {
+            preflight: verified,
+            timing,
+        },
+    )))
 }
 
 enum FreshAccount {
