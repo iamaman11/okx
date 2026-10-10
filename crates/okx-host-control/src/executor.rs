@@ -1084,8 +1084,12 @@ fn read_owned_launch_tail(path: &Path, start_offset: u64) -> Option<(String, boo
     }
     let start = start_offset.max(size.saturating_sub(RUNTIME_DIAGNOSTIC_TAIL_BYTES));
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = Vec::with_capacity((size - start) as usize);
-    file.read_to_end(&mut bytes).ok()?;
+    let expected_bytes = size - start;
+    let mut bytes = Vec::with_capacity(expected_bytes as usize);
+    let received_bytes = file.take(expected_bytes).read_to_end(&mut bytes).ok()?;
+    if received_bytes as u64 != expected_bytes {
+        return None;
+    }
     let mut tail = String::from_utf8_lossy(&bytes).into_owned();
     if start > start_offset {
         // A tail can start mid-line. Do not parse such a fragment as an event.
