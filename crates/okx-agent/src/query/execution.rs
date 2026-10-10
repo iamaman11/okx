@@ -1087,13 +1087,24 @@ async fn mutate_execution(
                     ));
                 }
             };
+            let Some(own_order_id) = entry.record.order_id.as_deref() else {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    EXECUTION_MUTATION_UNSAFE_CODE,
+                    "amend requires a reconciled exchange order id for the exact owned CLOSE"
+                        .to_owned(),
+                    false,
+                ));
+            };
             let admission = match pre_mutation_admission(
                 request,
                 context,
                 generated_at,
                 execution,
                 shadow_plan,
-                entry.record.order_id.as_deref(),
+                Some(own_order_id),
             )
             .await?
             {
