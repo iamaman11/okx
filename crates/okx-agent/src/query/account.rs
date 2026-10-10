@@ -17,6 +17,7 @@ struct AccountSummaryResult {
     account_ledger: okx_observation::AccountLedgerSummary,
     pending_protective_algos: okx_api::PendingProtectiveAlgoInventory,
     reconciliation: Option<okx_execution::AccountLedgerReconciliation>,
+    managed_execution_intents: Option<okx_execution::ManagedExecutionInventory>,
     coherence: AccountSummaryCoherence,
 }
 
@@ -255,9 +256,12 @@ pub(super) async fn dispatch(
                 }
             }
 
-            let reconciliation = match context.execution {
-                Some(execution) => match execution.reconcile_account_ledger(&facts).await {
-                    Ok(value) => {
+            let (reconciliation, managed_execution_intents) = match context.execution {
+                Some(execution) => match execution
+                    .reconcile_account_ledger_with_intents(&facts)
+                    .await
+                {
+                    Ok((value, inventory)) => {
                         if !value.consistent {
                             return Ok(failure_response(
                                 request,
@@ -270,6 +274,40 @@ pub(super) async fn dispatch(
                                     value.unexpected_exchange_fills_for_non_submitted_intents,
                                     value.identity_mismatches
                                 ),
+                                false,
+                            ));
+                        }
+                        if !inventory.complete_within_bound {
+                            quality = DataQuality::Degraded;
+                            warnings.push(format!(
+                                "managed execution intent identity sample contains {} of {} intents; no complete inventory claim is made",
+                                inventory.shown, inventory.total
+                            ));
+                        }
+                        // A durable intent from a different authenticated UID is
+                        // never accepted as this account's reconciliation proof.
+                        if inventory.rows.iter().any(|item| {
+                            item.account_uid_fingerprint
+                                != facts.summary.authority.account_uid_fingerprint
+                        }) {
+                            return Ok(failure_response(
+                                request,
+                                generated_at,
+                                AgentResponseStatus::Failed,
+                                ACCOUNT_LEDGER_INCONSISTENT_CODE,
+                                "managed execution intent belongs to another authenticated account"
+                                    .to_owned(),
+                                false,
+                            ));
+                        }
+                        if inventory.total != value.managed_intents {
+                            return Ok(failure_response(
+                                request,
+                                generated_at,
+                                AgentResponseStatus::Failed,
+                                ACCOUNT_LEDGER_INCONSISTENT_CODE,
+                                "managed intent inventory and exchange reconciliation disagree on source ledger count"
+                                    .to_owned(),
                                 false,
                             ));
                         }
@@ -302,7 +340,7 @@ pub(super) async fn dispatch(
                                 value.position_attribution_unavailable_events
                             ));
                         }
-                        Some(value)
+                        (Some(value), Some(inventory))
                     }
                     Err(error) => {
                         return Ok(failure_response(
@@ -321,7 +359,7 @@ pub(super) async fn dispatch(
                         "durable execution-ledger reconciliation is unavailable because the execution owner is not configured"
                             .to_owned(),
                     );
-                    None
+                    (None, None)
                 }
             };
 
@@ -337,6 +375,7 @@ pub(super) async fn dispatch(
                     account_ledger: facts.summary,
                     pending_protective_algos,
                     reconciliation,
+                    managed_execution_intents,
                     coherence,
                 })?),
                 failure: None,

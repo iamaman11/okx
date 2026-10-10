@@ -10,7 +10,9 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::{DurableExecutionLedger, ExecutionState};
+use crate::{
+    DurableExecutionLedger, ExecutionAction, ExecutionState, PositionSide, ProtectiveOrderStatus,
+};
 
 pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str = "okx.account-ledger-reconciliation/v1";
 const MAX_POSITION_ATTRIBUTION_ROWS: usize = 20;
@@ -52,6 +54,81 @@ pub enum AccountLedgerReconciliationError {
 
     #[error("position attribution decimal '{field}' is invalid: '{value}'")]
     InvalidDecimal { field: &'static str, value: String },
+}
+
+pub const MANAGED_EXECUTION_INVENTORY_SCHEMA_V1: &str = "okx.managed-execution-inventory/v1";
+pub const MAX_MANAGED_EXECUTION_INVENTORY_ROWS: usize = 16;
+
+/// Account-scoped durable identities only. No risk policy, private credentials or
+/// mutable plan content are included; the existing account_summary transport
+/// remains the sole read-only observation path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManagedExecutionIdentity {
+    pub intent_id: String,
+    pub client_order_id: String,
+    pub exchange_order_id: Option<String>,
+    pub account_uid_fingerprint: String,
+    pub instrument_id: String,
+    pub action: ExecutionAction,
+    pub position_side: PositionSide,
+    pub state: ExecutionState,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub protective_algo_client_id: Option<String>,
+    pub protective_algo_order_id: Option<String>,
+    pub protective_state: Option<ProtectiveOrderStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManagedExecutionInventory {
+    pub schema: &'static str,
+    pub total: usize,
+    pub shown: usize,
+    pub complete_within_bound: bool,
+    pub rows: Vec<ManagedExecutionIdentity>,
+}
+
+/// Bounded deterministic inventory for resolving pre-existing Demo intent IDs.
+/// Truncation is explicit and cannot be used as a proof of absence.
+pub fn managed_execution_inventory(ledger: &DurableExecutionLedger) -> ManagedExecutionInventory {
+    let mut entries = ledger.entries().collect::<Vec<_>>();
+    let total = entries.len();
+    entries.sort_by(|a, b| {
+        b.updated_at_ms
+            .cmp(&a.updated_at_ms)
+            .then_with(|| a.record.plan.intent_id.cmp(&b.record.plan.intent_id))
+    });
+    let rows = entries
+        .into_iter()
+        .take(MAX_MANAGED_EXECUTION_INVENTORY_ROWS)
+        .map(|entry| {
+            let plan = &entry.record.plan;
+            let protection = entry.record.protection.as_ref();
+            ManagedExecutionIdentity {
+                intent_id: plan.intent_id.clone(),
+                client_order_id: plan.client_order_id.clone(),
+                exchange_order_id: entry.record.order_id.clone(),
+                account_uid_fingerprint: plan.account_uid_fingerprint.clone(),
+                instrument_id: plan.instrument_id.clone(),
+                action: plan.action,
+                position_side: plan.position_side,
+                state: entry.record.state,
+                created_at_ms: entry.created_at_ms,
+                updated_at_ms: entry.updated_at_ms,
+                protective_algo_client_id: protection
+                    .map(|value| value.algo_client_order_id.clone()),
+                protective_algo_order_id: protection.and_then(|value| value.algo_order_id.clone()),
+                protective_state: protection.map(|value| value.status),
+            }
+        })
+        .collect::<Vec<_>>();
+    ManagedExecutionInventory {
+        schema: MANAGED_EXECUTION_INVENTORY_SCHEMA_V1,
+        total,
+        shown: rows.len(),
+        complete_within_bound: total <= MAX_MANAGED_EXECUTION_INVENTORY_ROWS,
+        rows,
+    }
 }
 
 pub fn reconcile_account_ledger(
@@ -353,6 +430,59 @@ mod tests {
             open_risk: None,
             risk_binding: None,
         }
+    }
+
+    #[test]
+    fn managed_intent_inventory_exposes_exact_ids_without_mutation_and_has_stable_order() {
+        let p = path("identity-inventory");
+        let _ = std::fs::remove_file(&p);
+        let mut ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("ledger");
+        for (suffix, time) in [("older", 101), ("newer", 102)] {
+            let mut plan = plan(&format!("intent_inventory_{suffix}_01234567"));
+            plan.instrument_id = format!("TOKEN{time}-USDT-SWAP");
+            ledger.prepare(plan, time).expect("prepare");
+        }
+        let inventory = managed_execution_inventory(&ledger);
+        assert_eq!(inventory.schema, MANAGED_EXECUTION_INVENTORY_SCHEMA_V1);
+        assert_eq!(inventory.total, 2);
+        assert_eq!(inventory.shown, 2);
+        assert!(inventory.complete_within_bound);
+        assert!(inventory.rows[0].intent_id.contains("newer"));
+        assert!(inventory.rows[1].intent_id.contains("older"));
+        assert_eq!(inventory.rows[0].state, ExecutionState::Prepared);
+        assert_eq!(inventory.rows[0].exchange_order_id, None);
+        assert_eq!(inventory.rows[0].action, ExecutionAction::Open);
+        assert_eq!(inventory.rows[0].account_uid_fingerprint, "uid-fingerprint");
+        assert_eq!(
+            inventory.rows[0].client_order_id,
+            derive_client_order_id(&inventory.rows[0].intent_id)
+        );
+        assert_eq!(
+            managed_execution_inventory(&ledger),
+            inventory,
+            "read-only repeat must not mutate ledger"
+        );
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn managed_intent_inventory_never_claims_complete_when_bounded() {
+        let p = path("identity-bounded");
+        let _ = std::fs::remove_file(&p);
+        let mut ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("ledger");
+        for n in 0..(MAX_MANAGED_EXECUTION_INVENTORY_ROWS + 1) {
+            let mut plan = plan(&format!("intent_inventory_many_{n:04}_01234567"));
+            plan.instrument_id = format!("TOKEN{n}-USDT-SWAP");
+            ledger.prepare(plan, (n + 100) as u64).expect("prepare");
+        }
+        let inventory = managed_execution_inventory(&ledger);
+        assert_eq!(inventory.total, MAX_MANAGED_EXECUTION_INVENTORY_ROWS + 1);
+        assert_eq!(inventory.shown, MAX_MANAGED_EXECUTION_INVENTORY_ROWS);
+        assert!(!inventory.complete_within_bound);
+        assert!(inventory.rows[0].intent_id.contains("0016"));
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]
