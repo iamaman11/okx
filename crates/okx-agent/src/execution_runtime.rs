@@ -10,10 +10,10 @@ use okx_api::{
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
     ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
-    ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, MutationAuthority,
-    MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor, OrderExecutorError,
-    PositionSide, PrepareOutcome, SubmitDisposition, execution_status_with_ledger,
-    reconcile_account_ledger,
+    ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, ManagedExecutionInventory,
+    MutationAuthority, MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor,
+    OrderExecutorError, PositionSide, PrepareOutcome, SubmitDisposition,
+    execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -143,12 +143,17 @@ impl ExecutionRuntime {
         matches!(self.mode, ExecutionRuntimeMode::DemoAcceptance)
     }
 
-    pub async fn reconcile_account_ledger(
+    /// Return the exchange reconciliation and exact identity inventory under
+    /// one ledger lock so the two views cannot observe different intent sets.
+    /// This does not perform a gateway send or a mutation.
+    pub async fn reconcile_account_ledger_with_intents(
         &self,
         facts: &AccountLedgerFacts,
-    ) -> Result<AccountLedgerReconciliation, AccountLedgerReconciliationError> {
+    ) -> Result<(AccountLedgerReconciliation, ManagedExecutionInventory), AccountLedgerReconciliationError> {
         let executor = self.executor.lock().await;
-        reconcile_account_ledger(executor.ledger(), facts)
+        let reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
+        let inventory = managed_execution_inventory(executor.ledger());
+        Ok((reconciliation, inventory))
     }
 
     pub async fn preflight(
