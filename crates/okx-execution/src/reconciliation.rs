@@ -56,7 +56,6 @@ pub enum AccountLedgerReconciliationError {
     InvalidDecimal { field: &'static str, value: String },
 }
 
-
 pub const MANAGED_EXECUTION_INVENTORY_SCHEMA_V1: &str = "okx.managed-execution-inventory/v1";
 pub const MAX_MANAGED_EXECUTION_INVENTORY_ROWS: usize = 16;
 
@@ -91,9 +90,7 @@ pub struct ManagedExecutionInventory {
 
 /// Bounded deterministic inventory for resolving pre-existing Demo intent IDs.
 /// Truncation is explicit and cannot be used as a proof of absence.
-pub fn managed_execution_inventory(
-    ledger: &DurableExecutionLedger,
-) -> ManagedExecutionInventory {
+pub fn managed_execution_inventory(ledger: &DurableExecutionLedger) -> ManagedExecutionInventory {
     let mut entries = ledger.entries().collect::<Vec<_>>();
     let total = entries.len();
     entries.sort_by(|a, b| {
@@ -120,8 +117,7 @@ pub fn managed_execution_inventory(
                 updated_at_ms: entry.updated_at_ms,
                 protective_algo_client_id: protection
                     .map(|value| value.algo_client_order_id.clone()),
-                protective_algo_order_id: protection
-                    .and_then(|value| value.algo_order_id.clone()),
+                protective_algo_order_id: protection.and_then(|value| value.algo_order_id.clone()),
                 protective_state: protection.map(|value| value.status),
             }
         })
