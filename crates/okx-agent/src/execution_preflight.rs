@@ -375,6 +375,58 @@ mod tests {
     }
 
     #[test]
+    fn mutation_preflight_rejects_rate_and_clock_mismatch_before_send() {
+        let observer = config("sub-uid", "main-uid", "read_only", "");
+        let executor = config("sub-uid", "main-uid", "read_only,trade", "");
+        let demo = OkxEnvironment::new(Region::Global, true);
+        let credential = evaluate_demo_executor_preflight(demo, &observer, &executor);
+        assert!(credential.accepted);
+        let clock = ClockEvidenceSnapshot {
+            server_time_ms: 1_790_000_000_000,
+            local_midpoint_ms: 1_790_000_000_000,
+            offset_ms: 0,
+            round_trip_ms: 15,
+            age_ms: 0,
+            max_abs_offset_ms: 5_000,
+            max_round_trip_ms: 2_000,
+            max_age_ms: 2_000,
+            accepted: true,
+        };
+        let rate = AccountRateLimitEvidence {
+            schema: okx_api::ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V3,
+            source: AccountRateLimitSource::DemoBaseFallback,
+            current_orders_per_2s: DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S,
+            next_orders_per_2s: None,
+            fill_ratio: None,
+            main_fill_ratio: None,
+            updated_at_ms: None,
+        };
+        let budget = okx_api::RateBudget::new().snapshot();
+        let admitted = |credential, clock, rate, budget| {
+            ExecutorPreflightSnapshot::new(credential, clock, rate, budget).accepted
+        };
+        assert!(admitted(credential.clone(), clock.clone(), rate.clone(), budget.clone()));
+        let mut invalid_rate = rate.clone();
+        invalid_rate.current_orders_per_2s = 0;
+        assert!(!admitted(credential.clone(), clock.clone(), invalid_rate, budget.clone()));
+        let mut invalid_rate = rate.clone();
+        invalid_rate.current_orders_per_2s -= 1;
+        assert!(!admitted(credential.clone(), clock.clone(), invalid_rate, budget.clone()));
+        let mut changed_budget = budget.clone();
+        changed_budget.current_subaccount_limit_per_2s -= 1;
+        assert!(!admitted(credential.clone(), clock.clone(), rate.clone(), changed_budget));
+        assert!(!admitted(
+            credential.clone(),
+            ClockEvidenceSnapshot { accepted: false, ..clock.clone() },
+            rate.clone(),
+            budget.clone(),
+        ));
+        let mismatched_executor = config("different-sub-uid", "main-uid", "read_only,trade", "");
+        let wrong_uid = evaluate_demo_executor_preflight(demo, &observer, &mismatched_executor);
+        assert!(!admitted(wrong_uid, clock, rate, budget));
+    }
+
+    #[test]
     fn accepted_does_not_require_ip_binding() {
         let observer = config("sub-uid", "main-uid", "read_only", "");
         let executor = config("sub-uid", "main-uid", "read_only,trade", "");

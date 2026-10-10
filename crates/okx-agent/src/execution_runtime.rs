@@ -692,6 +692,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_demo_preflight_does_not_submit_or_touch_ledger() {
+        let root = temp_root("demo-submit-rejected-preflight");
+        fs::create_dir_all(&root).expect("root");
+        let runtime = ExecutionRuntime::new_demo_acceptance(
+            &root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            1,
+            RateBudget::new(),
+        )
+        .expect("demo runtime");
+        let missing_intent = "intent_preflight_rejected_20261011";
+        let result = runtime
+            .submit_prepared_demo_authorized(
+                &preflight(false),
+                missing_intent,
+                timing(),
+                2,
+            )
+            .await
+            .expect("fail-closed before any gateway send");
+        assert!(result.is_none());
+        assert!(runtime.entry(missing_intent).await.is_none());
+        assert_eq!(runtime.mutation_authority().await, MutationAuthority::Disabled);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn rejected_demo_preflight_cannot_authorize_order_mutation() {
         let root = temp_root("demo-mutation-rejected-preflight");
         fs::create_dir_all(&root).expect("root");
