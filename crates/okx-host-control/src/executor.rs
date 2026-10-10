@@ -1504,7 +1504,7 @@ mod tests {
         assert!(args.contains(&DEMO_MAILBOX_ISSUE));
         assert!(args.contains(&"--cloudflare-ws-url"));
         assert!(args.contains(&"--cloudflare-runtime-id"));
-        assert!(!args.contains(&AGENT_CLOUDFLARE_WS_URL));
+        assert!(args.contains(&AGENT_CLOUDFLARE_WS_URL));
         assert_eq!(mailbox_issue(AgentProfile::DemoAcceptance), 234);
         assert_eq!(
             runtime_dir(AgentProfile::DemoAcceptance),
