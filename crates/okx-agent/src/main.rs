@@ -32,7 +32,7 @@ use okx_agent::{
     runtime::{MailboxRuntimeContext, run_mailbox_until_shutdown, run_until_shutdown},
 };
 use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, RateBudget, Region};
-use okx_protocol::MailboxEnvelope;
+use okx_protocol::{DirectRuntimeProfile, MailboxEnvelope};
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator};
 use zeroize::Zeroize;
 
@@ -281,6 +281,11 @@ async fn run(cli: Cli) -> AgentResult<()> {
                             ws_url,
                             cloudflare_runtime_id.clone(),
                             token,
+                            if environment.demo {
+                                DirectRuntimeProfile::DemoAcceptance
+                            } else {
+                                DirectRuntimeProfile::Production
+                            },
                         ) {
                             Ok(config) => Some(config),
                             Err(error) => {
