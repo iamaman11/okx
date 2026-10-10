@@ -775,10 +775,13 @@ fn evaluate_candidate_limits(
 /// Select only established account-wide breaches. Projected candidate limits,
 /// stale/incomplete data and per-intent policy rejection must not permanently
 /// halt the whole account. The caller must separately prove source freshness.
-pub fn durable_account_stop_reason(violations: &[RiskPolicyViolation]) -> Option<&'static str> {
+pub fn durable_account_stop_reason(
+    violations: &[RiskPolicyViolation],
+    daily_history_complete: bool,
+) -> Option<&'static str> {
     violations.iter().find_map(|violation| match (violation.code, violation.scope.as_str()) {
-        ("MAX_DAILY_REALIZED_LOSS", "utc_day")
-        | ("MAX_DRAWDOWN" | "MANDATE_MAX_DRAWDOWN", "capital_base")
+        ("MAX_DAILY_REALIZED_LOSS", "utc_day") if daily_history_complete => Some(violation.code),
+        ("MAX_DRAWDOWN" | "MANDATE_MAX_DRAWDOWN", "capital_base")
         | ("MAX_ACCOUNT_GROSS_NOTIONAL" | "MAX_MARGIN_UTILIZATION", "account") => {
             Some(violation.code)
         }
@@ -1406,7 +1409,7 @@ mod tests {
             violation("MINIMUM_DATA_QUALITY", "account"),
             violation("DAILY_REALIZED_LOSS_USD_EQUIVALENT_UNAVAILABLE", "utc_day"),
         ];
-        assert_eq!(durable_account_stop_reason(&rejected_candidate), None);
+        assert_eq!(durable_account_stop_reason(&rejected_candidate, true), None);
         for (code, scope) in [
             ("MAX_DAILY_REALIZED_LOSS", "utc_day"),
             ("MAX_DRAWDOWN", "capital_base"),
@@ -1415,11 +1418,11 @@ mod tests {
             ("MAX_MARGIN_UTILIZATION", "account"),
         ] {
             assert_eq!(
-                durable_account_stop_reason(&[violation(code, scope)]),
+                durable_account_stop_reason(&[violation(code, scope)], true),
                 Some(code)
             );
             assert_eq!(
-                durable_account_stop_reason(&[violation(code, "wrong-scope")]),
+                durable_account_stop_reason(&[violation(code, "wrong-scope")], true),
                 None
             );
         }
@@ -1427,8 +1430,12 @@ mod tests {
             durable_account_stop_reason(&[
                 violation("MAX_LOSS_PER_TRADE", "BTC-USDT-SWAP"),
                 violation("MAX_DAILY_REALIZED_LOSS", "utc_day")
-            ]),
+            ], true),
             Some("MAX_DAILY_REALIZED_LOSS")
+        );
+        assert_eq!(
+            durable_account_stop_reason(&[violation("MAX_DAILY_REALIZED_LOSS", "utc_day")], false),
+            None
         );
     }
 
