@@ -1,19 +1,19 @@
 use std::path::Path;
 
 use chrono::{SecondsFormat, Utc};
+use okx_analysis::{PortfolioRiskAnalysis, durable_account_stop_reason};
 use okx_api::{
     AccountApi, AccountRateLimitEvidence, ClockEvidence, Credentials, MarginMode, MutationTiming,
     OkxEnvironment, OkxPublicClient, OkxRestClient, PublicDataApi, RateBudget, RateBudgetSnapshot,
     TradeApi,
 };
-use okx_analysis::{PortfolioRiskAnalysis, durable_account_stop_reason};
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
     ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
-    ExecutionRiskStop,
-    ExecutionPlan, ExecutionStatusEnvelope, MutationAuthority, MutationPrepareDisposition,
-    MutationSubmitDisposition, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
-    SubmitDisposition, execution_status_with_ledger, reconcile_account_ledger,
+    ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, MutationAuthority,
+    MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor, OrderExecutorError,
+    PositionSide, PrepareOutcome, SubmitDisposition, execution_status_with_ledger,
+    reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -197,7 +197,8 @@ impl ExecutionRuntime {
         daily_history_complete: bool,
         observed_at_ms: u64,
     ) -> Result<Option<ExecutionRiskStop>, OrderExecutorError> {
-        let Some(reason) = durable_account_stop_reason(&risk.violations, daily_history_complete) else {
+        let Some(reason) = durable_account_stop_reason(&risk.violations, daily_history_complete)
+        else {
             return Ok(None);
         };
         let mut executor = self.executor.lock().await;
