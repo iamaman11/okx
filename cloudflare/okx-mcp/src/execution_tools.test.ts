@@ -61,4 +61,4 @@ for(const x of [
   if(result!==null)throw Error("malformed execution action reached runtime: "+JSON.stringify(x));
 }
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
-assert(EXECUTION_TOOLS[1] && (EXECUTION_TOOLS[1] as any).name==="execution_action","typed write name");
+assert(EXECUTION_TOOLS[1] !== undefined && (EXECUTION_TOOLS[1] as any).name==="execution_action","typed write name");
