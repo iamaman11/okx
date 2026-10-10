@@ -2140,7 +2140,9 @@ mod tests {
         let close = close_plan("intent_risk_stop_close_01", PositionSide::Long);
         ledger.prepare(close.clone(), 101).expect("prepare close");
         ledger.stop_new_risk("manual-stop", 102).expect("stop");
-        let submitting = ledger.begin_submission(&close.intent_id, 103).expect("close allowed");
+        let submitting = ledger
+            .begin_submission(&close.intent_id, 103)
+            .expect("close allowed");
         assert_eq!(submitting.record.state, ExecutionState::Submitting);
         let _ = fs::remove_dir_all(root);
     }
