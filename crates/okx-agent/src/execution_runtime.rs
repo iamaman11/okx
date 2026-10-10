@@ -194,9 +194,10 @@ impl ExecutionRuntime {
     pub async fn latch_account_risk_stop(
         &self,
         risk: &PortfolioRiskAnalysis,
+        daily_history_complete: bool,
         observed_at_ms: u64,
     ) -> Result<Option<ExecutionRiskStop>, OrderExecutorError> {
-        let Some(reason) = durable_account_stop_reason(&risk.violations) else {
+        let Some(reason) = durable_account_stop_reason(&risk.violations, daily_history_complete) else {
             return Ok(None);
         };
         let mut executor = self.executor.lock().await;
