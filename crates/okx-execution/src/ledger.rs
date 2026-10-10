@@ -27,6 +27,8 @@ pub const EXECUTION_LEDGER_SCHEMA_V2: &str = "okx.execution-ledger/v2";
 pub const EXECUTION_LEDGER_SCHEMA_V3: &str = "okx.execution-ledger/v3";
 pub const EXECUTION_LEDGER_SCHEMA_V4: &str = "okx.execution-ledger/v4";
 pub const EXECUTION_LEDGER_SCHEMA_V5: &str = "okx.execution-ledger/v5";
+pub const EXECUTION_LEDGER_SCHEMA_V6: &str = "okx.execution-ledger/v6";
+pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
 const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.json";
 
@@ -84,6 +86,12 @@ pub enum ExecutionLedgerError {
     #[error("reverse execution continuation was explicitly aborted")]
     ReverseAborted,
 
+    #[error("new risk is halted by a durable execution stop")]
+    NewRiskStopped,
+
+    #[error("risk-stop reason must be nonempty and at most 128 bytes")]
+    InvalidRiskStopReason,
+
     #[error("execution ledger capacity of {0} records is exhausted")]
     CapacityExceeded(usize),
 
@@ -94,11 +102,31 @@ pub enum ExecutionLedgerError {
     Transition(#[from] ExecutionTransitionError),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRiskStop {
+    pub schema: String,
+    pub stopped_at_ms: u64,
+    pub reason: String,
+}
+
+fn validate_risk_stop(value: &ExecutionRiskStop) -> Result<(), ExecutionLedgerError> {
+    if value.schema != EXECUTION_RISK_STOP_SCHEMA_V1 || value.stopped_at_ms == 0 {
+        return Err(ExecutionLedgerError::Corrupt("invalid durable risk-stop metadata"));
+    }
+    if value.reason.trim().is_empty() || value.reason.len() > 128 {
+        return Err(ExecutionLedgerError::Corrupt("invalid durable risk-stop reason"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecutionLedgerFile {
     schema: String,
     records: Vec<ExecutionLedgerEntry>,
+    #[serde(default)]
+    risk_stop: Option<ExecutionRiskStop>,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +176,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V3
                 | EXECUTION_LEDGER_SCHEMA_V4
                 | EXECUTION_LEDGER_SCHEMA_V5
+                | EXECUTION_LEDGER_SCHEMA_V6
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
