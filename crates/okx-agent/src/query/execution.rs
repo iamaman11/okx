@@ -2462,6 +2462,66 @@ mod tests {
     use okx_protocol::AGENT_REQUEST_SCHEMA_V1;
 
     const GENERATED_AT: &str = "2026-09-29T00:00:00.000Z";
+    #[test]
+    fn daily_loss_window_requires_current_complete_position_history() {
+        let start = (1_790_000_000_000_u64 / 86_400_000) * 86_400_000;
+        let end = start + 86_400_000;
+        let row = |resource: &str, complete| okx_observation::AccountHistoryCoverage {
+            resource: resource.to_owned(),
+            documented_window: "last_3_months",
+            instrument_count: 0,
+            sample_instruments: Vec::new(),
+            rows: 0,
+            pages: 1,
+            complete_within_bound: complete,
+            newest_event_time_ms: None,
+            oldest_event_time_ms: None,
+        };
+        let coverage = [
+            row("positions_history:SWAP", true),
+            row("positions_history:FUTURES", true),
+        ];
+        let from = start.to_string();
+        let until = end.to_string();
+        assert!(daily_history_complete_at(
+            &coverage,
+            Some(&from),
+            Some(&until),
+            start + 1,
+        ));
+        assert!(!daily_history_complete_at(
+            &coverage,
+            Some(&from),
+            Some(&until),
+            end,
+        ));
+        assert!(!daily_history_complete_at(
+            &coverage,
+            None,
+            Some(&until),
+            start + 1,
+        ));
+        assert!(!daily_history_complete_at(
+            &[],
+            Some(&from),
+            Some(&until),
+            start + 1,
+        ));
+        assert!(!daily_history_complete_at(
+            &[row("positions_history:SWAP", false)],
+            Some(&from),
+            Some(&until),
+            start + 1,
+        ));
+        assert!(!daily_history_complete_at(
+            &[row("orders_history:SWAP", true)],
+            Some(&from),
+            Some(&until),
+            start + 1,
+        ));
+    }
+
+
 
     fn request() -> AgentRequest {
         AgentRequest {
