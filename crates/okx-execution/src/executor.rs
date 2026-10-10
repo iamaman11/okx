@@ -755,6 +755,9 @@ where
             .into());
         }
 
+        if mutation.kind == OrderMutationKind::Amend {
+            self.ledger.require_new_risk_allowed(entry.record.plan.action)?;
+        }
         let request = order_mutation_request(&entry.record, &mutation)?;
         let rate_plan = match &request {
             OrderMutationRequest::Amend(request) => self.gateway.admit_amend_order(request),
