@@ -24,7 +24,8 @@ use tokio::sync::Mutex;
 use crate::{
     AgentError, AgentResult,
     execution_preflight::{
-        ExecutorCredentialPreflight, ExecutorPreflightSnapshot, evaluate_demo_executor_preflight_against_snapshot,
+        ExecutorCredentialPreflight, ExecutorPreflightSnapshot,
+        evaluate_demo_executor_preflight_against_snapshot,
         evaluate_executor_preflight_against_snapshot,
     },
 };
