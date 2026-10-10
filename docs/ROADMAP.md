@@ -29,23 +29,21 @@ explicit optional live activation gate
 The final live activation gate is not a sixth development stage. Production live trading remains fail-closed until separately authorized after Stages 1–5 pass.
 
 
-## Current 4C-G1 unblock: strictly unsent PREPARED — 2026-10-10
+## Stage 4C-G1 — ACCEPTED, 2026-10-10; active next G2
 
-**Status: SOURCE CANDIDATE, NOT MERGED/DEPLOYED/PHYSICALLY ACCEPTED.** One Demo BTC-USDT-SWAP long remains open and has exchange-visible ACTIVE OCO. The previous CLOSE `intent_stage4c_close_long_20261010a` is durable `PREPARED` with null exchange_order_id and holds the instrument reservation. A coherent account ledger is **not** terminal flat. This is a local state-lifecycle defect, not evidence that a venue CLOSE was sent. Keep the parent OCO intact.
+**Source of truth: [#160](https://github.com/iamaman11/okx/issues/160), Demo execution acceptance [#223](https://github.com/iamaman11/okx/issues/223).** G1 was physically proven after a two-day stale unsent PREPARED CLOSE and an already-absent exchange OCO mismatch. This summary supersedes earlier G1 candidate/current language elsewhere in this file.
 
-**Single fix owner:** `ExecutionRecord::abandon_prepared` → `DurableExecutionLedger::abandon_prepared` → existing `OrderExecutor` and `ExecutionRuntime` → closed Demo-only `AgentOperation::AbandonPreparedExecution` → existing Cloudflare MCP `execution_action(action=abandon_prepared)`. No second executor, mutation transport, SQL edit, ledger deletion, daemon, polling loop or automatic retry. The persisted original intent becomes `REJECTED` with exact reason `LOCAL_PREPARED_ABANDONED_UNSENT`, **never** an exchange order cancellation. Strictly no `SUBMITTING`, `UNKNOWN_SUBMISSION`, prior ordId, mutation, reverse or unresolved protective effect. Same-ID duplicate yields the identical persisted record.
+| Gate | Accepted physical or test evidence |
+| --- | --- |
+| T1 durable unsent lifecycle | Old `intent_stage4c_close_long_20261010a` became `REJECTED/LOCAL_PREPARED_ABANDONED_UNSENT`; no order ID. Negative SUBMITTING/UNKNOWN/reverse/replay tests. Original history retained |
+| T2 bounded typed transport | One Demo-only existing MCP `execution_action` with strict `abandon_prepared`, tool contract `okx.mcp.tools/2026-10-10.2`; production unavailable for writes |
+| T3 CI and installation | [PR #273](https://github.com/iamaman11/okx/pull/273), [#274](https://github.com/iamaman11/okx/pull/274), [#275](https://github.com/iamaman11/okx/pull/275) merged. #275 exact [CI #38080218448](https://github.com/iamaman11/okx/actions/runs/38080218448) 6/6 PASS, postmerge CI #38080713118 SUCCESS; tested=merged tree `1dfa0766cd8025d0942fe3a35b24334fe39d3d28`, installed Windows artifact `11680297582`, agent SHA256 `95b7ae1061b47353334fbafa57ca7a1abb313fe6b707122522007846a872f17e` |
+| T4 original reservation recovery | Exactly one local `abandon_prepared`, original ACTIVE parent OCO unchanged during repair. Independent read and post-restart old CLOSE terminal result proven |
+| T5 Demo exchange flat and cleanup | One risk-bound IOC CLOSE `intent_stage4c_close_exit_20261010b` physically `FILLED` 0.02/0.02, one final fill, VWAP 82986.37 USDT; despite lost transport ACK it was **never replayed**. Complete bounded order/fill/bill history, 0 positions, 0 ordinary orders, **0 pending conditional/OCO** across SWAP/FUTURES, coherent ledger. Attached parent protection naturally disappeared at venue; new local zero-inventory confirmation `cleanup_stage4c_already_absent_20261010a` became `CONFIRMED_ABSENT` with `exchange_post_sent=false`. Post-restart parent `CLEANED_UP`, exit `FILLED`, zero exposure. CONTROL restart PASS, Demo MCP generation 292 FRESH |
 
-**Gate tests and acceptance (serial, not independent parallel tasks):**
+**Single next slice 4C-G2:** prove native Demo preflight across same UID, observed/exec credential permission fences, clock, rates, reference freshness, risk-mandate hard stops, transport and restart, with positive/negative and fault-recovery acceptance. Then **G3** bounded AMEND/Hedge where supported/ADD/REDUCE/REVERSE/protection/fills/bills/TCA physical matrix; then **G4** uncertain ACK, crash/restore, idempotent fail-closed ordering. Stage 5A→5B→5C is later and production live remains hard OFF.
 
-| Test | Stimulus / observable PASS | Fail-closed condition |
-| --- | --- | --- |
-| T1 State and ledger | PREPARED-only → atomic terminal marker; retained original ID; after restart new **reducing** CLOSE can be prepared, original ACTIVE parent OCO unchanged | SUBMITTING/UNKNOWN/reverse/non-PREPARED refuse, no state or timestamp changed |
-| T2 Protocol and Worker | Unknown field and invalid ID rejected; `abandon_prepared` is one closed typed Demo mutation, authenticated generation/profile fenced | production/unverified profile refuses; never substitute encrypted GitHub after connector refusal |
-| T3 Source/provenance | Full exact-head six-job Rust/TypeScript CI, tested tree equality, no-rebuild promotion, exact binary and Worker deployed | source-only passing is not installation PASS |
-| T4 Physical original-intent repair | Fresh correct-Demo-UID Cloudflare account/ledger/status, exact old intent PREPARED and zero exchange identity; **one** authorized local abandonment; persistent readback REJECTED with local marker and parent OCO still ACTIVE | No trade send, no unsafe alternate mutation channel; unresolved effect -> NOT_ACCEPTED |
-| T5 Terminal G1 safety | New CLOSE allowed only after independent fresh preflight; one explicitly authorized reducing order and exact order/fill/bill/position/ordinary and all 4 protective pending scope proof, no orphan; compare runtime generation and unchanged UID | unknown ACK never replayed; if position/OCO still live, G1 stays OPEN and Stage 5 cannot start |
-
-**NEXT only:** finish candidate CI/provenance and installed proof, perform precisely supported Demo abandonment once and re-query both the original intent and parent protection. Do not assume that local reservation release closes the venue position. The further G1 risk-reducing CLOSE and protection cleanup are **separate**, safety-gated physical steps before G2/G3/G4. Live account hard OFF.
+**Mandatory G4 bug:** One confirmed successful CLOSE originally produced a generic `DIRECT_TRANSPORT_QUERY_FAILED` with `retryable=true`. That hint **must not authorize repeated mutations**. G4 must enforce a non-replayable/uncertain status for exchange-effecting tool errors and prove independent ledger/exchange recovery before accepting operational readiness. The implemented operator correctly sent this CLOSE exactly once.
 
 ## CURRENT: one sequential stage gate and verified acceptance — 2026-10-10
 
