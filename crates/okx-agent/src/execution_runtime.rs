@@ -705,17 +705,15 @@ mod tests {
         .expect("demo runtime");
         let missing_intent = "intent_preflight_rejected_20261011";
         let result = runtime
-            .submit_prepared_demo_authorized(
-                &preflight(false),
-                missing_intent,
-                timing(),
-                2,
-            )
+            .submit_prepared_demo_authorized(&preflight(false), missing_intent, timing(), 2)
             .await
             .expect("fail-closed before any gateway send");
         assert!(result.is_none());
         assert!(runtime.entry(missing_intent).await.is_none());
-        assert_eq!(runtime.mutation_authority().await, MutationAuthority::Disabled);
+        assert_eq!(
+            runtime.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
         let _ = fs::remove_dir_all(root);
     }
 

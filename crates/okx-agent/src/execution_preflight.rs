@@ -405,19 +405,42 @@ mod tests {
         let admitted = |credential, clock, rate, budget| {
             ExecutorPreflightSnapshot::new(credential, clock, rate, budget).accepted
         };
-        assert!(admitted(credential.clone(), clock.clone(), rate.clone(), budget.clone()));
+        assert!(admitted(
+            credential.clone(),
+            clock.clone(),
+            rate.clone(),
+            budget.clone()
+        ));
         let mut invalid_rate = rate.clone();
         invalid_rate.current_orders_per_2s = 0;
-        assert!(!admitted(credential.clone(), clock.clone(), invalid_rate, budget.clone()));
-        let mut invalid_rate = rate.clone();
-        invalid_rate.current_orders_per_2s -= 1;
-        assert!(!admitted(credential.clone(), clock.clone(), invalid_rate, budget.clone()));
-        let mut changed_budget = budget.clone();
-        changed_budget.current_subaccount_limit_per_2s -= 1;
-        assert!(!admitted(credential.clone(), clock.clone(), rate.clone(), changed_budget));
         assert!(!admitted(
             credential.clone(),
-            ClockEvidenceSnapshot { accepted: false, ..clock.clone() },
+            clock.clone(),
+            invalid_rate,
+            budget.clone()
+        ));
+        let mut invalid_rate = rate.clone();
+        invalid_rate.current_orders_per_2s -= 1;
+        assert!(!admitted(
+            credential.clone(),
+            clock.clone(),
+            invalid_rate,
+            budget.clone()
+        ));
+        let mut changed_budget = budget.clone();
+        changed_budget.current_subaccount_limit_per_2s -= 1;
+        assert!(!admitted(
+            credential.clone(),
+            clock.clone(),
+            rate.clone(),
+            changed_budget
+        ));
+        assert!(!admitted(
+            credential.clone(),
+            ClockEvidenceSnapshot {
+                accepted: false,
+                ..clock.clone()
+            },
             rate.clone(),
             budget.clone(),
         ));
