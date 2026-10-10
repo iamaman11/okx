@@ -47,7 +47,8 @@ pub const EXECUTION_RISK_POLICY_REQUIRED_CODE: &str = "EXECUTION_RISK_POLICY_REQ
 pub const EXECUTION_RISK_POLICY_REJECTED_CODE: &str = "EXECUTION_RISK_POLICY_REJECTED";
 pub const EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE: &str = "EXECUTION_RISK_EVIDENCE_UNAVAILABLE";
 pub const EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE: &str = "EXECUTION_RISK_EVIDENCE_NOT_FRESH";
-pub const EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE: &str = "EXECUTION_RISK_STOP_PERSISTENCE_FAILED";
+pub const EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE: &str =
+    "EXECUTION_RISK_STOP_PERSISTENCE_FAILED";
 pub const EXECUTION_RECONCILIATION_FAILED_CODE: &str = "EXECUTION_RECONCILIATION_FAILED";
 pub const EXECUTION_RECONCILIATION_UNAVAILABLE_CODE: &str = "EXECUTION_RECONCILIATION_UNAVAILABLE";
 pub const EXECUTION_MUTATION_UNSAFE_CODE: &str = "EXECUTION_MUTATION_UNSAFE";
@@ -64,9 +65,7 @@ fn daily_history_complete_at(
     let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
         return false;
     };
-    if end.checked_sub(start) != Some(86_400_000)
-        || observed_at_ms < start
-        || observed_at_ms >= end
+    if end.checked_sub(start) != Some(86_400_000) || observed_at_ms < start || observed_at_ms >= end
     {
         return false;
     }
@@ -81,7 +80,6 @@ fn daily_history_complete_at(
     }
     seen
 }
-
 
 pub(super) async fn dispatch(
     request: &AgentRequest,
@@ -1462,8 +1460,14 @@ async fn pre_mutation_admission(
     };
     let daily_history_complete = daily_history_complete_at(
         &risk_facts.summary.history_coverage,
-        risk_facts.summary.daily_realized_pnl_utc_day_start_ms.as_deref(),
-        risk_facts.summary.daily_realized_pnl_utc_day_end_ms.as_deref(),
+        risk_facts
+            .summary
+            .daily_realized_pnl_utc_day_start_ms
+            .as_deref(),
+        risk_facts
+            .summary
+            .daily_realized_pnl_utc_day_end_ms
+            .as_deref(),
         utc_now_ms(),
     );
     // Opening new exposure requires complete bounded history. Reducing a
@@ -2520,8 +2524,6 @@ mod tests {
             start + 1,
         ));
     }
-
-
 
     fn request() -> AgentRequest {
         AgentRequest {
