@@ -9,6 +9,7 @@ import {
   PONG_DEADLINE_MS,
   RESPONSE_DEADLINE_MS,
   RUNTIME_NAME,
+  decodeRuntimeProfile,
   sameHex,
   sha256Hex,
   type SocketAttachment,
@@ -104,6 +105,12 @@ export class RuntimeSession {
         ws.close(1008, "invalid hello");
         return;
       }
+      const runtimeProfile = decodeRuntimeProfile(frame.runtime_profile);
+      if (!runtimeProfile) {
+        ws.close(1008, "invalid runtime profile");
+        return;
+      }
+      attachment.runtimeProfile = runtimeProfile;
       attachment.hello = true;
       ws.serializeAttachment(attachment);
       ws.send(JSON.stringify({
@@ -265,6 +272,7 @@ export class RuntimeSession {
       schema: "okx.direct-transport.status/v1",
       status: fresh ? "PASS" : "STALE",
       runtime_id: active.attachment.runtimeId,
+      runtime_profile: active.attachment.runtimeProfile ?? "unverified",
       connected: true,
       session_fresh: fresh,
       connection_generation: active.attachment.generation,
