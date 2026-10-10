@@ -1411,11 +1411,8 @@ mod tests {
         assert!(unavailable["fatal_error"].is_null());
 
         // The bounded tail cannot claim to cover the complete startup.
-        fs::write(
-            &stderr,
-            vec![b'x'; (launch.stderr_offset + RUNTIME_DIAGNOSTIC_TAIL_BYTES + 8) as usize],
-        )
-        .expect("oversized");
+        let oversized = launch.stderr_offset + RUNTIME_DIAGNOSTIC_TAIL_BYTES + 8;
+        fs::write(&stderr, vec![b'x'; oversized as usize]).expect("oversized");
         let truncated = current_launch_summary(&root, &launch);
         assert_eq!(truncated["log_evidence"]["complete_since_launch"], false);
         assert!(truncated["fatal_error"].is_null());
