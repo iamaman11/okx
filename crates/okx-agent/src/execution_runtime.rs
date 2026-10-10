@@ -149,7 +149,10 @@ impl ExecutionRuntime {
     pub async fn reconcile_account_ledger_with_intents(
         &self,
         facts: &AccountLedgerFacts,
-    ) -> Result<(AccountLedgerReconciliation, ManagedExecutionInventory), AccountLedgerReconciliationError> {
+    ) -> Result<
+        (AccountLedgerReconciliation, ManagedExecutionInventory),
+        AccountLedgerReconciliationError,
+    > {
         let executor = self.executor.lock().await;
         let reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
         let inventory = managed_execution_inventory(executor.ledger());
