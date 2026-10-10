@@ -904,7 +904,7 @@ Accepted Stage-3A runtime shape:
 - the bounded Tier-B v1 proof uses BTC historical trade events through the existing public REST owner rather than introducing a separate archive acquisition subsystem;
 - the external research surface remains `research_capabilities` + `research`.
 
-The next cursor is **Stage 3B — Deterministic Replay Kernel**. Do not add framework layers, services, statistical methods or storage authorities for speculative completeness. Any non-planned structural delta requires a reproduced source/runtime/test contradiction and explicit architecture review.
+The historical next cursor after Stage 3A was **Stage 3B — Deterministic Replay Kernel**; the current single work ID is 4C-G1 in ROADMAP. Do not add framework layers, services, statistical methods or storage authorities for speculative completeness. Any non-planned structural delta requires a reproduced source/runtime/test contradiction and explicit architecture review.
 
 ## Non-goals
 
