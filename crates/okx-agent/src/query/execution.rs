@@ -1007,20 +1007,19 @@ async fn cancel_mutation_admission(
             )));
         }
     };
-    if !crate::execution_preflight::ExecutorPreflightSnapshot::new(
-        preflight.clone(),
+    let verified = crate::execution_preflight::ExecutorPreflightSnapshot::new(
+        preflight,
         clock.snapshot(),
         account_rate_limit,
         rate_budget,
-    )
-    .accepted
-    {
+    );
+    if !verified.accepted {
         return Ok(PreMutationAdmissionResult::Response(Box::new(
             preflight_rejected(request, generated_at),
         )));
     }
     Ok(PreMutationAdmissionResult::Ready(PreMutationAdmission {
-        preflight,
+        preflight: verified,
         timing,
     }))
 }
@@ -1495,7 +1494,7 @@ async fn cancel_owned_protection(
 }
 
 struct PreMutationAdmission {
-    preflight: crate::execution_preflight::ExecutorCredentialPreflight,
+    preflight: crate::execution_preflight::ExecutorPreflightSnapshot,
     timing: MutationTiming,
 }
 
@@ -1893,14 +1892,13 @@ async fn pre_mutation_admission(
             ));
         }
     };
-    if !crate::execution_preflight::ExecutorPreflightSnapshot::new(
-        preflight.clone(),
+    let verified = crate::execution_preflight::ExecutorPreflightSnapshot::new(
+        preflight,
         clock.snapshot(),
         account_rate_limit,
         rate_budget,
-    )
-    .accepted
-    {
+    );
+    if !verified.accepted {
         admission_response!(preflight_rejected(request, generated_at));
     }
     if let Err(error) = revalidate_venue_execution(&plan, &rules, &venue, timing.exp_time_ms()) {
@@ -1954,7 +1952,7 @@ async fn pre_mutation_admission(
     }
 
     Ok(PreMutationAdmissionResult::Ready(PreMutationAdmission {
-        preflight,
+        preflight: verified,
         timing,
     }))
 }
