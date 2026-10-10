@@ -772,6 +772,20 @@ fn evaluate_candidate_limits(
     })
 }
 
+/// Select only established account-wide breaches. Projected candidate limits,
+/// stale/incomplete data and per-intent policy rejection must not permanently
+/// halt the whole account. The caller must separately prove source freshness.
+pub fn durable_account_stop_reason(violations: &[RiskPolicyViolation]) -> Option<&'static str> {
+    violations.iter().find_map(|violation| match (violation.code, violation.scope.as_str()) {
+        ("MAX_DAILY_REALIZED_LOSS", "utc_day")
+        | ("MAX_DRAWDOWN" | "MANDATE_MAX_DRAWDOWN", "capital_base")
+        | ("MAX_ACCOUNT_GROSS_NOTIONAL" | "MAX_MARGIN_UTILIZATION", "account") => {
+            Some(violation.code)
+        }
+        _ => None,
+    })
+}
+
 pub fn evaluate_candidate_risk(
     mandate: &TradingMandate,
     policy: &HardRiskPolicy,
