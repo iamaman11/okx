@@ -1,4 +1,4 @@
-import { buildExecutionOperation, EXECUTION_TOOLS, executionProfilePermitsOperation } from "./execution_tools.js";
+import { buildExecutionOperation, EXECUTION_TOOLS, executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
 function assert(condition: boolean, detail: string): void {
   if (!condition) throw Error(detail);
 }
@@ -61,11 +61,13 @@ for(const x of [
   if(result!==null)throw Error("malformed execution action reached runtime: "+JSON.stringify(x));
 }
 for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution"]) {
+  assert(isExecutionMutation(op), "all trading writes classify as uncertain on lost ACK");
   assert(executionProfilePermitsOperation("demo_acceptance",op), "verified Demo write allowed");
   for (const profile of ["production","unverified","",undefined]) {
     assert(!executionProfilePermitsOperation(profile,op), "non-Demo profile must deny write");
   }
 }
 assert(executionProfilePermitsOperation("production","account_summary"),"read is allowed");
+assert(!isExecutionMutation("account_summary"),"read must not be misclassified as exchange mutation");
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
 assert(EXECUTION_TOOLS[1] !== undefined && (EXECUTION_TOOLS[1] as any).name==="execution_action","typed write name");
