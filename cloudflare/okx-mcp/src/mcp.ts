@@ -1,3 +1,4 @@
+import { buildExecutionOperation, EXECUTION_TOOLS } from "./execution_tools";
 import {
   dispatchRuntime,
   type Env,
@@ -536,6 +537,7 @@ export const mcpApi = {
               additionalProperties: false,
             },
           },
+          ...EXECUTION_TOOLS,
         ],
       });
     }
@@ -1321,6 +1323,21 @@ export const mcpApi = {
           },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
+      }
+      if (name === "executor_preflight") {
+        if (Object.keys(args).length !== 0) return jsonRpcError(id,-32602,"executor_preflight takes no input");
+        return jsonRpc(id,toolResult(await dispatchRuntime(env,{
+          schema:"okx.agent.request/v1",request_id:requestId(),
+          operation:{type:"executor_preflight"},
+        })));
+      }
+      if (name === "execution_action") {
+        const operation=buildExecutionOperation(args);
+        if (!operation) return jsonRpcError(id,-32602,"invalid typed execution action");
+        // One call = one durable operation, never a multi-command RPC or auto-retry.
+        return jsonRpc(id,toolResult(await dispatchRuntime(env,{
+          schema:"okx.agent.request/v1",request_id:requestId(),operation,
+        })));
       }
       if (name === "account_summary") {
         const agentRequest = {
