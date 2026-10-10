@@ -1,6 +1,6 @@
 # Stage 5 implementation checklist and live-admission contract
 
-This is an **implementation checklist subordinate to canonical roadmap #160**, not a new stage or another owner of product decisions. Stage 4 exchange acceptance is tracked in #223; scientific strategy eligibility in #216. Status on 2026-10-10: Stage 5 **OPEN**, production mutations **DISABLED**. Demo is only the physical test environment for the same Rust execution core intended for live.
+This is an **implementation checklist subordinate to canonical roadmap #160**, not a new stage or another owner of product decisions. Stage 4 exchange acceptance is tracked in #223; scientific strategy eligibility in #216. Status on 2026-10-10: Stage 5 **OPEN**, production mutations **DISABLED**. Source-only 5A progress: #263 (durable STOP_NEW_RISK) and #264 (observed account-breach latching) merged with exact-head CI; the latest verified installed binary is still the earlier #260 build. 5A physical restart/exchange denial acceptance, 5B, 5C, and live admission remain unaccepted. Current production MCP is healthy, but source-specific BTC WS completeness can degrade independently. Demo is only the physical test environment for the same Rust execution core intended for live.
 
 ## Order of work and responsibility
 
