@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use chrono::{SecondsFormat, Utc};
+use okx_analysis::{PortfolioRiskAnalysis, durable_account_stop_reason};
 use okx_api::{
     AccountApi, AccountRateLimitEvidence, ClockEvidence, Credentials, MarginMode, MutationTiming,
     OkxEnvironment, OkxPublicClient, OkxRestClient, PublicDataApi, RateBudget, RateBudgetSnapshot,
@@ -9,9 +10,10 @@ use okx_api::{
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
     ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
-    ExecutionPlan, ExecutionStatusEnvelope, MutationAuthority, MutationPrepareDisposition,
-    MutationSubmitDisposition, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
-    SubmitDisposition, execution_status_with_ledger, reconcile_account_ledger,
+    ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, MutationAuthority,
+    MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor, OrderExecutorError,
+    PositionSide, PrepareOutcome, SubmitDisposition, execution_status_with_ledger,
+    reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -185,6 +187,26 @@ impl ExecutionRuntime {
 
     pub async fn mutation_authority(&self) -> MutationAuthority {
         self.executor.lock().await.mutation_authority()
+    }
+
+    /// Called only after the query owner has verified private account and
+    /// ledger coherence. A candidate-only rejection never creates a global stop.
+    pub async fn latch_account_risk_stop(
+        &self,
+        risk: &PortfolioRiskAnalysis,
+        daily_history_complete: bool,
+        observed_at_ms: u64,
+    ) -> Result<Option<ExecutionRiskStop>, OrderExecutorError> {
+        let Some(reason) = durable_account_stop_reason(&risk.violations, daily_history_complete)
+        else {
+            return Ok(None);
+        };
+        let mut executor = self.executor.lock().await;
+        executor.stop_new_risk(reason, observed_at_ms).map(Some)
+    }
+
+    pub async fn risk_stop_status(&self) -> Option<ExecutionRiskStop> {
+        self.executor.lock().await.ledger().risk_stop().cloned()
     }
 
     pub async fn submit_prepared_demo_authorized(

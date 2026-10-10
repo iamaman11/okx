@@ -772,6 +772,27 @@ fn evaluate_candidate_limits(
     })
 }
 
+/// Select only established account-wide breaches. Projected candidate limits,
+/// stale/incomplete data and per-intent policy rejection must not permanently
+/// halt the whole account. The caller must separately prove source freshness.
+pub fn durable_account_stop_reason(
+    violations: &[RiskPolicyViolation],
+    daily_history_complete: bool,
+) -> Option<&'static str> {
+    violations.iter().find_map(
+        |violation| match (violation.code, violation.scope.as_str()) {
+            ("MAX_DAILY_REALIZED_LOSS", "utc_day") if daily_history_complete => {
+                Some(violation.code)
+            }
+            ("MAX_DRAWDOWN" | "MANDATE_MAX_DRAWDOWN", "capital_base")
+            | ("MAX_ACCOUNT_GROSS_NOTIONAL" | "MAX_MARGIN_UTILIZATION", "account") => {
+                Some(violation.code)
+            }
+            _ => None,
+        },
+    )
+}
+
 pub fn evaluate_candidate_risk(
     mandate: &TradingMandate,
     policy: &HardRiskPolicy,
@@ -1375,6 +1396,55 @@ fn normalized(value: Option<Decimal>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_stop_selects_only_proven_account_limits_not_candidate_or_stale_data() {
+        fn violation(code: &'static str, scope: &str) -> RiskPolicyViolation {
+            RiskPolicyViolation {
+                code,
+                scope: scope.to_owned(),
+                observed: "10".to_owned(),
+                limit: "5".to_owned(),
+            }
+        }
+        let rejected_candidate = vec![
+            violation("MAX_ACCOUNT_GROSS_NOTIONAL_PROJECTED", "account"),
+            violation("MAX_LOSS_PER_TRADE", "BTC-USDT-SWAP"),
+            violation("MINIMUM_DATA_QUALITY", "account"),
+            violation("DAILY_REALIZED_LOSS_USD_EQUIVALENT_UNAVAILABLE", "utc_day"),
+        ];
+        assert_eq!(durable_account_stop_reason(&rejected_candidate, true), None);
+        for (code, scope) in [
+            ("MAX_DAILY_REALIZED_LOSS", "utc_day"),
+            ("MAX_DRAWDOWN", "capital_base"),
+            ("MANDATE_MAX_DRAWDOWN", "capital_base"),
+            ("MAX_ACCOUNT_GROSS_NOTIONAL", "account"),
+            ("MAX_MARGIN_UTILIZATION", "account"),
+        ] {
+            assert_eq!(
+                durable_account_stop_reason(&[violation(code, scope)], true),
+                Some(code)
+            );
+            assert_eq!(
+                durable_account_stop_reason(&[violation(code, "wrong-scope")], true),
+                None
+            );
+        }
+        assert_eq!(
+            durable_account_stop_reason(
+                &[
+                    violation("MAX_LOSS_PER_TRADE", "BTC-USDT-SWAP"),
+                    violation("MAX_DAILY_REALIZED_LOSS", "utc_day")
+                ],
+                true
+            ),
+            Some("MAX_DAILY_REALIZED_LOSS")
+        );
+        assert_eq!(
+            durable_account_stop_reason(&[violation("MAX_DAILY_REALIZED_LOSS", "utc_day")], false),
+            None
+        );
+    }
 
     fn replay_mandate() -> TradingMandate {
         TradingMandate {

@@ -47,7 +47,7 @@ pub use risk::{
     VirtualPositionConstraintEvidence, VirtualPositionConstraintInput, analyze_account_risk,
     analyze_portfolio_risk, candidate_risk_context_from_account,
     compare_account_position_risk_oracle, compare_virtual_position_builder_notional,
-    evaluate_candidate_risk, validate_virtual_linear_position,
+    durable_account_stop_reason, evaluate_candidate_risk, validate_virtual_linear_position,
     virtual_portfolio_initial_margin_usd,
 };
 pub use scenario::{

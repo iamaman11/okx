@@ -47,9 +47,39 @@ pub const EXECUTION_RISK_POLICY_REQUIRED_CODE: &str = "EXECUTION_RISK_POLICY_REQ
 pub const EXECUTION_RISK_POLICY_REJECTED_CODE: &str = "EXECUTION_RISK_POLICY_REJECTED";
 pub const EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE: &str = "EXECUTION_RISK_EVIDENCE_UNAVAILABLE";
 pub const EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE: &str = "EXECUTION_RISK_EVIDENCE_NOT_FRESH";
+pub const EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE: &str =
+    "EXECUTION_RISK_STOP_PERSISTENCE_FAILED";
 pub const EXECUTION_RECONCILIATION_FAILED_CODE: &str = "EXECUTION_RECONCILIATION_FAILED";
 pub const EXECUTION_RECONCILIATION_UNAVAILABLE_CODE: &str = "EXECUTION_RECONCILIATION_UNAVAILABLE";
 pub const EXECUTION_MUTATION_UNSAFE_CODE: &str = "EXECUTION_MUTATION_UNSAFE";
+
+fn daily_history_complete_at(
+    coverage: &[okx_observation::AccountHistoryCoverage],
+    day_start: Option<&str>,
+    day_end: Option<&str>,
+    observed_at_ms: u64,
+) -> bool {
+    let (Some(start), Some(end)) = (day_start, day_end) else {
+        return false;
+    };
+    let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
+        return false;
+    };
+    if end.checked_sub(start) != Some(86_400_000) || observed_at_ms < start || observed_at_ms >= end
+    {
+        return false;
+    }
+    let mut seen = false;
+    for row in coverage {
+        if row.resource.starts_with("positions_history:") {
+            seen = true;
+            if !row.complete_within_bound {
+                return false;
+            }
+        }
+    }
+    seen
+}
 
 pub(super) async fn dispatch(
     request: &AgentRequest,
@@ -1428,18 +1458,34 @@ async fn pre_mutation_admission(
             ));
         }
     };
-    if risk_facts
-        .summary
-        .history_coverage
-        .iter()
-        .any(|coverage| !coverage.complete_within_bound)
+    let daily_history_complete = daily_history_complete_at(
+        &risk_facts.summary.history_coverage,
+        risk_facts
+            .summary
+            .daily_realized_pnl_utc_day_start_ms
+            .as_deref(),
+        risk_facts
+            .summary
+            .daily_realized_pnl_utc_day_end_ms
+            .as_deref(),
+        utc_now_ms(),
+    );
+    // Opening new exposure requires complete bounded history. Reducing a
+    // verified position must not be trapped by unrelated historical gaps.
+    if plan.action.is_risk_increasing()
+        && (!daily_history_complete
+            || risk_facts
+                .summary
+                .history_coverage
+                .iter()
+                .any(|coverage| !coverage.complete_within_bound))
     {
         admission_response!(failure_response(
             request,
             generated_at,
             AgentResponseStatus::Rejected,
             EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
-            "bounded account-history coverage is incomplete for pre-mutation risk".to_owned(),
+            "UTC-day or bounded account-history coverage is incomplete for new risk".to_owned(),
             true,
         ));
     }
@@ -1576,12 +1622,32 @@ async fn pre_mutation_admission(
             ));
         }
     };
-    if let Err(error) = revalidate_hard_risk_policy(
+    let risk_disposition = revalidate_hard_risk_policy(
         &plan,
         &risk_analysis,
         &account.account_generation,
         configured_leverage.as_deref(),
-    ) {
+    );
+    // Never persist a global stop based on a mismatched immutable mandate,
+    // stale account generation or invalid candidate binding. Actual accepted
+    // risk analyses with an account-wide violation may latch before send.
+    if matches!(
+        &risk_disposition,
+        Ok(_) | Err(okx_execution::ExecutionValidationError::HardRiskPolicyRejected(_))
+    ) && let Err(error) = execution
+        .latch_account_risk_stop(&risk_analysis, daily_history_complete, utc_now_ms())
+        .await
+    {
+        admission_response!(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE,
+            format!("unable to persist account risk stop: {error}"),
+            false,
+        ));
+    }
+    if let Err(error) = risk_disposition {
         admission_response!(failure_response(
             request,
             generated_at,
@@ -2404,6 +2470,64 @@ mod tests {
     use okx_protocol::AGENT_REQUEST_SCHEMA_V1;
 
     const GENERATED_AT: &str = "2026-09-29T00:00:00.000Z";
+    #[test]
+    fn daily_loss_window_requires_current_complete_position_history() {
+        let start = (1_790_000_000_000_u64 / 86_400_000) * 86_400_000;
+        let end = start + 86_400_000;
+        let row = |resource: &str, complete| okx_observation::AccountHistoryCoverage {
+            resource: resource.to_owned(),
+            documented_window: "last_3_months",
+            instrument_count: 0,
+            sample_instruments: Vec::new(),
+            rows: 0,
+            pages: 1,
+            complete_within_bound: complete,
+            newest_event_time_ms: None,
+            oldest_event_time_ms: None,
+        };
+        let coverage = [
+            row("positions_history:SWAP", true),
+            row("positions_history:FUTURES", true),
+        ];
+        let from = start.to_string();
+        let until = end.to_string();
+        assert!(daily_history_complete_at(
+            &coverage,
+            Some(&from),
+            Some(&until),
+            start + 1,
+        ));
+        assert!(!daily_history_complete_at(
+            &coverage,
+            Some(&from),
+            Some(&until),
+            end,
+        ));
+        assert!(!daily_history_complete_at(
+            &coverage,
+            None,
+            Some(&until),
+            start + 1,
+        ));
+        assert!(!daily_history_complete_at(
+            &[],
+            Some(&from),
+            Some(&until),
+            start + 1,
+        ));
+        assert!(!daily_history_complete_at(
+            &[row("positions_history:SWAP", false)],
+            Some(&from),
+            Some(&until),
+            start + 1,
+        ));
+        assert!(!daily_history_complete_at(
+            &[row("orders_history:SWAP", true)],
+            Some(&from),
+            Some(&until),
+            start + 1,
+        ));
+    }
 
     fn request() -> AgentRequest {
         AgentRequest {
