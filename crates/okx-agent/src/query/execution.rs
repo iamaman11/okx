@@ -1345,20 +1345,18 @@ async fn cancel_owned_protection(
             .as_ref()
             .and_then(|link| link.cleanup.as_ref())
             .is_none()
-        {
-            if let Err(error) = execution
+            && let Err(error) = execution
                 .prepare_protective_cleanup(intent_id, mutation_id, observed_at_ms)
                 .await
-            {
-                return Ok(failure_response(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Rejected,
-                    EXECUTION_MUTATION_UNSAFE_CODE,
-                    error.to_string(),
-                    false,
-                ));
-            }
+        {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_MUTATION_UNSAFE_CODE,
+                error.to_string(),
+                false,
+            ));
         }
         let confirmed = execution
             .confirm_protective_cleanup_absent(
