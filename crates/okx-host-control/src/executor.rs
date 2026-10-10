@@ -479,7 +479,7 @@ impl HostExecutor {
                 "profile": profile,
                 "mailbox_issue": mailbox_issue(profile),
                 "runtime_root": runtime_dir(profile),
-                "cloudflare_attached": profile == AgentProfile::Production
+                "cloudflare_attached": true
             }));
         }
 
@@ -515,7 +515,7 @@ impl HostExecutor {
             "profile": profile,
             "mailbox_issue": mailbox_issue(profile),
             "runtime_root": runtime_dir(profile),
-            "cloudflare_attached": profile == AgentProfile::Production
+            "cloudflare_attached": true
         }))
     }
 
@@ -563,7 +563,7 @@ impl HostExecutor {
             "profile": profile,
             "mailbox_issue": mailbox_issue(profile),
             "runtime_root": runtime_dir(profile),
-            "cloudflare_attached": profile == AgentProfile::Production
+            "cloudflare_attached": true
         }))
     }
 
@@ -626,7 +626,8 @@ impl HostExecutor {
                     "demo_acceptance": {
                         "runtime_root": DEMO_RUNTIME_ROOT,
                         "mailbox_issue": 234,
-                        "cloudflare_attached": false,
+                        "cloudflare_attached": true,
+                        "direct_transport_read_only": true,
                         "mutation_acceptance_explicit": true
                     },
                     "single_owner": true
@@ -913,6 +914,10 @@ const DEMO_ACCEPTANCE_AGENT_ARGS: &[&str] = &[
     "--mailbox-issue",
     DEMO_MAILBOX_ISSUE,
     "--demo-mutation-acceptance",
+    "--cloudflare-ws-url",
+    AGENT_CLOUDFLARE_WS_URL,
+    "--cloudflare-runtime-id",
+    AGENT_CLOUDFLARE_RUNTIME_ID,
 ];
 
 fn agent_args(profile: AgentProfile) -> &'static [&'static str] {
@@ -1497,7 +1502,8 @@ mod tests {
         assert!(args.contains(&"--root"));
         assert!(args.contains(&DEMO_RUNTIME_ROOT));
         assert!(args.contains(&DEMO_MAILBOX_ISSUE));
-        assert!(!args.contains(&"--cloudflare-ws-url"));
+        assert!(args.contains(&"--cloudflare-ws-url"));
+        assert!(args.contains(&"--cloudflare-runtime-id"));
         assert!(!args.contains(&AGENT_CLOUDFLARE_WS_URL));
         assert_eq!(mailbox_issue(AgentProfile::DemoAcceptance), 234);
         assert_eq!(
