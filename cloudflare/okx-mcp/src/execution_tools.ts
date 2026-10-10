@@ -169,6 +169,15 @@ function lineageInput(v: unknown): boolean {
     && exactKeys(v.decision_reference,["decision_time_ms","price","price_basis","price_policy_version"])
     && typeof v.decision_reference.price === "string";
 }
+export function executionProfilePermitsOperation(profile: string | undefined, operationType: unknown): boolean {
+  const mutation = [
+    "prepare_execution", "submit_prepared_execution",
+    "mutate_execution", "abort_reverse_execution",
+  ].includes(String(operationType));
+  // The profile is authenticated from a single Windows Hello, not MCP input.
+  return !mutation || profile === "demo_acceptance";
+}
+
 /** Return exactly one whitelisted native Rust AgentOperation, never arbitrary operation JSON. */
 export function buildExecutionOperation(args: Record<string, unknown>): Record<string, unknown> | null {
   if (!token(args.intent_id,16,128) || typeof args.action !== "string") return null;
