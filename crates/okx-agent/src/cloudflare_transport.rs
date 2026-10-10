@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 use crate::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
-    execution_runtime::ExecutionRuntime,
+    execution_runtime::{ExecutionRuntime, ExecutionRuntimeMode},
     market_bootstrap::MarketBootstrapper,
     query::{ObservationQueryContext, dispatch},
     research_session::ResearchSessionHandle,
@@ -342,11 +342,20 @@ async fn run_session(
                         )
                         .await?;
 
-                        if !request.operation.direct_transport_read_only() {
+                        // Explicit user-authorized Demo acceptance reuses the same
+                        // immutable Rust prepare/submit/mutate executor and policy.
+                        // Production is denied even if Worker/OAuth sends a write
+                        // through this otherwise authenticated read transport.
+                        let demo_allowed = config.runtime_profile == DirectRuntimeProfile::DemoAcceptance
+                            && context.execution.is_some_and(|execution| {
+                                execution.mode() == ExecutionRuntimeMode::DemoAcceptance
+                            })
+                            && request.operation.direct_transport_demo_execution();
+                        if !request.operation.direct_transport_read_only() && !demo_allowed {
                             let response = direct_rejection(
                                 &request.request_id,
                                 DIRECT_TRANSPORT_MUTATION_REJECTED,
-                                "mutation-capable operations are not accepted on the direct ChatGPT transport",
+                                "executor mutation requires a profile-verified Demo runtime and its existing Rust admission; production remains read-only",
                                 false,
                             );
                             send_frame(
