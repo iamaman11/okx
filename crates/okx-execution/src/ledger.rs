@@ -112,10 +112,14 @@ pub struct ExecutionRiskStop {
 
 fn validate_risk_stop(value: &ExecutionRiskStop) -> Result<(), ExecutionLedgerError> {
     if value.schema != EXECUTION_RISK_STOP_SCHEMA_V1 || value.stopped_at_ms == 0 {
-        return Err(ExecutionLedgerError::Corrupt("invalid durable risk-stop metadata"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "invalid durable risk-stop metadata",
+        ));
     }
     if value.reason.trim().is_empty() || value.reason.len() > 128 {
-        return Err(ExecutionLedgerError::Corrupt("invalid durable risk-stop reason"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "invalid durable risk-stop reason",
+        ));
     }
     Ok(())
 }
@@ -162,7 +166,15 @@ impl ExecutionLedgerStore {
         &self.path
     }
 
-    fn load(&self) -> Result<(BTreeMap<String, ExecutionLedgerEntry>, Option<ExecutionRiskStop>), ExecutionLedgerError> {
+    fn load(
+        &self,
+    ) -> Result<
+        (
+            BTreeMap<String, ExecutionLedgerEntry>,
+            Option<ExecutionRiskStop>,
+        ),
+        ExecutionLedgerError,
+    > {
         if !self.path.exists() {
             return Ok((BTreeMap::new(), None));
         }
@@ -182,7 +194,9 @@ impl ExecutionLedgerStore {
         }
         if let Some(stop) = &file.risk_stop {
             if file.schema != EXECUTION_LEDGER_SCHEMA_V6 {
-                return Err(ExecutionLedgerError::Corrupt("risk stop on legacy ledger schema"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "risk stop on legacy ledger schema",
+                ));
             }
             validate_risk_stop(stop)?;
         }
@@ -293,7 +307,11 @@ impl DurableExecutionLedger {
             store.save(&entries, risk_stop.as_ref())?;
         }
 
-        Ok(Self { store, entries, risk_stop })
+        Ok(Self {
+            store,
+            entries,
+            risk_stop,
+        })
     }
 
     /// Persist a one-way new-risk stop in the existing atomic execution ledger.
@@ -730,13 +748,19 @@ impl DurableExecutionLedger {
         mutation_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
-        let entry = self.get(intent_id)
+        let entry = self
+            .get(intent_id)
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
-        let mutation = entry.record.mutations.iter()
+        let mutation = entry
+            .record
+            .mutations
+            .iter()
             .find(|item| item.mutation_id == mutation_id)
-            .ok_or_else(|| ExecutionLedgerError::Transition(
-                ExecutionTransitionError::MutationNotFound(mutation_id.to_owned())
-            ))?;
+            .ok_or_else(|| {
+                ExecutionLedgerError::Transition(ExecutionTransitionError::MutationNotFound(
+                    mutation_id.to_owned(),
+                ))
+            })?;
         if mutation.kind == OrderMutationKind::Amend {
             self.require_new_risk_allowed(entry.record.plan.action)?;
         }
@@ -2071,23 +2095,39 @@ mod tests {
             let stop = ledger.stop_new_risk("account-limit", 102).expect("stop");
             assert_eq!(stop.stopped_at_ms, 102);
             assert_eq!(
-                ledger.stop_new_risk("cannot-reset-by-repeating", 103).expect("idempotent stop"),
+                ledger
+                    .stop_new_risk("cannot-reset-by-repeating", 103)
+                    .expect("idempotent stop"),
                 stop,
             );
             assert!(matches!(
                 ledger.begin_submission(intent_id, 104),
                 Err(ExecutionLedgerError::NewRiskStopped)
             ));
-            assert_eq!(ledger.get(intent_id).expect("entry").record.state, ExecutionState::Prepared);
+            assert_eq!(
+                ledger.get(intent_id).expect("entry").record.state,
+                ExecutionState::Prepared
+            );
         }
         let mut reopened = DurableExecutionLedger::open(store, 200).expect("reopen");
-        assert_eq!(reopened.risk_stop().expect("persisted stop").reason, "account-limit");
+        assert_eq!(
+            reopened.risk_stop().expect("persisted stop").reason,
+            "account-limit"
+        );
         assert!(matches!(
             reopened.begin_submission(intent_id, 201),
             Err(ExecutionLedgerError::NewRiskStopped)
         ));
-        assert!(reopened.require_new_risk_allowed(ExecutionAction::Close).is_ok());
-        assert!(reopened.require_new_risk_allowed(ExecutionAction::Reduce).is_ok());
+        assert!(
+            reopened
+                .require_new_risk_allowed(ExecutionAction::Close)
+                .is_ok()
+        );
+        assert!(
+            reopened
+                .require_new_risk_allowed(ExecutionAction::Reduce)
+                .is_ok()
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2109,7 +2149,9 @@ mod tests {
         fs::write(store.path(), serde_json::to_vec(&file).expect("encode")).expect("corrupt");
         assert!(matches!(
             DurableExecutionLedger::open(store, 200),
-            Err(ExecutionLedgerError::Corrupt("invalid durable risk-stop metadata"))
+            Err(ExecutionLedgerError::Corrupt(
+                "invalid durable risk-stop metadata"
+            ))
         ));
         let _ = fs::remove_dir_all(root);
     }
