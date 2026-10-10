@@ -24,7 +24,8 @@ use tokio::sync::Mutex;
 use crate::{
     AgentError, AgentResult,
     execution_preflight::{
-        ExecutorCredentialPreflight, evaluate_demo_executor_preflight_against_snapshot,
+        ExecutorCredentialPreflight, ExecutorPreflightSnapshot,
+        evaluate_demo_executor_preflight_against_snapshot,
         evaluate_executor_preflight_against_snapshot,
     },
 };
@@ -219,12 +220,15 @@ impl ExecutionRuntime {
 
     pub async fn submit_prepared_demo_authorized(
         &self,
-        preflight: &ExecutorCredentialPreflight,
+        preflight: &ExecutorPreflightSnapshot,
         intent_id: &str,
         timing: MutationTiming,
         observed_at_ms: u64,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !preflight.accepted {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance
+            || !preflight.accepted
+            || !preflight.credential.accepted
+        {
             self.executor.lock().await.disable_mutations();
             return Ok(None);
         }
@@ -473,13 +477,16 @@ impl ExecutionRuntime {
 
     pub async fn submit_order_mutation_demo_authorized(
         &self,
-        preflight: &ExecutorCredentialPreflight,
+        preflight: &ExecutorPreflightSnapshot,
         intent_id: &str,
         mutation_id: &str,
         timing: MutationTiming,
         observed_at_ms: u64,
     ) -> AgentResult<Option<Result<MutationSubmitDisposition, OrderExecutorError>>> {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !preflight.accepted {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance
+            || !preflight.accepted
+            || !preflight.credential.accepted
+        {
             self.executor.lock().await.disable_mutations();
             return Ok(None);
         }
@@ -534,13 +541,16 @@ impl ExecutionRuntime {
 
     pub async fn submit_protective_cleanup_demo_authorized(
         &self,
-        preflight: &ExecutorCredentialPreflight,
+        preflight: &ExecutorPreflightSnapshot,
         intent_id: &str,
         mutation_id: &str,
         timing: MutationTiming,
         observed_at_ms: u64,
     ) -> AgentResult<Option<Result<MutationSubmitDisposition, OrderExecutorError>>> {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !preflight.accepted {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance
+            || !preflight.accepted
+            || !preflight.credential.accepted
+        {
             self.executor.lock().await.disable_mutations();
             return Ok(None);
         }
@@ -595,8 +605,8 @@ mod tests {
         std::env::temp_dir().join(format!("okx-{label}-{}-{nonce}", process::id()))
     }
 
-    fn preflight(accepted: bool) -> ExecutorCredentialPreflight {
-        ExecutorCredentialPreflight {
+    fn preflight(accepted: bool) -> ExecutorPreflightSnapshot {
+        let credential = ExecutorCredentialPreflight {
             schema: crate::execution_preflight::EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1,
             accepted,
             observer_read_only: true,
@@ -611,7 +621,28 @@ mod tests {
             long_short_mode: true,
             subaccount: true,
             production_environment: false,
-        }
+        };
+        let clock = okx_api::ClockEvidenceSnapshot {
+            server_time_ms: 1_790_000_000_000,
+            local_midpoint_ms: 1_790_000_000_000,
+            offset_ms: 0,
+            round_trip_ms: 10,
+            age_ms: 0,
+            max_abs_offset_ms: 5_000,
+            max_round_trip_ms: 2_000,
+            max_age_ms: 2_000,
+            accepted: true,
+        };
+        let rate = AccountRateLimitEvidence {
+            schema: okx_api::ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V3,
+            source: okx_api::AccountRateLimitSource::DemoBaseFallback,
+            current_orders_per_2s: okx_api::DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S,
+            next_orders_per_2s: None,
+            fill_ratio: None,
+            main_fill_ratio: None,
+            updated_at_ms: None,
+        };
+        ExecutorPreflightSnapshot::new(credential, clock, rate, RateBudget::new().snapshot())
     }
 
     fn timing() -> MutationTiming {
@@ -688,6 +719,32 @@ mod tests {
             MutationAuthority::Disabled
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn rejected_demo_preflight_does_not_submit_or_touch_ledger() {
+        let root = temp_root("demo-submit-rejected-preflight");
+        fs::create_dir_all(&root).expect("root");
+        let runtime = ExecutionRuntime::new_demo_acceptance(
+            &root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            1,
+            RateBudget::new(),
+        )
+        .expect("demo runtime");
+        let missing_intent = "intent_preflight_rejected_20261011";
+        let result = runtime
+            .submit_prepared_demo_authorized(&preflight(false), missing_intent, timing(), 2)
+            .await
+            .expect("fail-closed before any gateway send");
+        assert!(result.is_none());
+        assert!(runtime.entry(missing_intent).await.is_none());
+        assert_eq!(
+            runtime.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
         let _ = fs::remove_dir_all(root);
     }
 

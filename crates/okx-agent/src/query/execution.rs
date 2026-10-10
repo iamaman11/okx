@@ -960,6 +960,22 @@ async fn cancel_mutation_admission(
             preflight_rejected(request, generated_at),
         )));
     }
+    let account_rate_limit = match execution.account_rate_limit_evidence().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(PreMutationAdmissionResult::Response(Box::new(
+                failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    EXECUTION_PREFLIGHT_UNAVAILABLE_CODE,
+                    error.to_string(),
+                    true,
+                ),
+            )));
+        }
+    };
+    let rate_budget = execution.rate_budget_snapshot();
 
     let clock = match execution.clock_evidence().await {
         Ok(value) => value,
@@ -991,10 +1007,23 @@ async fn cancel_mutation_admission(
             )));
         }
     };
-    Ok(PreMutationAdmissionResult::Ready(PreMutationAdmission {
+    let verified = crate::execution_preflight::ExecutorPreflightSnapshot::new(
         preflight,
-        timing,
-    }))
+        clock.snapshot(),
+        account_rate_limit,
+        rate_budget,
+    );
+    if !verified.accepted {
+        return Ok(PreMutationAdmissionResult::Response(Box::new(
+            preflight_rejected(request, generated_at),
+        )));
+    }
+    Ok(PreMutationAdmissionResult::Ready(Box::new(
+        PreMutationAdmission {
+            preflight: verified,
+            timing,
+        },
+    )))
 }
 
 async fn mutate_execution(
@@ -1467,12 +1496,12 @@ async fn cancel_owned_protection(
 }
 
 struct PreMutationAdmission {
-    preflight: crate::execution_preflight::ExecutorCredentialPreflight,
+    preflight: crate::execution_preflight::ExecutorPreflightSnapshot,
     timing: MutationTiming,
 }
 
 enum PreMutationAdmissionResult {
-    Ready(PreMutationAdmission),
+    Ready(Box<PreMutationAdmission>),
     Response(Box<AgentResponse>),
 }
 
@@ -1817,8 +1846,27 @@ async fn pre_mutation_admission(
         Err(error) => return Err(error),
     };
 
-    // Venue REST evidence can take long enough to consume the clock-evidence age budget.
-    // Sample exchange time only after all pre-mutation venue I/O is complete.
+    // G2: the same accepted rate+credential+clock contract as executor_preflight
+    // must hold on the actual mutation path, not only on its read-only probe.
+    // Read exchange rate evidence before the FINAL time sample so a slow REST
+    // rate lookup cannot consume the mutation TTL.
+    let account_rate_limit = match execution.account_rate_limit_evidence().await {
+        Ok(value) => value,
+        Err(error) => {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_PREFLIGHT_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+    let rate_budget = execution.rate_budget_snapshot();
+
+    // Venue and rate REST evidence can consume the clock-evidence age budget.
+    // Sample exchange time only after all pre-mutation REST I/O is complete.
     let clock = match execution.clock_evidence().await {
         Ok(value) => value,
         Err(error) => {
@@ -1846,6 +1894,15 @@ async fn pre_mutation_admission(
             ));
         }
     };
+    let verified = crate::execution_preflight::ExecutorPreflightSnapshot::new(
+        preflight,
+        clock.snapshot(),
+        account_rate_limit,
+        rate_budget,
+    );
+    if !verified.accepted {
+        admission_response!(preflight_rejected(request, generated_at));
+    }
     if let Err(error) = revalidate_venue_execution(&plan, &rules, &venue, timing.exp_time_ms()) {
         admission_response!(validation_failure(request, generated_at, error));
     }
@@ -1896,10 +1953,12 @@ async fn pre_mutation_admission(
         ));
     }
 
-    Ok(PreMutationAdmissionResult::Ready(PreMutationAdmission {
-        preflight,
-        timing,
-    }))
+    Ok(PreMutationAdmissionResult::Ready(Box::new(
+        PreMutationAdmission {
+            preflight: verified,
+            timing,
+        },
+    )))
 }
 
 enum FreshAccount {
@@ -2000,7 +2059,7 @@ fn preflight_rejected(request: &AgentRequest, generated_at: &str) -> AgentRespon
         generated_at,
         AgentResponseStatus::Rejected,
         EXECUTION_PREFLIGHT_REJECTED_CODE,
-        "executor credential/account preflight did not satisfy the production safety contract"
+        "credential, clock or account-rate preflight did not satisfy current runtime safety contract"
             .to_owned(),
         false,
     )
