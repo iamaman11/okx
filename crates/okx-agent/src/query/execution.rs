@@ -69,16 +69,29 @@ fn daily_history_complete_at(
     {
         return false;
     }
-    let mut seen = false;
+    // The daily PnL source merges both derivative position histories.
+    // An absent or duplicate scope cannot authorize a permanent account stop.
+    let mut swap_complete = false;
+    let mut futures_complete = false;
     for row in coverage {
-        if row.resource.starts_with("positions_history:") {
-            seen = true;
-            if !row.complete_within_bound {
-                return false;
+        match row.resource.as_str() {
+            "positions_history:SWAP" => {
+                if swap_complete || !row.complete_within_bound {
+                    return false;
+                }
+                swap_complete = true;
             }
+            "positions_history:FUTURES" => {
+                if futures_complete || !row.complete_within_bound {
+                    return false;
+                }
+                futures_complete = true;
+            }
+            unknown if unknown.starts_with("positions_history:") => return false,
+            _ => {}
         }
     }
-    seen
+    swap_complete && futures_complete
 }
 
 pub(super) async fn dispatch(
@@ -2521,6 +2534,37 @@ mod tests {
             Some(&until),
             start + 1,
         ));
+        // Neither a single complete scope nor a duplicate may make the UTC
+        // daily-loss observation authoritative for an irreversible stop.
+        for incomplete_scopes in [
+            vec![row("positions_history:SWAP", true)],
+            vec![row("positions_history:FUTURES", true)],
+            vec![
+                row("positions_history:SWAP", true),
+                row("positions_history:FUTURES", false),
+            ],
+            vec![
+                row("positions_history:SWAP", false),
+                row("positions_history:FUTURES", true),
+            ],
+            vec![
+                row("positions_history:SWAP", true),
+                row("positions_history:SWAP", true),
+                row("positions_history:FUTURES", true),
+            ],
+            vec![
+                row("positions_history:SWAP", true),
+                row("positions_history:FUTURES", true),
+                row("positions_history:OPTIONS", true),
+            ],
+        ] {
+            assert!(!daily_history_complete_at(
+                &incomplete_scopes,
+                Some(&from),
+                Some(&until),
+                start + 1,
+            ));
+        }
         assert!(!daily_history_complete_at(
             &[row("orders_history:SWAP", true)],
             Some(&from),
