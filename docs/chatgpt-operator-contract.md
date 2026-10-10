@@ -12,7 +12,7 @@ The goal is to keep queries attributable, context-efficient and fail-closed whil
 - Cloudflare owns authentication/rendezvous/correlation only; Windows/Rust remains the product authority.
 - The repository is public, so private account/risk DATA must never be published as plaintext.
 - The GitHub DATA cryptographic contract remains X25519 -> HKDF-SHA256 -> ChaCha20-Poly1305.
-- Every new product capability must be black-box accepted through the connected Cloudflare MCP surface first. A healthy runtime or newer Worker contract is not enough; the capability itself must be callable. If the ChatGPT tool list is stale, refresh tools and rerun the primary call before using GitHub fallback as parity evidence.
+- Every **read-only** product capability exposed on the Cloudflare primary must be black-box accepted through the actual connected MCP tool. A healthy runtime or newer Worker contract is not enough; refresh tools if stale and re-run that specific primary operation before treating GitHub as parity evidence. **Stage-4C Demo exchange mutations** are a deliberately separate narrow physical acceptance path: the current Cloudflare surface intentionally rejects writes, so the existing encrypted GitHub DATA #234 may exercise the *same Rust executor* with fresh Demo-only admission and independent venue/ledger reconciliation. This exception is **not** acceptance of a primary read-only capability, a new mutation MCP endpoint, a platform-refusal bypass, or real-money write authority.
 
 ## Production-intended operator contract; Demo as venue acceptance, not product fork
 
