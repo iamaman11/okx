@@ -52,6 +52,37 @@ pub const EXECUTION_RECONCILIATION_FAILED_CODE: &str = "EXECUTION_RECONCILIATION
 pub const EXECUTION_RECONCILIATION_UNAVAILABLE_CODE: &str = "EXECUTION_RECONCILIATION_UNAVAILABLE";
 pub const EXECUTION_MUTATION_UNSAFE_CODE: &str = "EXECUTION_MUTATION_UNSAFE";
 
+fn daily_history_complete_at(
+    coverage: &[okx_observation::AccountHistoryCoverage],
+    day_start: Option<&str>,
+    day_end: Option<&str>,
+    observed_at_ms: u64,
+) -> bool {
+    let (Some(start), Some(end)) = (day_start, day_end) else {
+        return false;
+    };
+    let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
+        return false;
+    };
+    if end.checked_sub(start) != Some(86_400_000)
+        || observed_at_ms < start
+        || observed_at_ms >= end
+    {
+        return false;
+    }
+    let mut seen = false;
+    for row in coverage {
+        if row.resource.starts_with("positions_history:") {
+            seen = true;
+            if !row.complete_within_bound {
+                return false;
+            }
+        }
+    }
+    seen
+}
+
+
 pub(super) async fn dispatch(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
