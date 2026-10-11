@@ -229,8 +229,9 @@ impl PrivateRuntimeState {
         }
     }
 
-    pub(super) fn observe_algo_event(&mut self, received_at_ms: u64) {
-        self.last_inbound_ms = Some(received_at_ms);
+    pub(super) fn observe_algo_event(&mut self, _received_at_ms: u64) {
+        // Do not advance private account/positions freshness with business
+        // algo traffic. Their connection lifetimes and timestamps are separate.
         if let Some(next) = self.algo_event_sequence.checked_add(1) {
             self.algo_event_sequence = next;
         } else {
@@ -396,7 +397,9 @@ mod tests {
         state.acknowledge_algo_subscription(&arg);
         let cursor = state.algo_convergence_cursor().expect("native algo cursor");
         assert_eq!(state.algo_convergence_unchanged(cursor), Ok(()));
+        let private_last_inbound = state.status().last_inbound_ms;
         state.observe_algo_event(12);
+        assert_eq!(state.status().last_inbound_ms, private_last_inbound);
         assert_eq!(
             state.algo_convergence_unchanged(cursor),
             Err(PrivateConvergenceError::AlgoChanged)
