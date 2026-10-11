@@ -707,7 +707,10 @@ pub(crate) async fn assemble_account_snapshot(
                     warnings: vec![ACCOUNT_WS_GENERATION_CHANGED_WARNING.to_owned()],
                 });
             }
-            Err(PrivateConvergenceError::JournalGap) => {
+            // A native algo event can never improve account convergence.
+            // Treat it as an unusable fence even if encountered here.
+            Err(PrivateConvergenceError::AlgoChanged)
+            | Err(PrivateConvergenceError::JournalGap) => {
                 return Ok(AssembledAccountSnapshot {
                     snapshot: rest,
                     quality: DataQuality::Degraded,

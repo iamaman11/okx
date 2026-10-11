@@ -8,6 +8,8 @@ pub enum PrivateChannel {
     Account,
     Positions,
     Orders,
+    #[serde(rename = "orders-algo")]
+    OrdersAlgo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +56,16 @@ impl PrivateSubscription {
     pub fn positions_any() -> Self {
         Self {
             channel: PrivateChannel::Positions,
+            ccy: None,
+            instrument_type: Some("ANY".to_owned()),
+            instrument_family: None,
+            instrument_id: None,
+        }
+    }
+
+    pub fn orders_algo_any() -> Self {
+        Self {
+            channel: PrivateChannel::OrdersAlgo,
             ccy: None,
             instrument_type: Some("ANY".to_owned()),
             instrument_family: None,
@@ -131,7 +143,7 @@ const EVENT_ONLY_EXTRA_PARAMS: &str = r#"{"updateInterval":"0"}"#;
 fn subscription_extra_params(subscription: &PrivateSubscription) -> Option<&'static str> {
     match subscription.channel {
         PrivateChannel::Account | PrivateChannel::Positions => Some(EVENT_ONLY_EXTRA_PARAMS),
-        PrivateChannel::Orders => None,
+        PrivateChannel::Orders | PrivateChannel::OrdersAlgo => None,
     }
 }
 
@@ -269,6 +281,24 @@ mod tests {
             EVENT_ONLY_EXTRA_PARAMS
         );
         assert!(unsubscribe["args"][2].get("extraParams").is_none());
+    }
+
+    #[test]
+    fn native_business_algo_channel_requires_exact_typed_subscription() {
+        let subscriptions = [PrivateSubscription::orders_algo_any()];
+        let payload = private_subscribe_payload(&subscriptions).expect("subscribe");
+        let parsed: Value = serde_json::from_str(&payload).expect("json");
+        assert_eq!(parsed["args"][0]["channel"], "orders-algo");
+        assert_eq!(parsed["args"][0]["instType"], "ANY");
+        assert!(parsed["args"][0].get("extraParams").is_none());
+        assert!(matches!(
+            parse_private_text(
+                r#"{"arg":{"channel":"orders-algo","instType":"ANY"},"data":[{"algoId":"100","state":"canceled"}]}"#
+            ).expect("algo event"),
+            PrivateInboundMessage::Data {
+                arg: PrivateWsArg { channel: PrivateChannel::OrdersAlgo, .. }, data
+            } if data.len() == 1
+        ));
     }
 
     #[test]

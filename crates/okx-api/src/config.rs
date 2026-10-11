@@ -58,6 +58,19 @@ impl OkxEnvironment {
         }
     }
 
+    /// Algo lifecycle events are published on the authenticated business socket,
+    /// not on the ordinary account/positions/orders private socket.
+    pub const fn business_ws_url(self) -> &'static str {
+        match (self.region, self.demo) {
+            (Region::Global, false) => "wss://ws.okx.com/ws/v5/business",
+            (Region::Global, true) => "wss://wspap.okx.com/ws/v5/business",
+            (Region::Eea, false) => "wss://wseea.okx.com/ws/v5/business",
+            (Region::Eea, true) => "wss://wseeapap.okx.com/ws/v5/business",
+            (Region::UsAu, false) => "wss://wsus.okx.com/ws/v5/business",
+            (Region::UsAu, true) => "wss://wsuspap.okx.com/ws/v5/business",
+        }
+    }
+
     pub const fn private_ws_url(self) -> &'static str {
         match (self.region, self.demo) {
             (Region::Global, false) => "wss://ws.okx.com/ws/v5/private",
