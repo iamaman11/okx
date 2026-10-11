@@ -2705,7 +2705,9 @@ mod tests {
         let mut record = ExecutionRecord::new(plan);
         record.begin_submission().expect("begin single parent");
         let parent_order_id = format!("8{algo_id}");
-        record.acknowledge(parent_order_id.clone()).expect("parent ACK");
+        record
+            .acknowledge(parent_order_id.clone())
+            .expect("parent ACK");
         record
             .reconcile_found_with_protection(
                 parent_order_id,
@@ -2851,8 +2853,16 @@ mod tests {
         assert!(verify(&duplicate_parent, &account, &inventory, &details).is_err());
         let mut duplicate_client = records.clone();
         let first_algo_client = duplicate_client[0]
-            .protection.as_ref().unwrap().algo_client_order_id.clone();
-        duplicate_client[1].protection.as_mut().unwrap().algo_client_order_id = first_algo_client;
+            .protection
+            .as_ref()
+            .unwrap()
+            .algo_client_order_id
+            .clone();
+        duplicate_client[1]
+            .protection
+            .as_mut()
+            .unwrap()
+            .algo_client_order_id = first_algo_client;
         assert!(verify(&duplicate_client, &account, &inventory, &details).is_err());
         let mut missing_leg = records.clone();
         missing_leg.pop();
