@@ -1235,6 +1235,16 @@ async fn cancel_owned_protection(
             PreMutationAdmissionResult::Ready(value) => value,
             PreMutationAdmissionResult::Response(value) => return Ok(*value),
         };
+    // Fence all fresh REST/WS and algo reads with the same private WS cursor.
+    // Local flat recovery cannot retire an unknown algo based on a snapshot
+    // observed before a competing exchange fill arrived.
+    let Some(private_ws) = context.private_ws else {
+        return Ok(account_not_fresh(request, generated_at));
+    };
+    let cursor = match private_ws.convergence_cursor().await {
+        Ok(value) => value,
+        Err(_) => return Ok(account_not_fresh(request, generated_at)),
+    };
     // Re-read the account after admission: flat means no exchange positions,
     // ordinary pending orders, or non-owning residual risk. This is Demo only.
     let account = match fresh_account(request, context, generated_at).await? {
@@ -1293,7 +1303,16 @@ async fn cancel_owned_protection(
             true,
         ));
     }
-    let Some(protection) = entry.record.protection.as_ref() else {
+    match private_ws.convergence_window(cursor).await {
+        Ok(window) if window.events.is_empty() => {}
+        _ => return Ok(failure_response(
+            request, generated_at, AgentResponseStatus::Rejected,
+            EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+            "private WS changed or lost bounded account events during flat and OCO observation; no cleanup or resend".to_owned(),
+            true,
+        )),
+    }
+    let Some(protection) = entry.record.protection.clone() else {
         return Ok(failure_response(
             request,
             generated_at,
@@ -1305,6 +1324,34 @@ async fn cancel_owned_protection(
     };
     let owned_algo = protection.algo_order_id.clone().unwrap_or_default();
     let owned_client = protection.algo_client_order_id.clone();
+
+    // The current request is an independently fresh, exact-UID FLAT proof,
+    // with zero ordinary orders and COMPLETE zero conditional/OCO inventory.
+    // Retire any size-amend SUBMITTING/UNKNOWN/ACK without resending a POST;
+    // only then use the existing durable zero-OCO cleanup transition.
+    if let Some(amend) = protection.size_amend.as_ref()
+        && !matches!(
+            amend.state,
+            okx_execution::ProtectiveSizeAmendState::Confirmed
+                | okx_execution::ProtectiveSizeAmendState::RetiredAbsent
+        )
+    {
+        if inventory.rows != 0 {
+            return Ok(failure_response(
+                request, generated_at, AgentResponseStatus::Rejected,
+                EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+                "unresolved protective resize still has pending exchange OCO; no repeat POST or cleanup allowed".to_owned(),
+                true,
+            ));
+        }
+        entry = execution
+            .retire_protective_size_amend_absent(
+                intent_id,
+                &amend.mutation_id,
+                utc_now_ms().max(entry.updated_at_ms),
+            )
+            .await?;
+    }
 
     if let Some(previous) = protection.cleanup.as_ref() {
         if previous.mutation_id != mutation_id {
@@ -2865,6 +2912,16 @@ mod tests {
                     algo_order_id_present: value.algo_order_id.is_some(),
                     covered_size: value.covered_size.clone(),
                     failure_code: value.failure_code.clone(),
+                    size_amend: value.size_amend.as_ref().map(|amend| {
+                        okx_execution::ProtectiveSizeAmendStatus {
+                            mutation_id: amend.mutation_id.clone(),
+                            state: amend.state,
+                            previous_size: amend.previous_size.clone(),
+                            target_size: amend.target_size.clone(),
+                            exchange_effect_confirmed: amend.state
+                                == okx_execution::ProtectiveSizeAmendState::Confirmed,
+                        }
+                    }),
                 }
             }),
             submission_timing: entry
