@@ -3330,13 +3330,12 @@ mod tests {
                 response: Mutex::new(None),
             };
             let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
-            assert!(matches!(
+            assert!(
                 executor
                     .ledger()
                     .entries()
-                    .find(|record| record.record.plan.intent_id == parent.plan.intent_id),
-                Some(_)
-            ));
+                    .any(|record| record.record.plan.intent_id == parent.plan.intent_id)
+            );
             executor
                 .prepare_protected_add_hedge_fenced(
                     plan.clone(),
