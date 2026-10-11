@@ -1526,6 +1526,8 @@ fn validate_managed_protective_coverage(
     let mut short = Decimal::ZERO;
     let mut matched_amend = amended.is_none();
     let mut seen_algos = std::collections::BTreeSet::new();
+    let mut seen_algo_clients = std::collections::BTreeSet::new();
+    let mut seen_parent_orders = std::collections::BTreeSet::new();
     let mut active_count = 0usize;
     for record in records {
         let Some(link) = record.protection.as_ref() else {
@@ -1571,7 +1573,12 @@ fn validate_managed_protective_coverage(
                 .ok_or_else(denied)?
         };
         let algo_id = link.algo_order_id.as_deref().ok_or_else(denied)?;
-        if size <= Decimal::ZERO || !seen_algos.insert(algo_id) {
+        let parent_id = record.order_id.as_deref().ok_or_else(denied)?;
+        if size <= Decimal::ZERO
+            || !seen_algos.insert(algo_id)
+            || !seen_algo_clients.insert(link.algo_client_order_id.as_str())
+            || !seen_parent_orders.insert(parent_id)
+        {
             return Err(denied());
         }
         // There must be exactly one independently read venue detail AND one
@@ -2697,10 +2704,11 @@ mod tests {
         plan.client_order_id = crate::derive_client_order_id(intent);
         let mut record = ExecutionRecord::new(plan);
         record.begin_submission().expect("begin single parent");
-        record.acknowledge("987654321098").expect("parent ACK");
+        let parent_order_id = format!("8{algo_id}");
+        record.acknowledge(parent_order_id.clone()).expect("parent ACK");
         record
             .reconcile_found_with_protection(
-                "987654321098",
+                parent_order_id,
                 ExchangeOrderState::Filled,
                 Some(ProtectiveOrderResolution::Active {
                     algo_order_id: algo_id.to_owned(),
@@ -2837,6 +2845,13 @@ mod tests {
         let mut uncertain_parent = records.clone();
         uncertain_parent[2].state = ExecutionState::UnknownSubmission;
         assert!(verify(&uncertain_parent, &account, &inventory, &details).is_err());
+        let mut duplicate_parent = records.clone();
+        duplicate_parent[1].order_id = duplicate_parent[0].order_id.clone();
+        assert!(verify(&duplicate_parent, &account, &inventory, &details).is_err());
+        let mut duplicate_client = records.clone();
+        duplicate_client[1].protection.as_mut().unwrap().algo_client_order_id =
+            duplicate_client[0].protection.as_ref().unwrap().algo_client_order_id.clone();
+        assert!(verify(&duplicate_client, &account, &inventory, &details).is_err());
         let mut missing_leg = records.clone();
         missing_leg.pop();
         assert!(verify(&missing_leg, &account, &inventory, &details).is_err());
