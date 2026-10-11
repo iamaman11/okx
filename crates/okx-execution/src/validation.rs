@@ -1420,6 +1420,20 @@ mod tests {
         assert_eq!(plan.action, ExecutionAction::Add);
         assert_eq!(plan.side, OrderSide::Buy);
         assert!(plan.open_risk.is_some());
+
+        // A position's generation can advance between two independently
+        // FRESH reads. Do not keep an old generation; revalidate the complete
+        // plan against the second fenced snapshot and bind that generation.
+        account.account_generation = "new-fresh-live-position-generation".to_owned();
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, Some(&candidate)),
+            Err(ExecutionValidationError::AccountGenerationMismatch)
+        );
+        intent.expected_account_generation = account.account_generation.clone();
+        let refreshed = prepare_execution(&intent, &rules, &account, Some(&candidate))
+            .expect("freshly fenced ADD is valid after generation advances");
+        assert_eq!(refreshed.account_generation, account.account_generation);
+        assert_eq!(refreshed.action, ExecutionAction::Add);
     }
 
     #[test]
