@@ -1162,17 +1162,26 @@ where
         };
         validate_protective_algo(record, &algo)?;
 
+        // A proved size amendment changes the effective risk protection of a
+        // terminal parent without changing its historical parent fill size.
+        // UNKNOWN/ACKNOWLEDGED amendments never authorize new coverage claims.
+        let expected_size = match protection.size_amend.as_ref() {
+            Some(amend) if amend.state == ProtectiveSizeAmendState::Confirmed => {
+                Decimal::from_str(&amend.target_size)
+                    .map_err(|_| OrderExecutorError::ProtectionIdentityMismatch)?
+            }
+            _ => filled,
+        };
+
         match algo.state.as_str() {
             "live" | "effective" | "partially_effective" => {
-                // A recognized algoId and valid stop prices do not prove that
-                // the exchange has protection for THIS filled size/side.
-                validate_effective_protective_leg(record, &algo, filled)?;
+                validate_effective_protective_leg(record, &algo, expected_size)?;
                 if algo.algo_order_id.trim().is_empty() {
                     return Err(OrderExecutorError::ProtectionIdentityMismatch);
                 }
                 Ok(Some(ProtectiveOrderResolution::Active {
                     algo_order_id: algo.algo_order_id,
-                    covered_size: filled.normalize().to_string(),
+                    covered_size: expected_size.normalize().to_string(),
                 }))
             }
             "canceled" => Ok(Some(ProtectiveOrderResolution::Failed {
@@ -2200,6 +2209,42 @@ mod tests {
             )
             .expect("active");
         (root, ledger, entry.record)
+    }
+
+    #[tokio::test]
+    async fn independently_confirmed_resize_changes_ongoing_parent_protection_readback_size() {
+        let (root, mut ledger, record) = resize_ledger("resize-reconcile-parent");
+        let intent = record.plan.intent_id.clone();
+        let mid = "resize_reconcile_01234567";
+        ledger.prepare_protective_size_amend(&intent, mid, "0.5", 105)
+            .expect("prepare");
+        ledger.begin_protective_size_amend(&intent, mid, 106).expect("submit");
+        ledger.mark_protective_size_amend_unknown(&intent, mid, 107)
+            .expect("uncertain");
+        let unresolved = ledger.get(&intent).unwrap().record.clone();
+        let bad_gateway = ProtectiveLookupGateway::new(Ok(resize_algo(&record, "0.5")));
+        let bad_executor = OrderExecutor::enabled_for_test(ledger, bad_gateway);
+        let mut parent_order = order_details(&record.plan, "filled");
+        parent_order.accumulated_fill_size = "1".to_owned();
+        assert!(matches!(
+            bad_executor.protection_resolution(&unresolved, &parent_order, ExchangeOrderState::Filled).await,
+            Err(OrderExecutorError::ProtectionIdentityMismatch)
+        ), "UNKNOWN shrink cannot be declared active/reconciled from order readback alone");
+        let mut ledger = bad_executor.ledger;
+        ledger.confirm_protective_size_amend(&intent, mid, 108)
+            .expect("simulate independently proven account + algo size");
+        let confirmed = ledger.get(&intent).unwrap().record.clone();
+        let gateway = ProtectiveLookupGateway::new(Ok(resize_algo(&record, "0.5")));
+        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        assert_eq!(
+            executor.protection_resolution(&confirmed, &parent_order, ExchangeOrderState::Filled)
+                .await.expect("parent historical fill reconciles with resized live protection"),
+            Some(ProtectiveOrderResolution::Active {
+                algo_order_id: "123456789012".to_owned(),
+                covered_size: "0.5".to_owned(),
+            })
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
