@@ -747,30 +747,37 @@ mod tests {
         // implicit empty ledger from a newly named file. No file is rewritten.
         let marker = b"{intentional-corrupt-existing-ledger}";
         fs::write(&production_path, marker).unwrap();
-        assert!(ExecutionRuntime::new(
-            &base,
-            OkxEnvironment::new(Region::Global, false),
-            credentials(),
-            100,
-            RateBudget::new(),
-        ).is_err());
+        assert!(
+            ExecutionRuntime::new(
+                &base,
+                OkxEnvironment::new(Region::Global, false),
+                credentials(),
+                100,
+                RateBudget::new(),
+            )
+            .is_err()
+        );
         let demo = ExecutionRuntime::new_demo_acceptance(
             &demo_root,
             OkxEnvironment::new(Region::Global, true),
             credentials(),
             100,
             RateBudget::new(),
-        ).expect("different accepted Demo root");
+        )
+        .expect("different accepted Demo root");
         assert_eq!(demo.mode(), ExecutionRuntimeMode::DemoAcceptance);
         assert!(demo_path.exists() == false);
         fs::write(&demo_path, marker).unwrap();
-        assert!(ExecutionRuntime::new_demo_acceptance(
-            &demo_root,
-            OkxEnvironment::new(Region::Global, true),
-            credentials(),
-            101,
-            RateBudget::new(),
-        ).is_err());
+        assert!(
+            ExecutionRuntime::new_demo_acceptance(
+                &demo_root,
+                OkxEnvironment::new(Region::Global, true),
+                credentials(),
+                101,
+                RateBudget::new(),
+            )
+            .is_err()
+        );
         assert_eq!(fs::read(&production_path).unwrap(), marker);
         assert_eq!(fs::read(&demo_path).unwrap(), marker);
         drop(demo);
