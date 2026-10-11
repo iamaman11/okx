@@ -2022,6 +2022,63 @@ mod tests {
     }
 
     #[test]
+    fn flat_and_independently_absent_oco_retires_unknown_resize_without_replaying_post() {
+        let root = temp_root("protection-flat-resize-recovery");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let parent = "intent_flat_oco_recovery_012345";
+        let resize = "resize_unknown_flat_01234567";
+        let cleanup = "cleanup_after_flat_01234567";
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("ledger");
+        ledger.prepare(protected_plan(parent), 101).expect("prepare");
+        ledger.begin_submission(parent, 102).expect("submit");
+        ledger.acknowledge(parent, "parent123", 103).expect("ack");
+        ledger.reconcile_found_with_resolutions(
+            parent, "parent123", ExchangeOrderState::Filled,
+            OrderMutationResolution::Pending,
+            Some(ProtectiveOrderResolution::Active {
+                algo_order_id: "123456789012".to_owned(),
+                covered_size: "1".to_owned(),
+            }), 104,
+        ).expect("active OCO");
+        ledger.prepare_protective_size_amend(parent, resize, "0.5", 105)
+            .expect("prepared");
+        ledger.begin_protective_size_amend(parent, resize, 106)
+            .expect("SUBMITTING before crash");
+        drop(ledger);
+
+        let mut reopened = DurableExecutionLedger::open(store.clone(), 200).expect("reopen");
+        assert!(reopened.begin_protective_size_amend(parent, resize, 201).is_err(),
+            "never replay ambiguous exchange POST");
+        assert!(reopened.prepare_protective_cleanup(parent, cleanup, 202).is_err(),
+            "UNKNOWN resize forbids normal cancellation");
+        // Agent may call this only after independently observed exact-UID FLAT
+        // and complete zero conditional/OCO inventory under stable WS cursor.
+        let retired = reopened.retire_protective_size_amend_absent(parent, resize, 203)
+            .expect("durable local retirement");
+        assert_eq!(
+            retired.record.protection.as_ref().unwrap().size_amend.as_ref().unwrap().state,
+            ProtectiveSizeAmendState::RetiredAbsent
+        );
+        assert!(reopened.begin_protective_size_amend(parent, resize, 204).is_err());
+        reopened.prepare_protective_cleanup(parent, cleanup, 205)
+            .expect("PREPARED without send");
+        let flat = reopened.confirm_protective_cleanup_absent(parent, cleanup, 206)
+            .expect("independent zero OCO scope");
+        assert_eq!(flat.record.protection.as_ref().unwrap().status,
+            ProtectiveOrderStatus::CleanedUp);
+        assert!(reopened.retire_protective_size_amend_absent(parent, resize, 207).is_err());
+        drop(reopened);
+        let recovered = DurableExecutionLedger::open(store, 300).expect("reopen after terminal");
+        let link = recovered.get(parent).unwrap().record.protection.as_ref().unwrap();
+        assert_eq!(link.size_amend.as_ref().unwrap().state,
+            ProtectiveSizeAmendState::RetiredAbsent);
+        assert_eq!(link.cleanup.as_ref().unwrap().state,
+            ProtectiveCleanupState::ConfirmedAbsent);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn protective_cleanup_unknown_persists_and_blocks_replay_after_restart() {
         let root = temp_root("protective-cleanup-unknown");
         let _ = fs::remove_dir_all(&root);
