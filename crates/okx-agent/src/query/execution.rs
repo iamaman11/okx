@@ -869,11 +869,18 @@ async fn executor_preflight(
         account_rate_limit,
         rate_budget,
     );
+    // This bounded readout does not change the trading admission contract.
+    // In particular an algo ACK does not prove an atomic exchange operation.
+    let private_ws = match context.private_ws {
+        Some(handle) => Some(handle.status().await),
+        None => None,
+    };
+    let readout = crate::execution_preflight::ExecutorPreflightReadout::new(evidence, private_ws);
     Ok(completed(
         request,
         generated_at,
-        crate::execution_preflight::EXECUTOR_PREFLIGHT_SCHEMA_V3,
-        serde_json::to_value(evidence)?,
+        crate::execution_preflight::EXECUTOR_PREFLIGHT_SCHEMA_V4,
+        serde_json::to_value(readout)?,
     ))
 }
 

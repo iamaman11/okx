@@ -9,6 +9,7 @@ use serde::Serialize;
 pub const EXECUTOR_CREDENTIAL_PREFLIGHT_SCHEMA_V1: &str = "okx.executor-credential-preflight/v1";
 pub const EXECUTOR_PREFLIGHT_SCHEMA_V2: &str = "okx.executor-preflight/v2";
 pub const EXECUTOR_PREFLIGHT_SCHEMA_V3: &str = "okx.executor-preflight/v3";
+pub const EXECUTOR_PREFLIGHT_SCHEMA_V4: &str = "okx.executor-preflight/v4";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutorCredentialPreflight {
@@ -36,6 +37,44 @@ pub struct ExecutorPreflightSnapshot {
     pub clock: ClockEvidenceSnapshot,
     pub account_rate_limit: AccountRateLimitEvidence,
     pub rate_budget: RateBudgetSnapshot,
+}
+
+/// Read-only operator evidence. This is not a new admission path:
+/// a healthy local algo event stream does not provide exchange-side
+/// atomicity, nor does it exclude other trade API credentials.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorPreflightReadout {
+    #[serde(flatten)]
+    pub preflight: ExecutorPreflightSnapshot,
+    pub protected_oco: ProtectedOcoReadiness,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProtectedOcoReadiness {
+    pub event_monitor_ready: bool,
+    pub exchange_atomicity_proven: bool,
+    pub exclusive_account_writer_proven: bool,
+    pub private_ws: Option<okx_runtime::PrivateWsStatus>,
+}
+
+impl ExecutorPreflightReadout {
+    pub fn new(
+        mut preflight: ExecutorPreflightSnapshot,
+        private_ws: Option<okx_runtime::PrivateWsStatus>,
+    ) -> Self {
+        preflight.schema = EXECUTOR_PREFLIGHT_SCHEMA_V4;
+        Self {
+            preflight,
+            protected_oco: ProtectedOcoReadiness {
+                event_monitor_ready: private_ws
+                    .as_ref()
+                    .is_some_and(|status| status.algo_subscription_ready),
+                exchange_atomicity_proven: false,
+                exclusive_account_writer_proven: false,
+                private_ws,
+            },
+        }
+    }
 }
 
 impl ExecutorPreflightSnapshot {
@@ -273,6 +312,31 @@ mod tests {
 
     fn environment() -> OkxEnvironment {
         OkxEnvironment::new(Region::Global, false)
+    }
+
+    #[test]
+    fn operator_preflight_never_equates_event_ack_with_exchange_atomicity() {
+        let absent = ProtectedOcoReadiness {
+            event_monitor_ready: false,
+            exchange_atomicity_proven: false,
+            exclusive_account_writer_proven: false,
+            private_ws: None,
+        };
+        assert!(!absent.event_monitor_ready);
+        let mut stream = okx_runtime::PrivateRuntimeState::new().status();
+        assert!(!stream.algo_subscription_ready);
+        stream.algo_subscription_ready = true;
+        let readout = ProtectedOcoReadiness {
+            event_monitor_ready: stream.algo_subscription_ready,
+            exchange_atomicity_proven: false,
+            exclusive_account_writer_proven: false,
+            private_ws: Some(stream),
+        };
+        let value = serde_json::to_value(readout).expect("bounded operator evidence");
+        assert_eq!(value["event_monitor_ready"], true);
+        assert_eq!(value["exchange_atomicity_proven"], false);
+        assert_eq!(value["exclusive_account_writer_proven"], false);
+        assert_eq!(value["private_ws"]["algo_subscription_ready"], true);
     }
 
     #[test]
