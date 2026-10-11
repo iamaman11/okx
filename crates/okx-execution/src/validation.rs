@@ -1448,11 +1448,22 @@ mod tests {
         let candidate = open_candidate(&rules, PositionDirection::Long);
         let mut account = account();
         let intent = open_intent(&rules, &account, &candidate, PositionSide::Long);
+        let original =
+            prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("flat open");
 
         // Even a fully observed position is not an owned fresh OPEN lot.
         account.positions.push(position(PositionSide::Long, "5"));
         assert_eq!(
             prepare_execution(&intent, &rules, &account, Some(&candidate)),
+            Err(ExecutionValidationError::OpenRequiresFlatInstrument)
+        );
+        assert_eq!(
+            revalidate_execution_plan(
+                &original,
+                &rules,
+                &account,
+                Some(original.open_risk.as_ref().unwrap().fee_generation.as_str())
+            ),
             Err(ExecutionValidationError::OpenRequiresFlatInstrument)
         );
 
