@@ -27,9 +27,9 @@ Accepted:
 - Stage 3D causal live-decision parity kernel — ACCEPTED;
 - Stage 3D bounded event-driven PAPER/SHADOW session owner — research implementation; independent H2 promotion remains gated by #216.
 
-Canonical roadmap **#160** and the [single-work Stage1–5 acceptance matrix](docs/ROADMAP.md). **Next and only active work ID: 4C-G1**, authenticated **read-only Demo** previous-exposure/ledger reconciliation. Do not work on Stage5/research in parallel. Source main at this checkpoint `6fb4f64b7431267d354017901ea21d11fa2d63ce`; PR #268 controller verified 6/6 CI `38057028443` and physically deployed with launcher rollback, tested/merged tree `c434e7b2ce225e9739155aa7ae83fdd838b94c61`. Installed **agent** remains prior #260 artifact `11650383653`; #263/#264/#267 agent changes are source-only. Demo current-PID CONTROL status was blocked before GitHub publication; no new Demo DATA or orders sent. Production safe-restore PASS PID 13984, Cloudflare PASS/FRESH generation 284 (authenticated production account only). Demo exposure remains UNVERIFIED; old instId is a retained, not live-attributed log message.
+The **only current acceptance cursor** is [issue #160](https://github.com/iamaman11/okx/issues/160); [#223](https://github.com/iamaman11/okx/issues/223) holds the exact Demo venue evidence. At the 2026-10-11 checkpoint: Stage 4C G1/G2 and G3-A/B protected LONG/SHORT physical round-trips are accepted. PR [#279](https://github.com/iamaman11/okx/pull/279) (tested/merged tree `7e55a556d658dd9c6678b7767b05de53db7033dd`) and verified native artifact `11684605898` installed the exact own-CLOSE AMEND-reservation fix; **4C-G3C physical AMEND remains OPEN**. Next: prove one bounded Demo live CLOSE AMEND and independent fills/bills/protection/terminal FLAT; finish remaining G3; then G4 uncertain ACK/recovery; only then Stage 5A->5B->5C and the separate Live gate. The initial historical snapshots are preserved in #160, not copied here.
 
-Live trading is **not enabled**. The production executor remains `ReadOnly` with no approved real-money mutation authority; isolated Demo acceptance uses the shared executor with a separate, temporary admission guard. Stage 4C filled-position/terminal-flat exchange acceptance and Stage 5 physical governance proof are not yet complete.
+Live trading is **not enabled**. Production remains `ReadOnly`; an authenticated `demo_acceptance` session can use the **same Rust executor** through one closed typed Demo-only MCP `execution_action` with independent full preflight/risk/UID checks. Source-accepted, installed, exchange-accepted and Live-authorized are separate states. The currently authenticated Demo account was independently reconciled FRESH with zero positions, ordinary orders and pending SWAP/FUTURES OCO as of the stated checkpoint; this is not a guarantee about a later account snapshot.
 
 ## Architecture
 
@@ -63,7 +63,7 @@ ONE okx-agent.exe
         |
         +--> pure deterministic Analysis
         |
-        +--> ONE hard-disabled OrderExecutor
+        +--> ONE production-disabled OrderExecutor
         |      -> durable mutation ledger
         |
         +--> encrypted typed DATA mailbox
@@ -95,7 +95,7 @@ ChatGPT -> OAuth MCP Worker -> Cloudflare RuntimeSession
         <- bounded typed AgentResponse <-
 ```
 
-The direct path is generation-bound, heartbeat-probed and bounded by frame size, in-flight concurrency and response deadline. Mutation-capable operations remain rejected on this transport at the current stage. GitHub DATA #10 remains an encrypted **fallback/parity/recovery** path, not the normal product path:
+The direct path is generation-bound, heartbeat-probed and bounded by frame size, in-flight concurrency and response deadline. The Worker and Rust owner admit only the explicitly typed `execution_action` on an authenticated `demo_acceptance` profile; all production writes remain rejected. A healthy MCP session alone does not prove tool-schema freshness, account source freshness or permission for a specific mutation. GitHub DATA (#10 protocol; #234 bounded Demo acceptance mailbox) remains an encrypted **fallback/parity/recovery** path, not the normal product path:
 
 ```text
 ChatGPT -> encrypted typed request -> GitHub #10 -> okx-agent
@@ -166,7 +166,7 @@ Canonical issues:
 - #113 historical production-readiness closure baseline;
 - #5 product/domain architecture;
 - #7 Windows runtime/deployment;
-- #10 encrypted DATA transport;
+- #10 encrypted DATA transport protocol; #234 bounded Demo DATA acceptance mailbox;
 - #12 CONTROL transport;
 - #3 execution boundary;
 - #47 capability matrix;
