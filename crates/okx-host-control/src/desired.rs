@@ -41,6 +41,15 @@ impl AgentDesiredState {
         }
     }
 
+    /// Keep the last committed exchange environment even while the agent is stopped.
+    /// Dropping it to Production would let stop + restart bypass profile handoff.
+    pub const fn stopped_on(profile: AgentProfile) -> Self {
+        Self {
+            agent: AgentDesired::Stopped,
+            profile,
+        }
+    }
+
     pub const fn production_running() -> Self {
         Self {
             agent: AgentDesired::Running,
@@ -231,6 +240,18 @@ mod tests {
             AgentDesiredState::production_running()
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stopped_demo_retains_its_identity_across_durable_restart() {
+        let root = test_root("stopped-demo");
+        let _ = fs::remove_dir_all(&root);
+        let store = DesiredStateStore::at(root.join("desired.json"));
+        let stopped = AgentDesiredState::stopped_on(AgentProfile::DemoAcceptance);
+        store.save(stopped).expect("save stopped Demo");
+        assert_eq!(store.load().expect("reload stopped Demo"), stopped);
+        assert_ne!(stopped.profile, AgentProfile::Production);
         let _ = fs::remove_dir_all(root);
     }
 
