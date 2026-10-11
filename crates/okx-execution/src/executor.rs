@@ -2216,29 +2216,41 @@ mod tests {
         let (root, mut ledger, record) = resize_ledger("resize-reconcile-parent");
         let intent = record.plan.intent_id.clone();
         let mid = "resize_reconcile_01234567";
-        ledger.prepare_protective_size_amend(&intent, mid, "0.5", 105)
+        ledger
+            .prepare_protective_size_amend(&intent, mid, "0.5", 105)
             .expect("prepare");
-        ledger.begin_protective_size_amend(&intent, mid, 106).expect("submit");
-        ledger.mark_protective_size_amend_unknown(&intent, mid, 107)
+        ledger
+            .begin_protective_size_amend(&intent, mid, 106)
+            .expect("submit");
+        ledger
+            .mark_protective_size_amend_unknown(&intent, mid, 107)
             .expect("uncertain");
         let unresolved = ledger.get(&intent).unwrap().record.clone();
         let bad_gateway = ProtectiveLookupGateway::new(Ok(resize_algo(&record, "0.5")));
         let bad_executor = OrderExecutor::enabled_for_test(ledger, bad_gateway);
         let mut parent_order = order_details(&record.plan, "filled");
         parent_order.accumulated_fill_size = "1".to_owned();
-        assert!(matches!(
-            bad_executor.protection_resolution(&unresolved, &parent_order, ExchangeOrderState::Filled).await,
-            Err(OrderExecutorError::ProtectionIdentityMismatch)
-        ), "UNKNOWN shrink cannot be declared active/reconciled from order readback alone");
+        assert!(
+            matches!(
+                bad_executor
+                    .protection_resolution(&unresolved, &parent_order, ExchangeOrderState::Filled)
+                    .await,
+                Err(OrderExecutorError::ProtectionIdentityMismatch)
+            ),
+            "UNKNOWN shrink cannot be declared active/reconciled from order readback alone"
+        );
         let mut ledger = bad_executor.ledger;
-        ledger.confirm_protective_size_amend(&intent, mid, 108)
+        ledger
+            .confirm_protective_size_amend(&intent, mid, 108)
             .expect("simulate independently proven account + algo size");
         let confirmed = ledger.get(&intent).unwrap().record.clone();
         let gateway = ProtectiveLookupGateway::new(Ok(resize_algo(&record, "0.5")));
         let executor = OrderExecutor::enabled_for_test(ledger, gateway);
         assert_eq!(
-            executor.protection_resolution(&confirmed, &parent_order, ExchangeOrderState::Filled)
-                .await.expect("parent historical fill reconciles with resized live protection"),
+            executor
+                .protection_resolution(&confirmed, &parent_order, ExchangeOrderState::Filled)
+                .await
+                .expect("parent historical fill reconciles with resized live protection"),
             Some(ProtectiveOrderResolution::Active {
                 algo_order_id: "123456789012".to_owned(),
                 covered_size: "0.5".to_owned(),
