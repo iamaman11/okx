@@ -1236,7 +1236,10 @@ impl AgentOperation {
                     | ExecutionMutationRequest::ConfirmProtectionSize { mutation_id } => {
                         validate_mutation_id(mutation_id)
                     }
-                    ExecutionMutationRequest::ShrinkProtection { mutation_id, new_size } => {
+                    ExecutionMutationRequest::ShrinkProtection {
+                        mutation_id,
+                        new_size,
+                    } => {
                         validate_mutation_id(mutation_id)?;
                         validate_positive_decimal_text(new_size, "mutation.new_size")
                     }
