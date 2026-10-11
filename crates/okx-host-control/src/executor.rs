@@ -139,9 +139,8 @@ impl HostExecutor {
         let running = self.agent_is_running()?;
 
         if let Some(error) = self.desired_error.clone() {
-            if running {
-                self.terminate_agent_owned()?;
-            }
+            // Corrupt desired state cannot certify a safe exit. Leave any
+            // already owned live process supervising its venue protection.
             self.last_reconcile = "DEGRADED_DESIRED_STATE".to_owned();
             return Ok(json!({
                 "disposition": self.last_reconcile.clone(),
