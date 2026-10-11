@@ -712,7 +712,10 @@ impl TradeApi {
         request: &AmendAlgoOrderRequest,
     ) -> Result<RateRequestPlan, OkxError> {
         request.validate()?;
-        let plan = self.client.rate_budget().amend_algo_rest_plan(&request.instrument_id);
+        let plan = self
+            .client
+            .rate_budget()
+            .amend_algo_rest_plan(&request.instrument_id);
         self.client
             .rate_budget()
             .admit(&plan)
