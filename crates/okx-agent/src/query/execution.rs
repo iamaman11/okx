@@ -1056,6 +1056,18 @@ async fn mutate_execution(
         ));
     }
 
+    if let ExecutionMutationRequest::ConfirmProtectionSize { mutation_id } = mutation {
+        return confirm_owned_protection_size(
+            request,
+            context,
+            generated_at,
+            execution,
+            intent_id,
+            mutation_id,
+        )
+        .await;
+    }
+
     if let ExecutionMutationRequest::CancelProtection { mutation_id } = mutation {
         return cancel_owned_protection(
             request,
@@ -1121,8 +1133,9 @@ async fn mutate_execution(
             };
             (mutation_id.as_str(), admission)
         }
-        ExecutionMutationRequest::CancelProtection { .. } => {
-            unreachable!("protective cleanup is routed before ordinary order mutation")
+        ExecutionMutationRequest::CancelProtection { .. }
+        | ExecutionMutationRequest::ConfirmProtectionSize { .. } => {
+            unreachable!("protective reconciliation is routed before ordinary order mutation")
         }
         ExecutionMutationRequest::Cancel { mutation_id } => {
             let admission =
@@ -1155,8 +1168,9 @@ async fn mutate_execution(
                 )
                 .await
         }
-        ExecutionMutationRequest::CancelProtection { .. } => {
-            unreachable!("protective cleanup has a distinct durable state")
+        ExecutionMutationRequest::CancelProtection { .. }
+        | ExecutionMutationRequest::ConfirmProtectionSize { .. } => {
+            unreachable!("protective reconciliation has a distinct durable state")
         }
         ExecutionMutationRequest::Cancel { .. } => {
             execution
@@ -1207,6 +1221,94 @@ async fn mutate_execution(
             AgentResponseStatus::Rejected,
             EXECUTION_INPUT_INCONSISTENT_CODE,
             error.to_string(),
+            false,
+        )),
+    }
+}
+
+/// Local readback of an uncertain protective-size amendment. This path
+/// never sends amend-algos, including after crash/lost ACK.
+async fn confirm_owned_protection_size(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+    intent_id: &str,
+    mutation_id: &str,
+) -> AgentResult<AgentResponse> {
+    let admission = match cancel_mutation_admission(request, context, generated_at, execution).await? {
+        PreMutationAdmissionResult::Ready(value) => value,
+        PreMutationAdmissionResult::Response(response) => return Ok(*response),
+    };
+    if !admission.preflight.accepted || !execution.demo_mutation_acceptance_requested() {
+        return Ok(preflight_rejected(request, generated_at));
+    }
+    let Some(private_ws) = context.private_ws else {
+        return Ok(account_not_fresh(request, generated_at));
+    };
+    let cursor = match private_ws.convergence_cursor().await {
+        Ok(cursor) => cursor,
+        Err(_) => return Ok(account_not_fresh(request, generated_at)),
+    };
+    let account = match fresh_account(request, context, generated_at).await? {
+        FreshAccount::Ready(value) => value,
+        FreshAccount::Response(response) => return Ok(*response),
+    };
+    let Some(observer) = context.account_fallback else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    let inventory = match observer.pending_protective_algos().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(failure_response(
+                request, generated_at, AgentResponseStatus::Failed,
+                EXECUTION_RECONCILIATION_UNAVAILABLE_CODE, error.to_string(), false,
+            ));
+        }
+    };
+    if !inventory.complete_within_bound || inventory.rows != inventory.samples.len() {
+        return Ok(failure_response(
+            request, generated_at, AgentResponseStatus::Rejected,
+            EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+            "complete SWAP/FUTURES conditional/OCO inventory is required before confirming a size change".to_owned(),
+            false,
+        ));
+    }
+    // The executor owns its ledger mutex while reading every managed venue
+    // algo. The final callback runs *after* those GETs and immediately before
+    // persisting CONFIRMED under the SAME mutex.
+    let result = execution
+        .confirm_protective_size_amend_demo_fenced(
+            intent_id,
+            mutation_id,
+            &account,
+            &inventory,
+            utc_now_ms(),
+            || async {
+                matches!(
+                    private_ws.convergence_window(cursor).await,
+                    Ok(window) if window.events.is_empty()
+                )
+            },
+        )
+        .await;
+    match result {
+        Ok(entry) => Ok(completed(
+            request, generated_at, "okx.protective-size-confirmation/v1",
+            serde_json::json!({
+                "intent_id": intent_id,
+                "mutation_id": mutation_id,
+                "state": "CONFIRMED",
+                "record_updated_at_ms": entry.updated_at_ms,
+                "exchange_post_sent": false,
+                "exchange_post_replayed": false,
+                "proof": "exact_managed_algo_get_plus_aggregate_position_coverage_and_final_private_ws_fence",
+            }),
+        )),
+        Err(error) => Ok(failure_response(
+            request, generated_at, AgentResponseStatus::Rejected,
+            EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+            format!("protective resize remains UNKNOWN/ACK unless complete exact venue/WS proof succeeds: {error}; never replay exchange POST"),
             false,
         )),
     }
