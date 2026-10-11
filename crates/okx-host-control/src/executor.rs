@@ -528,7 +528,11 @@ impl HostExecutor {
         let was_running = self.agent_is_running()?;
         ensure_profile_unchanged(
             self.desired_profile,
-            if was_running { self.running_profile } else { None },
+            if was_running {
+                self.running_profile
+            } else {
+                None
+            },
             self.desired_profile,
         )?;
         // STOP is not a change of environment; preserve the Demo identity so
