@@ -745,6 +745,47 @@ mod tests {
     }
 
     #[test]
+    fn accepted_demo_history_retains_path_but_real_file_is_disjoint() {
+        let demo = OkxEnvironment::new(Region::Global, true);
+        let production = OkxEnvironment::new(Region::Global, false);
+        assert_eq!(execution_ledger_file_name(demo), "execution-ledger.json");
+        assert_eq!(
+            execution_ledger_file_name(production),
+            "execution-ledger-production.json"
+        );
+        assert_ne!(
+            execution_ledger_file_name(demo),
+            execution_ledger_file_name(production)
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_demo_mutation_gate_rejects_foreign_or_missing_uid_and_production_claim() {
+        let root = temp_root("one-demo-gate");
+        fs::create_dir_all(&root).unwrap();
+        let runtime = ExecutionRuntime::new_demo_acceptance(
+            &root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            1,
+            RateBudget::new(),
+        )
+        .expect("demo runtime");
+        let mut accepted = preflight(true);
+        let executor = runtime.executor.lock().await;
+        assert!(runtime.demo_mutation_admitted(&accepted, executor.ledger()));
+        accepted.credential.account_uid_fingerprint.clear();
+        assert!(!runtime.demo_mutation_admitted(&accepted, executor.ledger()));
+        accepted = preflight(true);
+        accepted.credential.production_environment = true;
+        assert!(!runtime.demo_mutation_admitted(&accepted, executor.ledger()));
+        accepted = preflight(false);
+        assert!(!runtime.demo_mutation_admitted(&accepted, executor.ledger()));
+        drop(executor);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn demo_acceptance_runtime_rejects_production_environment_before_construction() {
         let result = ExecutionRuntime::new_demo_acceptance(
             Path::new("."),
