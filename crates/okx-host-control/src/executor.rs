@@ -498,14 +498,9 @@ impl HostExecutor {
 
         let pid = match self.start_agent_process(profile) {
             Ok(pid) => pid,
-            Err(error) if profile == AgentProfile::DemoAcceptance => {
-                let _ = self.persist_desired(AgentDesiredState::production_running());
-                if self.start_agent_process(AgentProfile::Production).is_err() {
-                    self.schedule_restart();
-                }
-                return Err(error);
-            }
             Err(error) => {
+                // A failed Demo launch is NOT authority to start Production.
+                // Keep the committed environment for same-profile recovery.
                 self.schedule_restart();
                 return Err(error);
             }
@@ -563,7 +558,9 @@ impl HostExecutor {
             agent: AgentDesired::Running,
             profile,
         })?;
-        let _ = self.terminate_agent_owned();
+        // A failed termination is not proof that the previous owner exited.
+        // Never launch a second agent on this uncertain result.
+        self.terminate_agent_owned()?;
         let pid = match self.start_agent_process(profile) {
             Ok(pid) => pid,
             Err(error) => {
