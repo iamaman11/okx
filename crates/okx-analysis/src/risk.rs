@@ -257,7 +257,9 @@ pub fn conservative_account_with_position_oracle(
 ) -> Result<AccountSnapshot, String> {
     let mut observed = BTreeMap::new();
     for row in oracle_positions {
-        let contracts = row.contracts.parse::<Decimal>()
+        let contracts = row
+            .contracts
+            .parse::<Decimal>()
             .map_err(|_| format!("invalid oracle contracts for {}", row.instrument_id))?;
         if contracts == Decimal::ZERO {
             continue;
@@ -267,34 +269,57 @@ pub fn conservative_account_with_position_oracle(
         {
             return Err(format!("unsupported oracle position {}", row.instrument_id));
         }
-        let key = (&row.instrument_type, &row.instrument_id, &row.position_side, &row.margin_mode);
-        if observed.insert(key, (contracts, &row.notional_usd)).is_some() {
+        let key = (
+            &row.instrument_type,
+            &row.instrument_id,
+            &row.position_side,
+            &row.margin_mode,
+        );
+        if observed
+            .insert(key, (contracts, &row.notional_usd))
+            .is_some()
+        {
             return Err(format!("duplicate oracle position {}", row.instrument_id));
         }
     }
     let mut bounded = account.clone();
     for position in &mut bounded.positions {
-        let contracts = position.position.parse::<Decimal>()
+        let contracts = position
+            .position
+            .parse::<Decimal>()
             .map_err(|_| format!("invalid account contracts for {}", position.instrument_id))?;
         if contracts == Decimal::ZERO {
             continue;
         }
-        let key = (&position.instrument_type, &position.instrument_id,
-            &position.position_side, &position.margin_mode);
+        let key = (
+            &position.instrument_type,
+            &position.instrument_id,
+            &position.position_side,
+            &position.margin_mode,
+        );
         let Some((other_contracts, oracle_usd)) = observed.remove(&key) else {
             return Err(format!("missing oracle lot for {}", position.instrument_id));
         };
         if contracts != other_contracts {
-            return Err(format!("oracle contracts differ for {}", position.instrument_id));
+            return Err(format!(
+                "oracle contracts differ for {}",
+                position.instrument_id
+            ));
         }
-        let local_usd = position.notional_usd.as_deref()
+        let local_usd = position
+            .notional_usd
+            .as_deref()
             .ok_or_else(|| format!("missing local USD notional for {}", position.instrument_id))?
             .parse::<Decimal>()
             .map_err(|_| format!("invalid local USD notional for {}", position.instrument_id))?;
-        let oracle_usd = oracle_usd.parse::<Decimal>()
+        let oracle_usd = oracle_usd
+            .parse::<Decimal>()
             .map_err(|_| format!("invalid oracle USD notional for {}", position.instrument_id))?;
         if local_usd < Decimal::ZERO || oracle_usd < Decimal::ZERO {
-            return Err(format!("negative unsigned USD notional for {}", position.instrument_id));
+            return Err(format!(
+                "negative unsigned USD notional for {}",
+                position.instrument_id
+            ));
         }
         position.notional_usd = Some(local_usd.max(oracle_usd).normalize().to_string());
     }
@@ -302,21 +327,28 @@ pub fn conservative_account_with_position_oracle(
         return Err("oracle reports extra non-zero positions".to_owned());
     }
     if let Some(value) = oracle_adjusted_equity_usd.filter(|s| !s.trim().is_empty()) {
-        let oracle_equity = value.parse::<Decimal>()
+        let oracle_equity = value
+            .parse::<Decimal>()
             .map_err(|_| "invalid oracle adjusted equity".to_owned())?;
         if oracle_equity < Decimal::ZERO {
             return Err("negative oracle adjusted equity".to_owned());
         }
-        let total = bounded.balance.total_equity_usd.parse::<Decimal>()
+        let total = bounded
+            .balance
+            .total_equity_usd
+            .parse::<Decimal>()
             .map_err(|_| "invalid local total equity".to_owned())?;
         bounded.balance.total_equity_usd = total.min(oracle_equity).normalize().to_string();
         bounded.balance.adjusted_equity_usd = Some(
             match bounded.balance.adjusted_equity_usd.as_deref() {
-                Some(local) => local.parse::<Decimal>()
+                Some(local) => local
+                    .parse::<Decimal>()
                     .map_err(|_| "invalid local adjusted equity".to_owned())?
                     .min(oracle_equity),
                 None => oracle_equity,
-            }.normalize().to_string()
+            }
+            .normalize()
+            .to_string(),
         );
     }
     Ok(bounded)
@@ -2255,36 +2287,65 @@ mod tests {
 
     #[test]
     fn asynchronous_position_marks_are_bounded_without_a_magic_usd_tolerance() {
-        let account = account("long_short_mode", vec![position(
-            "BTC-USDT-SWAP", "SWAP", "long", "0.01", Some("8.332001"),
-            Some("83320.01"), None,
-        )]);
+        let account = account(
+            "long_short_mode",
+            vec![position(
+                "BTC-USDT-SWAP",
+                "SWAP",
+                "long",
+                "0.01",
+                Some("8.332001"),
+                Some("83320.01"),
+                None,
+            )],
+        );
         let oracle = [PositionOracleEvidence {
-            instrument_type: "SWAP".to_owned(), instrument_id: "BTC-USDT-SWAP".to_owned(),
-            position_side: "long".to_owned(), margin_mode: "cross".to_owned(),
-            contracts: "0.010".to_owned(), notional_usd: "8.3320129874".to_owned(),
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            position_side: "long".to_owned(),
+            margin_mode: "cross".to_owned(),
+            contracts: "0.010".to_owned(),
+            notional_usd: "8.3320129874".to_owned(),
         }];
         let bounded = conservative_account_with_position_oracle(&account, &oracle, Some("475"))
             .expect("quantity exact, tiny changing USD mark is conservative");
-        assert_eq!(bounded.positions[0].notional_usd.as_deref(), Some("8.3320129874"));
+        assert_eq!(
+            bounded.positions[0].notional_usd.as_deref(),
+            Some("8.3320129874")
+        );
         assert_eq!(bounded.balance.total_equity_usd, "475");
         assert_eq!(bounded.balance.adjusted_equity_usd.as_deref(), Some("475"));
         let mut lower = oracle.to_vec();
         lower[0].notional_usd = "8.331".to_owned();
         let bounded = conservative_account_with_position_oracle(&account, &lower, None)
             .expect("smaller independent mark must not decrease local exposure");
-        assert_eq!(bounded.positions[0].notional_usd.as_deref(), Some("8.332001"));
+        assert_eq!(
+            bounded.positions[0].notional_usd.as_deref(),
+            Some("8.332001")
+        );
     }
 
     #[test]
     fn mismatched_side_quantity_duplicate_and_extra_oracle_lots_fail_closed() {
-        let account = account("long_short_mode", vec![position(
-            "BTC-USDT-SWAP", "SWAP", "long", "0.01", Some("8.33"), None, None,
-        )]);
+        let account = account(
+            "long_short_mode",
+            vec![position(
+                "BTC-USDT-SWAP",
+                "SWAP",
+                "long",
+                "0.01",
+                Some("8.33"),
+                None,
+                None,
+            )],
+        );
         let mut row = PositionOracleEvidence {
-            instrument_type: "SWAP".to_owned(), instrument_id: "BTC-USDT-SWAP".to_owned(),
-            position_side: "long".to_owned(), margin_mode: "cross".to_owned(),
-            contracts: "0.01".to_owned(), notional_usd: "8.34".to_owned(),
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            position_side: "long".to_owned(),
+            margin_mode: "cross".to_owned(),
+            contracts: "0.01".to_owned(),
+            notional_usd: "8.34".to_owned(),
         };
         row.contracts = "0.02".to_owned();
         assert!(conservative_account_with_position_oracle(&account, &[row.clone()], None).is_err());
@@ -2292,9 +2353,19 @@ mod tests {
         row.position_side = "short".to_owned();
         assert!(conservative_account_with_position_oracle(&account, &[row.clone()], None).is_err());
         row.position_side = "long".to_owned();
-        assert!(conservative_account_with_position_oracle(&account, &[row.clone(), row.clone()], None).is_err());
+        assert!(
+            conservative_account_with_position_oracle(&account, &[row.clone(), row.clone()], None)
+                .is_err()
+        );
         assert!(conservative_account_with_position_oracle(&account, &[], None).is_err());
-        assert!(conservative_account_with_position_oracle(&account("long_short_mode", vec![]), &[row], None).is_err());
+        assert!(
+            conservative_account_with_position_oracle(
+                &account("long_short_mode", vec![]),
+                &[row],
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

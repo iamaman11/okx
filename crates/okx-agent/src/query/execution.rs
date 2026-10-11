@@ -1,9 +1,9 @@
 use okx_analysis::{
     CandidateOrderAssumptions, ExecutionTcaReport, HARD_RISK_POLICY_SCHEMA_V1,
     LiquidityRole as AnalysisLiquidityRole, PortfolioCandidate, PositionDirection,
-    PositionOracleEvidence, conservative_account_with_position_oracle,
-    TRADING_MANDATE_SCHEMA_V1, TcaFillOutcome, TcaReference, TcaSide, analyze_candidate_order,
-    analyze_execution_tca_report, analyze_portfolio_risk,
+    PositionOracleEvidence, TRADING_MANDATE_SCHEMA_V1, TcaFillOutcome, TcaReference, TcaSide,
+    analyze_candidate_order, analyze_execution_tca_report, analyze_portfolio_risk,
+    conservative_account_with_position_oracle,
 };
 use okx_api::{InstrumentType, MUTATION_REQUEST_TTL_MS, MarginMode, MutationTiming};
 use okx_execution::{
@@ -361,9 +361,18 @@ async fn prepare_risk_increasing(
             common.instrument,
         ));
     };
-    if let Err(reason) = risk_increasing_market_quality(context, common.instrument, &rules.reference_generation).await {
-        return Ok(failure_response(request, generated_at, AgentResponseStatus::Rejected,
-            EXECUTION_MARKET_NOT_FRESH_CODE, reason, true));
+    if let Err(reason) =
+        risk_increasing_market_quality(context, common.instrument, &rules.reference_generation)
+            .await
+    {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MARKET_NOT_FRESH_CODE,
+            reason,
+            true,
+        ));
     }
     let Some(observer) = context.account_fallback else {
         return Ok(execution_unavailable(request, generated_at));
@@ -2104,32 +2113,63 @@ async fn pre_mutation_admission(
     let oracle = if plan.action.is_risk_increasing() {
         let evidence = match observer.account_position_risk_oracle().await {
             Ok(value) => value,
-            Err(error) => admission_response!(failure_response(request, generated_at,
-                AgentResponseStatus::Rejected, EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
-                format!("fresh position-risk oracle unavailable: {error}"), true)),
+            Err(error) => admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
+                format!("fresh position-risk oracle unavailable: {error}"),
+                true
+            )),
         };
         let skew = super::account::observation_skew_ms(&account.source_received_at, &evidence.ts);
         if !matches!(skew, Ok(value) if value <= 30_000) {
-            admission_response!(failure_response(request, generated_at,
-                AgentResponseStatus::Rejected, EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
-                format!("position-risk oracle timestamp is invalid or differs by more than 30000 ms: {skew:?}"), true));
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_EVIDENCE_NOT_FRESH_CODE,
+                format!(
+                    "position-risk oracle timestamp is invalid or differs by more than 30000 ms: {skew:?}"
+                ),
+                true
+            ));
         }
         Some(evidence)
-    } else { None };
+    } else {
+        None
+    };
     let conservative_account = if let Some(oracle) = oracle.as_ref() {
-        let positions = oracle.positions.iter().map(|p| PositionOracleEvidence {
-            instrument_type: p.instrument_type.clone(), instrument_id: p.instrument_id.clone(),
-            position_side: p.position_side.clone(), margin_mode: p.margin_mode.clone(),
-            contracts: p.pos.clone(), notional_usd: p.notional_usd.clone(),
-        }).collect::<Vec<_>>();
-        match conservative_account_with_position_oracle(&account, &positions,
-            Some(&oracle.adjusted_equity_usd)) {
+        let positions = oracle
+            .positions
+            .iter()
+            .map(|p| PositionOracleEvidence {
+                instrument_type: p.instrument_type.clone(),
+                instrument_id: p.instrument_id.clone(),
+                position_side: p.position_side.clone(),
+                margin_mode: p.margin_mode.clone(),
+                contracts: p.pos.clone(),
+                notional_usd: p.notional_usd.clone(),
+            })
+            .collect::<Vec<_>>();
+        match conservative_account_with_position_oracle(
+            &account,
+            &positions,
+            Some(&oracle.adjusted_equity_usd),
+        ) {
             Ok(value) => value,
-            Err(error) => admission_response!(failure_response(request, generated_at,
-                AgentResponseStatus::Rejected, EXECUTION_ORACLE_INCONSISTENT_CODE,
-                format!("exact lot identity / quantity oracle evidence inconsistent: {error}"), true)),
+            Err(error) => admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_ORACLE_INCONSISTENT_CODE,
+                format!("exact lot identity / quantity oracle evidence inconsistent: {error}"),
+                true
+            )),
         }
-    } else { (*account).clone() };
+    } else {
+        (*account).clone()
+    };
     let daily_history_complete = daily_history_complete_at(
         &risk_facts.summary.history_coverage,
         risk_facts
@@ -2334,14 +2374,27 @@ async fn pre_mutation_admission(
         admission_response!(reference_not_fresh(request, generated_at));
     };
     if plan.action.is_risk_increasing() {
-        if let Err(reason) = risk_increasing_market_quality(context, &plan.instrument_id,
-            &rules.reference_generation).await {
-            admission_response!(failure_response(request, generated_at,
-                AgentResponseStatus::Rejected, EXECUTION_MARKET_NOT_FRESH_CODE, reason, true));
+        if let Err(reason) = risk_increasing_market_quality(
+            context,
+            &plan.instrument_id,
+            &rules.reference_generation,
+        )
+        .await
+        {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_MARKET_NOT_FRESH_CODE,
+                reason,
+                true
+            ));
         }
     } else {
         let public_state = public_ws.state();
-        if public_state.read().await.connection_state() != okx_runtime::PublicConnectionState::Connected {
+        if public_state.read().await.connection_state()
+            != okx_runtime::PublicConnectionState::Connected
+        {
             admission_response!(reference_not_fresh(request, generated_at));
         }
     }
@@ -2478,10 +2531,21 @@ async fn pre_mutation_admission(
         ));
     }
     if plan.action.is_risk_increasing() {
-        if let Err(reason) = risk_increasing_market_quality(context, &plan.instrument_id,
-            &rules.reference_generation).await {
-            admission_response!(failure_response(request, generated_at,
-                AgentResponseStatus::Rejected, EXECUTION_MARKET_NOT_FRESH_CODE, reason, true));
+        if let Err(reason) = risk_increasing_market_quality(
+            context,
+            &plan.instrument_id,
+            &rules.reference_generation,
+        )
+        .await
+        {
+            admission_response!(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_MARKET_NOT_FRESH_CODE,
+                reason,
+                true
+            ));
         }
     }
 
@@ -2532,8 +2596,15 @@ async fn risk_increasing_market_quality(
 ) -> Result<(), String> {
     let public_ws = context.public_ws.ok_or("public WebSocket unavailable")?;
     let state = public_ws.state();
-    let quality = state.read().await.quality_snapshot(instrument,
-        utc_now_ms(), MARKET_INTELLIGENCE_MAX_AGE_MS, false)
+    let quality = state
+        .read()
+        .await
+        .quality_snapshot(
+            instrument,
+            utc_now_ms(),
+            MARKET_INTELLIGENCE_MAX_AGE_MS,
+            false,
+        )
         .map_err(|error| format!("instrument WS quality unavailable: {error}"))?;
     verify_risk_market_quality(&quality, expected_reference_generation)
 }
@@ -2548,9 +2619,13 @@ fn verify_risk_market_quality(
         || !quality.sequence_continuity_proven
         || quality.reference_generation != expected_reference_generation
     {
-        return Err(format!("instrument market not FRESH (reason={}, reference_match={}, seq_contiguous={}, connected={})",
-            quality.reason, quality.reference_generation == expected_reference_generation,
-            quality.sequence_continuity_proven, quality.persistent_ws_connected));
+        return Err(format!(
+            "instrument market not FRESH (reason={}, reference_match={}, seq_contiguous={}, connected={})",
+            quality.reason,
+            quality.reference_generation == expected_reference_generation,
+            quality.sequence_continuity_proven,
+            quality.persistent_ws_connected
+        ));
     }
     Ok(())
 }
@@ -3515,16 +3590,23 @@ mod tests {
     #[test]
     fn market_admission_rejects_connected_but_incomplete_and_changed_reference() {
         let mut quality = okx_runtime::PublicQualitySnapshot {
-            schema: "okx.snapshot-quality/v2".to_owned(), instrument_id: "BTC-USDT-SWAP".to_owned(),
-            quality: MarketReadiness::Fresh, reference_generation: "sha256:ref".to_owned(),
+            schema: "okx.snapshot-quality/v2".to_owned(),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            quality: MarketReadiness::Fresh,
+            reference_generation: "sha256:ref".to_owned(),
             reference_source_received_at: "2026-10-11T00:00:00Z".to_owned(),
-            market_mode: "websocket".to_owned(), persistent_ws_connected: true,
-            connection_state: okx_runtime::PublicConnectionState::Connected, connection_generation: 1,
-            connection_id_fingerprint: None, acknowledged_subscriptions: 8,
-            sequence_continuity_proven: true, order_book_seq_id: Some(7),
+            market_mode: "websocket".to_owned(),
+            persistent_ws_connected: true,
+            connection_state: okx_runtime::PublicConnectionState::Connected,
+            connection_generation: 1,
+            connection_id_fingerprint: None,
+            acknowledged_subscriptions: 8,
+            sequence_continuity_proven: true,
+            order_book_seq_id: Some(7),
             order_book_exchange_timestamp_ms: Some("1791753000000".to_owned()),
             oldest_required_receive_ms: Some(1791753000000),
-            reason: "FRESH".to_owned(), last_error: None,
+            reason: "FRESH".to_owned(),
+            last_error: None,
         };
         assert!(verify_risk_market_quality(&quality, "sha256:ref").is_ok());
         quality.quality = MarketReadiness::Degraded;

@@ -1929,7 +1929,10 @@ fn non_empty_option(value: &str) -> Option<String> {
     (!value.trim().is_empty()).then(|| value.to_owned())
 }
 
-pub(super) fn observation_skew_ms(source_received_at: &str, oracle_timestamp_ms: &str) -> Result<u64, String> {
+pub(super) fn observation_skew_ms(
+    source_received_at: &str,
+    oracle_timestamp_ms: &str,
+) -> Result<u64, String> {
     let source_ms = chrono::DateTime::parse_from_rfc3339(source_received_at)
         .map_err(|error| {
             format!(
