@@ -2639,6 +2639,150 @@ mod tests {
         }
     }
 
+
+    fn active_multi_lot_record(
+        mut plan: ExecutionPlan,
+        intent: &str,
+        algo_id: &str,
+    ) -> ExecutionRecord {
+        plan.intent_id = intent.to_owned();
+        plan.client_order_id = crate::derive_client_order_id(intent);
+        let mut record = ExecutionRecord::new(plan);
+        record.begin_submission().expect("begin single parent");
+        record.acknowledge("987654321098").expect("parent ACK");
+        record
+            .reconcile_found_with_protection(
+                "987654321098",
+                ExchangeOrderState::Filled,
+                Some(ProtectiveOrderResolution::Active {
+                    algo_order_id: algo_id.to_owned(),
+                    covered_size: "1".to_owned(),
+                }),
+            )
+            .expect("attached live protection");
+        record
+    }
+
+    /// The venue inventory has no size/side fields. Only exact detail reads
+    /// for *every* managed algo can prove the aggregate on LONG and SHORT.
+    #[test]
+    fn managed_multi_lot_oco_requires_exact_hedge_side_aggregate_and_no_unknown() {
+        let mut first = active_multi_lot_record(
+            protected_plan(), "intent_multi_long_first_012345", "123456789012",
+        );
+        let mut add = protected_plan();
+        add.action = crate::ExecutionAction::Add;
+        let second = active_multi_lot_record(
+            add, "intent_multi_long_add_01234567", "123456789013",
+        );
+        let mut hedge = protected_plan();
+        hedge.action = crate::ExecutionAction::Hedge;
+        hedge.position_side = PositionSide::Short;
+        hedge.side = OrderSide::Sell;
+        let third = active_multi_lot_record(
+            hedge, "intent_multi_short_hedge_012345", "123456789014",
+        );
+        let mutation = "resize_multi_0123456789abc";
+        first.prepare_protective_size_amend(mutation, "0.5").expect("prepare");
+        first.begin_protective_size_amend(mutation).expect("one submit marker");
+        first.mark_protective_size_amend_unknown(mutation).expect("lost ACK");
+
+        let (mut account, mut inventory) = resize_coverage(&first);
+        account.positions[0].position = "1.5".to_owned();
+        let mut short_position = account.positions[0].clone();
+        short_position.position_side = "short".to_owned();
+        short_position.position = "1".to_owned();
+        account.positions.push(short_position);
+
+        for (record, id) in [(&second, "123456789013"), (&third, "123456789014")] {
+            let mut row = inventory.samples[0].clone();
+            row.algo_order_id = id.to_owned();
+            row.client_order_id = record.protection.as_ref().unwrap().algo_client_order_id.clone();
+            inventory.samples.push(row);
+        }
+        inventory.rows = inventory.samples.len();
+        let mut long_add = resize_algo(&second, "1");
+        long_add.algo_order_id = "123456789013".to_owned();
+        let mut short_hedge = resize_algo(&third, "1");
+        short_hedge.algo_order_id = "123456789014".to_owned();
+        short_hedge.position_side = "short".to_owned();
+        short_hedge.side = "buy".to_owned();
+        let details = vec![resize_algo(&first, "0.5"), long_add, short_hedge];
+        let records = vec![first.clone(), second.clone(), third.clone()];
+        let target = Some((first.plan.intent_id.as_str(), Decimal::new(5, 1)));
+        let verify = |records: &[ExecutionRecord],
+                      account: &AccountSnapshot,
+                      inventory: &PendingProtectiveAlgoInventory,
+                      details: &[TradeAlgoOrderDetails]| {
+            validate_managed_protective_coverage(records, account, inventory, details, target)
+        };
+        verify(&records, &account, &inventory, &details)
+            .expect("two LONG lots plus one independent SHORT have exact venue coverage");
+
+        let mut overcovered = account.clone();
+        overcovered.positions[0].position = "1".to_owned();
+        assert!(verify(&records, &overcovered, &inventory, &details).is_err());
+        let mut undercovered = account.clone();
+        undercovered.positions[0].position = "2".to_owned();
+        assert!(verify(&records, &undercovered, &inventory, &details).is_err());
+        let mut wrong_short = account.clone();
+        wrong_short.positions[1].position = "0.5".to_owned();
+        assert!(verify(&records, &wrong_short, &inventory, &details).is_err());
+        let mut duplicate_side = account.clone();
+        duplicate_side.positions.push(account.positions[1].clone());
+        assert!(verify(&records, &duplicate_side, &inventory, &details).is_err());
+        let mut wrong_uid = account.clone();
+        wrong_uid.account_uid_fingerprint = "wrong-demo-uid".to_owned();
+        assert!(verify(&records, &wrong_uid, &inventory, &details).is_err());
+        let mut stale = account.clone();
+        stale.private_ws_connected = false;
+        assert!(verify(&records, &stale, &inventory, &details).is_err());
+        let mut pending = account.clone();
+        pending.pending_orders.push(
+            serde_json::from_value(serde_json::json!({
+                "order_id":"outside-close", "client_order_id": null,
+                "instrument_type":"SWAP", "instrument_id": first.plan.instrument_id,
+                "side":"sell", "position_side":"long", "trade_mode":"cross",
+                "order_type":"limit", "price":null, "size":"0.1",
+                "accumulated_fill_size":"0", "average_fill_price":null,
+                "state":"live", "reduce_only":null, "creation_time_ms":"1",
+                "update_time_ms":"1"
+            })).expect("external pending order"),
+        );
+        assert!(verify(&records, &pending, &inventory, &details).is_err());
+
+        let mut truncated = inventory.clone();
+        truncated.complete_within_bound = false;
+        assert!(verify(&records, &account, &truncated, &details).is_err());
+        let mut missing = inventory.clone();
+        missing.samples.pop();
+        assert!(verify(&records, &account, &missing, &details).is_err());
+        let mut foreign = inventory.clone();
+        foreign.samples[1].client_order_id = "foreign".to_owned();
+        assert!(verify(&records, &account, &foreign, &details).is_err());
+        let mut duplicate = inventory.clone();
+        duplicate.samples[1] = duplicate.samples[0].clone();
+        assert!(verify(&records, &account, &duplicate, &details).is_err());
+        let mut wrong_exit = details.clone();
+        wrong_exit[2].side = "sell".to_owned();
+        assert!(verify(&records, &account, &inventory, &wrong_exit).is_err());
+        let mut incorrect_size = details.clone();
+        incorrect_size[1].size = "2".to_owned();
+        assert!(verify(&records, &account, &inventory, &incorrect_size).is_err());
+        assert!(verify(&records, &account, &inventory, &details[0..2]).is_err());
+        let mut unresolved_other = records.clone();
+        unresolved_other[1]
+            .prepare_protective_size_amend("resize_other_0123456789abc", "0.5")
+            .expect("unresolved second leg");
+        assert!(verify(&unresolved_other, &account, &inventory, &details).is_err());
+        let mut uncertain_parent = records.clone();
+        uncertain_parent[2].state = ExecutionState::UnknownSubmission;
+        assert!(verify(&uncertain_parent, &account, &inventory, &details).is_err());
+        let mut missing_leg = records.clone();
+        missing_leg.pop();
+        assert!(verify(&missing_leg, &account, &inventory, &details).is_err());
+    }
+
     fn resize_ledger(label: &str) -> (std::path::PathBuf, DurableExecutionLedger, ExecutionRecord) {
         let (root, mut ledger) = ledger(label);
         let plan = protected_plan();
