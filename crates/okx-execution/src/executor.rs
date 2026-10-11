@@ -3,11 +3,10 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use okx_api::{
     AmendAlgoOrderAck, AmendAlgoOrderRequest, AmendOrderRequest, ApiOrderSide, ApiOrderType,
-    ApiPositionSide, ApiTradeMode,
-    ApiTriggerPriceType, AttachedAlgoOrderRequest, CancelAlgoOrderAck, CancelAlgoOrderRequest,
-    CancelOrderRequest, MutationTiming, OkxEnvironment, OkxError, OrderOperationAck,
-    PlaceOrderRequest, RateDecision, RateRequestPlan, RateThrottleEvidence, TradeAlgoOrderDetails,
-    TradeApi, TradeOrderDetails, TradeResponse,
+    ApiPositionSide, ApiTradeMode, ApiTriggerPriceType, AttachedAlgoOrderRequest,
+    CancelAlgoOrderAck, CancelAlgoOrderRequest, CancelOrderRequest, MutationTiming, OkxEnvironment,
+    OkxError, OrderOperationAck, PlaceOrderRequest, RateDecision, RateRequestPlan,
+    RateThrottleEvidence, TradeAlgoOrderDetails, TradeApi, TradeOrderDetails, TradeResponse,
 };
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -17,9 +16,9 @@ use crate::{
     ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
     ExecutionTransitionError, MutationPrepareDisposition, OrderMutationKind, OrderMutationRecord,
     OrderMutationResolution, OrderMutationState, OrderSide, OrderType, PositionSide,
-    PrepareOutcome, ProtectiveCleanupState, ProtectiveOrderResolution,
-    ProtectiveSizeAmendState, ProtectiveTriggerPriceBasis,
-    TradeMode, classify_prepare_result, derive_amend_request_id, require_live_trading_enabled,
+    PrepareOutcome, ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveSizeAmendState,
+    ProtectiveTriggerPriceBasis, TradeMode, classify_prepare_result, derive_amend_request_id,
+    require_live_trading_enabled,
 };
 
 #[async_trait]
@@ -584,7 +583,10 @@ where
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
         Ok(self.ledger.prepare_protective_size_amend(
-            intent_id, mutation_id, target_size, observed_at_ms,
+            intent_id,
+            mutation_id,
+            target_size,
+            observed_at_ms,
         )?)
     }
 
@@ -598,14 +600,27 @@ where
         observed_at_ms: u64,
     ) -> Result<MutationSubmitDisposition, OrderExecutorError> {
         require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
-        let entry = self.ledger.get(intent_id).cloned()
+        let entry = self
+            .ledger
+            .get(intent_id)
+            .cloned()
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
-        let protection = entry.record.protection.as_ref()
+        let protection = entry
+            .record
+            .protection
+            .as_ref()
             .ok_or(OrderExecutorError::InvalidMutationInput("protection"))?;
-        let amend = protection.size_amend.as_ref()
-            .ok_or(OrderExecutorError::InvalidMutationInput("protective_size_amend"))?;
+        let amend =
+            protection
+                .size_amend
+                .as_ref()
+                .ok_or(OrderExecutorError::InvalidMutationInput(
+                    "protective_size_amend",
+                ))?;
         if amend.mutation_id != mutation_id || amend.state != ProtectiveSizeAmendState::Prepared {
-            return Err(OrderExecutorError::InvalidMutationInput("protective_size_amend_state"));
+            return Err(OrderExecutorError::InvalidMutationInput(
+                "protective_size_amend_state",
+            ));
         }
         let request = AmendAlgoOrderRequest {
             instrument_id: entry.record.plan.instrument_id.clone(),
@@ -615,13 +630,18 @@ where
             cancel_on_fail: false,
         };
         request.validate().map_err(OrderExecutorError::PreSubmit)?;
-        let current = self.gateway.algo_order_by_client_id(
-            protection.algo_client_order_id.clone()
-        ).await.map_err(OrderExecutorError::PreSubmit)?;
+        let current = self
+            .gateway
+            .algo_order_by_client_id(protection.algo_client_order_id.clone())
+            .await
+            .map_err(OrderExecutorError::PreSubmit)?;
         validate_protective_algo(&entry.record, &current)?;
-        if current.algo_order_id != request.algo_order_id || !matches!(
-            current.state.as_str(), "live" | "effective" | "partially_effective"
-        ) {
+        if current.algo_order_id != request.algo_order_id
+            || !matches!(
+                current.state.as_str(),
+                "live" | "effective" | "partially_effective"
+            )
+        {
             return Err(OrderExecutorError::ProtectionIdentityMismatch);
         }
         let old_size = Decimal::from_str(&amend.previous_size)
@@ -629,27 +649,42 @@ where
         validate_effective_protective_leg(&entry.record, &current, old_size)?;
         let rate_plan = match self.gateway.admit_amend_algo_order(&request) {
             Ok(plan) => plan,
-            Err(OkxError::RateLimited { evidence }) if !evidence.request_sent =>
-                return Err(OrderExecutorError::RateDeferred { evidence: *evidence }),
+            Err(OkxError::RateLimited { evidence }) if !evidence.request_sent => {
+                return Err(OrderExecutorError::RateDeferred {
+                    evidence: *evidence,
+                });
+            }
             Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
         };
-        self.ledger.begin_protective_size_amend(intent_id, mutation_id, observed_at_ms)?;
-        let reply = self.gateway.amend_algo_order(request.clone(), timing, rate_plan).await;
+        self.ledger
+            .begin_protective_size_amend(intent_id, mutation_id, observed_at_ms)?;
+        let reply = self
+            .gateway
+            .amend_algo_order(request.clone(), timing, rate_plan)
+            .await;
         match reply {
-            Ok(reply) if reply.code == "0" && reply.data.len() == 1
-                && reply.data[0].algo_order_id == request.algo_order_id
-                && reply.data[0].request_id == request.request_id
-                && reply.data[0].client_order_id == protection.algo_client_order_id
-                && reply.data[0].status_code == "0" =>
-                    Ok(MutationSubmitDisposition::Acknowledged(
-                        self.ledger.acknowledge_protective_size_amend(
-                            intent_id, mutation_id, observed_at_ms,
-                        )?
-                    )),
+            Ok(reply)
+                if reply.code == "0"
+                    && reply.data.len() == 1
+                    && reply.data[0].algo_order_id == request.algo_order_id
+                    && reply.data[0].request_id == request.request_id
+                    && reply.data[0].client_order_id == protection.algo_client_order_id
+                    && reply.data[0].status_code == "0" =>
+            {
+                Ok(MutationSubmitDisposition::Acknowledged(
+                    self.ledger.acknowledge_protective_size_amend(
+                        intent_id,
+                        mutation_id,
+                        observed_at_ms,
+                    )?,
+                ))
+            }
             _ => Ok(MutationSubmitDisposition::Unknown(
                 self.ledger.mark_protective_size_amend_unknown(
-                    intent_id, mutation_id, observed_at_ms,
-                )?
+                    intent_id,
+                    mutation_id,
+                    observed_at_ms,
+                )?,
             )),
         }
     }
@@ -661,7 +696,9 @@ where
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
         Ok(self.ledger.mark_protective_size_amend_unknown(
-            intent_id, mutation_id, observed_at_ms,
+            intent_id,
+            mutation_id,
+            observed_at_ms,
         )?)
     }
 
@@ -673,31 +710,53 @@ where
         mutation_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
-        let entry = self.ledger.get(intent_id).cloned()
+        let entry = self
+            .ledger
+            .get(intent_id)
+            .cloned()
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
-        let protection = entry.record.protection.as_ref()
+        let protection = entry
+            .record
+            .protection
+            .as_ref()
             .ok_or(OrderExecutorError::InvalidMutationInput("protection"))?;
-        let amend = protection.size_amend.as_ref()
-            .ok_or(OrderExecutorError::InvalidMutationInput("protective_size_amend"))?;
+        let amend =
+            protection
+                .size_amend
+                .as_ref()
+                .ok_or(OrderExecutorError::InvalidMutationInput(
+                    "protective_size_amend",
+                ))?;
         if amend.mutation_id != mutation_id
-            || !matches!(amend.state, ProtectiveSizeAmendState::Unknown | ProtectiveSizeAmendState::Acknowledged)
+            || !matches!(
+                amend.state,
+                ProtectiveSizeAmendState::Unknown | ProtectiveSizeAmendState::Acknowledged
+            )
         {
-            return Err(OrderExecutorError::InvalidMutationInput("protective_size_amend_state"));
+            return Err(OrderExecutorError::InvalidMutationInput(
+                "protective_size_amend_state",
+            ));
         }
-        let current = self.gateway.algo_order_by_client_id(protection.algo_client_order_id.clone())
-            .await.map_err(OrderExecutorError::PreSubmit)?;
+        let current = self
+            .gateway
+            .algo_order_by_client_id(protection.algo_client_order_id.clone())
+            .await
+            .map_err(OrderExecutorError::PreSubmit)?;
         validate_protective_algo(&entry.record, &current)?;
         if current.algo_order_id != amend.algo_order_id
-            || !matches!(current.state.as_str(), "live" | "effective" | "partially_effective")
+            || !matches!(
+                current.state.as_str(),
+                "live" | "effective" | "partially_effective"
+            )
         {
             return Err(OrderExecutorError::ProtectionIdentityMismatch);
         }
         let new_size = Decimal::from_str(&amend.target_size)
             .map_err(|_| OrderExecutorError::ProtectionIdentityMismatch)?;
         validate_effective_protective_leg(&entry.record, &current, new_size)?;
-        Ok(self.ledger.confirm_protective_size_amend(
-            intent_id, mutation_id, observed_at_ms,
-        )?)
+        Ok(self
+            .ledger
+            .confirm_protective_size_amend(intent_id, mutation_id, observed_at_ms)?)
     }
 
     pub fn prepare_protective_cleanup(
@@ -2044,31 +2103,49 @@ mod tests {
     #[async_trait]
     impl ExecutionGateway for ExactResizeGateway {
         async fn place_order(
-            &self, _: PlaceOrderRequest, _: MutationTiming, _: Option<RateRequestPlan>
+            &self,
+            _: PlaceOrderRequest,
+            _: MutationTiming,
+            _: Option<RateRequestPlan>,
         ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
             panic!("no parent order should be sent during resize test");
         }
 
         async fn order_by_client_id(
-            &self, _: String, _: String
+            &self,
+            _: String,
+            _: String,
         ) -> Result<TradeOrderDetails, OkxError> {
             panic!("no unrelated parent lookup");
         }
 
         async fn algo_order_by_client_id(
-            &self, _: String
+            &self,
+            _: String,
         ) -> Result<TradeAlgoOrderDetails, OkxError> {
-            Ok(self.details.lock().expect("details").pop_front().expect("one lookup"))
+            Ok(self
+                .details
+                .lock()
+                .expect("details")
+                .pop_front()
+                .expect("one lookup"))
         }
 
         async fn amend_algo_order(
-            &self, req: AmendAlgoOrderRequest, _: MutationTiming, _: Option<RateRequestPlan>
+            &self,
+            req: AmendAlgoOrderRequest,
+            _: MutationTiming,
+            _: Option<RateRequestPlan>,
         ) -> Result<TradeResponse<AmendAlgoOrderAck>, OkxError> {
             req.validate()?;
             assert_eq!(req.new_size, "0.5");
             assert!(!req.cancel_on_fail);
             self.sends.fetch_add(1, Ordering::SeqCst);
-            self.response.lock().expect("response").take().expect("single send")
+            self.response
+                .lock()
+                .expect("response")
+                .take()
+                .expect("single send")
         }
     }
 
@@ -2076,7 +2153,12 @@ mod tests {
         TradeAlgoOrderDetails {
             instrument_id: record.plan.instrument_id.clone(),
             algo_order_id: "123456789012".to_owned(),
-            client_order_id: record.protection.as_ref().unwrap().algo_client_order_id.clone(),
+            client_order_id: record
+                .protection
+                .as_ref()
+                .unwrap()
+                .algo_client_order_id
+                .clone(),
             state: "live".to_owned(),
             take_profit_trigger_price: "0.12".to_owned(),
             take_profit_trigger_price_type: "mark".to_owned(),
@@ -2098,16 +2180,25 @@ mod tests {
         let (root, mut ledger) = ledger(label);
         let plan = protected_plan();
         ledger.prepare(plan.clone(), 101).expect("prepare");
-        ledger.begin_submission(&plan.intent_id, 102).expect("submit");
-        ledger.acknowledge(&plan.intent_id, "parent123", 103).expect("ack");
-        let entry = ledger.reconcile_found_with_resolutions(
-            &plan.intent_id, "parent123", ExchangeOrderState::Filled,
-            OrderMutationResolution::Pending,
-            Some(ProtectiveOrderResolution::Active {
-                algo_order_id: "123456789012".to_owned(),
-                covered_size: "1".to_owned(),
-            }), 104,
-        ).expect("active");
+        ledger
+            .begin_submission(&plan.intent_id, 102)
+            .expect("submit");
+        ledger
+            .acknowledge(&plan.intent_id, "parent123", 103)
+            .expect("ack");
+        let entry = ledger
+            .reconcile_found_with_resolutions(
+                &plan.intent_id,
+                "parent123",
+                ExchangeOrderState::Filled,
+                OrderMutationResolution::Pending,
+                Some(ProtectiveOrderResolution::Active {
+                    algo_order_id: "123456789012".to_owned(),
+                    covered_size: "1".to_owned(),
+                }),
+                104,
+            )
+            .expect("active");
         (root, ledger, entry.record)
     }
 
@@ -2118,29 +2209,59 @@ mod tests {
         let mid = "resize_once_0123456789abc";
         let gateway = ExactResizeGateway {
             sends: AtomicUsize::new(0),
-            details: Mutex::new(vec![
-                resize_algo(&record, "1"), resize_algo(&record, "0.5")
-            ].into()),
+            details: Mutex::new(
+                vec![resize_algo(&record, "1"), resize_algo(&record, "0.5")].into(),
+            ),
             response: Mutex::new(Some(Err(OkxError::Response(
-                "transport returned no ACK".to_owned()
+                "transport returned no ACK".to_owned(),
             )))),
         };
         let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
-        executor.prepare_protective_size_amend(&intent, mid, "0.5", 105)
+        executor
+            .prepare_protective_size_amend(&intent, mid, "0.5", 105)
             .expect("durable prepare");
-        assert!(matches!(executor.submit_prepared_protective_size_amend(
-            &intent, mid, timing(), 106
-        ).await.expect("unknown"), MutationSubmitDisposition::Unknown(_)));
+        assert!(matches!(
+            executor
+                .submit_prepared_protective_size_amend(&intent, mid, timing(), 106)
+                .await
+                .expect("unknown"),
+            MutationSubmitDisposition::Unknown(_)
+        ));
         assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
-        assert!(executor.submit_prepared_protective_size_amend(
-            &intent, mid, timing(), 107
-        ).await.is_err(), "NEVER replay uncertain POST");
+        assert!(
+            executor
+                .submit_prepared_protective_size_amend(&intent, mid, timing(), 107)
+                .await
+                .is_err(),
+            "NEVER replay uncertain POST"
+        );
         assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
-        let proof = executor.confirm_protective_size_amend_from_venue(&intent, mid, 108)
-            .await.expect("venue size equals target, not sufficient for position");
-        assert_eq!(proof.record.protection.as_ref().unwrap().covered_size.as_deref(), Some("0.5"));
-        assert_eq!(proof.record.protection.as_ref().unwrap().size_amend.as_ref().unwrap().state,
-            ProtectiveSizeAmendState::Confirmed);
+        let proof = executor
+            .confirm_protective_size_amend_from_venue(&intent, mid, 108)
+            .await
+            .expect("venue size equals target, not sufficient for position");
+        assert_eq!(
+            proof
+                .record
+                .protection
+                .as_ref()
+                .unwrap()
+                .covered_size
+                .as_deref(),
+            Some("0.5")
+        );
+        assert_eq!(
+            proof
+                .record
+                .protection
+                .as_ref()
+                .unwrap()
+                .size_amend
+                .as_ref()
+                .unwrap()
+                .state,
+            ProtectiveSizeAmendState::Confirmed
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2152,36 +2273,63 @@ mod tests {
         let request_id = derive_amend_request_id(&intent, mid);
         let gateway = ExactResizeGateway {
             sends: AtomicUsize::new(0),
-            details: Mutex::new(vec![
-                resize_algo(&record, "1"), resize_algo(&record, "1")
-            ].into()),
+            details: Mutex::new(vec![resize_algo(&record, "1"), resize_algo(&record, "1")].into()),
             response: Mutex::new(Some(Ok(TradeResponse {
-                code: "0".to_owned(), message: String::new(),
+                code: "0".to_owned(),
+                message: String::new(),
                 data: vec![AmendAlgoOrderAck {
                     algo_order_id: "123456789012".to_owned(),
-                    client_order_id: record.protection.as_ref().unwrap().algo_client_order_id.clone(),
-                    request_id, status_code: "0".to_owned(),
+                    client_order_id: record
+                        .protection
+                        .as_ref()
+                        .unwrap()
+                        .algo_client_order_id
+                        .clone(),
+                    request_id,
+                    status_code: "0".to_owned(),
                     status_message: String::new(),
                 }],
-                in_time_us: String::new(), out_time_us: String::new(),
+                in_time_us: String::new(),
+                out_time_us: String::new(),
             }))),
         };
         let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
-        executor.prepare_protective_size_amend(&intent, mid, "0.5", 105)
+        executor
+            .prepare_protective_size_amend(&intent, mid, "0.5", 105)
             .expect("durable");
-        assert!(matches!(executor.submit_prepared_protective_size_amend(
-            &intent, mid, timing(), 106
-        ).await.expect("ack"), MutationSubmitDisposition::Acknowledged(_)));
-        assert!(matches!(executor.confirm_protective_size_amend_from_venue(
-            &intent, mid, 107
-        ).await, Err(OrderExecutorError::ProtectionIdentityMismatch)));
-        let link = executor.ledger().get(&intent).unwrap().record.protection.as_ref().unwrap();
+        assert!(matches!(
+            executor
+                .submit_prepared_protective_size_amend(&intent, mid, timing(), 106)
+                .await
+                .expect("ack"),
+            MutationSubmitDisposition::Acknowledged(_)
+        ));
+        assert!(matches!(
+            executor
+                .confirm_protective_size_amend_from_venue(&intent, mid, 107)
+                .await,
+            Err(OrderExecutorError::ProtectionIdentityMismatch)
+        ));
+        let link = executor
+            .ledger()
+            .get(&intent)
+            .unwrap()
+            .record
+            .protection
+            .as_ref()
+            .unwrap();
         assert_eq!(link.covered_size.as_deref(), Some("1"));
-        assert_eq!(link.size_amend.as_ref().unwrap().state, ProtectiveSizeAmendState::Acknowledged);
+        assert_eq!(
+            link.size_amend.as_ref().unwrap().state,
+            ProtectiveSizeAmendState::Acknowledged
+        );
         assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
-        assert!(executor.submit_prepared_protective_size_amend(
-            &intent, mid, timing(), 108
-        ).await.is_err());
+        assert!(
+            executor
+                .submit_prepared_protective_size_amend(&intent, mid, timing(), 108)
+                .await
+                .is_err()
+        );
         assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
         let _ = fs::remove_dir_all(root);
     }
