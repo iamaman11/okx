@@ -17,6 +17,7 @@ use crate::{
     ExecutionState, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
     OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
     PositionSide, ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveOrderStatus,
+    ProtectiveSizeAmendState,
     ProtectiveTriggerPriceBasis, ReverseContinuation, ReverseExecutionLink, ReverseLeg,
     derive_client_order_id, derive_protective_algo_client_id, derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
@@ -711,6 +712,54 @@ impl DurableExecutionLedger {
         Ok(MutationPrepareDisposition::Created(entry))
     }
 
+    pub fn prepare_protective_size_amend(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        new_size: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.prepare_protective_size_amend(mutation_id, new_size).map(|_| ())
+        })
+    }
+
+    pub fn begin_protective_size_amend(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| record.begin_protective_size_amend(mutation_id))
+    }
+
+    pub fn acknowledge_protective_size_amend(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| record.acknowledge_protective_size_amend(mutation_id))
+    }
+
+    pub fn mark_protective_size_amend_unknown(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| record.mark_protective_size_amend_unknown(mutation_id))
+    }
+
+    pub fn confirm_protective_size_amend(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| record.confirm_protective_size_amend(mutation_id))
+    }
+
     pub fn prepare_protective_cleanup(
         &mut self,
         intent_id: &str,
@@ -1134,6 +1183,30 @@ fn validate_protection_link(record: &ExecutionRecord) -> Result<(), ExecutionLed
         }
     }
 
+    if let Some(amend) = protection.size_amend.as_ref() {
+        let prior = positive_decimal(&amend.previous_size);
+        let target = positive_decimal(&amend.target_size);
+        if !valid_mutation_id(&amend.mutation_id)
+            || amend.request_id != derive_amend_request_id(&record.plan.intent_id, &amend.mutation_id)
+            || amend.algo_order_id.is_empty()
+            || !amend.algo_order_id.bytes().all(|b| b.is_ascii_digit())
+            || protection.algo_order_id.as_deref() != Some(amend.algo_order_id.as_str())
+            || protection.status != ProtectiveOrderStatus::Active
+            || !record.state.is_terminal()
+            || prior.is_none() || target.is_none() || target >= prior
+            || protection.covered_size.as_deref() != Some(
+                match amend.state {
+                    ProtectiveSizeAmendState::Confirmed => amend.target_size.as_str(),
+                    _ => amend.previous_size.as_str(),
+                })
+            || (protection.cleanup.is_some()
+                && amend.state != ProtectiveSizeAmendState::Confirmed)
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "protective resize state does not match exact owned algo/size",
+            ));
+        }
+    }
     if let Some(cleanup) = protection.cleanup.as_ref() {
         if !valid_mutation_id(&cleanup.mutation_id)
             || protection.algo_order_id.as_deref() != Some(cleanup.algo_order_id.as_str())
