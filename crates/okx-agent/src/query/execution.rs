@@ -487,14 +487,7 @@ async fn prepare_risk_increasing(
                 utc_now_ms(),
                 || async {
                     protective_readback_in_ttl(started_ms, utc_now_ms())
-                        && matches!(
-                            private_ws.convergence_window(cursor).await,
-                            Ok(window) if window.events.is_empty()
-                        )
-                        && private_ws
-                            .algo_convergence_unchanged(algo_cursor)
-                            .await
-                            .is_ok()
+                        && private_ws.protected_oco_window_unchanged(cursor, algo_cursor).await
                 },
             )
             .await;
@@ -968,14 +961,7 @@ async fn submit_prepared(
                         let finished_ms = utc_now_ms();
                         protective_readback_in_ttl(started_ms, finished_ms)
                             && finished_ms <= expires_at_ms
-                            && matches!(
-                                private_ws.convergence_window(cursor).await,
-                                Ok(window) if window.events.is_empty()
-                            )
-                            && private_ws
-                                .algo_convergence_unchanged(algo_cursor)
-                                .await
-                                .is_ok()
+                            && private_ws.protected_oco_window_unchanged(cursor, algo_cursor).await
                     },
                 )
                 .await?

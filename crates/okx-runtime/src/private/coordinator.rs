@@ -71,11 +71,13 @@ impl PrivateWsHandle {
         self.state.read().await.algo_convergence_cursor()
     }
 
-    pub async fn algo_convergence_unchanged(
+    /// One local critical-section across both event streams.
+    pub async fn protected_oco_window_unchanged(
         &self,
-        cursor: super::state::AlgoConvergenceCursor,
-    ) -> Result<(), PrivateConvergenceError> {
-        self.state.read().await.algo_convergence_unchanged(cursor)
+        private: PrivateConvergenceCursor,
+        algo: super::state::AlgoConvergenceCursor,
+    ) -> bool {
+        self.state.read().await.protected_oco_window_unchanged(private, algo)
     }
 }
 

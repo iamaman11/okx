@@ -216,6 +216,16 @@ impl PrivateRuntimeState {
         Ok(())
     }
 
+    /// Both local event cursors are tested under ONE lock, never across awaits.
+    pub fn protected_oco_window_unchanged(
+        &self,
+        private: PrivateConvergenceCursor,
+        algo: AlgoConvergenceCursor,
+    ) -> bool {
+        matches!(self.convergence_window(private), Ok(window) if window.events.is_empty())
+            && self.algo_convergence_unchanged(algo).is_ok()
+    }
+
     pub(super) fn acknowledge_business_login(&mut self, connection_id: Option<String>) {
         self.business_logged_in = true;
         self.business_connection_id = connection_id;
@@ -396,6 +406,8 @@ mod tests {
         };
         state.acknowledge_algo_subscription(&arg);
         let cursor = state.algo_convergence_cursor().expect("native algo cursor");
+        let private_cursor = state.convergence_cursor().expect("private cursor");
+        assert!(state.protected_oco_window_unchanged(private_cursor, cursor));
         assert_eq!(state.algo_convergence_unchanged(cursor), Ok(()));
         let private_last_inbound = state.status().last_inbound_ms;
         state.observe_algo_event(12);
@@ -406,6 +418,10 @@ mod tests {
         );
         assert_eq!(state.status().algo_events_seen, 1);
         let new_cursor = state.algo_convergence_cursor().expect("after event");
+        let current_private = state.convergence_cursor().expect("private still ready");
+        assert!(state.protected_oco_window_unchanged(current_private, new_cursor));
+        state.observe_event(PrivateWsEvent::Orders(Vec::new()), 13);
+        assert!(!state.protected_oco_window_unchanged(current_private, new_cursor));
         state.set_disconnected(true, "business websocket lost");
         assert_eq!(
             state.algo_convergence_unchanged(new_cursor),
