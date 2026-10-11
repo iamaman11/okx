@@ -2327,7 +2327,7 @@ mod tests {
 
     #[test]
     fn mismatched_side_quantity_duplicate_and_extra_oracle_lots_fail_closed() {
-        let account = account(
+        let snapshot = account(
             "long_short_mode",
             vec![position(
                 "BTC-USDT-SWAP",
@@ -2348,16 +2348,16 @@ mod tests {
             notional_usd: "8.34".to_owned(),
         };
         row.contracts = "0.02".to_owned();
-        assert!(conservative_account_with_position_oracle(&account, &[row.clone()], None).is_err());
+        assert!(conservative_account_with_position_oracle(&snapshot, &[row.clone()], None).is_err());
         row.contracts = "0.01".to_owned();
         row.position_side = "short".to_owned();
-        assert!(conservative_account_with_position_oracle(&account, &[row.clone()], None).is_err());
+        assert!(conservative_account_with_position_oracle(&snapshot, &[row.clone()], None).is_err());
         row.position_side = "long".to_owned();
         assert!(
-            conservative_account_with_position_oracle(&account, &[row.clone(), row.clone()], None)
+            conservative_account_with_position_oracle(&snapshot, &[row.clone(), row.clone()], None)
                 .is_err()
         );
-        assert!(conservative_account_with_position_oracle(&account, &[], None).is_err());
+        assert!(conservative_account_with_position_oracle(&snapshot, &[], None).is_err());
         assert!(
             conservative_account_with_position_oracle(
                 &account("long_short_mode", vec![]),
