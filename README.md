@@ -4,6 +4,25 @@ Rust/Tokio OKX observation, analysis and execution-safety platform for the curre
 
 The production architecture is deliberately small: one Windows supervisor chain, one observation runtime, one mutation owner, typed encrypted access, and hosted-CI artifacts as the only normal deployment authority.
 
+## Product charter — permanent; not a parallel roadmap
+
+**Goal:** one simple, understandable, modular, industrial OKX application for analysis and trading that ChatGPT can operate end-to-end **without manual user-side commands, guessing account state or blindly resending an uncertain order**. Demo is an exchange acceptance environment for **the same Rust executor intended for future real trading**, never a second application. Production remains **ReadOnly** until the independent explicit Live gate after Stage 5.
+
+| Existing single owner | Responsibility; no replacement or duplicate |
+| --- | --- |
+| `okx-observation` | Fresh, coherent, attributable market and exact-account truth |
+| `okx-analysis` | Deterministic risk, calculations and transaction-cost analysis (TCA) |
+| `okx-execution` | Sole trade/risk-mutation owner, durable intent/ledger, protection, exact exchange reconciliation and **non-replay after UNKNOWN** |
+| Windows `okx-host-control` + one agent | Native single-process ownership, lifecycle, verified installation and recovery |
+| Cloudflare MCP | **Primary** typed ChatGPT data and permitted Demo-trade transport; no second execution owner |
+| GitHub | Canonical code, CI, exact verified releases, typed CONTROL and encrypted fallback/parity; **never** a workaround for a primary-tool refusal |
+
+**No code for code's sake:** no Demo fork, new watchdog/scheduler/daemon/polling loop, competing API/RPC, risk engine or execution owner. First identify an observable missing capability or defect, reuse an existing module, make the smallest safe change, test failure paths, prove exact CI and installed artifact, physically verify Demo exchange results if relevant, and **close the work item** before moving on. Existing protections cannot be removed to make a test pass. ChatGPT must use bounded status/decision packets with account UID/profile, source freshness, risk, unresolved intents and next safe action; never depend on a long chat history as the ledger.
+
+**Five development stages only. Current critical path:** G3-C physically accepted → **G3-D1 NOW** read-only venue TP/SL/OCO + Hedge semantics → **G3-D2** protected ADD/REDUCE/HEDGE smallest-code correction → **G3-D3** bounded physical Demo fills/bills/OCO/FLAT → G3-E/F, G4 unknown ACK and restart safety → Stage 5A/B/C (including **safe Demo↔Production ReadOnly switching at 5C-2**) → independently human-authorized Live activation. The environment switch **does not block** modifying position size inside the already-running Demo; #283 is merged lifecycle source-only, **not installed and not a proven switch**.
+
+**One operational cursor:** [canonical #160](https://github.com/iamaman11/okx/issues/160) and physical exchange proofs [#223](https://github.com/iamaman11/okx/issues/223). Historical contradictory next-step notes are archived, not authority.
+
 ## Current production state
 
 Accepted:
@@ -27,9 +46,9 @@ Accepted:
 - Stage 3D causal live-decision parity kernel — ACCEPTED;
 - Stage 3D bounded event-driven PAPER/SHADOW session owner — research implementation; independent H2 promotion remains gated by #216.
 
-The **only current acceptance cursor** is [#160](https://github.com/iamaman11/okx/issues/160); [#223](https://github.com/iamaman11/okx/issues/223#issuecomment-6103793654) stores physical venue evidence. Stage 4C G1/G2 and G3-A/B/C are **physically accepted only for their exact Demo scenarios**; G3C proved one actual unprotected reducing CLOSE AMEND, terminal cleanup and durable restart using installed PR #279 artifact `11684605898`. **ONLY NEXT G3-D, in four serial acceptance slices:** D0 fail-closed native Demo ↔ Production **ReadOnly** profile handoff, D1 read-only OKX protection/position-mode feasibility, D2 minimal same-owner protected ADD/REDUCE/HEDGE implementation and regression tests, D3 low-risk actual Demo order/fill/OCO/flat/restart proof. Then G3-E REVERSE, G3-F negative/race cases, G4 uncertain ACK and recovery, Stage 5A/B/C, and separate explicit Live activation. The selector does not authorize real-money trading.
+The **only current acceptance cursor** is the first section of [#160](https://github.com/iamaman11/okx/issues/160); [#223](https://github.com/iamaman11/okx/issues/223#issuecomment-6103793654) records exact physical Demo truth. Stage 4C G1/G2 and G3-A/B/C are **PHYSICALLY ACCEPTED for their exact Demo scenarios** only; G3C proved a same-order reducing CLOSE AMEND, fills, terminal OCO cleanup and restart with installed agent artifact `11684605898`. **NEXT = G3-D1 read-only OKX TP/SL/Hedge venue feasibility**, then G3-D2 minimal existing-owner coverage correction, then G3-D3 Demo ADD/REDUCE/HEDGE/FLAT physical tests; G3-E/F, G4 uncertain ACK/non-replay, Stage 5A/B/C and separate Live gate follow. **D0 switching work is deferred to 5C-2** because Demo multi-leg acceptance does not require leaving Demo. This current cursor supersedes earlier D0-first historical notes.
 
-Live trading is **not enabled**. The single environment choice is **Demo / Real (Production ReadOnly)**, not a trading-authority switch. Existing `start_demo_acceptance` and `restore_production_agent` are raw owner operations, **not yet safe one-step user switching**: native `switch_agent_profile` and `reconcile_desired` must first fail-closed on open/unknown exposure, active conditional/OCO, nonterminal intents or untrusted state and prove fresh exact-account quiescence. Do not expose them as unrestricted UI controls. One authenticated `demo_acceptance` profile may use the same Rust executor through one typed Demo-only MCP `execution_action`; production remains hard `ReadOnly`. G3-D and later physical PASS do not activate Live.
+Live trading is **not enabled**. One eventual user choice is **Demo / Real (Production ReadOnly)**; choosing a trading environment never grants real-money execution authority. [PR #283](https://github.com/iamaman11/okx/pull/283) merged source-only deny-by-default profile transition guards, **not yet installed or proven as a complete safe toggle**. Existing lifecycle shutdown/restart/install can still interrupt supervision with open exposure, so do not claim lifecycle safety from CI. A later Stage 5C-2 proof must cover fresh exact-account/ledger/OCO guard, single-owner handoff and negative crash/recovery cases; stay on the accepted Demo profile for G3-D1/D2/D3. The single typed Demo-only `execution_action` uses the same `okx-execution` owner; Production remains ReadOnly.
 
 ## Architecture
 
