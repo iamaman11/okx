@@ -262,6 +262,42 @@ impl ExecutionRuntime {
         Ok(Some(result))
     }
 
+    /// Validate current owned OCO coverage under the SAME executor mutex,
+    /// then perform the only possible prepared exchange submission.
+    pub async fn submit_prepared_add_hedge_demo_fenced<F, Fut>(
+        &self,
+        preflight: &ExecutorPreflightSnapshot,
+        intent_id: &str,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+        final_private_ws_fence: F,
+    ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let mut executor = self.executor.lock().await;
+        if !self.demo_mutation_admitted(preflight, executor.ledger()) {
+            executor.disable_mutations();
+            return Ok(None);
+        }
+        executor.enable_demo_acceptance(self.environment)?;
+        let result = executor
+            .submit_prepared_protected_add_hedge_fenced(
+                intent_id,
+                account,
+                inventory,
+                timing,
+                observed_at_ms,
+                final_private_ws_fence,
+            )
+            .await;
+        executor.disable_mutations();
+        Ok(Some(result))
+    }
+
     pub async fn venue_execution_evidence(
         &self,
         plan: &ExecutionPlan,
@@ -342,6 +378,35 @@ impl ExecutionRuntime {
             .lock()
             .await
             .prepare_with_lineage(plan, lineage, observed_at_ms)
+    }
+
+    /// Native fenced admission of a second protected lot; no alternate
+    /// executor, no independent trading authority.
+    pub async fn prepare_protected_add_hedge_fenced<F, Fut>(
+        &self,
+        plan: ExecutionPlan,
+        lineage: Option<ExecutionLineageBinding>,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
+        observed_at_ms: u64,
+        final_private_ws_fence: F,
+    ) -> Result<PrepareOutcome, OrderExecutorError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        self.executor
+            .lock()
+            .await
+            .prepare_protected_add_hedge_fenced(
+                plan,
+                lineage,
+                account,
+                inventory,
+                observed_at_ms,
+                final_private_ws_fence,
+            )
+            .await
     }
 
     pub async fn prepare_reverse_close(
