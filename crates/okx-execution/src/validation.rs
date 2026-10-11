@@ -155,7 +155,9 @@ pub enum ExecutionValidationError {
     #[error("CLOSE must consume the full unreserved position; use REDUCE for partial exits")]
     CloseMustFullyClose,
 
-    #[error("OPEN requires the entire instrument to be FLAT; an existing position must not be silently adopted as a new protected lot")]
+    #[error(
+        "OPEN requires the entire instrument to be FLAT; an existing position must not be silently adopted as a new protected lot"
+    )]
     OpenRequiresFlatInstrument,
 
     #[error("add execution requires an existing same-side position")]
