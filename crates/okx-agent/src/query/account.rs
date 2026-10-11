@@ -884,20 +884,43 @@ pub(super) async fn dispatch(
                 }
             };
             if coherence.coherent && !oracle_comparison.consistent {
-                return Ok(failure_response(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Failed,
-                    PORTFOLIO_RISK_ORACLE_MISMATCH_CODE,
-                    format!(
-                        "coherent local portfolio risk does not match OKX account-position-risk oracle: gross_residual_usd={}, adjusted_equity_residual_usd={}",
-                        oracle_comparison.gross_notional_residual_usd,
-                        oracle_comparison
-                            .adjusted_equity_residual_usd
-                            .as_deref()
-                            .unwrap_or("<unavailable>")
-                    ),
-                    false,
+                // Exact USD equality compares two separately marked REST reads.
+                // Preserve the explicit residual, but only classify it as an
+                // impossible account mismatch when exact lot identity differs.
+                // A moving valuation is reported DEGRADED, never silently FRESH.
+                let oracle_lots = oracle
+                    .positions
+                    .iter()
+                    .map(|position| okx_analysis::PositionOracleEvidence {
+                        instrument_type: position.instrument_type.clone(),
+                        instrument_id: position.instrument_id.clone(),
+                        position_side: position.position_side.clone(),
+                        margin_mode: position.margin_mode.clone(),
+                        contracts: position.pos.clone(),
+                        notional_usd: position.notional_usd.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                if let Err(error) = okx_analysis::conservative_account_with_position_oracle(
+                    &assembled.snapshot,
+                    &oracle_lots,
+                    Some(&oracle.adjusted_equity_usd),
+                ) {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        PORTFOLIO_RISK_ORACLE_MISMATCH_CODE,
+                        format!(
+                            "position-risk oracle lot identity, quantity or valuation invalid: {error}"
+                        ),
+                        false,
+                    ));
+                }
+                quality = DataQuality::Degraded;
+                warnings.push(format!(
+                    "separately observed account-position-risk has exact matching lots but asynchronously different USD valuation: gross_residual_usd={}, adjusted_equity_residual_usd={}; exact USD equivalence not claimed; new-risk admission uses the conservative upper per-lot notional",
+                    oracle_comparison.gross_notional_residual_usd,
+                    oracle_comparison.adjusted_equity_residual_usd.as_deref().unwrap_or("<unavailable>"),
                 ));
             }
             if !coherence.coherent && !oracle_comparison.consistent {
@@ -1929,7 +1952,10 @@ fn non_empty_option(value: &str) -> Option<String> {
     (!value.trim().is_empty()).then(|| value.to_owned())
 }
 
-fn observation_skew_ms(source_received_at: &str, oracle_timestamp_ms: &str) -> Result<u64, String> {
+pub(super) fn observation_skew_ms(
+    source_received_at: &str,
+    oracle_timestamp_ms: &str,
+) -> Result<u64, String> {
     let source_ms = chrono::DateTime::parse_from_rfc3339(source_received_at)
         .map_err(|error| {
             format!(
