@@ -23,6 +23,18 @@ use crate::{
     require_live_trading_enabled,
 };
 
+/// Exact single-owned attached-OCO shrink inputs. The executor verifies
+/// these independently before durable SUBMITTING and one venue POST.
+pub struct FencedProtectiveShrinkRequest<'a> {
+    pub intent_id: &'a str,
+    pub mutation_id: &'a str,
+    pub target_size: &'a str,
+    pub account: &'a AccountSnapshot,
+    pub inventory: &'a PendingProtectiveAlgoInventory,
+    pub timing: MutationTiming,
+    pub observed_at_ms: u64,
+}
+
 #[async_trait]
 pub trait ExecutionGateway: Send + Sync {
     fn admit_place_order(
@@ -597,15 +609,29 @@ where
         )?)
     }
 
-    /// Demo-only. Persist SUBMITTING before exactly one REST POST.
-    /// Initial readback is not equivalent to fresh full position coverage.
-    pub async fn submit_prepared_protective_size_amend(
+    /// One-shot, *shrinking only* OCO repair for a previously reduced Hedge
+    /// position. It cannot open/close exposure or admit a partial REDUCE.
+    /// Verify the single owned OCO and the exact already-remaining side size
+    /// under an account/WS fence BEFORE the first durable SUBMITTING marker.
+    /// No PREPARED record is left behind by a failed read-only admission.
+    pub async fn submit_protective_size_amend_fenced<F, Fut>(
         &mut self,
-        intent_id: &str,
-        mutation_id: &str,
-        timing: MutationTiming,
-        observed_at_ms: u64,
-    ) -> Result<MutationSubmitDisposition, OrderExecutorError> {
+        request: FencedProtectiveShrinkRequest<'_>,
+        final_private_ws_fence: F,
+    ) -> Result<MutationSubmitDisposition, OrderExecutorError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let FencedProtectiveShrinkRequest {
+            intent_id,
+            mutation_id,
+            target_size: new_size,
+            account,
+            inventory,
+            timing,
+            observed_at_ms,
+        } = request;
         require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
         let entry = self
             .ledger
@@ -616,24 +642,64 @@ where
             .record
             .protection
             .as_ref()
-            .ok_or(OrderExecutorError::InvalidMutationInput("protection"))?;
-        let amend =
-            protection
-                .size_amend
-                .as_ref()
-                .ok_or(OrderExecutorError::InvalidMutationInput(
-                    "protective_size_amend",
-                ))?;
-        if amend.mutation_id != mutation_id || amend.state != ProtectiveSizeAmendState::Prepared {
+            .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
+        let target = Decimal::from_str(new_size)
+            .map_err(|_| OrderExecutorError::ProtectionCoverageUnproven)?;
+        let previous = protection
+            .covered_size
+            .as_deref()
+            .and_then(|value| Decimal::from_str(value).ok())
+            .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
+        if entry.record.state != ExecutionState::Filled
+            || protection.status != crate::ProtectiveOrderStatus::Active
+            || protection.cleanup.is_some()
+            || entry.record.active_mutation().is_some()
+            || target <= Decimal::ZERO
+            || target >= previous
+        {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        // Single-lot only: multi-lot/other Hedge-side permission needs the
+        // separate zero-gap ADD/HEDGE acceptance. An unresolved or foreign
+        // managed parent cannot borrow this lot's protective coverage.
+        if self.ledger.entries().any(|other| {
+            other.record.plan.instrument_id == entry.record.plan.instrument_id
+                && other.record.plan.intent_id != intent_id
+                && (!other.record.state.is_terminal()
+                    || other.record.protection_blocks_new_managed_intent())
+        }) {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        validate_protective_amend_coverage(&entry.record, account, inventory, target)?;
+        // An opposite-side Hedge lot (even outside this intent) is not
+        // covered by the single-algo inventory; refuse rather than infer it.
+        if account.positions.iter().any(|position| {
+            position.instrument_id == entry.record.plan.instrument_id
+                && position.position_side != entry.record.plan.position_side.as_str()
+                && Decimal::from_str(&position.position).ok() != Some(Decimal::ZERO)
+        }) {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+
+        // Exactly one mutation ID and request ID own one algo. A retry after
+        // SUBMITTING/UNKNOWN/ACK is rejected before a GET or POST.
+        if let Some(amend) = protection.size_amend.as_ref()
+            && (amend.mutation_id != mutation_id
+                || Decimal::from_str(&amend.target_size).ok() != Some(target)
+                || amend.state != ProtectiveSizeAmendState::Prepared)
+        {
             return Err(OrderExecutorError::InvalidMutationInput(
                 "protective_size_amend_state",
             ));
         }
         let request = AmendAlgoOrderRequest {
             instrument_id: entry.record.plan.instrument_id.clone(),
-            algo_order_id: amend.algo_order_id.clone(),
-            request_id: amend.request_id.clone(),
-            new_size: amend.target_size.clone(),
+            algo_order_id: protection
+                .algo_order_id
+                .clone()
+                .ok_or(OrderExecutorError::ProtectionIdentityMismatch)?,
+            request_id: derive_amend_request_id(intent_id, mutation_id),
+            new_size: target.normalize().to_string(),
             cancel_on_fail: false,
         };
         request.validate().map_err(OrderExecutorError::PreSubmit)?;
@@ -651,9 +717,7 @@ where
         {
             return Err(OrderExecutorError::ProtectionIdentityMismatch);
         }
-        let old_size = Decimal::from_str(&amend.previous_size)
-            .map_err(|_| OrderExecutorError::ProtectionIdentityMismatch)?;
-        validate_effective_protective_leg(&entry.record, &current, old_size)?;
+        validate_effective_protective_leg(&entry.record, &current, previous)?;
         let rate_plan = match self.gateway.admit_amend_algo_order(&request) {
             Ok(plan) => plan,
             Err(OkxError::RateLimited { evidence }) if !evidence.request_sent => {
@@ -663,8 +727,20 @@ where
             }
             Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
         };
+        // The agent checks event continuity AND TTL after the awaited venue
+        // GET and before durable PREPARED/SUBMITTING; keep the executor lock.
+        if !final_private_ws_fence().await {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        self.ledger.prepare_protective_size_amend(
+            intent_id,
+            mutation_id,
+            &request.new_size,
+            observed_at_ms,
+        )?;
         self.ledger
             .begin_protective_size_amend(intent_id, mutation_id, observed_at_ms)?;
+        // The only network mutation. Once SUBMITTING is durable, never retry.
         let reply = self
             .gateway
             .amend_algo_order(request.clone(), timing, rate_plan)
@@ -2975,7 +3051,18 @@ mod tests {
             .expect("durable prepare");
         assert!(matches!(
             executor
-                .submit_prepared_protective_size_amend(&intent, mid, timing(), 106)
+                .submit_protective_size_amend_fenced(
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mid,
+                        target_size: "0.5",
+                        account: &resize_coverage(&record).0,
+                        inventory: &resize_coverage(&record).1,
+                        timing: timing(),
+                        observed_at_ms: 106,
+                    },
+                    || async { true },
+                )
                 .await
                 .expect("unknown"),
             MutationSubmitDisposition::Unknown(_)
@@ -2983,7 +3070,18 @@ mod tests {
         assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
         assert!(
             executor
-                .submit_prepared_protective_size_amend(&intent, mid, timing(), 107)
+                .submit_protective_size_amend_fenced(
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mid,
+                        target_size: "0.5",
+                        account: &resize_coverage(&record).0,
+                        inventory: &resize_coverage(&record).1,
+                        timing: timing(),
+                        observed_at_ms: 107,
+                    },
+                    || async { true },
+                )
                 .await
                 .is_err(),
             "NEVER replay uncertain POST"
@@ -3021,6 +3119,154 @@ mod tests {
                 .unwrap()
                 .state,
             ProtectiveSizeAmendState::Confirmed
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn protected_shrink_requires_post_get_ws_fence_before_any_durable_mutation_or_post() {
+        let (root, ledger, record) = resize_ledger("resize-send-fence");
+        let intent = record.plan.intent_id.clone();
+        let mutation = "resize_send_fence_0123456789";
+        let gateway = ExactResizeGateway {
+            sends: AtomicUsize::new(0),
+            details: Mutex::new(vec![resize_algo(&record, "1")].into()),
+            response: Mutex::new(None),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        let (account, inventory) = resize_coverage(&record);
+        assert!(matches!(
+            executor
+                .submit_protective_size_amend_fenced(
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mutation,
+                        target_size: "0.5",
+                        account: &account,
+                        inventory: &inventory,
+                        timing: timing(),
+                        observed_at_ms: 105,
+                    },
+                    || async { false },
+                )
+                .await,
+            Err(OrderExecutorError::ProtectionCoverageUnproven),
+        ));
+        assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
+        assert!(
+            executor
+                .ledger()
+                .get(&intent)
+                .unwrap()
+                .record
+                .protection
+                .as_ref()
+                .unwrap()
+                .size_amend
+                .is_none()
+        );
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("restart without PREPARED trap");
+        assert!(
+            reopened
+                .get(&intent)
+                .unwrap()
+                .record
+                .protection
+                .as_ref()
+                .unwrap()
+                .size_amend
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn protected_shrink_rejects_foreign_oco_wrong_residual_and_other_hedge_side_without_post()
+    {
+        let (root, ledger, record) = resize_ledger("resize-send-scope");
+        let intent = record.plan.intent_id.clone();
+        let mutation = "resize_send_scope_0123456789";
+        let gateway = ExactResizeGateway {
+            sends: AtomicUsize::new(0),
+            details: Mutex::new(vec![resize_algo(&record, "1")].into()),
+            response: Mutex::new(None),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        let (account, inventory) = resize_coverage(&record);
+        let mut wrong = account.clone();
+        wrong.positions[0].position = "0.75".to_owned();
+        assert!(
+            executor
+                .submit_protective_size_amend_fenced(
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mutation,
+                        target_size: "0.5",
+                        account: &wrong,
+                        inventory: &inventory,
+                        timing: timing(),
+                        observed_at_ms: 105,
+                    },
+                    || async { true },
+                )
+                .await
+                .is_err()
+        );
+        let mut foreign = inventory.clone();
+        foreign.rows += 1;
+        assert!(
+            executor
+                .submit_protective_size_amend_fenced(
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mutation,
+                        target_size: "0.5",
+                        account: &account,
+                        inventory: &foreign,
+                        timing: timing(),
+                        observed_at_ms: 105,
+                    },
+                    || async { true },
+                )
+                .await
+                .is_err()
+        );
+        let mut opposite = account.clone();
+        let mut other_pos = account.positions[0].clone();
+        other_pos.position_side = "short".to_owned();
+        other_pos.position = "0.5".to_owned();
+        opposite.positions.push(other_pos);
+        assert!(
+            executor
+                .submit_protective_size_amend_fenced(
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mutation,
+                        target_size: "0.5",
+                        account: &opposite,
+                        inventory: &inventory,
+                        timing: timing(),
+                        observed_at_ms: 105,
+                    },
+                    || async { true },
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
+        assert!(
+            executor
+                .ledger()
+                .get(&intent)
+                .unwrap()
+                .record
+                .protection
+                .as_ref()
+                .unwrap()
+                .size_amend
+                .is_none()
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -3134,7 +3380,18 @@ mod tests {
             .expect("durable");
         assert!(matches!(
             executor
-                .submit_prepared_protective_size_amend(&intent, mid, timing(), 106)
+                .submit_protective_size_amend_fenced(
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mid,
+                        target_size: "0.5",
+                        account: &resize_coverage(&record).0,
+                        inventory: &resize_coverage(&record).1,
+                        timing: timing(),
+                        observed_at_ms: 106,
+                    },
+                    || async { true },
+                )
                 .await
                 .expect("ack"),
             MutationSubmitDisposition::Acknowledged(_)
@@ -3168,7 +3425,18 @@ mod tests {
         assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
         assert!(
             executor
-                .submit_prepared_protective_size_amend(&intent, mid, timing(), 108)
+                .submit_protective_size_amend_fenced(
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mid,
+                        target_size: "0.5",
+                        account: &resize_coverage(&record).0,
+                        inventory: &resize_coverage(&record).1,
+                        timing: timing(),
+                        observed_at_ms: 108,
+                    },
+                    || async { true },
+                )
                 .await
                 .is_err()
         );

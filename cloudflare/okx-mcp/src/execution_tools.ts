@@ -91,7 +91,7 @@ export const EXECUTION_TOOLS: Json[] = [
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
-        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","abort_reverse","abandon_prepared"] },
+        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared"] },
         intent_id: ID, instrument: INSTRUMENT,
         trade_mode: { type: "string", enum: ["cross","isolated"] },
         order_type: { type: "string", enum: ["limit","post_only","fok","ioc"] },
@@ -211,6 +211,12 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
         || (args.new_price!==undefined && !decimal(args.new_price))) return null;
       return {type:"mutate_execution",intent_id,mutation:{
         type:"amend",mutation_id:args.mutation_id,new_size:args.new_size??null,new_price:args.new_price??null,
+      }};
+    case "shrink_protection_size":
+      if (!exactKeys(args,["action","intent_id","mutation_id","new_size"])
+        || !token(args.mutation_id,8,128) || !decimal(args.new_size)) return null;
+      return {type:"mutate_execution",intent_id,mutation:{
+        type:"shrink_protection",mutation_id:args.mutation_id,new_size:args.new_size,
       }};
     case "cancel":
     case "cancel_protection":

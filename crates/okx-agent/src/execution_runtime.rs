@@ -10,10 +10,11 @@ use okx_api::{
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
     ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
-    ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, ManagedExecutionInventory,
-    MutationAuthority, MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor,
-    OrderExecutorError, PositionSide, PrepareOutcome, SubmitDisposition,
-    execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
+    ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
+    ManagedExecutionInventory, MutationAuthority, MutationPrepareDisposition,
+    MutationSubmitDisposition, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
+    SubmitDisposition, execution_status_with_ledger, managed_execution_inventory,
+    reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -495,6 +496,35 @@ impl ExecutionRuntime {
         executor.enable_demo_acceptance(self.environment)?;
         let result = executor
             .submit_order_mutation(intent_id, mutation_id, timing, observed_at_ms)
+            .await;
+        executor.disable_mutations();
+        Ok(Some(result))
+    }
+
+    /// Existing Demo authority, one owner mutex, one fenced exchange
+    /// mutation. Never enable a production mutation or trust caller proof
+    /// without the executor's independent exact-ID venue validation.
+    pub async fn shrink_protective_size_demo_authorized<F, Fut>(
+        &self,
+        preflight: &ExecutorPreflightSnapshot,
+        request: FencedProtectiveShrinkRequest<'_>,
+        final_private_ws_fence: F,
+    ) -> AgentResult<Option<Result<MutationSubmitDisposition, OrderExecutorError>>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance
+            || !preflight.accepted
+            || !preflight.credential.accepted
+        {
+            self.executor.lock().await.disable_mutations();
+            return Ok(None);
+        }
+        let mut executor = self.executor.lock().await;
+        executor.enable_demo_acceptance(self.environment)?;
+        let result = executor
+            .submit_protective_size_amend_fenced(request, final_private_ws_fence)
             .await;
         executor.disable_mutations();
         Ok(Some(result))

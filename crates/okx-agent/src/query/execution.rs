@@ -9,11 +9,12 @@ use okx_execution::{
     EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_STATUS_SCHEMA_V3, ExecutionAction,
     ExecutionDecisionReference, ExecutionIntent, ExecutionLedgerEntry, ExecutionLedgerError,
     ExecutionLineageBinding, ExecutionRiskBinding, ExecutionState, ExecutionTcaInstrumentType,
-    ExecutionTcaMechanicsBinding, ExecutionTransitionError, OrderExecutorError,
-    OrderSide as ExecutionOrderSide, OrderType, PositionSide as ExecutionPositionSide,
-    PrepareDeferral, PrepareFailure, PrepareOutcome, PrepareRejection, ReverseContinuation,
-    ReverseLeg, TradeMode, prepare_execution, revalidate_amend_execution_plan,
-    revalidate_execution_plan, revalidate_hard_risk_policy, revalidate_venue_execution,
+    ExecutionTcaMechanicsBinding, ExecutionTransitionError, FencedProtectiveShrinkRequest,
+    OrderExecutorError, OrderSide as ExecutionOrderSide, OrderType,
+    PositionSide as ExecutionPositionSide, PrepareDeferral, PrepareFailure, PrepareOutcome,
+    PrepareRejection, ReverseContinuation, ReverseLeg, TradeMode, prepare_execution,
+    revalidate_amend_execution_plan, revalidate_execution_plan, revalidate_hard_risk_policy,
+    revalidate_venue_execution,
 };
 use okx_protocol::{
     ExecutionEntryRequest, ExecutionLineageRequest, ExecutionMutationRequest, ExecutionOrderType,
@@ -1056,6 +1057,23 @@ async fn mutate_execution(
         ));
     }
 
+    if let ExecutionMutationRequest::ShrinkProtection {
+        mutation_id,
+        new_size,
+    } = mutation
+    {
+        return shrink_owned_protection_size(
+            request,
+            context,
+            generated_at,
+            execution,
+            intent_id,
+            mutation_id,
+            new_size,
+        )
+        .await;
+    }
+
     if let ExecutionMutationRequest::ConfirmProtectionSize { mutation_id } = mutation {
         return confirm_owned_protection_size(
             request,
@@ -1134,7 +1152,8 @@ async fn mutate_execution(
             (mutation_id.as_str(), admission)
         }
         ExecutionMutationRequest::CancelProtection { .. }
-        | ExecutionMutationRequest::ConfirmProtectionSize { .. } => {
+        | ExecutionMutationRequest::ConfirmProtectionSize { .. }
+        | ExecutionMutationRequest::ShrinkProtection { .. } => {
             unreachable!("protective reconciliation is routed before ordinary order mutation")
         }
         ExecutionMutationRequest::Cancel { mutation_id } => {
@@ -1169,7 +1188,8 @@ async fn mutate_execution(
                 .await
         }
         ExecutionMutationRequest::CancelProtection { .. }
-        | ExecutionMutationRequest::ConfirmProtectionSize { .. } => {
+        | ExecutionMutationRequest::ConfirmProtectionSize { .. }
+        | ExecutionMutationRequest::ShrinkProtection { .. } => {
             unreachable!("protective reconciliation has a distinct durable state")
         }
         ExecutionMutationRequest::Cancel { .. } => {
@@ -1223,6 +1243,136 @@ async fn mutate_execution(
             error.to_string(),
             false,
         )),
+    }
+}
+
+/// Shrink an existing attached OCO only when the remaining position is
+/// already independently smaller than its original protected size. This does
+/// not reduce a position or grant ADD/HEDGE: it repairs a single owned algo.
+/// The executor holds the existing one-owner mutex through its final fence,
+/// durable SUBMITTING write, and exactly one potential venue POST.
+async fn shrink_owned_protection_size(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+    intent_id: &str,
+    mutation_id: &str,
+    new_size: &str,
+) -> AgentResult<AgentResponse> {
+    let admission =
+        match cancel_mutation_admission(request, context, generated_at, execution).await? {
+            PreMutationAdmissionResult::Ready(value) => value,
+            PreMutationAdmissionResult::Response(response) => return Ok(*response),
+        };
+    if !admission.preflight.accepted || !execution.demo_mutation_acceptance_requested() {
+        return Ok(preflight_rejected(request, generated_at));
+    }
+    let Some(private_ws) = context.private_ws else {
+        return Ok(account_not_fresh(request, generated_at));
+    };
+    let cursor = match private_ws.convergence_cursor().await {
+        Ok(value) => value,
+        Err(_) => return Ok(account_not_fresh(request, generated_at)),
+    };
+    let started_ms = utc_now_ms();
+    let account = match fresh_account(request, context, generated_at).await? {
+        FreshAccount::Ready(value) => value,
+        FreshAccount::Response(response) => return Ok(*response),
+    };
+    let Some(observer) = context.account_fallback else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    let inventory = match observer.pending_protective_algos().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+                error.to_string(),
+                true,
+            ));
+        }
+    };
+    // Four venue scopes must be complete. One exact owned OCO and no other
+    // open side are validated independently by the executor before mutation.
+    if !inventory.complete_within_bound || inventory.rows != inventory.samples.len() {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            "the full SWAP/FUTURES conditional/OCO inventory is unavailable; size shrink denied"
+                .to_owned(),
+            true,
+        ));
+    }
+    let observed_at_ms = utc_now_ms();
+    let expires_at_ms = admission.timing.exp_time_ms();
+    let result = execution
+        .shrink_protective_size_demo_authorized(
+            &admission.preflight,
+            FencedProtectiveShrinkRequest {
+                intent_id,
+                mutation_id,
+                target_size: new_size,
+                account: &account,
+                inventory: &inventory,
+                timing: admission.timing,
+                observed_at_ms,
+            },
+            || async {
+                let finished_at_ms = utc_now_ms();
+                protective_readback_in_ttl(started_ms, finished_at_ms)
+                    && finished_at_ms <= expires_at_ms
+                    && matches!(
+                        private_ws.convergence_window(cursor).await,
+                        Ok(window) if window.events.is_empty()
+                    )
+            },
+        )
+        .await?;
+    match result {
+        Some(Ok(disposition)) => {
+            let state = match disposition {
+                okx_execution::MutationSubmitDisposition::Acknowledged(_) => "ACKNOWLEDGED",
+                okx_execution::MutationSubmitDisposition::Unknown(_) => "UNKNOWN",
+                okx_execution::MutationSubmitDisposition::Rejected(_) => "REJECTED",
+                okx_execution::MutationSubmitDisposition::RateRejected { .. } => "RATE_REJECTED",
+            };
+            let response = completed(
+                request,
+                generated_at,
+                "okx.protective-size-shrink/v1",
+                serde_json::json!({
+                    "intent_id": intent_id,
+                    "mutation_id": mutation_id,
+                    "state": state,
+                    "exchange_post_replayed": false,
+                    "exchange_effect_terminally_verified": false,
+                    "next_safe_action": "confirm_protection_size",
+                }),
+            );
+            Ok(AgentResponse {
+                quality: DataQuality::Degraded,
+                warnings: vec![
+                    "a native OCO shrink is not confirmed by its ACK; independently reread the full exact-account position and protective inventory; NEVER resend an UNKNOWN mutation"
+                        .to_owned(),
+                ],
+                ..response
+            })
+        }
+        Some(Err(error)) => Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            format!("native protected size shrink denied: {error}; no mutation may be replayed"),
+            false,
+        )),
+        None => Ok(preflight_rejected(request, generated_at)),
     }
 }
 

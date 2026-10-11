@@ -903,6 +903,10 @@ pub enum ExecutionMutationRequest {
     ConfirmProtectionSize {
         mutation_id: String,
     },
+    ShrinkProtection {
+        mutation_id: String,
+        new_size: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1231,6 +1235,13 @@ impl AgentOperation {
                     | ExecutionMutationRequest::CancelProtection { mutation_id }
                     | ExecutionMutationRequest::ConfirmProtectionSize { mutation_id } => {
                         validate_mutation_id(mutation_id)
+                    }
+                    ExecutionMutationRequest::ShrinkProtection {
+                        mutation_id,
+                        new_size,
+                    } => {
+                        validate_mutation_id(mutation_id)?;
+                        validate_positive_decimal_text(new_size, "mutation.new_size")
                     }
                 }
             }
