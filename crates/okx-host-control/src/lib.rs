@@ -91,6 +91,9 @@ pub enum HostControlError {
     #[error("desired lifecycle state is corrupt or unsupported")]
     DesiredStateCorrupt,
 
+    #[error("switching the active trading environment requires an authenticated quiescence proof")]
+    ProfileHandoffProofRequired,
+
     #[error("agent process could not be assigned to the controller job object: {0}")]
     JobAssignment(String),
 
@@ -162,6 +165,7 @@ impl HostControlError {
             Self::ArtifactHashMismatch => "ARTIFACT_HASH_MISMATCH",
             Self::InvalidExecutionPath => "INVALID_EXECUTION_PATH",
             Self::DesiredStateCorrupt => "DESIRED_STATE_CORRUPT",
+            Self::ProfileHandoffProofRequired => "PROFILE_HANDOFF_PROOF_REQUIRED",
             Self::JobAssignment(_) => "JOB_ASSIGNMENT_FAILED",
             Self::ControllerAlreadyRunning => "CONTROLLER_ALREADY_RUNNING",
             Self::WindowsIdentityUnavailable => "WINDOWS_IDENTITY_UNAVAILABLE",
