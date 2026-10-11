@@ -2529,23 +2529,22 @@ async fn pre_mutation_admission(
             true,
         ));
     }
-    if plan.action.is_risk_increasing() {
-        if let Err(reason) = risk_increasing_market_quality(
+    if plan.action.is_risk_increasing()
+        && let Err(reason) = risk_increasing_market_quality(
             context,
             &plan.instrument_id,
             &rules.reference_generation,
         )
         .await
-        {
-            admission_response!(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Rejected,
-                EXECUTION_MARKET_NOT_FRESH_CODE,
-                reason,
-                true
-            ));
-        }
+    {
+        admission_response!(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_MARKET_NOT_FRESH_CODE,
+            reason,
+            true,
+        ));
     }
 
     Ok(PreMutationAdmissionResult::Ready(Box::new(
