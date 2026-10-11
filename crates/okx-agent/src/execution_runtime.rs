@@ -500,6 +500,17 @@ impl ExecutionRuntime {
         Ok(Some(result))
     }
 
+    pub async fn retire_protective_size_amend_absent(
+        &self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        self.executor.lock().await.retire_protective_size_amend_absent(
+            intent_id, mutation_id, observed_at_ms,
+        )
+    }
+
     pub async fn prepare_protective_cleanup(
         &self,
         intent_id: &str,
