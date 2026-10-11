@@ -470,9 +470,10 @@ impl HostExecutor {
         // The CONTROL command is not a flat-account witness. Do not persist a
         // different desired profile before proof, even if the child is down:
         // old exchange exposure or an UNKNOWN durable intent may survive.
-        ensure_profile_unchanged(self.desired_profile, self.running_profile, profile)?;
+        let running = self.agent_is_running()?;
+        ensure_profile_unchanged(self.desired_profile, self.running_profile, running, profile)?;
         self.require_agent_binary()?;
-        if self.agent_is_running()? && self.running_profile == Some(profile) {
+        if running && self.running_profile == Some(profile) {
             self.persist_desired(AgentDesiredState {
                 agent: AgentDesired::Running,
                 profile,
@@ -491,7 +492,7 @@ impl HostExecutor {
             agent: AgentDesired::Running,
             profile,
         })?;
-        if self.agent_is_running()? {
+        if running {
             self.terminate_agent_owned()?;
         }
 
@@ -522,11 +523,8 @@ impl HostExecutor {
         let was_running = self.agent_is_running()?;
         ensure_profile_unchanged(
             self.desired_profile,
-            if was_running {
-                self.running_profile
-            } else {
-                None
-            },
+            self.running_profile,
+            was_running,
             self.desired_profile,
         )?;
         // STOP is not a change of environment; preserve the Demo identity so
@@ -548,11 +546,7 @@ impl HostExecutor {
     fn restart_agent(&mut self) -> HostControlResult<Value> {
         let profile = self.desired_profile;
         let running = self.agent_is_running()?;
-        ensure_profile_unchanged(
-            self.desired_profile,
-            if running { self.running_profile } else { None },
-            profile,
-        )?;
+        ensure_profile_unchanged(self.desired_profile, self.running_profile, running, profile)?;
         self.persist_desired(AgentDesiredState {
             agent: AgentDesired::Running,
             profile,
@@ -680,7 +674,8 @@ impl HostExecutor {
         let running = self.agent_is_running()?;
         ensure_profile_unchanged(
             self.desired_profile,
-            if running { self.running_profile } else { None },
+            self.running_profile,
+            running,
             self.desired_profile,
         )?;
         if running {
@@ -1240,9 +1235,13 @@ fn command_available(command: &str) -> bool {
 fn ensure_profile_unchanged(
     committed: AgentProfile,
     running: Option<AgentProfile>,
+    process_alive: bool,
     requested: AgentProfile,
 ) -> HostControlResult<()> {
-    if committed != requested || running.is_some_and(|active| active != requested) {
+    if committed != requested
+        || running.is_some_and(|active| active != requested)
+        || (process_alive && running != Some(requested))
+    {
         return Err(HostControlError::ProfileHandoffProofRequired);
     }
     Ok(())
@@ -1276,21 +1275,25 @@ mod tests {
     fn profile_handoff_requires_real_quiescence_not_a_control_request() {
         use AgentProfile::{DemoAcceptance as Demo, Production as Prod};
 
-        assert!(ensure_profile_unchanged(Demo, Some(Demo), Demo).is_ok());
-        assert!(ensure_profile_unchanged(Demo, None, Demo).is_ok());
-        assert!(ensure_profile_unchanged(Prod, Some(Prod), Prod).is_ok());
-        for (committed, running, requested) in [
-            (Demo, Some(Demo), Prod),
-            (Demo, None, Prod),
-            (Prod, Some(Prod), Demo),
-            (Prod, None, Demo),
+        assert!(ensure_profile_unchanged(Demo, Some(Demo), true, Demo).is_ok());
+        assert!(ensure_profile_unchanged(Demo, None, false, Demo).is_ok());
+        assert!(ensure_profile_unchanged(Prod, Some(Prod), true, Prod).is_ok());
+        for (committed, running, process_alive, requested) in [
+            (Demo, Some(Demo), true, Prod),
+            (Demo, None, false, Prod),
+            (Prod, Some(Prod), true, Demo),
+            (Prod, None, false, Demo),
             // A stale persisted target can never stop the still-running source
             // merely because reconcile_desired() sees a profile mismatch.
-            (Prod, Some(Demo), Prod),
-            (Demo, Some(Prod), Demo),
+            (Prod, Some(Demo), true, Prod),
+            (Demo, Some(Prod), true, Demo),
+            // An observed live process with untrusted/unknown profile identity
+            // is NOT equivalent to a stopped agent.
+            (Demo, None, true, Demo),
+            (Prod, None, true, Prod),
         ] {
             assert!(matches!(
-                ensure_profile_unchanged(committed, running, requested),
+                ensure_profile_unchanged(committed, running, process_alive, requested),
                 Err(HostControlError::ProfileHandoffProofRequired)
             ));
         }
