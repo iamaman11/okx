@@ -428,9 +428,19 @@ async fn prepare_risk_increasing(
             FreshAccount::Ready(value) => value,
             FreshAccount::Response(response) => return Ok(*response),
         };
-        if account.account_generation != plan.account_generation {
-            return Ok(account_not_fresh(request, generated_at));
-        }
+        // Unrealized PnL / mark changes a live-position account generation
+        // between independent FRESH snapshots. Do not pretend that a previous
+        // generation is still the authority, nor require it to stay frozen.
+        // Recompute the full immutable plan against the SAME freshly
+        // converged account fenced below with the venue OCO reads.
+        let mut fenced_intent = intent.clone();
+        fenced_intent.expected_account_generation = account.account_generation.clone();
+        let mut fenced_plan =
+            match prepare_execution(&fenced_intent, &rules, &account, Some(&candidate)) {
+                Ok(value) => value,
+                Err(error) => return Ok(validation_failure(request, generated_at, error)),
+            };
+        fenced_plan.risk_binding = common.risk.map(execution_risk_binding);
         let Some(observer) = context.account_fallback else {
             return Ok(execution_unavailable(request, generated_at));
         };
@@ -449,7 +459,7 @@ async fn prepare_risk_increasing(
         };
         let result = execution
             .prepare_protected_add_hedge_fenced(
-                plan,
+                fenced_plan,
                 lineage,
                 &account,
                 &inventory,
