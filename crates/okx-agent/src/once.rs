@@ -482,21 +482,33 @@ mod tests {
         // The request is correctly encrypted and signed by the same client
         // test key as read-only messages. It cannot reach durable PREPARED.
         for (suffix, operation) in [
-            ("submit", AgentOperation::SubmitPreparedExecution {
-                intent_id: "intent_mailbox_01234567".to_owned(),
-            }),
-            ("abandon", AgentOperation::AbandonPreparedExecution {
-                intent_id: "intent_mailbox_01234567".to_owned(),
-            }),
-            ("abort", AgentOperation::AbortReverseExecution {
-                intent_id: "intent_mailbox_01234567".to_owned(),
-            }),
-            ("cancel", AgentOperation::MutateExecution {
-                intent_id: "intent_mailbox_01234567".to_owned(),
-                mutation: okx_protocol::ExecutionMutationRequest::Cancel {
-                    mutation_id: "mutation_mailbox_01234567".to_owned(),
+            (
+                "submit",
+                AgentOperation::SubmitPreparedExecution {
+                    intent_id: "intent_mailbox_01234567".to_owned(),
                 },
-            }),
+            ),
+            (
+                "abandon",
+                AgentOperation::AbandonPreparedExecution {
+                    intent_id: "intent_mailbox_01234567".to_owned(),
+                },
+            ),
+            (
+                "abort",
+                AgentOperation::AbortReverseExecution {
+                    intent_id: "intent_mailbox_01234567".to_owned(),
+                },
+            ),
+            (
+                "cancel",
+                AgentOperation::MutateExecution {
+                    intent_id: "intent_mailbox_01234567".to_owned(),
+                    mutation: okx_protocol::ExecutionMutationRequest::Cancel {
+                        mutation_id: "mutation_mailbox_01234567".to_owned(),
+                    },
+                },
+            ),
         ] {
             let request_id = format!("req_mailbox_{suffix}_0123456789");
             let request = AgentRequest {
