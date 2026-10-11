@@ -3016,7 +3016,11 @@ mod tests {
             .expect("durable prepare");
         assert!(matches!(
             executor
-                .submit_prepared_protective_size_amend(&intent, mid, timing(), 106)
+                .submit_protective_size_amend_fenced(
+                    &intent, mid, "0.5",
+                    &resize_coverage(&record).0, &resize_coverage(&record).1,
+                    timing(), 106, || async { true },
+                )
                 .await
                 .expect("unknown"),
             MutationSubmitDisposition::Unknown(_)
@@ -3024,7 +3028,11 @@ mod tests {
         assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
         assert!(
             executor
-                .submit_prepared_protective_size_amend(&intent, mid, timing(), 107)
+                .submit_protective_size_amend_fenced(
+                    &intent, mid, "0.5",
+                    &resize_coverage(&record).0, &resize_coverage(&record).1,
+                    timing(), 107, || async { true },
+                )
                 .await
                 .is_err(),
             "NEVER replay uncertain POST"
@@ -3063,6 +3071,75 @@ mod tests {
                 .state,
             ProtectiveSizeAmendState::Confirmed
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn protected_shrink_requires_post_get_ws_fence_before_any_durable_mutation_or_post() {
+        let (root, ledger, record) = resize_ledger("resize-send-fence");
+        let intent = record.plan.intent_id.clone();
+        let mutation = "resize_send_fence_0123456789";
+        let gateway = ExactResizeGateway {
+            sends: AtomicUsize::new(0),
+            details: Mutex::new(vec![resize_algo(&record, "1")].into()),
+            response: Mutex::new(None),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        let (account, inventory) = resize_coverage(&record);
+        assert!(matches!(
+            executor.submit_protective_size_amend_fenced(
+                &intent, mutation, "0.5", &account, &inventory, timing(), 105,
+                || async { false },
+            ).await,
+            Err(OrderExecutorError::ProtectionCoverageUnproven),
+        ));
+        assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
+        assert!(executor.ledger().get(&intent).unwrap().record
+            .protection.as_ref().unwrap().size_amend.is_none());
+        let reopened = DurableExecutionLedger::open(
+            ExecutionLedgerStore::at(root.join("ledger.json")), 200,
+        ).expect("restart without PREPARED trap");
+        assert!(reopened.get(&intent).unwrap().record.protection.as_ref()
+            .unwrap().size_amend.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn protected_shrink_rejects_foreign_oco_wrong_residual_and_other_hedge_side_without_post() {
+        let (root, ledger, record) = resize_ledger("resize-send-scope");
+        let intent = record.plan.intent_id.clone();
+        let mutation = "resize_send_scope_0123456789";
+        let gateway = ExactResizeGateway {
+            sends: AtomicUsize::new(0),
+            details: Mutex::new(vec![resize_algo(&record, "1")].into()),
+            response: Mutex::new(None),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        let (account, inventory) = resize_coverage(&record);
+        let mut wrong = account.clone();
+        wrong.positions[0].position = "0.75".to_owned();
+        assert!(executor.submit_protective_size_amend_fenced(
+            &intent, mutation, "0.5", &wrong, &inventory, timing(), 105,
+            || async { true },
+        ).await.is_err());
+        let mut foreign = inventory.clone();
+        foreign.rows += 1;
+        assert!(executor.submit_protective_size_amend_fenced(
+            &intent, mutation, "0.5", &account, &foreign, timing(), 105,
+            || async { true },
+        ).await.is_err());
+        let mut opposite = account.clone();
+        let mut other_pos = account.positions[0].clone();
+        other_pos.position_side = "short".to_owned();
+        other_pos.position = "0.5".to_owned();
+        opposite.positions.push(other_pos);
+        assert!(executor.submit_protective_size_amend_fenced(
+            &intent, mutation, "0.5", &opposite, &inventory, timing(), 105,
+            || async { true },
+        ).await.is_err());
+        assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
+        assert!(executor.ledger().get(&intent).unwrap().record
+            .protection.as_ref().unwrap().size_amend.is_none());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3175,7 +3252,11 @@ mod tests {
             .expect("durable");
         assert!(matches!(
             executor
-                .submit_prepared_protective_size_amend(&intent, mid, timing(), 106)
+                .submit_protective_size_amend_fenced(
+                    &intent, mid, "0.5",
+                    &resize_coverage(&record).0, &resize_coverage(&record).1,
+                    timing(), 106, || async { true },
+                )
                 .await
                 .expect("ack"),
             MutationSubmitDisposition::Acknowledged(_)
@@ -3209,7 +3290,11 @@ mod tests {
         assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
         assert!(
             executor
-                .submit_prepared_protective_size_amend(&intent, mid, timing(), 108)
+                .submit_protective_size_amend_fenced(
+                    &intent, mid, "0.5",
+                    &resize_coverage(&record).0, &resize_coverage(&record).1,
+                    timing(), 108, || async { true },
+                )
                 .await
                 .is_err()
         );
