@@ -15,7 +15,7 @@ pub use contract::{
     execution_status_with_ledger,
 };
 pub use executor::{
-    ExecutionGateway, MutationAuthority, MutationSubmitDisposition, OrderExecutor,
+    ExecutionGateway, FencedProtectiveShrinkRequest, MutationAuthority, MutationSubmitDisposition, OrderExecutor,
     OrderExecutorError, ReconcileDisposition, SubmitDisposition,
 };
 pub use ledger::{
