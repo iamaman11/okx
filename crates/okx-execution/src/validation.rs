@@ -155,11 +155,19 @@ pub enum ExecutionValidationError {
     #[error("CLOSE must consume the full unreserved position; use REDUCE for partial exits")]
     CloseMustFullyClose,
 
+    #[error(
+        "OPEN requires the entire instrument to be FLAT; an existing position must not be silently adopted as a new protected lot"
+    )]
+    OpenRequiresFlatInstrument,
+
     #[error("add execution requires an existing same-side position")]
     AddRequiresExistingPosition,
 
     #[error("hedge execution requires an existing opposite-side position")]
     HedgeRequiresOppositePosition,
+
+    #[error("HEDGE requires a FLAT target side; use ADD when that side already has exposure")]
+    HedgeRequiresFlatTarget,
 
     #[error(
         "reduce execution must leave a positive unreserved position; use close for the full amount"
@@ -814,22 +822,44 @@ fn validate_risk_increasing_position_semantics(
     intent: &ExecutionIntent,
     account: &AccountSnapshot,
 ) -> Result<(), ExecutionValidationError> {
+    // Risk-increasing lot labels are an admission contract, not presentation.
+    // Never let OPEN silently adopt an existing (possibly foreign) position,
+    // or HEDGE silently increase a side already occupied. Invalid or
+    // out-of-mode instrument positions are not evidence of a safe empty side.
+    for position in account
+        .positions
+        .iter()
+        .filter(|position| position.instrument_id == intent.instrument_id)
+    {
+        let quantity = decimal("position", &position.position)?;
+        if quantity < Decimal::ZERO
+            || (quantity > Decimal::ZERO
+                && (position.margin_mode != intent.trade_mode.as_str()
+                    || !matches!(position.position_side.as_str(), "long" | "short")))
+        {
+            return Err(ExecutionValidationError::InvalidPositionValue);
+        }
+    }
+    let target = matching_position_quantity(account, intent, intent.position_side)?;
+    let opposite_side = match intent.position_side {
+        PositionSide::Long => PositionSide::Short,
+        PositionSide::Short => PositionSide::Long,
+    };
+    let opposite = matching_position_quantity(account, intent, opposite_side)?;
     match intent.action {
-        ExecutionAction::Add => {
-            if matching_position_quantity(account, intent, intent.position_side)? <= Decimal::ZERO {
-                return Err(ExecutionValidationError::AddRequiresExistingPosition);
-            }
+        ExecutionAction::Open if target > Decimal::ZERO || opposite > Decimal::ZERO => {
+            return Err(ExecutionValidationError::OpenRequiresFlatInstrument);
         }
-        ExecutionAction::Hedge => {
-            let opposite = match intent.position_side {
-                PositionSide::Long => PositionSide::Short,
-                PositionSide::Short => PositionSide::Long,
-            };
-            if matching_position_quantity(account, intent, opposite)? <= Decimal::ZERO {
-                return Err(ExecutionValidationError::HedgeRequiresOppositePosition);
-            }
+        ExecutionAction::Add if target <= Decimal::ZERO => {
+            return Err(ExecutionValidationError::AddRequiresExistingPosition);
         }
-        ExecutionAction::Open => {}
+        ExecutionAction::Hedge if opposite <= Decimal::ZERO => {
+            return Err(ExecutionValidationError::HedgeRequiresOppositePosition);
+        }
+        ExecutionAction::Hedge if target > Decimal::ZERO => {
+            return Err(ExecutionValidationError::HedgeRequiresFlatTarget);
+        }
+        ExecutionAction::Open | ExecutionAction::Add | ExecutionAction::Hedge => {}
         ExecutionAction::Reduce | ExecutionAction::Close => {
             unreachable!("risk-reducing action cannot enter risk-increasing validation")
         }
@@ -1412,6 +1442,73 @@ mod tests {
         assert_eq!(plan.action, ExecutionAction::Hedge);
         assert_eq!(plan.side, OrderSide::Sell);
         assert!(plan.open_risk.is_some());
+    }
+
+    #[test]
+    fn open_never_adopts_existing_or_foreign_hedge_exposure() {
+        let rules = rules();
+        let candidate = open_candidate(&rules, PositionDirection::Long);
+        let mut account = account();
+        let intent = open_intent(&rules, &account, &candidate, PositionSide::Long);
+        let original =
+            prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("flat open");
+
+        // Even a fully observed position is not an owned fresh OPEN lot.
+        account.positions.push(position(PositionSide::Long, "5"));
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, Some(&candidate)),
+            Err(ExecutionValidationError::OpenRequiresFlatInstrument)
+        );
+        assert_eq!(
+            revalidate_execution_plan(
+                &original,
+                &rules,
+                &account,
+                Some(original.open_risk.as_ref().unwrap().fee_generation.as_str())
+            ),
+            Err(ExecutionValidationError::OpenRequiresFlatInstrument)
+        );
+
+        account.positions.clear();
+        account.positions.push(position(PositionSide::Short, "3"));
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, Some(&candidate)),
+            Err(ExecutionValidationError::OpenRequiresFlatInstrument)
+        );
+
+        // An unknown/mismatched mode must not be treated as an empty side.
+        account.positions[0].margin_mode = "isolated".to_owned();
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, Some(&candidate)),
+            Err(ExecutionValidationError::InvalidPositionValue)
+        );
+    }
+
+    #[test]
+    fn hedge_cannot_relabel_an_already_open_target_side_or_skip_revalidation() {
+        let rules = rules();
+        let candidate = open_candidate(&rules, PositionDirection::Short);
+        let mut account = account();
+        let mut intent = open_intent(&rules, &account, &candidate, PositionSide::Short);
+        intent.action = ExecutionAction::Hedge;
+        account.positions.push(position(PositionSide::Long, "5"));
+
+        let plan =
+            prepare_execution(&intent, &rules, &account, Some(&candidate)).expect("initial hedge");
+        account.positions.push(position(PositionSide::Short, "2"));
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, Some(&candidate)),
+            Err(ExecutionValidationError::HedgeRequiresFlatTarget)
+        );
+        assert_eq!(
+            revalidate_execution_plan(
+                &plan,
+                &rules,
+                &account,
+                Some(plan.open_risk.as_ref().unwrap().fee_generation.as_str())
+            ),
+            Err(ExecutionValidationError::HedgeRequiresFlatTarget)
+        );
     }
 
     #[test]
