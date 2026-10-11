@@ -766,7 +766,40 @@ where
         let new_size = Decimal::from_str(&amend.target_size)
             .map_err(|_| OrderExecutorError::ProtectionIdentityMismatch)?;
         validate_effective_protective_leg(&entry.record, &current, new_size)?;
-        validate_protective_amend_coverage(&entry.record, account, inventory, new_size)?;
+        // A matching target OCO alone cannot establish that the *remaining*
+        // LONG and SHORT positions have exact aggregate protection. Read all
+        // other managed live algos, then compare the complete inventory and
+        // both side quantities before recording the durable confirmation.
+        // The agent caller must fence all reads with one private-WS cursor.
+        let records: Vec<_> = self
+            .ledger
+            .entries()
+            .filter(|item| item.record.plan.instrument_id == entry.record.plan.instrument_id)
+            .map(|item| item.record.clone())
+            .collect();
+        let mut details = vec![current];
+        for other in &records {
+            if other.plan.intent_id == intent_id {
+                continue;
+            }
+            if let Some(link) = &other.protection {
+                if link.status == crate::ProtectiveOrderStatus::Active {
+                    details.push(
+                        self.gateway
+                            .algo_order_by_client_id(link.algo_client_order_id.clone())
+                            .await
+                            .map_err(OrderExecutorError::PreSubmit)?,
+                    );
+                }
+            }
+        }
+        validate_managed_protective_coverage(
+            &records,
+            account,
+            inventory,
+            &details,
+            Some((intent_id, new_size)),
+        )?;
         Ok(self
             .ledger
             .confirm_protective_size_amend(intent_id, mutation_id, observed_at_ms)?)
@@ -1440,6 +1473,186 @@ fn validate_protective_algo(
         || !decimal_equal(&algo.stop_loss_order_price, "-1")
     {
         return Err(OrderExecutorError::ProtectionIdentityMismatch);
+    }
+    Ok(())
+}
+
+/// Read-only aggregate proof for the *entire* instrument, including both
+/// Hedge sides and every simultaneously live managed lot. The inventory is
+/// a complete exchange snapshot, while each algo detail supplies exact venue
+/// size/exit-side/trigger evidence; neither alone is sufficient.
+///
+/// This is deliberately NOT an ADD/REDUCE/HEDGE send permit. The caller must
+/// fence reads with a private-WS event cursor and independently revalidate at
+/// send admission. A mismatched or ambiguous scope leaves InstrumentBusy set.
+fn validate_managed_protective_coverage(
+    records: &[ExecutionRecord],
+    account: &AccountSnapshot,
+    inventory: &PendingProtectiveAlgoInventory,
+    details: &[TradeAlgoOrderDetails],
+    amended: Option<(&str, Decimal)>,
+) -> Result<(), OrderExecutorError> {
+    let denied = || OrderExecutorError::ProtectionCoverageUnproven;
+    if account.account_uid_fingerprint.is_empty()
+        || account.source != ACCOUNT_CONVERGED_SOURCE_V2
+        || account.quality_reason != M4_REST_WS_CONVERGED_REASON
+        || !account.private_ws_connected
+        || account.private_ws_generation.is_none_or(|value| value == 0)
+        || account.account_generation.is_empty()
+        || account.position_mode != "long_short_mode"
+        || !account.pending_orders.is_empty()
+        || !inventory.complete_within_bound
+        || inventory.rows != inventory.samples.len()
+    {
+        return Err(denied());
+    }
+    let instrument = records.first().map(|record| record.plan.instrument_id.as_str())
+        .ok_or_else(denied)?;
+    if records.iter().any(|record| record.plan.instrument_id != instrument
+        || record.plan.account_uid_fingerprint != account.account_uid_fingerprint
+        || !record.state.is_terminal()
+        || record.active_mutation().is_some())
+    {
+        return Err(denied());
+    }
+
+    // Only a proved exact live OCO contributes coverage. Every other
+    // protection state is either already cleaned/never activated or blocks
+    // the whole readback. Do not borrow quantity from a different Hedge side.
+    let mut long = Decimal::ZERO;
+    let mut short = Decimal::ZERO;
+    let mut matched_amend = amended.is_none();
+    let mut seen_algos = std::collections::BTreeSet::new();
+    let mut active_count = 0usize;
+    for record in records {
+        let Some(link) = record.protection.as_ref() else {
+            continue;
+        };
+        if link.status == crate::ProtectiveOrderStatus::CleanedUp
+            || link.status == crate::ProtectiveOrderStatus::NotActivated
+        {
+            continue;
+        }
+        if link.status != crate::ProtectiveOrderStatus::Active
+            || record.state != ExecutionState::Filled
+            || link.cleanup.is_some()
+        {
+            return Err(denied());
+        }
+        let is_target = amended.is_some_and(|(id, _)| record.plan.intent_id == id);
+        let size = if is_target {
+            let (id, new_size) = amended.expect("target matched");
+            let amendment = link.size_amend.as_ref().ok_or_else(denied)?;
+            if record.plan.intent_id != id
+                || !matches!(
+                    amendment.state,
+                    ProtectiveSizeAmendState::Unknown | ProtectiveSizeAmendState::Acknowledged
+                )
+                || Decimal::from_str(&amendment.target_size).ok() != Some(new_size)
+            {
+                return Err(denied());
+            }
+            matched_amend = true;
+            new_size
+        } else {
+            if link.size_amend.as_ref().is_some_and(|amendment| {
+                amendment.state != ProtectiveSizeAmendState::Confirmed
+            }) {
+                return Err(denied());
+            }
+            link.covered_size
+                .as_deref()
+                .and_then(|value| Decimal::from_str(value).ok())
+                .ok_or_else(denied)?
+        };
+        let algo_id = link.algo_order_id.as_deref().ok_or_else(denied)?;
+        if size <= Decimal::ZERO || !seen_algos.insert(algo_id) {
+            return Err(denied());
+        }
+        // There must be exactly one independently read venue detail AND one
+        // inventory row for this managed algo. Foreign/duplicate/truncated
+        // inventory is not evidence of coverage.
+        let mut matching_details = details.iter().filter(|row| row.algo_order_id == algo_id);
+        let detail = matching_details.next().ok_or_else(denied)?;
+        if matching_details.next().is_some() {
+            return Err(denied());
+        }
+        let mut matching_inventory = inventory.samples.iter().filter(|row| {
+            row.instrument_id == instrument && row.algo_order_id == algo_id
+        });
+        let sample = matching_inventory.next().ok_or_else(denied)?;
+        if matching_inventory.next().is_some()
+            || sample.client_order_id != link.algo_client_order_id
+            || sample.state != "live"
+            || !matches!(sample.order_type.as_str(), "oco" | "conditional")
+            || detail.algo_order_id != sample.algo_order_id
+            || !matches!(detail.state.as_str(), "live" | "effective" | "partially_effective")
+        {
+            return Err(denied());
+        }
+        validate_protective_algo(record, detail)?;
+        validate_effective_protective_leg(record, detail, size)?;
+        match record.plan.position_side {
+            PositionSide::Long => long = long.checked_add(size).ok_or_else(denied)?,
+            PositionSide::Short => short = short.checked_add(size).ok_or_else(denied)?,
+        };
+        active_count += 1;
+    }
+    if !matched_amend || details.len() != active_count
+        || inventory.samples.iter().filter(|row| row.instrument_id == instrument).count() != active_count
+    {
+        return Err(denied());
+    }
+
+    // One positive exchange position per Hedge side. No extra/missing lots,
+    // no phantom protection for a FLAT side and no unprotected residual.
+    let mut observed_long = Decimal::ZERO;
+    let mut observed_short = Decimal::ZERO;
+    let mut seen_long = false;
+    let mut seen_short = false;
+    for position in account.positions.iter().filter(|p| p.instrument_id == instrument) {
+        let size = Decimal::from_str(&position.position).map_err(|_| denied())?;
+        if size < Decimal::ZERO { return Err(denied()); }
+        if size == Decimal::ZERO { continue; }
+        let side_seen = match position.position_side.as_str() {
+            "long" => {
+                observed_long = size;
+                &mut seen_long
+            }
+            "short" => {
+                observed_short = size;
+                &mut seen_short
+            }
+            _ => return Err(denied()),
+        };
+        if *side_seen || !records.iter().any(|record|
+            record.plan.trade_mode.as_str() == position.margin_mode
+            && record.plan.position_side.as_str() == position.position_side
+            && record.protection.as_ref().is_some_and(|link|
+                link.status == crate::ProtectiveOrderStatus::Active)
+        ) {
+            return Err(denied());
+        }
+        *side_seen = true;
+    }
+    if long != observed_long || short != observed_short {
+        return Err(denied());
+    }
+    // Retain the prior strict single-lot predicate as a regression boundary.
+    if active_count == 1 && inventory.rows == 1 {
+        let only = records.iter().find(|record| record.protection.as_ref()
+            .is_some_and(|link| link.status == crate::ProtectiveOrderStatus::Active))
+            .ok_or_else(denied)?;
+        let expected = if let Some((id, target)) = amended {
+            if only.plan.intent_id == id { target } else {
+                Decimal::from_str(only.protection.as_ref().unwrap().covered_size.as_deref()
+                    .ok_or_else(denied)?).map_err(|_| denied())?
+            }
+        } else {
+            Decimal::from_str(only.protection.as_ref().unwrap().covered_size.as_deref()
+                .ok_or_else(denied)?).map_err(|_| denied())?
+        };
+        validate_protective_amend_coverage(only, account, inventory, expected)?;
     }
     Ok(())
 }
