@@ -192,6 +192,9 @@ pub enum ProtectiveSizeAmendState {
     Unknown,
     Acknowledged,
     Confirmed,
+    /// The original protection is independently absent and the account is
+    /// flat; no size change is claimed or POST retried.
+    RetiredAbsent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -784,6 +787,31 @@ impl ExecutionRecord {
         Ok(())
     }
 
+    /// Only a caller with fresh same-UID FLAT + complete zero pending
+    /// SWAP/FUTURES conditional/OCO inventory may invoke this terminal local
+    /// recovery transition. Never resend the mutation after UNKNOWN.
+    pub fn retire_protective_size_amend_absent(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        let protection = self.protection.as_mut()
+            .ok_or(ExecutionTransitionError::InvalidProtectiveSizeAmendTransition)?;
+        let amendment = protection.size_amend.as_mut()
+            .ok_or(ExecutionTransitionError::InvalidProtectiveSizeAmendTransition)?;
+        if amendment.mutation_id != mutation_id
+            || !matches!(amendment.state,
+                ProtectiveSizeAmendState::Prepared | ProtectiveSizeAmendState::Submitting
+                | ProtectiveSizeAmendState::Unknown | ProtectiveSizeAmendState::Acknowledged)
+            || protection.status != ProtectiveOrderStatus::Active
+            || protection.cleanup.is_some()
+            || protection.algo_order_id.as_deref() != Some(amendment.algo_order_id.as_str())
+        {
+            return Err(ExecutionTransitionError::InvalidProtectiveSizeAmendTransition);
+        }
+        amendment.state = ProtectiveSizeAmendState::RetiredAbsent;
+        Ok(())
+    }
+
     fn transition_protective_size_amend(
         &mut self,
         mutation_id: &str,
@@ -823,10 +851,9 @@ impl ExecutionRecord {
             return Err(ExecutionTransitionError::ProtectiveCleanupConflict);
         }
         if protection.status != ProtectiveOrderStatus::Active
-            || protection
-                .size_amend
-                .as_ref()
-                .is_some_and(|a| a.state != ProtectiveSizeAmendState::Confirmed)
+            || protection.size_amend.as_ref().is_some_and(|a|
+                !matches!(a.state,
+                    ProtectiveSizeAmendState::Confirmed | ProtectiveSizeAmendState::RetiredAbsent))
         {
             return Err(ExecutionTransitionError::InvalidProtectiveCleanup);
         }
