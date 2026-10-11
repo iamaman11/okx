@@ -60,7 +60,25 @@ impl PrivateWsConnection {
         rate_budget: RateBudget,
         connection_scope: String,
     ) -> Result<Self, PrivateWsError> {
-        let (socket, _response) = connect_async(environment.private_ws_url()).await?;
+        Self::connect_url(environment.private_ws_url(), rate_budget, connection_scope).await
+    }
+
+    /// A second exchange socket in the SAME private coordinator; it is not
+    /// an alternate trading ingress or a second execution owner.
+    pub async fn connect_business_with_rate_budget(
+        environment: OkxEnvironment,
+        rate_budget: RateBudget,
+        connection_scope: String,
+    ) -> Result<Self, PrivateWsError> {
+        Self::connect_url(environment.business_ws_url(), rate_budget, connection_scope).await
+    }
+
+    async fn connect_url(
+        url: &str,
+        rate_budget: RateBudget,
+        connection_scope: String,
+    ) -> Result<Self, PrivateWsError> {
+        let (socket, _response) = connect_async(url).await?;
         Ok(Self {
             socket,
             rate_budget,
