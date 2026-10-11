@@ -1226,6 +1226,15 @@ async fn mutate_execution(
     }
 }
 
+/// Bound the complete REST readback under the same existing mutation TTL.
+/// A clock rollback or a slow/multi-page GET cannot silently turn an old
+/// account snapshot into a current OCO confirmation.
+fn protective_readback_in_ttl(started_at_ms: u64, finished_at_ms: u64) -> bool {
+    finished_at_ms
+        .checked_sub(started_at_ms)
+        .is_some_and(|elapsed| elapsed <= MUTATION_REQUEST_TTL_MS)
+}
+
 /// Local readback of an uncertain protective-size amendment. This path
 /// never sends amend-algos, including after crash/lost ACK.
 async fn confirm_owned_protection_size(
@@ -1251,6 +1260,7 @@ async fn confirm_owned_protection_size(
         Ok(cursor) => cursor,
         Err(_) => return Ok(account_not_fresh(request, generated_at)),
     };
+    let readback_started_ms = utc_now_ms();
     let account = match fresh_account(request, context, generated_at).await? {
         FreshAccount::Ready(value) => value,
         FreshAccount::Response(response) => return Ok(*response),
@@ -1290,10 +1300,11 @@ async fn confirm_owned_protection_size(
             &inventory,
             utc_now_ms(),
             || async {
-                matches!(
-                    private_ws.convergence_window(cursor).await,
-                    Ok(window) if window.events.is_empty()
-                )
+                protective_readback_in_ttl(readback_started_ms, utc_now_ms())
+                    && matches!(
+                        private_ws.convergence_window(cursor).await,
+                        Ok(window) if window.events.is_empty()
+                    )
             },
         )
         .await;
@@ -2845,6 +2856,16 @@ mod tests {
     use okx_protocol::AGENT_REQUEST_SCHEMA_V1;
 
     const GENERATED_AT: &str = "2026-09-29T00:00:00.000Z";
+
+    #[test]
+    fn protective_readback_rejects_expired_or_reversed_clock_after_venue_reads() {
+        let start = 1_790_000_000_000_u64;
+        assert!(protective_readback_in_ttl(start, start));
+        assert!(protective_readback_in_ttl(start, start + MUTATION_REQUEST_TTL_MS));
+        assert!(!protective_readback_in_ttl(start, start + MUTATION_REQUEST_TTL_MS + 1));
+        assert!(!protective_readback_in_ttl(start, start - 1));
+    }
+
     #[test]
     fn daily_loss_window_requires_current_complete_position_history() {
         let start = (1_790_000_000_000_u64 / 86_400_000) * 86_400_000;
