@@ -531,7 +531,10 @@ fn public_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Optio
 fn private_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Option<String>) {
     let scope = if path == "/api/v5/account/instruments" {
         param(params, "instType").map(|value| format!("authenticated_user+inst_type:{value}"))
-    } else if matches!(path, "/api/v5/trade/order" | "/api/v5/trade/cancel-algos" | "/api/v5/trade/amend-algos") {
+    } else if matches!(
+        path,
+        "/api/v5/trade/order" | "/api/v5/trade/cancel-algos" | "/api/v5/trade/amend-algos"
+    ) {
         param(params, "instId").map(|value| format!("authenticated_user+instrument:{value}"))
     } else {
         Some("authenticated_user".to_owned())
@@ -756,7 +759,8 @@ mod tests {
         assert_ne!(
             btc.domains[0].key,
             rate.trade_rest_plan(RateOperationClass::AmendOrder, "BTC-USDT-SWAP", None)
-                .domains[0].key
+                .domains[0]
+                .key
         );
     }
 
