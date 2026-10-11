@@ -1506,13 +1506,16 @@ fn validate_managed_protective_coverage(
     {
         return Err(denied());
     }
-    let instrument = records.first().map(|record| record.plan.instrument_id.as_str())
+    let instrument = records
+        .first()
+        .map(|record| record.plan.instrument_id.as_str())
         .ok_or_else(denied)?;
-    if records.iter().any(|record| record.plan.instrument_id != instrument
-        || record.plan.account_uid_fingerprint != account.account_uid_fingerprint
-        || !record.state.is_terminal()
-        || record.active_mutation().is_some())
-    {
+    if records.iter().any(|record| {
+        record.plan.instrument_id != instrument
+            || record.plan.account_uid_fingerprint != account.account_uid_fingerprint
+            || !record.state.is_terminal()
+            || record.active_mutation().is_some()
+    }) {
         return Err(denied());
     }
 
@@ -1555,9 +1558,11 @@ fn validate_managed_protective_coverage(
             matched_amend = true;
             new_size
         } else {
-            if link.size_amend.as_ref().is_some_and(|amendment| {
-                amendment.state != ProtectiveSizeAmendState::Confirmed
-            }) {
+            if link
+                .size_amend
+                .as_ref()
+                .is_some_and(|amendment| amendment.state != ProtectiveSizeAmendState::Confirmed)
+            {
                 return Err(denied());
             }
             link.covered_size
@@ -1577,16 +1582,20 @@ fn validate_managed_protective_coverage(
         if matching_details.next().is_some() {
             return Err(denied());
         }
-        let mut matching_inventory = inventory.samples.iter().filter(|row| {
-            row.instrument_id == instrument && row.algo_order_id == algo_id
-        });
+        let mut matching_inventory = inventory
+            .samples
+            .iter()
+            .filter(|row| row.instrument_id == instrument && row.algo_order_id == algo_id);
         let sample = matching_inventory.next().ok_or_else(denied)?;
         if matching_inventory.next().is_some()
             || sample.client_order_id != link.algo_client_order_id
             || sample.state != "live"
             || !matches!(sample.order_type.as_str(), "oco" | "conditional")
             || detail.algo_order_id != sample.algo_order_id
-            || !matches!(detail.state.as_str(), "live" | "effective" | "partially_effective")
+            || !matches!(
+                detail.state.as_str(),
+                "live" | "effective" | "partially_effective"
+            )
         {
             return Err(denied());
         }
@@ -1598,8 +1607,14 @@ fn validate_managed_protective_coverage(
         };
         active_count += 1;
     }
-    if !matched_amend || details.len() != active_count
-        || inventory.samples.iter().filter(|row| row.instrument_id == instrument).count() != active_count
+    if !matched_amend
+        || details.len() != active_count
+        || inventory
+            .samples
+            .iter()
+            .filter(|row| row.instrument_id == instrument)
+            .count()
+            != active_count
     {
         return Err(denied());
     }
@@ -1610,10 +1625,18 @@ fn validate_managed_protective_coverage(
     let mut observed_short = Decimal::ZERO;
     let mut seen_long = false;
     let mut seen_short = false;
-    for position in account.positions.iter().filter(|p| p.instrument_id == instrument) {
+    for position in account
+        .positions
+        .iter()
+        .filter(|p| p.instrument_id == instrument)
+    {
         let size = Decimal::from_str(&position.position).map_err(|_| denied())?;
-        if size < Decimal::ZERO { return Err(denied()); }
-        if size == Decimal::ZERO { continue; }
+        if size < Decimal::ZERO {
+            return Err(denied());
+        }
+        if size == Decimal::ZERO {
+            continue;
+        }
         let side_seen = match position.position_side.as_str() {
             "long" => {
                 observed_long = size;
@@ -1625,12 +1648,16 @@ fn validate_managed_protective_coverage(
             }
             _ => return Err(denied()),
         };
-        if *side_seen || !records.iter().any(|record|
-            record.plan.trade_mode.as_str() == position.margin_mode
-            && record.plan.position_side.as_str() == position.position_side
-            && record.protection.as_ref().is_some_and(|link|
-                link.status == crate::ProtectiveOrderStatus::Active)
-        ) {
+        if *side_seen
+            || !records.iter().any(|record| {
+                record.plan.trade_mode.as_str() == position.margin_mode
+                    && record.plan.position_side.as_str() == position.position_side
+                    && record
+                        .protection
+                        .as_ref()
+                        .is_some_and(|link| link.status == crate::ProtectiveOrderStatus::Active)
+            })
+        {
             return Err(denied());
         }
         *side_seen = true;
@@ -1640,17 +1667,39 @@ fn validate_managed_protective_coverage(
     }
     // Retain the prior strict single-lot predicate as a regression boundary.
     if active_count == 1 && inventory.rows == 1 {
-        let only = records.iter().find(|record| record.protection.as_ref()
-            .is_some_and(|link| link.status == crate::ProtectiveOrderStatus::Active))
+        let only = records
+            .iter()
+            .find(|record| {
+                record
+                    .protection
+                    .as_ref()
+                    .is_some_and(|link| link.status == crate::ProtectiveOrderStatus::Active)
+            })
             .ok_or_else(denied)?;
         let expected = if let Some((id, target)) = amended {
-            if only.plan.intent_id == id { target } else {
-                Decimal::from_str(only.protection.as_ref().unwrap().covered_size.as_deref()
-                    .ok_or_else(denied)?).map_err(|_| denied())?
+            if only.plan.intent_id == id {
+                target
+            } else {
+                Decimal::from_str(
+                    only.protection
+                        .as_ref()
+                        .unwrap()
+                        .covered_size
+                        .as_deref()
+                        .ok_or_else(denied)?,
+                )
+                .map_err(|_| denied())?
             }
         } else {
-            Decimal::from_str(only.protection.as_ref().unwrap().covered_size.as_deref()
-                .ok_or_else(denied)?).map_err(|_| denied())?
+            Decimal::from_str(
+                only.protection
+                    .as_ref()
+                    .unwrap()
+                    .covered_size
+                    .as_deref()
+                    .ok_or_else(denied)?,
+            )
+            .map_err(|_| denied())?
         };
         validate_protective_amend_coverage(only, account, inventory, expected)?;
     }
@@ -2639,7 +2688,6 @@ mod tests {
         }
     }
 
-
     fn active_multi_lot_record(
         mut plan: ExecutionPlan,
         intent: &str,
@@ -2668,24 +2716,29 @@ mod tests {
     #[test]
     fn managed_multi_lot_oco_requires_exact_hedge_side_aggregate_and_no_unknown() {
         let mut first = active_multi_lot_record(
-            protected_plan(), "intent_multi_long_first_012345", "123456789012",
+            protected_plan(),
+            "intent_multi_long_first_012345",
+            "123456789012",
         );
         let mut add = protected_plan();
         add.action = crate::ExecutionAction::Add;
-        let second = active_multi_lot_record(
-            add, "intent_multi_long_add_01234567", "123456789013",
-        );
+        let second = active_multi_lot_record(add, "intent_multi_long_add_01234567", "123456789013");
         let mut hedge = protected_plan();
         hedge.action = crate::ExecutionAction::Hedge;
         hedge.position_side = PositionSide::Short;
         hedge.side = OrderSide::Sell;
-        let third = active_multi_lot_record(
-            hedge, "intent_multi_short_hedge_012345", "123456789014",
-        );
+        let third =
+            active_multi_lot_record(hedge, "intent_multi_short_hedge_012345", "123456789014");
         let mutation = "resize_multi_0123456789abc";
-        first.prepare_protective_size_amend(mutation, "0.5").expect("prepare");
-        first.begin_protective_size_amend(mutation).expect("one submit marker");
-        first.mark_protective_size_amend_unknown(mutation).expect("lost ACK");
+        first
+            .prepare_protective_size_amend(mutation, "0.5")
+            .expect("prepare");
+        first
+            .begin_protective_size_amend(mutation)
+            .expect("one submit marker");
+        first
+            .mark_protective_size_amend_unknown(mutation)
+            .expect("lost ACK");
 
         let (mut account, mut inventory) = resize_coverage(&first);
         account.positions[0].position = "1.5".to_owned();
@@ -2697,7 +2750,12 @@ mod tests {
         for (record, id) in [(&second, "123456789013"), (&third, "123456789014")] {
             let mut row = inventory.samples[0].clone();
             row.algo_order_id = id.to_owned();
-            row.client_order_id = record.protection.as_ref().unwrap().algo_client_order_id.clone();
+            row.client_order_id = record
+                .protection
+                .as_ref()
+                .unwrap()
+                .algo_client_order_id
+                .clone();
             inventory.samples.push(row);
         }
         inventory.rows = inventory.samples.len();
@@ -2747,7 +2805,8 @@ mod tests {
                 "accumulated_fill_size":"0", "average_fill_price":null,
                 "state":"live", "reduce_only":null, "creation_time_ms":"1",
                 "update_time_ms":"1"
-            })).expect("external pending order"),
+            }))
+            .expect("external pending order"),
         );
         assert!(verify(&records, &pending, &inventory, &details).is_err());
 
