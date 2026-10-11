@@ -2846,11 +2846,13 @@ mod tests {
         uncertain_parent[2].state = ExecutionState::UnknownSubmission;
         assert!(verify(&uncertain_parent, &account, &inventory, &details).is_err());
         let mut duplicate_parent = records.clone();
-        duplicate_parent[1].order_id = duplicate_parent[0].order_id.clone();
+        let first_parent_id = duplicate_parent[0].order_id.clone();
+        duplicate_parent[1].order_id = first_parent_id;
         assert!(verify(&duplicate_parent, &account, &inventory, &details).is_err());
         let mut duplicate_client = records.clone();
-        duplicate_client[1].protection.as_mut().unwrap().algo_client_order_id =
-            duplicate_client[0].protection.as_ref().unwrap().algo_client_order_id.clone();
+        let first_algo_client = duplicate_client[0]
+            .protection.as_ref().unwrap().algo_client_order_id.clone();
+        duplicate_client[1].protection.as_mut().unwrap().algo_client_order_id = first_algo_client;
         assert!(verify(&duplicate_client, &account, &inventory, &details).is_err());
         let mut missing_leg = records.clone();
         missing_leg.pop();
