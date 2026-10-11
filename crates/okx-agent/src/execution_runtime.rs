@@ -500,6 +500,50 @@ impl ExecutionRuntime {
         Ok(Some(result))
     }
 
+    /// Existing Demo authority, one owner mutex, one fenced exchange
+    /// mutation. Never enable a production mutation or trust caller proof
+    /// without the executor's independent exact-ID venue validation.
+    pub async fn shrink_protective_size_demo_authorized<F, Fut>(
+        &self,
+        preflight: &ExecutorPreflightSnapshot,
+        intent_id: &str,
+        mutation_id: &str,
+        target_size: &str,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+        final_private_ws_fence: F,
+    ) -> AgentResult<Option<Result<MutationSubmitDisposition, OrderExecutorError>>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance
+            || !preflight.accepted
+            || !preflight.credential.accepted
+        {
+            self.executor.lock().await.disable_mutations();
+            return Ok(None);
+        }
+        let mut executor = self.executor.lock().await;
+        executor.enable_demo_acceptance(self.environment)?;
+        let result = executor
+            .submit_protective_size_amend_fenced(
+                intent_id,
+                mutation_id,
+                target_size,
+                account,
+                inventory,
+                timing,
+                observed_at_ms,
+                final_private_ws_fence,
+            )
+            .await;
+        executor.disable_mutations();
+        Ok(Some(result))
+    }
+
     /// Local exchange-effect readback, NOT an amend-algos resend. Hold the
     /// one executor/ledger mutex through all venue GETs, final private-WS
     /// fence and the durable CONFIRMED transition. Production cannot mutate
