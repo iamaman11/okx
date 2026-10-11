@@ -271,7 +271,6 @@ impl ExecutionRuntime {
         account: &AccountSnapshot,
         inventory: &PendingProtectiveAlgoInventory,
         timing: MutationTiming,
-        observed_at_ms: u64,
         final_private_ws_fence: F,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>>
     where
@@ -290,7 +289,7 @@ impl ExecutionRuntime {
                 account,
                 inventory,
                 timing,
-                observed_at_ms,
+                timing.request_time_ms(),
                 final_private_ws_fence,
             )
             .await;
