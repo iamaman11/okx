@@ -15,11 +15,13 @@ The production architecture is deliberately small: one Windows supervisor chain,
 | `okx-execution` | Sole trade/risk-mutation owner, durable intent/ledger, protection, exact exchange reconciliation and **non-replay after UNKNOWN** |
 | Windows `okx-host-control` + one agent | Native single-process ownership, lifecycle, verified installation and recovery |
 | Cloudflare MCP | **Primary** typed ChatGPT data and permitted Demo-trade transport; no second execution owner |
-| GitHub | Canonical code, CI, exact verified releases, typed CONTROL and encrypted fallback/parity; **never** a workaround for a primary-tool refusal |
+| GitHub | Canonical code, CI, exact verified releases, typed CONTROL and encrypted read-only diagnostics/parity; **never** a workaround for a primary-tool refusal |
 
 **No code for code's sake:** no Demo fork, new watchdog/scheduler/daemon/polling loop, competing API/RPC, risk engine or execution owner. First identify an observable missing capability or defect, reuse an existing module, make the smallest safe change, test failure paths, prove exact CI and installed artifact, physically verify Demo exchange results if relevant, and **close the work item** before moving on. Existing protections cannot be removed to make a test pass. ChatGPT must use bounded status/decision packets with account UID/profile, source freshness, risk, unresolved intents and next safe action; never depend on a long chat history as the ledger.
 
-**Five development stages only. Current critical path:** G3-C physically accepted → **G3-D1 NOW** read-only venue TP/SL/OCO + Hedge semantics → **G3-D2** protected ADD/REDUCE/HEDGE smallest-code correction → **G3-D3** bounded physical Demo fills/bills/OCO/FLAT → G3-E/F, G4 unknown ACK and restart safety → Stage 5A/B/C (including **safe Demo↔Production ReadOnly switching at 5C-2**) → independently human-authorized Live activation. The environment switch **does not block** modifying position size inside the already-running Demo; #283 is merged lifecycle source-only, **not installed and not a proven switch**.
+**Exactly five product stages. ONE current critical path:** Stages 1–3 closed within documented scope → **4C-R1** durable FLAT/OCO ledger cleanup → **4C-R2** risk-oracle mark/time basis, explicit risk admission, market FRESH, OCO race bound → **4C-D** physical protected FOK OPEN/ADD/HEDGE/full exits → **4C-E** safe REDUCE/REVERSE or typed UNSUPPORTED → **G3-F/G4** lost ACK/crashes/non-replay and Windows recovery → **Stage 5A** portfolio risk governance → **5B** accounting/TCA/science → **5C** operator usability, exact deploy/restore, safe Demo↔Production ReadOnly → separately human-approved **Live gate**. See one canonical [#160 AC-01…AC-10](https://github.com/iamaman11/okx/issues/160), not another roadmap.
+
+**Anti-loop / simplicity contract:** each reproducible invariant -> one same-owner causal change -> negative/race regression -> one coherent PR + six CI checks -> exact verified install if runtime changed -> physical Demo venue proof when applicable -> terminal PASS / FAIL-BLOCKED / UNSUPPORTED. After two unsuccessful bounded root-cause attempts, record a precise blocker/native unsupported premise, not a new transport/refactor. Keep one agent, executor, ledger, MCP Demo write ingress and Windows owner. Large files split only where it clarifies an actual changed responsibility; no code for code's sake.
 
 **One operational cursor:** [canonical #160](https://github.com/iamaman11/okx/issues/160) and physical exchange proofs [#223](https://github.com/iamaman11/okx/issues/223). Historical contradictory next-step notes are archived, not authority.
 
@@ -46,7 +48,9 @@ Accepted:
 - Stage 3D causal live-decision parity kernel — ACCEPTED;
 - Stage 3D bounded event-driven PAPER/SHADOW session owner — research implementation; independent H2 promotion remains gated by #216.
 
-The **only current acceptance cursor** is the first section of [#160](https://github.com/iamaman11/okx/issues/160); [#223](https://github.com/iamaman11/okx/issues/223#issuecomment-6103793654) records exact physical Demo truth. Stage 4C G1/G2 and G3-A/B/C are **PHYSICALLY ACCEPTED for their exact Demo scenarios** only; G3C proved a same-order reducing CLOSE AMEND, fills, terminal OCO cleanup and restart with installed agent artifact `11684605898`. **NEXT = G3-D1 read-only OKX TP/SL/Hedge venue feasibility**, then G3-D2 minimal existing-owner coverage correction, then G3-D3 Demo ADD/REDUCE/HEDGE/FLAT physical tests; G3-E/F, G4 uncertain ACK/non-replay, Stage 5A/B/C and separate Live gate follow. **D0 switching work is deferred to 5C-2** because Demo multi-leg acceptance does not require leaving Demo. This current cursor supersedes earlier D0-first historical notes.
+**Current verified state:** `main eb1da12add28f3bdcee909c09339f6515e2558ce`; PR #297 6/6 CI PASS; exact Windows artifact `11713135973` installed with CONTROL `READY_RUNNING`; primary Cloudflare Demo MCP `PASS/session_fresh`, tool contract `okx.mcp.tools/2026-10-11.2`. Authenticated account FRESH FLAT (positions=0, regular orders=0, native OCO=0, unresolved=0, reconciled). One FOK OPEN plus attached protection and one FOK CLOSE physically passed. ADD/HEDGE/REDUCE/REVERSE physical PASS **not proven**. Live **OFF**.
+
+**NEXT = 4C-R1.** Independently observed exchange FLAT/0 live OCO still coexists with an old OPEN marked protection `ACTIVE` in durable ledger; exact same-UID, fully scoped exchange absence and restart-persistent terminal cleanup must close that record before next Demo OPEN. Then 4C-R2 risk oracle, WS and OCO race admission BEFORE further physical ADD/HEDGE testing. Historical D1/D2/PR evidence is not the active work cursor.
 
 Live trading is **not enabled**. One eventual user choice is **Demo / Real (Production ReadOnly)**; choosing a trading environment never grants real-money execution authority. [PR #283](https://github.com/iamaman11/okx/pull/283) merged source-only deny-by-default profile transition guards, **not yet installed or proven as a complete safe toggle**. Existing lifecycle shutdown/restart/install can still interrupt supervision with open exposure, so do not claim lifecycle safety from CI. A later Stage 5C-2 proof must cover fresh exact-account/ledger/OCO guard, single-owner handoff and negative crash/recovery cases; stay on the accepted Demo profile for G3-D1/D2/D3. The single typed Demo-only `execution_action` uses the same `okx-execution` owner; Production remains ReadOnly.
 
@@ -114,7 +118,7 @@ ChatGPT -> OAuth MCP Worker -> Cloudflare RuntimeSession
         <- bounded typed AgentResponse <-
 ```
 
-The direct path is generation-bound, heartbeat-probed and bounded by frame size, in-flight concurrency and response deadline. The Worker and Rust owner admit only the explicitly typed `execution_action` on an authenticated `demo_acceptance` profile; all production writes remain rejected. A healthy MCP session alone does not prove tool-schema freshness, account source freshness or permission for a specific mutation. GitHub DATA (#10 protocol; #234 bounded Demo acceptance mailbox) remains an encrypted **fallback/parity/recovery** path, not the normal product path:
+The direct path is generation-bound, heartbeat-probed and bounded by frame size, in-flight concurrency and response deadline. The Worker and Rust owner admit only the explicitly typed `execution_action` on an authenticated `demo_acceptance` profile; all production writes remain rejected. A healthy MCP session alone does not prove tool-schema freshness, account source freshness or permission for a specific mutation. GitHub DATA (#10 protocol; #234 historical Demo acceptance mailbox) remains an encrypted **read-only diagnosis/parity** path, NOT a fallback trading-write ingress:
 
 ```text
 ChatGPT -> encrypted typed request -> GitHub #10 -> okx-agent
@@ -174,7 +178,7 @@ Installed production binaries do not execute from the mutable source checkout.
 ## Canonical documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [Roadmap and production-closure cursor](docs/ROADMAP.md)
+- [Roadmap index (authority #160)](docs/ROADMAP.md)
 - [Encrypted GitHub mailbox](docs/encrypted-github-mailbox.md)
 - [ChatGPT operator contract](docs/chatgpt-operator-contract.md)
 

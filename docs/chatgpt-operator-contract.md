@@ -1,17 +1,21 @@
 # ChatGPT operator contract
 
-This document defines the normal operating discipline for ChatGPT over the accepted Cloudflare-primary / GitHub-fallback architecture.
+This document defines the normal operating discipline for ChatGPT over the accepted Cloudflare-primary / GitHub read-only-diagnostic architecture.
 
 The goal is to keep queries attributable, context-efficient and fail-closed while allowing broad analytical question coverage without turning every natural-language question into a new backend endpoint.
 
-## Current operator authority — 2026-10-11 checkpoint
+## Current operator authority — 2026-10-11
 
-The Cloudflare MCP primary exposes read-only `executor_preflight`, `execution_status`, `account_summary` and analysis, plus one seven-action closed Demo-only `execution_action` (tool contract `okx.mcp.tools/2026-10-10.2` at acceptance). Production remains hard `ReadOnly`. Stage 4C G1/G2 and G3-A/B/C exact Demo exchange/AMEND/CANCEL/CLOSE/OCO cleanup and restart are physically accepted on the one Demo account. [#223 exact evidence](https://github.com/iamaman11/okx/issues/223#issuecomment-6103793654), installed agent artifact `11684605898`. **ONLY NEXT G3-D1 read-only venue protection feasibility**, D2 same-executor protected ADD/REDUCE/HEDGE, D3 physical Demo; then G3-E/F, G4, Stage 5A–C including 5C-2 safe Demo/Production ReadOnly choice and separate Live approval. [Canonical charter and current cursor #160](https://github.com/iamaman11/okx/issues/160) governs any old headings. No real-money mutation.
+**Verified release and account:** `main eb1da12add28f3bdcee909c09339f6515e2558ce`; PR #297 6/6 CI PASS; exact Windows artifact `11713135973` installed with CONTROL `READY_RUNNING`; primary Cloudflare Demo MCP `PASS/session_fresh`, tool contract `okx.mcp.tools/2026-10-11.2`. Authenticated account FRESH FLAT (positions=0, regular orders=0, native OCO=0, unresolved=0, reconciled). One FOK OPEN plus attached protection and one FOK CLOSE physically passed. ADD/HEDGE/REDUCE/REVERSE physical PASS **not proven**. Live **OFF**.
+
+**NEXT = Stage 4C-R1:** exact independently confirmed exchange FLAT/0 pending OCO plus durable cleanup of old OPEN `protection=ACTIVE`, same UID, negative foreign/incomplete/UNKNOWN tests, no exchange POST; then 4C-R2 risk oracle/market/OCO race, 4C-D physical FOK ADD/HEDGE, 4C-E REDUCE/REVERSE, G3-F/G4, Stage 5A/B/C, separate Live gate. [#160](https://github.com/iamaman11/okx/issues/160) is the only acceptance authority. All legacy D1/NEXT and artifact text below is dated history.
+
+**Operator GO/NO-GO:** a PASS connector does NOT mean FRESH market/account, accepted hard risk or permission for the specific mutation. Prefer one bounded typed reply with profile, UID, source generations/timestamps, oracle agreement, ledger and venue OCO/UNKNOWN, artifact provenance, next action. Never submit new risk to diagnose a failing risk/OCO check; never retry an UNKNOWN exchange effect. One Rust executor, ledger, Windows owner, primary Cloudflare MCP Demo trading ingress. GitHub DATA read-only diagnosis only; CONTROL typed lifecycle only.
 
 ## Transport split
 
 - **Primary DATA:** ChatGPT -> OAuth `okx-cloudflare-mcp` -> one Durable Object rendezvous -> one outbound authenticated Windows WSS -> existing typed `AgentRequest/AgentResponse` path.
-- **Fallback DATA:** GitHub issue #10 defines the encrypted strongly typed contract; issue #234 contains bounded Demo exchange-acceptance mailbox evidence. Neither may bypass a refused primary mutation. It is parity/recovery only, not the normal product path.
+- **Read-only diagnostic DATA:** GitHub issue #10 defines encrypted strongly typed diagnostics; issue #234 contains historical Demo acceptance evidence. Use only for diagnostic/parity/recovery reads, never trading writes or a path around refused primary mutations.
 - **CONTROL:** GitHub issue #12 with plaintext strongly typed lifecycle/deploy/diagnostic requests.
 - Cloudflare owns authentication/rendezvous/correlation only; Windows/Rust remains the product authority.
 - The repository is public, so private account/risk DATA must never be published as plaintext.
