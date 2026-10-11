@@ -560,11 +560,14 @@ impl DurableExecutionLedger {
             if !entry.record.state.is_terminal() {
                 return true;
             }
-            // Attached protection (even active) must reserve the instrument
-            // against new risk. A terminal parent must not trap a separately
-            // validated risk-reducing CLOSE/REDUCE.
+            // Attached protection (even active) reserves the instrument
+            // against new risk. Partial REDUCE can leave a still-live,
+            // oversized TP/SL algo. Until durable, exact-ID OCO resize and
+            // re-readback are implemented, DENY REDUCE as well. Full reducing
+            // CLOSE remains allowed (physically accepted G3C).
             if entry.record.protection_blocks_new_managed_intent()
-                && incoming_action.is_risk_increasing()
+                && (incoming_action.is_risk_increasing()
+                    || incoming_action == ExecutionAction::Reduce)
             {
                 return true;
             }
@@ -1790,6 +1793,13 @@ mod tests {
         assert!(matches!(
             restarted.prepare(plan("intent_blocked_active_0123456"), 203),
             Err(ExecutionLedgerError::InstrumentBusy)
+        ));
+        // A partial reduce cannot safely resize the active venue OCO yet.
+        assert!(restarted.instrument_reserved(
+            "DOGE-USDT-SWAP",
+            "intent_partial_reduce_01234567",
+            ExecutionAction::Reduce,
+            None
         ));
         assert!(matches!(
             restarted
