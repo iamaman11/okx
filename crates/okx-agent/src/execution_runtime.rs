@@ -766,7 +766,7 @@ mod tests {
         )
         .expect("different accepted Demo root");
         assert_eq!(demo.mode(), ExecutionRuntimeMode::DemoAcceptance);
-        assert!(demo_path.exists() == false);
+        assert!(!demo_path.exists());
         fs::write(&demo_path, marker).unwrap();
         assert!(
             ExecutionRuntime::new_demo_acceptance(
