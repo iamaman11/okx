@@ -3712,8 +3712,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_prepared_protected_limit_and_post_only_cannot_send_or_persist_submitting() {
-        for order_type in [OrderType::Limit, OrderType::PostOnly] {
+    async fn legacy_prepared_protected_nonfok_cannot_send_or_persist_submitting() {
+        for order_type in [OrderType::Limit, OrderType::PostOnly, OrderType::Ioc] {
             let name = format!("legacy-protected-{order_type:?}");
             let (root, mut ledger) = ledger(&name);
             let mut old = protected_plan();
