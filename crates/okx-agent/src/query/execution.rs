@@ -1236,10 +1236,11 @@ async fn confirm_owned_protection_size(
     intent_id: &str,
     mutation_id: &str,
 ) -> AgentResult<AgentResponse> {
-    let admission = match cancel_mutation_admission(request, context, generated_at, execution).await? {
-        PreMutationAdmissionResult::Ready(value) => value,
-        PreMutationAdmissionResult::Response(response) => return Ok(*response),
-    };
+    let admission =
+        match cancel_mutation_admission(request, context, generated_at, execution).await? {
+            PreMutationAdmissionResult::Ready(value) => value,
+            PreMutationAdmissionResult::Response(response) => return Ok(*response),
+        };
     if !admission.preflight.accepted || !execution.demo_mutation_acceptance_requested() {
         return Ok(preflight_rejected(request, generated_at));
     }
@@ -1261,8 +1262,12 @@ async fn confirm_owned_protection_size(
         Ok(value) => value,
         Err(error) => {
             return Ok(failure_response(
-                request, generated_at, AgentResponseStatus::Failed,
-                EXECUTION_RECONCILIATION_UNAVAILABLE_CODE, error.to_string(), false,
+                request,
+                generated_at,
+                AgentResponseStatus::Failed,
+                EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+                error.to_string(),
+                false,
             ));
         }
     };
@@ -1294,7 +1299,9 @@ async fn confirm_owned_protection_size(
         .await;
     match result {
         Ok(entry) => Ok(completed(
-            request, generated_at, "okx.protective-size-confirmation/v1",
+            request,
+            generated_at,
+            "okx.protective-size-confirmation/v1",
             serde_json::json!({
                 "intent_id": intent_id,
                 "mutation_id": mutation_id,
@@ -1306,9 +1313,13 @@ async fn confirm_owned_protection_size(
             }),
         )),
         Err(error) => Ok(failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
             EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
-            format!("protective resize remains UNKNOWN/ACK unless complete exact venue/WS proof succeeds: {error}; never replay exchange POST"),
+            format!(
+                "protective resize remains UNKNOWN/ACK unless complete exact venue/WS proof succeeds: {error}; never replay exchange POST"
+            ),
             false,
         )),
     }
