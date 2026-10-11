@@ -714,14 +714,19 @@ where
     /// complete, bounded SWAP/FUTURES conditional+OCO pending inventory,
     /// both read under a stable private WS event cursor. If that condition
     /// cannot be proven, no durable confirmation is recorded.
-    pub async fn confirm_protective_size_amend_from_venue(
+    pub async fn confirm_protective_size_amend_from_venue<F, Fut>(
         &mut self,
         intent_id: &str,
         mutation_id: &str,
         account: &AccountSnapshot,
         inventory: &PendingProtectiveAlgoInventory,
         observed_at_ms: u64,
-    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        final_private_ws_fence: F,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
         let entry = self
             .ledger
             .get(intent_id)
@@ -800,6 +805,13 @@ where
             &details,
             Some((intent_id, new_size)),
         )?;
+        // Final event fence must run AFTER all REST algo reads and while the
+        // same executor mutex is still owned. A mid-read private WS event,
+        // disconnect or cursor-generation change forbids CONFIRMED. The
+        // caller cannot precompute a bool before these awaited GETs.
+        if !final_private_ws_fence().await {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
         Ok(self
             .ledger
             .confirm_protective_size_amend(intent_id, mutation_id, observed_at_ms)?)
@@ -2984,6 +2996,7 @@ mod tests {
                 &resize_coverage(&record).0,
                 &resize_coverage(&record).1,
                 108,
+                || async { true },
             )
             .await
             .expect("exact algo plus complete same-UID remaining position");
@@ -3008,6 +3021,81 @@ mod tests {
                 .unwrap()
                 .state,
             ProtectiveSizeAmendState::Confirmed
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn private_ws_fence_failure_after_algo_get_leaves_resize_unknown_and_cannot_replay() {
+        let (root, mut ledger, record) = resize_ledger("resize-fence-race");
+        let intent = record.plan.intent_id.clone();
+        let mutation = "resize_race_0123456789abc";
+        ledger
+            .prepare_protective_size_amend(&intent, mutation, "0.5", 105)
+            .expect("prepared");
+        ledger
+            .begin_protective_size_amend(&intent, mutation, 106)
+            .expect("sent once");
+        ledger
+            .mark_protective_size_amend_unknown(&intent, mutation, 107)
+            .expect("unknown");
+        let gateway = ProtectiveLookupGateway::new(Ok(resize_algo(&record, "0.5")));
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        let fence_called = std::sync::atomic::AtomicBool::new(false);
+        let result = executor
+            .confirm_protective_size_amend_from_venue(
+                &intent,
+                mutation,
+                &resize_coverage(&record).0,
+                &resize_coverage(&record).1,
+                108,
+                || async {
+                    fence_called.store(true, std::sync::atomic::Ordering::SeqCst);
+                    false
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(OrderExecutorError::ProtectionCoverageUnproven)
+        ));
+        assert!(fence_called.load(std::sync::atomic::Ordering::SeqCst));
+        let protection = executor
+            .ledger()
+            .get(&intent)
+            .unwrap()
+            .record
+            .protection
+            .as_ref()
+            .unwrap();
+        assert_eq!(protection.covered_size.as_deref(), Some("1"));
+        assert_eq!(
+            protection.size_amend.as_ref().unwrap().state,
+            ProtectiveSizeAmendState::Unknown
+        );
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("restart");
+        assert_eq!(
+            reopened
+                .get(&intent)
+                .unwrap()
+                .record
+                .protection
+                .as_ref()
+                .unwrap()
+                .size_amend
+                .as_ref()
+                .unwrap()
+                .state,
+            ProtectiveSizeAmendState::Unknown
+        );
+        assert!(
+            reopened
+                .get(&intent)
+                .unwrap()
+                .record
+                .protection_blocks_new_managed_intent()
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -3058,7 +3146,8 @@ mod tests {
                     mid,
                     &resize_coverage(&record).0,
                     &resize_coverage(&record).1,
-                    107
+                    107,
+                    || async { true },
                 )
                 .await,
             Err(OrderExecutorError::ProtectionIdentityMismatch)

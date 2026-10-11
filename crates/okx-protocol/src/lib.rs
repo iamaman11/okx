@@ -898,6 +898,11 @@ pub enum ExecutionMutationRequest {
     CancelProtection {
         mutation_id: String,
     },
+    /// Local ledger confirmation after independent, fenced venue readback.
+    /// No exchange POST and no replay of the original amend-algos request.
+    ConfirmProtectionSize {
+        mutation_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1223,7 +1228,8 @@ impl AgentOperation {
                         Ok(())
                     }
                     ExecutionMutationRequest::Cancel { mutation_id }
-                    | ExecutionMutationRequest::CancelProtection { mutation_id } => {
+                    | ExecutionMutationRequest::CancelProtection { mutation_id }
+                    | ExecutionMutationRequest::ConfirmProtectionSize { mutation_id } => {
                         validate_mutation_id(mutation_id)
                     }
                 }

@@ -4,8 +4,8 @@ use chrono::{SecondsFormat, Utc};
 use okx_analysis::{PortfolioRiskAnalysis, durable_account_stop_reason};
 use okx_api::{
     AccountApi, AccountRateLimitEvidence, ClockEvidence, Credentials, MarginMode, MutationTiming,
-    OkxEnvironment, OkxPublicClient, OkxRestClient, PublicDataApi, RateBudget, RateBudgetSnapshot,
-    TradeApi,
+    OkxEnvironment, OkxPublicClient, OkxRestClient, PendingProtectiveAlgoInventory, PublicDataApi,
+    RateBudget, RateBudgetSnapshot, TradeApi,
 };
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
@@ -498,6 +498,42 @@ impl ExecutionRuntime {
             .await;
         executor.disable_mutations();
         Ok(Some(result))
+    }
+
+    /// Local exchange-effect readback, NOT an amend-algos resend. Hold the
+    /// one executor/ledger mutex through all venue GETs, final private-WS
+    /// fence and the durable CONFIRMED transition. Production cannot mutate
+    /// its ledger using a Demo-only operator confirmation.
+    pub async fn confirm_protective_size_amend_demo_fenced<F, Fut>(
+        &self,
+        intent_id: &str,
+        mutation_id: &str,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
+        observed_at_ms: u64,
+        final_private_ws_fence: F,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance {
+            return Err(OrderExecutorError::Transition(
+                okx_execution::ExecutionTransitionError::LiveTradingDisabled,
+            ));
+        }
+        self.executor
+            .lock()
+            .await
+            .confirm_protective_size_amend_from_venue(
+                intent_id,
+                mutation_id,
+                account,
+                inventory,
+                observed_at_ms,
+                final_private_ws_fence,
+            )
+            .await
     }
 
     pub async fn retire_protective_size_amend_absent(
