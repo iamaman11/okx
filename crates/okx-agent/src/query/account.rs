@@ -888,16 +888,18 @@ pub(super) async fn dispatch(
                 // Preserve the explicit residual, but only classify it as an
                 // impossible account mismatch when exact lot identity differs.
                 // A moving valuation is reported DEGRADED, never silently FRESH.
-                let oracle_lots = oracle.positions.iter().map(|position| {
-                    okx_analysis::PositionOracleEvidence {
+                let oracle_lots = oracle
+                    .positions
+                    .iter()
+                    .map(|position| okx_analysis::PositionOracleEvidence {
                         instrument_type: position.instrument_type.clone(),
                         instrument_id: position.instrument_id.clone(),
                         position_side: position.position_side.clone(),
                         margin_mode: position.margin_mode.clone(),
                         contracts: position.pos.clone(),
                         notional_usd: position.notional_usd.clone(),
-                    }
-                }).collect::<Vec<_>>();
+                    })
+                    .collect::<Vec<_>>();
                 if let Err(error) = okx_analysis::conservative_account_with_position_oracle(
                     &assembled.snapshot,
                     &oracle_lots,
@@ -908,7 +910,9 @@ pub(super) async fn dispatch(
                         generated_at,
                         AgentResponseStatus::Failed,
                         PORTFOLIO_RISK_ORACLE_MISMATCH_CODE,
-                        format!("position-risk oracle lot identity, quantity or valuation invalid: {error}"),
+                        format!(
+                            "position-risk oracle lot identity, quantity or valuation invalid: {error}"
+                        ),
                         false,
                     ));
                 }
