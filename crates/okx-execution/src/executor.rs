@@ -3033,8 +3033,12 @@ mod tests {
         ledger
             .prepare_protective_size_amend(&intent, mutation, "0.5", 105)
             .expect("prepared");
-        ledger.begin_protective_size_amend(&intent, mutation, 106).expect("sent once");
-        ledger.mark_protective_size_amend_unknown(&intent, mutation, 107).expect("unknown");
+        ledger
+            .begin_protective_size_amend(&intent, mutation, 106)
+            .expect("sent once");
+        ledger
+            .mark_protective_size_amend_unknown(&intent, mutation, 107)
+            .expect("unknown");
         let gateway = ProtectiveLookupGateway::new(Ok(resize_algo(&record, "0.5")));
         let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
         let fence_called = std::sync::atomic::AtomicBool::new(false);
@@ -3051,20 +3055,48 @@ mod tests {
                 },
             )
             .await;
-        assert!(matches!(result, Err(OrderExecutorError::ProtectionCoverageUnproven)));
+        assert!(matches!(
+            result,
+            Err(OrderExecutorError::ProtectionCoverageUnproven)
+        ));
         assert!(fence_called.load(std::sync::atomic::Ordering::SeqCst));
-        let protection = executor.ledger().get(&intent).unwrap().record.protection.as_ref().unwrap();
+        let protection = executor
+            .ledger()
+            .get(&intent)
+            .unwrap()
+            .record
+            .protection
+            .as_ref()
+            .unwrap();
         assert_eq!(protection.covered_size.as_deref(), Some("1"));
-        assert_eq!(protection.size_amend.as_ref().unwrap().state, ProtectiveSizeAmendState::Unknown);
-        let reopened = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join("ledger.json")), 200,
-        ).expect("restart");
         assert_eq!(
-            reopened.get(&intent).unwrap().record.protection.as_ref().unwrap()
-                .size_amend.as_ref().unwrap().state,
+            protection.size_amend.as_ref().unwrap().state,
             ProtectiveSizeAmendState::Unknown
         );
-        assert!(reopened.get(&intent).unwrap().record.protection_blocks_new_managed_intent());
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("restart");
+        assert_eq!(
+            reopened
+                .get(&intent)
+                .unwrap()
+                .record
+                .protection
+                .as_ref()
+                .unwrap()
+                .size_amend
+                .as_ref()
+                .unwrap()
+                .state,
+            ProtectiveSizeAmendState::Unknown
+        );
+        assert!(
+            reopened
+                .get(&intent)
+                .unwrap()
+                .record
+                .protection_blocks_new_managed_intent()
+        );
         let _ = fs::remove_dir_all(root);
     }
 
