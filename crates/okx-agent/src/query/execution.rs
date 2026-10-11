@@ -925,7 +925,6 @@ async fn submit_prepared(
                     &account,
                     &inventory,
                     timing,
-                    observed_at_ms,
                     || async {
                         let finished_ms = utc_now_ms();
                         protective_readback_in_ttl(started_ms, finished_ms)
