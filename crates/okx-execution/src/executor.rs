@@ -623,11 +623,16 @@ where
             .get(intent_id)
             .cloned()
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
-        let protection = entry.record.protection.as_ref()
+        let protection = entry
+            .record
+            .protection
+            .as_ref()
             .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
         let target = Decimal::from_str(new_size)
             .map_err(|_| OrderExecutorError::ProtectionCoverageUnproven)?;
-        let previous = protection.covered_size.as_deref()
+        let previous = protection
+            .covered_size
+            .as_deref()
             .and_then(|value| Decimal::from_str(value).ok())
             .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
         if entry.record.state != ExecutionState::Filled
@@ -674,20 +679,26 @@ where
         }
         let request = AmendAlgoOrderRequest {
             instrument_id: entry.record.plan.instrument_id.clone(),
-            algo_order_id: protection.algo_order_id.clone()
+            algo_order_id: protection
+                .algo_order_id
+                .clone()
                 .ok_or(OrderExecutorError::ProtectionIdentityMismatch)?,
             request_id: derive_amend_request_id(intent_id, mutation_id),
             new_size: target.normalize().to_string(),
             cancel_on_fail: false,
         };
         request.validate().map_err(OrderExecutorError::PreSubmit)?;
-        let current = self.gateway
+        let current = self
+            .gateway
             .algo_order_by_client_id(protection.algo_client_order_id.clone())
             .await
             .map_err(OrderExecutorError::PreSubmit)?;
         validate_protective_algo(&entry.record, &current)?;
         if current.algo_order_id != request.algo_order_id
-            || !matches!(current.state.as_str(), "live" | "effective" | "partially_effective")
+            || !matches!(
+                current.state.as_str(),
+                "live" | "effective" | "partially_effective"
+            )
         {
             return Err(OrderExecutorError::ProtectionIdentityMismatch);
         }
@@ -695,7 +706,9 @@ where
         let rate_plan = match self.gateway.admit_amend_algo_order(&request) {
             Ok(plan) => plan,
             Err(OkxError::RateLimited { evidence }) if !evidence.request_sent => {
-                return Err(OrderExecutorError::RateDeferred { evidence: *evidence });
+                return Err(OrderExecutorError::RateDeferred {
+                    evidence: *evidence,
+                });
             }
             Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
         };
@@ -705,13 +718,16 @@ where
             return Err(OrderExecutorError::ProtectionCoverageUnproven);
         }
         self.ledger.prepare_protective_size_amend(
-            intent_id, mutation_id, &request.new_size, observed_at_ms,
+            intent_id,
+            mutation_id,
+            &request.new_size,
+            observed_at_ms,
         )?;
-        self.ledger.begin_protective_size_amend(
-            intent_id, mutation_id, observed_at_ms,
-        )?;
+        self.ledger
+            .begin_protective_size_amend(intent_id, mutation_id, observed_at_ms)?;
         // The only network mutation. Once SUBMITTING is durable, never retry.
-        let reply = self.gateway
+        let reply = self
+            .gateway
             .amend_algo_order(request.clone(), timing, rate_plan)
             .await;
         match reply {
@@ -725,13 +741,17 @@ where
             {
                 Ok(MutationSubmitDisposition::Acknowledged(
                     self.ledger.acknowledge_protective_size_amend(
-                        intent_id, mutation_id, observed_at_ms,
+                        intent_id,
+                        mutation_id,
+                        observed_at_ms,
                     )?,
                 ))
             }
             _ => Ok(MutationSubmitDisposition::Unknown(
                 self.ledger.mark_protective_size_amend_unknown(
-                    intent_id, mutation_id, observed_at_ms,
+                    intent_id,
+                    mutation_id,
+                    observed_at_ms,
                 )?,
             )),
         }
@@ -3017,9 +3037,14 @@ mod tests {
         assert!(matches!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent, mid, "0.5",
-                    &resize_coverage(&record).0, &resize_coverage(&record).1,
-                    timing(), 106, || async { true },
+                    &intent,
+                    mid,
+                    "0.5",
+                    &resize_coverage(&record).0,
+                    &resize_coverage(&record).1,
+                    timing(),
+                    106,
+                    || async { true },
                 )
                 .await
                 .expect("unknown"),
@@ -3029,9 +3054,14 @@ mod tests {
         assert!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent, mid, "0.5",
-                    &resize_coverage(&record).0, &resize_coverage(&record).1,
-                    timing(), 107, || async { true },
+                    &intent,
+                    mid,
+                    "0.5",
+                    &resize_coverage(&record).0,
+                    &resize_coverage(&record).1,
+                    timing(),
+                    107,
+                    || async { true },
                 )
                 .await
                 .is_err(),
@@ -3087,25 +3117,53 @@ mod tests {
         let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
         let (account, inventory) = resize_coverage(&record);
         assert!(matches!(
-            executor.submit_protective_size_amend_fenced(
-                &intent, mutation, "0.5", &account, &inventory, timing(), 105,
-                || async { false },
-            ).await,
+            executor
+                .submit_protective_size_amend_fenced(
+                    &intent,
+                    mutation,
+                    "0.5",
+                    &account,
+                    &inventory,
+                    timing(),
+                    105,
+                    || async { false },
+                )
+                .await,
             Err(OrderExecutorError::ProtectionCoverageUnproven),
         ));
         assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
-        assert!(executor.ledger().get(&intent).unwrap().record
-            .protection.as_ref().unwrap().size_amend.is_none());
-        let reopened = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join("ledger.json")), 200,
-        ).expect("restart without PREPARED trap");
-        assert!(reopened.get(&intent).unwrap().record.protection.as_ref()
-            .unwrap().size_amend.is_none());
+        assert!(
+            executor
+                .ledger()
+                .get(&intent)
+                .unwrap()
+                .record
+                .protection
+                .as_ref()
+                .unwrap()
+                .size_amend
+                .is_none()
+        );
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("restart without PREPARED trap");
+        assert!(
+            reopened
+                .get(&intent)
+                .unwrap()
+                .record
+                .protection
+                .as_ref()
+                .unwrap()
+                .size_amend
+                .is_none()
+        );
         let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn protected_shrink_rejects_foreign_oco_wrong_residual_and_other_hedge_side_without_post() {
+    async fn protected_shrink_rejects_foreign_oco_wrong_residual_and_other_hedge_side_without_post()
+    {
         let (root, ledger, record) = resize_ledger("resize-send-scope");
         let intent = record.plan.intent_id.clone();
         let mutation = "resize_send_scope_0123456789";
@@ -3118,28 +3176,71 @@ mod tests {
         let (account, inventory) = resize_coverage(&record);
         let mut wrong = account.clone();
         wrong.positions[0].position = "0.75".to_owned();
-        assert!(executor.submit_protective_size_amend_fenced(
-            &intent, mutation, "0.5", &wrong, &inventory, timing(), 105,
-            || async { true },
-        ).await.is_err());
+        assert!(
+            executor
+                .submit_protective_size_amend_fenced(
+                    &intent,
+                    mutation,
+                    "0.5",
+                    &wrong,
+                    &inventory,
+                    timing(),
+                    105,
+                    || async { true },
+                )
+                .await
+                .is_err()
+        );
         let mut foreign = inventory.clone();
         foreign.rows += 1;
-        assert!(executor.submit_protective_size_amend_fenced(
-            &intent, mutation, "0.5", &account, &foreign, timing(), 105,
-            || async { true },
-        ).await.is_err());
+        assert!(
+            executor
+                .submit_protective_size_amend_fenced(
+                    &intent,
+                    mutation,
+                    "0.5",
+                    &account,
+                    &foreign,
+                    timing(),
+                    105,
+                    || async { true },
+                )
+                .await
+                .is_err()
+        );
         let mut opposite = account.clone();
         let mut other_pos = account.positions[0].clone();
         other_pos.position_side = "short".to_owned();
         other_pos.position = "0.5".to_owned();
         opposite.positions.push(other_pos);
-        assert!(executor.submit_protective_size_amend_fenced(
-            &intent, mutation, "0.5", &opposite, &inventory, timing(), 105,
-            || async { true },
-        ).await.is_err());
+        assert!(
+            executor
+                .submit_protective_size_amend_fenced(
+                    &intent,
+                    mutation,
+                    "0.5",
+                    &opposite,
+                    &inventory,
+                    timing(),
+                    105,
+                    || async { true },
+                )
+                .await
+                .is_err()
+        );
         assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
-        assert!(executor.ledger().get(&intent).unwrap().record
-            .protection.as_ref().unwrap().size_amend.is_none());
+        assert!(
+            executor
+                .ledger()
+                .get(&intent)
+                .unwrap()
+                .record
+                .protection
+                .as_ref()
+                .unwrap()
+                .size_amend
+                .is_none()
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3253,9 +3354,14 @@ mod tests {
         assert!(matches!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent, mid, "0.5",
-                    &resize_coverage(&record).0, &resize_coverage(&record).1,
-                    timing(), 106, || async { true },
+                    &intent,
+                    mid,
+                    "0.5",
+                    &resize_coverage(&record).0,
+                    &resize_coverage(&record).1,
+                    timing(),
+                    106,
+                    || async { true },
                 )
                 .await
                 .expect("ack"),
@@ -3291,9 +3397,14 @@ mod tests {
         assert!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent, mid, "0.5",
-                    &resize_coverage(&record).0, &resize_coverage(&record).1,
-                    timing(), 108, || async { true },
+                    &intent,
+                    mid,
+                    "0.5",
+                    &resize_coverage(&record).0,
+                    &resize_coverage(&record).1,
+                    timing(),
+                    108,
+                    || async { true },
                 )
                 .await
                 .is_err()
