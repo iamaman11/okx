@@ -770,6 +770,17 @@ impl DurableExecutionLedger {
         })
     }
 
+    pub fn retire_protective_size_amend_absent(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.retire_protective_size_amend_absent(mutation_id)
+        })
+    }
+
     pub fn prepare_protective_cleanup(
         &mut self,
         intent_id: &str,
