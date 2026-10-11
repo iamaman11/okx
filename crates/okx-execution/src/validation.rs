@@ -1294,12 +1294,10 @@ mod tests {
                     Err(ExecutionValidationError::ProtectedParentCanRemainPartiallyFilled)
                 );
             }
-            for order_type in [OrderType::Fok] {
-                assert_eq!(
-                    require_terminal_protected_parent(action, order_type),
-                    Ok(())
-                );
-            }
+            assert_eq!(
+                require_terminal_protected_parent(action, OrderType::Fok),
+                Ok(())
+            );
         }
         for action in [ExecutionAction::Close, ExecutionAction::Reduce] {
             for order_type in [
