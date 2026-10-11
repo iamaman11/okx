@@ -1821,8 +1821,15 @@ mod tests {
         validate_effective_protective_leg(&record, &algo, Decimal::ONE)
             .expect("exact LONG exit protection");
 
-        for defect in ["wrong_size", "wrong_side", "wrong_position_side", "wrong_mode",
-                       "missing_size", "full_close_shortcut", "wrong_order_type"] {
+        for defect in [
+            "wrong_size",
+            "wrong_side",
+            "wrong_position_side",
+            "wrong_mode",
+            "missing_size",
+            "full_close_shortcut",
+            "wrong_order_type",
+        ] {
             let mut wrong_leg = algo.clone();
             match defect {
                 "wrong_size" => wrong_leg.size = "2".to_owned(),
@@ -1834,10 +1841,13 @@ mod tests {
                 "wrong_order_type" => wrong_leg.order_type = "move_order_stop".to_owned(),
                 _ => unreachable!(),
             }
-            assert!(matches!(
-                validate_effective_protective_leg(&record, &wrong_leg, Decimal::ONE),
-                Err(OrderExecutorError::ProtectionIdentityMismatch)
-            ), "rejected {defect}");
+            assert!(
+                matches!(
+                    validate_effective_protective_leg(&record, &wrong_leg, Decimal::ONE),
+                    Err(OrderExecutorError::ProtectionIdentityMismatch)
+                ),
+                "rejected {defect}"
+            );
         }
         // HEDGE SHORT protection uses the opposite exit side, and never
         // borrows a LONG leg's otherwise matching algo identity.
@@ -1850,9 +1860,9 @@ mod tests {
         validate_effective_protective_leg(&short_record, &short_algo, Decimal::ONE)
             .expect("matching SHORT exit");
         short_algo.side = "sell".to_owned();
-        assert!(validate_effective_protective_leg(
-            &short_record, &short_algo, Decimal::ONE
-        ).is_err());
+        assert!(
+            validate_effective_protective_leg(&short_record, &short_algo, Decimal::ONE).is_err()
+        );
 
         let mut wrong = algo;
         wrong.stop_loss_trigger_price = "0.08".to_owned();
