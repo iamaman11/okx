@@ -174,21 +174,33 @@ impl AmendAlgoOrderRequest {
             || self.algo_order_id.len() > 64
             || !self.algo_order_id.bytes().all(|b| b.is_ascii_digit())
         {
-            return Err(OkxError::Config("algoId must be one exact numeric exchange ID".to_owned()));
+            return Err(OkxError::Config(
+                "algoId must be one exact numeric exchange ID".to_owned(),
+            ));
         }
         validate_client_id("reqId", &self.request_id)?;
         if self.cancel_on_fail {
-            return Err(OkxError::Config("amend-algos may not cancel existing protection on failure".to_owned()));
+            return Err(OkxError::Config(
+                "amend-algos may not cancel existing protection on failure".to_owned(),
+            ));
         }
-        let (whole, fraction) = self.new_size.split_once('.').unwrap_or((&self.new_size, ""));
+        let (whole, fraction) = self
+            .new_size
+            .split_once('.')
+            .unwrap_or((&self.new_size, ""));
         if self.new_size.is_empty()
             || self.new_size.len() > 64
             || whole.is_empty()
             || !whole.bytes().all(|b| b.is_ascii_digit())
             || !fraction.bytes().all(|b| b.is_ascii_digit())
-            || !self.new_size.bytes().any(|b| b.is_ascii_digit() && b != b'0')
+            || !self
+                .new_size
+                .bytes()
+                .any(|b| b.is_ascii_digit() && b != b'0')
         {
-            return Err(OkxError::Config("newSz must be a positive decimal".to_owned()));
+            return Err(OkxError::Config(
+                "newSz must be a positive decimal".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -1069,11 +1081,14 @@ mod tests {
         let ack: AmendAlgoOrderAck = serde_json::from_value(serde_json::json!({
             "algoId":"2510789768709120", "algoClOrdId":"prx001",
             "reqId":"amendAlgo001", "sCode":"0", "sMsg":""
-        })).expect("ack");
+        }))
+        .expect("ack");
         assert_eq!(ack.algo_order_id, valid.algo_order_id);
         assert_eq!(ack.request_id, valid.request_id);
 
-        for size in ["", "0", "0.000", "-1", "+2", "NaN", "1e2", ".1", "1.2.3", "1 "] {
+        for size in [
+            "", "0", "0.000", "-1", "+2", "NaN", "1e2", ".1", "1.2.3", "1 ",
+        ] {
             let mut invalid = valid.clone();
             invalid.new_size = size.to_owned();
             assert!(invalid.validate().is_err(), "rejected {size}");
@@ -1098,7 +1113,8 @@ mod tests {
             "algoClOrdId":"prx001", "state":"live",
             "sz":"0.02", "side":"sell", "posSide":"long", "tdMode":"cross",
             "ordType":"oco", "closeFraction":""
-        })).expect("venue read");
+        }))
+        .expect("venue read");
         assert_eq!(algo.size, "0.02");
         assert_eq!(algo.side, "sell");
         assert_eq!(algo.position_side, "long");
