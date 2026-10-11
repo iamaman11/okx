@@ -73,6 +73,9 @@ pub enum ExecutionLedgerError {
     #[error("execution ledger client_order_id collision")]
     ClientOrderIdCollision,
 
+    #[error("execution ledger contains records from a different OKX account UID")]
+    AccountScopeMismatch,
+
     #[error(
         "another nonterminal managed execution, unresolved protection, or pending reverse owns this instrument"
     )]
@@ -209,7 +212,13 @@ impl ExecutionLedgerStore {
 
         let mut by_intent = BTreeMap::new();
         let mut client_order_ids = BTreeSet::new();
+        let mut ledger_uid: Option<String> = None;
         for entry in file.records {
+            let uid = &entry.record.plan.account_uid_fingerprint;
+            if ledger_uid.as_ref().is_some_and(|expected| expected != uid) {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+            ledger_uid = Some(uid.clone());
             validate_entry(&entry)?;
             let intent_id = entry.record.plan.intent_id.clone();
             if by_intent.insert(intent_id, entry.clone()).is_some() {
@@ -233,7 +242,13 @@ impl ExecutionLedgerStore {
         }
 
         let mut client_order_ids = BTreeSet::new();
+        let mut ledger_uid: Option<&str> = None;
         for (intent_id, entry) in entries {
+            let uid = entry.record.plan.account_uid_fingerprint.as_str();
+            if ledger_uid.is_some_and(|expected| expected != uid) {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+            ledger_uid = Some(uid);
             validate_entry(entry)?;
             if intent_id != &entry.record.plan.intent_id {
                 return Err(ExecutionLedgerError::Corrupt(
@@ -504,6 +519,13 @@ impl DurableExecutionLedger {
         require_timestamp(observed_at_ms)?;
         validate_plan_identity(&record.plan)?;
         validate_reverse_link(&record)?;
+        // One ledger is owned by exactly one authenticated exchange UID,
+        // even after FLAT or when the previous managed intents are terminal.
+        if self.entries.values().any(|entry| {
+            entry.record.plan.account_uid_fingerprint != record.plan.account_uid_fingerprint
+        }) {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
 
         if let Some(existing) = self.entries.get(&record.plan.intent_id) {
             return if existing.record == record {
@@ -1628,6 +1650,63 @@ mod tests {
             "legacy plan without serialized risk_binding must remain readable"
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ledger_rejects_second_account_uid_even_after_terminal_intents_and_restart() {
+        let root = temp_root("uid-scope");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).unwrap();
+        let first = "intent_scope_demo_0123456789";
+        ledger.prepare(plan(first), 101).unwrap();
+        let mut alien = plan("intent_scope_other_0123456789");
+        alien.account_uid_fingerprint = "different-exchange-uid".to_owned();
+        assert!(matches!(
+            ledger.prepare(alien.clone(), 102),
+            Err(ExecutionLedgerError::AccountScopeMismatch)
+        ));
+        assert_eq!(ledger.len(), 1);
+        let mut reopened = DurableExecutionLedger::open(store, 103).unwrap();
+        assert!(matches!(
+            reopened.prepare(alien, 104),
+            Err(ExecutionLedgerError::AccountScopeMismatch)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mixed_uid_legacy_file_is_rejected_without_mutation_or_rewrite() {
+        let root = temp_root("mixed-uid-legacy");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut alien = plan("intent_mixed_other_0123456789");
+        alien.account_uid_fingerprint = "second-uid".to_owned();
+        let file = ExecutionLedgerFile {
+            schema: EXECUTION_LEDGER_SCHEMA_V6.to_owned(),
+            records: vec![
+                ExecutionLedgerEntry {
+                    record: ExecutionRecord::new(plan("intent_mixed_main_0123456789")),
+                    created_at_ms: 100,
+                    updated_at_ms: 100,
+                },
+                ExecutionLedgerEntry {
+                    record: ExecutionRecord::new(alien),
+                    created_at_ms: 100,
+                    updated_at_ms: 100,
+                },
+            ],
+            risk_stop: None,
+        };
+        let payload = serde_json::to_vec_pretty(&file).unwrap();
+        fs::write(store.path(), &payload).unwrap();
+        assert!(matches!(
+            DurableExecutionLedger::open(store.clone(), 101),
+            Err(ExecutionLedgerError::AccountScopeMismatch)
+        ));
+        assert_eq!(fs::read(store.path()).unwrap(), payload);
         let _ = fs::remove_dir_all(root);
     }
 
