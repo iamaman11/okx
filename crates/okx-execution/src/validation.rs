@@ -228,7 +228,10 @@ pub fn prepare_execution(
         }
         // CLOSE cannot be renamed partial REDUCE to bypass a durable active
         // OCO reservation. The latter needs a separately safe algo resize.
-        if intent.action == ExecutionAction::Close && size != available {
+        if intent.action == ExecutionAction::Close
+            && (size != available
+                || available != matching_position_quantity(account, intent, intent.position_side)?)
+        {
             return Err(ExecutionValidationError::CloseMustFullyClose);
         }
         None
@@ -406,7 +409,10 @@ pub fn revalidate_execution_plan(
         if plan.action == ExecutionAction::Reduce && size >= available {
             return Err(ExecutionValidationError::ReduceWouldFullyClose);
         }
-        if plan.action == ExecutionAction::Close && size != available {
+        if plan.action == ExecutionAction::Close
+            && (size != available
+                || available != matching_position_quantity(account, &intent, plan.position_side)?)
+        {
             return Err(ExecutionValidationError::CloseMustFullyClose);
         }
     }
@@ -1734,9 +1740,13 @@ mod tests {
             price: "0.10000".to_owned(),
         };
 
-        let plan = prepare_execution(&intent, &rules, &account, None).expect("close plan");
-        assert_eq!(plan.side, OrderSide::Sell);
-        assert!(plan.open_risk.is_none());
+        // A competing pending reducing order means available < actual
+        // position. Calling this a full CLOSE would silently leave residual
+        // exposure with an oversized protective algo. Fail closed instead.
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, None),
+            Err(ExecutionValidationError::CloseMustFullyClose)
+        );
 
         let mut too_large = intent;
         too_large.size = "3.51".to_owned();
