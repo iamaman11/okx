@@ -147,6 +147,9 @@ pub enum ExecutionValidationError {
         available: String,
     },
 
+    #[error("CLOSE must consume the full unreserved position; use REDUCE for partial exits")]
+    CloseMustFullyClose,
+
     #[error("add execution requires an existing same-side position")]
     AddRequiresExistingPosition,
 
@@ -222,6 +225,14 @@ pub fn prepare_execution(
         let available = validate_close_capacity(intent, account, size, side)?;
         if intent.action == ExecutionAction::Reduce && size >= available {
             return Err(ExecutionValidationError::ReduceWouldFullyClose);
+        }
+        // CLOSE cannot be renamed partial REDUCE to bypass a durable active
+        // OCO reservation. The latter needs a separately safe algo resize.
+        if intent.action == ExecutionAction::Close
+            && (size != available
+                || available != matching_position_quantity(account, intent, intent.position_side)?)
+        {
+            return Err(ExecutionValidationError::CloseMustFullyClose);
         }
         None
     };
@@ -397,6 +408,12 @@ pub fn revalidate_execution_plan(
         let available = validate_close_capacity(&intent, account, size, plan.side)?;
         if plan.action == ExecutionAction::Reduce && size >= available {
             return Err(ExecutionValidationError::ReduceWouldFullyClose);
+        }
+        if plan.action == ExecutionAction::Close
+            && (size != available
+                || available != matching_position_quantity(account, &intent, plan.position_side)?)
+        {
+            return Err(ExecutionValidationError::CloseMustFullyClose);
         }
     }
 
@@ -1328,9 +1345,22 @@ mod tests {
         );
 
         intent.action = ExecutionAction::Close;
+        intent.size = "2".to_owned();
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, None),
+            Err(ExecutionValidationError::CloseMustFullyClose)
+        );
+        intent.size = "5".to_owned();
         let close = prepare_execution(&intent, &rules, &account, None).expect("full close");
         assert_eq!(close.action, ExecutionAction::Close);
         assert_eq!(close.size, "5");
+
+        let mut relabeled_partial = close.clone();
+        relabeled_partial.size = "2".to_owned();
+        assert_eq!(
+            revalidate_execution_plan(&relabeled_partial, &rules, &account, None),
+            Err(ExecutionValidationError::CloseMustFullyClose)
+        );
     }
 
     #[test]
@@ -1550,7 +1580,7 @@ mod tests {
             position_side: PositionSide::Long,
             action: ExecutionAction::Close,
             order_type: OrderType::Limit,
-            size: "4".to_owned(),
+            size: "5".to_owned(),
             price: "0.1".to_owned(),
         };
         let plan = prepare_execution(&intent, &rules, &account, None).expect("initial close");
@@ -1564,7 +1594,7 @@ mod tests {
             trade_mode: "cross".to_owned(),
             order_type: "limit".to_owned(),
             price: Some("0.1".to_owned()),
-            size: "4".to_owned(),
+            size: "5".to_owned(),
             accumulated_fill_size: "0".to_owned(),
             average_fill_price: None,
             state: "live".to_owned(),
@@ -1583,11 +1613,25 @@ mod tests {
             revalidate_execution_plan(&plan, &rules, &account, None),
             Err(ExecutionValidationError::CloseSizeExceedsAvailable { .. })
         ));
-        revalidate_amend_execution_plan(&plan, &rules, &account, None, "exact-venue-order-1")
-            .expect("own 4 can replace itself, independent order 1 remains reserved");
+        // With only its own pending close, full CLOSE may amend itself
+        // without counting its own order twice.
+        let mut only_own = account.clone();
+        only_own.pending_orders.pop();
+        revalidate_amend_execution_plan(&plan, &rules, &only_own, None, "exact-venue-order-1")
+            .expect("full own close may amend itself");
+
+        // With another independent close of 1, there are only 4 unreserved
+        // contracts. Do not let a 5-contract CLOSE over-sell that position.
+        assert_eq!(
+            revalidate_amend_execution_plan(&plan, &rules, &account, None, "exact-venue-order-1"),
+            Err(ExecutionValidationError::CloseSizeExceedsAvailable {
+                requested: "5".to_owned(),
+                available: "4".to_owned()
+            })
+        );
 
         let mut oversized = plan.clone();
-        oversized.size = "4.01".to_owned();
+        oversized.size = "5.01".to_owned();
         assert_eq!(
             revalidate_amend_execution_plan(
                 &oversized,
@@ -1597,7 +1641,7 @@ mod tests {
                 "exact-venue-order-1"
             ),
             Err(ExecutionValidationError::CloseSizeExceedsAvailable {
-                requested: "4.01".to_owned(),
+                requested: "5.01".to_owned(),
                 available: "4".to_owned()
             })
         );
@@ -1696,9 +1740,13 @@ mod tests {
             price: "0.10000".to_owned(),
         };
 
-        let plan = prepare_execution(&intent, &rules, &account, None).expect("close plan");
-        assert_eq!(plan.side, OrderSide::Sell);
-        assert!(plan.open_risk.is_none());
+        // A competing pending reducing order means available < actual
+        // position. Calling this a full CLOSE would silently leave residual
+        // exposure with an oversized protective algo. Fail closed instead.
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, None),
+            Err(ExecutionValidationError::CloseMustFullyClose)
+        );
 
         let mut too_large = intent;
         too_large.size = "3.51".to_owned();

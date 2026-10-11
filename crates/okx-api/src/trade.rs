@@ -150,6 +150,76 @@ pub struct AmendOrderRequest {
     pub new_price: Option<String>,
 }
 
+/// Validated wire format only. This is NOT a callable send path:
+/// a durable single-send ledger mutation is required first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmendAlgoOrderRequest {
+    #[serde(rename = "instId")]
+    pub instrument_id: String,
+    #[serde(rename = "algoId")]
+    pub algo_order_id: String,
+    #[serde(rename = "reqId")]
+    pub request_id: String,
+    #[serde(rename = "newSz")]
+    pub new_size: String,
+    #[serde(rename = "cxlOnFail")]
+    pub cancel_on_fail: bool,
+}
+
+impl AmendAlgoOrderRequest {
+    pub fn validate(&self) -> Result<(), OkxError> {
+        validate_instrument_id(&self.instrument_id)?;
+        if self.algo_order_id.is_empty()
+            || self.algo_order_id.len() > 64
+            || !self.algo_order_id.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(OkxError::Config(
+                "algoId must be one exact numeric exchange ID".to_owned(),
+            ));
+        }
+        validate_client_id("reqId", &self.request_id)?;
+        if self.cancel_on_fail {
+            return Err(OkxError::Config(
+                "amend-algos may not cancel existing protection on failure".to_owned(),
+            ));
+        }
+        let (whole, fraction) = self
+            .new_size
+            .split_once('.')
+            .unwrap_or((&self.new_size, ""));
+        if self.new_size.is_empty()
+            || self.new_size.len() > 64
+            || whole.is_empty()
+            || !whole.bytes().all(|b| b.is_ascii_digit())
+            || !fraction.bytes().all(|b| b.is_ascii_digit())
+            || !self
+                .new_size
+                .bytes()
+                .any(|b| b.is_ascii_digit() && b != b'0')
+        {
+            return Err(OkxError::Config(
+                "newSz must be a positive decimal".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AmendAlgoOrderAck {
+    #[serde(rename = "algoId", default)]
+    pub algo_order_id: String,
+    #[serde(rename = "algoClOrdId", default)]
+    pub client_order_id: String,
+    #[serde(rename = "reqId", default)]
+    pub request_id: String,
+    #[serde(rename = "sCode", default)]
+    pub status_code: String,
+    #[serde(rename = "sMsg", default)]
+    pub status_message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderOperationAck {
     #[serde(rename = "ordId", default)]
@@ -287,6 +357,19 @@ pub struct TradeAlgoOrderDetails {
     pub stop_loss_order_price: String,
     #[serde(rename = "failCode", default)]
     pub failure_code: String,
+    /// Exchange-owned fields required to prove exact active TP/SL leg size.
+    #[serde(rename = "sz", default)]
+    pub size: String,
+    #[serde(rename = "side", default)]
+    pub side: String,
+    #[serde(rename = "posSide", default)]
+    pub position_side: String,
+    #[serde(rename = "tdMode", default)]
+    pub trade_mode: String,
+    #[serde(rename = "ordType", default)]
+    pub order_type: String,
+    #[serde(rename = "closeFraction", default)]
+    pub close_fraction: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -976,6 +1059,68 @@ mod tests {
         assert_eq!(full.rows, PROTECTIVE_ALGO_PAGE_LIMIT);
         assert!(!full.complete_within_bound);
         assert_eq!(full.samples.len(), PROTECTIVE_ALGO_SAMPLE_LIMIT);
+    }
+
+    #[test]
+    fn algo_resize_wire_contract_requires_exact_one_algo_and_non_cancelling_positive_size() {
+        let valid = AmendAlgoOrderRequest {
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            algo_order_id: "2510789768709120".to_owned(),
+            request_id: "amendAlgo001".to_owned(),
+            new_size: "0.02".to_owned(),
+            cancel_on_fail: false,
+        };
+        valid.validate().expect("safe wire shape");
+        assert_eq!(
+            serde_json::to_value(&valid).expect("json"),
+            serde_json::json!({
+                "instId":"BTC-USDT-SWAP", "algoId":"2510789768709120",
+                "reqId":"amendAlgo001", "newSz":"0.02", "cxlOnFail":false
+            })
+        );
+        let ack: AmendAlgoOrderAck = serde_json::from_value(serde_json::json!({
+            "algoId":"2510789768709120", "algoClOrdId":"prx001",
+            "reqId":"amendAlgo001", "sCode":"0", "sMsg":""
+        }))
+        .expect("ack");
+        assert_eq!(ack.algo_order_id, valid.algo_order_id);
+        assert_eq!(ack.request_id, valid.request_id);
+
+        for size in [
+            "", "0", "0.000", "-1", "+2", "NaN", "1e2", ".1", "1.2.3", "1 ",
+        ] {
+            let mut invalid = valid.clone();
+            invalid.new_size = size.to_owned();
+            assert!(invalid.validate().is_err(), "rejected {size}");
+        }
+        for id in ["", "abc", "123-456", "10 20"] {
+            let mut invalid = valid.clone();
+            invalid.algo_order_id = id.to_owned();
+            assert!(invalid.validate().is_err(), "rejected {id}");
+        }
+        let mut cancel_on_fail = valid.clone();
+        cancel_on_fail.cancel_on_fail = true;
+        assert!(cancel_on_fail.validate().is_err());
+        let mut malformed_request = valid;
+        malformed_request.request_id = "contains_underscore".to_owned();
+        assert!(malformed_request.validate().is_err());
+    }
+
+    #[test]
+    fn algo_details_preserve_exchange_position_side_and_exact_quantity() {
+        let algo: TradeAlgoOrderDetails = serde_json::from_value(serde_json::json!({
+            "instId":"BTC-USDT-SWAP", "algoId":"2510789768709120",
+            "algoClOrdId":"prx001", "state":"live",
+            "sz":"0.02", "side":"sell", "posSide":"long", "tdMode":"cross",
+            "ordType":"oco", "closeFraction":""
+        }))
+        .expect("venue read");
+        assert_eq!(algo.size, "0.02");
+        assert_eq!(algo.side, "sell");
+        assert_eq!(algo.position_side, "long");
+        assert_eq!(algo.trade_mode, "cross");
+        assert_eq!(algo.order_type, "oco");
+        assert_eq!(algo.close_fraction, "");
     }
 
     #[test]
