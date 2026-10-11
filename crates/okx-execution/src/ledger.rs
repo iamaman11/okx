@@ -19,7 +19,8 @@ use crate::{
     PositionSide, ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveOrderStatus,
     ProtectiveSizeAmendState,
     ProtectiveTriggerPriceBasis, ReverseContinuation, ReverseExecutionLink, ReverseLeg,
-    derive_client_order_id, derive_protective_algo_client_id, derive_reverse_open_intent_id,
+    derive_amend_request_id, derive_client_order_id, derive_protective_algo_client_id,
+    derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
