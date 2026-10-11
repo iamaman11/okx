@@ -283,13 +283,14 @@ impl ExecutionRuntime {
             return Ok(None);
         }
         executor.enable_demo_acceptance(self.environment)?;
+        let observed_at_ms = timing.request_time_ms();
         let result = executor
             .submit_prepared_protected_add_hedge_fenced(
                 intent_id,
                 account,
                 inventory,
                 timing,
-                timing.request_time_ms(),
+                observed_at_ms,
                 final_private_ws_fence,
             )
             .await;
