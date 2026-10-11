@@ -1574,7 +1574,7 @@ mod tests {
             position_side: PositionSide::Long,
             action: ExecutionAction::Close,
             order_type: OrderType::Limit,
-            size: "4".to_owned(),
+            size: "5".to_owned(),
             price: "0.1".to_owned(),
         };
         let plan = prepare_execution(&intent, &rules, &account, None).expect("initial close");
@@ -1588,7 +1588,7 @@ mod tests {
             trade_mode: "cross".to_owned(),
             order_type: "limit".to_owned(),
             price: Some("0.1".to_owned()),
-            size: "4".to_owned(),
+            size: "5".to_owned(),
             accumulated_fill_size: "0".to_owned(),
             average_fill_price: None,
             state: "live".to_owned(),
@@ -1607,11 +1607,25 @@ mod tests {
             revalidate_execution_plan(&plan, &rules, &account, None),
             Err(ExecutionValidationError::CloseSizeExceedsAvailable { .. })
         ));
-        revalidate_amend_execution_plan(&plan, &rules, &account, None, "exact-venue-order-1")
-            .expect("own 4 can replace itself, independent order 1 remains reserved");
+        // With only its own pending close, full CLOSE may amend itself
+        // without counting its own order twice.
+        let mut only_own = account.clone();
+        only_own.pending_orders.pop();
+        revalidate_amend_execution_plan(&plan, &rules, &only_own, None, "exact-venue-order-1")
+            .expect("full own close may amend itself");
+
+        // With another independent close of 1, there are only 4 unreserved
+        // contracts. Do not let a 5-contract CLOSE over-sell that position.
+        assert_eq!(
+            revalidate_amend_execution_plan(&plan, &rules, &account, None, "exact-venue-order-1"),
+            Err(ExecutionValidationError::CloseSizeExceedsAvailable {
+                requested: "5".to_owned(),
+                available: "4".to_owned()
+            })
+        );
 
         let mut oversized = plan.clone();
-        oversized.size = "4.01".to_owned();
+        oversized.size = "5.01".to_owned();
         assert_eq!(
             revalidate_amend_execution_plan(
                 &oversized,
@@ -1621,7 +1635,7 @@ mod tests {
                 "exact-venue-order-1"
             ),
             Err(ExecutionValidationError::CloseSizeExceedsAvailable {
-                requested: "4.01".to_owned(),
+                requested: "5.01".to_owned(),
                 available: "4".to_owned()
             })
         );
