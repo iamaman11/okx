@@ -3742,7 +3742,10 @@ mod tests {
             drop(executor);
             let store = ExecutionLedgerStore::at(root.join("ledger.json"));
             let reopened = DurableExecutionLedger::open(store, 200).expect("durable");
-            assert_eq!(reopened.get(&old.intent_id).unwrap().record.state, ExecutionState::Prepared);
+            assert_eq!(
+                reopened.get(&old.intent_id).unwrap().record.state,
+                ExecutionState::Prepared
+            );
             let _ = fs::remove_dir_all(root);
         }
     }
