@@ -23,6 +23,18 @@ use crate::{
     require_live_trading_enabled,
 };
 
+/// Exact single-owned attached-OCO shrink inputs. The executor verifies
+/// these independently before durable SUBMITTING and one venue POST.
+pub struct FencedProtectiveShrinkRequest<'a> {
+    pub intent_id: &'a str,
+    pub mutation_id: &'a str,
+    pub target_size: &'a str,
+    pub account: &'a AccountSnapshot,
+    pub inventory: &'a PendingProtectiveAlgoInventory,
+    pub timing: MutationTiming,
+    pub observed_at_ms: u64,
+}
+
 #[async_trait]
 pub trait ExecutionGateway: Send + Sync {
     fn admit_place_order(
@@ -604,19 +616,22 @@ where
     /// No PREPARED record is left behind by a failed read-only admission.
     pub async fn submit_protective_size_amend_fenced<F, Fut>(
         &mut self,
-        intent_id: &str,
-        mutation_id: &str,
-        new_size: &str,
-        account: &AccountSnapshot,
-        inventory: &PendingProtectiveAlgoInventory,
-        timing: MutationTiming,
-        observed_at_ms: u64,
+        request: FencedProtectiveShrinkRequest<'_>,
         final_private_ws_fence: F,
     ) -> Result<MutationSubmitDisposition, OrderExecutorError>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = bool>,
     {
+        let FencedProtectiveShrinkRequest {
+            intent_id,
+            mutation_id,
+            target_size: new_size,
+            account,
+            inventory,
+            timing,
+            observed_at_ms,
+        } = request;
         require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
         let entry = self
             .ledger
@@ -3037,13 +3052,15 @@ mod tests {
         assert!(matches!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent,
-                    mid,
-                    "0.5",
-                    &resize_coverage(&record).0,
-                    &resize_coverage(&record).1,
-                    timing(),
-                    106,
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mid,
+                        target_size: "0.5",
+                        account: &resize_coverage(&record).0,
+                        inventory: &resize_coverage(&record).1,
+                        timing: timing(),
+                        observed_at_ms: 106,
+                    },
                     || async { true },
                 )
                 .await
@@ -3054,13 +3071,15 @@ mod tests {
         assert!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent,
-                    mid,
-                    "0.5",
-                    &resize_coverage(&record).0,
-                    &resize_coverage(&record).1,
-                    timing(),
-                    107,
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mid,
+                        target_size: "0.5",
+                        account: &resize_coverage(&record).0,
+                        inventory: &resize_coverage(&record).1,
+                        timing: timing(),
+                        observed_at_ms: 107,
+                    },
                     || async { true },
                 )
                 .await
@@ -3119,13 +3138,15 @@ mod tests {
         assert!(matches!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent,
-                    mutation,
-                    "0.5",
-                    &account,
-                    &inventory,
-                    timing(),
-                    105,
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mutation,
+                        target_size: "0.5",
+                        account: &account,
+                        inventory: &inventory,
+                        timing: timing(),
+                        observed_at_ms: 105,
+                    },
                     || async { false },
                 )
                 .await,
@@ -3179,13 +3200,15 @@ mod tests {
         assert!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent,
-                    mutation,
-                    "0.5",
-                    &wrong,
-                    &inventory,
-                    timing(),
-                    105,
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mutation,
+                        target_size: "0.5",
+                        account: &wrong,
+                        inventory: &inventory,
+                        timing: timing(),
+                        observed_at_ms: 105,
+                    },
                     || async { true },
                 )
                 .await
@@ -3196,13 +3219,15 @@ mod tests {
         assert!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent,
-                    mutation,
-                    "0.5",
-                    &account,
-                    &foreign,
-                    timing(),
-                    105,
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mutation,
+                        target_size: "0.5",
+                        account: &account,
+                        inventory: &foreign,
+                        timing: timing(),
+                        observed_at_ms: 105,
+                    },
                     || async { true },
                 )
                 .await
@@ -3216,13 +3241,15 @@ mod tests {
         assert!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent,
-                    mutation,
-                    "0.5",
-                    &opposite,
-                    &inventory,
-                    timing(),
-                    105,
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mutation,
+                        target_size: "0.5",
+                        account: &opposite,
+                        inventory: &inventory,
+                        timing: timing(),
+                        observed_at_ms: 105,
+                    },
                     || async { true },
                 )
                 .await
@@ -3354,13 +3381,15 @@ mod tests {
         assert!(matches!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent,
-                    mid,
-                    "0.5",
-                    &resize_coverage(&record).0,
-                    &resize_coverage(&record).1,
-                    timing(),
-                    106,
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mid,
+                        target_size: "0.5",
+                        account: &resize_coverage(&record).0,
+                        inventory: &resize_coverage(&record).1,
+                        timing: timing(),
+                        observed_at_ms: 106,
+                    },
                     || async { true },
                 )
                 .await
@@ -3397,13 +3426,15 @@ mod tests {
         assert!(
             executor
                 .submit_protective_size_amend_fenced(
-                    &intent,
-                    mid,
-                    "0.5",
-                    &resize_coverage(&record).0,
-                    &resize_coverage(&record).1,
-                    timing(),
-                    108,
+                    FencedProtectiveShrinkRequest {
+                        intent_id: &intent,
+                        mutation_id: mid,
+                        target_size: "0.5",
+                        account: &resize_coverage(&record).0,
+                        inventory: &resize_coverage(&record).1,
+                        timing: timing(),
+                        observed_at_ms: 108,
+                    },
                     || async { true },
                 )
                 .await
