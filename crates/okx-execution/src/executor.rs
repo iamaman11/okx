@@ -421,6 +421,116 @@ where
         ))?)
     }
 
+    /// Only the existing executor may open another protected Hedge lot.
+    /// The proof is completed under the external one-owner mutex, and its
+    /// final private-WS fence is checked immediately before durable prepare.
+    pub async fn prepare_protected_add_hedge_fenced<F, Fut>(
+        &mut self,
+        plan: ExecutionPlan,
+        lineage: Option<ExecutionLineageBinding>,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
+        observed_at_ms: u64,
+        final_private_ws_fence: F,
+    ) -> Result<PrepareOutcome, OrderExecutorError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        self.verify_existing_protected_lots(&plan, account, inventory)
+            .await?;
+        if !final_private_ws_fence().await {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        Ok(classify_prepare_result(
+            self.ledger
+                .prepare_with_confirmed_active_coverage(plan, lineage, observed_at_ms),
+        )?)
+    }
+
+    /// The ordinary submit path can never send a PREPARED ADD/HEDGE with
+    /// active legacy OCO without a fresh independent readback.
+    pub async fn submit_prepared_protected_add_hedge_fenced<F, Fut>(
+        &mut self,
+        intent_id: &str,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+        final_private_ws_fence: F,
+    ) -> Result<SubmitDisposition, OrderExecutorError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
+        let entry = self
+            .ledger
+            .get(intent_id)
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        if entry.record.state != ExecutionState::Prepared {
+            return Err(OrderExecutorError::NotPrepared(entry.record.state));
+        }
+        let plan = entry.record.plan.clone();
+        self.verify_existing_protected_lots(&plan, account, inventory)
+            .await?;
+        if !final_private_ws_fence().await {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        self.submit_prepared_inner(intent_id, timing, observed_at_ms, true)
+            .await
+    }
+
+    /// The exact current exchange inventory, each parent/algo identity and
+    /// both Hedge sides must agree. This does not mutate the exchange or
+    /// ledger. It is reused on BOTH prepare and immediately pre-send.
+    async fn verify_existing_protected_lots(
+        &self,
+        plan: &ExecutionPlan,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
+    ) -> Result<(), OrderExecutorError> {
+        if !matches!(plan.action, crate::ExecutionAction::Add | crate::ExecutionAction::Hedge)
+            || plan.order_type != OrderType::Fok
+            || plan.open_risk.is_none()
+            || plan.account_uid_fingerprint != account.account_uid_fingerprint
+        {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        let records: Vec<_> = self
+            .ledger
+            .entries()
+            .filter(|entry| {
+                entry.record.plan.instrument_id == plan.instrument_id
+                    && entry.record.plan.intent_id != plan.intent_id
+            })
+            .map(|entry| entry.record.clone())
+            .collect();
+        if !records.iter().any(|record| {
+            record.state == ExecutionState::Filled
+                && record
+                    .protection
+                    .as_ref()
+                    .is_some_and(|link| link.status == crate::ProtectiveOrderStatus::Active)
+        }) {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        let mut details = Vec::new();
+        for record in &records {
+            if let Some(link) = &record.protection
+                && link.status == crate::ProtectiveOrderStatus::Active
+            {
+                details.push(
+                    self.gateway
+                        .algo_order_by_client_id(link.algo_client_order_id.clone())
+                        .await
+                        .map_err(OrderExecutorError::PreSubmit)?,
+                );
+            }
+        }
+        validate_managed_protective_coverage(&records, account, inventory, &details, None)
+    }
+
     pub fn prepare_reverse_close(
         &mut self,
         plan: ExecutionPlan,
@@ -1024,6 +1134,17 @@ where
         timing: MutationTiming,
         observed_at_ms: u64,
     ) -> Result<SubmitDisposition, OrderExecutorError> {
+        self.submit_prepared_inner(intent_id, timing, observed_at_ms, false)
+            .await
+    }
+
+    async fn submit_prepared_inner(
+        &mut self,
+        intent_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+        protected_existing_lots_proven: bool,
+    ) -> Result<SubmitDisposition, OrderExecutorError> {
         // The production constructor is intentionally fail-closed. The hard
         // gate is the first operation: disabled execution must not validate,
         // persist SUBMITTING, or call the exchange gateway.
@@ -1037,6 +1158,13 @@ where
 
         if entry.record.state != ExecutionState::Prepared {
             return Err(OrderExecutorError::NotPrepared(entry.record.state));
+        }
+        if matches!(
+            entry.record.plan.action,
+            crate::ExecutionAction::Add | crate::ExecutionAction::Hedge
+        ) && !protected_existing_lots_proven
+        {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
         }
 
         self.ledger
