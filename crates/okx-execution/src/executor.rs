@@ -782,15 +782,15 @@ where
             if other.plan.intent_id == intent_id {
                 continue;
             }
-            if let Some(link) = &other.protection {
-                if link.status == crate::ProtectiveOrderStatus::Active {
-                    details.push(
-                        self.gateway
-                            .algo_order_by_client_id(link.algo_client_order_id.clone())
-                            .await
-                            .map_err(OrderExecutorError::PreSubmit)?,
-                    );
-                }
+            if let Some(link) = &other.protection
+                && link.status == crate::ProtectiveOrderStatus::Active
+            {
+                details.push(
+                    self.gateway
+                        .algo_order_by_client_id(link.algo_client_order_id.clone())
+                        .await
+                        .map_err(OrderExecutorError::PreSubmit)?,
+                );
             }
         }
         validate_managed_protective_coverage(
