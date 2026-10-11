@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ExecutionLineageBinding, ExecutionPlan, PositionSide, derive_protective_algo_client_id,
+    ExecutionLineageBinding, ExecutionPlan, PositionSide, derive_amend_request_id,
+    derive_protective_algo_client_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
@@ -181,6 +182,29 @@ pub struct ProtectiveCleanupRecord {
     pub state: ProtectiveCleanupState,
 }
 
+/// An exact-ID size change cannot be retried once SUBMITTING has been
+/// persisted. ACK never proves exchange-size application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProtectiveSizeAmendState {
+    Prepared,
+    Submitting,
+    Unknown,
+    Acknowledged,
+    Confirmed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectiveSizeAmendRecord {
+    pub mutation_id: String,
+    pub request_id: String,
+    pub algo_order_id: String,
+    pub previous_size: String,
+    pub target_size: String,
+    pub state: ProtectiveSizeAmendState,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProtectiveOrderLink {
@@ -196,6 +220,8 @@ pub struct ProtectiveOrderLink {
     pub failure_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<ProtectiveCleanupRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_amend: Option<ProtectiveSizeAmendRecord>,
 }
 
 impl ProtectiveOrderLink {
@@ -212,6 +238,7 @@ impl ProtectiveOrderLink {
             covered_size: None,
             failure_code: None,
             cleanup: None,
+            size_amend: None,
         })
     }
 
@@ -438,6 +465,19 @@ pub enum ExecutionTransitionError {
     #[error("protective cleanup transition is invalid or replay was attempted")]
     InvalidProtectiveCleanupTransition,
 
+    #[error(
+        "protective size amendment requires active terminal-parent OCO and strict shrinking size"
+    )]
+    InvalidProtectiveSizeAmend,
+
+    #[error("protective size amendment conflicts with another durable mutation")]
+    ProtectiveSizeAmendConflict,
+
+    #[error(
+        "protective size amendment transition is invalid or uncertain POST replay was attempted"
+    )]
+    InvalidProtectiveSizeAmendTransition,
+
     #[error("reverse execution linkage is invalid")]
     InvalidReverseLink,
 
@@ -618,6 +658,150 @@ impl ExecutionRecord {
         Ok(())
     }
 
+    /// One strictly reducing size change per attached protective OCO. Multiple
+    /// sequential changes need a separately accepted multi-amend contract.
+    /// This does NOT grant permission to send: the caller must prove fresh
+    /// exact-account exposure and remaining side-specific OCO coverage.
+    pub fn prepare_protective_size_amend(
+        &mut self,
+        mutation_id: &str,
+        target_size: &str,
+    ) -> Result<bool, ExecutionTransitionError> {
+        if !valid_mutation_id(mutation_id)
+            || !self.state.is_terminal()
+            || self.active_mutation().is_some()
+        {
+            return Err(ExecutionTransitionError::InvalidProtectiveSizeAmend);
+        }
+        let protection = self
+            .protection
+            .as_mut()
+            .ok_or(ExecutionTransitionError::InvalidProtectiveSizeAmend)?;
+        if let Some(existing) = protection.size_amend.as_ref() {
+            if existing.mutation_id == mutation_id
+                && Decimal::from_str(&existing.target_size).ok()
+                    == Decimal::from_str(target_size).ok()
+                && Decimal::from_str(target_size)
+                    .ok()
+                    .is_some_and(|n| n > Decimal::ZERO)
+            {
+                return Ok(false);
+            }
+            return Err(ExecutionTransitionError::ProtectiveSizeAmendConflict);
+        }
+        if protection.status != ProtectiveOrderStatus::Active || protection.cleanup.is_some() {
+            return Err(ExecutionTransitionError::InvalidProtectiveSizeAmend);
+        }
+        let algo_id = protection
+            .algo_order_id
+            .as_deref()
+            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .ok_or(ExecutionTransitionError::InvalidProtectiveSizeAmend)?;
+        let prior = protection
+            .covered_size
+            .as_deref()
+            .and_then(|v| Decimal::from_str(v).ok())
+            .filter(|v| *v > Decimal::ZERO)
+            .ok_or(ExecutionTransitionError::InvalidProtectiveSizeAmend)?;
+        let target = Decimal::from_str(target_size)
+            .ok()
+            .filter(|v| *v > Decimal::ZERO && *v < prior)
+            .ok_or(ExecutionTransitionError::InvalidProtectiveSizeAmend)?;
+        protection.size_amend = Some(ProtectiveSizeAmendRecord {
+            mutation_id: mutation_id.to_owned(),
+            request_id: derive_amend_request_id(&self.plan.intent_id, mutation_id),
+            algo_order_id: algo_id.to_owned(),
+            previous_size: prior.normalize().to_string(),
+            target_size: target.normalize().to_string(),
+            state: ProtectiveSizeAmendState::Prepared,
+        });
+        Ok(true)
+    }
+
+    pub fn begin_protective_size_amend(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        self.transition_protective_size_amend(
+            mutation_id,
+            ProtectiveSizeAmendState::Prepared,
+            ProtectiveSizeAmendState::Submitting,
+        )
+    }
+
+    pub fn acknowledge_protective_size_amend(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        self.transition_protective_size_amend(
+            mutation_id,
+            ProtectiveSizeAmendState::Submitting,
+            ProtectiveSizeAmendState::Acknowledged,
+        )
+    }
+
+    pub fn mark_protective_size_amend_unknown(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        self.transition_protective_size_amend(
+            mutation_id,
+            ProtectiveSizeAmendState::Submitting,
+            ProtectiveSizeAmendState::Unknown,
+        )
+    }
+
+    /// ONLY call after independent exact-id exchange detail, same-account
+    /// position-side and pending OCO inventory have been re-read and agreed.
+    /// This transition cannot grant ADD/HEDGE access: instrument reservation
+    /// remains protected even after confirmation.
+    pub fn confirm_protective_size_amend(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<(), ExecutionTransitionError> {
+        let protection = self
+            .protection
+            .as_mut()
+            .ok_or(ExecutionTransitionError::InvalidProtectiveSizeAmendTransition)?;
+        let amendment = protection
+            .size_amend
+            .as_mut()
+            .ok_or(ExecutionTransitionError::InvalidProtectiveSizeAmendTransition)?;
+        if amendment.mutation_id != mutation_id
+            || !matches!(
+                amendment.state,
+                ProtectiveSizeAmendState::Unknown | ProtectiveSizeAmendState::Acknowledged
+            )
+            || protection.status != ProtectiveOrderStatus::Active
+            || protection.cleanup.is_some()
+            || protection.algo_order_id.as_deref() != Some(amendment.algo_order_id.as_str())
+            || protection.covered_size.as_deref() != Some(amendment.previous_size.as_str())
+        {
+            return Err(ExecutionTransitionError::InvalidProtectiveSizeAmendTransition);
+        }
+        protection.covered_size = Some(amendment.target_size.clone());
+        amendment.state = ProtectiveSizeAmendState::Confirmed;
+        Ok(())
+    }
+
+    fn transition_protective_size_amend(
+        &mut self,
+        mutation_id: &str,
+        from: ProtectiveSizeAmendState,
+        to: ProtectiveSizeAmendState,
+    ) -> Result<(), ExecutionTransitionError> {
+        let amend = self
+            .protection
+            .as_mut()
+            .and_then(|p| p.size_amend.as_mut())
+            .ok_or(ExecutionTransitionError::InvalidProtectiveSizeAmendTransition)?;
+        if amend.mutation_id != mutation_id || amend.state != from {
+            return Err(ExecutionTransitionError::InvalidProtectiveSizeAmendTransition);
+        }
+        amend.state = to;
+        Ok(())
+    }
+
     /// A uniquely identified attached algo can only be cleaned up after the
     /// parent is terminal. The agent additionally requires a coherent flat
     /// account and exact pending algo identity before admitting this step.
@@ -638,7 +822,12 @@ impl ExecutionRecord {
             }
             return Err(ExecutionTransitionError::ProtectiveCleanupConflict);
         }
-        if protection.status != ProtectiveOrderStatus::Active {
+        if protection.status != ProtectiveOrderStatus::Active
+            || protection
+                .size_amend
+                .as_ref()
+                .is_some_and(|a| a.state != ProtectiveSizeAmendState::Confirmed)
+        {
             return Err(ExecutionTransitionError::InvalidProtectiveCleanup);
         }
         let algo_order_id = protection

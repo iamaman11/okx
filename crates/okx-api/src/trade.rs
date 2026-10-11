@@ -10,6 +10,7 @@ const PLACE_ORDER_PATH: &str = "/api/v5/trade/order";
 const CANCEL_ORDER_PATH: &str = "/api/v5/trade/cancel-order";
 const CANCEL_ALGO_PATH: &str = "/api/v5/trade/cancel-algos";
 const AMEND_ORDER_PATH: &str = "/api/v5/trade/amend-order";
+const AMEND_ALGO_PATH: &str = "/api/v5/trade/amend-algos";
 const ORDER_DETAILS_PATH: &str = "/api/v5/trade/order";
 const ALGO_ORDER_DETAILS_PATH: &str = "/api/v5/trade/order-algo";
 const ALGO_PENDING_PATH: &str = "/api/v5/trade/orders-algo-pending";
@@ -702,6 +703,44 @@ impl TradeApi {
         let rate_plan = self.admit_amend_order(request)?;
         self.amend_order_after_admission(request, timing, &rate_plan)
             .await
+    }
+
+    /// Called by the durable OrderExecutor only. This is a single exact-ID
+    /// non-cancelling size change, NOT a replacement TP/SL and NOT auto-retried.
+    pub fn admit_amend_algo_order(
+        &self,
+        request: &AmendAlgoOrderRequest,
+    ) -> Result<RateRequestPlan, OkxError> {
+        request.validate()?;
+        let plan = self
+            .client
+            .rate_budget()
+            .amend_algo_rest_plan(&request.instrument_id);
+        self.client
+            .rate_budget()
+            .admit(&plan)
+            .map_err(|evidence| OkxError::RateLimited { evidence })?;
+        Ok(plan)
+    }
+
+    pub async fn amend_algo_order_after_admission(
+        &self,
+        request: &AmendAlgoOrderRequest,
+        timing: &MutationTiming,
+        plan: &RateRequestPlan,
+    ) -> Result<TradeResponse<AmendAlgoOrderAck>, OkxError> {
+        request.validate()?;
+        Ok(self
+            .client
+            .private_post_after_admission(
+                AMEND_ALGO_PATH,
+                request,
+                timing.request_timestamp(),
+                Some(timing.exp_time_ms()),
+                plan,
+            )
+            .await?
+            .into())
     }
 
     pub async fn account_rate_limit(&self) -> Result<AccountRateLimitEvidence, OkxError> {

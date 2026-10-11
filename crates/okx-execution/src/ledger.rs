@@ -17,8 +17,9 @@ use crate::{
     ExecutionState, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
     OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
     PositionSide, ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveOrderStatus,
-    ProtectiveTriggerPriceBasis, ReverseContinuation, ReverseExecutionLink, ReverseLeg,
-    derive_client_order_id, derive_protective_algo_client_id, derive_reverse_open_intent_id,
+    ProtectiveSizeAmendState, ProtectiveTriggerPriceBasis, ReverseContinuation,
+    ReverseExecutionLink, ReverseLeg, derive_amend_request_id, derive_client_order_id,
+    derive_protective_algo_client_id, derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
@@ -711,6 +712,64 @@ impl DurableExecutionLedger {
         Ok(MutationPrepareDisposition::Created(entry))
     }
 
+    pub fn prepare_protective_size_amend(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        new_size: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record
+                .prepare_protective_size_amend(mutation_id, new_size)
+                .map(|_| ())
+        })
+    }
+
+    pub fn begin_protective_size_amend(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.begin_protective_size_amend(mutation_id)
+        })
+    }
+
+    pub fn acknowledge_protective_size_amend(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.acknowledge_protective_size_amend(mutation_id)
+        })
+    }
+
+    pub fn mark_protective_size_amend_unknown(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.mark_protective_size_amend_unknown(mutation_id)
+        })
+    }
+
+    pub fn confirm_protective_size_amend(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+        self.mutate(intent_id, observed_at_ms, |record| {
+            record.confirm_protective_size_amend(mutation_id)
+        })
+    }
+
     pub fn prepare_protective_cleanup(
         &mut self,
         intent_id: &str,
@@ -1134,6 +1193,32 @@ fn validate_protection_link(record: &ExecutionRecord) -> Result<(), ExecutionLed
         }
     }
 
+    if let Some(amend) = protection.size_amend.as_ref() {
+        let prior = positive_decimal(&amend.previous_size);
+        let target = positive_decimal(&amend.target_size);
+        if !valid_mutation_id(&amend.mutation_id)
+            || amend.request_id
+                != derive_amend_request_id(&record.plan.intent_id, &amend.mutation_id)
+            || amend.algo_order_id.is_empty()
+            || !amend.algo_order_id.bytes().all(|b| b.is_ascii_digit())
+            || protection.algo_order_id.as_deref() != Some(amend.algo_order_id.as_str())
+            || protection.status != ProtectiveOrderStatus::Active
+            || !record.state.is_terminal()
+            || prior.is_none()
+            || target.is_none()
+            || target >= prior
+            || protection.covered_size.as_deref()
+                != Some(match amend.state {
+                    ProtectiveSizeAmendState::Confirmed => amend.target_size.as_str(),
+                    _ => amend.previous_size.as_str(),
+                })
+            || (protection.cleanup.is_some() && amend.state != ProtectiveSizeAmendState::Confirmed)
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "protective resize state does not match exact owned algo/size",
+            ));
+        }
+    }
     if let Some(cleanup) = protection.cleanup.as_ref() {
         if !valid_mutation_id(&cleanup.mutation_id)
             || protection.algo_order_id.as_deref() != Some(cleanup.algo_order_id.as_str())
@@ -1811,6 +1896,117 @@ mod tests {
             PrepareDisposition::Created(_)
         ));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protective_resize_crash_unknown_is_durable_and_never_replayed() {
+        let root = temp_root("protective-resize-unknown");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let intent = "intent_protection_resize_012345";
+        let mutation = "resize_0123456789abcdef";
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+        ledger
+            .prepare(protected_plan(intent), 101)
+            .expect("prepare");
+        ledger.begin_submission(intent, 102).expect("send");
+        ledger.acknowledge(intent, "parent123", 103).expect("ack");
+        ledger
+            .reconcile_found_with_resolutions(
+                intent,
+                "parent123",
+                ExchangeOrderState::Filled,
+                OrderMutationResolution::Pending,
+                Some(ProtectiveOrderResolution::Active {
+                    algo_order_id: "123456789012".to_owned(),
+                    covered_size: "1".to_owned(),
+                }),
+                104,
+            )
+            .expect("active");
+        for bad in ["0", "-1", "1", "2", "NaN", ""] {
+            assert!(
+                ledger
+                    .prepare_protective_size_amend(intent, mutation, bad, 105)
+                    .is_err()
+            );
+        }
+        ledger
+            .prepare_protective_size_amend(intent, mutation, "0.5", 105)
+            .expect("persist exact target");
+        ledger
+            .begin_protective_size_amend(intent, mutation, 106)
+            .expect("persist SUBMITTING");
+        drop(ledger);
+
+        let mut restarted = DurableExecutionLedger::open(store.clone(), 200).expect("restart");
+        let amend = restarted
+            .get(intent)
+            .unwrap()
+            .record
+            .protection
+            .as_ref()
+            .unwrap()
+            .size_amend
+            .as_ref()
+            .unwrap();
+        assert_eq!(amend.state, ProtectiveSizeAmendState::Submitting);
+        assert_eq!(amend.target_size, "0.5");
+        assert!(
+            restarted
+                .begin_protective_size_amend(intent, mutation, 201)
+                .is_err()
+        );
+        assert!(
+            restarted
+                .prepare_protective_size_amend(intent, "resize_different_01234567", "0.2", 202)
+                .is_err()
+        );
+        assert!(matches!(
+            restarted.prepare(plan("intent_resize_blocked_012345"), 203),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
+        restarted
+            .mark_protective_size_amend_unknown(intent, mutation, 204)
+            .expect("uncertain after process crash");
+        drop(restarted);
+
+        let mut recovered = DurableExecutionLedger::open(store.clone(), 300).expect("reopen");
+        assert!(
+            recovered
+                .begin_protective_size_amend(intent, mutation, 301)
+                .is_err()
+        );
+        assert!(
+            recovered
+                .acknowledge_protective_size_amend(intent, mutation, 302)
+                .is_err()
+        );
+        let confirmed = recovered
+            .confirm_protective_size_amend(intent, mutation, 303)
+            .expect("only after independently attested exact venue target");
+        let protected = confirmed.record.protection.as_ref().unwrap();
+        assert_eq!(protected.covered_size.as_deref(), Some("0.5"));
+        assert_eq!(
+            protected.size_amend.as_ref().unwrap().state,
+            ProtectiveSizeAmendState::Confirmed
+        );
+        assert!(
+            recovered
+                .confirm_protective_size_amend(intent, mutation, 304)
+                .is_err()
+        );
+        assert!(matches!(
+            recovered.prepare(plan("intent_resize_still_busy_012345"), 305),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
+        // Deliberate one-amend-per-parent policy until multi-REDUCE proven.
+        assert!(
+            recovered
+                .prepare_protective_size_amend(intent, "resize_second_01234567", "0.25", 306)
+                .is_err()
+        );
         let _ = fs::remove_dir_all(root);
     }
 

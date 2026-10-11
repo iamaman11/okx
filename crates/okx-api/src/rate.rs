@@ -30,6 +30,7 @@ pub enum RateOperationClass {
     WsUnsubscribe,
     PlaceOrder,
     AmendOrder,
+    AmendAlgoOrder,
     CancelOrder,
     WsPlaceOrder,
     WsAmendOrder,
@@ -187,6 +188,17 @@ impl RateBudget {
                 window_ms,
             }],
         }
+    }
+
+    /// A separate venue rate domain: /amend-algos is not ordinary /amend-order.
+    /// Account+instrument, 20 requests per 2 seconds (no hidden retry).
+    pub fn amend_algo_rest_plan(&self, instrument_id: &str) -> RateRequestPlan {
+        let mut plan = self.private_rest_plan(
+            "/api/v5/trade/amend-algos",
+            &[("instId", instrument_id.to_owned())],
+        );
+        plan.operation = RateOperationClass::AmendAlgoOrder;
+        plan
     }
 
     pub fn trade_rest_plan(
@@ -519,7 +531,10 @@ fn public_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Optio
 fn private_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Option<String>) {
     let scope = if path == "/api/v5/account/instruments" {
         param(params, "instType").map(|value| format!("authenticated_user+inst_type:{value}"))
-    } else if matches!(path, "/api/v5/trade/order" | "/api/v5/trade/cancel-algos") {
+    } else if matches!(
+        path,
+        "/api/v5/trade/order" | "/api/v5/trade/cancel-algos" | "/api/v5/trade/amend-algos"
+    ) {
         param(params, "instId").map(|value| format!("authenticated_user+instrument:{value}"))
     } else {
         Some("authenticated_user".to_owned())
@@ -539,6 +554,7 @@ fn private_rest_policy(path: &str, params: &[(&str, String)]) -> (u32, u64, Opti
         "/api/v5/trade/orders-pending" => (60, 2_000),
         "/api/v5/trade/orders-algo-pending" => (20, 2_000),
         "/api/v5/trade/cancel-algos" => (20, 2_000),
+        "/api/v5/trade/amend-algos" => (20, 2_000),
         "/api/v5/trade/order-algo" => (20, 2_000),
         "/api/v5/trade/orders-history" => (40, 2_000),
         "/api/v5/trade/orders-history-archive" => (20, 2_000),
@@ -727,6 +743,25 @@ mod tests {
                 .admit_at(&plan, now)
                 .expect("documented IP+instrument budget admits distinct instruments");
         }
+    }
+
+    #[test]
+    fn protective_algo_amend_has_independent_exact_user_instrument_rate_domain() {
+        let rate = RateBudget::new();
+        let btc = rate.amend_algo_rest_plan("BTC-USDT-SWAP");
+        let eth = rate.amend_algo_rest_plan("ETH-USDT-SWAP");
+        assert_eq!(btc.operation, RateOperationClass::AmendAlgoOrder);
+        assert_eq!(btc.domains.len(), 1);
+        assert_eq!(btc.domains[0].max_requests, 20);
+        assert_eq!(btc.domains[0].window_ms, 2_000);
+        assert_eq!(btc.domains[0].key.kind, RateDomainKind::PrivateRestUser);
+        assert_ne!(btc.domains[0].key, eth.domains[0].key);
+        assert_ne!(
+            btc.domains[0].key,
+            rate.trade_rest_plan(RateOperationClass::AmendOrder, "BTC-USDT-SWAP", None)
+                .domains[0]
+                .key
+        );
     }
 
     #[test]
