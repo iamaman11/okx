@@ -597,76 +597,121 @@ where
         )?)
     }
 
-    /// Demo-only. Persist SUBMITTING before exactly one REST POST.
-    /// Initial readback is not equivalent to fresh full position coverage.
-    pub async fn submit_prepared_protective_size_amend(
+    /// One-shot, *shrinking only* OCO repair for a previously reduced Hedge
+    /// position. It cannot open/close exposure or admit a partial REDUCE.
+    /// Verify the single owned OCO and the exact already-remaining side size
+    /// under an account/WS fence BEFORE the first durable SUBMITTING marker.
+    /// No PREPARED record is left behind by a failed read-only admission.
+    pub async fn submit_protective_size_amend_fenced<F, Fut>(
         &mut self,
         intent_id: &str,
         mutation_id: &str,
+        new_size: &str,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
         timing: MutationTiming,
         observed_at_ms: u64,
-    ) -> Result<MutationSubmitDisposition, OrderExecutorError> {
+        final_private_ws_fence: F,
+    ) -> Result<MutationSubmitDisposition, OrderExecutorError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
         require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
         let entry = self
             .ledger
             .get(intent_id)
             .cloned()
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
-        let protection = entry
-            .record
-            .protection
-            .as_ref()
-            .ok_or(OrderExecutorError::InvalidMutationInput("protection"))?;
-        let amend =
-            protection
-                .size_amend
-                .as_ref()
-                .ok_or(OrderExecutorError::InvalidMutationInput(
-                    "protective_size_amend",
-                ))?;
-        if amend.mutation_id != mutation_id || amend.state != ProtectiveSizeAmendState::Prepared {
+        let protection = entry.record.protection.as_ref()
+            .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
+        let target = Decimal::from_str(new_size)
+            .map_err(|_| OrderExecutorError::ProtectionCoverageUnproven)?;
+        let previous = protection.covered_size.as_deref()
+            .and_then(|value| Decimal::from_str(value).ok())
+            .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
+        if entry.record.state != ExecutionState::Filled
+            || protection.status != crate::ProtectiveOrderStatus::Active
+            || protection.cleanup.is_some()
+            || entry.record.active_mutation().is_some()
+            || target <= Decimal::ZERO
+            || target >= previous
+        {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        // Single-lot only: multi-lot/other Hedge-side permission needs the
+        // separate zero-gap ADD/HEDGE acceptance. An unresolved or foreign
+        // managed parent cannot borrow this lot's protective coverage.
+        if self.ledger.entries().any(|other| {
+            other.record.plan.instrument_id == entry.record.plan.instrument_id
+                && other.record.plan.intent_id != intent_id
+                && (!other.record.state.is_terminal()
+                    || other.record.protection_blocks_new_managed_intent())
+        }) {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        validate_protective_amend_coverage(&entry.record, account, inventory, target)?;
+        // An opposite-side Hedge lot (even outside this intent) is not
+        // covered by the single-algo inventory; refuse rather than infer it.
+        if account.positions.iter().any(|position| {
+            position.instrument_id == entry.record.plan.instrument_id
+                && position.position_side != entry.record.plan.position_side.as_str()
+                && Decimal::from_str(&position.position).ok() != Some(Decimal::ZERO)
+        }) {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+
+        // Exactly one mutation ID and request ID own one algo. A retry after
+        // SUBMITTING/UNKNOWN/ACK is rejected before a GET or POST.
+        if let Some(amend) = protection.size_amend.as_ref()
+            && (amend.mutation_id != mutation_id
+                || Decimal::from_str(&amend.target_size).ok() != Some(target)
+                || amend.state != ProtectiveSizeAmendState::Prepared)
+        {
             return Err(OrderExecutorError::InvalidMutationInput(
                 "protective_size_amend_state",
             ));
         }
         let request = AmendAlgoOrderRequest {
             instrument_id: entry.record.plan.instrument_id.clone(),
-            algo_order_id: amend.algo_order_id.clone(),
-            request_id: amend.request_id.clone(),
-            new_size: amend.target_size.clone(),
+            algo_order_id: protection.algo_order_id.clone()
+                .ok_or(OrderExecutorError::ProtectionIdentityMismatch)?,
+            request_id: derive_amend_request_id(intent_id, mutation_id),
+            new_size: target.normalize().to_string(),
             cancel_on_fail: false,
         };
         request.validate().map_err(OrderExecutorError::PreSubmit)?;
-        let current = self
-            .gateway
+        let current = self.gateway
             .algo_order_by_client_id(protection.algo_client_order_id.clone())
             .await
             .map_err(OrderExecutorError::PreSubmit)?;
         validate_protective_algo(&entry.record, &current)?;
         if current.algo_order_id != request.algo_order_id
-            || !matches!(
-                current.state.as_str(),
-                "live" | "effective" | "partially_effective"
-            )
+            || !matches!(current.state.as_str(), "live" | "effective" | "partially_effective")
         {
             return Err(OrderExecutorError::ProtectionIdentityMismatch);
         }
-        let old_size = Decimal::from_str(&amend.previous_size)
-            .map_err(|_| OrderExecutorError::ProtectionIdentityMismatch)?;
-        validate_effective_protective_leg(&entry.record, &current, old_size)?;
+        validate_effective_protective_leg(&entry.record, &current, previous)?;
         let rate_plan = match self.gateway.admit_amend_algo_order(&request) {
             Ok(plan) => plan,
             Err(OkxError::RateLimited { evidence }) if !evidence.request_sent => {
-                return Err(OrderExecutorError::RateDeferred {
-                    evidence: *evidence,
-                });
+                return Err(OrderExecutorError::RateDeferred { evidence: *evidence });
             }
             Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
         };
-        self.ledger
-            .begin_protective_size_amend(intent_id, mutation_id, observed_at_ms)?;
-        let reply = self
-            .gateway
+        // The agent checks event continuity AND TTL after the awaited venue
+        // GET and before durable PREPARED/SUBMITTING; keep the executor lock.
+        if !final_private_ws_fence().await {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        self.ledger.prepare_protective_size_amend(
+            intent_id, mutation_id, &request.new_size, observed_at_ms,
+        )?;
+        self.ledger.begin_protective_size_amend(
+            intent_id, mutation_id, observed_at_ms,
+        )?;
+        // The only network mutation. Once SUBMITTING is durable, never retry.
+        let reply = self.gateway
             .amend_algo_order(request.clone(), timing, rate_plan)
             .await;
         match reply {
@@ -680,17 +725,13 @@ where
             {
                 Ok(MutationSubmitDisposition::Acknowledged(
                     self.ledger.acknowledge_protective_size_amend(
-                        intent_id,
-                        mutation_id,
-                        observed_at_ms,
+                        intent_id, mutation_id, observed_at_ms,
                     )?,
                 ))
             }
             _ => Ok(MutationSubmitDisposition::Unknown(
                 self.ledger.mark_protective_size_amend_unknown(
-                    intent_id,
-                    mutation_id,
-                    observed_at_ms,
+                    intent_id, mutation_id, observed_at_ms,
                 )?,
             )),
         }
