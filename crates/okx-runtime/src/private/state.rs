@@ -231,12 +231,21 @@ impl PrivateRuntimeState {
         self.business_connection_id = connection_id;
     }
 
-    pub(super) fn acknowledge_algo_subscription(&mut self, arg: &PrivateWsArg) {
-        if self.business_logged_in
-            && subscription_from_arg(arg) == PrivateSubscription::orders_algo_any()
-        {
+    /// Only the ACK of the authenticated business connection and exact
+    /// account-wide algo subscription establishes event-stream readiness.
+    pub(super) fn acknowledge_algo_subscription(
+        &mut self,
+        arg: &PrivateWsArg,
+        connection_id: Option<&str>,
+    ) -> bool {
+        let accepted = self.business_logged_in
+            && connection_id.is_some()
+            && self.business_connection_id.as_deref() == connection_id
+            && subscription_from_arg(arg) == PrivateSubscription::orders_algo_any();
+        if accepted {
             self.algo_subscription_acked = true;
         }
+        accepted
     }
 
     pub(super) fn observe_algo_event(&mut self, _received_at_ms: u64) {
@@ -404,7 +413,17 @@ mod tests {
             instrument_family: sub.instrument_family,
             instrument_id: sub.instrument_id,
         };
-        state.acknowledge_algo_subscription(&arg);
+        assert!(!state.acknowledge_algo_subscription(&arg, None));
+        assert!(!state.acknowledge_algo_subscription(&arg, Some("wrong-business-conn")));
+        assert_eq!(
+            state.algo_convergence_cursor(),
+            Err(PrivateConvergenceError::NotReady)
+        );
+        let mut wrong_arg = arg.clone();
+        wrong_arg.instrument_type = Some("SWAP".to_owned());
+        assert!(!state.acknowledge_algo_subscription(&wrong_arg, Some("business-conn")));
+        assert!(!state.status().algo_subscription_ready);
+        assert!(state.acknowledge_algo_subscription(&arg, Some("business-conn")));
         let cursor = state.algo_convergence_cursor().expect("native algo cursor");
         let private_cursor = state.convergence_cursor().expect("private cursor");
         assert!(state.protected_oco_window_unchanged(private_cursor, cursor));
