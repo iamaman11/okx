@@ -561,13 +561,23 @@ impl DurableExecutionLedger {
             ));
         }
 
-        if self.instrument_reserved_with_confirmed_coverage(
-            &record.plan.instrument_id,
-            &record.plan.intent_id,
-            record.plan.action,
-            reverse_root_bypass,
-            confirmed_coverage,
-        ) {
+        let busy = if confirmed_coverage {
+            self.instrument_reserved_with_confirmed_coverage(
+                &record.plan.instrument_id,
+                &record.plan.intent_id,
+                record.plan.action,
+                reverse_root_bypass,
+                true,
+            )
+        } else {
+            self.instrument_reserved(
+                &record.plan.instrument_id,
+                &record.plan.intent_id,
+                record.plan.action,
+                reverse_root_bypass,
+            )
+        };
+        if busy {
             return Err(ExecutionLedgerError::InstrumentBusy);
         }
 
