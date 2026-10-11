@@ -378,18 +378,22 @@ impl PrivateWsCoordinator {
                                     business_subscriptions_sent = true;
                                 }
                             }
-                            PrivateInboundMessage::Subscribed { arg, .. } => {
-                                if arg.channel != PrivateChannel::OrdersAlgo
-                                    || !self.state.read().await.business_logged_in {
+                            PrivateInboundMessage::Subscribed { arg, connection_id } => {
+                                if !self
+                                    .state
+                                    .write()
+                                    .await
+                                    .acknowledge_algo_subscription(&arg, connection_id.as_deref())
+                                {
                                     return Ok(GenerationOutcome::Reconnect {
-                                        saw_data, reason: "business algo subscription unexpected".to_owned(),
+                                        saw_data,
+                                        reason: "business algo subscription ACK does not match authenticated connection".to_owned(),
                                     });
                                 }
-                                self.state.write().await.acknowledge_algo_subscription(&arg);
                             }
                             PrivateInboundMessage::Data { arg, data } => {
                                 if arg.channel != PrivateChannel::OrdersAlgo
-                                    || !self.state.read().await.business_logged_in {
+                                    || !self.state.read().await.algo_subscription_acked {
                                     return Ok(GenerationOutcome::Reconnect {
                                         saw_data, reason: "business algo event unauthenticated or malformed".to_owned(),
                                     });
