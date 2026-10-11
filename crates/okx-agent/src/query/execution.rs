@@ -1235,6 +1235,16 @@ async fn cancel_owned_protection(
             PreMutationAdmissionResult::Ready(value) => value,
             PreMutationAdmissionResult::Response(value) => return Ok(*value),
         };
+    // Fence all fresh REST/WS and algo reads with the same private WS cursor.
+    // Local flat recovery cannot retire an unknown algo based on a snapshot
+    // observed before a competing exchange fill arrived.
+    let Some(private_ws) = context.private_ws else {
+        return Ok(account_not_fresh(request, generated_at));
+    };
+    let cursor = match private_ws.convergence_cursor().await {
+        Ok(value) => value,
+        Err(_) => return Ok(account_not_fresh(request, generated_at)),
+    };
     // Re-read the account after admission: flat means no exchange positions,
     // ordinary pending orders, or non-owning residual risk. This is Demo only.
     let account = match fresh_account(request, context, generated_at).await? {
@@ -1292,6 +1302,15 @@ async fn cancel_owned_protection(
             "pending protective algo inventory is truncated; no absence or cancel proof".to_owned(),
             true,
         ));
+    }
+    match private_ws.convergence_window(cursor).await {
+        Ok(window) if window.events.is_empty() => {}
+        _ => return Ok(failure_response(
+            request, generated_at, AgentResponseStatus::Rejected,
+            EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+            "private WS changed or lost bounded account events during flat and OCO observation; no cleanup or resend".to_owned(),
+            true,
+        )),
     }
     let Some(protection) = entry.record.protection.clone() else {
         return Ok(failure_response(
