@@ -1293,7 +1293,7 @@ async fn cancel_owned_protection(
             true,
         ));
     }
-    let Some(protection) = entry.record.protection.as_ref() else {
+    let Some(protection) = entry.record.protection.clone() else {
         return Ok(failure_response(
             request,
             generated_at,
@@ -1305,6 +1305,29 @@ async fn cancel_owned_protection(
     };
     let owned_algo = protection.algo_order_id.clone().unwrap_or_default();
     let owned_client = protection.algo_client_order_id.clone();
+
+    // The current request is an independently fresh, exact-UID FLAT proof,
+    // with zero ordinary orders and COMPLETE zero conditional/OCO inventory.
+    // Retire any size-amend SUBMITTING/UNKNOWN/ACK without resending a POST;
+    // only then use the existing durable zero-OCO cleanup transition.
+    if let Some(amend) = protection.size_amend.as_ref()
+        && !matches!(amend.state,
+            okx_execution::ProtectiveSizeAmendState::Confirmed |
+            okx_execution::ProtectiveSizeAmendState::RetiredAbsent)
+    {
+        if inventory.rows != 0 {
+            return Ok(failure_response(
+                request, generated_at, AgentResponseStatus::Rejected,
+                EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+                "unresolved protective resize still has pending exchange OCO; no repeat POST or cleanup allowed".to_owned(),
+                true,
+            ));
+        }
+        entry = execution.retire_protective_size_amend_absent(
+            intent_id, &amend.mutation_id,
+            utc_now_ms().max(entry.updated_at_ms),
+        ).await?;
+    }
 
     if let Some(previous) = protection.cleanup.as_ref() {
         if previous.mutation_id != mutation_id {
