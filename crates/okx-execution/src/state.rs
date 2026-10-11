@@ -794,14 +794,22 @@ impl ExecutionRecord {
         &mut self,
         mutation_id: &str,
     ) -> Result<(), ExecutionTransitionError> {
-        let protection = self.protection.as_mut()
+        let protection = self
+            .protection
+            .as_mut()
             .ok_or(ExecutionTransitionError::InvalidProtectiveSizeAmendTransition)?;
-        let amendment = protection.size_amend.as_mut()
+        let amendment = protection
+            .size_amend
+            .as_mut()
             .ok_or(ExecutionTransitionError::InvalidProtectiveSizeAmendTransition)?;
         if amendment.mutation_id != mutation_id
-            || !matches!(amendment.state,
-                ProtectiveSizeAmendState::Prepared | ProtectiveSizeAmendState::Submitting
-                | ProtectiveSizeAmendState::Unknown | ProtectiveSizeAmendState::Acknowledged)
+            || !matches!(
+                amendment.state,
+                ProtectiveSizeAmendState::Prepared
+                    | ProtectiveSizeAmendState::Submitting
+                    | ProtectiveSizeAmendState::Unknown
+                    | ProtectiveSizeAmendState::Acknowledged
+            )
             || protection.status != ProtectiveOrderStatus::Active
             || protection.cleanup.is_some()
             || protection.algo_order_id.as_deref() != Some(amendment.algo_order_id.as_str())
@@ -851,9 +859,12 @@ impl ExecutionRecord {
             return Err(ExecutionTransitionError::ProtectiveCleanupConflict);
         }
         if protection.status != ProtectiveOrderStatus::Active
-            || protection.size_amend.as_ref().is_some_and(|a|
-                !matches!(a.state,
-                    ProtectiveSizeAmendState::Confirmed | ProtectiveSizeAmendState::RetiredAbsent))
+            || protection.size_amend.as_ref().is_some_and(|a| {
+                !matches!(
+                    a.state,
+                    ProtectiveSizeAmendState::Confirmed | ProtectiveSizeAmendState::RetiredAbsent
+                )
+            })
         {
             return Err(ExecutionTransitionError::InvalidProtectiveCleanup);
         }
