@@ -3243,7 +3243,7 @@ mod tests {
                 assert!(matches!(outcome, SubmitDisposition::UnknownSubmission(_)));
                 assert_eq!(
                     executor.ledger().get(&plan.intent_id).unwrap().record.state,
-                    ExecutionState::Unknown
+                    ExecutionState::UnknownSubmission
                 );
             } else {
                 assert!(matches!(outcome, SubmitDisposition::Acknowledged(_)));
@@ -3260,7 +3260,7 @@ mod tests {
             if unknown {
                 assert_eq!(
                     reopened.get(&plan.intent_id).unwrap().record.state,
-                    ExecutionState::Unknown
+                    ExecutionState::UnknownSubmission
                 );
             }
             let _ = fs::remove_dir_all(root);
