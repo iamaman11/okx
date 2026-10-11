@@ -10,7 +10,8 @@ use okx_api::{
 use okx_execution::{
     AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
     ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
-    ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, ManagedExecutionInventory,
+    ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
+    ManagedExecutionInventory,
     MutationAuthority, MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor,
     OrderExecutorError, PositionSide, PrepareOutcome, SubmitDisposition,
     execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
@@ -506,13 +507,7 @@ impl ExecutionRuntime {
     pub async fn shrink_protective_size_demo_authorized<F, Fut>(
         &self,
         preflight: &ExecutorPreflightSnapshot,
-        intent_id: &str,
-        mutation_id: &str,
-        target_size: &str,
-        account: &AccountSnapshot,
-        inventory: &PendingProtectiveAlgoInventory,
-        timing: MutationTiming,
-        observed_at_ms: u64,
+        request: FencedProtectiveShrinkRequest<'_>,
         final_private_ws_fence: F,
     ) -> AgentResult<Option<Result<MutationSubmitDisposition, OrderExecutorError>>>
     where
@@ -529,16 +524,7 @@ impl ExecutionRuntime {
         let mut executor = self.executor.lock().await;
         executor.enable_demo_acceptance(self.environment)?;
         let result = executor
-            .submit_protective_size_amend_fenced(
-                intent_id,
-                mutation_id,
-                target_size,
-                account,
-                inventory,
-                timing,
-                observed_at_ms,
-                final_private_ws_fence,
-            )
+            .submit_protective_size_amend_fenced(request, final_private_ws_fence)
             .await;
         executor.disable_mutations();
         Ok(Some(result))
