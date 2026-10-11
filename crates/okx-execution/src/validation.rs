@@ -115,7 +115,9 @@ pub enum ExecutionValidationError {
     #[error("opening execution requires accepted CandidateOrderAnalysis")]
     MissingOpenRiskEvidence,
 
-    #[error("protected risk-increasing order must be FOK or IOC: persistent partially filled parent does not prove attached TP/SL")]
+    #[error(
+        "protected risk-increasing order must be FOK or IOC: persistent partially filled parent does not prove attached TP/SL"
+    )]
     ProtectedParentCanRemainPartiallyFilled,
 
     #[error("closing execution must not carry opening CandidateOrderAnalysis")]
@@ -1277,7 +1279,11 @@ mod tests {
     fn protected_parent_can_not_remain_live_with_unprotected_partial_fill() {
         // This is an independent pure admission contract, deliberately
         // excluding ordinary risk-reducing CLOSE/REDUCE.
-        for action in [ExecutionAction::Open, ExecutionAction::Add, ExecutionAction::Hedge] {
+        for action in [
+            ExecutionAction::Open,
+            ExecutionAction::Add,
+            ExecutionAction::Hedge,
+        ] {
             for order_type in [OrderType::Limit, OrderType::PostOnly] {
                 assert_eq!(
                     require_terminal_protected_parent(action, order_type),
@@ -1285,14 +1291,23 @@ mod tests {
                 );
             }
             for order_type in [OrderType::Fok, OrderType::Ioc] {
-                assert_eq!(require_terminal_protected_parent(action, order_type), Ok(()));
+                assert_eq!(
+                    require_terminal_protected_parent(action, order_type),
+                    Ok(())
+                );
             }
         }
         for action in [ExecutionAction::Close, ExecutionAction::Reduce] {
             for order_type in [
-                OrderType::Limit, OrderType::PostOnly, OrderType::Fok, OrderType::Ioc
+                OrderType::Limit,
+                OrderType::PostOnly,
+                OrderType::Fok,
+                OrderType::Ioc,
             ] {
-                assert_eq!(require_terminal_protected_parent(action, order_type), Ok(()));
+                assert_eq!(
+                    require_terminal_protected_parent(action, order_type),
+                    Ok(())
+                );
             }
         }
 
