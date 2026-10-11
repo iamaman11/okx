@@ -2035,6 +2035,157 @@ mod tests {
         ));
     }
 
+    struct ExactResizeGateway {
+        sends: AtomicUsize,
+        details: Mutex<VecDeque<TradeAlgoOrderDetails>>,
+        response: Mutex<Option<Result<TradeResponse<AmendAlgoOrderAck>, OkxError>>>,
+    }
+
+    #[async_trait]
+    impl ExecutionGateway for ExactResizeGateway {
+        async fn place_order(
+            &self, _: PlaceOrderRequest, _: MutationTiming, _: Option<RateRequestPlan>
+        ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+            panic!("no parent order should be sent during resize test");
+        }
+
+        async fn order_by_client_id(
+            &self, _: String, _: String
+        ) -> Result<TradeOrderDetails, OkxError> {
+            panic!("no unrelated parent lookup");
+        }
+
+        async fn algo_order_by_client_id(
+            &self, _: String
+        ) -> Result<TradeAlgoOrderDetails, OkxError> {
+            Ok(self.details.lock().expect("details").pop_front().expect("one lookup"))
+        }
+
+        async fn amend_algo_order(
+            &self, req: AmendAlgoOrderRequest, _: MutationTiming, _: Option<RateRequestPlan>
+        ) -> Result<TradeResponse<AmendAlgoOrderAck>, OkxError> {
+            req.validate()?;
+            assert_eq!(req.new_size, "0.5");
+            assert!(!req.cancel_on_fail);
+            self.sends.fetch_add(1, Ordering::SeqCst);
+            self.response.lock().expect("response").take().expect("single send")
+        }
+    }
+
+    fn resize_algo(record: &ExecutionRecord, size: &str) -> TradeAlgoOrderDetails {
+        TradeAlgoOrderDetails {
+            instrument_id: record.plan.instrument_id.clone(),
+            algo_order_id: "123456789012".to_owned(),
+            client_order_id: record.protection.as_ref().unwrap().algo_client_order_id.clone(),
+            state: "live".to_owned(),
+            take_profit_trigger_price: "0.12".to_owned(),
+            take_profit_trigger_price_type: "mark".to_owned(),
+            take_profit_order_price: "-1".to_owned(),
+            stop_loss_trigger_price: "0.09".to_owned(),
+            stop_loss_trigger_price_type: "mark".to_owned(),
+            stop_loss_order_price: "-1".to_owned(),
+            failure_code: String::new(),
+            size: size.to_owned(),
+            side: "sell".to_owned(),
+            position_side: "long".to_owned(),
+            trade_mode: "cross".to_owned(),
+            order_type: "oco".to_owned(),
+            close_fraction: String::new(),
+        }
+    }
+
+    fn resize_ledger(label: &str) -> (std::path::PathBuf, DurableExecutionLedger, ExecutionRecord) {
+        let (root, mut ledger) = ledger(label);
+        let plan = protected_plan();
+        ledger.prepare(plan.clone(), 101).expect("prepare");
+        ledger.begin_submission(&plan.intent_id, 102).expect("submit");
+        ledger.acknowledge(&plan.intent_id, "parent123", 103).expect("ack");
+        let entry = ledger.reconcile_found_with_resolutions(
+            &plan.intent_id, "parent123", ExchangeOrderState::Filled,
+            OrderMutationResolution::Pending,
+            Some(ProtectiveOrderResolution::Active {
+                algo_order_id: "123456789012".to_owned(),
+                covered_size: "1".to_owned(),
+            }), 104,
+        ).expect("active");
+        (root, ledger, entry.record)
+    }
+
+    #[tokio::test]
+    async fn protected_resize_unknown_ack_sends_once_and_verifies_exact_venue_size() {
+        let (root, ledger, record) = resize_ledger("resize-gateway-unknown");
+        let intent = record.plan.intent_id.clone();
+        let mid = "resize_once_0123456789abc";
+        let gateway = ExactResizeGateway {
+            sends: AtomicUsize::new(0),
+            details: Mutex::new(vec![
+                resize_algo(&record, "1"), resize_algo(&record, "0.5")
+            ].into()),
+            response: Mutex::new(Some(Err(OkxError::Response(
+                "transport returned no ACK".to_owned()
+            )))),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        executor.prepare_protective_size_amend(&intent, mid, "0.5", 105)
+            .expect("durable prepare");
+        assert!(matches!(executor.submit_prepared_protective_size_amend(
+            &intent, mid, timing(), 106
+        ).await.expect("unknown"), MutationSubmitDisposition::Unknown(_)));
+        assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
+        assert!(executor.submit_prepared_protective_size_amend(
+            &intent, mid, timing(), 107
+        ).await.is_err(), "NEVER replay uncertain POST");
+        assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
+        let proof = executor.confirm_protective_size_amend_from_venue(&intent, mid, 108)
+            .await.expect("venue size equals target, not sufficient for position");
+        assert_eq!(proof.record.protection.as_ref().unwrap().covered_size.as_deref(), Some("0.5"));
+        assert_eq!(proof.record.protection.as_ref().unwrap().size_amend.as_ref().unwrap().state,
+            ProtectiveSizeAmendState::Confirmed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn protective_resize_ack_and_wrong_venue_size_never_finalize() {
+        let (root, ledger, record) = resize_ledger("resize-gateway-bad-readback");
+        let intent = record.plan.intent_id.clone();
+        let mid = "resize_ack_0123456789abc";
+        let request_id = derive_amend_request_id(&intent, mid);
+        let gateway = ExactResizeGateway {
+            sends: AtomicUsize::new(0),
+            details: Mutex::new(vec![
+                resize_algo(&record, "1"), resize_algo(&record, "1")
+            ].into()),
+            response: Mutex::new(Some(Ok(TradeResponse {
+                code: "0".to_owned(), message: String::new(),
+                data: vec![AmendAlgoOrderAck {
+                    algo_order_id: "123456789012".to_owned(),
+                    client_order_id: record.protection.as_ref().unwrap().algo_client_order_id.clone(),
+                    request_id, status_code: "0".to_owned(),
+                    status_message: String::new(),
+                }],
+                in_time_us: String::new(), out_time_us: String::new(),
+            }))),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        executor.prepare_protective_size_amend(&intent, mid, "0.5", 105)
+            .expect("durable");
+        assert!(matches!(executor.submit_prepared_protective_size_amend(
+            &intent, mid, timing(), 106
+        ).await.expect("ack"), MutationSubmitDisposition::Acknowledged(_)));
+        assert!(matches!(executor.confirm_protective_size_amend_from_venue(
+            &intent, mid, 107
+        ).await, Err(OrderExecutorError::ProtectionIdentityMismatch)));
+        let link = executor.ledger().get(&intent).unwrap().record.protection.as_ref().unwrap();
+        assert_eq!(link.covered_size.as_deref(), Some("1"));
+        assert_eq!(link.size_amend.as_ref().unwrap().state, ProtectiveSizeAmendState::Acknowledged);
+        assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
+        assert!(executor.submit_prepared_protective_size_amend(
+            &intent, mid, timing(), 108
+        ).await.is_err());
+        assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn zero_fill_cancel_resolves_not_activated_without_algo_evidence() {
         let (root, ledger) = ledger("protective-zero-fill");
