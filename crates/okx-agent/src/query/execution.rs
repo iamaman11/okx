@@ -9,6 +9,7 @@ use okx_execution::{
     EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_STATUS_SCHEMA_V3, ExecutionAction,
     ExecutionDecisionReference, ExecutionIntent, ExecutionLedgerEntry, ExecutionLedgerError,
     ExecutionLineageBinding, ExecutionRiskBinding, ExecutionState, ExecutionTcaInstrumentType,
+    FencedProtectiveShrinkRequest,
     ExecutionTcaMechanicsBinding, ExecutionTransitionError, OrderExecutorError,
     OrderSide as ExecutionOrderSide, OrderType, PositionSide as ExecutionPositionSide,
     PrepareDeferral, PrepareFailure, PrepareOutcome, PrepareRejection, ReverseContinuation,
@@ -1313,13 +1314,15 @@ async fn shrink_owned_protection_size(
     let result = execution
         .shrink_protective_size_demo_authorized(
             &admission.preflight,
-            intent_id,
-            mutation_id,
-            new_size,
-            &account,
-            &inventory,
-            admission.timing,
-            observed_at_ms,
+            FencedProtectiveShrinkRequest {
+                intent_id,
+                mutation_id,
+                target_size: new_size,
+                account: &account,
+                inventory: &inventory,
+                timing: admission.timing,
+                observed_at_ms,
+            },
             || async {
                 let finished_at_ms = utc_now_ms();
                 protective_readback_in_ttl(started_ms, finished_at_ms)
