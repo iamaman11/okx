@@ -1330,9 +1330,11 @@ async fn cancel_owned_protection(
     // Retire any size-amend SUBMITTING/UNKNOWN/ACK without resending a POST;
     // only then use the existing durable zero-OCO cleanup transition.
     if let Some(amend) = protection.size_amend.as_ref()
-        && !matches!(amend.state,
-            okx_execution::ProtectiveSizeAmendState::Confirmed |
-            okx_execution::ProtectiveSizeAmendState::RetiredAbsent)
+        && !matches!(
+            amend.state,
+            okx_execution::ProtectiveSizeAmendState::Confirmed
+                | okx_execution::ProtectiveSizeAmendState::RetiredAbsent
+        )
     {
         if inventory.rows != 0 {
             return Ok(failure_response(
@@ -1342,10 +1344,13 @@ async fn cancel_owned_protection(
                 true,
             ));
         }
-        entry = execution.retire_protective_size_amend_absent(
-            intent_id, &amend.mutation_id,
-            utc_now_ms().max(entry.updated_at_ms),
-        ).await?;
+        entry = execution
+            .retire_protective_size_amend_absent(
+                intent_id,
+                &amend.mutation_id,
+                utc_now_ms().max(entry.updated_at_ms),
+            )
+            .await?;
     }
 
     if let Some(previous) = protection.cleanup.as_ref() {
@@ -2907,15 +2912,16 @@ mod tests {
                     algo_order_id_present: value.algo_order_id.is_some(),
                     covered_size: value.covered_size.clone(),
                     failure_code: value.failure_code.clone(),
-                    size_amend: value.size_amend.as_ref().map(|amend|
+                    size_amend: value.size_amend.as_ref().map(|amend| {
                         okx_execution::ProtectiveSizeAmendStatus {
                             mutation_id: amend.mutation_id.clone(),
                             state: amend.state,
                             previous_size: amend.previous_size.clone(),
                             target_size: amend.target_size.clone(),
-                            exchange_effect_confirmed: amend.state ==
-                                okx_execution::ProtectiveSizeAmendState::Confirmed,
-                        }),
+                            exchange_effect_confirmed: amend.state
+                                == okx_execution::ProtectiveSizeAmendState::Confirmed,
+                        }
+                    }),
                 }
             }),
             submission_timing: entry
