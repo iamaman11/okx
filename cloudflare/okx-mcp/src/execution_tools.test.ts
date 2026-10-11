@@ -44,6 +44,9 @@ assert(buildExecutionOperation(uidAction("abandon_prepared"))?.type==="abandon_p
 assert(buildExecutionOperation(uidAction("amend",{mutation_id:"mutation_demo_012345",new_price:"79999"}))?.type==="mutate_execution","amend must be typed");
 assert(buildExecutionOperation(uidAction("cancel",{mutation_id:"mutation_demo_012345"}))?.type==="mutate_execution","cancel must be typed");
 assert(buildExecutionOperation(uidAction("cancel_protection",{mutation_id:"mutation_demo_012345"}))?.type==="mutate_execution","protection cancel must be typed");
+const confirm=buildExecutionOperation(uidAction("confirm_protection_size",{mutation_id:"mutation_demo_012345"}));
+assert(confirm?.type==="mutate_execution" && (confirm as any).mutation.type==="confirm_protection_size",
+  "fenced venue readback must use existing Demo-only mutation transport");
 for(const x of [
   uidAction("prepare",{...basePrepare,spec:{action:"open",position_side:"long",entry},risk:undefined}),
   uidAction("prepare",{...basePrepare,spec:{action:"open",position_side:"long",entry:{...entry,arbitrary:"do-not-forward"}}}),
@@ -55,6 +58,9 @@ for(const x of [
   uidAction("abandon_prepared",{new_price:"90000"}),
   uidAction("amend",{mutation_id:"mutation_demo_012345"}),
   uidAction("cancel",{mutation_id:"invalid!"}),
+  uidAction("confirm_protection_size",{mutation_id:"invalid!"}),
+  uidAction("confirm_protection_size",{mutation_id:"mutation_demo_012345",new_size:"0.5"}),
+  uidAction("confirm_protection_size",{mutation_id:"mutation_demo_012345",raw_rpc:"POST"}),
   uidAction("submit",{intent_id:"bad"}),
   uidAction("execute_batch",{orders:[]}),
 ]) {
@@ -75,5 +81,6 @@ assert(!isExecutionMutation("account_summary"),"read must not be misclassified a
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
 const advertisedActions = (EXECUTION_TOOLS[1] as any).inputSchema.properties.action.enum as string[];
 assert(advertisedActions.includes("abandon_prepared"),"advertised writable action list must include the typed unsent PREPARED release");
+assert(advertisedActions.includes("confirm_protection_size"),"existing tool schema advertises exact-ID safe local confirmation");
 assert(new Set(advertisedActions).size===advertisedActions.length,"advertised actions must be unique");
 assert(EXECUTION_TOOLS[1] !== undefined && (EXECUTION_TOOLS[1] as any).name==="execution_action","typed write name");
