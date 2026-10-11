@@ -5,12 +5,11 @@ use okx_api::{
     AmendAlgoOrderAck, AmendAlgoOrderRequest, AmendOrderRequest, ApiOrderSide, ApiOrderType,
     ApiPositionSide, ApiTradeMode, ApiTriggerPriceType, AttachedAlgoOrderRequest,
     CancelAlgoOrderAck, CancelAlgoOrderRequest, CancelOrderRequest, MutationTiming, OkxEnvironment,
-    OkxError, OrderOperationAck, PendingProtectiveAlgoInventory, PlaceOrderRequest, RateDecision, RateRequestPlan,
-    RateThrottleEvidence, TradeAlgoOrderDetails, TradeApi, TradeOrderDetails, TradeResponse,
+    OkxError, OrderOperationAck, PendingProtectiveAlgoInventory, PlaceOrderRequest, RateDecision,
+    RateRequestPlan, RateThrottleEvidence, TradeAlgoOrderDetails, TradeApi, TradeOrderDetails,
+    TradeResponse,
 };
-use okx_observation::{
-    AccountSnapshot, ACCOUNT_CONVERGED_SOURCE_V2, M4_REST_WS_CONVERGED_REASON,
-};
+use okx_observation::{ACCOUNT_CONVERGED_SOURCE_V2, AccountSnapshot, M4_REST_WS_CONVERGED_REASON};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
@@ -322,7 +321,9 @@ pub enum OrderExecutorError {
     #[error("exchange protective algo does not match the durable execution identity")]
     ProtectionIdentityMismatch,
 
-    #[error("protective amendment is not covered by coherent exact-account position and full OCO inventory")]
+    #[error(
+        "protective amendment is not covered by coherent exact-account position and full OCO inventory"
+    )]
     ProtectionCoverageUnproven,
 
     #[error("demo mutation authority requires an OKX Demo environment")]
@@ -780,7 +781,9 @@ where
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
         Ok(self.ledger.retire_protective_size_amend_absent(
-            intent_id, mutation_id, observed_at_ms,
+            intent_id,
+            mutation_id,
+            observed_at_ms,
         )?)
     }
 
@@ -1453,7 +1456,9 @@ fn validate_protective_amend_coverage(
     inventory: &PendingProtectiveAlgoInventory,
     expected: Decimal,
 ) -> Result<(), OrderExecutorError> {
-    let protection = record.protection.as_ref()
+    let protection = record
+        .protection
+        .as_ref()
         .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
     if expected <= Decimal::ZERO
         || account.account_uid_fingerprint.is_empty()
@@ -1487,7 +1492,8 @@ fn validate_protective_amend_coverage(
         {
             continue;
         }
-        let size = Decimal::from_str(&p.position).ok()
+        let size = Decimal::from_str(&p.position)
+            .ok()
             .filter(|v| *v >= Decimal::ZERO)
             .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
         if size == Decimal::ZERO {
@@ -2271,7 +2277,9 @@ mod tests {
         }
     }
 
-    fn resize_coverage(record: &ExecutionRecord) -> (AccountSnapshot, PendingProtectiveAlgoInventory) {
+    fn resize_coverage(
+        record: &ExecutionRecord,
+    ) -> (AccountSnapshot, PendingProtectiveAlgoInventory) {
         let account: AccountSnapshot = serde_json::from_value(serde_json::json!({
             "schema": "okx.account-snapshot/v2",
             "source": ACCOUNT_CONVERGED_SOURCE_V2,
@@ -2318,7 +2326,8 @@ mod tests {
                 "update_time_ms": null
             }],
             "pending_orders": []
-        })).expect("valid converged account fixture");
+        }))
+        .expect("valid converged account fixture");
         let inventory = PendingProtectiveAlgoInventory {
             schema: "okx.protective-algo-inventory/v1",
             scope: "authenticated_user",
@@ -2329,7 +2338,12 @@ mod tests {
             samples: vec![okx_api::PendingProtectiveAlgoSample {
                 instrument_id: record.plan.instrument_id.clone(),
                 algo_order_id: "123456789012".to_owned(),
-                client_order_id: record.protection.as_ref().unwrap().algo_client_order_id.clone(),
+                client_order_id: record
+                    .protection
+                    .as_ref()
+                    .unwrap()
+                    .algo_client_order_id
+                    .clone(),
                 order_type: "oco".to_owned(),
                 state: "live".to_owned(),
             }],
@@ -2343,8 +2357,15 @@ mod tests {
         let mut record = record;
         record.protection.as_mut().unwrap().algo_order_id = Some("123456789012".to_owned());
         let (account, inventory) = resize_coverage(&record);
-        assert!(validate_protective_amend_coverage(&record, &account, &inventory,
-            Decimal::from_str("0.5").unwrap()).is_ok());
+        assert!(
+            validate_protective_amend_coverage(
+                &record,
+                &account,
+                &inventory,
+                Decimal::from_str("0.5").unwrap()
+            )
+            .is_ok()
+        );
         let mut wrong_uid = account.clone();
         wrong_uid.account_uid_fingerprint = "different-uid".to_owned();
         let mut wrong_size = account.clone();
@@ -2354,15 +2375,18 @@ mod tests {
         let mut stale = account.clone();
         stale.quality_reason = "REST_ONLY".to_owned();
         let mut competing_order = account.clone();
-        competing_order.pending_orders.push(serde_json::from_value(serde_json::json!({
-            "order_id":"external", "client_order_id": null,
-            "instrument_type":"SWAP", "instrument_id": record.plan.instrument_id,
-            "side":"sell", "position_side":"long", "trade_mode":"cross",
-            "order_type":"limit", "price":null, "size":"0.1",
-            "accumulated_fill_size":"0", "average_fill_price":null,
-            "state":"live", "reduce_only":null, "creation_time_ms":"1",
-            "update_time_ms":"1"
-        })).unwrap());
+        competing_order.pending_orders.push(
+            serde_json::from_value(serde_json::json!({
+                "order_id":"external", "client_order_id": null,
+                "instrument_type":"SWAP", "instrument_id": record.plan.instrument_id,
+                "side":"sell", "position_side":"long", "trade_mode":"cross",
+                "order_type":"limit", "price":null, "size":"0.1",
+                "accumulated_fill_size":"0", "average_fill_price":null,
+                "state":"live", "reduce_only":null, "creation_time_ms":"1",
+                "update_time_ms":"1"
+            }))
+            .unwrap(),
+        );
         let mut duplicate_leg = account.clone();
         duplicate_leg.positions.push(account.positions[0].clone());
         let mut foreign_algo = inventory.clone();
@@ -2371,15 +2395,34 @@ mod tests {
         incomplete.complete_within_bound = false;
         let mut second_algo = inventory.clone();
         second_algo.rows = 2;
-        for invalid in [&wrong_uid,&wrong_size,&no_ws,&stale,&competing_order,&duplicate_leg] {
-            assert!(validate_protective_amend_coverage(
-                &record, invalid, &inventory, Decimal::from_str("0.5").unwrap()
-            ).is_err());
+        for invalid in [
+            &wrong_uid,
+            &wrong_size,
+            &no_ws,
+            &stale,
+            &competing_order,
+            &duplicate_leg,
+        ] {
+            assert!(
+                validate_protective_amend_coverage(
+                    &record,
+                    invalid,
+                    &inventory,
+                    Decimal::from_str("0.5").unwrap()
+                )
+                .is_err()
+            );
         }
-        for invalid in [&foreign_algo,&incomplete,&second_algo] {
-            assert!(validate_protective_amend_coverage(
-                &record, &account, invalid, Decimal::from_str("0.5").unwrap()
-            ).is_err());
+        for invalid in [&foreign_algo, &incomplete, &second_algo] {
+            assert!(
+                validate_protective_amend_coverage(
+                    &record,
+                    &account,
+                    invalid,
+                    Decimal::from_str("0.5").unwrap()
+                )
+                .is_err()
+            );
         }
     }
 
@@ -2493,7 +2536,11 @@ mod tests {
         assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
         let proof = executor
             .confirm_protective_size_amend_from_venue(
-                &intent, mid, &resize_coverage(&record).0, &resize_coverage(&record).1, 108
+                &intent,
+                mid,
+                &resize_coverage(&record).0,
+                &resize_coverage(&record).1,
+                108,
             )
             .await
             .expect("exact algo plus complete same-UID remaining position");
@@ -2564,7 +2611,11 @@ mod tests {
         assert!(matches!(
             executor
                 .confirm_protective_size_amend_from_venue(
-                    &intent, mid, &resize_coverage(&record).0, &resize_coverage(&record).1, 107
+                    &intent,
+                    mid,
+                    &resize_coverage(&record).0,
+                    &resize_coverage(&record).1,
+                    107
                 )
                 .await,
             Err(OrderExecutorError::ProtectionIdentityMismatch)
