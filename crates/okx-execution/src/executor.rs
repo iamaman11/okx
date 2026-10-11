@@ -5,8 +5,11 @@ use okx_api::{
     AmendAlgoOrderAck, AmendAlgoOrderRequest, AmendOrderRequest, ApiOrderSide, ApiOrderType,
     ApiPositionSide, ApiTradeMode, ApiTriggerPriceType, AttachedAlgoOrderRequest,
     CancelAlgoOrderAck, CancelAlgoOrderRequest, CancelOrderRequest, MutationTiming, OkxEnvironment,
-    OkxError, OrderOperationAck, PlaceOrderRequest, RateDecision, RateRequestPlan,
+    OkxError, OrderOperationAck, PendingProtectiveAlgoInventory, PlaceOrderRequest, RateDecision, RateRequestPlan,
     RateThrottleEvidence, TradeAlgoOrderDetails, TradeApi, TradeOrderDetails, TradeResponse,
+};
+use okx_observation::{
+    AccountSnapshot, ACCOUNT_CONVERGED_SOURCE_V2, M4_REST_WS_CONVERGED_REASON,
 };
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -318,6 +321,9 @@ pub enum OrderExecutorError {
 
     #[error("exchange protective algo does not match the durable execution identity")]
     ProtectionIdentityMismatch,
+
+    #[error("protective amendment is not covered by coherent exact-account position and full OCO inventory")]
+    ProtectionCoverageUnproven,
 
     #[error("demo mutation authority requires an OKX Demo environment")]
     DemoAuthorityRequiresDemoEnvironment,
@@ -702,12 +708,17 @@ where
         )?)
     }
 
-    /// This verifies only the exact OCO's exchange size/identity, NOT
-    /// independently the current side position or all pending algos.
+    /// A size amendment is not CONFIRMED on an algo GET alone. The caller
+    /// must also supply a fresh converged exact-account position snapshot and
+    /// complete, bounded SWAP/FUTURES conditional+OCO pending inventory,
+    /// both read under a stable private WS event cursor. If that condition
+    /// cannot be proven, no durable confirmation is recorded.
     pub async fn confirm_protective_size_amend_from_venue(
         &mut self,
         intent_id: &str,
         mutation_id: &str,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
         let entry = self
@@ -754,6 +765,7 @@ where
         let new_size = Decimal::from_str(&amend.target_size)
             .map_err(|_| OrderExecutorError::ProtectionIdentityMismatch)?;
         validate_effective_protective_leg(&entry.record, &current, new_size)?;
+        validate_protective_amend_coverage(&entry.record, account, inventory, new_size)?;
         Ok(self
             .ledger
             .confirm_protective_size_amend(intent_id, mutation_id, observed_at_ms)?)
@@ -1418,6 +1430,67 @@ fn validate_protective_algo(
 
 /// Verify the exchange-owned leg and effective size, not only the client
 /// supplied trigger prices. Missing sz/posSide/side is never affirmative proof.
+/// Pure fail-closed coverage predicate, not admission to send. In particular,
+/// one owned attached stop must exactly equal the remaining single side leg.
+/// Multi-lot, racing/foreign algo or pending close requires a separately
+/// accepted general coverage implementation; it cannot be guessed here.
+fn validate_protective_amend_coverage(
+    record: &ExecutionRecord,
+    account: &AccountSnapshot,
+    inventory: &PendingProtectiveAlgoInventory,
+    expected: Decimal,
+) -> Result<(), OrderExecutorError> {
+    let protection = record.protection.as_ref()
+        .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
+    if expected <= Decimal::ZERO
+        || account.account_uid_fingerprint.is_empty()
+        || account.account_uid_fingerprint != record.plan.account_uid_fingerprint
+        || account.source != ACCOUNT_CONVERGED_SOURCE_V2
+        || account.quality_reason != M4_REST_WS_CONVERGED_REASON
+        || !account.private_ws_connected
+        || account.private_ws_generation.is_none_or(|v| v == 0)
+        || account.account_generation.is_empty()
+        || account.position_mode != "long_short_mode"
+        || !account.pending_orders.is_empty()
+        || !inventory.complete_within_bound
+        || inventory.rows != 1
+        || inventory.samples.len() != 1
+    {
+        return Err(OrderExecutorError::ProtectionCoverageUnproven);
+    }
+    let sample = &inventory.samples[0];
+    if sample.instrument_id != record.plan.instrument_id
+        || sample.algo_order_id != protection.algo_order_id.as_deref().unwrap_or("")
+        || sample.client_order_id != protection.algo_client_order_id
+        || sample.state != "live"
+        || !matches!(sample.order_type.as_str(), "oco" | "conditional")
+    {
+        return Err(OrderExecutorError::ProtectionCoverageUnproven);
+    }
+    let mut exact_side = 0;
+    for p in &account.positions {
+        if p.instrument_id != record.plan.instrument_id
+            || p.position_side != record.plan.position_side.as_str()
+        {
+            continue;
+        }
+        let size = Decimal::from_str(&p.position).ok()
+            .filter(|v| *v >= Decimal::ZERO)
+            .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
+        if size == Decimal::ZERO {
+            continue;
+        }
+        if p.margin_mode != record.plan.trade_mode.as_str() || size != expected {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        exact_side += 1;
+    }
+    if exact_side != 1 {
+        return Err(OrderExecutorError::ProtectionCoverageUnproven);
+    }
+    Ok(())
+}
+
 fn validate_effective_protective_leg(
     record: &ExecutionRecord,
     algo: &TradeAlgoOrderDetails,
