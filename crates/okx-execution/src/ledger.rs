@@ -403,7 +403,26 @@ impl DurableExecutionLedger {
         if let Some(lineage) = lineage {
             record.bind_lineage(lineage)?;
         }
-        self.prepare_record(record, None, observed_at_ms)
+        self.prepare_record(record, None, observed_at_ms, false)
+    }
+
+    /// Only the Rust executor can invoke this after its exact-ID venue OCO
+    /// inventory + position proof and final private WS event fence.
+    /// No general ledger caller gets an active-protection bypass.
+    pub(crate) fn prepare_with_confirmed_active_coverage(
+        &mut self,
+        plan: ExecutionPlan,
+        lineage: Option<ExecutionLineageBinding>,
+        observed_at_ms: u64,
+    ) -> Result<PrepareDisposition, ExecutionLedgerError> {
+        if !matches!(plan.action, ExecutionAction::Add | ExecutionAction::Hedge) {
+            return Err(ExecutionLedgerError::InstrumentBusy);
+        }
+        let mut record = ExecutionRecord::new(plan);
+        if let Some(lineage) = lineage {
+            record.bind_lineage(lineage)?;
+        }
+        self.prepare_record(record, None, observed_at_ms, true)
     }
 
     pub fn prepare_reverse_close(
@@ -436,7 +455,7 @@ impl DurableExecutionLedger {
             open_intent_id,
             target_position_side,
         )?)?;
-        self.prepare_record(record, None, observed_at_ms)
+        self.prepare_record(record, None, observed_at_ms, false)
     }
 
     pub fn prepare_reverse_open(
@@ -476,7 +495,7 @@ impl DurableExecutionLedger {
             record.bind_lineage(lineage)?;
         }
         record.attach_reverse(ReverseExecutionLink::open_from(reverse)?)?;
-        self.prepare_record(record, Some(root_intent_id), observed_at_ms)
+        self.prepare_record(record, Some(root_intent_id), observed_at_ms, false)
     }
 
     pub fn abort_reverse(
@@ -515,6 +534,7 @@ impl DurableExecutionLedger {
         record: ExecutionRecord,
         reverse_root_bypass: Option<&str>,
         observed_at_ms: u64,
+        confirmed_coverage: bool,
     ) -> Result<PrepareDisposition, ExecutionLedgerError> {
         require_timestamp(observed_at_ms)?;
         validate_plan_identity(&record.plan)?;
@@ -541,12 +561,23 @@ impl DurableExecutionLedger {
             ));
         }
 
-        if self.instrument_reserved(
-            &record.plan.instrument_id,
-            &record.plan.intent_id,
-            record.plan.action,
-            reverse_root_bypass,
-        ) {
+        let busy = if confirmed_coverage {
+            self.instrument_reserved_with_confirmed_coverage(
+                &record.plan.instrument_id,
+                &record.plan.intent_id,
+                record.plan.action,
+                reverse_root_bypass,
+                true,
+            )
+        } else {
+            self.instrument_reserved(
+                &record.plan.instrument_id,
+                &record.plan.intent_id,
+                record.plan.action,
+                reverse_root_bypass,
+            )
+        };
+        if busy {
             return Err(ExecutionLedgerError::InstrumentBusy);
         }
 
@@ -576,6 +607,23 @@ impl DurableExecutionLedger {
         incoming_action: ExecutionAction,
         reverse_root_bypass: Option<&str>,
     ) -> bool {
+        self.instrument_reserved_with_confirmed_coverage(
+            instrument_id,
+            incoming_intent_id,
+            incoming_action,
+            reverse_root_bypass,
+            false,
+        )
+    }
+
+    fn instrument_reserved_with_confirmed_coverage(
+        &self,
+        instrument_id: &str,
+        incoming_intent_id: &str,
+        incoming_action: ExecutionAction,
+        reverse_root_bypass: Option<&str>,
+        confirmed_coverage: bool,
+    ) -> bool {
         self.entries.values().any(|entry| {
             if entry.record.plan.instrument_id != instrument_id {
                 return false;
@@ -583,16 +631,33 @@ impl DurableExecutionLedger {
             if !entry.record.state.is_terminal() {
                 return true;
             }
-            // Attached protection (even active) reserves the instrument
-            // against new risk. Partial REDUCE can leave a still-live,
-            // oversized TP/SL algo. Until durable, exact-ID OCO resize and
-            // re-readback are implemented, DENY REDUCE as well. Full reducing
-            // CLOSE remains allowed (physically accepted G3C).
+            // The ONLY newly permitted reservation is a terminal, fully
+            // filled, actively protected old lot proved under the same
+            // executor lock by exact venue GET + complete OCO inventory +
+            // per-Hedge-side aggregate quantities + final private WS fence.
+            // UNKNOWN, failed, canceled, pending amend/cleanup and reverse
+            // linkage can never borrow that permission.
             if entry.record.protection_blocks_new_managed_intent()
                 && (incoming_action.is_risk_increasing()
                     || incoming_action == ExecutionAction::Reduce)
             {
-                return true;
+                let proven_old_lot = confirmed_coverage
+                    && matches!(
+                        incoming_action,
+                        ExecutionAction::Add | ExecutionAction::Hedge
+                    )
+                    && entry.record.state == ExecutionState::Filled
+                    && entry.record.active_mutation().is_none()
+                    && entry.record.protection.as_ref().is_some_and(|protection| {
+                        protection.status == ProtectiveOrderStatus::Active
+                            && protection.cleanup.is_none()
+                            && protection.size_amend.as_ref().is_none_or(|amend| {
+                                amend.state == ProtectiveSizeAmendState::Confirmed
+                            })
+                    });
+                if !proven_old_lot {
+                    return true;
+                }
             }
             let Some(reverse) = entry.record.reverse.as_ref() else {
                 return false;

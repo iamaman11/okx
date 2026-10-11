@@ -421,6 +421,148 @@ where
         ))?)
     }
 
+    /// Only the existing executor may open another protected Hedge lot.
+    /// The proof is completed under the external one-owner mutex, and its
+    /// final private-WS fence is checked immediately before durable prepare.
+    pub async fn prepare_protected_add_hedge_fenced<F, Fut>(
+        &mut self,
+        plan: ExecutionPlan,
+        lineage: Option<ExecutionLineageBinding>,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
+        observed_at_ms: u64,
+        final_private_ws_fence: F,
+    ) -> Result<PrepareOutcome, OrderExecutorError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        self.verify_existing_protected_lots(&plan, account, inventory)
+            .await?;
+        if !final_private_ws_fence().await {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        Ok(classify_prepare_result(
+            self.ledger
+                .prepare_with_confirmed_active_coverage(plan, lineage, observed_at_ms),
+        )?)
+    }
+
+    /// The ordinary submit path can never send a PREPARED ADD/HEDGE with
+    /// active legacy OCO without a fresh independent readback.
+    pub async fn submit_prepared_protected_add_hedge_fenced<F, Fut>(
+        &mut self,
+        intent_id: &str,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+        final_private_ws_fence: F,
+    ) -> Result<SubmitDisposition, OrderExecutorError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
+        let entry = self
+            .ledger
+            .get(intent_id)
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        if entry.record.state != ExecutionState::Prepared {
+            return Err(OrderExecutorError::NotPrepared(entry.record.state));
+        }
+        let plan = entry.record.plan.clone();
+        self.verify_existing_protected_lots(&plan, account, inventory)
+            .await?;
+        if !final_private_ws_fence().await {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        self.submit_prepared_inner(intent_id, timing, observed_at_ms, true)
+            .await
+    }
+
+    /// The exact current exchange inventory, each parent/algo identity and
+    /// both Hedge sides must agree. This does not mutate the exchange or
+    /// ledger. It is reused on BOTH prepare and immediately pre-send.
+    async fn verify_existing_protected_lots(
+        &self,
+        plan: &ExecutionPlan,
+        account: &AccountSnapshot,
+        inventory: &PendingProtectiveAlgoInventory,
+    ) -> Result<(), OrderExecutorError> {
+        if !matches!(
+            plan.action,
+            crate::ExecutionAction::Add | crate::ExecutionAction::Hedge
+        ) || plan.order_type != OrderType::Fok
+            || plan.open_risk.is_none()
+            || plan.account_uid_fingerprint != account.account_uid_fingerprint
+        {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        let mut same_side = Decimal::ZERO;
+        let mut opposite_side = Decimal::ZERO;
+        for position in account
+            .positions
+            .iter()
+            .filter(|position| position.instrument_id == plan.instrument_id)
+        {
+            let amount = Decimal::from_str(&position.position)
+                .map_err(|_| OrderExecutorError::ProtectionCoverageUnproven)?;
+            if amount < Decimal::ZERO || position.margin_mode != plan.trade_mode.as_str() {
+                return Err(OrderExecutorError::ProtectionCoverageUnproven);
+            }
+            if position.position_side == plan.position_side.as_str() {
+                same_side = same_side
+                    .checked_add(amount)
+                    .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
+            } else if matches!(position.position_side.as_str(), "long" | "short") {
+                opposite_side = opposite_side
+                    .checked_add(amount)
+                    .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
+            } else {
+                return Err(OrderExecutorError::ProtectionCoverageUnproven);
+            }
+        }
+        if (plan.action == crate::ExecutionAction::Add && same_side <= Decimal::ZERO)
+            || (plan.action == crate::ExecutionAction::Hedge
+                && (same_side != Decimal::ZERO || opposite_side <= Decimal::ZERO))
+        {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        let records: Vec<_> = self
+            .ledger
+            .entries()
+            .filter(|entry| {
+                entry.record.plan.instrument_id == plan.instrument_id
+                    && entry.record.plan.intent_id != plan.intent_id
+            })
+            .map(|entry| entry.record.clone())
+            .collect();
+        if !records.iter().any(|record| {
+            record.state == ExecutionState::Filled
+                && record
+                    .protection
+                    .as_ref()
+                    .is_some_and(|link| link.status == crate::ProtectiveOrderStatus::Active)
+        }) {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
+        let mut details = Vec::new();
+        for record in &records {
+            if let Some(link) = &record.protection
+                && link.status == crate::ProtectiveOrderStatus::Active
+            {
+                details.push(
+                    self.gateway
+                        .algo_order_by_client_id(link.algo_client_order_id.clone())
+                        .await
+                        .map_err(OrderExecutorError::PreSubmit)?,
+                );
+            }
+        }
+        validate_managed_protective_coverage(&records, account, inventory, &details, None)
+    }
+
     pub fn prepare_reverse_close(
         &mut self,
         plan: ExecutionPlan,
@@ -1024,6 +1166,17 @@ where
         timing: MutationTiming,
         observed_at_ms: u64,
     ) -> Result<SubmitDisposition, OrderExecutorError> {
+        self.submit_prepared_inner(intent_id, timing, observed_at_ms, false)
+            .await
+    }
+
+    async fn submit_prepared_inner(
+        &mut self,
+        intent_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+        protected_existing_lots_proven: bool,
+    ) -> Result<SubmitDisposition, OrderExecutorError> {
         // The production constructor is intentionally fail-closed. The hard
         // gate is the first operation: disabled execution must not validate,
         // persist SUBMITTING, or call the exchange gateway.
@@ -1037,6 +1190,13 @@ where
 
         if entry.record.state != ExecutionState::Prepared {
             return Err(OrderExecutorError::NotPrepared(entry.record.state));
+        }
+        if matches!(
+            entry.record.plan.action,
+            crate::ExecutionAction::Add | crate::ExecutionAction::Hedge
+        ) && !protected_existing_lots_proven
+        {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
         }
 
         self.ledger
@@ -2993,6 +3153,330 @@ mod tests {
             )
             .expect("active");
         (root, ledger, entry.record)
+    }
+
+    /// Covers the real one-post path, not just a local admission predicate.
+    /// The gateway never fabricates a protection: native attached TP/SL must
+    /// be present on the exact FOK request, with its own new algo client ID.
+    struct CoveredLotGateway {
+        lookups: AtomicUsize,
+        sends: AtomicUsize,
+        details: Mutex<VecDeque<TradeAlgoOrderDetails>>,
+        result: Mutex<Option<Result<TradeResponse<OrderOperationAck>, OkxError>>>,
+    }
+
+    #[async_trait]
+    impl ExecutionGateway for CoveredLotGateway {
+        async fn place_order(
+            &self,
+            request: PlaceOrderRequest,
+            _: MutationTiming,
+            _: Option<RateRequestPlan>,
+        ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+            assert_eq!(request.order_type, ApiOrderType::Fok);
+            assert_eq!(request.attached_algo_orders.len(), 1);
+            self.sends.fetch_add(1, Ordering::SeqCst);
+            self.result
+                .lock()
+                .expect("one response")
+                .take()
+                .expect("single POST")
+        }
+
+        async fn order_by_client_id(
+            &self,
+            _: String,
+            _: String,
+        ) -> Result<TradeOrderDetails, OkxError> {
+            panic!("no unrelated order lookup")
+        }
+
+        async fn algo_order_by_client_id(
+            &self,
+            _: String,
+        ) -> Result<TradeAlgoOrderDetails, OkxError> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .details
+                .lock()
+                .expect("exact venue algo GETs")
+                .pop_front()
+                .expect("one exact protected parent lookup"))
+        }
+    }
+
+    #[tokio::test]
+    async fn fenced_fok_add_and_hedge_send_once_and_never_resend_unknown() {
+        for (action, unknown) in [
+            (ExecutionAction::Add, false),
+            (ExecutionAction::Hedge, false),
+            (ExecutionAction::Add, true),
+        ] {
+            let (root, ledger, parent) = resize_ledger(match (action, unknown) {
+                (ExecutionAction::Add, false) => "covered-add-send",
+                (ExecutionAction::Hedge, false) => "covered-hedge-send",
+                _ => "covered-add-unknown",
+            });
+            let (mut account, inventory) = resize_coverage(&parent);
+            account.positions[0].position = "1".to_owned();
+            let mut plan = fenced_add_hedge_plan(action);
+            plan.account_uid_fingerprint = parent.plan.account_uid_fingerprint.clone();
+            let gateway = CoveredLotGateway {
+                lookups: AtomicUsize::new(0),
+                sends: AtomicUsize::new(0),
+                details: Mutex::new(
+                    vec![resize_algo(&parent, "1"), resize_algo(&parent, "1")].into(),
+                ),
+                result: Mutex::new(Some(if unknown {
+                    Err(OkxError::Config(
+                        "injected ACK loss after one POST".to_owned(),
+                    ))
+                } else {
+                    Ok(accepted_response(&plan))
+                })),
+            };
+            let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    plan.clone(),
+                    None,
+                    &account,
+                    &inventory,
+                    105,
+                    || async { true },
+                )
+                .await
+                .expect("fenced prepare");
+            let outcome = executor
+                .submit_prepared_protected_add_hedge_fenced(
+                    &plan.intent_id,
+                    &account,
+                    &inventory,
+                    timing(),
+                    106,
+                    || async { true },
+                )
+                .await
+                .expect("single bounded send");
+            if unknown {
+                assert!(matches!(outcome, SubmitDisposition::UnknownSubmission(_)));
+                assert_eq!(
+                    executor.ledger().get(&plan.intent_id).unwrap().record.state,
+                    ExecutionState::UnknownSubmission
+                );
+            } else {
+                assert!(matches!(outcome, SubmitDisposition::Acknowledged(_)));
+            }
+            assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
+            assert_eq!(executor.gateway().lookups.load(Ordering::SeqCst), 2);
+            assert!(
+                executor
+                    .submit_prepared(&plan.intent_id, timing(), 107)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
+            drop(executor);
+            let reopened = DurableExecutionLedger::open(
+                ExecutionLedgerStore::at(root.join("ledger.json")),
+                200,
+            )
+            .expect("persisted send");
+            if unknown {
+                assert_eq!(
+                    reopened.get(&plan.intent_id).unwrap().record.state,
+                    ExecutionState::UnknownSubmission
+                );
+            }
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    fn fenced_add_hedge_plan(action: ExecutionAction) -> ExecutionPlan {
+        let mut value = protected_plan();
+        value.intent_id = format!(
+            "intent_fenced_{}__01234567890",
+            match action {
+                ExecutionAction::Add => "add",
+                ExecutionAction::Hedge => "hedge",
+                _ => unreachable!("only increasing existing positions"),
+            }
+        );
+        value.client_order_id = crate::derive_client_order_id(&value.intent_id);
+        value.action = action;
+        value.order_type = OrderType::Fok;
+        if action == ExecutionAction::Hedge {
+            value.position_side = PositionSide::Short;
+            value.side = OrderSide::Sell;
+        }
+        value
+    }
+
+    #[tokio::test]
+    async fn fenced_fok_add_and_hedge_require_exact_previous_lot_coverage() {
+        for action in [ExecutionAction::Add, ExecutionAction::Hedge] {
+            let (root, ledger, parent) = resize_ledger(match action {
+                ExecutionAction::Add => "fenced-add",
+                _ => "fenced-hedge",
+            });
+            let (mut account, inventory) = resize_coverage(&parent);
+            account.positions[0].position = "1".to_owned();
+            let mut plan = fenced_add_hedge_plan(action);
+            plan.account_uid_fingerprint = parent.plan.account_uid_fingerprint.clone();
+            let detail = resize_algo(&parent, "1");
+            let gateway = ExactResizeGateway {
+                sends: AtomicUsize::new(0),
+                details: Mutex::new(vec![detail.clone(), detail].into()),
+                response: Mutex::new(None),
+            };
+            let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+            assert!(
+                executor
+                    .ledger()
+                    .entries()
+                    .any(|record| record.record.plan.intent_id == parent.plan.intent_id)
+            );
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    plan.clone(),
+                    None,
+                    &account,
+                    &inventory,
+                    105,
+                    || async { true },
+                )
+                .await
+                .expect("exact previous parent+algo+Hedge position proof");
+            assert_eq!(
+                executor.ledger().get(&plan.intent_id).unwrap().record.state,
+                ExecutionState::Prepared
+            );
+            // The generic executor path is strictly denied; a proof must be
+            // repeated immediately before every authorized parent POST.
+            assert!(matches!(
+                executor
+                    .submit_prepared(&plan.intent_id, timing(), 106)
+                    .await,
+                Err(OrderExecutorError::ProtectionCoverageUnproven)
+            ));
+            assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                executor
+                    .submit_prepared_protected_add_hedge_fenced(
+                        &plan.intent_id,
+                        &account,
+                        &inventory,
+                        timing(),
+                        107,
+                        || async { false },
+                    )
+                    .await,
+                Err(OrderExecutorError::ProtectionCoverageUnproven)
+            ));
+            assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                executor.ledger().get(&plan.intent_id).unwrap().record.state,
+                ExecutionState::Prepared
+            );
+            drop(executor);
+            let reopened = DurableExecutionLedger::open(
+                ExecutionLedgerStore::at(root.join("ledger.json")),
+                200,
+            )
+            .expect("restart durable unsent");
+            assert_eq!(
+                reopened.get(&plan.intent_id).unwrap().record.state,
+                ExecutionState::Prepared
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[tokio::test]
+    async fn fenced_add_denies_foreign_oco_wrong_uid_ioc_and_failed_ws_before_persist() {
+        let (root, ledger, parent) = resize_ledger("fenced-add-negative");
+        let (mut account, mut inventory) = resize_coverage(&parent);
+        account.positions[0].position = "1".to_owned();
+        let mut plan = fenced_add_hedge_plan(ExecutionAction::Add);
+        plan.account_uid_fingerprint = parent.plan.account_uid_fingerprint.clone();
+        let gateway = ExactResizeGateway {
+            sends: AtomicUsize::new(0),
+            details: Mutex::new(
+                vec![
+                    resize_algo(&parent, "1"),
+                    resize_algo(&parent, "1"),
+                    resize_algo(&parent, "1"),
+                    resize_algo(&parent, "1"),
+                ]
+                .into(),
+            ),
+            response: Mutex::new(None),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        let mut ioc = plan.clone();
+        ioc.order_type = OrderType::Ioc;
+        assert!(matches!(
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    ioc,
+                    None,
+                    &account,
+                    &inventory,
+                    105,
+                    || async { true },
+                )
+                .await,
+            Err(OrderExecutorError::ProtectionCoverageUnproven)
+        ));
+        let mut wrong_uid = account.clone();
+        wrong_uid.account_uid_fingerprint = "different-uid".to_owned();
+        assert!(matches!(
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    plan.clone(),
+                    None,
+                    &wrong_uid,
+                    &inventory,
+                    106,
+                    || async { true },
+                )
+                .await,
+            Err(OrderExecutorError::ProtectionCoverageUnproven)
+        ));
+        let foreign = inventory.samples[0].clone();
+        inventory.samples.push(foreign);
+        inventory.rows = inventory.samples.len();
+        assert!(
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    plan.clone(),
+                    None,
+                    &account,
+                    &inventory,
+                    107,
+                    || async { true },
+                )
+                .await
+                .is_err()
+        );
+        inventory.samples.pop();
+        inventory.rows = inventory.samples.len();
+        assert!(matches!(
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    plan.clone(),
+                    None,
+                    &account,
+                    &inventory,
+                    108,
+                    || async { false },
+                )
+                .await,
+            Err(OrderExecutorError::ProtectionCoverageUnproven)
+        ));
+        assert!(executor.ledger().get(&plan.intent_id).is_none());
+        assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
