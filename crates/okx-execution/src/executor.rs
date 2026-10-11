@@ -1900,7 +1900,7 @@ mod tests {
 
     #[tokio::test]
     async fn partial_fill_cancel_with_matching_algo_uses_exact_filled_size() {
-        let (root, ledger) = ledger("protective-matching-evidence");
+        let (root, original_ledger) = ledger("protective-matching-evidence");
         let record = ExecutionRecord::new(protected_plan());
         let protection = record.protection.as_ref().expect("protection");
         let mut order = order_details(&record.plan, "canceled");
@@ -1927,7 +1927,7 @@ mod tests {
         let mut wrong_size = algo.clone();
         wrong_size.size = "0.2".to_owned();
         let gateway = ProtectiveLookupGateway::new(Ok(algo));
-        let executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        let executor = OrderExecutor::enabled_for_test(original_ledger, gateway);
 
         let resolution = executor
             .protection_resolution(&record, &order, ExchangeOrderState::Canceled)
