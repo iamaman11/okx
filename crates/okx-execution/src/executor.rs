@@ -942,6 +942,9 @@ where
 
         match algo.state.as_str() {
             "live" | "effective" | "partially_effective" => {
+                // A recognized algoId and valid stop prices do not prove that
+                // the exchange has protection for THIS filled size/side.
+                validate_effective_protective_leg(record, &algo, filled)?;
                 if algo.algo_order_id.trim().is_empty() {
                     return Err(OrderExecutorError::ProtectionIdentityMismatch);
                 }
@@ -1176,6 +1179,30 @@ fn validate_protective_algo(
         || !decimal_equal(&algo.take_profit_order_price, "-1")
         || !decimal_equal(&algo.stop_loss_trigger_price, &risk.stop_price)
         || !decimal_equal(&algo.stop_loss_order_price, "-1")
+    {
+        return Err(OrderExecutorError::ProtectionIdentityMismatch);
+    }
+    Ok(())
+}
+
+/// Verify the exchange-owned leg and effective size, not only the client
+/// supplied trigger prices. Missing sz/posSide/side is never affirmative proof.
+fn validate_effective_protective_leg(
+    record: &ExecutionRecord,
+    algo: &TradeAlgoOrderDetails,
+    filled: Decimal,
+) -> Result<(), OrderExecutorError> {
+    let expected_exit_side = match record.plan.side {
+        OrderSide::Buy => "sell",
+        OrderSide::Sell => "buy",
+    };
+    if filled <= Decimal::ZERO
+        || Decimal::from_str(&algo.size).ok() != Some(filled)
+        || algo.side != expected_exit_side
+        || algo.position_side != record.plan.position_side.as_str()
+        || algo.trade_mode != record.plan.trade_mode.as_str()
+        || !matches!(algo.order_type.as_str(), "oco" | "conditional")
+        || !matches!(algo.close_fraction.as_str(), "" | "0")
     {
         return Err(OrderExecutorError::ProtectionIdentityMismatch);
     }
@@ -1783,9 +1810,35 @@ mod tests {
             stop_loss_trigger_price_type: "mark".to_owned(),
             stop_loss_order_price: "-1".to_owned(),
             failure_code: String::new(),
+            size: "1".to_owned(),
+            side: "sell".to_owned(),
+            position_side: "long".to_owned(),
+            trade_mode: "cross".to_owned(),
+            order_type: "oco".to_owned(),
+            close_fraction: String::new(),
         };
         validate_protective_algo(&record, &algo).expect("matching algo");
+        validate_effective_protective_leg(&record, &algo, Decimal::ONE)
+            .expect("exact LONG exit protection");
 
+        for defect in ["wrong_size", "wrong_side", "wrong_position_side", "wrong_mode",
+                       "missing_size", "full_close_shortcut", "wrong_order_type"] {
+            let mut wrong_leg = algo.clone();
+            match defect {
+                "wrong_size" => wrong_leg.size = "2".to_owned(),
+                "wrong_side" => wrong_leg.side = "buy".to_owned(),
+                "wrong_position_side" => wrong_leg.position_side = "short".to_owned(),
+                "wrong_mode" => wrong_leg.trade_mode = "isolated".to_owned(),
+                "missing_size" => wrong_leg.size.clear(),
+                "full_close_shortcut" => wrong_leg.close_fraction = "1".to_owned(),
+                "wrong_order_type" => wrong_leg.order_type = "move_order_stop".to_owned(),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                validate_effective_protective_leg(&record, &wrong_leg, Decimal::ONE),
+                Err(OrderExecutorError::ProtectionIdentityMismatch)
+            ), "rejected {defect}");
+        }
         let mut wrong = algo;
         wrong.stop_loss_trigger_price = "0.08".to_owned();
         assert!(matches!(
@@ -1849,6 +1902,12 @@ mod tests {
             stop_loss_trigger_price_type: "mark".to_owned(),
             stop_loss_order_price: "-1".to_owned(),
             failure_code: String::new(),
+            size: "0.40".to_owned(),
+            side: "sell".to_owned(),
+            position_side: "long".to_owned(),
+            trade_mode: "cross".to_owned(),
+            order_type: "oco".to_owned(),
+            close_fraction: String::new(),
         };
         let gateway = ProtectiveLookupGateway::new(Ok(algo));
         let executor = OrderExecutor::enabled_for_test(ledger, gateway);
@@ -1887,6 +1946,12 @@ mod tests {
             stop_loss_trigger_price_type: "mark".to_owned(),
             stop_loss_order_price: "-1".to_owned(),
             failure_code: "51008".to_owned(),
+            size: "1".to_owned(),
+            side: "sell".to_owned(),
+            position_side: "long".to_owned(),
+            trade_mode: "cross".to_owned(),
+            order_type: "oco".to_owned(),
+            close_fraction: String::new(),
         };
         let gateway = ProtectiveLookupGateway::new(Ok(algo));
         let executor = OrderExecutor::enabled_for_test(ledger, gateway);
