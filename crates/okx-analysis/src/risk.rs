@@ -2348,10 +2348,14 @@ mod tests {
             notional_usd: "8.34".to_owned(),
         };
         row.contracts = "0.02".to_owned();
-        assert!(conservative_account_with_position_oracle(&snapshot, &[row.clone()], None).is_err());
+        assert!(
+            conservative_account_with_position_oracle(&snapshot, &[row.clone()], None).is_err()
+        );
         row.contracts = "0.01".to_owned();
         row.position_side = "short".to_owned();
-        assert!(conservative_account_with_position_oracle(&snapshot, &[row.clone()], None).is_err());
+        assert!(
+            conservative_account_with_position_oracle(&snapshot, &[row.clone()], None).is_err()
+        );
         row.position_side = "long".to_owned();
         assert!(
             conservative_account_with_position_oracle(&snapshot, &[row.clone(), row.clone()], None)
