@@ -33,17 +33,6 @@ use crate::{
 
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
 
-/// Existing Demo durable history MUST stay at its exact accepted path.
-/// Production gets an independent file with no implicit import, fallback,
-/// copying, renaming or lossy schema migration.
-fn execution_ledger_file_name(environment: OkxEnvironment) -> &'static str {
-    if environment.demo {
-        "execution-ledger.json"
-    } else {
-        "execution-ledger-production.json"
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionReconciliation {
     NotRequired,
@@ -135,7 +124,10 @@ impl ExecutionRuntime {
         let executor_account = AccountApi::new(rest.clone());
         let trade = TradeApi::new(rest);
         let ledger = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join(execution_ledger_file_name(environment))),
+            // The existing Windows owner already supplies disjoint roots:
+            // Demo C:\okx-runtime\demo and Production C:\okx-runtime.
+            // Never silently strand either profile's durable history.
+            ExecutionLedgerStore::at(root.join("execution-ledger.json")),
             observed_at_ms,
         )?;
         Ok(Self {
@@ -745,18 +737,44 @@ mod tests {
     }
 
     #[test]
-    fn accepted_demo_history_retains_path_but_real_file_is_disjoint() {
-        let demo = OkxEnvironment::new(Region::Global, true);
-        let production = OkxEnvironment::new(Region::Global, false);
-        assert_eq!(execution_ledger_file_name(demo), "execution-ledger.json");
-        assert_eq!(
-            execution_ledger_file_name(production),
-            "execution-ledger-production.json"
-        );
-        assert_ne!(
-            execution_ledger_file_name(demo),
-            execution_ledger_file_name(production)
-        );
+    fn existing_demo_and_production_roots_preserve_both_historical_ledger_files() {
+        let base = temp_root("disjoint-profile-ledger");
+        let demo_root = base.join("demo");
+        fs::create_dir_all(&demo_root).unwrap();
+        let production_path = base.join("execution-ledger.json");
+        let demo_path = demo_root.join("execution-ledger.json");
+        // A corrupt existing profile file must cause a hard failure, not an
+        // implicit empty ledger from a newly named file. No file is rewritten.
+        let marker = b"{intentional-corrupt-existing-ledger}";
+        fs::write(&production_path, marker).unwrap();
+        assert!(ExecutionRuntime::new(
+            &base,
+            OkxEnvironment::new(Region::Global, false),
+            credentials(),
+            100,
+            RateBudget::new(),
+        ).is_err());
+        let demo = ExecutionRuntime::new_demo_acceptance(
+            &demo_root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            100,
+            RateBudget::new(),
+        ).expect("different accepted Demo root");
+        assert_eq!(demo.mode(), ExecutionRuntimeMode::DemoAcceptance);
+        assert!(demo_path.exists() == false);
+        fs::write(&demo_path, marker).unwrap();
+        assert!(ExecutionRuntime::new_demo_acceptance(
+            &demo_root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            101,
+            RateBudget::new(),
+        ).is_err());
+        assert_eq!(fs::read(&production_path).unwrap(), marker);
+        assert_eq!(fs::read(&demo_path).unwrap(), marker);
+        drop(demo);
+        let _ = fs::remove_dir_all(base);
     }
 
     #[tokio::test]
