@@ -2843,6 +2843,7 @@ mod tests {
             covered_size: Some("1234567890.123456789012345678".to_owned()),
             failure_code: None,
             cleanup: None,
+            size_amend: None,
         });
         entry.record.submission_timing = Some(okx_execution::ExecutionSubmissionTimingEvidence {
             request_exchange_time_ms: 1_791_300_000_000,
