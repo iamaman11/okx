@@ -3155,6 +3155,118 @@ mod tests {
         (root, ledger, entry.record)
     }
 
+    /// Covers the real one-post path, not just a local admission predicate.
+    /// The gateway never fabricates a protection: native attached TP/SL must
+    /// be present on the exact FOK request, with its own new algo client ID.
+    struct CoveredLotGateway {
+        lookups: AtomicUsize,
+        sends: AtomicUsize,
+        details: Mutex<VecDeque<TradeAlgoOrderDetails>>,
+        result: Mutex<Option<Result<TradeResponse<OrderOperationAck>, OkxError>>>,
+    }
+
+    #[async_trait]
+    impl ExecutionGateway for CoveredLotGateway {
+        async fn place_order(
+            &self,
+            request: PlaceOrderRequest,
+            _: MutationTiming,
+            _: Option<RateRequestPlan>,
+        ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+            assert_eq!(request.order_type, ApiOrderType::Fok);
+            assert_eq!(request.attached_algo_orders.len(), 1);
+            self.sends.fetch_add(1, Ordering::SeqCst);
+            self.result.lock().expect("one response").take().expect("single POST")
+        }
+
+        async fn order_by_client_id(
+            &self,
+            _: String,
+            _: String,
+        ) -> Result<TradeOrderDetails, OkxError> {
+            panic!("no unrelated order lookup")
+        }
+
+        async fn algo_order_by_client_id(
+            &self,
+            _: String,
+        ) -> Result<TradeAlgoOrderDetails, OkxError> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .details
+                .lock()
+                .expect("exact venue algo GETs")
+                .pop_front()
+                .expect("one exact protected parent lookup"))
+        }
+    }
+
+    #[tokio::test]
+    async fn fenced_fok_add_and_hedge_send_once_and_never_resend_unknown() {
+        for (action, unknown) in [
+            (ExecutionAction::Add, false),
+            (ExecutionAction::Hedge, false),
+            (ExecutionAction::Add, true),
+        ] {
+            let (root, ledger, parent) = resize_ledger(match (action, unknown) {
+                (ExecutionAction::Add, false) => "covered-add-send",
+                (ExecutionAction::Hedge, false) => "covered-hedge-send",
+                _ => "covered-add-unknown",
+            });
+            let (mut account, inventory) = resize_coverage(&parent);
+            account.positions[0].position = "1".to_owned();
+            let mut plan = fenced_add_hedge_plan(action);
+            plan.account_uid_fingerprint = parent.plan.account_uid_fingerprint.clone();
+            let gateway = CoveredLotGateway {
+                lookups: AtomicUsize::new(0),
+                sends: AtomicUsize::new(0),
+                details: Mutex::new(vec![
+                    resize_algo(&parent, "1"),
+                    resize_algo(&parent, "1"),
+                ].into()),
+                result: Mutex::new(Some(if unknown {
+                    Err(OkxError::Config("injected ACK loss after one POST".to_owned()))
+                } else {
+                    Ok(accepted_response(&plan))
+                })),
+            };
+            let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    plan.clone(), None, &account, &inventory, 105, || async { true },
+                ).await.expect("fenced prepare");
+            let outcome = executor
+                .submit_prepared_protected_add_hedge_fenced(
+                    &plan.intent_id, &account, &inventory, timing(), 106, || async { true },
+                ).await.expect("single bounded send");
+            if unknown {
+                assert!(matches!(outcome, SubmitDisposition::UnknownSubmission(_)));
+                assert_eq!(
+                    executor.ledger().get(&plan.intent_id).unwrap().record.state,
+                    ExecutionState::Unknown
+                );
+            } else {
+                assert!(matches!(outcome, SubmitDisposition::Acknowledged(_)));
+            }
+            assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
+            assert_eq!(executor.gateway().lookups.load(Ordering::SeqCst), 2);
+            assert!(executor
+                .submit_prepared(&plan.intent_id, timing(), 107).await.is_err());
+            assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
+            drop(executor);
+            let reopened = DurableExecutionLedger::open(
+                ExecutionLedgerStore::at(root.join("ledger.json")), 200,
+            ).expect("persisted send");
+            if unknown {
+                assert_eq!(
+                    reopened.get(&plan.intent_id).unwrap().record.state,
+                    ExecutionState::Unknown
+                );
+            }
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
     fn fenced_add_hedge_plan(action: ExecutionAction) -> ExecutionPlan {
         let mut value = protected_plan();
         value.intent_id = format!(
