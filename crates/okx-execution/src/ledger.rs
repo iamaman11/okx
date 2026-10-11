@@ -632,7 +632,10 @@ impl DurableExecutionLedger {
                     || incoming_action == ExecutionAction::Reduce)
             {
                 let proven_old_lot = confirmed_coverage
-                    && matches!(incoming_action, ExecutionAction::Add | ExecutionAction::Hedge)
+                    && matches!(
+                        incoming_action,
+                        ExecutionAction::Add | ExecutionAction::Hedge
+                    )
                     && entry.record.state == ExecutionState::Filled
                     && entry.record.active_mutation().is_none()
                     && entry.record.protection.as_ref().is_some_and(|protection| {
