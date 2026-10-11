@@ -249,13 +249,17 @@ pub fn execution_status_with_ledger(
                     .is_some_and(|value| !value.trim().is_empty()),
                 covered_size: value.covered_size.clone(),
                 failure_code: value.failure_code.clone(),
-                size_amend: value.size_amend.as_ref().map(|amend| ProtectiveSizeAmendStatus {
-                    mutation_id: amend.mutation_id.clone(),
-                    state: amend.state,
-                    previous_size: amend.previous_size.clone(),
-                    target_size: amend.target_size.clone(),
-                    exchange_effect_confirmed: amend.state == ProtectiveSizeAmendState::Confirmed,
-                }),
+                size_amend: value
+                    .size_amend
+                    .as_ref()
+                    .map(|amend| ProtectiveSizeAmendStatus {
+                        mutation_id: amend.mutation_id.clone(),
+                        state: amend.state,
+                        previous_size: amend.previous_size.clone(),
+                        target_size: amend.target_size.clone(),
+                        exchange_effect_confirmed: amend.state
+                            == ProtectiveSizeAmendState::Confirmed,
+                    }),
             }),
         submission_timing: entry
             .record
