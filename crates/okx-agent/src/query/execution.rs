@@ -2861,8 +2861,14 @@ mod tests {
     fn protective_readback_rejects_expired_or_reversed_clock_after_venue_reads() {
         let start = 1_790_000_000_000_u64;
         assert!(protective_readback_in_ttl(start, start));
-        assert!(protective_readback_in_ttl(start, start + MUTATION_REQUEST_TTL_MS));
-        assert!(!protective_readback_in_ttl(start, start + MUTATION_REQUEST_TTL_MS + 1));
+        assert!(protective_readback_in_ttl(
+            start,
+            start + MUTATION_REQUEST_TTL_MS
+        ));
+        assert!(!protective_readback_in_ttl(
+            start,
+            start + MUTATION_REQUEST_TTL_MS + 1
+        ));
         assert!(!protective_readback_in_ttl(start, start - 1));
     }
 
