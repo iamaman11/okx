@@ -324,6 +324,9 @@ pub enum OrderExecutorError {
     #[error("pre-submit exchange request admission failed: {0}")]
     PreSubmit(OkxError),
 
+    #[error(transparent)]
+    Validation(#[from] crate::ExecutionValidationError),
+
     #[error("order mutation input '{0}' is invalid")]
     InvalidMutationInput(&'static str),
 
@@ -1038,6 +1041,15 @@ where
 
         self.ledger
             .require_new_risk_allowed(entry.record.plan.action)?;
+        // Recheck legacy PREPARED intents before SUBMITTING or gateway
+        // admission. A persistent risk-increasing parent may partially fill
+        // while attached TP/SL is not active on the exchange.
+        if entry.record.protection.is_some() {
+            crate::validation::require_terminal_protected_parent(
+                entry.record.plan.action,
+                entry.record.plan.order_type,
+            )?;
+        }
         let request = place_request(&entry.record);
         let rate_plan = match self.gateway.admit_place_order(&request) {
             Ok(value) => value,
@@ -3697,6 +3709,42 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn legacy_prepared_protected_limit_and_post_only_cannot_send_or_persist_submitting() {
+        for order_type in [OrderType::Limit, OrderType::PostOnly] {
+            let name = format!("legacy-protected-{order_type:?}");
+            let (root, mut ledger) = ledger(&name);
+            let mut old = protected_plan();
+            old.order_type = order_type;
+            ledger.prepare(old.clone(), 101).expect("legacy PREPARED");
+            let gateway = MockGateway::new(vec![], vec![]);
+            let mut executor = OrderExecutor::new(ledger, gateway);
+            executor
+                .enable_demo_acceptance(OkxEnvironment::new(okx_api::Region::Global, true))
+                .expect("Demo authority only");
+            let rejection = executor
+                .submit_prepared(&old.intent_id, timing(), 102)
+                .await
+                .expect_err("legacy pending main order may leave unprotected partial fill");
+            assert!(matches!(
+                rejection,
+                OrderExecutorError::Validation(
+                    crate::ExecutionValidationError::ProtectedParentCanRemainPartiallyFilled
+                )
+            ));
+            assert_eq!(executor.gateway().place_calls(), 0);
+            assert_eq!(
+                executor.ledger().get(&old.intent_id).unwrap().record.state,
+                ExecutionState::Prepared
+            );
+            drop(executor);
+            let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+            let reopened = DurableExecutionLedger::open(store, 200).expect("durable");
+            assert_eq!(reopened.get(&old.intent_id).unwrap().record.state, ExecutionState::Prepared);
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[tokio::test]
