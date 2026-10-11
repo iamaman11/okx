@@ -5,7 +5,8 @@ use crate::{
     DurableExecutionLedger, ExchangeOrderState, ExecutionAction, ExecutionLedgerEntry,
     ExecutionLedgerError, ExecutionLineageBinding, ExecutionPlan, ExecutionState,
     ExecutionSubmissionTimingEvidence, OrderSide, OrderType, PositionSide, PrepareDisposition,
-    ProtectiveOrderStatus, ProtectiveTriggerPriceBasis, ReverseContinuation, ReverseLeg, TradeMode,
+    ProtectiveOrderStatus, ProtectiveSizeAmendState, ProtectiveTriggerPriceBasis,
+    ReverseContinuation, ReverseLeg, TradeMode,
 };
 
 pub const EXECUTION_STATUS_SCHEMA_V1: &str = "okx.execution-status/v1";
@@ -120,6 +121,16 @@ pub struct ReverseExecutionStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ProtectiveSizeAmendStatus {
+    pub mutation_id: String,
+    pub state: ProtectiveSizeAmendState,
+    pub previous_size: String,
+    pub target_size: String,
+    pub exchange_effect_confirmed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProtectiveExecutionStatus {
     pub policy_version: String,
     pub algo_client_order_id: String,
@@ -130,6 +141,8 @@ pub struct ProtectiveExecutionStatus {
     pub covered_size: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_amend: Option<ProtectiveSizeAmendStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -236,6 +249,13 @@ pub fn execution_status_with_ledger(
                     .is_some_and(|value| !value.trim().is_empty()),
                 covered_size: value.covered_size.clone(),
                 failure_code: value.failure_code.clone(),
+                size_amend: value.size_amend.as_ref().map(|amend| ProtectiveSizeAmendStatus {
+                    mutation_id: amend.mutation_id.clone(),
+                    state: amend.state,
+                    previous_size: amend.previous_size.clone(),
+                    target_size: amend.target_size.clone(),
+                    exchange_effect_confirmed: amend.state == ProtectiveSizeAmendState::Confirmed,
+                }),
             }),
         submission_timing: entry
             .record
