@@ -887,74 +887,73 @@ async fn submit_prepared(
 
     let observed_at_ms = timing.request_time_ms();
     let demo_acceptance = execution.demo_mutation_acceptance_requested();
-    let submit_result = if demo_acceptance
-        && matches!(action, ExecutionAction::Add | ExecutionAction::Hedge)
-    {
-        let Some(private_ws) = context.private_ws else {
-            return Ok(account_not_fresh(request, generated_at));
-        };
-        let cursor = match private_ws.convergence_cursor().await {
-            Ok(value) => value,
-            Err(_) => return Ok(account_not_fresh(request, generated_at)),
-        };
-        let started_ms = utc_now_ms();
-        let expires_at_ms = timing.exp_time_ms();
-        let account = match fresh_account(request, context, generated_at).await? {
-            FreshAccount::Ready(value) => value,
-            FreshAccount::Response(response) => return Ok(*response),
-        };
-        let Some(observer) = context.account_fallback else {
-            return Ok(execution_unavailable(request, generated_at));
-        };
-        let inventory = match observer.pending_protective_algos().await {
-            Ok(value) => value,
-            Err(error) => {
-                return Ok(failure_response(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Rejected,
-                    EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
-                    format!("pre-send OCO readback unavailable; no POST: {error}"),
-                    false,
-                ));
+    let submit_result =
+        if demo_acceptance && matches!(action, ExecutionAction::Add | ExecutionAction::Hedge) {
+            let Some(private_ws) = context.private_ws else {
+                return Ok(account_not_fresh(request, generated_at));
+            };
+            let cursor = match private_ws.convergence_cursor().await {
+                Ok(value) => value,
+                Err(_) => return Ok(account_not_fresh(request, generated_at)),
+            };
+            let started_ms = utc_now_ms();
+            let expires_at_ms = timing.exp_time_ms();
+            let account = match fresh_account(request, context, generated_at).await? {
+                FreshAccount::Ready(value) => value,
+                FreshAccount::Response(response) => return Ok(*response),
+            };
+            let Some(observer) = context.account_fallback else {
+                return Ok(execution_unavailable(request, generated_at));
+            };
+            let inventory = match observer.pending_protective_algos().await {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Rejected,
+                        EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+                        format!("pre-send OCO readback unavailable; no POST: {error}"),
+                        false,
+                    ));
+                }
+            };
+            match execution
+                .submit_prepared_add_hedge_demo_fenced(
+                    &preflight,
+                    intent_id,
+                    &account,
+                    &inventory,
+                    timing,
+                    observed_at_ms,
+                    || async {
+                        let finished_ms = utc_now_ms();
+                        protective_readback_in_ttl(started_ms, finished_ms)
+                            && finished_ms <= expires_at_ms
+                            && matches!(
+                                private_ws.convergence_window(cursor).await,
+                                Ok(window) if window.events.is_empty()
+                            )
+                    },
+                )
+                .await?
+            {
+                Some(result) => result,
+                None => return Ok(preflight_rejected(request, generated_at)),
             }
+        } else if demo_acceptance {
+            match execution
+                .submit_prepared_demo_authorized(&preflight, intent_id, timing, observed_at_ms)
+                .await?
+            {
+                Some(result) => result,
+                None => return Ok(preflight_rejected(request, generated_at)),
+            }
+        } else {
+            execution
+                .submit_prepared(intent_id, timing, observed_at_ms)
+                .await
         };
-        match execution
-            .submit_prepared_add_hedge_demo_fenced(
-                &preflight,
-                intent_id,
-                &account,
-                &inventory,
-                timing,
-                observed_at_ms,
-                || async {
-                    let finished_ms = utc_now_ms();
-                    protective_readback_in_ttl(started_ms, finished_ms)
-                        && finished_ms <= expires_at_ms
-                        && matches!(
-                            private_ws.convergence_window(cursor).await,
-                            Ok(window) if window.events.is_empty()
-                        )
-                },
-            )
-            .await?
-        {
-            Some(result) => result,
-            None => return Ok(preflight_rejected(request, generated_at)),
-        }
-    } else if demo_acceptance {
-        match execution
-            .submit_prepared_demo_authorized(&preflight, intent_id, timing, observed_at_ms)
-            .await?
-        {
-            Some(result) => result,
-            None => return Ok(preflight_rejected(request, generated_at)),
-        }
-    } else {
-        execution
-            .submit_prepared(intent_id, timing, observed_at_ms)
-            .await
-    };
 
     match submit_result {
         Ok(_) if demo_acceptance => {
