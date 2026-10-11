@@ -62,6 +62,7 @@ pub fn classify_prepare_result(
         Err(error @ ExecutionLedgerError::Io(_)) => Err(error),
         Err(error @ ExecutionLedgerError::Json(_)) => Err(error),
         Err(error @ ExecutionLedgerError::Corrupt(_)) => Err(error),
+        Err(error @ ExecutionLedgerError::AccountScopeMismatch) => Err(error),
         Err(error @ ExecutionLedgerError::InvalidTimestamp) => Err(error),
         Err(error @ ExecutionLedgerError::NewRiskStopped) => Err(error),
         Err(error @ ExecutionLedgerError::InvalidRiskStopReason) => Err(error),
