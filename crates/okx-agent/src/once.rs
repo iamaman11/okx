@@ -11,6 +11,7 @@ use okx_protocol::{
 use crate::{AgentError, AgentResult, query::dispatch};
 
 pub const INVALID_REQUEST_CODE: &str = "INVALID_REQUEST";
+pub const MAILBOX_EXECUTION_DISABLED_CODE: &str = "MAILBOX_EXECUTION_DISABLED";
 pub const RESPONSE_TOO_LARGE_CODE: &str = "RESPONSE_TOO_LARGE";
 
 const GLOBAL_RESPONSE_PLAINTEXT_BYTES: usize = 40 * 1024;
@@ -108,7 +109,16 @@ async fn process_once_with_size_telemetry(
         Ok(request) if request.validate().is_ok() && request.request_id == envelope.request_id => {
             debug_assert_eq!(request.schema, AGENT_REQUEST_SCHEMA_V1);
             let budget = response_budget(&request.operation);
-            (dispatch(&request, context, generated_at).await?, budget)
+            // Encrypted GitHub mailbox and local Once are strictly read-only.
+            // Only the profile-verified Cloudflare direct transport calls the
+            // shared query dispatcher with trading authority. Decrypting an
+            // authenticated envelope does NOT authorize exchange mutation.
+            let response = if request.operation.direct_transport_read_only() {
+                dispatch(&request, context, generated_at).await?
+            } else {
+                mailbox_execution_disabled(&request.request_id, generated_at)
+            };
+            (response, budget)
         }
         Ok(_) | Err(_) => (
             invalid_request_response(&envelope.request_id, generated_at),
@@ -316,6 +326,24 @@ fn response_too_large_response(
     }
 }
 
+fn mailbox_execution_disabled(request_id: &str, generated_at: &str) -> AgentResponse {
+    AgentResponse {
+        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+        request_id: request_id.to_owned(),
+        status: AgentResponseStatus::Rejected,
+        generated_at: generated_at.to_owned(),
+        quality: DataQuality::NotReady,
+        result_schema: None,
+        result: None,
+        failure: Some(AgentFailure {
+            code: MAILBOX_EXECUTION_DISABLED_CODE.to_owned(),
+            message: "GitHub mailbox and local Once are read-only; trading writes require the authenticated primary Cloudflare direct transport and Demo policy".to_owned(),
+            retryable: false,
+        }),
+        warnings: Vec::new(),
+    }
+}
+
 fn invalid_request_response(request_id: &str, generated_at: &str) -> AgentResponse {
     AgentResponse {
         schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
@@ -447,6 +475,50 @@ mod tests {
         )
         .expect("decrypt response");
         Ok(serde_json::from_slice(&response_plaintext).expect("response json"))
+    }
+
+    #[tokio::test]
+    async fn encrypted_mailbox_rejects_valid_typed_execution_writes_before_dispatch() {
+        // The request is correctly encrypted and signed by the same client
+        // test key as read-only messages. It cannot reach durable PREPARED.
+        for (suffix, operation) in [
+            ("submit", AgentOperation::SubmitPreparedExecution {
+                intent_id: "intent_mailbox_01234567".to_owned(),
+            }),
+            ("abandon", AgentOperation::AbandonPreparedExecution {
+                intent_id: "intent_mailbox_01234567".to_owned(),
+            }),
+            ("abort", AgentOperation::AbortReverseExecution {
+                intent_id: "intent_mailbox_01234567".to_owned(),
+            }),
+            ("cancel", AgentOperation::MutateExecution {
+                intent_id: "intent_mailbox_01234567".to_owned(),
+                mutation: okx_protocol::ExecutionMutationRequest::Cancel {
+                    mutation_id: "mutation_mailbox_01234567".to_owned(),
+                },
+            }),
+        ] {
+            let request_id = format!("req_mailbox_{suffix}_0123456789");
+            let request = AgentRequest {
+                schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+                request_id: request_id.clone(),
+                operation,
+            };
+            request.validate().expect("valid typed request");
+            let response = process_authenticated_raw_request(
+                &serde_json::to_vec(&request).unwrap(),
+                &request_id,
+                [1; 12],
+                [2; 12],
+            )
+            .await
+            .expect("encrypted terminal denial");
+            assert_eq!(response.status, AgentResponseStatus::Rejected);
+            assert_eq!(
+                response.failure.unwrap().code,
+                MAILBOX_EXECUTION_DISABLED_CODE
+            );
+        }
     }
 
     #[tokio::test]
