@@ -30,6 +30,9 @@ pub struct PrivateWsStatus {
     pub account_data_seen: bool,
     pub positions_data_seen: bool,
     pub orders_updates_seen: bool,
+    /// Business /orders-algo is event-only; no snapshot exists on subscribe.
+    pub algo_subscription_ready: bool,
+    pub algo_events_seen: u64,
     pub last_inbound_ms: Option<u64>,
     pub last_error: Option<String>,
 }
@@ -38,6 +41,15 @@ pub type PrivateWsEvent = AccountWsEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrivateConvergenceCursor {
+    pub generation: u64,
+    pub sequence: u64,
+}
+
+/// The only event guard for native OCO mutations. A complete REST baseline
+/// must be acquired AFTER this cursor and before the final unchanged check.
+/// This is not exchange-side atomicity against an independent external writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlgoConvergenceCursor {
     pub generation: u64,
     pub sequence: u64,
 }
@@ -59,6 +71,9 @@ pub enum PrivateConvergenceError {
 
     #[error("private websocket event journal no longer contains the convergence cursor")]
     JournalGap,
+
+    #[error("authenticated business algo stream changed during OCO readback")]
+    AlgoChanged,
 }
 
 #[derive(Debug)]
@@ -71,6 +86,11 @@ pub struct PrivateRuntimeState {
     pub(super) account_data_seen: bool,
     pub(super) positions_data_seen: bool,
     pub(super) orders_updates_seen: bool,
+    pub(super) business_logged_in: bool,
+    business_connection_id: Option<String>,
+    pub(super) algo_subscription_acked: bool,
+    algo_event_sequence: u64,
+    algo_sequence_exhausted: bool,
     pub(super) last_inbound_ms: Option<u64>,
     pub(super) last_error: Option<String>,
     event_sequence: u64,
@@ -88,6 +108,11 @@ impl PrivateRuntimeState {
             account_data_seen: false,
             positions_data_seen: false,
             orders_updates_seen: false,
+            business_logged_in: false,
+            business_connection_id: None,
+            algo_subscription_acked: false,
+            algo_event_sequence: 0,
+            algo_sequence_exhausted: false,
             last_inbound_ms: None,
             last_error: None,
             event_sequence: 0,
@@ -115,6 +140,8 @@ impl PrivateRuntimeState {
             account_data_seen: self.account_data_seen,
             positions_data_seen: self.positions_data_seen,
             orders_updates_seen: self.orders_updates_seen,
+            algo_subscription_ready: self.algo_ready(),
+            algo_events_seen: self.algo_event_sequence,
             last_inbound_ms: self.last_inbound_ms,
             last_error: self.last_error.clone(),
         }
@@ -161,11 +188,70 @@ impl PrivateRuntimeState {
         })
     }
 
+    pub fn algo_convergence_cursor(&self) -> Result<AlgoConvergenceCursor, PrivateConvergenceError> {
+        if !self.algo_ready() {
+            return Err(PrivateConvergenceError::NotReady);
+        }
+        Ok(AlgoConvergenceCursor {
+            generation: self.generation,
+            sequence: self.algo_event_sequence,
+        })
+    }
+
+    pub fn algo_convergence_unchanged(
+        &self,
+        cursor: AlgoConvergenceCursor,
+    ) -> Result<(), PrivateConvergenceError> {
+        if cursor.generation != self.generation {
+            return Err(PrivateConvergenceError::GenerationChanged);
+        }
+        if !self.algo_ready() {
+            return Err(PrivateConvergenceError::NotReady);
+        }
+        if cursor.sequence != self.algo_event_sequence {
+            return Err(PrivateConvergenceError::AlgoChanged);
+        }
+        Ok(())
+    }
+
+    pub(super) fn acknowledge_business_login(&mut self, connection_id: Option<String>) {
+        self.business_logged_in = true;
+        self.business_connection_id = connection_id;
+    }
+
+    pub(super) fn acknowledge_algo_subscription(&mut self, arg: &PrivateWsArg) {
+        if self.business_logged_in
+            && subscription_from_arg(arg) == PrivateSubscription::orders_algo_any()
+        {
+            self.algo_subscription_acked = true;
+        }
+    }
+
+    pub(super) fn observe_algo_event(&mut self, received_at_ms: u64) {
+        self.last_inbound_ms = Some(received_at_ms);
+        if let Some(next) = self.algo_event_sequence.checked_add(1) {
+            self.algo_event_sequence = next;
+        } else {
+            self.algo_sequence_exhausted = true;
+        }
+    }
+
+    fn algo_ready(&self) -> bool {
+        self.convergence_ready()
+            && self.business_logged_in
+            && self.business_connection_id.is_some()
+            && self.algo_subscription_acked
+            && !self.algo_sequence_exhausted
+    }
+
     pub(super) fn set_connecting(&mut self) {
         self.connection_state = PrivateConnectionState::Connecting;
         self.logged_in = false;
         self.connection_id = None;
         self.acknowledged_subscriptions.clear();
+        self.business_logged_in = false;
+        self.business_connection_id = None;
+        self.algo_subscription_acked = false;
     }
 
     pub(super) fn begin_generation(&mut self, generation: u64) {
@@ -177,6 +263,11 @@ impl PrivateRuntimeState {
         self.account_data_seen = false;
         self.positions_data_seen = false;
         self.orders_updates_seen = false;
+        self.business_logged_in = false;
+        self.business_connection_id = None;
+        self.algo_subscription_acked = false;
+        self.algo_event_sequence = 0;
+        self.algo_sequence_exhausted = false;
         self.last_inbound_ms = None;
         self.last_error = None;
         self.event_sequence = 0;
@@ -192,6 +283,9 @@ impl PrivateRuntimeState {
         self.logged_in = false;
         self.connection_id = None;
         self.acknowledged_subscriptions.clear();
+        self.business_logged_in = false;
+        self.business_connection_id = None;
+        self.algo_subscription_acked = false;
         self.last_error = Some(reason.into());
     }
 
@@ -276,6 +370,42 @@ pub fn connection_fingerprint(connection_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_algo_cursor_requires_business_ack_and_no_concurrent_updates() {
+        let mut state = ready_state();
+        assert_eq!(state.algo_convergence_cursor(), Err(PrivateConvergenceError::NotReady));
+        state.acknowledge_business_login(Some("business-conn".to_owned()));
+        assert_eq!(state.algo_convergence_cursor(), Err(PrivateConvergenceError::NotReady));
+        let sub = PrivateSubscription::orders_algo_any();
+        let arg = PrivateWsArg {
+            channel: sub.channel,
+            ccy: sub.ccy,
+            instrument_type: sub.instrument_type,
+            instrument_family: sub.instrument_family,
+            instrument_id: sub.instrument_id,
+        };
+        state.acknowledge_algo_subscription(&arg);
+        let cursor = state.algo_convergence_cursor().expect("native algo cursor");
+        assert_eq!(state.algo_convergence_unchanged(cursor), Ok(()));
+        state.observe_algo_event(12);
+        assert_eq!(
+            state.algo_convergence_unchanged(cursor),
+            Err(PrivateConvergenceError::AlgoChanged)
+        );
+        assert_eq!(state.status().algo_events_seen, 1);
+        let new_cursor = state.algo_convergence_cursor().expect("after event");
+        state.set_disconnected(true, "business websocket lost");
+        assert_eq!(
+            state.algo_convergence_unchanged(new_cursor),
+            Err(PrivateConvergenceError::NotReady)
+        );
+        state.begin_generation(2);
+        assert_eq!(
+            state.algo_convergence_unchanged(new_cursor),
+            Err(PrivateConvergenceError::GenerationChanged)
+        );
+    }
 
     #[test]
     fn generation_reset_revokes_all_old_private_evidence() {
