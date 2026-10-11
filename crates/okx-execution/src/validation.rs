@@ -147,6 +147,9 @@ pub enum ExecutionValidationError {
         available: String,
     },
 
+    #[error("CLOSE must consume the full unreserved position; use REDUCE for partial exits")]
+    CloseMustFullyClose,
+
     #[error("add execution requires an existing same-side position")]
     AddRequiresExistingPosition,
 
@@ -222,6 +225,11 @@ pub fn prepare_execution(
         let available = validate_close_capacity(intent, account, size, side)?;
         if intent.action == ExecutionAction::Reduce && size >= available {
             return Err(ExecutionValidationError::ReduceWouldFullyClose);
+        }
+        // CLOSE cannot be renamed partial REDUCE to bypass a durable active
+        // OCO reservation. The latter needs a separately safe algo resize.
+        if intent.action == ExecutionAction::Close && size != available {
+            return Err(ExecutionValidationError::CloseMustFullyClose);
         }
         None
     };
@@ -397,6 +405,9 @@ pub fn revalidate_execution_plan(
         let available = validate_close_capacity(&intent, account, size, plan.side)?;
         if plan.action == ExecutionAction::Reduce && size >= available {
             return Err(ExecutionValidationError::ReduceWouldFullyClose);
+        }
+        if plan.action == ExecutionAction::Close && size != available {
+            return Err(ExecutionValidationError::CloseMustFullyClose);
         }
     }
 
@@ -1328,9 +1339,22 @@ mod tests {
         );
 
         intent.action = ExecutionAction::Close;
+        intent.size = "2".to_owned();
+        assert_eq!(
+            prepare_execution(&intent, &rules, &account, None),
+            Err(ExecutionValidationError::CloseMustFullyClose)
+        );
+        intent.size = "5".to_owned();
         let close = prepare_execution(&intent, &rules, &account, None).expect("full close");
         assert_eq!(close.action, ExecutionAction::Close);
         assert_eq!(close.size, "5");
+
+        let mut relabeled_partial = close.clone();
+        relabeled_partial.size = "2".to_owned();
+        assert_eq!(
+            revalidate_execution_plan(&relabeled_partial, &rules, &account, None),
+            Err(ExecutionValidationError::CloseMustFullyClose)
+        );
     }
 
     #[test]
