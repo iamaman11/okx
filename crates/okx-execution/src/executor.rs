@@ -771,6 +771,19 @@ where
             .confirm_protective_size_amend(intent_id, mutation_id, observed_at_ms)?)
     }
 
+    /// Recover only under an independently proven same-UID FLAT account
+    /// and complete empty protective inventory; never POST unknown mutation.
+    pub fn retire_protective_size_amend_absent(
+        &mut self,
+        intent_id: &str,
+        mutation_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<ExecutionLedgerEntry, OrderExecutorError> {
+        Ok(self.ledger.retire_protective_size_amend_absent(
+            intent_id, mutation_id, observed_at_ms,
+        )?)
+    }
+
     pub fn prepare_protective_cleanup(
         &mut self,
         intent_id: &str,
