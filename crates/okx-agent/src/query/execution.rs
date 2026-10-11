@@ -1056,7 +1056,11 @@ async fn mutate_execution(
         ));
     }
 
-    if let ExecutionMutationRequest::ShrinkProtection { mutation_id, new_size } = mutation {
+    if let ExecutionMutationRequest::ShrinkProtection {
+        mutation_id,
+        new_size,
+    } = mutation
+    {
         return shrink_owned_protection_size(
             request,
             context,
