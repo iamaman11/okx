@@ -1305,6 +1305,7 @@ async fn shrink_owned_protection_size(
         ));
     }
     let observed_at_ms = utc_now_ms();
+    let expires_at_ms = admission.timing.exp_time_ms();
     let result = execution
         .shrink_protective_size_demo_authorized(
             &admission.preflight,
@@ -1316,7 +1317,9 @@ async fn shrink_owned_protection_size(
             admission.timing,
             observed_at_ms,
             || async {
-                protective_readback_in_ttl(started_ms, utc_now_ms())
+                let finished_at_ms = utc_now_ms();
+                protective_readback_in_ttl(started_ms, finished_at_ms)
+                    && finished_at_ms <= expires_at_ms
                     && matches!(
                         private_ws.convergence_window(cursor).await,
                         Ok(window) if window.events.is_empty()
