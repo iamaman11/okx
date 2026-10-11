@@ -1839,6 +1839,21 @@ mod tests {
                 Err(OrderExecutorError::ProtectionIdentityMismatch)
             ), "rejected {defect}");
         }
+        // HEDGE SHORT protection uses the opposite exit side, and never
+        // borrows a LONG leg's otherwise matching algo identity.
+        let mut short_record = record.clone();
+        short_record.plan.position_side = PositionSide::Short;
+        short_record.plan.side = OrderSide::Sell;
+        let mut short_algo = algo.clone();
+        short_algo.position_side = "short".to_owned();
+        short_algo.side = "buy".to_owned();
+        validate_effective_protective_leg(&short_record, &short_algo, Decimal::ONE)
+            .expect("matching SHORT exit");
+        short_algo.side = "sell".to_owned();
+        assert!(validate_effective_protective_leg(
+            &short_record, &short_algo, Decimal::ONE
+        ).is_err());
+
         let mut wrong = algo;
         wrong.stop_loss_trigger_price = "0.08".to_owned();
         assert!(matches!(
@@ -1909,6 +1924,8 @@ mod tests {
             order_type: "oco".to_owned(),
             close_fraction: String::new(),
         };
+        let mut wrong_size = algo.clone();
+        wrong_size.size = "0.2".to_owned();
         let gateway = ProtectiveLookupGateway::new(Ok(algo));
         let executor = OrderExecutor::enabled_for_test(ledger, gateway);
 
@@ -1923,6 +1940,16 @@ mod tests {
                 covered_size: "0.4".to_owned(),
             })
         );
+        let (bad_root, bad_ledger) = ledger("protected-wrong-venue-size");
+        let bad_gateway = ProtectiveLookupGateway::new(Ok(wrong_size));
+        let bad_executor = OrderExecutor::enabled_for_test(bad_ledger, bad_gateway);
+        assert!(matches!(
+            bad_executor
+                .protection_resolution(&record, &order, ExchangeOrderState::Canceled)
+                .await,
+            Err(OrderExecutorError::ProtectionIdentityMismatch)
+        ));
+        let _ = fs::remove_dir_all(bad_root);
 
         let _ = fs::remove_dir_all(root);
     }
