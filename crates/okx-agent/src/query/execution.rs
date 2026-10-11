@@ -491,7 +491,10 @@ async fn prepare_risk_increasing(
                             private_ws.convergence_window(cursor).await,
                             Ok(window) if window.events.is_empty()
                         )
-                        && private_ws.algo_convergence_unchanged(algo_cursor).await.is_ok()
+                        && private_ws
+                            .algo_convergence_unchanged(algo_cursor)
+                            .await
+                            .is_ok()
                 },
             )
             .await;
@@ -969,7 +972,10 @@ async fn submit_prepared(
                                 private_ws.convergence_window(cursor).await,
                                 Ok(window) if window.events.is_empty()
                             )
-                            && private_ws.algo_convergence_unchanged(algo_cursor).await.is_ok()
+                            && private_ws
+                                .algo_convergence_unchanged(algo_cursor)
+                                .await
+                                .is_ok()
                     },
                 )
                 .await?

@@ -188,7 +188,9 @@ impl PrivateRuntimeState {
         })
     }
 
-    pub fn algo_convergence_cursor(&self) -> Result<AlgoConvergenceCursor, PrivateConvergenceError> {
+    pub fn algo_convergence_cursor(
+        &self,
+    ) -> Result<AlgoConvergenceCursor, PrivateConvergenceError> {
         if !self.algo_ready() {
             return Err(PrivateConvergenceError::NotReady);
         }
@@ -374,9 +376,15 @@ mod tests {
     #[test]
     fn native_algo_cursor_requires_business_ack_and_no_concurrent_updates() {
         let mut state = ready_state();
-        assert_eq!(state.algo_convergence_cursor(), Err(PrivateConvergenceError::NotReady));
+        assert_eq!(
+            state.algo_convergence_cursor(),
+            Err(PrivateConvergenceError::NotReady)
+        );
         state.acknowledge_business_login(Some("business-conn".to_owned()));
-        assert_eq!(state.algo_convergence_cursor(), Err(PrivateConvergenceError::NotReady));
+        assert_eq!(
+            state.algo_convergence_cursor(),
+            Err(PrivateConvergenceError::NotReady)
+        );
         let sub = PrivateSubscription::orders_algo_any();
         let arg = PrivateWsArg {
             channel: sub.channel,

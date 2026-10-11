@@ -2,7 +2,9 @@ use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
 use okx_api::{BalanceSnapshot, Credentials, OkxEnvironment, PendingOrder, Position, RateBudget};
-use okx_ws::{PrivateChannel, PrivateInboundMessage, PrivateSubscription, PrivateWsConnection, PrivateWsError};
+use okx_ws::{
+    PrivateChannel, PrivateInboundMessage, PrivateSubscription, PrivateWsConnection, PrivateWsError,
+};
 use tokio::{
     sync::{RwLock, watch},
     time::{Instant, interval, sleep_until},
@@ -133,11 +135,13 @@ impl PrivateWsCoordinator {
                         self.environment,
                         self.rate_budget.clone(),
                         format!("business-generation-{}", self.generation),
-                    ).await;
+                    )
+                    .await;
                     let result = match business {
-                        Ok(mut business) => self.run_generation(
-                            &mut connection, &mut business, &mut shutdown,
-                        ).await,
+                        Ok(mut business) => {
+                            self.run_generation(&mut connection, &mut business, &mut shutdown)
+                                .await
+                        }
                         Err(error) => Err(PrivateRuntimeError::WebSocket(error)),
                     };
                     match result {
