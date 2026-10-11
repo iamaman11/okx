@@ -1213,7 +1213,14 @@ fn validate_protection_link(record: &ExecutionRecord) -> Result<(), ExecutionLed
             || amend.algo_order_id.is_empty()
             || !amend.algo_order_id.bytes().all(|b| b.is_ascii_digit())
             || protection.algo_order_id.as_deref() != Some(amend.algo_order_id.as_str())
-            || protection.status != ProtectiveOrderStatus::Active
+            // RETIRED_ABSENT can progress through a durable FLAT+absent
+            // cleanup without ever claiming the target size was applied.
+            // All non-retired resizes still require ACTIVE protection.
+            || (protection.status != ProtectiveOrderStatus::Active
+                && !(amend.state == ProtectiveSizeAmendState::RetiredAbsent
+                    && protection.status == ProtectiveOrderStatus::CleanedUp
+                    && protection.cleanup.as_ref().is_some_and(|cleanup|
+                        cleanup.state == ProtectiveCleanupState::ConfirmedAbsent)))
             || !record.state.is_terminal()
             || prior.is_none()
             || target.is_none()
@@ -1223,7 +1230,9 @@ fn validate_protection_link(record: &ExecutionRecord) -> Result<(), ExecutionLed
                     ProtectiveSizeAmendState::Confirmed => amend.target_size.as_str(),
                     _ => amend.previous_size.as_str(),
                 })
-            || (protection.cleanup.is_some() && amend.state != ProtectiveSizeAmendState::Confirmed)
+            || (protection.cleanup.is_some()
+                && !matches!(amend.state,
+                    ProtectiveSizeAmendState::Confirmed | ProtectiveSizeAmendState::RetiredAbsent))
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "protective resize state does not match exact owned algo/size",
