@@ -1,8 +1,8 @@
 # Stage 5 implementation checklist and live-admission contract
 
-This is an **implementation checklist subordinate to [canonical roadmap #160](https://github.com/iamaman11/okx/issues/160)**, not another stage or product decision owner. Stage 4 exchange evidence belongs to #223. At the 2026-10-11 checkpoint, Stage 5 is **OPEN/NOT THE ACTIVE STAGE**, production writes **DISABLED**. Existing source-only 5A work #263 (durable STOP_NEW_RISK), #264 (observed account breach latch) and #267 (complete SWAP/FUTURES daily-loss evidence) must be reused, not duplicated. Stage 4C G1/G2 and G3-A/B Demo physical proof passed; the exact G3C AMEND source fix #279 was CI accepted and installed but its post-fix physical AMEND remains open. 5A physical tests, 5B, 5C and Live activation remain unaccepted.
+This is an **implementation checklist subordinate to [#160](https://github.com/iamaman11/okx/issues/160)**, not an additional plan or trading authority. Stage 4 exchange proof is [#223 G3C terminal acceptance](https://github.com/iamaman11/okx/issues/223#issuecomment-6103793654). As of 2026-10-11, Stage 5 remains **OPEN/NOT ACTIVE** and Production Live writes **DISABLED**. Existing source-only 5A changes #263 (durable STOP_NEW_RISK), #264 (account breach latch), #267 (full SWAP/FUTURES daily evidence) are retained. Stage 4C G1/G2, G3-A/B and **G3C exact live Demo reducing CLOSE AMEND plus terminal flat/restart PHYSICAL PASS**; remaining G3-D/E/F and G4 are still open. Stage 5A physical T1–T5, 5B, 5C and final Live activation remain unaccepted.
 
-**Current single-work pointer (2026-10-11):** [ROADMAP operative cursor](ROADMAP.md) → **4C-G3C physical AMEND**, NOT Stage 5. Then remaining G3, G4; after independent Stage-4 terminal T1–T5 proof proceed 5A-1 → 5A-2 → 5A-3 → 5B-1 → 5B-2 → 5C-1 → 5C-2 → 5C-3. Software and CI PASS are not exchange physical PASS. Stage-3 scientific eligibility remains a separate requirement only before Live orders directed by that strategy.
+**Current single-work pointer (2026-10-11):** [ROADMAP](ROADMAP.md) → **4C-G3-D ADD/REDUCE/HEDGE**, not Stage 5. After that G3-E REVERSE, G3-F negative/race, G4 uncertain-ACK/recovery; only after full Stage-4 closure proceed 5A-1 → 5A-2 → 5A-3 → 5B-1 → 5B-2 → 5C-1 → 5C-2 → 5C-3. Positive scientific strategy eligibility remains an independent precondition for strategy-directed Live trading.
 
 ## Order of work and responsibility
 
@@ -23,7 +23,7 @@ All work reuses existing crates and the single Windows agent. Stages are a **str
 
 ## Additional test cases per Stage-5 work ID — strictly after predecessors
 
-This is a **coverage ledger**, not authority to deploy a live executor. Stage-4C G3C, remaining G3 and G4 must independently close before these Stage-5 acceptance steps. Existing merged 5A source progress is retained, not parallel Stage-5 work. Each row below has a single owner, negative fixture, installed proof and terminal physical assertion.
+This is a **coverage ledger**, not a Live authorization. G3C is physically accepted; G3-D/E/F and G4 must still independently close before Stage-5 acceptance. Already merged source work remains reused, not an additional executor or parallel project.
 
 | ID / status | Smallest remaining deliverable and exact owner | Deterministic/fault test (T1/T2) | Black-box/installed acceptance (T3/T4/T5) |
 | --- | --- | --- | --- |
