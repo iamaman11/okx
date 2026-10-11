@@ -33,6 +33,17 @@ use crate::{
 
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
 
+/// Existing Demo durable history MUST stay at its exact accepted path.
+/// Production gets an independent file with no implicit import, fallback,
+/// copying, renaming or lossy schema migration.
+fn execution_ledger_file_name(environment: OkxEnvironment) -> &'static str {
+    if environment.demo {
+        "execution-ledger.json"
+    } else {
+        "execution-ledger-production.json"
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionReconciliation {
     NotRequired,
@@ -124,7 +135,7 @@ impl ExecutionRuntime {
         let executor_account = AccountApi::new(rest.clone());
         let trade = TradeApi::new(rest);
         let ledger = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join("execution-ledger.json")),
+            ExecutionLedgerStore::at(root.join(execution_ledger_file_name(environment))),
             observed_at_ms,
         )?;
         Ok(Self {
@@ -139,6 +150,26 @@ impl ExecutionRuntime {
 
     pub const fn mode(&self) -> ExecutionRuntimeMode {
         self.mode
+    }
+
+    /// Single admission authority reused by every exchange POST wrapper.
+    /// The operator's runtime mode and the independent Demo REST preflight
+    /// must agree on the SAME UID as the entire durable managed inventory.
+    fn demo_mutation_admitted(
+        &self,
+        preflight: &ExecutorPreflightSnapshot,
+        ledger: &DurableExecutionLedger,
+    ) -> bool {
+        self.environment.demo
+            && self.mode == ExecutionRuntimeMode::DemoAcceptance
+            && preflight.accepted
+            && preflight.credential.accepted
+            && !preflight.credential.production_environment
+            && !preflight.credential.account_uid_fingerprint.is_empty()
+            && ledger.entries().all(|entry| {
+                entry.record.plan.account_uid_fingerprint
+                    == preflight.credential.account_uid_fingerprint
+            })
     }
 
     pub const fn demo_mutation_acceptance_requested(&self) -> bool {
@@ -226,15 +257,11 @@ impl ExecutionRuntime {
         timing: MutationTiming,
         observed_at_ms: u64,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance
-            || !preflight.accepted
-            || !preflight.credential.accepted
-        {
-            self.executor.lock().await.disable_mutations();
+        let mut executor = self.executor.lock().await;
+        if !self.demo_mutation_admitted(preflight, executor.ledger()) {
+            executor.disable_mutations();
             return Ok(None);
         }
-
-        let mut executor = self.executor.lock().await;
         executor.enable_demo_acceptance(self.environment)?;
         let result = executor
             .submit_prepared(intent_id, timing, observed_at_ms)
@@ -484,15 +511,11 @@ impl ExecutionRuntime {
         timing: MutationTiming,
         observed_at_ms: u64,
     ) -> AgentResult<Option<Result<MutationSubmitDisposition, OrderExecutorError>>> {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance
-            || !preflight.accepted
-            || !preflight.credential.accepted
-        {
-            self.executor.lock().await.disable_mutations();
+        let mut executor = self.executor.lock().await;
+        if !self.demo_mutation_admitted(preflight, executor.ledger()) {
+            executor.disable_mutations();
             return Ok(None);
         }
-
-        let mut executor = self.executor.lock().await;
         executor.enable_demo_acceptance(self.environment)?;
         let result = executor
             .submit_order_mutation(intent_id, mutation_id, timing, observed_at_ms)
@@ -514,14 +537,11 @@ impl ExecutionRuntime {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = bool>,
     {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance
-            || !preflight.accepted
-            || !preflight.credential.accepted
-        {
-            self.executor.lock().await.disable_mutations();
+        let mut executor = self.executor.lock().await;
+        if !self.demo_mutation_admitted(preflight, executor.ledger()) {
+            executor.disable_mutations();
             return Ok(None);
         }
-        let mut executor = self.executor.lock().await;
         executor.enable_demo_acceptance(self.environment)?;
         let result = executor
             .submit_protective_size_amend_fenced(request, final_private_ws_fence)
@@ -625,14 +645,11 @@ impl ExecutionRuntime {
         timing: MutationTiming,
         observed_at_ms: u64,
     ) -> AgentResult<Option<Result<MutationSubmitDisposition, OrderExecutorError>>> {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance
-            || !preflight.accepted
-            || !preflight.credential.accepted
-        {
-            self.executor.lock().await.disable_mutations();
+        let mut executor = self.executor.lock().await;
+        if !self.demo_mutation_admitted(preflight, executor.ledger()) {
+            executor.disable_mutations();
             return Ok(None);
         }
-        let mut executor = self.executor.lock().await;
         executor.enable_demo_acceptance(self.environment)?;
         let result = executor
             .submit_prepared_protective_cleanup(intent_id, mutation_id, timing, observed_at_ms)
