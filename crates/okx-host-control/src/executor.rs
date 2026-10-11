@@ -150,6 +150,20 @@ impl HostExecutor {
             }));
         }
 
+        // A mismatch must never terminate a still-running owner. The desired state
+        // can be restored after a controller crash, so this guard belongs in
+        // automatic reconciliation as well as in the manual profile command.
+        // No verified native quiescence witness exists yet: fail closed.
+        if running && self.running_profile != Some(self.desired_profile) {
+            self.last_reconcile = "BLOCKED_PROFILE_HANDOFF_NO_QUIESCENCE_PROOF".to_owned();
+            return Ok(json!({
+                "disposition": self.last_reconcile,
+                "reason": HostControlError::ProfileHandoffProofRequired.code(),
+                "running_profile": self.running_profile,
+                "desired_profile": self.desired_profile
+            }));
+        }
+
         match self.desired_agent {
             AgentDesired::Stopped => {
                 if running {
@@ -160,20 +174,7 @@ impl HostExecutor {
                 }
             }
             AgentDesired::Running => {
-                if running && self.running_profile != Some(self.desired_profile) {
-                    self.terminate_agent_owned()?;
-                    match self.start_agent_process(self.desired_profile) {
-                        Ok(pid) => {
-                            self.last_reconcile =
-                                format!("SWITCHED_{:?}_AGENT_PID_{pid}", self.desired_profile);
-                        }
-                        Err(error) => {
-                            self.schedule_restart();
-                            self.last_reconcile = format!("PROFILE_SWITCH_FAILED_{}", error.code());
-                            return Err(error);
-                        }
-                    }
-                } else if running {
+                if running {
                     if self.agent_started_at.is_some_and(|started| {
                         started.elapsed() >= Duration::from_secs(HEALTHY_AGENT_SECS)
                     }) {
@@ -467,6 +468,10 @@ impl HostExecutor {
     }
 
     fn switch_agent_profile(&mut self, profile: AgentProfile) -> HostControlResult<Value> {
+        // The CONTROL command is not a flat-account witness. Do not persist a
+        // different desired profile before proof, even if the child is down:
+        // old exchange exposure or an UNKNOWN durable intent may survive.
+        ensure_profile_unchanged(self.desired_profile, self.running_profile, profile)?;
         self.require_agent_binary()?;
         if self.agent_is_running()? && self.running_profile == Some(profile) {
             self.persist_desired(AgentDesiredState {
@@ -520,8 +525,15 @@ impl HostExecutor {
     }
 
     fn stop_agent(&mut self) -> HostControlResult<Value> {
-        self.persist_desired(AgentDesiredState::stopped())?;
         let was_running = self.agent_is_running()?;
+        ensure_profile_unchanged(
+            self.desired_profile,
+            if was_running { self.running_profile } else { None },
+            self.desired_profile,
+        )?;
+        // STOP is not a change of environment; preserve the Demo identity so
+        // a later START/RESTART cannot silently become Production.
+        self.persist_desired(AgentDesiredState::stopped_on(self.desired_profile))?;
         if was_running {
             self.terminate_agent_owned()?;
         }
@@ -536,11 +548,13 @@ impl HostExecutor {
     }
 
     fn restart_agent(&mut self) -> HostControlResult<Value> {
-        let profile = if self.desired_agent == AgentDesired::Running {
-            self.desired_profile
-        } else {
-            AgentProfile::Production
-        };
+        let profile = self.desired_profile;
+        let running = self.agent_is_running()?;
+        ensure_profile_unchanged(
+            self.desired_profile,
+            if running { self.running_profile } else { None },
+            profile,
+        )?;
         self.persist_desired(AgentDesiredState {
             agent: AgentDesired::Running,
             profile,
@@ -663,7 +677,13 @@ impl HostExecutor {
 
     pub fn install_verified_agent(&mut self, bytes: &[u8]) -> HostControlResult<()> {
         let should_restore = self.desired_agent == AgentDesired::Running;
-        if self.agent_is_running()? {
+        let running = self.agent_is_running()?;
+        ensure_profile_unchanged(
+            self.desired_profile,
+            if running { self.running_profile } else { None },
+            self.desired_profile,
+        )?;
+        if running {
             self.terminate_agent_owned()?;
         }
 
@@ -1214,6 +1234,20 @@ fn command_available(command: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Until the current agent can attest a fresh quiescent account+ledger state,
+/// a raw CONTROL operation cannot change the bound exchange environment.
+/// This is intentionally narrower than live trading admission.
+fn ensure_profile_unchanged(
+    committed: AgentProfile,
+    running: Option<AgentProfile>,
+    requested: AgentProfile,
+) -> HostControlResult<()> {
+    if committed != requested || running.is_some_and(|active| active != requested) {
+        return Err(HostControlError::ProfileHandoffProofRequired);
+    }
+    Ok(())
+}
+
 pub fn install_current_executable(destination: &Path) -> HostControlResult<Value> {
     let source = std::env::current_exe()?;
     if !source.is_file() {
@@ -1237,6 +1271,43 @@ pub fn install_current_executable(destination: &Path) -> HostControlResult<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_handoff_requires_real_quiescence_not_a_control_request() {
+        use AgentProfile::{DemoAcceptance as Demo, Production as Prod};
+
+        assert!(ensure_profile_unchanged(Demo, Some(Demo), Demo).is_ok());
+        assert!(ensure_profile_unchanged(Demo, None, Demo).is_ok());
+        assert!(ensure_profile_unchanged(Prod, Some(Prod), Prod).is_ok());
+        for (committed, running, requested) in [
+            (Demo, Some(Demo), Prod),
+            (Demo, None, Prod),
+            (Prod, Some(Prod), Demo),
+            (Prod, None, Demo),
+            // A stale persisted target can never stop the still-running source
+            // merely because reconcile_desired() sees a profile mismatch.
+            (Prod, Some(Demo), Prod),
+            (Demo, Some(Prod), Demo),
+        ] {
+            assert!(matches!(
+                ensure_profile_unchanged(committed, running, requested),
+                Err(HostControlError::ProfileHandoffProofRequired)
+            ));
+        }
+    }
+
+    #[test]
+    fn raw_profile_switch_refuses_before_binary_or_desired_state_mutation() {
+        let mut host = HostExecutor::canonical().expect("controller");
+        host.desired_agent = AgentDesired::Running;
+        host.desired_profile = AgentProfile::DemoAcceptance;
+        assert!(matches!(
+            host.execute(HostControlOperation::RestoreProductionAgent),
+            Err(HostControlError::ProfileHandoffProofRequired)
+        ));
+        assert_eq!(host.desired_profile, AgentProfile::DemoAcceptance);
+        assert_eq!(host.desired_agent, AgentDesired::Running);
+    }
 
     #[test]
     fn canonical_root_is_fixed() {
