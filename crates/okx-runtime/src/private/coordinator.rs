@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
 use okx_api::{BalanceSnapshot, Credentials, OkxEnvironment, PendingOrder, Position, RateBudget};
-use okx_ws::{PrivateInboundMessage, PrivateWsConnection, PrivateWsError};
+use okx_ws::{PrivateChannel, PrivateInboundMessage, PrivateSubscription, PrivateWsConnection, PrivateWsError};
 use tokio::{
     sync::{RwLock, watch},
     time::{Instant, interval, sleep_until},
@@ -62,6 +62,19 @@ impl PrivateWsHandle {
     ) -> Result<PrivateConvergenceWindow, PrivateConvergenceError> {
         self.state.read().await.convergence_window(cursor)
     }
+
+    pub async fn algo_convergence_cursor(
+        &self,
+    ) -> Result<super::state::AlgoConvergenceCursor, PrivateConvergenceError> {
+        self.state.read().await.algo_convergence_cursor()
+    }
+
+    pub async fn algo_convergence_unchanged(
+        &self,
+        cursor: super::state::AlgoConvergenceCursor,
+    ) -> Result<(), PrivateConvergenceError> {
+        self.state.read().await.algo_convergence_unchanged(cursor)
+    }
 }
 
 impl PrivateWsCoordinator {
@@ -116,7 +129,18 @@ impl PrivateWsCoordinator {
                     self.generation = self.generation.saturating_add(1);
                     self.state.write().await.begin_generation(self.generation);
 
-                    match self.run_generation(&mut connection, &mut shutdown).await {
+                    let business = PrivateWsConnection::connect_business_with_rate_budget(
+                        self.environment,
+                        self.rate_budget.clone(),
+                        format!("business-generation-{}", self.generation),
+                    ).await;
+                    let result = match business {
+                        Ok(mut business) => self.run_generation(
+                            &mut connection, &mut business, &mut shutdown,
+                        ).await,
+                        Err(error) => Err(PrivateRuntimeError::WebSocket(error)),
+                    };
+                    match result {
                         Ok(outcome) => outcome,
                         Err(error) => GenerationOutcome::Reconnect {
                             saw_data: false,
@@ -161,16 +185,21 @@ impl PrivateWsCoordinator {
     async fn run_generation(
         &mut self,
         connection: &mut PrivateWsConnection,
+        business: &mut PrivateWsConnection,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Result<GenerationOutcome, PrivateRuntimeError> {
         let timestamp = Utc::now().timestamp().max(0).to_string();
         let login = self.credentials.websocket_login_material(&timestamp)?;
         connection.login(&login).await?;
+        business.login(&login).await?;
 
         let mut heartbeat = interval(Duration::from_secs(HEARTBEAT_TICK_SECONDS));
         let mut last_inbound = Instant::now();
+        let mut last_business_inbound = Instant::now();
         let mut awaiting_pong_since: Option<Instant> = None;
+        let mut awaiting_business_pong_since: Option<Instant> = None;
         let mut subscriptions_sent = false;
+        let mut business_subscriptions_sent = false;
         let mut saw_data = false;
 
         loop {
@@ -299,6 +328,12 @@ impl PrivateWsCoordinator {
                                             .collect::<Result<Vec<_>, _>>()?;
                                         PrivateWsEvent::Orders(updates)
                                     }
+                                    PrivateChannel::OrdersAlgo => {
+                                        return Ok(GenerationOutcome::Reconnect {
+                                            saw_data,
+                                            reason: "algo events on wrong authenticated socket".to_owned(),
+                                        });
+                                    }
                                 };
 
                                 saw_data = true;
@@ -308,6 +343,71 @@ impl PrivateWsCoordinator {
                                     .observe_event(event, now_ms());
                             }
                             PrivateInboundMessage::Other(_) => {}
+                        },
+                    }
+                }
+                message = business.next() => {
+                    last_business_inbound = Instant::now();
+                    match message {
+                        Err(error) => return Ok(GenerationOutcome::Reconnect {
+                            saw_data, reason: format!("business algo socket: {error}"),
+                        }),
+                        Ok(None) => return Ok(GenerationOutcome::Reconnect {
+                            saw_data, reason: "business algo socket closed".to_owned(),
+                        }),
+                        Ok(Some(message)) => match message {
+                            PrivateInboundMessage::Pong => awaiting_business_pong_since = None,
+                            PrivateInboundMessage::Login { code, message, connection_id } => {
+                                if code != "0" {
+                                    return Ok(GenerationOutcome::Reconnect {
+                                        saw_data, reason: format!("business login denied {code}: {message}"),
+                                    });
+                                }
+                                self.state.write().await.acknowledge_business_login(connection_id);
+                                if !business_subscriptions_sent {
+                                    business.subscribe(&[PrivateSubscription::orders_algo_any()]).await?;
+                                    business_subscriptions_sent = true;
+                                }
+                            }
+                            PrivateInboundMessage::Subscribed { arg, .. } => {
+                                if arg.channel != PrivateChannel::OrdersAlgo
+                                    || !self.state.read().await.business_logged_in {
+                                    return Ok(GenerationOutcome::Reconnect {
+                                        saw_data, reason: "business algo subscription unexpected".to_owned(),
+                                    });
+                                }
+                                self.state.write().await.acknowledge_algo_subscription(&arg);
+                            }
+                            PrivateInboundMessage::Data { arg, data } => {
+                                if arg.channel != PrivateChannel::OrdersAlgo
+                                    || !self.state.read().await.business_logged_in {
+                                    return Ok(GenerationOutcome::Reconnect {
+                                        saw_data, reason: "business algo event unauthenticated or malformed".to_owned(),
+                                    });
+                                }
+                                // Event-only, no initial snapshot. ANY update invalidates
+                                // an earlier exact-REST protection inventory read.
+                                let mut state = self.state.write().await;
+                                for _ in 0..data.len().max(1) {
+                                    state.observe_algo_event(now_ms());
+                                }
+                                saw_data = true;
+                            }
+                            PrivateInboundMessage::Error { code, message, .. } => {
+                                return Ok(GenerationOutcome::Reconnect {
+                                    saw_data,
+                                    reason: format!("business algo error {}: {}",
+                                        code.as_deref().unwrap_or("<none>"),
+                                        message.as_deref().unwrap_or("<none>")),
+                                });
+                            }
+                            PrivateInboundMessage::Notice { .. }
+                            | PrivateInboundMessage::Unsubscribed { .. }
+                            | PrivateInboundMessage::Other(_) => {
+                                return Ok(GenerationOutcome::Reconnect {
+                                    saw_data, reason: "business algo stream was invalidated".to_owned(),
+                                });
+                            }
                         },
                     }
                 }
@@ -323,9 +423,20 @@ impl PrivateWsCoordinator {
                         connection.send_application_ping().await?;
                         awaiting_pong_since = Some(Instant::now());
                     }
+                    if let Some(sent_at) = awaiting_business_pong_since {
+                        if sent_at.elapsed() >= Duration::from_secs(PONG_TIMEOUT_SECONDS) {
+                            return Ok(GenerationOutcome::Reconnect {
+                                saw_data, reason: "business algo heartbeat timed out".to_owned(),
+                            });
+                        }
+                    } else if last_business_inbound.elapsed() >= Duration::from_secs(IDLE_BEFORE_PING_SECONDS) {
+                        business.send_application_ping().await?;
+                        awaiting_business_pong_since = Some(Instant::now());
+                    }
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
+                        let _ = business.close().await;
                         let _ = connection.close().await;
                         return Ok(GenerationOutcome::Shutdown);
                     }
