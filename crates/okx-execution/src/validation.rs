@@ -116,7 +116,7 @@ pub enum ExecutionValidationError {
     MissingOpenRiskEvidence,
 
     #[error(
-        "protected risk-increasing order must be FOK or IOC: persistent partially filled parent does not prove attached TP/SL"
+        "protected risk-increasing order requires FOK; IOC partial-fill cancellation is not yet covered by the durable protection model"
     )]
     ProtectedParentCanRemainPartiallyFilled,
 
@@ -195,16 +195,19 @@ pub enum PreMutationRiskDisposition {
 
 /// OKX activates ordinary attached TP/SL after the main order is terminal:
 /// fully filled or partially filled with its remainder cancelled (1 Jul 2026
-/// rule). A persistent LIMIT/POST_ONLY may leave filled exposure without
-/// active protection. Fail closed at BOTH prepare and pre-SUBMITTING send.
+/// rule). LIMIT/POST_ONLY may leave filled exposure without active protection.
+/// IOC can partially fill and cancel the remainder, resulting in a CANCELED
+/// parent WITH exposure. The aggregate-protection check accepts FILLED parents
+/// only, so IOC is not admitted until its durable coverage model is accepted.
+/// Fail closed at prepare, revalidation and pre-SUBMITTING send.
 ///
-/// This is not proof of atomic/slippage-free protection for FOK/IOC; exact
-/// attached algo coverage still requires independent exchange readback.
+/// FOK also needs independent exchange readback proving the attached algo;
+/// it cannot guarantee zero time between fill and activation.
 pub(crate) fn require_terminal_protected_parent(
     action: ExecutionAction,
     order_type: OrderType,
 ) -> Result<(), ExecutionValidationError> {
-    if action.is_risk_increasing() && !matches!(order_type, OrderType::Fok | OrderType::Ioc) {
+    if action.is_risk_increasing() && order_type != OrderType::Fok {
         return Err(ExecutionValidationError::ProtectedParentCanRemainPartiallyFilled);
     }
     Ok(())
@@ -389,6 +392,7 @@ pub fn revalidate_execution_plan(
     let (size, _) = validate_order_mechanics(&plan.size, &plan.price, rules)?;
 
     if plan.action.is_risk_increasing() {
+        require_terminal_protected_parent(plan.action, plan.order_type)?;
         let evidence = plan
             .open_risk
             .as_ref()
@@ -1284,13 +1288,13 @@ mod tests {
             ExecutionAction::Add,
             ExecutionAction::Hedge,
         ] {
-            for order_type in [OrderType::Limit, OrderType::PostOnly] {
+            for order_type in [OrderType::Limit, OrderType::PostOnly, OrderType::Ioc] {
                 assert_eq!(
                     require_terminal_protected_parent(action, order_type),
                     Err(ExecutionValidationError::ProtectedParentCanRemainPartiallyFilled)
                 );
             }
-            for order_type in [OrderType::Fok, OrderType::Ioc] {
+            for order_type in [OrderType::Fok] {
                 assert_eq!(
                     require_terminal_protected_parent(action, order_type),
                     Ok(())
@@ -1315,17 +1319,39 @@ mod tests {
         let account = account();
         let candidate = open_candidate(&rules, PositionDirection::Long);
         let mut intent = open_intent(&rules, &account, &candidate, PositionSide::Long);
-        for unsafe_order_type in [OrderType::Limit, OrderType::PostOnly] {
+        for unsafe_order_type in [OrderType::Limit, OrderType::PostOnly, OrderType::Ioc] {
             intent.order_type = unsafe_order_type;
             assert_eq!(
                 prepare_execution(&intent, &rules, &account, Some(&candidate)),
                 Err(ExecutionValidationError::ProtectedParentCanRemainPartiallyFilled)
             );
         }
-        for terminal_type in [OrderType::Fok, OrderType::Ioc] {
-            intent.order_type = terminal_type;
-            assert!(prepare_execution(&intent, &rules, &account, Some(&candidate)).is_ok());
+        intent.order_type = OrderType::Fok;
+        let verified = prepare_execution(&intent, &rules, &account, Some(&candidate))
+            .expect("FOK remains admissible");
+        // Revalidation rejects a legacy or tampered plan before SUBMITTING.
+        for unsafe_order_type in [OrderType::Limit, OrderType::PostOnly, OrderType::Ioc] {
+            let mut legacy = verified.clone();
+            legacy.order_type = unsafe_order_type;
+            assert_eq!(
+                revalidate_execution_plan(
+                    &legacy,
+                    &rules,
+                    &account,
+                    Some(verified.open_risk.as_ref().unwrap().fee_generation.as_str()),
+                ),
+                Err(ExecutionValidationError::ProtectedParentCanRemainPartiallyFilled)
+            );
         }
+        assert!(
+            revalidate_execution_plan(
+                &verified,
+                &rules,
+                &account,
+                Some(verified.open_risk.as_ref().unwrap().fee_generation.as_str()),
+            )
+            .is_ok()
+        );
     }
 
     #[test]
