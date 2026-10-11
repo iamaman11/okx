@@ -497,6 +497,38 @@ where
         {
             return Err(OrderExecutorError::ProtectionCoverageUnproven);
         }
+        let mut same_side = Decimal::ZERO;
+        let mut opposite_side = Decimal::ZERO;
+        for position in account
+            .positions
+            .iter()
+            .filter(|position| position.instrument_id == plan.instrument_id)
+        {
+            let amount = Decimal::from_str(&position.position)
+                .map_err(|_| OrderExecutorError::ProtectionCoverageUnproven)?;
+            if amount < Decimal::ZERO
+                || position.margin_mode != plan.trade_mode.as_str()
+            {
+                return Err(OrderExecutorError::ProtectionCoverageUnproven);
+            }
+            if position.position_side == plan.position_side.as_str() {
+                same_side = same_side
+                    .checked_add(amount)
+                    .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
+            } else if matches!(position.position_side.as_str(), "long" | "short") {
+                opposite_side = opposite_side
+                    .checked_add(amount)
+                    .ok_or(OrderExecutorError::ProtectionCoverageUnproven)?;
+            } else {
+                return Err(OrderExecutorError::ProtectionCoverageUnproven);
+            }
+        }
+        if (plan.action == crate::ExecutionAction::Add && same_side <= Decimal::ZERO)
+            || (plan.action == crate::ExecutionAction::Hedge
+                && (same_side != Decimal::ZERO || opposite_side <= Decimal::ZERO))
+        {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
         let records: Vec<_> = self
             .ledger
             .entries()
