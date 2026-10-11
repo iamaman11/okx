@@ -12,23 +12,22 @@ Core rules:
 - analysis owns deterministic calculations;
 - execution owns all mutations;
 - transport only transports;
-- Cloudflare MCP is the primary ChatGPT data plane; GitHub encrypted DATA is fallback/parity only;
+- Cloudflare MCP is the primary ChatGPT data plane; GitHub encrypted DATA is read-only diagnostic/parity only;
 - Windows control only controls lifecycle/deployment;
 - GitHub-hosted CI is the normal build authority;
 - installed binaries are verified artifacts, not mutable-workspace builds;
 - uncertain mutation outcome is reconciled, never blindly replayed.
 
 
-## Current operating authority (2026-10-11 checkpoint)
+## Current operating authority — 2026-10-11
 
-**One current decision source:** [#160](https://github.com/iamaman11/okx/issues/160); physical Demo exchange evidence: [#223](https://github.com/iamaman11/okx/issues/223). Historical "current" notes below are dated evidence, not another operational cursor.
+**One current authority [#160](https://github.com/iamaman11/okx/issues/160)**; [exchange evidence #223](https://github.com/iamaman11/okx/issues/223). **Installed baseline:** `main eb1da12add28f3bdcee909c09339f6515e2558ce`; PR #297 6/6 CI PASS; exact Windows artifact `11713135973` installed with CONTROL `READY_RUNNING`; primary Cloudflare Demo MCP `PASS/session_fresh`, tool contract `okx.mcp.tools/2026-10-11.2`. Authenticated account FRESH FLAT (positions=0, regular orders=0, native OCO=0, unresolved=0, reconciled). One FOK OPEN plus attached protection and one FOK CLOSE physically passed. ADD/HEDGE/REDUCE/REVERSE physical PASS **not proven**. Live **OFF**.
 
-- Stage 4C G1/G2, protected G3-A/B and exact G3C reducing CLOSE AMEND are physically accepted for the exact Demo account, with terminal FLAT and restart under installed artifact `11684605898`. [Exact #223 evidence](https://github.com/iamaman11/okx/issues/223#issuecomment-6103793654). **Only next G3-D1 read-only venue TP/SL/Hedge feasibility**, D2 existing-owner protected ADD/REDUCE/HEDGE correction, D3 bounded physical Demo acceptance, then G3-E/F, G4, Stage 5A/B/C (safe single-owner Demo↔Production ReadOnly handoff in **5C-2**) and independent Live approval. Do not make switching a precondition for trading in the current Demo.
-- One Windows supervisor, one agent, one Rust `okx-execution` mutation/ledger owner. Worker is OAuth, rendezvous, validated closed-tool routing and correlation only; no second trading owner, scheduler, store or generic command tunnel.
-- Cloudflare MCP primary: **read-only analysis and status** on the authenticated current profile, and the one **typed Demo-only `execution_action`** on `demo_acceptance`. Worker profile and native Rust Demo authority both reject production writes. GitHub encrypted DATA (#10 protocol; #234 actual Demo test mailbox) is fallback/parity/recovery, not a path around a refused primary write. GitHub #12 CONTROL is limited to typed lifecycle operations.
-- Distinguish connector `PASS/session_fresh`, current tool contract `okx.mcp.tools/2026-10-10.2` (observed checkpoint), independent source `FRESH/DEGRADED/NOT_READY`, and exact per-operation permission. After every Worker tool-schema change: deploy -> compare declared tool-contract version and the tools visible in ChatGPT -> request **Update tools** only if needed -> read-only black-box contract probe -> permitted bounded Demo action test. A platform refusal is not evidence of OKX failure and must not be bypassed by GitHub/renaming.
-- All exchange-effecting lost-ACK/timeout outcomes are **UNKNOWN, non-replayable** until exact intent+ledger+venue reads independently resolve them. Local protection/recovery does not rely on ChatGPT remaining connected.
-- For trader/analyst efficiency: one bounded typed question/decision packet normally, target <=12,288 bytes; show account/profile, instrument, source+transport generation/age, quality, constraints, outstanding intents and next safe action. Keep all immutable detailed evidence by exact IDs instead of pasting mailbox/CI/history into model context. Account inventory is only for the authenticated account unless a separately supported master-account read is proven. Stage 5C must measure p50/p95/p99, N, bytes, failure/recovery and tool calls; do not invent token counts.
+**Only ordered development path:** Stage 4C-R1 FLAT/OCO durable ledger cleanup → R2 market/portfolio-oracle/OCO-race admission → D physical FOK protected ADD/HEDGE/full exits → E safe REDUCE/REVERSE or typed unsupported → G3-F/G4 uncertain ACK, restart and failure-injection → Stage 5A risk governance, 5B accounting/TCA, 5C compact one-call operation, exact native deploy/recovery and Demo↔Production ReadOnly → independently human-approved Live. Earlier “D1 NOW” excerpts are archival evidence, not instructions; #160 owns AC-01…AC-10 binary gates.
+
+**Invariant owners unchanged:** `okx-observation` = venue/account/market truth; `okx-analysis` = pure risk; `okx-execution` = sole mutation executor and UID-scoped durable ledger; one Windows controller+agent; Cloudflare MCP the only normal typed Demo-trade entry; GitHub CONTROL installation/lifecycle only and encrypted DATA only read-only diagnostics/parity, never trading fallback. Do not invent atomic OCO concurrency proof from private WS ACCOUNT/POSITIONS/ORDERS subscriptions that lack algo order updates: native exact-ID GET and complete inventory plus bounded fence, single writer or reject unverifiable competing writer. No duplicate state machine/daemon/scheduler or weaker risk policy.
+
+**Exit:** six CI jobs, tested==merged tree, exact installed binary provenance when changed; independently reconciled real Demo proofs plus failure/restart tests. One compact operator diagnosis exposes account UID/profile, market+oracle quality/generation, positions/OCO/UNKNOWN, deployment hash, next safe action. No code-only PASS for a physical trading requirement and no implicit Live grant from choosing a profile.
 
 ### Environment is a selected account/profile, never trading authority
 
