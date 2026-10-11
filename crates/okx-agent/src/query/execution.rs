@@ -439,6 +439,11 @@ async fn prepare_risk_increasing(
             Ok(value) => value,
             Err(_) => return Ok(account_not_fresh(request, generated_at)),
         };
+        let algo_cursor = match private_ws.algo_convergence_cursor().await {
+            Ok(value) => value,
+            Err(_) => return Ok(account_not_fresh(request, generated_at)),
+        };
+
         let started_ms = utc_now_ms();
         let account = match fresh_account(request, context, generated_at).await? {
             FreshAccount::Ready(value) => value,
@@ -486,6 +491,7 @@ async fn prepare_risk_increasing(
                             private_ws.convergence_window(cursor).await,
                             Ok(window) if window.events.is_empty()
                         )
+                        && private_ws.algo_convergence_unchanged(algo_cursor).await.is_ok()
                 },
             )
             .await;
@@ -922,6 +928,10 @@ async fn submit_prepared(
                 Ok(value) => value,
                 Err(_) => return Ok(account_not_fresh(request, generated_at)),
             };
+            let algo_cursor = match private_ws.algo_convergence_cursor().await {
+                Ok(value) => value,
+                Err(_) => return Ok(account_not_fresh(request, generated_at)),
+            };
             let started_ms = utc_now_ms();
             let expires_at_ms = timing.exp_time_ms();
             let account = match fresh_account(request, context, generated_at).await? {
@@ -959,6 +969,7 @@ async fn submit_prepared(
                                 private_ws.convergence_window(cursor).await,
                                 Ok(window) if window.events.is_empty()
                             )
+                            && private_ws.algo_convergence_unchanged(algo_cursor).await.is_ok()
                     },
                 )
                 .await?
