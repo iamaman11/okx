@@ -3155,6 +3155,157 @@ mod tests {
         (root, ledger, entry.record)
     }
 
+    fn fenced_add_hedge_plan(action: ExecutionAction) -> ExecutionPlan {
+        let mut value = protected_plan();
+        value.intent_id = format!("intent_fenced_{}__01234567890", match action {
+            ExecutionAction::Add => "add",
+            ExecutionAction::Hedge => "hedge",
+            _ => unreachable!("only increasing existing positions"),
+        });
+        value.client_order_id = crate::derive_client_order_id(&value.intent_id);
+        value.action = action;
+        value.order_type = OrderType::Fok;
+        if action == ExecutionAction::Hedge {
+            value.position_side = PositionSide::Short;
+            value.side = OrderSide::Sell;
+        }
+        value
+    }
+
+    #[tokio::test]
+    async fn fenced_fok_add_and_hedge_require_exact_previous_lot_coverage() {
+        for action in [ExecutionAction::Add, ExecutionAction::Hedge] {
+            let (root, ledger, parent) = resize_ledger(match action {
+                ExecutionAction::Add => "fenced-add",
+                _ => "fenced-hedge",
+            });
+            let (mut account, inventory) = resize_coverage(&parent);
+            account.positions[0].position = "1".to_owned();
+            let mut plan = fenced_add_hedge_plan(action);
+            plan.account_uid_fingerprint = parent.plan.account_uid_fingerprint.clone();
+            let detail = resize_algo(&parent, "1");
+            let gateway = ExactResizeGateway {
+                sends: AtomicUsize::new(0),
+                details: Mutex::new(vec![detail.clone(), detail].into()),
+                response: Mutex::new(None),
+            };
+            let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+            assert!(matches!(
+                executor.ledger().entries().find(|record| record.record.plan.intent_id == parent.plan.intent_id),
+                Some(_)
+            ));
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    plan.clone(),
+                    None,
+                    &account,
+                    &inventory,
+                    105,
+                    || async { true },
+                )
+                .await
+                .expect("exact previous parent+algo+Hedge position proof");
+            assert_eq!(
+                executor.ledger().get(&plan.intent_id).unwrap().record.state,
+                ExecutionState::Prepared
+            );
+            // The generic executor path is strictly denied; a proof must be
+            // repeated immediately before every authorized parent POST.
+            assert!(matches!(
+                executor.submit_prepared(&plan.intent_id, timing(), 106).await,
+                Err(OrderExecutorError::ProtectionCoverageUnproven)
+            ));
+            assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                executor
+                    .submit_prepared_protected_add_hedge_fenced(
+                        &plan.intent_id,
+                        &account,
+                        &inventory,
+                        timing(),
+                        107,
+                        || async { false },
+                    )
+                    .await,
+                Err(OrderExecutorError::ProtectionCoverageUnproven)
+            ));
+            assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                executor.ledger().get(&plan.intent_id).unwrap().record.state,
+                ExecutionState::Prepared
+            );
+            drop(executor);
+            let reopened = DurableExecutionLedger::open(
+                ExecutionLedgerStore::at(root.join("ledger.json")),
+                200,
+            ).expect("restart durable unsent");
+            assert_eq!(
+                reopened.get(&plan.intent_id).unwrap().record.state,
+                ExecutionState::Prepared
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[tokio::test]
+    async fn fenced_add_denies_foreign_oco_wrong_uid_ioc_and_failed_ws_before_persist() {
+        let (root, ledger, parent) = resize_ledger("fenced-add-negative");
+        let (mut account, mut inventory) = resize_coverage(&parent);
+        account.positions[0].position = "1".to_owned();
+        let mut plan = fenced_add_hedge_plan(ExecutionAction::Add);
+        plan.account_uid_fingerprint = parent.plan.account_uid_fingerprint.clone();
+        let gateway = ExactResizeGateway {
+            sends: AtomicUsize::new(0),
+            details: Mutex::new(vec![
+                resize_algo(&parent, "1"),
+                resize_algo(&parent, "1"),
+                resize_algo(&parent, "1"),
+                resize_algo(&parent, "1"),
+            ].into()),
+            response: Mutex::new(None),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        let mut ioc = plan.clone();
+        ioc.order_type = OrderType::Ioc;
+        assert!(matches!(
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    ioc, None, &account, &inventory, 105, || async { true },
+                ).await,
+            Err(OrderExecutorError::ProtectionCoverageUnproven)
+        ));
+        let mut wrong_uid = account.clone();
+        wrong_uid.account_uid_fingerprint = "different-uid".to_owned();
+        assert!(matches!(
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    plan.clone(), None, &wrong_uid, &inventory, 106, || async { true },
+                ).await,
+            Err(OrderExecutorError::ProtectionCoverageUnproven)
+        ));
+        let foreign = inventory.samples[0].clone();
+        inventory.samples.push(foreign);
+        inventory.rows = inventory.samples.len();
+        assert!(
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    plan.clone(), None, &account, &inventory, 107, || async { true },
+                ).await.is_err()
+        );
+        inventory.samples.pop();
+        inventory.rows = inventory.samples.len();
+        assert!(matches!(
+            executor
+                .prepare_protected_add_hedge_fenced(
+                    plan.clone(), None, &account, &inventory, 108, || async { false },
+                ).await,
+            Err(OrderExecutorError::ProtectionCoverageUnproven)
+        ));
+        assert!(executor.ledger().get(&plan.intent_id).is_none());
+        assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn independently_confirmed_resize_changes_ongoing_parent_protection_readback_size() {
         let (root, mut ledger, record) = resize_ledger("resize-reconcile-parent");
