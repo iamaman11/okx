@@ -487,7 +487,9 @@ async fn prepare_risk_increasing(
                 utc_now_ms(),
                 || async {
                     protective_readback_in_ttl(started_ms, utc_now_ms())
-                        && private_ws.protected_oco_window_unchanged(cursor, algo_cursor).await
+                        && private_ws
+                            .protected_oco_window_unchanged(cursor, algo_cursor)
+                            .await
                 },
             )
             .await;
@@ -961,7 +963,9 @@ async fn submit_prepared(
                         let finished_ms = utc_now_ms();
                         protective_readback_in_ttl(started_ms, finished_ms)
                             && finished_ms <= expires_at_ms
-                            && private_ws.protected_oco_window_unchanged(cursor, algo_cursor).await
+                            && private_ws
+                                .protected_oco_window_unchanged(cursor, algo_cursor)
+                                .await
                     },
                 )
                 .await?

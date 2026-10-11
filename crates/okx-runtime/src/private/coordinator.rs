@@ -77,7 +77,10 @@ impl PrivateWsHandle {
         private: PrivateConvergenceCursor,
         algo: super::state::AlgoConvergenceCursor,
     ) -> bool {
-        self.state.read().await.protected_oco_window_unchanged(private, algo)
+        self.state
+            .read()
+            .await
+            .protected_oco_window_unchanged(private, algo)
     }
 }
 
