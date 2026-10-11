@@ -38,6 +38,7 @@ pub use risk::{
     CandidateRiskContext, CandidateRiskContextEvidence, CandidateRiskGate, ClusterExposure,
     CorrelatedClusterLimit, ExposureAggregate, HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy,
     PORTFOLIO_RISK_ANALYSIS_SCHEMA_V2, PORTFOLIO_RISK_ANALYSIS_SCHEMA_V3, PortfolioCandidate,
+    PositionOracleEvidence, conservative_account_with_position_oracle,
     PortfolioRiskAnalysis, PositionRiskAnalysis, RISK_ORACLE_COMPARISON_SCHEMA_V2,
     RISK_ORACLE_CONSISTENCY_POLICY_V1, RiskDegradedMode, RiskMinimumQuality, RiskOracleComparison,
     RiskPolicyDecision, RiskPolicyViolation, TRADING_MANDATE_SCHEMA_V1, TradingMandate,
