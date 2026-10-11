@@ -3176,7 +3176,11 @@ mod tests {
             assert_eq!(request.order_type, ApiOrderType::Fok);
             assert_eq!(request.attached_algo_orders.len(), 1);
             self.sends.fetch_add(1, Ordering::SeqCst);
-            self.result.lock().expect("one response").take().expect("single POST")
+            self.result
+                .lock()
+                .expect("one response")
+                .take()
+                .expect("single POST")
         }
 
         async fn order_by_client_id(
@@ -3220,12 +3224,13 @@ mod tests {
             let gateway = CoveredLotGateway {
                 lookups: AtomicUsize::new(0),
                 sends: AtomicUsize::new(0),
-                details: Mutex::new(vec![
-                    resize_algo(&parent, "1"),
-                    resize_algo(&parent, "1"),
-                ].into()),
+                details: Mutex::new(
+                    vec![resize_algo(&parent, "1"), resize_algo(&parent, "1")].into(),
+                ),
                 result: Mutex::new(Some(if unknown {
-                    Err(OkxError::Config("injected ACK loss after one POST".to_owned()))
+                    Err(OkxError::Config(
+                        "injected ACK loss after one POST".to_owned(),
+                    ))
                 } else {
                     Ok(accepted_response(&plan))
                 })),
@@ -3233,12 +3238,26 @@ mod tests {
             let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
             executor
                 .prepare_protected_add_hedge_fenced(
-                    plan.clone(), None, &account, &inventory, 105, || async { true },
-                ).await.expect("fenced prepare");
+                    plan.clone(),
+                    None,
+                    &account,
+                    &inventory,
+                    105,
+                    || async { true },
+                )
+                .await
+                .expect("fenced prepare");
             let outcome = executor
                 .submit_prepared_protected_add_hedge_fenced(
-                    &plan.intent_id, &account, &inventory, timing(), 106, || async { true },
-                ).await.expect("single bounded send");
+                    &plan.intent_id,
+                    &account,
+                    &inventory,
+                    timing(),
+                    106,
+                    || async { true },
+                )
+                .await
+                .expect("single bounded send");
             if unknown {
                 assert!(matches!(outcome, SubmitDisposition::UnknownSubmission(_)));
                 assert_eq!(
@@ -3250,13 +3269,19 @@ mod tests {
             }
             assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
             assert_eq!(executor.gateway().lookups.load(Ordering::SeqCst), 2);
-            assert!(executor
-                .submit_prepared(&plan.intent_id, timing(), 107).await.is_err());
+            assert!(
+                executor
+                    .submit_prepared(&plan.intent_id, timing(), 107)
+                    .await
+                    .is_err()
+            );
             assert_eq!(executor.gateway().sends.load(Ordering::SeqCst), 1);
             drop(executor);
             let reopened = DurableExecutionLedger::open(
-                ExecutionLedgerStore::at(root.join("ledger.json")), 200,
-            ).expect("persisted send");
+                ExecutionLedgerStore::at(root.join("ledger.json")),
+                200,
+            )
+            .expect("persisted send");
             if unknown {
                 assert_eq!(
                     reopened.get(&plan.intent_id).unwrap().record.state,
