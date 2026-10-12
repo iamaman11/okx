@@ -4,7 +4,8 @@ use std::{
 };
 
 use okx_observation::{
-    AccountLedgerFacts, AccountPositionState, ExchangeFillIdentity, ExchangeOrderIdentity,
+    AccountLedgerFacts, AccountPositionState, ExchangeBillIdentity, ExchangeFillIdentity,
+    ExchangeOrderIdentity,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -16,6 +17,32 @@ use crate::{
 
 pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str = "okx.account-ledger-reconciliation/v1";
 const MAX_POSITION_ATTRIBUTION_ROWS: usize = 20;
+pub const STRATEGY_ATTRIBUTION_SCHEMA_V1: &str = "okx.strategy-exchange-attribution/v1";
+
+/// Observed *linked* exchange components; not a strategy NAV or account-equity proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinkedCurrencyAmount {
+    pub currency: String,
+    pub amount: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StrategyExchangeAttribution {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub strategy_nav_available: bool,
+    pub managed_intents: usize,
+    pub lineage_bound_intents: usize,
+    pub exact_orders: usize,
+    pub exact_fills: usize,
+    pub exact_trade_bills: usize,
+    pub duplicate_fill_or_bill_claims: usize,
+    pub unmatched_lineage_fills: usize,
+    pub unallocated_funding_bills: usize,
+    pub fills_fee_totals: Vec<LinkedCurrencyAmount>,
+    pub linked_trade_bill_pnl_totals: Vec<LinkedCurrencyAmount>,
+    pub incomplete_reasons: Vec<&'static str>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PositionAttributionDiagnostic {
@@ -45,6 +72,8 @@ pub struct AccountLedgerReconciliation {
     pub position_attribution: Vec<PositionAttributionDiagnostic>,
     pub position_attribution_unavailable_events: usize,
     pub consistent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy_attribution: Option<StrategyExchangeAttribution>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -135,12 +164,20 @@ pub fn reconcile_account_ledger(
     ledger: &DurableExecutionLedger,
     facts: &AccountLedgerFacts,
 ) -> Result<AccountLedgerReconciliation, AccountLedgerReconciliationError> {
-    reconcile_exchange_evidence(
+    let mut result = reconcile_exchange_evidence(
         ledger,
         &facts.authoritative_positions,
         &facts.exchange_orders,
         &facts.exchange_fills,
-    )
+    )?;
+    result.strategy_attribution = Some(attribute_strategy_exchange_evidence(
+        ledger,
+        &facts.exchange_orders,
+        &facts.exchange_fills,
+        &facts.exchange_bills,
+        facts.bills_history_complete,
+    )?);
+    Ok(result)
 }
 
 fn reconcile_exchange_evidence(
@@ -292,7 +329,152 @@ fn reconcile_exchange_evidence(
         position_attribution,
         position_attribution_unavailable_events,
         consistent: unexpected_orders == 0 && unexpected_fills == 0 && identity_mismatches == 0,
+        strategy_attribution: None,
     })
+}
+
+/// Strict read-only provenance projection. A shared Demo account can contain
+/// external fills and multiple strategies; missing lineage/capital/funding
+/// provenance is never converted into a synthetic NAV or a zero cashflow.
+fn attribute_strategy_exchange_evidence(
+    ledger: &DurableExecutionLedger,
+    orders: &[ExchangeOrderIdentity],
+    fills: &[ExchangeFillIdentity],
+    bills: &[ExchangeBillIdentity],
+    bills_complete: bool,
+) -> Result<StrategyExchangeAttribution, AccountLedgerReconciliationError> {
+    let mut lineage_bound_intents = 0usize;
+    let mut exact_orders = 0usize;
+    let mut exact_fills = 0usize;
+    let mut exact_trade_bills = 0usize;
+    let mut duplicate_claims = 0usize;
+    let mut unmatched_lineage_fills = 0usize;
+    let mut seen_fills = BTreeSet::new();
+    let mut seen_bills = BTreeSet::new();
+    let mut fees = BTreeMap::<String, Decimal>::new();
+    let mut pnl = BTreeMap::<String, Decimal>::new();
+
+    for entry in ledger.entries() {
+        let Some(_lineage) = entry.record.lineage.as_ref() else {
+            continue;
+        };
+        lineage_bound_intents += 1;
+        let plan = &entry.record.plan;
+        let Some(order_id) = entry.record.order_id.as_deref() else {
+            continue;
+        };
+        // Venue order must corroborate both independently persisted identifiers.
+        if !orders.iter().any(|order| {
+            order.instrument_id == plan.instrument_id
+                && order.client_order_id == plan.client_order_id
+                && order.order_id == order_id
+        }) {
+            continue;
+        }
+        exact_orders += 1;
+        for fill in fills.iter().filter(|fill| {
+            fill.instrument_id == plan.instrument_id
+                && fill.client_order_id == plan.client_order_id
+                && fill.order_id.as_deref() == Some(order_id)
+                && fill.position_side == plan.position_side.as_str()
+        }) {
+            let fill_key = (&fill.instrument_id, &fill.trade_id);
+            if !seen_fills.insert(fill_key) {
+                duplicate_claims += 1;
+                continue;
+            }
+            exact_fills += 1;
+            match (fill.fee.as_deref(), fill.fee_currency.as_deref()) {
+                (Some(fee), Some(currency)) if !currency.trim().is_empty() => {
+                    *fees.entry(currency.to_owned()).or_default() +=
+                        decimal("attribution.fill_fee", fee)?;
+                }
+                _ => {
+                    unmatched_lineage_fills += 1;
+                }
+            }
+
+            let mut has_exact_bill = false;
+            for bill in bills.iter().filter(|bill| {
+                bill.instrument_id == fill.instrument_id
+                    && bill.trade_id.as_deref() == Some(fill.trade_id.as_str())
+                    && bill.order_id.as_deref().is_none_or(|id| id == order_id)
+                    && bill
+                        .client_order_id
+                        .as_deref()
+                        .is_none_or(|id| id == plan.client_order_id)
+                    && !matches!(bill.sub_type.as_str(), "173" | "174")
+            }) {
+                has_exact_bill = true;
+                if !seen_bills.insert(&bill.bill_id) {
+                    duplicate_claims += 1;
+                    continue;
+                }
+                exact_trade_bills += 1;
+                if let Some(amount) = bill.pnl.as_deref() {
+                    if !bill.currency.trim().is_empty() {
+                        *pnl.entry(bill.currency.clone()).or_default() +=
+                            decimal("attribution.bill_pnl", amount)?;
+                    } else {
+                        unmatched_lineage_fills += 1;
+                    }
+                } else {
+                    unmatched_lineage_fills += 1;
+                }
+                // Bill fee is NOT added here: fill fee is the one trade-fee
+                // authority; bill fee is a reconciliation source, not a second cost.
+            }
+            if !has_exact_bill {
+                unmatched_lineage_fills += 1;
+            }
+        }
+    }
+
+    let funding_bills = bills
+        .iter()
+        .filter(|bill| matches!(bill.sub_type.as_str(), "173" | "174"))
+        .count();
+    let managed_intents = ledger.len();
+    let mut reasons = Vec::new();
+    if lineage_bound_intents < managed_intents {
+        reasons.push("historical_intents_missing_immutable_lineage");
+    }
+    if !bills_complete {
+        reasons.push("bills_history_incomplete");
+    }
+    if unmatched_lineage_fills > 0 || duplicate_claims > 0 {
+        reasons.push("fill_bill_provenance_incomplete");
+    }
+    if funding_bills > 0 {
+        reasons.push("funding_not_allocated_to_exact_strategy_position");
+    }
+    reasons.push("strategy_capital_cashflows_and_mark_to_market_unattested");
+    Ok(StrategyExchangeAttribution {
+        schema: STRATEGY_ATTRIBUTION_SCHEMA_V1,
+        status: "INCOMPLETE",
+        strategy_nav_available: false,
+        managed_intents,
+        lineage_bound_intents,
+        exact_orders,
+        exact_fills,
+        exact_trade_bills,
+        duplicate_fill_or_bill_claims: duplicate_claims,
+        unmatched_lineage_fills,
+        unallocated_funding_bills: funding_bills,
+        fills_fee_totals: linked_amounts(fees),
+        linked_trade_bill_pnl_totals: linked_amounts(pnl),
+        incomplete_reasons: reasons,
+    })
+}
+
+fn linked_amounts(amounts: BTreeMap<String, Decimal>) -> Vec<LinkedCurrencyAmount> {
+    amounts
+        .into_iter()
+        .map(|(currency, amount)| LinkedCurrencyAmount {
+            currency,
+            amount: amount.normalize().to_string(),
+        })
+        .collect()
 }
 
 fn reconcile_position_attribution(
@@ -403,6 +585,159 @@ mod tests {
         ExecutionAction, ExecutionLedgerStore, ExecutionPlan, OrderSide, OrderType, PositionSide,
         PrepareDisposition, TradeMode, derive_client_order_id,
     };
+
+    fn test_lineage() -> crate::ExecutionLineageBinding {
+        crate::ExecutionLineageBinding {
+            schema: crate::EXECUTION_LINEAGE_SCHEMA_V1.to_owned(),
+            origin_evidence_id: format!("sha256:{}", "a".repeat(64)),
+            origin_schema: "okx.strategy-decision/v1".to_owned(),
+            origin_version: "frozen-strategy-1".to_owned(),
+            authority_evidence_id: None,
+            decision_reference: crate::ExecutionDecisionReference {
+                decision_time_ms: 100,
+                price: "0.1".to_owned(),
+                price_basis: crate::TcaReferencePriceBasis::DecisionPrice,
+                price_policy_version: "v1".to_owned(),
+            },
+            tca_mechanics: None,
+        }
+    }
+
+    #[test]
+    fn exact_trade_and_bill_lineage_counts_fee_once_and_refuses_unallocated_funding_nav() {
+        let p = path("strategy-attribution-exact");
+        let _ = std::fs::remove_file(&p);
+        let mut ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("ledger");
+        let plan = plan("intent_attribution_exact_20261012a");
+        ledger
+            .prepare_with_lineage(plan.clone(), Some(test_lineage()), 101)
+            .expect("lineage bound");
+        ledger
+            .begin_submission(&plan.intent_id, 102)
+            .expect("first POST reservation");
+        ledger
+            .acknowledge(&plan.intent_id, "ord-exact", 103)
+            .expect("venue ACK");
+        let order = ExchangeOrderIdentity {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: plan.instrument_id.clone(),
+            order_id: "ord-exact".to_owned(),
+            client_order_id: plan.client_order_id.clone(),
+            state: "filled".to_owned(),
+            update_time_ms: "1791828000000".to_owned(),
+        };
+        let fill = ExchangeFillIdentity {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: plan.instrument_id.clone(),
+            order_id: Some("ord-exact".to_owned()),
+            client_order_id: plan.client_order_id.clone(),
+            trade_id: "trade-exact".to_owned(),
+            side: "buy".to_owned(),
+            position_side: "long".to_owned(),
+            fill_price: "0.1".to_owned(),
+            fill_size: "1".to_owned(),
+            fee: Some("-0.02".to_owned()),
+            fee_currency: Some("USDT".to_owned()),
+            execution_type: Some("T".to_owned()),
+            fill_time_ms: 1791828000000,
+        };
+        let bill = ExchangeBillIdentity {
+            bill_id: "bill-exact".to_owned(),
+            instrument_id: plan.instrument_id.clone(),
+            order_id: Some("ord-exact".to_owned()),
+            trade_id: Some("trade-exact".to_owned()),
+            client_order_id: Some(plan.client_order_id.clone()),
+            currency: "USDT".to_owned(),
+            sub_type: "1".to_owned(),
+            pnl: Some("0.13".to_owned()),
+            fee: Some("-0.02".to_owned()),
+            timestamp_ms: 1791828000000,
+        };
+        let funding = ExchangeBillIdentity {
+            bill_id: "bill-funding".to_owned(),
+            instrument_id: plan.instrument_id.clone(),
+            order_id: None,
+            trade_id: None,
+            client_order_id: None,
+            currency: "USDT".to_owned(),
+            sub_type: "173".to_owned(),
+            pnl: Some("-0.01".to_owned()),
+            fee: None,
+            timestamp_ms: 1791828000100,
+        };
+        let report = attribute_strategy_exchange_evidence(
+            &ledger,
+            &[order],
+            &[fill],
+            &[bill.clone(), bill, funding],
+            true,
+        )
+        .expect("strict read-only attribution");
+        assert_eq!(report.lineage_bound_intents, 1);
+        assert_eq!(report.exact_orders, 1);
+        assert_eq!(report.exact_fills, 1);
+        assert_eq!(
+            report.exact_trade_bills, 1,
+            "same billId must never count twice"
+        );
+        assert_eq!(report.duplicate_fill_or_bill_claims, 1);
+        assert_eq!(report.unallocated_funding_bills, 1);
+        assert_eq!(
+            report.fills_fee_totals[0].amount, "-0.02",
+            "bill fee is not added again"
+        );
+        assert_eq!(report.linked_trade_bill_pnl_totals[0].amount, "0.13");
+        assert_eq!(report.status, "INCOMPLETE");
+        assert!(!report.strategy_nav_available);
+        assert!(
+            report
+                .incomplete_reasons
+                .contains(&"strategy_capital_cashflows_and_mark_to_market_unattested")
+        );
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn old_fills_without_original_lineage_are_not_retroactively_attributed() {
+        let p = path("strategy-attribution-legacy");
+        let _ = std::fs::remove_file(&p);
+        let mut ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("ledger");
+        let plan = plan("intent_legacy_no_lineage_20261012");
+        ledger.prepare(plan.clone(), 101).expect("prepared");
+        let fill = ExchangeFillIdentity {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: plan.instrument_id,
+            order_id: Some("old-order".to_owned()),
+            client_order_id: plan.client_order_id,
+            trade_id: "old-trade".to_owned(),
+            side: "buy".to_owned(),
+            position_side: "long".to_owned(),
+            fill_price: "0.1".to_owned(),
+            fill_size: "1".to_owned(),
+            fee: Some("-0.5".to_owned()),
+            fee_currency: Some("USDT".to_owned()),
+            execution_type: Some("M".to_owned()),
+            fill_time_ms: 1791828000000,
+        };
+        let report = attribute_strategy_exchange_evidence(&ledger, &[], &[fill], &[], false)
+            .expect("legacy evidence remains incomplete");
+        assert_eq!(report.lineage_bound_intents, 0);
+        assert_eq!(report.exact_fills, 0);
+        assert!(report.fills_fee_totals.is_empty());
+        assert!(
+            report
+                .incomplete_reasons
+                .contains(&"historical_intents_missing_immutable_lineage")
+        );
+        assert!(
+            report
+                .incomplete_reasons
+                .contains(&"bills_history_incomplete")
+        );
+        let _ = std::fs::remove_file(p);
+    }
 
     fn path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

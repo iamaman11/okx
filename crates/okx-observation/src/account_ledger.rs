@@ -122,12 +122,29 @@ pub struct ExchangeFillIdentity {
     pub fill_time_ms: u64,
 }
 
+/// Immutable exact bill identifiers retained alongside the account aggregates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExchangeBillIdentity {
+    pub bill_id: String,
+    pub instrument_id: String,
+    pub order_id: Option<String>,
+    pub trade_id: Option<String>,
+    pub client_order_id: Option<String>,
+    pub currency: String,
+    pub sub_type: String,
+    pub pnl: Option<String>,
+    pub fee: Option<String>,
+    pub timestamp_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct AccountLedgerFacts {
     pub summary: AccountLedgerSummary,
     pub authoritative_positions: Vec<crate::AccountPositionState>,
     pub exchange_orders: Vec<ExchangeOrderIdentity>,
     pub exchange_fills: Vec<ExchangeFillIdentity>,
+    pub exchange_bills: Vec<ExchangeBillIdentity>,
+    pub bills_history_complete: bool,
     order_history_complete: BTreeMap<String, bool>,
 }
 
@@ -368,6 +385,7 @@ impl AccountLedgerFacts {
         )?);
         let mut funding = BTreeMap::<String, Aggregate>::new();
         let mut bill_ids = BTreeSet::new();
+        let mut exchange_bills = Vec::with_capacity(bills.rows.len());
         for bill in &bills.rows {
             let bill_id = required("bills_history.billId", &bill.bill_id)?;
             timestamp_required("bills_history.ts", &bill.timestamp_ms)?;
@@ -376,6 +394,18 @@ impl AccountLedgerFacts {
                     "bill:{bill_id}"
                 )));
             }
+            exchange_bills.push(ExchangeBillIdentity {
+                bill_id: bill_id.to_owned(),
+                instrument_id: bill.instrument_id.clone(),
+                order_id: optional(&bill.order_id).map(str::to_owned),
+                trade_id: optional(&bill.trade_id).map(str::to_owned),
+                client_order_id: optional(&bill.client_order_id).map(str::to_owned),
+                currency: bill.ccy.clone(),
+                sub_type: bill.bill_sub_type.clone(),
+                pnl: optional(&bill.pnl).map(str::to_owned),
+                fee: optional(&bill.fee).map(str::to_owned),
+                timestamp_ms: timestamp_required("bills_history.ts", &bill.timestamp_ms)?,
+            });
             if matches!(
                 bill.bill_sub_type.as_str(),
                 FUNDING_EXPENSE_SUBTYPE | FUNDING_INCOME_SUBTYPE
@@ -419,6 +449,8 @@ impl AccountLedgerFacts {
             },
             exchange_orders,
             exchange_fills,
+            exchange_bills,
+            bills_history_complete: bills.complete,
             order_history_complete,
         })
     }
