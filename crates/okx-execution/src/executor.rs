@@ -1191,6 +1191,11 @@ where
         if entry.record.state != ExecutionState::Prepared {
             return Err(OrderExecutorError::NotPrepared(entry.record.state));
         }
+        // Also deny a legacy PREPARED partial REDUCE through the core executor,
+        // before any SUBMITTING journal transition or exchange gateway POST.
+        if entry.record.plan.action == crate::ExecutionAction::Reduce {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
         if matches!(
             entry.record.plan.action,
             crate::ExecutionAction::Add | crate::ExecutionAction::Hedge
@@ -4296,6 +4301,43 @@ mod tests {
             executor
                 .ledger()
                 .get(&intent.intent_id)
+                .expect("intent")
+                .record
+                .state,
+            ExecutionState::Prepared
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn legacy_prepared_partial_reduce_after_restart_never_reaches_gateway() {
+        let (root, mut journal) = ledger("legacy-reduce-unsupported");
+        let mut plan = plan();
+        plan.action = ExecutionAction::Reduce;
+        plan.side = OrderSide::Sell;
+        journal
+            .prepare(plan.clone(), 101)
+            .expect("persist old PREPARED");
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("restart");
+        let gateway = LocalDeferredGateway {
+            place_calls: AtomicUsize::new(0),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(reopened, gateway);
+        let failure = executor
+            .submit_prepared(&plan.intent_id, timing(), 201)
+            .await
+            .expect_err("partial REDUCE cannot reach exchange");
+        assert!(matches!(
+            failure,
+            OrderExecutorError::ProtectionCoverageUnproven
+        ));
+        assert_eq!(executor.gateway().place_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            executor
+                .ledger()
+                .get(&plan.intent_id)
                 .expect("intent")
                 .record
                 .state,

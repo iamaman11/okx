@@ -478,6 +478,7 @@ impl DurableExecutionLedger {
             || plan.action != ExecutionAction::Open
             || plan.intent_id != reverse.open_intent_id
             || plan.instrument_id != root.record.plan.instrument_id
+            || plan.account_uid_fingerprint != root.record.plan.account_uid_fingerprint
             || plan.trade_mode != root.record.plan.trade_mode
             || plan.position_side != reverse.target_position_side
         {
@@ -2622,6 +2623,13 @@ mod tests {
         wrong_side.client_order_id = derive_client_order_id(&wrong_side.intent_id);
         assert!(matches!(
             ledger.prepare_reverse_open(reverse_id, wrong_side, 106),
+            Err(ExecutionLedgerError::ReverseMismatch)
+        ));
+
+        let mut foreign_account = reverse_open_plan(reverse_id, PositionSide::Short);
+        foreign_account.account_uid_fingerprint = "other-account-fingerprint".to_owned();
+        assert!(matches!(
+            ledger.prepare_reverse_open(reverse_id, foreign_account, 107),
             Err(ExecutionLedgerError::ReverseMismatch)
         ));
 
