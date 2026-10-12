@@ -210,6 +210,12 @@ struct ExecutionLedgerFile {
     capital_reservation: Option<StrategyCapitalReservation>,
 }
 
+type LoadedExecutionLedger = (
+    BTreeMap<String, ExecutionLedgerEntry>,
+    Option<ExecutionRiskStop>,
+    Option<StrategyCapitalReservation>,
+);
+
 #[derive(Debug, Clone)]
 pub struct ExecutionLedgerStore {
     path: PathBuf,
@@ -243,16 +249,7 @@ impl ExecutionLedgerStore {
         &self.path
     }
 
-    fn load(
-        &self,
-    ) -> Result<
-        (
-            BTreeMap<String, ExecutionLedgerEntry>,
-            Option<ExecutionRiskStop>,
-            Option<StrategyCapitalReservation>,
-        ),
-        ExecutionLedgerError,
-    > {
+    fn load(&self) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
         if !self.path.exists() {
             return Ok((BTreeMap::new(), None, None));
         }

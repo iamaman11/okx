@@ -700,7 +700,7 @@ fn assess_flat_strategy_nav(
         || facts
             .authoritative_positions
             .iter()
-            .any(|p| Decimal::from_str(&p.position).map_or(true, |q| q != Decimal::ZERO))
+            .any(|p| !Decimal::from_str(&p.position).is_ok_and(|q| q == Decimal::ZERO))
     {
         reasons.push("nav_open_position_or_pending_order");
     }
@@ -836,16 +836,15 @@ fn assess_flat_strategy_nav(
     }
     let allocated = decimal("nav.allocated_usdt", &capital.allocated_usdt)?;
     let nav = allocated + pnl + fee;
-    if let Some(current) = facts.trading_usdt_equity.as_deref() {
-        if decimal("nav.current_usdt_equity", current)?
+    if let Some(current) = facts.trading_usdt_equity.as_deref()
+        && decimal("nav.current_usdt_equity", current)?
             - decimal(
                 "nav.opening_usdt_equity",
                 &capital.opening_account_usdt_equity,
             )?
             != pnl + fee
-        {
-            reasons.push("nav_shared_account_equity_residual");
-        }
+    {
+        reasons.push("nav_shared_account_equity_residual");
     }
     reasons.sort_unstable();
     reasons.dedup();
