@@ -2185,17 +2185,37 @@ mod tests {
             leverage: "2".to_owned(),
         };
         let denied = analyze_portfolio_risk(
-            &snapshot, &ledger("0"), mandate.clone(), policy.clone(),
-            Some(candidate("40.02")), true,
-        ).expect("account equity cannot enlarge mandate risk");
+            &snapshot,
+            &ledger("0"),
+            mandate.clone(),
+            policy.clone(),
+            Some(candidate("40.02")),
+            true,
+        )
+        .expect("account equity cannot enlarge mandate risk");
         assert_eq!(denied.policy_decision, RiskPolicyDecision::Rejected);
-        assert!(denied.violations.iter().any(|v| v.code == "MAX_MARGIN_UTILIZATION_PROJECTED"));
+        assert!(
+            denied
+                .violations
+                .iter()
+                .any(|v| v.code == "MAX_MARGIN_UTILIZATION_PROJECTED")
+        );
         let at_limit = analyze_portfolio_risk(
-            &snapshot, &ledger("0"), mandate.clone(), policy.clone(),
-            Some(candidate("40")), true,
-        ).expect("exact Decimal boundary");
+            &snapshot,
+            &ledger("0"),
+            mandate.clone(),
+            policy.clone(),
+            Some(candidate("40")),
+            true,
+        )
+        .expect("exact Decimal boundary");
         assert_eq!(
-            at_limit.candidate.as_ref().expect("projection").projected_margin_utilization_ratio.as_deref(),
+            at_limit
+                .candidate
+                .as_ref()
+                .expect("projection")
+                .projected_margin_utilization_ratio
+                .as_deref(),
             Some("0.2")
         );
         assert_eq!(at_limit.policy_decision, RiskPolicyDecision::Accepted);
@@ -2205,14 +2225,28 @@ mod tests {
         let direct = evaluate_candidate_risk(&mandate, &policy, &candidate("40.02"), &context)
             .expect("same admission engine");
         assert_eq!(direct.decision, RiskPolicyDecision::Rejected);
-        assert!(direct.violations.iter().any(|v| v.code == "MAX_MARGIN_UTILIZATION_PROJECTED"));
+        assert!(
+            direct
+                .violations
+                .iter()
+                .any(|v| v.code == "MAX_MARGIN_UTILIZATION_PROJECTED")
+        );
     }
 
     #[test]
     fn missing_margin_with_open_position_denies_new_risk_but_flat_is_exempt() {
-        let mut snapshot = account("long_short_mode", vec![position(
-            "BTC-USDT-SWAP", "SWAP", "long", "1", Some("40"), Some("100"), Some("80"),
-        )]);
+        let mut snapshot = account(
+            "long_short_mode",
+            vec![position(
+                "BTC-USDT-SWAP",
+                "SWAP",
+                "long",
+                "1",
+                Some("40"),
+                Some("100"),
+                Some("80"),
+            )],
+        );
         snapshot.balance.initial_margin_requirement_usd = None;
         let candidate = PortfolioCandidate {
             instrument: "BTC-USDT-SWAP".to_owned(),
@@ -2222,19 +2256,48 @@ mod tests {
             leverage: "2".to_owned(),
         };
         let rejected = analyze_portfolio_risk(
-            &snapshot, &ledger("0"), mandate(), policy(), Some(candidate.clone()), true,
-        ).expect("typed fail closed");
+            &snapshot,
+            &ledger("0"),
+            mandate(),
+            policy(),
+            Some(candidate.clone()),
+            true,
+        )
+        .expect("typed fail closed");
         assert_eq!(rejected.policy_decision, RiskPolicyDecision::Rejected);
-        assert!(rejected.violations.iter().any(|v| v.code == "MARGIN_EVIDENCE_UNAVAILABLE"));
-        assert!(candidate_risk_context_from_account(
-            &snapshot, &ledger("0"), &mandate(), "BTC-USDT-SWAP", true,
-        ).is_err());
+        assert!(
+            rejected
+                .violations
+                .iter()
+                .any(|v| v.code == "MARGIN_EVIDENCE_UNAVAILABLE")
+        );
+        assert!(
+            candidate_risk_context_from_account(
+                &snapshot,
+                &ledger("0"),
+                &mandate(),
+                "BTC-USDT-SWAP",
+                true,
+            )
+            .is_err()
+        );
 
         snapshot.positions.clear();
         let flat = analyze_portfolio_risk(
-            &snapshot, &ledger("0"), mandate(), policy(), Some(candidate), true,
-        ).expect("verified flat without initial margin");
-        assert!(!flat.violations.iter().any(|v| v.code == "MARGIN_EVIDENCE_UNAVAILABLE"));
+            &snapshot,
+            &ledger("0"),
+            mandate(),
+            policy(),
+            Some(candidate),
+            true,
+        )
+        .expect("verified flat without initial margin");
+        assert!(
+            !flat
+                .violations
+                .iter()
+                .any(|v| v.code == "MARGIN_EVIDENCE_UNAVAILABLE")
+        );
     }
 
     #[test]
