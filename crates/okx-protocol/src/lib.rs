@@ -1350,6 +1350,30 @@ pub enum DirectTransportFrame {
 }
 
 impl DirectTransportFrame {
+    /// Validate the transport envelope before sending delivery ACK.
+    /// Request *operation* validation belongs to the single Rust owner, which
+    /// returns a typed rejection rather than tearing down the whole WS session.
+    /// Malformed request identities and envelopes are still fatal.
+    pub fn validate_incoming_envelope(&self) -> Result<(), ProtocolError> {
+        match self {
+            Self::Request {
+                schema,
+                session_id,
+                connection_generation,
+                request,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(session_id, 16, 128)?;
+                validate_connection_generation(*connection_generation)?;
+                if request.schema != AGENT_REQUEST_SCHEMA_V1 {
+                    return Err(ProtocolError::UnsupportedSchema(request.schema.clone()));
+                }
+                validate_request_id(&request.request_id)
+            }
+            _ => self.validate(),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
             Self::Hello {
@@ -3411,6 +3435,53 @@ mod direct_transport_tests {
         let decoded: DirectTransportFrame = serde_json::from_str(&encoded).expect("decode");
         assert_eq!(decoded, frame);
         decoded.validate().expect("valid decoded frame");
+    }
+
+    #[test]
+    fn invalid_trade_operation_does_not_invalidate_authenticated_transport_envelope() {
+        let mut request = request();
+        request.operation = AgentOperation::PrepareExecution {
+            intent_id: "intent_lineage_bad_012345".to_owned(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            trade_mode: ExecutionTradeMode::Cross,
+            order_type: ExecutionOrderType::Fok,
+            spec: ExecutionPrepareSpec::Open {
+                position_side: PositionSide::Long,
+                entry: ExecutionEntryRequest {
+                    entry_price: "80000".to_owned(),
+                    stop_price: "79000".to_owned(),
+                    max_settle_notional: "10".to_owned(),
+                    max_loss_settle: "1".to_owned(),
+                    target_rr: "2".to_owned(),
+                    entry_liquidity_role: LiquidityRole::Taker,
+                    exit_liquidity_role: LiquidityRole::Taker,
+                },
+            },
+            risk: None,
+            lineage: Some(Box::new(ExecutionLineageRequest {
+                origin_evidence_id: "invalid-text-is-not-sha256".to_owned(),
+                origin_schema: "stage4c.demo/v1".to_owned(),
+                origin_version: "v1".to_owned(),
+                authority_evidence_id: None,
+                decision_reference: ExecutionDecisionReferenceRequest {
+                    decision_time_ms: 1_790_000_000_000,
+                    price: "80000".to_owned(),
+                    price_basis: ExecutionReferencePriceBasis::LimitPrice,
+                    price_policy_version: "v1".to_owned(),
+                },
+            })),
+        };
+        let frame = DirectTransportFrame::Request {
+            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+            session_id: "session_direct_0123456789".to_owned(),
+            connection_generation: 7,
+            request,
+        };
+        assert!(frame.validate_incoming_envelope().is_ok());
+        assert!(frame.validate().is_err());
+        if let DirectTransportFrame::Request { request, .. } = frame {
+            assert!(request.validate().is_err());
+        }
     }
 
     #[test]

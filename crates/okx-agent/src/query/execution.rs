@@ -996,7 +996,53 @@ async fn submit_prepared(
 
     match submit_result {
         Ok(_) if demo_acceptance => {
-            execution_status_response(request, context, generated_at, intent_id).await
+            // The native submit has already returned. The immediately following
+            // exchange status read is a separate I/O operation and may fail even
+            // after a real FILLED order. Never relabel a successful submit as a
+            // retryable generic query error. Report the exact durable ledger
+            // state as DEGRADED when independent readback is unavailable.
+            match execution_status_response(request, context, generated_at, intent_id).await {
+                Ok(response) => Ok(response),
+                Err(error) => {
+                    eprintln!(
+                        "post-submit independent status read failed for {intent_id}: {error}; returning existing durable state without exchange replay"
+                    );
+                    let Some((_, status)) = execution.status_with_entry(intent_id).await? else {
+                        return Ok(failure_response(
+                            request,
+                            generated_at,
+                            AgentResponseStatus::Failed,
+                            EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
+                            "submitted intent has no durable readback; reconcile exact intent before further mutation"
+                                .to_owned(),
+                            false,
+                        ));
+                    };
+                    let result = ExecutionStatusResult {
+                        status,
+                        tca: ExecutionTcaStatus::unavailable(
+                            "post_submit_independent_reconciliation_unavailable",
+                        ),
+                        unattributed_analytics: ExecutionUnattributedAnalytics {
+                            post_fill_markout: "unavailable_no_versioned_post_fill_market_evidence",
+                            funding: "unavailable_no_per_intent_funding_attribution",
+                            counterfactual: "unavailable_no_versioned_counterfactual_evidence",
+                        },
+                    };
+                    let mut response = completed(
+                        request,
+                        generated_at,
+                        EXECUTION_STATUS_SCHEMA_V3,
+                        serde_json::to_value(result)?,
+                    );
+                    response.quality = DataQuality::Degraded;
+                    response.warnings = vec![
+                        "post-submit independent exchange status read unavailable; durable local execution state only, reconcile exact intent before any dependent order"
+                            .to_owned(),
+                    ];
+                    Ok(response)
+                }
+            }
         }
         Err(OrderExecutorError::Transition(ExecutionTransitionError::LiveTradingDisabled)) => {
             Ok(failure_response(

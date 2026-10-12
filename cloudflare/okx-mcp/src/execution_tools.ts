@@ -4,6 +4,7 @@ import { isObject, type Json } from "./shared.js";
 // All real order/UID/policy/risk/reconciliation authority stays in okx-execution.
 const ID = { type: "string", minLength: 16, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$" };
 const MUTATION_ID = { type: "string", minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$" };
+const EVIDENCE_ID = { type: "string", minLength: 71, maxLength: 71, pattern: "^sha256:[0-9a-f]{64}$" };
 const DECIMAL = { type: "string", minLength: 1, maxLength: 64, pattern: "^[0-9]+(?:\\.[0-9]+)?$" };
 const POSITIVE = DECIMAL;
 const INSTRUMENT = { type: "string", minLength: 3, maxLength: 64, pattern: "^[A-Za-z0-9_-]+$" };
@@ -64,9 +65,9 @@ const risk = {
 const lineage = {
   type: "object", additionalProperties: false,
   properties: {
-    origin_evidence_id: { type: "string", minLength: 1, maxLength: 128 },
+    origin_evidence_id: EVIDENCE_ID,
     origin_schema: VERSION, origin_version: VERSION,
-    authority_evidence_id: { type: "string", minLength: 1, maxLength: 128 },
+    authority_evidence_id: EVIDENCE_ID,
     decision_reference: {
       type: "object", additionalProperties: false,
       properties: {
@@ -164,10 +165,18 @@ function riskInput(v: unknown): boolean {
 }
 function lineageInput(v: unknown): boolean {
   if (!isObject(v) || !exactKeys(v,["origin_evidence_id","origin_schema","origin_version","authority_evidence_id","decision_reference"]) || !isObject(v.decision_reference)) return false;
-  return typeof v.origin_evidence_id === "string" && typeof v.origin_schema === "string"
-    && typeof v.origin_version === "string"
-    && exactKeys(v.decision_reference,["decision_time_ms","price","price_basis","price_policy_version"])
-    && typeof v.decision_reference.price === "string";
+  const d = v.decision_reference;
+  const version = (x: unknown) => typeof x === "string" && x.length > 0
+    && x.length <= 128 && /^[A-Za-z0-9._/-]+$/.test(x);
+  const evidence = (x: unknown) => typeof x === "string" && /^sha256:[0-9a-f]{64}$/.test(x);
+  return evidence(v.origin_evidence_id)
+    && (v.authority_evidence_id === undefined || evidence(v.authority_evidence_id))
+    && version(v.origin_schema) && version(v.origin_version)
+    && exactKeys(d,["decision_time_ms","price","price_basis","price_policy_version"])
+    && Number.isSafeInteger(d.decision_time_ms) && Number(d.decision_time_ms) > 0
+    && decimal(d.price)
+    && ["decision_price","arrival_mid","mark","index","last","limit_price"].includes(String(d.price_basis))
+    && version(d.price_policy_version);
 }
 export function isExecutionMutation(operationType: unknown): boolean {
   return [
