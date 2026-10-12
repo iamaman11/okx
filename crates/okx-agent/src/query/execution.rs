@@ -472,8 +472,15 @@ async fn prepare_risk_increasing(
         .map(|value| execution_lineage_binding(value, &rules));
     // The same immutable risk/venue policy must reject new exposure before
     // PREPARED persistence; SUBMIT independently repeats this admission.
-    match pre_mutation_admission(request, context, generated_at, execution, plan.clone(), None)
-        .await?
+    match pre_mutation_admission(
+        request,
+        context,
+        generated_at,
+        execution,
+        plan.clone(),
+        None,
+    )
+    .await?
     {
         PreMutationAdmissionResult::Ready(_) => {}
         PreMutationAdmissionResult::Response(response) => return Ok(*response),
