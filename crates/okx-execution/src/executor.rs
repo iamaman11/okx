@@ -4403,17 +4403,17 @@ mod tests {
         closing.action = ExecutionAction::Close;
         closing.side = OrderSide::Sell;
         journal.prepare(opening.clone(), 101).expect("prepare open");
-        journal.prepare(closing.clone(), 102).expect("prepare close");
+        journal
+            .prepare(closing.clone(), 102)
+            .expect("prepare close");
         journal
             .stop_new_risk("MAX_DAILY_REALIZED_LOSS", 103)
             .expect("atomic account stop");
         drop(journal);
 
-        let reopened = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join("ledger.json")),
-            200,
-        )
-        .expect("restart preserves stop");
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("restart preserves stop");
         assert_eq!(
             reopened.risk_stop().expect("risk stop").reason,
             "MAX_DAILY_REALIZED_LOSS"
@@ -4422,34 +4422,48 @@ mod tests {
         let mut executor = OrderExecutor::enabled_for_test(reopened, gateway);
 
         assert!(matches!(
-            executor.submit_prepared(&opening.intent_id, timing(), 201).await,
-            Err(OrderExecutorError::Ledger(ExecutionLedgerError::NewRiskStopped))
+            executor
+                .submit_prepared(&opening.intent_id, timing(), 201)
+                .await,
+            Err(OrderExecutorError::Ledger(
+                ExecutionLedgerError::NewRiskStopped
+            ))
         ));
         assert_eq!(executor.gateway().place_calls(), 0);
         assert!(matches!(
-            executor.submit_prepared(&closing.intent_id, timing(), 202).await,
+            executor
+                .submit_prepared(&closing.intent_id, timing(), 202)
+                .await,
             Ok(SubmitDisposition::Acknowledged(_))
         ));
         assert_eq!(executor.gateway().place_calls(), 1);
         assert!(matches!(
-            executor.submit_prepared(&closing.intent_id, timing(), 203).await,
+            executor
+                .submit_prepared(&closing.intent_id, timing(), 203)
+                .await,
             Err(OrderExecutorError::NotPrepared(_))
         ));
         assert_eq!(executor.gateway().place_calls(), 1);
         drop(executor);
 
-        let final_ledger = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join("ledger.json")),
-            204,
-        )
-        .expect("second restart");
+        let final_ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 204)
+                .expect("second restart");
         assert!(final_ledger.risk_stop().is_some());
         assert_eq!(
-            final_ledger.get(&opening.intent_id).expect("not posted").record.state,
+            final_ledger
+                .get(&opening.intent_id)
+                .expect("not posted")
+                .record
+                .state,
             ExecutionState::Prepared
         );
         assert_eq!(
-            final_ledger.get(&closing.intent_id).expect("posted once").record.state,
+            final_ledger
+                .get(&closing.intent_id)
+                .expect("posted once")
+                .record
+                .state,
             ExecutionState::Acknowledged
         );
         let _ = fs::remove_dir_all(root);

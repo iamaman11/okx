@@ -2270,10 +2270,12 @@ mod tests {
                 .as_deref(),
             Some("0.2")
         );
-        assert!(!exact_budget
-            .violations
-            .iter()
-            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
+        assert!(
+            !exact_budget
+                .violations
+                .iter()
+                .any(|v| v.code == "STRATEGY_NAV_UNATTESTED")
+        );
 
         let mut context = replay_context();
         context.total_equity_usd = snapshot.balance.total_equity_usd.clone();
