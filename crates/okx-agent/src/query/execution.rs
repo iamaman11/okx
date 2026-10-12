@@ -59,10 +59,7 @@ pub const EXECUTION_MUTATION_UNSAFE_CODE: &str = "EXECUTION_MUTATION_UNSAFE";
 pub const EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE: &str =
     "EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED";
 
-fn protected_add_hedge_unsupported(
-    request: &AgentRequest,
-    generated_at: &str,
-) -> AgentResponse {
+fn protected_add_hedge_unsupported(request: &AgentRequest, generated_at: &str) -> AgentResponse {
     failure_response(
         request,
         generated_at,
@@ -3646,7 +3643,10 @@ mod tests {
     #[test]
     fn unsupported_protected_add_hedge_is_typed_and_non_retryable_at_both_boundaries() {
         for action in [ExecutionAction::Add, ExecutionAction::Hedge] {
-            assert!(matches!(action, ExecutionAction::Add | ExecutionAction::Hedge));
+            assert!(matches!(
+                action,
+                ExecutionAction::Add | ExecutionAction::Hedge
+            ));
             let response = protected_add_hedge_unsupported(&request(), GENERATED_AT);
             assert_eq!(response.status, AgentResponseStatus::Rejected);
             assert_eq!(response.quality, DataQuality::NotReady);
@@ -3657,7 +3657,10 @@ mod tests {
         }
         // OPEN/CLOSE are not reclassified by this policy.
         for action in [ExecutionAction::Open, ExecutionAction::Close] {
-            assert!(!matches!(action, ExecutionAction::Add | ExecutionAction::Hedge));
+            assert!(!matches!(
+                action,
+                ExecutionAction::Add | ExecutionAction::Hedge
+            ));
         }
     }
 
