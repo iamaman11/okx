@@ -38,7 +38,13 @@ pub struct StrategyExchangeAttribution {
     pub exact_trade_bills: usize,
     pub duplicate_fill_or_bill_claims: usize,
     pub unmatched_lineage_fills: usize,
+    pub missing_exact_bill_links: usize,
+    pub fee_bill_mismatches: usize,
+    pub fill_pnl_bill_mismatches: usize,
     pub unallocated_funding_bills: usize,
+    pub unallocated_funding_totals: Vec<LinkedCurrencyAmount>,
+    pub unlinked_nonfunding_bills: usize,
+    /// ONLY independently corroborated fill/bill amounts, not all fill fees.
     pub fills_fee_totals: Vec<LinkedCurrencyAmount>,
     pub linked_trade_bill_pnl_totals: Vec<LinkedCurrencyAmount>,
     pub incomplete_reasons: Vec<&'static str>,
@@ -333,9 +339,9 @@ fn reconcile_exchange_evidence(
     })
 }
 
-/// Strict read-only provenance projection. A shared Demo account can contain
-/// external fills and multiple strategies; missing lineage/capital/funding
-/// provenance is never converted into a synthetic NAV or a zero cashflow.
+/// Strict read-only provenance projection. BillId from the *fill* and
+/// billId from account bills MUST agree; matching only instrument/tradeId
+/// is insufficient proof. No inference of shared account capital/ownership.
 fn attribute_strategy_exchange_evidence(
     ledger: &DurableExecutionLedger,
     orders: &[ExchangeOrderIdentity],
@@ -349,10 +355,14 @@ fn attribute_strategy_exchange_evidence(
     let mut exact_trade_bills = 0usize;
     let mut duplicate_claims = 0usize;
     let mut unmatched_lineage_fills = 0usize;
+    let mut missing_exact_bill_links = 0usize;
+    let mut fee_bill_mismatches = 0usize;
+    let mut fill_pnl_bill_mismatches = 0usize;
     let mut seen_fills = BTreeSet::new();
     let mut seen_bills = BTreeSet::new();
     let mut fees = BTreeMap::<String, Decimal>::new();
     let mut pnl = BTreeMap::<String, Decimal>::new();
+    let mut funding = BTreeMap::<String, Decimal>::new();
 
     for entry in ledger.entries() {
         let Some(_lineage) = entry.record.lineage.as_ref() else {
@@ -363,7 +373,6 @@ fn attribute_strategy_exchange_evidence(
         let Some(order_id) = entry.record.order_id.as_deref() else {
             continue;
         };
-        // Venue order must corroborate both independently persisted identifiers.
         if !orders.iter().any(|order| {
             order.instrument_id == plan.instrument_id
                 && order.client_order_id == plan.client_order_id
@@ -372,68 +381,116 @@ fn attribute_strategy_exchange_evidence(
             continue;
         }
         exact_orders += 1;
+
+        // A fill matching only one of the two independently bound order IDs,
+        // or having the wrong position side, must not be silently discarded.
         for fill in fills.iter().filter(|fill| {
-            fill.instrument_id == plan.instrument_id
-                && fill.client_order_id == plan.client_order_id
-                && fill.order_id.as_deref() == Some(order_id)
-                && fill.position_side == plan.position_side.as_str()
+            fill.client_order_id == plan.client_order_id
+                || fill.order_id.as_deref() == Some(order_id)
         }) {
+            if fill.instrument_id != plan.instrument_id
+                || fill.client_order_id != plan.client_order_id
+                || fill.order_id.as_deref() != Some(order_id)
+                || fill.position_side != plan.position_side.as_str()
+                || fill.side != plan.side.as_str()
+            {
+                unmatched_lineage_fills += 1;
+                continue;
+            }
             let fill_key = (&fill.instrument_id, &fill.trade_id);
             if !seen_fills.insert(fill_key) {
                 duplicate_claims += 1;
                 continue;
             }
             exact_fills += 1;
-            match (fill.fee.as_deref(), fill.fee_currency.as_deref()) {
-                (Some(fee), Some(currency)) if !currency.trim().is_empty() => {
-                    *fees.entry(currency.to_owned()).or_default() +=
-                        decimal("attribution.fill_fee", fee)?;
-                }
-                _ => {
-                    unmatched_lineage_fills += 1;
-                }
+
+            let Some(bill_id) = fill.bill_id.as_deref() else {
+                missing_exact_bill_links += 1;
+                continue;
+            };
+            let linked = bills
+                .iter()
+                .filter(|bill| bill.bill_id == bill_id)
+                .collect::<Vec<_>>();
+            if linked.len() > 1 {
+                duplicate_claims += linked.len() - 1;
+            }
+            let Some(bill) = linked.first() else {
+                missing_exact_bill_links += 1;
+                continue;
+            };
+            if !seen_bills.insert(&bill.bill_id) {
+                duplicate_claims += 1;
+                continue;
+            }
+            // Funding and unrelated bills are never allowed to inherit a
+            // fill's strategy identity just because billId happens to match.
+            if matches!(bill.sub_type.as_str(), "173" | "174")
+                || bill.instrument_id != fill.instrument_id
+                || bill.trade_id.as_deref() != Some(fill.trade_id.as_str())
+                || bill.order_id.as_deref().is_some_and(|id| id != order_id)
+                || bill
+                    .client_order_id
+                    .as_deref()
+                    .is_some_and(|id| id != plan.client_order_id)
+            {
+                unmatched_lineage_fills += 1;
+                continue;
             }
 
-            let mut has_exact_bill = false;
-            for bill in bills.iter().filter(|bill| {
-                bill.instrument_id == fill.instrument_id
-                    && bill.trade_id.as_deref() == Some(fill.trade_id.as_str())
-                    && bill.order_id.as_deref().is_none_or(|id| id == order_id)
-                    && bill
-                        .client_order_id
-                        .as_deref()
-                        .is_none_or(|id| id == plan.client_order_id)
-                    && !matches!(bill.sub_type.as_str(), "173" | "174")
-            }) {
-                has_exact_bill = true;
-                if !seen_bills.insert(&bill.bill_id) {
-                    duplicate_claims += 1;
-                    continue;
-                }
-                exact_trade_bills += 1;
-                if let Some(amount) = bill.pnl.as_deref() {
-                    if !bill.currency.trim().is_empty() {
-                        *pnl.entry(bill.currency.clone()).or_default() +=
-                            decimal("attribution.bill_pnl", amount)?;
-                    } else {
-                        unmatched_lineage_fills += 1;
-                    }
-                } else {
-                    unmatched_lineage_fills += 1;
-                }
-                // Bill fee is NOT added here: fill fee is the one trade-fee
-                // authority; bill fee is a reconciliation source, not a second cost.
+            let (Some(fill_fee), Some(fill_currency), Some(bill_fee)) = (
+                fill.fee.as_deref(),
+                fill.fee_currency.as_deref(),
+                bill.fee.as_deref(),
+            ) else {
+                fee_bill_mismatches += 1;
+                continue;
+            };
+            if fill_currency != bill.currency
+                || fill_currency.trim().is_empty()
+                || decimal("attribution.fill_fee", fill_fee)?
+                    != decimal("attribution.bill_fee", bill_fee)?
+            {
+                fee_bill_mismatches += 1;
+                continue;
             }
-            if !has_exact_bill {
-                unmatched_lineage_fills += 1;
+
+            let (Some(fill_pnl), Some(bill_pnl)) =
+                (fill.fill_pnl.as_deref(), bill.pnl.as_deref())
+            else {
+                fill_pnl_bill_mismatches += 1;
+                continue;
+            };
+            let fill_realized = decimal("attribution.fill_pnl", fill_pnl)?;
+            let bill_realized = decimal("attribution.bill_pnl", bill_pnl)?;
+            if fill_realized != bill_realized {
+                fill_pnl_bill_mismatches += 1;
+                continue;
             }
+
+            // Only source-complete, independently cross-checked financial
+            // events enter either total; bill fee is NOT added to fill fee.
+            exact_trade_bills += 1;
+            *fees.entry(fill_currency.to_owned()).or_default() +=
+                decimal("attribution.verified_fee", fill_fee)?;
+            *pnl.entry(bill.currency.clone()).or_default() += bill_realized;
         }
     }
 
-    let funding_bills = bills
-        .iter()
-        .filter(|bill| matches!(bill.sub_type.as_str(), "173" | "174"))
-        .count();
+    let mut unallocated_funding_bills = 0usize;
+    let mut unlinked_nonfunding_bills = 0usize;
+    for bill in bills {
+        if matches!(bill.sub_type.as_str(), "173" | "174") {
+            unallocated_funding_bills += 1;
+            if let (Some(value), false) = (bill.pnl.as_deref(), bill.currency.trim().is_empty()) {
+                *funding.entry(bill.currency.clone()).or_default() +=
+                    decimal("attribution.unallocated_funding", value)?;
+            }
+        } else if !seen_bills.contains(&bill.bill_id) {
+            unlinked_nonfunding_bills += 1;
+        }
+    }
+
     let managed_intents = ledger.len();
     let mut reasons = Vec::new();
     if lineage_bound_intents < managed_intents {
@@ -445,8 +502,22 @@ fn attribute_strategy_exchange_evidence(
     if unmatched_lineage_fills > 0 || duplicate_claims > 0 {
         reasons.push("fill_bill_provenance_incomplete");
     }
-    if funding_bills > 0 {
+    if missing_exact_bill_links > 0 {
+        reasons.push("native_fill_bill_id_missing_or_bill_unobserved");
+    }
+    if fee_bill_mismatches > 0 {
+        reasons.push("bill_fee_or_currency_not_reconciled");
+    }
+    if fill_pnl_bill_mismatches > 0 {
+        reasons.push("fill_realized_pnl_not_reconciled_with_bill");
+    }
+    if unallocated_funding_bills > 0 {
+        // OKX funding bills have no stable strategy/position-side identity.
+        // Instrument and timestamp alone do not establish an owner.
         reasons.push("funding_not_allocated_to_exact_strategy_position");
+    }
+    if unlinked_nonfunding_bills > 0 {
+        reasons.push("account_bill_activity_outside_exact_managed_fill_links");
     }
     reasons.push("strategy_capital_cashflows_and_mark_to_market_unattested");
     Ok(StrategyExchangeAttribution {
@@ -460,7 +531,12 @@ fn attribute_strategy_exchange_evidence(
         exact_trade_bills,
         duplicate_fill_or_bill_claims: duplicate_claims,
         unmatched_lineage_fills,
-        unallocated_funding_bills: funding_bills,
+        missing_exact_bill_links,
+        fee_bill_mismatches,
+        fill_pnl_bill_mismatches,
+        unallocated_funding_bills,
+        unallocated_funding_totals: linked_amounts(funding),
+        unlinked_nonfunding_bills,
         fills_fee_totals: linked_amounts(fees),
         linked_trade_bill_pnl_totals: linked_amounts(pnl),
         incomplete_reasons: reasons,
@@ -633,6 +709,8 @@ mod tests {
             order_id: Some("ord-exact".to_owned()),
             client_order_id: plan.client_order_id.clone(),
             trade_id: "trade-exact".to_owned(),
+            bill_id: Some("bill-exact".to_owned()),
+            fill_pnl: Some("0.13".to_owned()),
             side: "buy".to_owned(),
             position_side: "long".to_owned(),
             fill_price: "0.1".to_owned(),
@@ -683,6 +761,7 @@ mod tests {
         );
         assert_eq!(report.duplicate_fill_or_bill_claims, 1);
         assert_eq!(report.unallocated_funding_bills, 1);
+        assert_eq!(report.unallocated_funding_totals[0].amount, "-0.01");
         assert_eq!(
             report.fills_fee_totals[0].amount, "-0.02",
             "bill fee is not added again"
@@ -695,6 +774,193 @@ mod tests {
                 .incomplete_reasons
                 .contains(&"strategy_capital_cashflows_and_mark_to_market_unattested")
         );
+        let _ = std::fs::remove_file(p);
+    }
+
+    fn linked_accounting_pair(
+        plan: &ExecutionPlan,
+        trade_id: &str,
+        bill_id: &str,
+        fee: &str,
+        currency: &str,
+        realized_pnl: &str,
+    ) -> (ExchangeFillIdentity, ExchangeBillIdentity) {
+        let fill = ExchangeFillIdentity {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: plan.instrument_id.clone(),
+            order_id: Some("ord-exact".to_owned()),
+            client_order_id: plan.client_order_id.clone(),
+            trade_id: trade_id.to_owned(),
+            bill_id: Some(bill_id.to_owned()),
+            fill_pnl: Some(realized_pnl.to_owned()),
+            side: "buy".to_owned(),
+            position_side: "long".to_owned(),
+            fill_price: "0.1".to_owned(),
+            fill_size: "0.5".to_owned(),
+            fee: Some(fee.to_owned()),
+            fee_currency: Some(currency.to_owned()),
+            execution_type: Some("M".to_owned()),
+            fill_time_ms: 1791828000000,
+        };
+        let bill = ExchangeBillIdentity {
+            bill_id: bill_id.to_owned(),
+            instrument_id: plan.instrument_id.clone(),
+            order_id: Some("ord-exact".to_owned()),
+            trade_id: Some(trade_id.to_owned()),
+            client_order_id: Some(plan.client_order_id.clone()),
+            currency: currency.to_owned(),
+            sub_type: "3".to_owned(),
+            pnl: Some(realized_pnl.to_owned()),
+            fee: Some(fee.to_owned()),
+            timestamp_ms: 1791828000000,
+        };
+        (fill, bill)
+    }
+
+    fn acknowledged_test_ledger(
+        name: &str,
+    ) -> (DurableExecutionLedger, ExecutionPlan, PathBuf) {
+        let p = path(name);
+        let _ = std::fs::remove_file(&p);
+        let mut ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("ledger");
+        let plan = plan("intent_attribution_corroboration_20261012a");
+        ledger
+            .prepare_with_lineage(plan.clone(), Some(test_lineage()), 101)
+            .expect("bind strategy evidence");
+        ledger
+            .begin_submission(&plan.intent_id, 102)
+            .expect("reserve venue send");
+        ledger
+            .acknowledge(&plan.intent_id, "ord-exact", 103)
+            .expect("exact venue order ACK");
+        (ledger, plan, p)
+    }
+
+    #[test]
+    fn mismatched_native_bill_id_fee_currency_and_pnl_never_claim_reconciled_costs() {
+        let (ledger, plan, p) = acknowledged_test_ledger("native-bill-mismatches");
+        let order = ExchangeOrderIdentity {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: plan.instrument_id.clone(),
+            order_id: "ord-exact".to_owned(),
+            client_order_id: plan.client_order_id.clone(),
+            state: "filled".to_owned(),
+            update_time_ms: "1791828000000".to_owned(),
+        };
+        let (fill, bill) =
+            linked_accounting_pair(&plan, "trade-1", "bill-1", "-0.02", "USDT", "0.13");
+        let analyze = |fill: ExchangeFillIdentity, bill: ExchangeBillIdentity| {
+            attribute_strategy_exchange_evidence(
+                &ledger,
+                std::slice::from_ref(&order),
+                &[fill],
+                &[bill],
+                true,
+            )
+            .expect("typed read-only bill validation")
+        };
+        let ok = analyze(fill.clone(), bill.clone());
+        assert_eq!(ok.exact_trade_bills, 1);
+        assert_eq!(ok.fills_fee_totals[0].amount, "-0.02");
+        assert_eq!(ok.linked_trade_bill_pnl_totals[0].amount, "0.13");
+        assert_eq!(ok.fee_bill_mismatches, 0);
+        assert_eq!(ok.fill_pnl_bill_mismatches, 0);
+
+        let mut altered_fee = bill.clone();
+        altered_fee.fee = Some("-0.03".to_owned());
+        let bad = analyze(fill.clone(), altered_fee);
+        assert_eq!(bad.exact_trade_bills, 0);
+        assert_eq!(bad.fee_bill_mismatches, 1);
+        assert!(bad.fills_fee_totals.is_empty());
+        assert!(bad.incomplete_reasons.contains(&"bill_fee_or_currency_not_reconciled"));
+
+        let mut altered_currency = bill.clone();
+        altered_currency.currency = "USDC".to_owned();
+        assert_eq!(analyze(fill.clone(), altered_currency).fee_bill_mismatches, 1);
+
+        let mut altered_pnl = bill.clone();
+        altered_pnl.pnl = Some("0.14".to_owned());
+        let bad = analyze(fill.clone(), altered_pnl);
+        assert_eq!(bad.exact_trade_bills, 0);
+        assert_eq!(bad.fill_pnl_bill_mismatches, 1);
+        assert!(bad.linked_trade_bill_pnl_totals.is_empty());
+
+        let mut wrong_bill_id = fill.clone();
+        wrong_bill_id.bill_id = Some("another-bill".to_owned());
+        let bad = analyze(wrong_bill_id, bill.clone());
+        assert_eq!(bad.missing_exact_bill_links, 1);
+        assert_eq!(bad.exact_trade_bills, 0);
+
+        let mut no_bill_id = fill.clone();
+        no_bill_id.bill_id = None;
+        assert_eq!(analyze(no_bill_id, bill.clone()).missing_exact_bill_links, 1);
+
+        let mut wrong_order = bill.clone();
+        wrong_order.order_id = Some("external-order".to_owned());
+        let bad = analyze(fill.clone(), wrong_order);
+        assert_eq!(bad.unmatched_lineage_fills, 1);
+        assert_eq!(bad.exact_trade_bills, 0);
+        assert!(bad.fills_fee_totals.is_empty());
+
+        let mut wrong_trade = bill.clone();
+        wrong_trade.trade_id = Some("unrelated-fill".to_owned());
+        assert_eq!(analyze(fill.clone(), wrong_trade).unmatched_lineage_fills, 1);
+
+        let missing_history = attribute_strategy_exchange_evidence(
+            &ledger,
+            &[order],
+            &[fill],
+            &[bill],
+            false,
+        )
+        .expect("missing history is an incomplete witness");
+        assert!(missing_history.incomplete_reasons.contains(&"bills_history_incomplete"));
+        assert_eq!(missing_history.status, "INCOMPLETE");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn partial_fills_non_settle_currency_rebate_and_external_bill_do_not_mix() {
+        let (ledger, plan, p) = acknowledged_test_ledger("native-partial-fees");
+        let order = ExchangeOrderIdentity {
+            instrument_type: "SWAP".to_owned(),
+            instrument_id: plan.instrument_id.clone(),
+            order_id: "ord-exact".to_owned(),
+            client_order_id: plan.client_order_id.clone(),
+            state: "filled".to_owned(),
+            update_time_ms: "1791828000000".to_owned(),
+        };
+        let (a, ab) = linked_accounting_pair(
+            &plan, "trade-a", "bill-a", "-0.01", "USDT", "0.13",
+        );
+        let (b, bb) = linked_accounting_pair(
+            &plan, "trade-b", "bill-b", "0.004", "USDC", "-0.03",
+        );
+        let mut external = bb.clone();
+        external.bill_id = "manual-unmanaged-bill".to_owned();
+        external.trade_id = Some("external-trade".to_owned());
+        let r = attribute_strategy_exchange_evidence(
+            &ledger,
+            &[order],
+            &[a, b],
+            &[ab, bb, external],
+            true,
+        )
+        .expect("partial accounting");
+        assert_eq!(r.exact_fills, 2);
+        assert_eq!(r.exact_trade_bills, 2);
+        assert_eq!(r.unlinked_nonfunding_bills, 1);
+        assert_eq!(r.fills_fee_totals.len(), 2);
+        assert_eq!(r.fills_fee_totals[0].currency, "USDC");
+        assert_eq!(r.fills_fee_totals[0].amount, "0.004");
+        assert_eq!(r.fills_fee_totals[1].amount, "-0.01");
+        assert_eq!(r.linked_trade_bill_pnl_totals[0].amount, "-0.03");
+        assert_eq!(r.linked_trade_bill_pnl_totals[1].amount, "0.13");
+        assert!(r
+            .incomplete_reasons
+            .contains(&"account_bill_activity_outside_exact_managed_fill_links"));
+        assert!(!r.strategy_nav_available);
         let _ = std::fs::remove_file(p);
     }
 
@@ -712,6 +978,8 @@ mod tests {
             order_id: Some("old-order".to_owned()),
             client_order_id: plan.client_order_id,
             trade_id: "old-trade".to_owned(),
+            bill_id: None,
+            fill_pnl: None,
             side: "buy".to_owned(),
             position_side: "long".to_owned(),
             fill_price: "0.1".to_owned(),
@@ -877,6 +1145,8 @@ mod tests {
             order_id: Some("ord-1".to_owned()),
             client_order_id: "managed-client".to_owned(),
             trade_id: "trade-managed-1".to_owned(),
+            bill_id: None,
+            fill_pnl: None,
             side: "buy".to_owned(),
             position_side: "long".to_owned(),
             fill_price: "0.1".to_owned(),
@@ -926,6 +1196,8 @@ mod tests {
             order_id: Some("manual-1".to_owned()),
             client_order_id: String::new(),
             trade_id: "trade-1".to_owned(),
+            bill_id: None,
+            fill_pnl: None,
             side: "buy".to_owned(),
             position_side: "long".to_owned(),
             fill_price: "0.1".to_owned(),
