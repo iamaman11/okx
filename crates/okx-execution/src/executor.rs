@@ -2223,7 +2223,7 @@ mod tests {
         fs,
         path::PathBuf,
         sync::{
-            Mutex,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
@@ -2245,6 +2245,7 @@ mod tests {
         lookup_calls: AtomicUsize,
         place_results: Mutex<VecDeque<Result<TradeResponse<OrderOperationAck>, OkxError>>>,
         lookup_results: Mutex<VecDeque<Result<TradeOrderDetails, OkxError>>>,
+        algo_results: Mutex<VecDeque<Result<TradeAlgoOrderDetails, OkxError>>>,
     }
 
     impl MockGateway {
@@ -2257,7 +2258,16 @@ mod tests {
                 lookup_calls: AtomicUsize::new(0),
                 place_results: Mutex::new(place_results.into()),
                 lookup_results: Mutex::new(lookup_results.into()),
+                algo_results: Mutex::new(VecDeque::new()),
             }
+        }
+
+        fn with_algo_results(
+            mut self,
+            results: Vec<Result<TradeAlgoOrderDetails, OkxError>>,
+        ) -> Self {
+            self.algo_results = Mutex::new(results.into());
+            self
         }
 
         fn place_calls(&self) -> usize {
@@ -2296,6 +2306,46 @@ mod tests {
                 .expect("lookup queue")
                 .pop_front()
                 .expect("lookup result")
+        }
+
+        async fn algo_order_by_client_id(
+            &self,
+            _client_order_id: String,
+        ) -> Result<TradeAlgoOrderDetails, OkxError> {
+            self.algo_results
+                .lock()
+                .expect("algo queue")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(OkxError::Response("no scripted algo readback".to_owned()))
+                })
+        }
+    }
+
+    /// Test-only abrupt process termination at the exact gateway boundary.
+    /// The production executor has already fsync'd SUBMITTING by this point.
+    struct CrashAtGateway {
+        post_attempts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ExecutionGateway for CrashAtGateway {
+        async fn place_order(
+            &self,
+            _request: PlaceOrderRequest,
+            _timing: MutationTiming,
+            _rate_plan: Option<RateRequestPlan>,
+        ) -> Result<TradeResponse<OrderOperationAck>, OkxError> {
+            self.post_attempts.fetch_add(1, Ordering::SeqCst);
+            panic!("injected process exit at uncertain POST boundary");
+        }
+
+        async fn order_by_client_id(
+            &self,
+            _instrument_id: String,
+            _client_order_id: String,
+        ) -> Result<TradeOrderDetails, OkxError> {
+            panic!("no independent readback in crashed process");
         }
     }
 
@@ -2626,6 +2676,39 @@ mod tests {
             state: state.to_owned(),
             creation_time_ms: "1790000000000".to_owned(),
             update_time_ms: "1790000001000".to_owned(),
+        }
+    }
+
+    fn filled_protected_order(plan: &ExecutionPlan) -> TradeOrderDetails {
+        let mut order = order_details(plan, "filled");
+        order.accumulated_fill_size = plan.size.clone();
+        order.average_fill_price = plan.price.clone();
+        order
+    }
+
+    fn active_owned_algo(plan: &ExecutionPlan) -> TradeAlgoOrderDetails {
+        let protection = ExecutionRecord::new(plan.clone())
+            .protection
+            .expect("attached OCO");
+        let risk = plan.open_risk.as_ref().expect("protected risk");
+        TradeAlgoOrderDetails {
+            instrument_id: plan.instrument_id.clone(),
+            algo_order_id: "algo-g4-1".to_owned(),
+            client_order_id: protection.algo_client_order_id,
+            state: "live".to_owned(),
+            take_profit_trigger_price: risk.target_price.clone(),
+            take_profit_trigger_price_type: "mark".to_owned(),
+            take_profit_order_price: "-1".to_owned(),
+            stop_loss_trigger_price: risk.stop_price.clone(),
+            stop_loss_trigger_price_type: "mark".to_owned(),
+            stop_loss_order_price: "-1".to_owned(),
+            failure_code: String::new(),
+            size: plan.size.clone(),
+            side: "sell".to_owned(),
+            position_side: "long".to_owned(),
+            trade_mode: "cross".to_owned(),
+            order_type: "oco".to_owned(),
+            close_fraction: String::new(),
         }
     }
 
@@ -4432,6 +4515,163 @@ mod tests {
         assert_eq!(entry.record.order_id.as_deref(), Some("ord-1"));
         assert_eq!(executor.gateway().place_calls(), 1);
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// G4: death before the durable SUBMITTING boundary leaves an unsent
+    /// PREPARED order eligible for exactly one later authorized submission.
+    #[tokio::test]
+    async fn crash_before_submitting_preserves_prepared_without_prior_post() {
+        let (root, mut journal) = ledger("g4-before-submitting");
+        let plan = plan();
+        journal.prepare(plan.clone(), 101).expect("prepare");
+        drop(journal);
+
+        let reopened = DurableExecutionLedger::open(
+            ExecutionLedgerStore::at(root.join("ledger.json")),
+            200,
+        )
+        .expect("reopen");
+        assert_eq!(
+            reopened.get(&plan.intent_id).expect("intent").record.state,
+            ExecutionState::Prepared
+        );
+        let gateway = MockGateway::new(vec![Ok(accepted_response(&plan))], vec![]);
+        let mut executor = OrderExecutor::enabled_for_test(reopened, gateway);
+        let sent = executor
+            .submit_prepared(&plan.intent_id, timing(), 201)
+            .await
+            .expect("first and only post");
+        assert!(matches!(sent, SubmitDisposition::Acknowledged(_)));
+        assert_eq!(executor.gateway().place_calls(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// G4: emulate process death *inside* gateway.place_order, after the
+    /// existing executor has persisted SUBMITTING. No test hook in production.
+    #[tokio::test]
+    async fn crash_at_post_boundary_recovers_unknown_and_never_replays() {
+        let (root, ledger) = ledger("g4-crash-at-post");
+        let plan = plan();
+        let post_attempts = Arc::new(AtomicUsize::new(0));
+        let gateway = CrashAtGateway {
+            post_attempts: Arc::clone(&post_attempts),
+        };
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        executor.prepare(plan.clone(), 101).expect("prepare");
+        let intent_id = plan.intent_id.clone();
+        let task = tokio::spawn(async move {
+            let _ = executor.submit_prepared(&intent_id, timing(), 102).await;
+        });
+        assert!(task.await.expect_err("injected process crash").is_panic());
+        assert_eq!(post_attempts.load(Ordering::SeqCst), 1);
+
+        let reopened = DurableExecutionLedger::open(
+            ExecutionLedgerStore::at(root.join("ledger.json")),
+            200,
+        )
+        .expect("restart recovers SUBMITTING");
+        assert_eq!(
+            reopened.get(&plan.intent_id).expect("intent").record.state,
+            ExecutionState::UnknownSubmission
+        );
+        let mut recovered = OrderExecutor::enabled_for_test(
+            reopened,
+            MockGateway::new(vec![], vec![]),
+        );
+        assert!(matches!(
+            recovered.submit_prepared(&plan.intent_id, timing(), 201).await,
+            Err(OrderExecutorError::NotPrepared(ExecutionState::UnknownSubmission))
+        ));
+        assert_eq!(recovered.gateway().place_calls(), 0);
+        assert_eq!(post_attempts.load(Ordering::SeqCst), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// G4: exchange filled a FOK protected parent, but delivery of its
+    /// successful ACK was lost. Exact exchange order + exact owned OCO must
+    /// reconcile after a restart, without any second POST even when the
+    /// initial independent lookup is unavailable.
+    #[tokio::test]
+    async fn lost_ack_after_protected_fill_recovers_exact_oco_without_replay() {
+        let (root, ledger) = ledger("g4-lost-ack-protected");
+        let mut plan = protected_plan();
+        plan.order_type = OrderType::Fok;
+        let gateway = MockGateway::new(
+            vec![Err(OkxError::Response("ack lost after exchange fill".to_owned()))],
+            vec![],
+        );
+        let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
+        executor.prepare(plan.clone(), 101).expect("prepare");
+        let first = executor
+            .submit_prepared(&plan.intent_id, timing(), 102)
+            .await
+            .expect("uncertain outcome");
+        assert!(matches!(first, SubmitDisposition::UnknownSubmission(_)));
+        assert_eq!(executor.gateway().place_calls(), 1);
+        drop(executor);
+
+        let reopened = DurableExecutionLedger::open(
+            ExecutionLedgerStore::at(root.join("ledger.json")),
+            200,
+        )
+        .expect("restart");
+        assert_eq!(
+            reopened.get(&plan.intent_id).expect("intent").record.state,
+            ExecutionState::UnknownSubmission
+        );
+        let gateway = MockGateway::new(
+            vec![],
+            vec![
+                Err(OkxError::Response("readback temporarily unavailable".to_owned())),
+                Ok(filled_protected_order(&plan)),
+            ],
+        )
+        .with_algo_results(vec![Ok(active_owned_algo(&plan))]);
+        let mut recovered = OrderExecutor::enabled_for_test(reopened, gateway);
+
+        let unavailable = recovered
+            .reconcile(&plan.intent_id, 201)
+            .await
+            .expect("bounded readback");
+        assert!(matches!(unavailable, ReconcileDisposition::Unavailable(_)));
+        assert_eq!(
+            recovered.ledger().get(&plan.intent_id).expect("unknown").record.state,
+            ExecutionState::UnknownSubmission
+        );
+        assert!(matches!(
+            recovered.submit_prepared(&plan.intent_id, timing(), 202).await,
+            Err(OrderExecutorError::NotPrepared(ExecutionState::UnknownSubmission))
+        ));
+        assert_eq!(recovered.gateway().place_calls(), 0);
+
+        let found = recovered
+            .reconcile(&plan.intent_id, 203)
+            .await
+            .expect("exact order + owned algo");
+        assert!(matches!(found, ReconcileDisposition::Found(_)));
+        let entry = recovered.ledger().get(&plan.intent_id).expect("reconciled");
+        assert_eq!(entry.record.state, ExecutionState::Filled);
+        let protection = entry.record.protection.as_ref().expect("active protection");
+        assert_eq!(protection.status, ProtectiveOrderStatus::Active);
+        assert_eq!(protection.covered_size.as_deref(), Some(plan.size.as_str()));
+        assert_eq!(recovered.gateway().place_calls(), 0);
+        drop(recovered);
+
+        let durable = DurableExecutionLedger::open(
+            ExecutionLedgerStore::at(root.join("ledger.json")),
+            205,
+        )
+        .expect("second restart");
+        assert_eq!(
+            durable.get(&plan.intent_id).expect("final").record.state,
+            ExecutionState::Filled
+        );
+        assert_eq!(
+            durable.get(&plan.intent_id).expect("final").record
+                .protection.as_ref().expect("oco").status,
+            ProtectiveOrderStatus::Active
+        );
         let _ = fs::remove_dir_all(root);
     }
 
