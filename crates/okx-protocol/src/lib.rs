@@ -3466,7 +3466,7 @@ mod direct_transport_tests {
                 decision_reference: ExecutionDecisionReferenceRequest {
                     decision_time_ms: 1_790_000_000_000,
                     price: "80000".to_owned(),
-                    price_basis: ExecutionDecisionPriceBasis::LimitPrice,
+                    price_basis: ExecutionReferencePriceBasis::LimitPrice,
                     price_policy_version: "v1".to_owned(),
                 },
             })),
