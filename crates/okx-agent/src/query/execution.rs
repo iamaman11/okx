@@ -58,16 +58,34 @@ pub const EXECUTION_RECONCILIATION_UNAVAILABLE_CODE: &str = "EXECUTION_RECONCILI
 pub const EXECUTION_MUTATION_UNSAFE_CODE: &str = "EXECUTION_MUTATION_UNSAFE";
 pub const EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE: &str =
     "EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED";
+pub const EXECUTION_PROTECTED_REDUCE_UNSUPPORTED_CODE: &str =
+    "EXECUTION_PROTECTED_REDUCE_UNSUPPORTED";
 
-fn protected_add_hedge_unsupported(request: &AgentRequest, generated_at: &str) -> AgentResponse {
-    failure_response(
-        request,
-        generated_at,
-        AgentResponseStatus::Rejected,
-        EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE,
-        "protected ADD/HEDGE is unsupported: OKX does not provide an established exchange-atomic guarantee against an existing OCO triggering between exact GET/WS fence and new entry; no intent or exchange POST is permitted".to_owned(),
-        false,
-    )
+/// One product policy for prepare and submit, including legacy PREPARED.
+fn unsupported_position_action(action: ExecutionAction) -> Option<(&'static str, &'static str)> {
+    match action {
+        ExecutionAction::Add | ExecutionAction::Hedge => Some((
+            EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE,
+            "protected ADD/HEDGE is unsupported: existing native OCO triggers cannot be exchange-atomically excluded; no intent or exchange POST is permitted",
+        )),
+        ExecutionAction::Reduce => Some((
+            EXECUTION_PROTECTED_REDUCE_UNSUPPORTED_CODE,
+            "protected partial REDUCE in Hedge mode cannot atomically reduce the position and resize an existing OCO; no intent or exchange POST is permitted",
+        )),
+        ExecutionAction::Open | ExecutionAction::Close => None,
+    }
+}
+
+fn unsupported_position_response(
+    request: &AgentRequest,
+    generated_at: &str,
+    action: ExecutionAction,
+) -> Option<AgentResponse> {
+    let (code, reason) = unsupported_position_action(action)?;
+    Some(failure_response(
+        request, generated_at, AgentResponseStatus::Rejected,
+        code, reason.to_owned(), false,
+    ))
 }
 pub const EXECUTION_PREPARED_ABANDON_UNSAFE_CODE: &str = "EXECUTION_PREPARED_ABANDON_UNSAFE";
 
@@ -355,8 +373,8 @@ async fn prepare_risk_increasing(
     // An external OKX stop can trigger after our last REST/WS observation.
     // Without venue-atomic attached-OCO exchange protection this action is
     // not a supported product operation, even when every local read is FRESH.
-    if matches!(action, ExecutionAction::Add | ExecutionAction::Hedge) {
-        return Ok(protected_add_hedge_unsupported(request, generated_at));
+    if let Some(response) = unsupported_position_response(request, generated_at, action) {
+        return Ok(response);
     }
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
@@ -448,82 +466,6 @@ async fn prepare_risk_increasing(
     let lineage = common
         .lineage
         .map(|value| execution_lineage_binding(value, &rules));
-    if matches!(action, ExecutionAction::Add | ExecutionAction::Hedge) {
-        // A fresh private-WS cursor must fence the account, full OCO
-        // inventory, every exact-ID algo GET and the durable prepare.
-        let Some(private_ws) = context.private_ws else {
-            return Ok(account_not_fresh(request, generated_at));
-        };
-        let cursor = match private_ws.convergence_cursor().await {
-            Ok(value) => value,
-            Err(_) => return Ok(account_not_fresh(request, generated_at)),
-        };
-        let algo_cursor = match private_ws.algo_convergence_cursor().await {
-            Ok(value) => value,
-            Err(_) => return Ok(account_not_fresh(request, generated_at)),
-        };
-
-        let started_ms = utc_now_ms();
-        let account = match fresh_account(request, context, generated_at).await? {
-            FreshAccount::Ready(value) => value,
-            FreshAccount::Response(response) => return Ok(*response),
-        };
-        // Unrealized PnL / mark changes a live-position account generation
-        // between independent FRESH snapshots. Do not pretend that a previous
-        // generation is still the authority, nor require it to stay frozen.
-        // Recompute the full immutable plan against the SAME freshly
-        // converged account fenced below with the venue OCO reads.
-        let mut fenced_intent = intent.clone();
-        fenced_intent.expected_account_generation = account.account_generation.clone();
-        let mut fenced_plan =
-            match prepare_execution(&fenced_intent, &rules, &account, Some(&candidate)) {
-                Ok(value) => value,
-                Err(error) => return Ok(validation_failure(request, generated_at, error)),
-            };
-        fenced_plan.risk_binding = common.risk.map(execution_risk_binding);
-        let Some(observer) = context.account_fallback else {
-            return Ok(execution_unavailable(request, generated_at));
-        };
-        let inventory = match observer.pending_protective_algos().await {
-            Ok(value) => value,
-            Err(error) => {
-                return Ok(failure_response(
-                    request,
-                    generated_at,
-                    AgentResponseStatus::Rejected,
-                    EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
-                    format!("protected ADD/HEDGE requires complete OCO evidence: {error}"),
-                    true,
-                ));
-            }
-        };
-        let result = execution
-            .prepare_protected_add_hedge_fenced(
-                fenced_plan,
-                lineage,
-                &account,
-                &inventory,
-                utc_now_ms(),
-                || async {
-                    protective_readback_in_ttl(started_ms, utc_now_ms())
-                        && private_ws
-                            .protected_oco_window_unchanged(cursor, algo_cursor)
-                            .await
-                },
-            )
-            .await;
-        return match result {
-            Ok(outcome) => prepare_outcome_response(request, generated_at, outcome),
-            Err(error) => Ok(failure_response(
-                request,
-                generated_at,
-                AgentResponseStatus::Rejected,
-                EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
-                format!("exact owned OCO/position/WS coverage denied ADD/HEDGE: {error}"),
-                false,
-            )),
-        };
-    }
     commit_prepared(request, generated_at, execution, plan, lineage, target).await
 }
 
@@ -542,6 +484,9 @@ async fn prepare_risk_reducing(
         target,
     } = input;
     debug_assert!(action.is_risk_reducing());
+    if let Some(response) = unsupported_position_response(request, generated_at, action) {
+        return Ok(response);
+    }
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
@@ -928,8 +873,8 @@ async fn submit_prepared(
     // Existing prepared intents also fail closed. A previously installed
     // binary may have persisted PREPARED before this venue decision; no
     // preflight, SUBMITTING transition or exchange POST may follow.
-    if matches!(action, ExecutionAction::Add | ExecutionAction::Hedge) {
-        return Ok(protected_add_hedge_unsupported(request, generated_at));
+    if let Some(response) = unsupported_position_response(request, generated_at, action) {
+        return Ok(response);
     }
     let admission = match pre_mutation_admission(
         request,
@@ -949,63 +894,7 @@ async fn submit_prepared(
 
     let observed_at_ms = timing.request_time_ms();
     let demo_acceptance = execution.demo_mutation_acceptance_requested();
-    let submit_result =
-        if demo_acceptance && matches!(action, ExecutionAction::Add | ExecutionAction::Hedge) {
-            let Some(private_ws) = context.private_ws else {
-                return Ok(account_not_fresh(request, generated_at));
-            };
-            let cursor = match private_ws.convergence_cursor().await {
-                Ok(value) => value,
-                Err(_) => return Ok(account_not_fresh(request, generated_at)),
-            };
-            let algo_cursor = match private_ws.algo_convergence_cursor().await {
-                Ok(value) => value,
-                Err(_) => return Ok(account_not_fresh(request, generated_at)),
-            };
-            let started_ms = utc_now_ms();
-            let expires_at_ms = timing.exp_time_ms();
-            let account = match fresh_account(request, context, generated_at).await? {
-                FreshAccount::Ready(value) => value,
-                FreshAccount::Response(response) => return Ok(*response),
-            };
-            let Some(observer) = context.account_fallback else {
-                return Ok(execution_unavailable(request, generated_at));
-            };
-            let inventory = match observer.pending_protective_algos().await {
-                Ok(value) => value,
-                Err(error) => {
-                    return Ok(failure_response(
-                        request,
-                        generated_at,
-                        AgentResponseStatus::Rejected,
-                        EXECUTION_RECONCILIATION_UNAVAILABLE_CODE,
-                        format!("pre-send OCO readback unavailable; no POST: {error}"),
-                        false,
-                    ));
-                }
-            };
-            match execution
-                .submit_prepared_add_hedge_demo_fenced(
-                    &preflight,
-                    intent_id,
-                    &account,
-                    &inventory,
-                    timing,
-                    || async {
-                        let finished_ms = utc_now_ms();
-                        protective_readback_in_ttl(started_ms, finished_ms)
-                            && finished_ms <= expires_at_ms
-                            && private_ws
-                                .protected_oco_window_unchanged(cursor, algo_cursor)
-                                .await
-                    },
-                )
-                .await?
-            {
-                Some(result) => result,
-                None => return Ok(preflight_rejected(request, generated_at)),
-            }
-        } else if demo_acceptance {
+    let submit_result = if demo_acceptance {
             match execution
                 .submit_prepared_demo_authorized(&preflight, intent_id, timing, observed_at_ms)
                 .await?
@@ -3641,26 +3530,27 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_protected_add_hedge_is_typed_and_non_retryable_at_both_boundaries() {
-        for action in [ExecutionAction::Add, ExecutionAction::Hedge] {
-            assert!(matches!(
-                action,
-                ExecutionAction::Add | ExecutionAction::Hedge
-            ));
-            let response = protected_add_hedge_unsupported(&request(), GENERATED_AT);
+    fn unsupported_position_actions_share_prepare_and_submit_admission() {
+        for (action, expected_code) in [
+            (ExecutionAction::Add, EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE),
+            (ExecutionAction::Hedge, EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE),
+            (ExecutionAction::Reduce, EXECUTION_PROTECTED_REDUCE_UNSUPPORTED_CODE),
+        ] {
+            let (code, reason) = unsupported_position_action(action).expect("blocked");
+            assert_eq!(code, expected_code);
+            assert!(reason.contains("no intent or exchange POST"));
+            // Both trading boundaries invoke this exact policy before writes.
+            let response = unsupported_position_response(&request(), GENERATED_AT, action)
+                .expect("typed response");
             assert_eq!(response.status, AgentResponseStatus::Rejected);
             assert_eq!(response.quality, DataQuality::NotReady);
-            let failure = response.failure.expect("explicit product decision");
-            assert_eq!(failure.code, EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE);
+            let failure = response.failure.expect("failure");
+            assert_eq!(failure.code, expected_code);
             assert!(!failure.retryable);
-            assert!(failure.message.contains("no intent or exchange POST"));
         }
-        // OPEN/CLOSE are not reclassified by this policy.
         for action in [ExecutionAction::Open, ExecutionAction::Close] {
-            assert!(!matches!(
-                action,
-                ExecutionAction::Add | ExecutionAction::Hedge
-            ));
+            assert!(unsupported_position_action(action).is_none());
+            assert!(unsupported_position_response(&request(), GENERATED_AT, action).is_none());
         }
     }
 

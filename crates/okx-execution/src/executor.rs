@@ -1191,6 +1191,11 @@ where
         if entry.record.state != ExecutionState::Prepared {
             return Err(OrderExecutorError::NotPrepared(entry.record.state));
         }
+        // Also deny a legacy PREPARED partial REDUCE through the core executor,
+        // before any SUBMITTING journal transition or exchange gateway POST.
+        if entry.record.plan.action == crate::ExecutionAction::Reduce {
+            return Err(OrderExecutorError::ProtectionCoverageUnproven);
+        }
         if matches!(
             entry.record.plan.action,
             crate::ExecutionAction::Add | crate::ExecutionAction::Hedge
