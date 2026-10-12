@@ -167,6 +167,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
     let plaintext_bytes = match operation {
         AgentOperation::InstrumentRules { .. }
         | AgentOperation::ExecutorPreflight
+        | AgentOperation::BeginStrategyRun { .. }
         | AgentOperation::SubmitPreparedExecution { .. }
         | AgentOperation::MutateExecution { .. }
         | AgentOperation::AbortReverseExecution { .. }

@@ -1009,24 +1009,52 @@ mod tests {
         };
 
         let ro = ExecutionRuntime::new(
-            &root, OkxEnvironment::new(Region::Global, true),
-            credentials(), 100, RateBudget::new(),
-        ).expect("read-only owner");
-        assert!(ro.begin_strategy_run_demo_authorized(
-            &credential, reservation.clone(), &opening, 102,
-        ).await.expect("read-only refused").is_none());
-        assert!(ro.executor.lock().await.ledger().capital_reservation().is_none());
+            &root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            100,
+            RateBudget::new(),
+        )
+        .expect("read-only owner");
+        assert!(
+            ro.begin_strategy_run_demo_authorized(&credential, reservation.clone(), &opening, 102,)
+                .await
+                .expect("read-only refused")
+                .is_none()
+        );
+        assert!(
+            ro.executor
+                .lock()
+                .await
+                .ledger()
+                .capital_reservation()
+                .is_none()
+        );
         drop(ro);
 
         let demo = ExecutionRuntime::new_demo_acceptance(
-            &root, OkxEnvironment::new(Region::Global, true),
-            credentials(), 100, RateBudget::new(),
-        ).expect("Demo owner");
+            &root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            100,
+            RateBudget::new(),
+        )
+        .expect("Demo owner");
         let rejected = preflight(false).credential;
-        assert!(demo.begin_strategy_run_demo_authorized(
-            &rejected, reservation, &opening, 102,
-        ).await.expect("rejected preflight").is_none());
-        assert!(demo.executor.lock().await.ledger().capital_reservation().is_none());
+        assert!(
+            demo.begin_strategy_run_demo_authorized(&rejected, reservation, &opening, 102,)
+                .await
+                .expect("rejected preflight")
+                .is_none()
+        );
+        assert!(
+            demo.executor
+                .lock()
+                .await
+                .ledger()
+                .capital_reservation()
+                .is_none()
+        );
         let _ = fs::remove_dir_all(root);
     }
 
