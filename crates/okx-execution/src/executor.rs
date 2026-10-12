@@ -4400,6 +4400,9 @@ mod tests {
         let mut closing = plan();
         closing.intent_id = "intent_daily_stop_protective_close_20261012".to_owned();
         closing.client_order_id = crate::derive_client_order_id(&closing.intent_id);
+        // Different instrument avoids pretending an unreconciled PREPARED OPEN
+        // and an unrelated exit can share one instrument reservation.
+        closing.instrument_id = "ETH-USDT-SWAP".to_owned();
         closing.action = ExecutionAction::Close;
         closing.side = OrderSide::Sell;
         journal.prepare(opening.clone(), 101).expect("prepare open");
