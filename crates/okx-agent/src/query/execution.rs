@@ -13,10 +13,10 @@ use okx_execution::{
     ExecutionTcaMechanicsBinding, ExecutionTransitionError, FencedProtectiveShrinkRequest,
     OrderExecutorError, OrderSide as ExecutionOrderSide, OrderType,
     PositionSide as ExecutionPositionSide, PrepareDeferral, PrepareFailure, PrepareOutcome,
-    PrepareRejection, ReverseContinuation, ReverseLeg, TradeMode, prepare_execution,
+    PrepareRejection, ReverseContinuation, ReverseLeg, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
+    StrategyAllocationOpening, StrategyCapitalReservation, TradeMode, prepare_execution,
     revalidate_amend_execution_plan, revalidate_execution_plan, revalidate_hard_risk_policy,
-    revalidate_venue_execution, StrategyAllocationOpening, StrategyCapitalReservation,
-    STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
+    revalidate_venue_execution,
 };
 use okx_protocol::{
     ExecutionEntryRequest, ExecutionLineageRequest, ExecutionMutationRequest, ExecutionOrderType,
@@ -154,9 +154,17 @@ pub(super) async fn dispatch(
             operator_authority_id,
         } => {
             begin_strategy_run(
-                request, context, generated_at, allocation_id, origin_schema,
-                origin_version, mandate_version, allocated_usdt, operator_authority_id,
-            ).await
+                request,
+                context,
+                generated_at,
+                allocation_id,
+                origin_schema,
+                origin_version,
+                mandate_version,
+                allocated_usdt,
+                operator_authority_id,
+            )
+            .await
         }
         AgentOperation::PrepareExecution {
             intent_id,
@@ -216,34 +224,45 @@ async fn begin_strategy_run(
     allocated_usdt: &str,
     operator_authority_id: &str,
 ) -> AgentResult<AgentResponse> {
-    let deny = |reason: String| failure_response(
-        request, generated_at, AgentResponseStatus::Rejected,
-        EXECUTION_CAPITAL_OPENING_UNATTESTED_CODE, reason, false,
-    );
+    let deny = |reason: String| {
+        failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_CAPITAL_OPENING_UNATTESTED_CODE,
+            reason,
+            false,
+        )
+    };
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
     if !execution.demo_mutation_acceptance_requested() {
-        return Ok(deny("new strategy run requires the authenticated Demo owner".to_owned()));
+        return Ok(deny(
+            "new strategy run requires the authenticated Demo owner".to_owned(),
+        ));
     }
     let snapshot = match fresh_account(request, context, generated_at).await? {
         FreshAccount::Ready(account) => account,
         FreshAccount::Response(reply) => return Ok(*reply),
     };
-    let preflight = match executor_preflight_check(
-        request, generated_at, execution, &snapshot,
-    ).await? {
-        ExecutorPreflightCheck::Ready(value) => value,
-        ExecutorPreflightCheck::Response(reply) => return Ok(*reply),
-    };
+    let preflight =
+        match executor_preflight_check(request, generated_at, execution, &snapshot).await? {
+            ExecutorPreflightCheck::Ready(value) => value,
+            ExecutorPreflightCheck::Response(reply) => return Ok(*reply),
+        };
     if !preflight.accepted || preflight.production_environment {
         return Ok(preflight_rejected(request, generated_at));
     }
     let Some(observer) = context.account_fallback else {
-        return Ok(deny("independent read-only exchange account source unavailable".to_owned()));
+        return Ok(deny(
+            "independent read-only exchange account source unavailable".to_owned(),
+        ));
     };
     let Some(ws) = context.private_ws else {
-        return Ok(deny("independent private WS continuity unavailable".to_owned()));
+        return Ok(deny(
+            "independent private WS continuity unavailable".to_owned(),
+        ));
     };
     let cursor = match ws.convergence_cursor().await {
         Ok(cursor) => cursor,
@@ -255,14 +274,24 @@ async fn begin_strategy_run(
     };
     let protection = match observer.pending_protective_algos().await {
         Ok(value) => value,
-        Err(_) => return Ok(deny("native pending OCO/conditional source unavailable".to_owned())),
+        Err(_) => {
+            return Ok(deny(
+                "native pending OCO/conditional source unavailable".to_owned(),
+            ));
+        }
     };
     let window = match ws.convergence_window(cursor).await {
         Ok(value) => value,
-        Err(_) => return Ok(deny("private WS generation or delta gap during opening".to_owned())),
+        Err(_) => {
+            return Ok(deny(
+                "private WS generation or delta gap during opening".to_owned(),
+            ));
+        }
     };
     if !window.events.is_empty() {
-        return Ok(deny("account changed during independent opening readback".to_owned()));
+        return Ok(deny(
+            "account changed during independent opening readback".to_owned(),
+        ));
     }
     if facts.summary.authority.account_uid_fingerprint != preflight.account_uid_fingerprint
         || facts.summary.account_generation != snapshot.account_generation
@@ -270,13 +299,19 @@ async fn begin_strategy_run(
         || !facts.bills_history_complete
         || !facts.exchange_orders_history_complete
         || !facts.exchange_fills_history_complete
-        || facts.summary.history_coverage.iter().any(|c| !c.complete_within_bound)
+        || facts
+            .summary
+            .history_coverage
+            .iter()
+            .any(|c| !c.complete_within_bound)
         || !protection.complete_within_bound
         || protection.rows > 0
         || facts.summary.open_positions > 0
         || facts.summary.pending_orders > 0
     {
-        return Ok(deny("opening account/coverage/OCO/other-currency proof incomplete".to_owned()));
+        return Ok(deny(
+            "opening account/coverage/OCO/other-currency proof incomplete".to_owned(),
+        ));
     }
     let Some(usdt_equity) = facts.trading_usdt_equity.as_deref() else {
         return Ok(deny("native USDT trading equity unavailable".to_owned()));
@@ -306,14 +341,19 @@ async fn begin_strategy_run(
         operator_authority_id: operator_authority_id.to_owned(),
         started_at_ms: observed_at_ms,
     };
-    match execution.begin_strategy_run_demo_authorized(
-        &preflight, reservation, &opening, observed_at_ms,
-    ).await? {
+    match execution
+        .begin_strategy_run_demo_authorized(&preflight, reservation, &opening, observed_at_ms)
+        .await?
+    {
         Some(Ok(value)) => Ok(completed(
-            request, generated_at, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
+            request,
+            generated_at,
+            STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
             serde_json::to_value(value)?,
         )),
-        Some(Err(error)) => Ok(deny(format!("durable strategy allocation rejected: {error}"))),
+        Some(Err(error)) => Ok(deny(format!(
+            "durable strategy allocation rejected: {error}"
+        ))),
         None => Ok(preflight_rejected(request, generated_at)),
     }
 }

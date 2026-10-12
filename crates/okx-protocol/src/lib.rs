@@ -3603,10 +3603,17 @@ mod direct_transport_tests {
         }
         assert!(bad.validate().is_err(), "zero capital cannot be reserved");
         let mut bad = begin;
-        if let AgentOperation::BeginStrategyRun { operator_authority_id, .. } = &mut bad {
+        if let AgentOperation::BeginStrategyRun {
+            operator_authority_id,
+            ..
+        } = &mut bad
+        {
             *operator_authority_id = "caller-witness".to_owned();
         }
-        assert!(bad.validate().is_err(), "witness id format is checked at runtime too");
+        assert!(
+            bad.validate().is_err(),
+            "witness id format is checked at runtime too"
+        );
     }
 
     #[test]

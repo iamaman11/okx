@@ -13,9 +13,8 @@ use okx_execution::{
     ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
     ManagedExecutionInventory, MutationAuthority, MutationPrepareDisposition,
     MutationSubmitDisposition, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
-    StrategyAllocationOpening, StrategyCapitalReservation,
-    SubmitDisposition, execution_status_with_ledger, managed_execution_inventory,
-    reconcile_account_ledger,
+    StrategyAllocationOpening, StrategyCapitalReservation, SubmitDisposition,
+    execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -254,13 +253,18 @@ impl ExecutionRuntime {
             || !preflight.accepted
             || preflight.production_environment
             || preflight.account_uid_fingerprint != opening.account_uid_fingerprint
-            || !executor.ledger().entries().all(|e| {
-                e.record.plan.account_uid_fingerprint == preflight.account_uid_fingerprint
-            })
+            || !executor
+                .ledger()
+                .entries()
+                .all(|e| e.record.plan.account_uid_fingerprint == preflight.account_uid_fingerprint)
         {
             return Ok(None);
         }
-        Ok(Some(executor.reserve_strategy_capital(reservation, opening, now_ms)))
+        Ok(Some(executor.reserve_strategy_capital(
+            reservation,
+            opening,
+            now_ms,
+        )))
     }
 
     pub async fn risk_stop_status(&self) -> Option<ExecutionRiskStop> {

@@ -375,7 +375,9 @@ where
         opening: &crate::StrategyAllocationOpening,
         now_ms: u64,
     ) -> Result<crate::StrategyCapitalReservation, OrderExecutorError> {
-        Ok(self.ledger.reserve_strategy_capital(reservation, opening, now_ms)?)
+        Ok(self
+            .ledger
+            .reserve_strategy_capital(reservation, opening, now_ms)?)
     }
 
     pub fn stop_new_risk(
