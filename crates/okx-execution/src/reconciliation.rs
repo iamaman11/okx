@@ -1085,7 +1085,10 @@ mod tests {
         let mut ledger =
             DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("ledger");
         let first = plan("intent_origin_family_one_20261012");
-        let second = plan("intent_origin_family_two_20261012");
+        let mut second = plan("intent_origin_family_two_20261012");
+        // Two independently owned instruments; the test must not bypass the
+        // existing one-active-intent-per-instrument executor invariant.
+        second.instrument_id = "BTC-USDT-SWAP".to_owned();
         let origin1 = test_lineage();
         let mut origin2 = test_lineage();
         origin2.origin_version = "independent-origin-v2".to_owned();
