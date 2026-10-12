@@ -455,8 +455,7 @@ fn attribute_strategy_exchange_evidence(
                 continue;
             }
 
-            let (Some(fill_pnl), Some(bill_pnl)) =
-                (fill.fill_pnl.as_deref(), bill.pnl.as_deref())
+            let (Some(fill_pnl), Some(bill_pnl)) = (fill.fill_pnl.as_deref(), bill.pnl.as_deref())
             else {
                 fill_pnl_bill_mismatches += 1;
                 continue;
@@ -817,9 +816,7 @@ mod tests {
         (fill, bill)
     }
 
-    fn acknowledged_test_ledger(
-        name: &str,
-    ) -> (DurableExecutionLedger, ExecutionPlan, PathBuf) {
+    fn acknowledged_test_ledger(name: &str) -> (DurableExecutionLedger, ExecutionPlan, PathBuf) {
         let p = path(name);
         let _ = std::fs::remove_file(&p);
         let mut ledger =
@@ -873,11 +870,17 @@ mod tests {
         assert_eq!(bad.exact_trade_bills, 0);
         assert_eq!(bad.fee_bill_mismatches, 1);
         assert!(bad.fills_fee_totals.is_empty());
-        assert!(bad.incomplete_reasons.contains(&"bill_fee_or_currency_not_reconciled"));
+        assert!(
+            bad.incomplete_reasons
+                .contains(&"bill_fee_or_currency_not_reconciled")
+        );
 
         let mut altered_currency = bill.clone();
         altered_currency.currency = "USDC".to_owned();
-        assert_eq!(analyze(fill.clone(), altered_currency).fee_bill_mismatches, 1);
+        assert_eq!(
+            analyze(fill.clone(), altered_currency).fee_bill_mismatches,
+            1
+        );
 
         let mut altered_pnl = bill.clone();
         altered_pnl.pnl = Some("0.14".to_owned());
@@ -894,7 +897,10 @@ mod tests {
 
         let mut no_bill_id = fill.clone();
         no_bill_id.bill_id = None;
-        assert_eq!(analyze(no_bill_id, bill.clone()).missing_exact_bill_links, 1);
+        assert_eq!(
+            analyze(no_bill_id, bill.clone()).missing_exact_bill_links,
+            1
+        );
 
         let mut wrong_order = bill.clone();
         wrong_order.order_id = Some("external-order".to_owned());
@@ -905,17 +911,19 @@ mod tests {
 
         let mut wrong_trade = bill.clone();
         wrong_trade.trade_id = Some("unrelated-fill".to_owned());
-        assert_eq!(analyze(fill.clone(), wrong_trade).unmatched_lineage_fills, 1);
+        assert_eq!(
+            analyze(fill.clone(), wrong_trade).unmatched_lineage_fills,
+            1
+        );
 
-        let missing_history = attribute_strategy_exchange_evidence(
-            &ledger,
-            &[order],
-            &[fill],
-            &[bill],
-            false,
-        )
-        .expect("missing history is an incomplete witness");
-        assert!(missing_history.incomplete_reasons.contains(&"bills_history_incomplete"));
+        let missing_history =
+            attribute_strategy_exchange_evidence(&ledger, &[order], &[fill], &[bill], false)
+                .expect("missing history is an incomplete witness");
+        assert!(
+            missing_history
+                .incomplete_reasons
+                .contains(&"bills_history_incomplete")
+        );
         assert_eq!(missing_history.status, "INCOMPLETE");
         let _ = std::fs::remove_file(p);
     }
@@ -931,12 +939,8 @@ mod tests {
             state: "filled".to_owned(),
             update_time_ms: "1791828000000".to_owned(),
         };
-        let (a, ab) = linked_accounting_pair(
-            &plan, "trade-a", "bill-a", "-0.01", "USDT", "0.13",
-        );
-        let (b, bb) = linked_accounting_pair(
-            &plan, "trade-b", "bill-b", "0.004", "USDC", "-0.03",
-        );
+        let (a, ab) = linked_accounting_pair(&plan, "trade-a", "bill-a", "-0.01", "USDT", "0.13");
+        let (b, bb) = linked_accounting_pair(&plan, "trade-b", "bill-b", "0.004", "USDC", "-0.03");
         let mut external = bb.clone();
         external.bill_id = "manual-unmanaged-bill".to_owned();
         external.trade_id = Some("external-trade".to_owned());
@@ -957,9 +961,10 @@ mod tests {
         assert_eq!(r.fills_fee_totals[1].amount, "-0.01");
         assert_eq!(r.linked_trade_bill_pnl_totals[0].amount, "-0.03");
         assert_eq!(r.linked_trade_bill_pnl_totals[1].amount, "0.13");
-        assert!(r
-            .incomplete_reasons
-            .contains(&"account_bill_activity_outside_exact_managed_fill_links"));
+        assert!(
+            r.incomplete_reasons
+                .contains(&"account_bill_activity_outside_exact_managed_fill_links")
+        );
         assert!(!r.strategy_nav_available);
         let _ = std::fs::remove_file(p);
     }
