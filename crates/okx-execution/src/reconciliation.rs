@@ -17,6 +17,7 @@ use crate::{
 
 pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str = "okx.account-ledger-reconciliation/v1";
 const MAX_POSITION_ATTRIBUTION_ROWS: usize = 20;
+const MAX_ORIGIN_COHORT_ROWS: usize = 8;
 pub const STRATEGY_ATTRIBUTION_SCHEMA_V1: &str = "okx.strategy-exchange-attribution/v1";
 
 /// Observed *linked* exchange components; not a strategy NAV or account-equity proxy.
@@ -44,10 +45,37 @@ pub struct StrategyExchangeAttribution {
     pub unallocated_funding_bills: usize,
     pub unallocated_funding_totals: Vec<LinkedCurrencyAmount>,
     pub unlinked_nonfunding_bills: usize,
+    pub orders_history_complete: bool,
+    pub fills_history_complete: bool,
+    /// Different decision-origin/mandate cohorts are NOT a single strategy NAV.
+    pub origin_cohorts_total: usize,
+    pub origin_cohorts_truncated: bool,
+    pub origin_cohorts: Vec<AttributionOriginCohort>,
     /// ONLY independently corroborated fill/bill amounts, not all fill fees.
     pub fills_fee_totals: Vec<LinkedCurrencyAmount>,
     pub linked_trade_bill_pnl_totals: Vec<LinkedCurrencyAmount>,
     pub incomplete_reasons: Vec<&'static str>,
+}
+
+/// Grouping by immutable execution provenance and declared mandate only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AttributionOriginCohort {
+    pub origin_schema: String,
+    pub origin_version: String,
+    pub mandate_version: Option<String>,
+    pub declared_capital_usd: Option<String>,
+    pub lineage_bound_intents: usize,
+    pub exact_trade_bills: usize,
+    pub verified_fees: Vec<LinkedCurrencyAmount>,
+    pub verified_realized_pnl: Vec<LinkedCurrencyAmount>,
+}
+
+#[derive(Default)]
+struct AttributionCohortAccumulator {
+    intents: usize,
+    exact_trade_bills: usize,
+    fees: BTreeMap<String, Decimal>,
+    pnl: BTreeMap<String, Decimal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -182,6 +210,8 @@ pub fn reconcile_account_ledger(
         &facts.exchange_fills,
         &facts.exchange_bills,
         facts.bills_history_complete,
+        facts.exchange_orders_history_complete,
+        facts.exchange_fills_history_complete,
     )?);
     Ok(result)
 }
@@ -348,6 +378,8 @@ fn attribute_strategy_exchange_evidence(
     fills: &[ExchangeFillIdentity],
     bills: &[ExchangeBillIdentity],
     bills_complete: bool,
+    orders_complete: bool,
+    fills_complete: bool,
 ) -> Result<StrategyExchangeAttribution, AccountLedgerReconciliationError> {
     let mut lineage_bound_intents = 0usize;
     let mut exact_orders = 0usize;
@@ -363,13 +395,31 @@ fn attribute_strategy_exchange_evidence(
     let mut fees = BTreeMap::<String, Decimal>::new();
     let mut pnl = BTreeMap::<String, Decimal>::new();
     let mut funding = BTreeMap::<String, Decimal>::new();
+    // No source-evidence ID can itself prove a separate capital account.
+    // Cohorts are evidence partitions, never allocation or NAV authority.
+    let mut cohorts = BTreeMap::<
+        (String, String, Option<String>, Option<String>, String),
+        AttributionCohortAccumulator,
+    >::new();
 
     for entry in ledger.entries() {
-        let Some(_lineage) = entry.record.lineage.as_ref() else {
+        let Some(lineage) = entry.record.lineage.as_ref() else {
             continue;
         };
         lineage_bound_intents += 1;
         let plan = &entry.record.plan;
+        let key = (
+            lineage.origin_schema.clone(),
+            lineage.origin_version.clone(),
+            plan.risk_binding
+                .as_ref()
+                .map(|risk| risk.mandate.version.clone()),
+            plan.risk_binding
+                .as_ref()
+                .map(|risk| risk.mandate.capital_base_usd.clone()),
+            plan.account_uid_fingerprint.clone(),
+        );
+        cohorts.entry(key.clone()).or_default().intents += 1;
         let Some(order_id) = entry.record.order_id.as_deref() else {
             continue;
         };
@@ -473,6 +523,11 @@ fn attribute_strategy_exchange_evidence(
             *fees.entry(fill_currency.to_owned()).or_default() +=
                 decimal("attribution.verified_fee", fill_fee)?;
             *pnl.entry(bill.currency.clone()).or_default() += bill_realized;
+            let cohort = cohorts.entry(key.clone()).or_default();
+            cohort.exact_trade_bills += 1;
+            *cohort.fees.entry(fill_currency.to_owned()).or_default() +=
+                decimal("attribution.verified_fee", fill_fee)?;
+            *cohort.pnl.entry(bill.currency.clone()).or_default() += bill_realized;
         }
     }
 
@@ -498,6 +553,12 @@ fn attribute_strategy_exchange_evidence(
     if !bills_complete {
         reasons.push("bills_history_incomplete");
     }
+    if !orders_complete {
+        reasons.push("orders_history_incomplete");
+    }
+    if !fills_complete {
+        reasons.push("fills_history_incomplete");
+    }
     if unmatched_lineage_fills > 0 || duplicate_claims > 0 {
         reasons.push("fill_bill_provenance_incomplete");
     }
@@ -518,7 +579,37 @@ fn attribute_strategy_exchange_evidence(
     if unlinked_nonfunding_bills > 0 {
         reasons.push("account_bill_activity_outside_exact_managed_fill_links");
     }
+    // Origin/version alone cannot prove that a capital pool is exclusive.
+    // Even a single cohort still lacks strategy capital and funding ownership.
     reasons.push("strategy_capital_cashflows_and_mark_to_market_unattested");
+    let origin_cohorts_total = cohorts.len();
+    if origin_cohorts_total > 1 {
+        reasons.push("multiple_origin_cohorts_not_one_strategy");
+    }
+    let origin_cohorts = cohorts
+        .into_iter()
+        .take(MAX_ORIGIN_COHORT_ROWS)
+        .map(
+            |(
+                (origin_schema, origin_version, mandate_version, declared_capital_usd, _uid),
+                value,
+            )| {
+                AttributionOriginCohort {
+                    origin_schema,
+                    origin_version,
+                    mandate_version,
+                    declared_capital_usd,
+                    lineage_bound_intents: value.intents,
+                    exact_trade_bills: value.exact_trade_bills,
+                    verified_fees: linked_amounts(value.fees),
+                    verified_realized_pnl: linked_amounts(value.pnl),
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+    if origin_cohorts_total > origin_cohorts.len() {
+        reasons.push("origin_cohorts_truncated");
+    }
     Ok(StrategyExchangeAttribution {
         schema: STRATEGY_ATTRIBUTION_SCHEMA_V1,
         status: "INCOMPLETE",
@@ -536,6 +627,11 @@ fn attribute_strategy_exchange_evidence(
         unallocated_funding_bills,
         unallocated_funding_totals: linked_amounts(funding),
         unlinked_nonfunding_bills,
+        orders_history_complete: orders_complete,
+        fills_history_complete: fills_complete,
+        origin_cohorts_total,
+        origin_cohorts_truncated: origin_cohorts_total > origin_cohorts.len(),
+        origin_cohorts,
         fills_fee_totals: linked_amounts(fees),
         linked_trade_bill_pnl_totals: linked_amounts(pnl),
         incomplete_reasons: reasons,
@@ -749,6 +845,8 @@ mod tests {
             &[fill],
             &[bill.clone(), bill, funding],
             true,
+            true,
+            true,
         )
         .expect("strict read-only attribution");
         assert_eq!(report.lineage_bound_intents, 1);
@@ -854,6 +952,8 @@ mod tests {
                 &[fill],
                 &[bill],
                 true,
+                true,
+                true,
             )
             .expect("typed read-only bill validation")
         };
@@ -916,9 +1016,16 @@ mod tests {
             1
         );
 
-        let missing_history =
-            attribute_strategy_exchange_evidence(&ledger, &[order], &[fill], &[bill], false)
-                .expect("missing history is an incomplete witness");
+        let missing_history = attribute_strategy_exchange_evidence(
+            &ledger,
+            &[order],
+            &[fill],
+            &[bill],
+            false,
+            false,
+            false,
+        )
+        .expect("missing history is an incomplete witness");
         assert!(
             missing_history
                 .incomplete_reasons
@@ -950,6 +1057,8 @@ mod tests {
             &[a, b],
             &[ab, bb, external],
             true,
+            true,
+            true,
         )
         .expect("partial accounting");
         assert_eq!(r.exact_fills, 2);
@@ -966,6 +1075,122 @@ mod tests {
                 .contains(&"account_bill_activity_outside_exact_managed_fill_links")
         );
         assert!(!r.strategy_nav_available);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn different_immutable_origin_versions_and_incomplete_venue_history_cannot_form_one_nav() {
+        let p = path("distinct-provenance-cohorts");
+        let _ = std::fs::remove_file(&p);
+        let mut ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("ledger");
+        let first = plan("intent_origin_family_one_20261012");
+        let mut second = plan("intent_origin_family_two_20261012");
+        // Two independently owned instruments; the test must not bypass the
+        // existing one-active-intent-per-instrument executor invariant.
+        second.instrument_id = "BTC-USDT-SWAP".to_owned();
+        let origin1 = test_lineage();
+        let mut origin2 = test_lineage();
+        origin2.origin_version = "independent-origin-v2".to_owned();
+
+        for (plan, lineage, order_id) in [
+            (&first, origin1, "ord-exact"),
+            (&second, origin2, "ord-other"),
+        ] {
+            ledger
+                .prepare_with_lineage(plan.clone(), Some(lineage), 101)
+                .expect("immutably bound intent");
+            ledger
+                .begin_submission(&plan.intent_id, 102)
+                .expect("durable send reservation");
+            ledger
+                .acknowledge(&plan.intent_id, order_id, 103)
+                .expect("exact exchange ACK");
+        }
+
+        let (fill1, bill1) = linked_accounting_pair(
+            &first,
+            "trade-cohort-one",
+            "bill-one",
+            "-0.02",
+            "USDT",
+            "0.11",
+        );
+        let (mut fill2, mut bill2) = linked_accounting_pair(
+            &second,
+            "trade-cohort-two",
+            "bill-two",
+            "-0.03",
+            "USDT",
+            "0.22",
+        );
+        fill2.order_id = Some("ord-other".to_owned());
+        bill2.order_id = Some("ord-other".to_owned());
+        let orders = [
+            ExchangeOrderIdentity {
+                instrument_type: "SWAP".to_owned(),
+                instrument_id: first.instrument_id.clone(),
+                order_id: "ord-exact".to_owned(),
+                client_order_id: first.client_order_id.clone(),
+                state: "filled".to_owned(),
+                update_time_ms: "1791828000000".to_owned(),
+            },
+            ExchangeOrderIdentity {
+                instrument_type: "SWAP".to_owned(),
+                instrument_id: second.instrument_id.clone(),
+                order_id: "ord-other".to_owned(),
+                client_order_id: second.client_order_id.clone(),
+                state: "filled".to_owned(),
+                update_time_ms: "1791828000000".to_owned(),
+            },
+        ];
+        let report = attribute_strategy_exchange_evidence(
+            &ledger,
+            &orders,
+            &[fill1, fill2],
+            &[bill1, bill2],
+            true,
+            false,
+            false,
+        )
+        .expect("account source partition");
+        assert_eq!(report.exact_trade_bills, 2);
+        assert_eq!(report.origin_cohorts_total, 2);
+        assert!(!report.origin_cohorts_truncated);
+        let independent = report
+            .origin_cohorts
+            .iter()
+            .find(|cohort| cohort.origin_version == "independent-origin-v2")
+            .expect("second origin");
+        let original = report
+            .origin_cohorts
+            .iter()
+            .find(|cohort| cohort.origin_version == "frozen-strategy-1")
+            .expect("first origin");
+        assert_eq!(original.verified_realized_pnl[0].amount, "0.11");
+        assert_eq!(independent.verified_realized_pnl[0].amount, "0.22");
+        assert_eq!(original.verified_fees[0].amount, "-0.02");
+        assert_eq!(independent.verified_fees[0].amount, "-0.03");
+        assert_eq!(report.linked_trade_bill_pnl_totals[0].amount, "0.33");
+        assert!(!report.orders_history_complete);
+        assert!(!report.fills_history_complete);
+        assert!(
+            report
+                .incomplete_reasons
+                .contains(&"orders_history_incomplete")
+        );
+        assert!(
+            report
+                .incomplete_reasons
+                .contains(&"fills_history_incomplete")
+        );
+        assert!(
+            report
+                .incomplete_reasons
+                .contains(&"multiple_origin_cohorts_not_one_strategy")
+        );
+        assert_eq!(report.status, "INCOMPLETE");
+        assert!(!report.strategy_nav_available);
         let _ = std::fs::remove_file(p);
     }
 
@@ -994,8 +1219,9 @@ mod tests {
             execution_type: Some("M".to_owned()),
             fill_time_ms: 1791828000000,
         };
-        let report = attribute_strategy_exchange_evidence(&ledger, &[], &[fill], &[], false)
-            .expect("legacy evidence remains incomplete");
+        let report =
+            attribute_strategy_exchange_evidence(&ledger, &[], &[fill], &[], false, false, false)
+                .expect("legacy evidence remains incomplete");
         assert_eq!(report.lineage_bound_intents, 0);
         assert_eq!(report.exact_fills, 0);
         assert!(report.fills_fee_totals.is_empty());

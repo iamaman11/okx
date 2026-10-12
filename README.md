@@ -219,3 +219,6 @@ expected current launcher SHA-256; they never mutate the Scheduler definition.
 
 
 **Stage 5B-1 exchange proof:** #308 merged/installed (CI six jobs, exact tree and primary Demo read-only account summary). It proved 8 fill/bill links, but 3 funding bills are unallocated and 22/35 legacy intents have no original lineage; never equate the linked partial trade totals to a strategy NAV. The next functional gate cross-checks native fill `billId`, fee currency/amount and `fillPnl` against account bill `billId`, `fee`, `ccy`, `pnl`; mismatches are `INCOMPLETE`, funding without position-side ownership is unallocated, starting capital and external cashflows remain unattested. No extra data plane or trade engine.
+
+
+**5B-1 provenance boundary after #309:** source-exact venue fees/PnL are verified only for 8 original lineage-bound fills; 35 durable intents do not identify one independently capitalized strategy. Immutable decision origin schema/version and the original mandate are evidence cohorts, not proof of capital ownership. New same-stage correction groups financial evidence by origin/mandate, with explicit refusal for truncated order/fill/bill histories. Funding 173/174 lacks independently proven strategy-side identity. Declared TradingMandate capital is a risk budget, not a funded allocation. No artificial strategy NAV or Live admission.
