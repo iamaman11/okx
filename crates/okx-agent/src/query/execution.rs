@@ -56,6 +56,19 @@ pub const EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE: &str =
 pub const EXECUTION_RECONCILIATION_FAILED_CODE: &str = "EXECUTION_RECONCILIATION_FAILED";
 pub const EXECUTION_RECONCILIATION_UNAVAILABLE_CODE: &str = "EXECUTION_RECONCILIATION_UNAVAILABLE";
 pub const EXECUTION_MUTATION_UNSAFE_CODE: &str = "EXECUTION_MUTATION_UNSAFE";
+pub const EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE: &str =
+    "EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED";
+
+fn protected_add_hedge_unsupported(request: &AgentRequest, generated_at: &str) -> AgentResponse {
+    failure_response(
+        request,
+        generated_at,
+        AgentResponseStatus::Rejected,
+        EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE,
+        "protected ADD/HEDGE is unsupported: OKX does not provide an established exchange-atomic guarantee against an existing OCO triggering between exact GET/WS fence and new entry; no intent or exchange POST is permitted".to_owned(),
+        false,
+    )
+}
 pub const EXECUTION_PREPARED_ABANDON_UNSAFE_CODE: &str = "EXECUTION_PREPARED_ABANDON_UNSAFE";
 
 fn daily_history_complete_at(
@@ -339,6 +352,12 @@ async fn prepare_risk_increasing(
         target,
     } = input;
     debug_assert!(action.is_risk_increasing());
+    // An external OKX stop can trigger after our last REST/WS observation.
+    // Without venue-atomic attached-OCO exchange protection this action is
+    // not a supported product operation, even when every local read is FRESH.
+    if matches!(action, ExecutionAction::Add | ExecutionAction::Hedge) {
+        return Ok(protected_add_hedge_unsupported(request, generated_at));
+    }
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
@@ -906,6 +925,12 @@ async fn submit_prepared(
 
     let plan = entry.record.plan;
     let action = plan.action;
+    // Existing prepared intents also fail closed. A previously installed
+    // binary may have persisted PREPARED before this venue decision; no
+    // preflight, SUBMITTING transition or exchange POST may follow.
+    if matches!(action, ExecutionAction::Add | ExecutionAction::Hedge) {
+        return Ok(protected_add_hedge_unsupported(request, generated_at));
+    }
     let admission = match pre_mutation_admission(
         request,
         context,
@@ -3613,6 +3638,30 @@ mod tests {
             "execution status response must stay below compact budget, got {} bytes",
             bytes.len()
         );
+    }
+
+    #[test]
+    fn unsupported_protected_add_hedge_is_typed_and_non_retryable_at_both_boundaries() {
+        for action in [ExecutionAction::Add, ExecutionAction::Hedge] {
+            assert!(matches!(
+                action,
+                ExecutionAction::Add | ExecutionAction::Hedge
+            ));
+            let response = protected_add_hedge_unsupported(&request(), GENERATED_AT);
+            assert_eq!(response.status, AgentResponseStatus::Rejected);
+            assert_eq!(response.quality, DataQuality::NotReady);
+            let failure = response.failure.expect("explicit product decision");
+            assert_eq!(failure.code, EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE);
+            assert!(!failure.retryable);
+            assert!(failure.message.contains("no intent or exchange POST"));
+        }
+        // OPEN/CLOSE are not reclassified by this policy.
+        for action in [ExecutionAction::Open, ExecutionAction::Close] {
+            assert!(!matches!(
+                action,
+                ExecutionAction::Add | ExecutionAction::Hedge
+            ));
+        }
     }
 
     #[test]
