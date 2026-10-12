@@ -83,8 +83,12 @@ fn unsupported_position_response(
 ) -> Option<AgentResponse> {
     let (code, reason) = unsupported_position_action(action)?;
     Some(failure_response(
-        request, generated_at, AgentResponseStatus::Rejected,
-        code, reason.to_owned(), false,
+        request,
+        generated_at,
+        AgentResponseStatus::Rejected,
+        code,
+        reason.to_owned(),
+        false,
     ))
 }
 pub const EXECUTION_PREPARED_ABANDON_UNSAFE_CODE: &str = "EXECUTION_PREPARED_ABANDON_UNSAFE";
@@ -895,18 +899,18 @@ async fn submit_prepared(
     let observed_at_ms = timing.request_time_ms();
     let demo_acceptance = execution.demo_mutation_acceptance_requested();
     let submit_result = if demo_acceptance {
-            match execution
-                .submit_prepared_demo_authorized(&preflight, intent_id, timing, observed_at_ms)
-                .await?
-            {
-                Some(result) => result,
-                None => return Ok(preflight_rejected(request, generated_at)),
-            }
-        } else {
-            execution
-                .submit_prepared(intent_id, timing, observed_at_ms)
-                .await
-        };
+        match execution
+            .submit_prepared_demo_authorized(&preflight, intent_id, timing, observed_at_ms)
+            .await?
+        {
+            Some(result) => result,
+            None => return Ok(preflight_rejected(request, generated_at)),
+        }
+    } else {
+        execution
+            .submit_prepared(intent_id, timing, observed_at_ms)
+            .await
+    };
 
     match submit_result {
         Ok(_) if demo_acceptance => {
@@ -3532,9 +3536,18 @@ mod tests {
     #[test]
     fn unsupported_position_actions_share_prepare_and_submit_admission() {
         for (action, expected_code) in [
-            (ExecutionAction::Add, EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE),
-            (ExecutionAction::Hedge, EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE),
-            (ExecutionAction::Reduce, EXECUTION_PROTECTED_REDUCE_UNSUPPORTED_CODE),
+            (
+                ExecutionAction::Add,
+                EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE,
+            ),
+            (
+                ExecutionAction::Hedge,
+                EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE,
+            ),
+            (
+                ExecutionAction::Reduce,
+                EXECUTION_PROTECTED_REDUCE_UNSUPPORTED_CODE,
+            ),
         ] {
             let (code, reason) = unsupported_position_action(action).expect("blocked");
             assert_eq!(code, expected_code);
