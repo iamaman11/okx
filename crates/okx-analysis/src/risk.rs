@@ -750,12 +750,15 @@ fn candidate_risk_context_from_analysis(
                 )?,
             )
         })?;
-    let account_initial_margin = account_risk
-        .initial_margin_requirement_usd
-        .as_deref()
-        .map(|value| non_negative_decimal("risk_account_initial_margin_usd", value))
-        .transpose()?
-        .unwrap_or(Decimal::ZERO);
+    // Missing initial margin is not zero for an account that already has
+    // risk. Only an independently flat/no-pending account can use zero.
+    let account_initial_margin = match account_risk.initial_margin_requirement_usd.as_deref() {
+        Some(value) => non_negative_decimal("risk_account_initial_margin_usd", value)?,
+        None if account_gross == Decimal::ZERO && account.pending_orders.is_empty() => {
+            Decimal::ZERO
+        }
+        None => return Err(AnalysisError::MissingInitialMarginRequirement),
+    };
     let drawdown = if total_equity < capital_base {
         (capital_base - total_equity) / capital_base
     } else {
@@ -861,9 +864,19 @@ fn evaluate_candidate_limits(
         &policy.max_instrument_gross_notional_usd,
     )?;
 
-    let projected_margin = if total_equity > Decimal::ZERO {
-        Some(((current_imr + notional / leverage) / total_equity).normalize())
+    // The account's large exchange equity cannot silently enlarge a
+    // strategy's declared risk budget. Apply the stricter of both capitals.
+    let assigned_capital = positive_decimal("capital_base_usd", &mandate.capital_base_usd)?;
+    let effective_capital = total_equity.min(assigned_capital);
+    let projected_margin = if effective_capital > Decimal::ZERO {
+        Some(((current_imr + notional / leverage) / effective_capital).normalize())
     } else {
+        violations.push(RiskPolicyViolation {
+            code: "MARGIN_CAPITAL_UNAVAILABLE",
+            scope: "capital_base".to_owned(),
+            observed: "0".to_owned(),
+            limit: mandate.capital_base_usd.clone(),
+        });
         None
     };
     if let Some(value) = projected_margin {
@@ -1224,12 +1237,19 @@ pub fn analyze_portfolio_risk(
             .map(|row| decimal("instrument_gross", &row.gross_notional_usd))
             .transpose()?
             .unwrap_or(Decimal::ZERO);
-        let current_imr = account_risk
-            .initial_margin_requirement_usd
-            .as_deref()
-            .map(|value| decimal("initial_margin_requirement_usd", value))
-            .transpose()?
-            .unwrap_or(Decimal::ZERO);
+        let current_imr = match account_risk.initial_margin_requirement_usd.as_deref() {
+            Some(value) => non_negative_decimal("initial_margin_requirement_usd", value)?,
+            None if gross == Decimal::ZERO && account.pending_orders.is_empty() => Decimal::ZERO,
+            None => {
+                violations.push(RiskPolicyViolation {
+                    code: "MARGIN_EVIDENCE_UNAVAILABLE",
+                    scope: "account".to_owned(),
+                    observed: "missing_with_existing_exposure".to_owned(),
+                    limit: "complete_initial_margin_requirement".to_owned(),
+                });
+                Decimal::ZERO
+            }
+        };
         let candidate_limits = evaluate_candidate_limits(
             &mandate,
             &policy,
@@ -2146,6 +2166,75 @@ mod tests {
                 .projected_account_gross_notional_usd,
             "150"
         );
+    }
+
+    #[test]
+    fn mandate_capital_not_large_demo_equity_controls_projected_margin() {
+        let mut snapshot = account("long_short_mode", Vec::new());
+        snapshot.balance.total_equity_usd = "103645.67936626275".to_owned();
+        snapshot.balance.initial_margin_requirement_usd = Some("0".to_owned());
+        let mut mandate = mandate();
+        mandate.capital_base_usd = "100".to_owned();
+        let mut policy = policy();
+        policy.max_margin_utilization_ratio = "0.2".to_owned();
+        let candidate = |notional: &str| PortfolioCandidate {
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            direction: PositionDirection::Long,
+            notional_usd: notional.to_owned(),
+            worst_case_loss_usd: "0.5".to_owned(),
+            leverage: "2".to_owned(),
+        };
+        let denied = analyze_portfolio_risk(
+            &snapshot, &ledger("0"), mandate.clone(), policy.clone(),
+            Some(candidate("40.02")), true,
+        ).expect("account equity cannot enlarge mandate risk");
+        assert_eq!(denied.policy_decision, RiskPolicyDecision::Rejected);
+        assert!(denied.violations.iter().any(|v| v.code == "MAX_MARGIN_UTILIZATION_PROJECTED"));
+        let at_limit = analyze_portfolio_risk(
+            &snapshot, &ledger("0"), mandate.clone(), policy.clone(),
+            Some(candidate("40")), true,
+        ).expect("exact Decimal boundary");
+        assert_eq!(
+            at_limit.candidate.as_ref().expect("projection").projected_margin_utilization_ratio.as_deref(),
+            Some("0.2")
+        );
+        assert_eq!(at_limit.policy_decision, RiskPolicyDecision::Accepted);
+
+        let mut context = replay_context();
+        context.total_equity_usd = snapshot.balance.total_equity_usd.clone();
+        let direct = evaluate_candidate_risk(&mandate, &policy, &candidate("40.02"), &context)
+            .expect("same admission engine");
+        assert_eq!(direct.decision, RiskPolicyDecision::Rejected);
+        assert!(direct.violations.iter().any(|v| v.code == "MAX_MARGIN_UTILIZATION_PROJECTED"));
+    }
+
+    #[test]
+    fn missing_margin_with_open_position_denies_new_risk_but_flat_is_exempt() {
+        let mut snapshot = account("long_short_mode", vec![position(
+            "BTC-USDT-SWAP", "SWAP", "long", "1", Some("40"), Some("100"), Some("80"),
+        )]);
+        snapshot.balance.initial_margin_requirement_usd = None;
+        let candidate = PortfolioCandidate {
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            direction: PositionDirection::Long,
+            notional_usd: "10".to_owned(),
+            worst_case_loss_usd: "1".to_owned(),
+            leverage: "2".to_owned(),
+        };
+        let rejected = analyze_portfolio_risk(
+            &snapshot, &ledger("0"), mandate(), policy(), Some(candidate.clone()), true,
+        ).expect("typed fail closed");
+        assert_eq!(rejected.policy_decision, RiskPolicyDecision::Rejected);
+        assert!(rejected.violations.iter().any(|v| v.code == "MARGIN_EVIDENCE_UNAVAILABLE"));
+        assert!(candidate_risk_context_from_account(
+            &snapshot, &ledger("0"), &mandate(), "BTC-USDT-SWAP", true,
+        ).is_err());
+
+        snapshot.positions.clear();
+        let flat = analyze_portfolio_risk(
+            &snapshot, &ledger("0"), mandate(), policy(), Some(candidate), true,
+        ).expect("verified flat without initial margin");
+        assert!(!flat.violations.iter().any(|v| v.code == "MARGIN_EVIDENCE_UNAVAILABLE"));
     }
 
     #[test]

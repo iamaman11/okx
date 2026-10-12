@@ -185,6 +185,8 @@ pub enum AnalysisError {
     },
     #[error("non-zero position '{0}' is missing notionalUsd")]
     MissingPositionNotional(String),
+    #[error("account initial margin is unavailable while exposure or pending orders exist")]
+    MissingInitialMarginRequirement,
     #[error(
         "estimated liquidation price is on the non-adverse side of mark price for instrument '{0}'"
     )]
