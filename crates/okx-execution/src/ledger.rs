@@ -2012,9 +2012,10 @@ mod tests {
         let mut ledger = DurableExecutionLedger::open(store, 1100).unwrap();
         assert_eq!(ledger.capital_reservation(), Some(&reservation));
         assert_eq!(
-            ledger.reserve_strategy_capital(reservation.clone(), &evidence, 1101),
-            Ok(reservation.clone()),
-            "duplicate identical request has no second debit"
+            ledger
+                .reserve_strategy_capital(reservation.clone(), &evidence, 1101)
+                .expect("duplicate identical request has no second debit"),
+            reservation
         );
         let mut another = reservation;
         another.allocation_id = "second-budget-same-account".to_owned();
