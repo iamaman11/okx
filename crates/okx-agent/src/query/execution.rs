@@ -157,12 +157,14 @@ pub(super) async fn dispatch(
                 request,
                 context,
                 generated_at,
-                allocation_id,
-                origin_schema,
-                origin_version,
-                mandate_version,
-                allocated_usdt,
-                operator_authority_id,
+                StrategyOpeningRequest {
+                    allocation_id,
+                    origin_schema,
+                    origin_version,
+                    mandate_version,
+                    allocated_usdt,
+                    operator_authority_id,
+                },
             )
             .await
         }
@@ -213,17 +215,29 @@ pub(super) async fn dispatch(
 
 /// Existing Demo executor owns the journal mutation. The caller supplies
 /// the *allocation choice* only; REST/WS/account/OCO proof is sourced here.
+struct StrategyOpeningRequest<'a> {
+    allocation_id: &'a str,
+    origin_schema: &'a str,
+    origin_version: &'a str,
+    mandate_version: &'a str,
+    allocated_usdt: &'a str,
+    operator_authority_id: &'a str,
+}
+
 async fn begin_strategy_run(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
     generated_at: &str,
-    allocation_id: &str,
-    origin_schema: &str,
-    origin_version: &str,
-    mandate_version: &str,
-    allocated_usdt: &str,
-    operator_authority_id: &str,
+    input: StrategyOpeningRequest<'_>,
 ) -> AgentResult<AgentResponse> {
+    let StrategyOpeningRequest {
+        allocation_id,
+        origin_schema,
+        origin_version,
+        mandate_version,
+        allocated_usdt,
+        operator_authority_id,
+    } = input;
     let deny = |reason: String| {
         failure_response(
             request,
