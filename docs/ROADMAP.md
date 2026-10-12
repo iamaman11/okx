@@ -29,7 +29,7 @@ explicit optional live activation gate
 The final live activation gate is not a sixth development stage. Production live trading remains fail-closed until separately authorized after Stages 1–5 pass.
 
 
-## One operative cursor — G3-F/G4 failure recovery (2026-10-12)
+## One operative cursor — Stage 5A mandate risk admission (2026-10-12)
 
 **Authority:** [#160](https://github.com/iamaman11/okx/issues/160) AC-01…AC-10 and current T1–T5 evidence. This repository index never overrides #160 and no older CURRENT/NEXT section below is active.
 
@@ -39,7 +39,9 @@ The final live activation gate is not a sixth development stage. Production live
 
 **Accepted 4C-E:** [PR #304](https://github.com/iamaman11/okx/pull/304), exact CI/install and real Demo protected serial REVERSE complete, final FLAT/zero OCO, accepted ordinary CLOSE AMEND; protected partial REDUCE and ADD/HEDGE remain UNSUPPORTED (not accepted as functional features). The authoritative stage evidence is [issue #160](https://github.com/iamaman11/okx/issues/160#issuecomment-6117035371).
 
-**Current G3-F/G4 work item (NOT YET ACCEPTED):** existing Rust owner and one ledger must prove three deterministic crash boundaries: before SUBMITTING (PREPARED, zero POST), after persisted SUBMITTING but before known ACK (UNKNOWN after reopen, no replay), and actual exchange FILLED + owned ACTIVE OCO with lost ACK (read-only exact-ID recovery after transient GET failure, never resubmit). Test the no-signal / WS-gap fail-closed admission and native Windows process recovery without introducing test daemons, mutation transports or replay toggles. Negative identity/coverage and still-live/UNKNOWN cannot be silently treated as FLAT. Six-job exact-head CI, verified installed source tree, independently observed exchange/account/ledger and any physically induced failures are required before G4 PASS. Simulations prove deterministic Rust properties only, not physical injected venue loss. Stage 4C must separately report unavailable protected ADD/HEDGE/REDUCE.
+**G3-F/G4 supported-scope accepted:** [PR #305](https://github.com/iamaman11/okx/pull/305), 6/6 CI, exact native Windows install, physical agent crash and recovery at FLAT and while a live position was fully covered by its original OCO; final exchange/ledger FLAT PASS, full physical lost-ACK after POST not demonstrated. Stage 4C full protected ADD/HEDGE/partial REDUCE remains UNSUPPORTED and not product-accepted. [Evidence #160](https://github.com/iamaman11/okx/issues/160#issuecomment-6117330353).
+
+**ONE NEXT Stage 5A risk governance (functional work, NOT YET ACCEPTED):** use the existing Rust risk engine, execution admission and durable STOP_NEW_RISK. The candidate's projected margin base must be the lesser of actual account equity and the mandate's explicitly assigned capital; large Demo account funds cannot subsidize a small strategy budget. Missing initial margin with already open exposure or pending orders rejects fresh new risk, never silently defaults to zero. Exact decimal boundaries, stale/private-WS gaps, external lot/oracle consistency, daily-loss UTC windows and old-prepared submit revalidation must fail closed. Retain reducing exits during STOP. One coherent PR, six-job exact-tree CI, Windows install and positive/negative independent Demo risk admission proof. Do not interpret this as Live trading authority. Stage 5B and 5C follow without inventing new stages.
 
 **Hard stops:** inconsistent UID/ledger, incomplete OCO inventory, incorrect coverage, stale market/oracle, unauthorized profile or uncertain POST → NO new risk. Unknown is not flat; never duplicate POST, add new agents, run side-channel Demo writes, create new schedulers or restart prior accepted slices. The baseline Open/Close is not a repeatable validation task when unrelated code changes.
 
