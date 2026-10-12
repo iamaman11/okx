@@ -702,8 +702,8 @@ mod tests {
     fn old_fills_without_original_lineage_are_not_retroactively_attributed() {
         let p = path("strategy-attribution-legacy");
         let _ = std::fs::remove_file(&p);
-        let mut ledger = DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100)
-            .expect("ledger");
+        let mut ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("ledger");
         let plan = plan("intent_legacy_no_lineage_20261012");
         ledger.prepare(plan.clone(), 101).expect("prepared");
         let fill = ExchangeFillIdentity {
