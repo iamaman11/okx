@@ -26,10 +26,12 @@ Stage 5  GOVERNANCE + OPERATIONS + LEARNING
 explicit optional live activation gate
 ```
 
+**PERMANENT INVARIANT (canonical #160):** «уменьшать эксплуатационную сложность, а не добавлять новые компоненты». Every 5A/5B/5C functional acceptance must reuse one owner chain, shrink operator/context/recovery burden, and never add new daemon, scheduler, fallback write path, trade owner or preparatory stage. Failure to prove native safety → typed rejection, not a workaround.
+
 The final live activation gate is not a sixth development stage. Production live trading remains fail-closed until separately authorized after Stages 1–5 pass.
 
 
-## One operative cursor — Stage 5A mandate risk admission (2026-10-12)
+## One operative cursor — Stage 5A strategy NAV provenance and durable stop (2026-10-12)
 
 **Authority:** [#160](https://github.com/iamaman11/okx/issues/160) AC-01…AC-10 and current T1–T5 evidence. This repository index never overrides #160 and no older CURRENT/NEXT section below is active.
 
@@ -41,7 +43,9 @@ The final live activation gate is not a sixth development stage. Production live
 
 **G3-F/G4 supported-scope accepted:** [PR #305](https://github.com/iamaman11/okx/pull/305), 6/6 CI, exact native Windows install, physical agent crash and recovery at FLAT and while a live position was fully covered by its original OCO; final exchange/ledger FLAT PASS, full physical lost-ACK after POST not demonstrated. Stage 4C full protected ADD/HEDGE/partial REDUCE remains UNSUPPORTED and not product-accepted. [Evidence #160](https://github.com/iamaman11/okx/issues/160#issuecomment-6117330353).
 
-**ONE NEXT Stage 5A risk governance (functional work, NOT YET ACCEPTED):** use the existing Rust risk engine, execution admission and durable STOP_NEW_RISK. The candidate's projected margin base must be the lesser of actual account equity and the mandate's explicitly assigned capital; large Demo account funds cannot subsidize a small strategy budget. Missing initial margin with already open exposure or pending orders rejects fresh new risk, never silently defaults to zero. Exact decimal boundaries, stale/private-WS gaps, external lot/oracle consistency, daily-loss UTC windows and old-prepared submit revalidation must fail closed. Retain reducing exits during STOP. One coherent PR, six-job exact-tree CI, Windows install and positive/negative independent Demo risk admission proof. Do not interpret this as Live trading authority. Stage 5B and 5C follow without inventing new stages.
+**Stage 5A completed risk-budget functional gate:** [PR #306](https://github.com/iamaman11/okx/pull/306) 6/6 CI / exact installed binary; $100 mandate / 20% margin cap enforced at prepare and submit, over-limit intent never persisted, unchanged order counts.
+
+**ONE CURRENT 5A risk gap:** the actual OKX Demo account has much more equity than the strategy's declared capital. Whole-account equity and UTC-day account PnL do **not** establish strategy NAV/drawdown. The existing risk engine must explicitly refuse unproven account-equity attribution instead of counting a false zero strategy drawdown; no unverified NAV must be minted from `min(account_equity, mandate_capital)`. Preserve permitted reducing exits, distinguish candidate-only evidence failures from independently observed account-wide daily breaches, persist STOP without ever repeating a blocked POST after restart. Do not force an irreversible STOP onto the shared real Demo ledger with synthetic policy thresholds just to get a physical test. Tests use temporary durable store plus read-only live venue risk evaluation. Strategy PnL/NAV attribution requires source-complete fill/bill lineage in Stage 5B; Stage 5A remains **OPEN / NOT ACCEPTED** until that evidence is available. Exact 6/6 CI, native deployment and independent no-mutation check required for this functional PR.
 
 **Hard stops:** inconsistent UID/ledger, incomplete OCO inventory, incorrect coverage, stale market/oracle, unauthorized profile or uncertain POST → NO new risk. Unknown is not flat; never duplicate POST, add new agents, run side-channel Demo writes, create new schedulers or restart prior accepted slices. The baseline Open/Close is not a repeatable validation task when unrelated code changes.
 
