@@ -44,7 +44,6 @@ pub struct StrategyExchangeAttribution {
     pub incomplete_reasons: Vec<&'static str>,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PositionAttributionDiagnostic {
     pub instrument_id: String,
@@ -334,7 +333,6 @@ fn reconcile_exchange_evidence(
     })
 }
 
-
 /// Strict read-only provenance projection. A shared Demo account can contain
 /// external fills and multiple strategies; missing lineage/capital/funding
 /// provenance is never converted into a synthetic NAV or a zero cashflow.
@@ -609,8 +607,8 @@ mod tests {
     fn exact_trade_and_bill_lineage_counts_fee_once_and_refuses_unallocated_funding_nav() {
         let p = path("strategy-attribution-exact");
         let _ = std::fs::remove_file(&p);
-        let mut ledger = DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100)
-            .expect("ledger");
+        let mut ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("ledger");
         let plan = plan("intent_attribution_exact_20261012a");
         ledger
             .prepare_with_lineage(plan.clone(), Some(test_lineage()), 101)
@@ -669,20 +667,34 @@ mod tests {
             timestamp_ms: 1791828000100,
         };
         let report = attribute_strategy_exchange_evidence(
-            &ledger, &[order], &[fill], &[bill.clone(), bill, funding], true,
-        ).expect("strict read-only attribution");
+            &ledger,
+            &[order],
+            &[fill],
+            &[bill.clone(), bill, funding],
+            true,
+        )
+        .expect("strict read-only attribution");
         assert_eq!(report.lineage_bound_intents, 1);
         assert_eq!(report.exact_orders, 1);
         assert_eq!(report.exact_fills, 1);
-        assert_eq!(report.exact_trade_bills, 1, "same billId must never count twice");
+        assert_eq!(
+            report.exact_trade_bills, 1,
+            "same billId must never count twice"
+        );
         assert_eq!(report.duplicate_fill_or_bill_claims, 1);
         assert_eq!(report.unallocated_funding_bills, 1);
-        assert_eq!(report.fills_fee_totals[0].amount, "-0.02", "bill fee is not added again");
+        assert_eq!(
+            report.fills_fee_totals[0].amount, "-0.02",
+            "bill fee is not added again"
+        );
         assert_eq!(report.linked_trade_bill_pnl_totals[0].amount, "0.13");
         assert_eq!(report.status, "INCOMPLETE");
         assert!(!report.strategy_nav_available);
-        assert!(report.incomplete_reasons.contains(
-            &"strategy_capital_cashflows_and_mark_to_market_unattested"));
+        assert!(
+            report
+                .incomplete_reasons
+                .contains(&"strategy_capital_cashflows_and_mark_to_market_unattested")
+        );
         let _ = std::fs::remove_file(p);
     }
 
@@ -709,15 +721,21 @@ mod tests {
             execution_type: Some("M".to_owned()),
             fill_time_ms: 1791828000000,
         };
-        let report = attribute_strategy_exchange_evidence(
-            &ledger, &[], &[fill], &[], false,
-        ).expect("legacy evidence remains incomplete");
+        let report = attribute_strategy_exchange_evidence(&ledger, &[], &[fill], &[], false)
+            .expect("legacy evidence remains incomplete");
         assert_eq!(report.lineage_bound_intents, 0);
         assert_eq!(report.exact_fills, 0);
         assert!(report.fills_fee_totals.is_empty());
-        assert!(report.incomplete_reasons.contains(
-            &"historical_intents_missing_immutable_lineage"));
-        assert!(report.incomplete_reasons.contains(&"bills_history_incomplete"));
+        assert!(
+            report
+                .incomplete_reasons
+                .contains(&"historical_intents_missing_immutable_lineage")
+        );
+        assert!(
+            report
+                .incomplete_reasons
+                .contains(&"bills_history_incomplete")
+        );
         let _ = std::fs::remove_file(p);
     }
 
