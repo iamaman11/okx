@@ -2316,9 +2316,7 @@ mod tests {
                 .lock()
                 .expect("algo queue")
                 .pop_front()
-                .unwrap_or_else(|| {
-                    Err(OkxError::Response("no scripted algo readback".to_owned()))
-                })
+                .unwrap_or_else(|| Err(OkxError::Response("no scripted algo readback".to_owned())))
         }
     }
 
@@ -4527,11 +4525,9 @@ mod tests {
         journal.prepare(plan.clone(), 101).expect("prepare");
         drop(journal);
 
-        let reopened = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join("ledger.json")),
-            200,
-        )
-        .expect("reopen");
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("reopen");
         assert_eq!(
             reopened.get(&plan.intent_id).expect("intent").record.state,
             ExecutionState::Prepared
@@ -4566,22 +4562,22 @@ mod tests {
         assert!(task.await.expect_err("injected process crash").is_panic());
         assert_eq!(post_attempts.load(Ordering::SeqCst), 1);
 
-        let reopened = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join("ledger.json")),
-            200,
-        )
-        .expect("restart recovers SUBMITTING");
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("restart recovers SUBMITTING");
         assert_eq!(
             reopened.get(&plan.intent_id).expect("intent").record.state,
             ExecutionState::UnknownSubmission
         );
-        let mut recovered = OrderExecutor::enabled_for_test(
-            reopened,
-            MockGateway::new(vec![], vec![]),
-        );
+        let mut recovered =
+            OrderExecutor::enabled_for_test(reopened, MockGateway::new(vec![], vec![]));
         assert!(matches!(
-            recovered.submit_prepared(&plan.intent_id, timing(), 201).await,
-            Err(OrderExecutorError::NotPrepared(ExecutionState::UnknownSubmission))
+            recovered
+                .submit_prepared(&plan.intent_id, timing(), 201)
+                .await,
+            Err(OrderExecutorError::NotPrepared(
+                ExecutionState::UnknownSubmission
+            ))
         ));
         assert_eq!(recovered.gateway().place_calls(), 0);
         assert_eq!(post_attempts.load(Ordering::SeqCst), 1);
@@ -4598,7 +4594,9 @@ mod tests {
         let mut plan = protected_plan();
         plan.order_type = OrderType::Fok;
         let gateway = MockGateway::new(
-            vec![Err(OkxError::Response("ack lost after exchange fill".to_owned()))],
+            vec![Err(OkxError::Response(
+                "ack lost after exchange fill".to_owned(),
+            ))],
             vec![],
         );
         let mut executor = OrderExecutor::enabled_for_test(ledger, gateway);
@@ -4611,11 +4609,9 @@ mod tests {
         assert_eq!(executor.gateway().place_calls(), 1);
         drop(executor);
 
-        let reopened = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join("ledger.json")),
-            200,
-        )
-        .expect("restart");
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("restart");
         assert_eq!(
             reopened.get(&plan.intent_id).expect("intent").record.state,
             ExecutionState::UnknownSubmission
@@ -4623,7 +4619,9 @@ mod tests {
         let gateway = MockGateway::new(
             vec![],
             vec![
-                Err(OkxError::Response("readback temporarily unavailable".to_owned())),
+                Err(OkxError::Response(
+                    "readback temporarily unavailable".to_owned(),
+                )),
                 Ok(filled_protected_order(&plan)),
             ],
         )
@@ -4636,12 +4634,21 @@ mod tests {
             .expect("bounded readback");
         assert!(matches!(unavailable, ReconcileDisposition::Unavailable(_)));
         assert_eq!(
-            recovered.ledger().get(&plan.intent_id).expect("unknown").record.state,
+            recovered
+                .ledger()
+                .get(&plan.intent_id)
+                .expect("unknown")
+                .record
+                .state,
             ExecutionState::UnknownSubmission
         );
         assert!(matches!(
-            recovered.submit_prepared(&plan.intent_id, timing(), 202).await,
-            Err(OrderExecutorError::NotPrepared(ExecutionState::UnknownSubmission))
+            recovered
+                .submit_prepared(&plan.intent_id, timing(), 202)
+                .await,
+            Err(OrderExecutorError::NotPrepared(
+                ExecutionState::UnknownSubmission
+            ))
         ));
         assert_eq!(recovered.gateway().place_calls(), 0);
 
@@ -4658,18 +4665,22 @@ mod tests {
         assert_eq!(recovered.gateway().place_calls(), 0);
         drop(recovered);
 
-        let durable = DurableExecutionLedger::open(
-            ExecutionLedgerStore::at(root.join("ledger.json")),
-            205,
-        )
-        .expect("second restart");
+        let durable =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 205)
+                .expect("second restart");
         assert_eq!(
             durable.get(&plan.intent_id).expect("final").record.state,
             ExecutionState::Filled
         );
         assert_eq!(
-            durable.get(&plan.intent_id).expect("final").record
-                .protection.as_ref().expect("oco").status,
+            durable
+                .get(&plan.intent_id)
+                .expect("final")
+                .record
+                .protection
+                .as_ref()
+                .expect("oco")
+                .status,
             ProtectiveOrderStatus::Active
         );
         let _ = fs::remove_dir_all(root);
