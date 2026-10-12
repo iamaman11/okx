@@ -754,7 +754,7 @@ fn candidate_risk_context_from_analysis(
     // risk. Only an independently flat/no-pending account can use zero.
     let account_initial_margin = match account_risk.initial_margin_requirement_usd.as_deref() {
         Some(value) => non_negative_decimal("risk_account_initial_margin_usd", value)?,
-        None if account_gross == Decimal::ZERO && account.pending_orders.is_empty() => {
+        None if account_gross == Decimal::ZERO && account_risk.pending_order_count == 0 => {
             Decimal::ZERO
         }
         None => return Err(AnalysisError::MissingInitialMarginRequirement),
