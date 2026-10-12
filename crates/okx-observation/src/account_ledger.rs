@@ -149,6 +149,10 @@ pub struct AccountLedgerFacts {
     pub exchange_fills: Vec<ExchangeFillIdentity>,
     pub exchange_bills: Vec<ExchangeBillIdentity>,
     pub bills_history_complete: bool,
+    /// True only if all requested venue order histories were source-complete.
+    pub exchange_orders_history_complete: bool,
+    /// True only if all requested venue fill histories were source-complete.
+    pub exchange_fills_history_complete: bool,
     order_history_complete: BTreeMap<String, bool>,
 }
 
@@ -420,6 +424,11 @@ impl AccountLedgerFacts {
             }
         }
 
+        let exchange_orders_history_complete =
+            !order_histories.is_empty() && order_histories.iter().all(|(_, h)| h.complete);
+        let exchange_fills_history_complete =
+            !fill_histories.is_empty() && fill_histories.iter().all(|(_, h)| h.complete);
+
         Ok(Self {
             authoritative_positions: snapshot.positions.clone(),
             summary: AccountLedgerSummary {
@@ -455,6 +464,8 @@ impl AccountLedgerFacts {
             exchange_fills,
             exchange_bills,
             bills_history_complete: bills.complete,
+            exchange_orders_history_complete,
+            exchange_fills_history_complete,
             order_history_complete,
         })
     }

@@ -33,6 +33,11 @@ The final live activation gate is not a sixth development stage. Production live
 
 ## One operative cursor — Stage 5B-1 source-exact attribution for Stage 5A NAV (2026-10-12)
 
+
+
+**After installed #309, current Stage 5B-1 correctness boundary:** exact billId/fee/PnL matches do not themselves form a single strategy capital ledger. Evidence must be partitioned by immutable decision origin, original mandate and account scope; no mixing origin cohorts into an independently verified NAV. Orders and fills must be source-complete, not just bills. Funding ownership without authenticated position-side evidence is UNSUPPORTED rather than guessed by instrument/time. User-declared $100 budget is not proof that shared Demo equity contains a separately allocated $100 cash account. No new stages, services or alternative transports.
+
+
 PR #308 already has exact 6-job CI, tested/merged tree parity, native installed agent and read-only exchange reconciliation (8 linked trades / 3 unallocated funding bills), but cannot prove total strategy capital/NAV. Current functional boundary: native fill billId and realized PnL must reconcile with same billId/fee/currency/PnL; isolated funding ownership and external capital/cashflow sources remain UNSUPPORTED/INCOMPLETE until independently attested. This adds no new stage or operator transport.
 
 **Authority:** [#160](https://github.com/iamaman11/okx/issues/160) AC-01…AC-10 and current T1–T5 evidence. This repository index never overrides #160 and no older CURRENT/NEXT section below is active.
