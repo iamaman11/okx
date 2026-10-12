@@ -35,6 +35,39 @@ const c=buildExecutionOperation(uidAction("prepare",{
   ...basePrepare,spec:{action:"open",position_side:"long",entry},
 }));
 assert(c?.type==="prepare_execution", "risk-bound open must be typed");
+const validLineage = {
+  origin_evidence_id:"sha256:"+"a".repeat(64),
+  origin_schema:"stage4c.demo/v1",
+  origin_version:"v1",
+  decision_reference:{
+    decision_time_ms:1791763200000,
+    price:"80000",
+    price_basis:"limit_price",
+    price_policy_version:"stage4c/v1",
+  },
+};
+assert(buildExecutionOperation(uidAction("prepare",{
+  ...basePrepare,spec:{action:"open",position_side:"long",entry},lineage:validLineage,
+}))?.type==="prepare_execution","correct native sha256 lineage must pass unchanged");
+for(const bad of [
+  {origin_evidence_id:"physical-demo-btc-20261012a"},
+  {origin_evidence_id:"sha256:"+"A".repeat(64)},
+  {origin_evidence_id:"sha256:"+"a".repeat(63)},
+  {authority_evidence_id:"external-note"},
+  {decision_reference:{...validLineage.decision_reference,price_basis:"external"}},
+  {decision_reference:{...validLineage.decision_reference,decision_time_ms:0}},
+  {decision_reference:{...validLineage.decision_reference,price:"0"}},
+]) {
+  const attempt = buildExecutionOperation(uidAction("prepare",{
+    ...basePrepare,
+    spec:{action:"open",position_side:"long",entry},
+    lineage:{...validLineage,...bad},
+  }));
+  assert(attempt===null,"malformed lineage must fail at MCP ingress before transport: "+JSON.stringify(bad));
+}
+const schemaLineage = (EXECUTION_TOOLS[1] as any).inputSchema.properties.lineage;
+assert(schemaLineage.properties.origin_evidence_id.pattern==="^sha256:[0-9a-f]{64}$",
+  "advertised MCP schema must match the native SHA256 evidence contract");
 assert(buildExecutionOperation(uidAction("prepare",{
   ...basePrepare,spec:{action:"close",position_side:"long",size:"0.02",price:"80000"},
 }))?.type==="prepare_execution","risk-bound reduce/close must be typed");
