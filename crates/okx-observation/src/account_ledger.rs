@@ -112,6 +112,10 @@ pub struct ExchangeFillIdentity {
     pub order_id: Option<String>,
     pub client_order_id: String,
     pub trade_id: String,
+    /// Venue-native exact link to the corresponding account bill.
+    pub bill_id: Option<String>,
+    /// Venue-reported realized PnL of this fill, not the account's net PnL.
+    pub fill_pnl: Option<String>,
     pub side: String,
     pub position_side: String,
     pub fill_price: String,
@@ -604,6 +608,11 @@ fn normalize_fill_identity(
         order_id: optional(&row.order_id).map(str::to_owned),
         client_order_id: row.client_order_id.clone(),
         trade_id: trade_id.to_owned(),
+        bill_id: optional(&row.bill_id).map(str::to_owned),
+        fill_pnl: optional(&row.fill_pnl)
+            .map(|value| decimal_required("fills_history.fillPnl", value))
+            .transpose()?
+            .map(|value| value.normalize().to_string()),
         side: required("fills_history.side", &row.side)?.to_owned(),
         position_side: required("fills_history.posSide", &row.position_side)?.to_owned(),
         fill_price: fill_price.normalize().to_string(),

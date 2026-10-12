@@ -350,6 +350,8 @@ mod tests {
             order_id: Some("ord-1".to_owned()),
             client_order_id: "managed-client".to_owned(),
             trade_id: trade_id.to_owned(),
+            bill_id: None,
+            fill_pnl: None,
             side: "buy".to_owned(),
             position_side: "long".to_owned(),
             fill_price: price.to_owned(),

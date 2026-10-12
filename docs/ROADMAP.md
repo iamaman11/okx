@@ -33,6 +33,8 @@ The final live activation gate is not a sixth development stage. Production live
 
 ## One operative cursor — Stage 5B-1 source-exact attribution for Stage 5A NAV (2026-10-12)
 
+PR #308 already has exact 6-job CI, tested/merged tree parity, native installed agent and read-only exchange reconciliation (8 linked trades / 3 unallocated funding bills), but cannot prove total strategy capital/NAV. Current functional boundary: native fill billId and realized PnL must reconcile with same billId/fee/currency/PnL; isolated funding ownership and external capital/cashflow sources remain UNSUPPORTED/INCOMPLETE until independently attested. This adds no new stage or operator transport.
+
 **Authority:** [#160](https://github.com/iamaman11/okx/issues/160) AC-01…AC-10 and current T1–T5 evidence. This repository index never overrides #160 and no older CURRENT/NEXT section below is active.
 
 **Accepted and not to repeat:** same native Rust executor through Cloudflare MCP and Windows CONTROL; [PR #302](https://github.com/iamaman11/okx/pull/302) source installed, CI 6/6, typed lineage/uncertain-post transport fixed. Four real Demo protected FOK OPEN→CLOSE round-trips / eight exchange FILLED orders on BTC, ETH and DOGE; all original OCOs activated at exact size and terminally cleaned, current account FLAT 0 positions / pending regular / OCO / unresolved, ledger consistent. Live OFF. Source hashes, CI, exact artifact and physical evidence are at the top of #160.

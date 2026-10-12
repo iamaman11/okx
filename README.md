@@ -216,3 +216,6 @@ entrypoint is a Windows GUI-subsystem launcher and all controller-owned child pr
 verified launcher-root upgrades must not create console or PowerShell windows on the interactive
 desktop. Launcher-root upgrades are verified against an exact successful PR-CI artifact and the
 expected current launcher SHA-256; they never mutate the Scheduler definition.
+
+
+**Stage 5B-1 exchange proof:** #308 merged/installed (CI six jobs, exact tree and primary Demo read-only account summary). It proved 8 fill/bill links, but 3 funding bills are unallocated and 22/35 legacy intents have no original lineage; never equate the linked partial trade totals to a strategy NAV. The next functional gate cross-checks native fill `billId`, fee currency/amount and `fillPnl` against account bill `billId`, `fee`, `ccy`, `pnl`; mismatches are `INCOMPLETE`, funding without position-side ownership is unallocated, starting capital and external cashflows remain unattested. No extra data plane or trade engine.
