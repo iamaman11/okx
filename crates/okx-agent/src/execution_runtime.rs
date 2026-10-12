@@ -978,6 +978,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strategy_opening_cannot_write_in_read_only_or_on_rejected_demo_preflight() {
+        let root = temp_root("capital-opening-owner-fence");
+        fs::create_dir_all(&root).expect("root");
+        let authorization = format!("sha256:{}", "a".repeat(64));
+        let credential = preflight(true).credential;
+        let opening = StrategyAllocationOpening {
+            account_uid_fingerprint: credential.account_uid_fingerprint.clone(),
+            account_generation: "fresh".to_owned(),
+            observed_usdt_equity: "1000".to_owned(),
+            observed_at_ms: 101,
+            source_history_complete: true,
+            zero_positions: true,
+            zero_pending_orders: true,
+            zero_native_protection: true,
+            operator_authority_id: authorization.clone(),
+        };
+        let reservation = StrategyCapitalReservation {
+            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "strategy_owner_fence_20261013".to_owned(),
+            account_uid_fingerprint: opening.account_uid_fingerprint.clone(),
+            origin_schema: "okx.research.live-decision/v1".to_owned(),
+            origin_version: "run-2026-10-13".to_owned(),
+            mandate_version: "demo-mandate-v1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: opening.observed_usdt_equity.clone(),
+            account_generation: opening.account_generation.clone(),
+            operator_authority_id: authorization,
+            started_at_ms: 101,
+        };
+
+        let ro = ExecutionRuntime::new(
+            &root, OkxEnvironment::new(Region::Global, true),
+            credentials(), 100, RateBudget::new(),
+        ).expect("read-only owner");
+        assert!(ro.begin_strategy_run_demo_authorized(
+            &credential, reservation.clone(), &opening, 102,
+        ).await.expect("read-only refused").is_none());
+        assert!(ro.executor.lock().await.ledger().capital_reservation().is_none());
+        drop(ro);
+
+        let demo = ExecutionRuntime::new_demo_acceptance(
+            &root, OkxEnvironment::new(Region::Global, true),
+            credentials(), 100, RateBudget::new(),
+        ).expect("Demo owner");
+        let rejected = preflight(false).credential;
+        assert!(demo.begin_strategy_run_demo_authorized(
+            &rejected, reservation, &opening, 102,
+        ).await.expect("rejected preflight").is_none());
+        assert!(demo.executor.lock().await.ledger().capital_reservation().is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn rejected_demo_preflight_does_not_submit_or_touch_ledger() {
         let root = temp_root("demo-submit-rejected-preflight");
         fs::create_dir_all(&root).expect("root");
