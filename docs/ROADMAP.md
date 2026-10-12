@@ -31,7 +31,7 @@ explicit optional live activation gate
 The final live activation gate is not a sixth development stage. Production live trading remains fail-closed until separately authorized after Stages 1–5 pass.
 
 
-## One operative cursor — Stage 5A strategy NAV provenance and durable stop (2026-10-12)
+## One operative cursor — Stage 5B-1 source-exact attribution for Stage 5A NAV (2026-10-12)
 
 **Authority:** [#160](https://github.com/iamaman11/okx/issues/160) AC-01…AC-10 and current T1–T5 evidence. This repository index never overrides #160 and no older CURRENT/NEXT section below is active.
 

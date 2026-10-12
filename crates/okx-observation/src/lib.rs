@@ -19,7 +19,8 @@ pub use account::{
 pub use account_ledger::{
     ACCOUNT_LEDGER_HISTORY_WINDOW, ACCOUNT_LEDGER_SUMMARY_SCHEMA_V1, AccountAuthorityEvidence,
     AccountHistoryCoverage, AccountLedgerError, AccountLedgerFacts, AccountLedgerSummary,
-    CurrencyAggregate, ExchangeFillIdentity, ExchangeOrderIdentity, ExecutionFillEvidence,
+    CurrencyAggregate, ExchangeBillIdentity, ExchangeFillIdentity, ExchangeOrderIdentity,
+    ExecutionFillEvidence,
     FundingBalanceEvidence, normalize_execution_fill_history,
 };
 pub use capabilities::{
