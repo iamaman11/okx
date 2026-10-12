@@ -4390,6 +4390,88 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// One native ledger and one gateway: after an account-wide daily stop,
+    /// restart must forbid every pending risk-increasing POST while the
+    /// already needed reducing CLOSE remains usable exactly once.
+    #[tokio::test]
+    async fn durable_daily_stop_after_restart_allows_one_exit_but_zero_new_risk_posts() {
+        let (root, mut journal) = ledger("daily-stop-exit-survival");
+        let opening = plan();
+        let mut closing = plan();
+        closing.intent_id = "intent_daily_stop_protective_close_20261012".to_owned();
+        closing.client_order_id = crate::derive_client_order_id(&closing.intent_id);
+        // Different instrument avoids pretending an unreconciled PREPARED OPEN
+        // and an unrelated exit can share one instrument reservation.
+        closing.instrument_id = "ETH-USDT-SWAP".to_owned();
+        closing.action = ExecutionAction::Close;
+        closing.side = OrderSide::Sell;
+        journal.prepare(opening.clone(), 101).expect("prepare open");
+        journal
+            .prepare(closing.clone(), 102)
+            .expect("prepare close");
+        journal
+            .stop_new_risk("MAX_DAILY_REALIZED_LOSS", 103)
+            .expect("atomic account stop");
+        drop(journal);
+
+        let reopened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
+                .expect("restart preserves stop");
+        assert_eq!(
+            reopened.risk_stop().expect("risk stop").reason,
+            "MAX_DAILY_REALIZED_LOSS"
+        );
+        let gateway = MockGateway::new(vec![Ok(accepted_response(&closing))], vec![]);
+        let mut executor = OrderExecutor::enabled_for_test(reopened, gateway);
+
+        assert!(matches!(
+            executor
+                .submit_prepared(&opening.intent_id, timing(), 201)
+                .await,
+            Err(OrderExecutorError::Ledger(
+                ExecutionLedgerError::NewRiskStopped
+            ))
+        ));
+        assert_eq!(executor.gateway().place_calls(), 0);
+        assert!(matches!(
+            executor
+                .submit_prepared(&closing.intent_id, timing(), 202)
+                .await,
+            Ok(SubmitDisposition::Acknowledged(_))
+        ));
+        assert_eq!(executor.gateway().place_calls(), 1);
+        assert!(matches!(
+            executor
+                .submit_prepared(&closing.intent_id, timing(), 203)
+                .await,
+            Err(OrderExecutorError::NotPrepared(_))
+        ));
+        assert_eq!(executor.gateway().place_calls(), 1);
+        drop(executor);
+
+        let final_ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 204)
+                .expect("second restart");
+        assert!(final_ledger.risk_stop().is_some());
+        assert_eq!(
+            final_ledger
+                .get(&opening.intent_id)
+                .expect("not posted")
+                .record
+                .state,
+            ExecutionState::Prepared
+        );
+        assert_eq!(
+            final_ledger
+                .get(&closing.intent_id)
+                .expect("posted once")
+                .record
+                .state,
+            ExecutionState::Acknowledged
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn legacy_prepared_partial_reduce_after_restart_never_reaches_gateway() {
         let (root, mut journal) = ledger("legacy-reduce-unsupported");

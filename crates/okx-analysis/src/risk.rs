@@ -927,6 +927,24 @@ pub fn durable_account_stop_reason(
     )
 }
 
+// Exchange equity is not a verified strategy NAV. A larger shared account
+// balance cannot prove that this strategy has avoided drawdown.
+// A candidate-only denial must not become a permanent account risk stop.
+fn require_strategy_nav_attribution(
+    violations: &mut Vec<RiskPolicyViolation>,
+    account_equity: Decimal,
+    mandate_capital: Decimal,
+) {
+    if account_equity > mandate_capital {
+        violations.push(RiskPolicyViolation {
+            code: "STRATEGY_NAV_UNATTESTED",
+            scope: "capital_base".to_owned(),
+            observed: "shared_account_equity_exceeds_mandate_capital".to_owned(),
+            limit: "independent_strategy_nav_and_drawdown_evidence".to_owned(),
+        });
+    }
+}
+
 pub fn evaluate_candidate_risk(
     mandate: &TradingMandate,
     policy: &HardRiskPolicy,
@@ -956,6 +974,8 @@ pub fn evaluate_candidate_risk(
     )?;
 
     let mut violations = Vec::new();
+    let mandate_capital = positive_decimal("capital_base_usd", &mandate.capital_base_usd)?;
+    require_strategy_nav_attribution(&mut violations, total_equity, mandate_capital);
     if matches!(policy.minimum_quality, RiskMinimumQuality::Fresh) && !context.account_is_fresh {
         violations.push(RiskPolicyViolation {
             code: "MINIMUM_DATA_QUALITY",
@@ -1103,6 +1123,11 @@ pub fn analyze_portfolio_risk(
     let (daily_loss, unsupported_daily_loss_currencies) =
         usd_equivalent_daily_loss(&ledger.daily_realized_pnl_utc)?;
     let mut violations = Vec::new();
+    if candidate.is_some() {
+        // Account equity beyond the allocated mandate cannot attest that
+        // strategy-specific NAV has avoided drawdown.
+        require_strategy_nav_attribution(&mut violations, total_equity, capital_base);
+    }
     if !unsupported_daily_loss_currencies.is_empty() {
         violations.push(RiskPolicyViolation {
             code: "DAILY_REALIZED_LOSS_USD_EQUIVALENT_UNAVAILABLE",
@@ -2218,7 +2243,39 @@ mod tests {
                 .as_deref(),
             Some("0.2")
         );
-        assert_eq!(at_limit.policy_decision, RiskPolicyDecision::Accepted);
+        assert_eq!(at_limit.policy_decision, RiskPolicyDecision::Rejected);
+        assert!(
+            at_limit
+                .violations
+                .iter()
+                .any(|v| v.code == "STRATEGY_NAV_UNATTESTED")
+        );
+        let mut bounded_account = snapshot.clone();
+        bounded_account.balance.total_equity_usd = "100".to_owned();
+        let exact_budget = analyze_portfolio_risk(
+            &bounded_account,
+            &ledger("0"),
+            mandate.clone(),
+            policy.clone(),
+            Some(candidate("40")),
+            true,
+        )
+        .expect("dedicated-size equity boundary");
+        assert_eq!(
+            exact_budget
+                .candidate
+                .as_ref()
+                .expect("candidate")
+                .projected_margin_utilization_ratio
+                .as_deref(),
+            Some("0.2")
+        );
+        assert!(
+            !exact_budget
+                .violations
+                .iter()
+                .any(|v| v.code == "STRATEGY_NAV_UNATTESTED")
+        );
 
         let mut context = replay_context();
         context.total_equity_usd = snapshot.balance.total_equity_usd.clone();
@@ -2297,6 +2354,29 @@ mod tests {
                 .violations
                 .iter()
                 .any(|v| v.code == "MARGIN_EVIDENCE_UNAVAILABLE")
+        );
+    }
+
+    #[test]
+    fn missing_strategy_nav_does_not_latch_global_stop_without_true_breach() {
+        let mut violations = Vec::new();
+        require_strategy_nav_attribution(
+            &mut violations,
+            Decimal::from(100_000u64),
+            Decimal::from(100u64),
+        );
+        assert_eq!(violations[0].code, "STRATEGY_NAV_UNATTESTED");
+        assert_eq!(durable_account_stop_reason(&violations, true), None);
+        violations.push(RiskPolicyViolation {
+            code: "MAX_DAILY_REALIZED_LOSS",
+            scope: "utc_day".to_owned(),
+            observed: "2".to_owned(),
+            limit: "1".to_owned(),
+        });
+        assert_eq!(durable_account_stop_reason(&violations, false), None);
+        assert_eq!(
+            durable_account_stop_reason(&violations, true),
+            Some("MAX_DAILY_REALIZED_LOSS")
         );
     }
 
