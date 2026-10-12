@@ -95,7 +95,9 @@ pub enum ExecutionLedgerError {
     #[error("new risk is halted by a durable execution stop")]
     NewRiskStopped,
 
-    #[error("strategy capital reservation requires independently witnessed fresh FLAT account and operator authorization")]
+    #[error(
+        "strategy capital reservation requires independently witnessed fresh FLAT account and operator authorization"
+    )]
     CapitalReservationUnattested,
 
     #[error("strategy capital reservation is immutable and conflicts with existing reservation")]
@@ -169,7 +171,9 @@ pub struct StrategyAllocationOpening {
     pub operator_authority_id: String,
 }
 
-fn validate_capital_reservation(r: &StrategyCapitalReservation) -> Result<(), ExecutionLedgerError> {
+fn validate_capital_reservation(
+    r: &StrategyCapitalReservation,
+) -> Result<(), ExecutionLedgerError> {
     let allocated = Decimal::from_str(&r.allocated_usdt).ok();
     let equity = Decimal::from_str(&r.opening_account_usdt_equity).ok();
     if r.schema != STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1
@@ -183,7 +187,9 @@ fn validate_capital_reservation(r: &StrategyCapitalReservation) -> Result<(), Ex
         || r.started_at_ms == 0
         || r.operator_authority_id.len() != 71
         || !r.operator_authority_id.starts_with("sha256:")
-        || !r.operator_authority_id[7..].bytes().all(|c| c.is_ascii_hexdigit())
+        || !r.operator_authority_id[7..]
+            .bytes()
+            .all(|c| c.is_ascii_hexdigit())
         || allocated.is_none_or(|v| v <= Decimal::ZERO)
         || equity.is_none_or(|v| v < Decimal::ZERO)
         || allocated.zip(equity).is_none_or(|(a, e)| a > e)
@@ -266,7 +272,10 @@ impl ExecutionLedgerStore {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
         if let Some(stop) = &file.risk_stop {
-            if !matches!(file.schema.as_str(), EXECUTION_LEDGER_SCHEMA_V6 | EXECUTION_LEDGER_SCHEMA_V7) {
+            if !matches!(
+                file.schema.as_str(),
+                EXECUTION_LEDGER_SCHEMA_V6 | EXECUTION_LEDGER_SCHEMA_V7
+            ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "risk stop on legacy ledger schema",
                 ));
@@ -274,7 +283,9 @@ impl ExecutionLedgerStore {
             validate_risk_stop(stop)?;
         }
         if file.capital_reservation.is_some() && file.schema != EXECUTION_LEDGER_SCHEMA_V7 {
-            return Err(ExecutionLedgerError::Corrupt("capital reservation on legacy schema"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "capital reservation on legacy schema",
+            ));
         }
         if let Some(reservation) = &file.capital_reservation {
             validate_capital_reservation(reservation)?;
@@ -433,8 +444,11 @@ impl DurableExecutionLedger {
             stopped_at_ms: observed_at_ms,
             reason,
         };
-        self.store
-            .save(&self.entries, Some(&stop), self.capital_reservation.as_ref())?;
+        self.store.save(
+            &self.entries,
+            Some(&stop),
+            self.capital_reservation.as_ref(),
+        )?;
         self.risk_stop = Some(stop.clone());
         Ok(stop)
     }
@@ -469,32 +483,39 @@ impl DurableExecutionLedger {
             && reservation.started_at_ms == opening.observed_at_ms
             && Decimal::from_str(&reservation.opening_account_usdt_equity).ok()
                 == Decimal::from_str(&opening.observed_usdt_equity).ok();
-        if !exact || now_ms < opening.observed_at_ms
+        if !exact
+            || now_ms < opening.observed_at_ms
             || now_ms - opening.observed_at_ms > 10_000
             || !opening.source_history_complete
             || !opening.zero_positions
             || !opening.zero_pending_orders
             || !opening.zero_native_protection
             || self.risk_stop.is_some()
-            || self.entries.values().any(|e| !e.record.state.is_terminal()
-                || e.created_at_ms >= reservation.started_at_ms)
+            || self.entries.values().any(|e| {
+                !e.record.state.is_terminal() || e.created_at_ms >= reservation.started_at_ms
+            })
             || self.entries.values().any(|e| {
                 e.record.plan.account_uid_fingerprint != reservation.account_uid_fingerprint
             })
         {
             return Err(ExecutionLedgerError::CapitalReservationUnattested);
         }
-        self.store.save(&self.entries, self.risk_stop.as_ref(), Some(&reservation))?;
+        self.store
+            .save(&self.entries, self.risk_stop.as_ref(), Some(&reservation))?;
         self.capital_reservation = Some(reservation.clone());
         Ok(reservation)
     }
 
     /// A saved capital boundary may only admit NEW risk from its exact
     /// origin and risk-mandate. Old unsent intents cannot cross the boundary.
-    fn validate_capital_intent(&self, record: &ExecutionRecord, created_at_ms: u64)
-        -> Result<(), ExecutionLedgerError>
-    {
-        let Some(r) = &self.capital_reservation else { return Ok(()); };
+    fn validate_capital_intent(
+        &self,
+        record: &ExecutionRecord,
+        created_at_ms: u64,
+    ) -> Result<(), ExecutionLedgerError> {
+        let Some(r) = &self.capital_reservation else {
+            return Ok(());
+        };
         if !record.plan.action.is_risk_increasing() {
             return Ok(());
         }
@@ -503,9 +524,11 @@ impl DurableExecutionLedger {
             || record.lineage.as_ref().is_none_or(|l| {
                 l.origin_schema != r.origin_schema || l.origin_version != r.origin_version
             })
-            || record.plan.risk_binding.as_ref().is_none_or(|b| {
-                b.mandate.version != r.mandate_version
-            })
+            || record
+                .plan
+                .risk_binding
+                .as_ref()
+                .is_none_or(|b| b.mandate.version != r.mandate_version)
         {
             return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
         }
@@ -1203,7 +1226,11 @@ impl DurableExecutionLedger {
         entry: ExecutionLedgerEntry,
     ) -> Result<(), ExecutionLedgerError> {
         self.entries.insert(intent_id.clone(), entry);
-        if let Err(error) = self.store.save(&self.entries, self.risk_stop.as_ref(), self.capital_reservation.as_ref()) {
+        if let Err(error) = self.store.save(
+            &self.entries,
+            self.risk_stop.as_ref(),
+            self.capital_reservation.as_ref(),
+        ) {
             self.entries.remove(&intent_id);
             return Err(error);
         }
@@ -1237,7 +1264,11 @@ impl DurableExecutionLedger {
             validate_entry(entry)?;
         }
 
-        if let Err(error) = self.store.save(&self.entries, self.risk_stop.as_ref(), self.capital_reservation.as_ref()) {
+        if let Err(error) = self.store.save(
+            &self.entries,
+            self.risk_stop.as_ref(),
+            self.capital_reservation.as_ref(),
+        ) {
             self.entries.insert(intent_id.to_owned(), original);
             return Err(error);
         }
@@ -1998,7 +2029,10 @@ mod tests {
             Err(ExecutionLedgerError::CapitalReservationScopeMismatch)
         ));
         let close = close_plan("intent_protective_close_20261013", PositionSide::Long);
-        assert!(ledger.prepare(close, 1103).is_ok(), "safe exits are not locked");
+        assert!(
+            ledger.prepare(close, 1103).is_ok(),
+            "safe exits are not locked"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

@@ -206,7 +206,9 @@ impl AccountLedgerFacts {
             let equity = decimal_required("balance.details.eq", &detail.equity)?;
             if detail.currency == "USDT" {
                 if trading_usdt_equity.is_some() {
-                    return Err(AccountLedgerError::DuplicateIdentity("balance.details.USDT".to_owned()));
+                    return Err(AccountLedgerError::DuplicateIdentity(
+                        "balance.details.USDT".to_owned(),
+                    ));
                 }
                 trading_usdt_equity = Some(equity.normalize().to_string());
             } else if !equity.is_zero() {
