@@ -4315,7 +4315,9 @@ mod tests {
         let mut plan = plan();
         plan.action = ExecutionAction::Reduce;
         plan.side = OrderSide::Sell;
-        journal.prepare(plan.clone(), 101).expect("persist old PREPARED");
+        journal
+            .prepare(plan.clone(), 101)
+            .expect("persist old PREPARED");
         let reopened =
             DurableExecutionLedger::open(ExecutionLedgerStore::at(root.join("ledger.json")), 200)
                 .expect("restart");
@@ -4327,10 +4329,18 @@ mod tests {
             .submit_prepared(&plan.intent_id, timing(), 201)
             .await
             .expect_err("partial REDUCE cannot reach exchange");
-        assert!(matches!(failure, OrderExecutorError::ProtectionCoverageUnproven));
+        assert!(matches!(
+            failure,
+            OrderExecutorError::ProtectionCoverageUnproven
+        ));
         assert_eq!(executor.gateway().place_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
-            executor.ledger().get(&plan.intent_id).expect("intent").record.state,
+            executor
+                .ledger()
+                .get(&plan.intent_id)
+                .expect("intent")
+                .record
+                .state,
             ExecutionState::Prepared
         );
         let _ = fs::remove_dir_all(root);
