@@ -92,11 +92,13 @@ export const EXECUTION_TOOLS: Json[] = [
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
-        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared"] },
+        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run"] },
         intent_id: ID, instrument: INSTRUMENT,
         trade_mode: { type: "string", enum: ["cross","isolated"] },
         order_type: { type: "string", enum: ["limit","post_only","fok","ioc"] },
         spec, risk, lineage, mutation_id: MUTATION_ID, new_size: POSITIVE, new_price: POSITIVE,
+        origin_schema: VERSION, origin_version: VERSION, mandate_version: VERSION,
+        allocated_usdt: POSITIVE, operator_authority_id: EVIDENCE_ID,
       },
       required: ["action","intent_id"],
     },
@@ -182,6 +184,7 @@ export function isExecutionMutation(operationType: unknown): boolean {
   return [
     "prepare_execution", "submit_prepared_execution",
     "mutate_execution", "abort_reverse_execution", "abandon_prepared_execution",
+    "begin_strategy_run",
   ].includes(String(operationType));
 }
 
@@ -195,6 +198,18 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
   if (!token(args.intent_id,16,128) || typeof args.action !== "string") return null;
   const intent_id=args.intent_id;
   switch(args.action){
+    case "begin_strategy_run": {
+      if (!exactKeys(args,["action","intent_id","origin_schema","origin_version","mandate_version","allocated_usdt","operator_authority_id"])
+        || ![args.origin_schema,args.origin_version,args.mandate_version].every(v =>
+          typeof v==="string" && v.length>0 && v.length<=64 && /^[A-Za-z0-9._/-]+$/.test(v))
+        || !decimal(args.allocated_usdt)
+        || typeof args.operator_authority_id!=="string"
+        || !/^sha256:[0-9a-f]{64}$/.test(args.operator_authority_id)) return null;
+      return {type:"begin_strategy_run",allocation_id:intent_id,
+        origin_schema:args.origin_schema,origin_version:args.origin_version,
+        mandate_version:args.mandate_version,allocated_usdt:args.allocated_usdt,
+        operator_authority_id:args.operator_authority_id};
+    }
     case "prepare": {
       if (!exactKeys(args,["action","intent_id","instrument","trade_mode","order_type","spec","risk","lineage"])
         || !token(args.instrument,3,64) || !["cross","isolated"].includes(String(args.trade_mode))

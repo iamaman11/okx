@@ -354,6 +354,7 @@ pub(crate) async fn dispatch(
             account::dispatch(request, context, generated_at).await
         }
         AgentOperation::ExecutorPreflight
+        | AgentOperation::BeginStrategyRun { .. }
         | AgentOperation::PrepareExecution { .. }
         | AgentOperation::SubmitPreparedExecution { .. }
         | AgentOperation::MutateExecution { .. }

@@ -13,6 +13,7 @@ use okx_execution::{
     ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
     ManagedExecutionInventory, MutationAuthority, MutationPrepareDisposition,
     MutationSubmitDisposition, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
+    StrategyAllocationOpening, StrategyCapitalReservation,
     SubmitDisposition, execution_status_with_ledger, managed_execution_inventory,
     reconcile_account_ledger,
 };
@@ -236,6 +237,30 @@ impl ExecutionRuntime {
         };
         let mut executor = self.executor.lock().await;
         executor.stop_new_risk(reason, observed_at_ms).map(Some)
+    }
+
+    /// Verified Demo-only administrative ledger mutation, no exchange POST.
+    /// Source truth and profile are acquired by the existing execution query.
+    pub async fn begin_strategy_run_demo_authorized(
+        &self,
+        preflight: &ExecutorCredentialPreflight,
+        reservation: StrategyCapitalReservation,
+        opening: &StrategyAllocationOpening,
+        now_ms: u64,
+    ) -> Result<Option<Result<StrategyCapitalReservation, OrderExecutorError>>, AgentError> {
+        let mut executor = self.executor.lock().await;
+        if !self.environment.demo
+            || self.mode != ExecutionRuntimeMode::DemoAcceptance
+            || !preflight.accepted
+            || preflight.production_environment
+            || preflight.account_uid_fingerprint != opening.account_uid_fingerprint
+            || !executor.ledger().entries().all(|e| {
+                e.record.plan.account_uid_fingerprint == preflight.account_uid_fingerprint
+            })
+        {
+            return Ok(None);
+        }
+        Ok(Some(executor.reserve_strategy_capital(reservation, opening, now_ms)))
     }
 
     pub async fn risk_stop_status(&self) -> Option<ExecutionRiskStop> {
