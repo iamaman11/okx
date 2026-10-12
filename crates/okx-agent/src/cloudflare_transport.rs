@@ -484,7 +484,9 @@ fn completed_direct_response(
     match result {
         Ok(response) => response,
         Err(error) => {
-            eprintln!("direct transport request {request_id} failed (mutation={mutating}): {error}");
+            eprintln!(
+                "direct transport request {request_id} failed (mutation={mutating}): {error}"
+            );
             AgentResponse {
                 schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
                 request_id: request_id.to_owned(),
@@ -698,7 +700,9 @@ mod tests {
         let response = completed_direct_response(
             "req_direct_submit_unsafe_0001",
             true,
-            Err(AgentError::CloudflareTransport("private exchange detail".to_owned())),
+            Err(AgentError::CloudflareTransport(
+                "private exchange detail".to_owned(),
+            )),
         );
         assert_eq!(response.status, AgentResponseStatus::Failed);
         let failure = response.failure.expect("typed uncertain mutation");
