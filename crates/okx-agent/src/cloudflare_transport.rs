@@ -39,6 +39,9 @@ const MAX_INFLIGHT_READ_QUERIES: usize = 8;
 const DIRECT_TRANSPORT_MUTATION_REJECTED: &str = "DIRECT_TRANSPORT_MUTATION_REJECTED";
 const DIRECT_TRANSPORT_BUSY: &str = "DIRECT_TRANSPORT_BUSY";
 const DIRECT_TRANSPORT_QUERY_FAILED: &str = "DIRECT_TRANSPORT_QUERY_FAILED";
+const DIRECT_TRANSPORT_INPUT_REJECTED: &str = "DIRECT_TRANSPORT_INPUT_REJECTED";
+const DIRECT_TRANSPORT_MUTATION_OUTCOME_UNKNOWN: &str =
+    "EXECUTION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT";
 
 fn direct_operation_allowed(
     profile: DirectRuntimeProfile,
@@ -212,7 +215,7 @@ async fn run_session(
     let mut heartbeat_nonce: Option<String> = None;
     let heartbeat_deadline = sleep(Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
     tokio::pin!(heartbeat_deadline);
-    let mut in_flight: FuturesUnordered<BoxFuture<'_, (String, AgentResult<AgentResponse>)>> =
+    let mut in_flight: FuturesUnordered<BoxFuture<'_, (String, bool, AgentResult<AgentResponse>)>> =
         FuturesUnordered::new();
     // No two exchange-affecting commands may be outstanding on the same
     // transport generation. Read/status requests remain independently bounded.
@@ -263,13 +266,13 @@ async fn run_session(
                     .reset(Instant::now() + Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
             }
             completed = in_flight.next(), if !in_flight.is_empty() => {
-                let Some((request_id, result)) = completed else {
+                let Some((request_id, mutating, result)) = completed else {
                     continue;
                 };
                 if active_mutation.as_deref() == Some(request_id.as_str()) {
                     active_mutation = None;
                 }
-                let response = completed_read_response(&request_id, result);
+                let response = completed_direct_response(&request_id, mutating, result);
                 response.validate()?;
                 send_frame(
                     &mut sink,
@@ -346,8 +349,9 @@ async fn run_session(
                             &frame_session,
                             frame_generation,
                         )?;
-                        request.validate()?;
-
+                        // Envelope and request ID were validated by next_text_frame;
+                        // send ACK before validating the typed operation so that bad
+                        // user input cannot disconnect a healthy trading session.
                         send_frame(
                             &mut sink,
                             &DirectTransportFrame::DeliveryAck {
@@ -358,6 +362,27 @@ async fn run_session(
                             },
                         )
                         .await?;
+
+                        if let Err(error) = request.validate() {
+                            eprintln!("direct transport rejected malformed operation: {error}");
+                            let response = direct_rejection(
+                                &request.request_id,
+                                DIRECT_TRANSPORT_INPUT_REJECTED,
+                                "native typed request failed validation before any trade action",
+                                false,
+                            );
+                            send_frame(
+                                &mut sink,
+                                &DirectTransportFrame::Response {
+                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                                    session_id: session_id.clone(),
+                                    connection_generation,
+                                    response,
+                                },
+                            )
+                            .await?;
+                            continue;
+                        }
 
                         // Explicit user-authorized Demo acceptance reuses the same
                         // immutable Rust prepare/submit/mutate executor and policy.
@@ -432,7 +457,7 @@ async fn run_session(
                             async move {
                                 let result =
                                     dispatch(&request, query_context, &generated_at).await;
-                                (response_request_id, result)
+                                (response_request_id, mutating, result)
                             }
                             .boxed(),
                         );
@@ -451,11 +476,15 @@ async fn run_session(
     }
 }
 
-fn completed_read_response(request_id: &str, result: AgentResult<AgentResponse>) -> AgentResponse {
+fn completed_direct_response(
+    request_id: &str,
+    mutating: bool,
+    result: AgentResult<AgentResponse>,
+) -> AgentResponse {
     match result {
         Ok(response) => response,
         Err(error) => {
-            eprintln!("direct transport read request {request_id} failed: {error}");
+            eprintln!("direct transport request {request_id} failed (mutation={mutating}): {error}");
             AgentResponse {
                 schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
                 request_id: request_id.to_owned(),
@@ -465,9 +494,19 @@ fn completed_read_response(request_id: &str, result: AgentResult<AgentResponse>)
                 result_schema: None,
                 result: None,
                 failure: Some(AgentFailure {
-                    code: DIRECT_TRANSPORT_QUERY_FAILED.to_owned(),
-                    message: "direct transport read query failed".to_owned(),
-                    retryable: true,
+                    code: if mutating {
+                        DIRECT_TRANSPORT_MUTATION_OUTCOME_UNKNOWN
+                    } else {
+                        DIRECT_TRANSPORT_QUERY_FAILED
+                    }
+                    .to_owned(),
+                    message: if mutating {
+                        "trade result is unconfirmed; reconcile the exact intent, never replay POST"
+                    } else {
+                        "direct transport read query failed"
+                    }
+                    .to_owned(),
+                    retryable: !mutating,
                 }),
                 warnings: Vec::new(),
             }
@@ -542,7 +581,7 @@ fn next_text_frame(
         ));
     }
     let frame: DirectTransportFrame = serde_json::from_str(text.as_str())?;
-    frame.validate()?;
+    frame.validate_incoming_envelope()?;
     Ok(frame)
 }
 
@@ -655,9 +694,25 @@ mod tests {
     }
 
     #[test]
+    fn post_mutation_internal_error_requires_exact_intent_readback_without_retry() {
+        let response = completed_direct_response(
+            "req_direct_submit_unsafe_0001",
+            true,
+            Err(AgentError::CloudflareTransport("private exchange detail".to_owned())),
+        );
+        assert_eq!(response.status, AgentResponseStatus::Failed);
+        let failure = response.failure.expect("typed uncertain mutation");
+        assert_eq!(failure.code, DIRECT_TRANSPORT_MUTATION_OUTCOME_UNKNOWN);
+        assert!(!failure.retryable);
+        assert!(failure.message.contains("exact intent"));
+        assert!(!failure.message.contains("private exchange detail"));
+    }
+
+    #[test]
     fn request_local_read_error_becomes_typed_failure() {
-        let response = completed_read_response(
+        let response = completed_direct_response(
             "req_direct_query_failure_0001",
+            false,
             Err(AgentError::CloudflareTransport(
                 "internal detail must stay local".to_owned(),
             )),
