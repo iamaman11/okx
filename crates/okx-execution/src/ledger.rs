@@ -29,6 +29,8 @@ pub const EXECUTION_LEDGER_SCHEMA_V3: &str = "okx.execution-ledger/v3";
 pub const EXECUTION_LEDGER_SCHEMA_V4: &str = "okx.execution-ledger/v4";
 pub const EXECUTION_LEDGER_SCHEMA_V5: &str = "okx.execution-ledger/v5";
 pub const EXECUTION_LEDGER_SCHEMA_V6: &str = "okx.execution-ledger/v6";
+pub const EXECUTION_LEDGER_SCHEMA_V7: &str = "okx.execution-ledger/v7";
+pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1: &str = "okx.strategy-capital-reservation/v1";
 pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
 const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.json";
@@ -93,6 +95,15 @@ pub enum ExecutionLedgerError {
     #[error("new risk is halted by a durable execution stop")]
     NewRiskStopped,
 
+    #[error("strategy capital reservation requires independently witnessed fresh FLAT account and operator authorization")]
+    CapitalReservationUnattested,
+
+    #[error("strategy capital reservation is immutable and conflicts with existing reservation")]
+    CapitalReservationConflict,
+
+    #[error("risk-increasing execution does not belong to the capital reservation")]
+    CapitalReservationScopeMismatch,
+
     #[error("risk-stop reason must be nonempty and at most 128 bytes")]
     InvalidRiskStopReason,
 
@@ -128,6 +139,60 @@ fn validate_risk_stop(value: &ExecutionRiskStop) -> Result<(), ExecutionLedgerEr
     Ok(())
 }
 
+/// Persisted virtual reservation, NOT a cash transfer, proof of funding, or NAV.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyCapitalReservation {
+    pub schema: String,
+    pub allocation_id: String,
+    pub account_uid_fingerprint: String,
+    pub origin_schema: String,
+    pub origin_version: String,
+    pub mandate_version: String,
+    pub allocated_usdt: String,
+    pub opening_account_usdt_equity: String,
+    pub account_generation: String,
+    pub operator_authority_id: String,
+    pub started_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrategyAllocationOpening {
+    pub account_uid_fingerprint: String,
+    pub account_generation: String,
+    pub observed_usdt_equity: String,
+    pub observed_at_ms: u64,
+    pub source_history_complete: bool,
+    pub zero_positions: bool,
+    pub zero_pending_orders: bool,
+    pub zero_native_protection: bool,
+    pub operator_authority_id: String,
+}
+
+fn validate_capital_reservation(r: &StrategyCapitalReservation) -> Result<(), ExecutionLedgerError> {
+    let allocated = Decimal::from_str(&r.allocated_usdt).ok();
+    let equity = Decimal::from_str(&r.opening_account_usdt_equity).ok();
+    if r.schema != STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1
+        || r.allocation_id.trim().is_empty()
+        || r.allocation_id.len() > 128
+        || r.account_uid_fingerprint.trim().is_empty()
+        || r.account_generation.trim().is_empty()
+        || r.origin_schema.trim().is_empty()
+        || r.origin_version.trim().is_empty()
+        || r.mandate_version.trim().is_empty()
+        || r.started_at_ms == 0
+        || r.operator_authority_id.len() != 71
+        || !r.operator_authority_id.starts_with("sha256:")
+        || !r.operator_authority_id[7..].bytes().all(|c| c.is_ascii_hexdigit())
+        || allocated.is_none_or(|v| v <= Decimal::ZERO)
+        || equity.is_none_or(|v| v < Decimal::ZERO)
+        || allocated.zip(equity).is_none_or(|(a, e)| a > e)
+    {
+        return Err(ExecutionLedgerError::CapitalReservationUnattested);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecutionLedgerFile {
@@ -135,6 +200,8 @@ struct ExecutionLedgerFile {
     records: Vec<ExecutionLedgerEntry>,
     #[serde(default)]
     risk_stop: Option<ExecutionRiskStop>,
+    #[serde(default)]
+    capital_reservation: Option<StrategyCapitalReservation>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,11 +243,12 @@ impl ExecutionLedgerStore {
         (
             BTreeMap<String, ExecutionLedgerEntry>,
             Option<ExecutionRiskStop>,
+            Option<StrategyCapitalReservation>,
         ),
         ExecutionLedgerError,
     > {
         if !self.path.exists() {
-            return Ok((BTreeMap::new(), None));
+            return Ok((BTreeMap::new(), None, None));
         }
 
         let bytes = fs::read(&self.path)?;
@@ -193,16 +261,23 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V4
                 | EXECUTION_LEDGER_SCHEMA_V5
                 | EXECUTION_LEDGER_SCHEMA_V6
+                | EXECUTION_LEDGER_SCHEMA_V7
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
         if let Some(stop) = &file.risk_stop {
-            if file.schema != EXECUTION_LEDGER_SCHEMA_V6 {
+            if !matches!(file.schema.as_str(), EXECUTION_LEDGER_SCHEMA_V6 | EXECUTION_LEDGER_SCHEMA_V7) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "risk stop on legacy ledger schema",
                 ));
             }
             validate_risk_stop(stop)?;
+        }
+        if file.capital_reservation.is_some() && file.schema != EXECUTION_LEDGER_SCHEMA_V7 {
+            return Err(ExecutionLedgerError::Corrupt("capital reservation on legacy schema"));
+        }
+        if let Some(reservation) = &file.capital_reservation {
+            validate_capital_reservation(reservation)?;
         }
         if file.records.len() > self.max_records {
             return Err(ExecutionLedgerError::Corrupt(
@@ -229,13 +304,14 @@ impl ExecutionLedgerStore {
             }
         }
 
-        Ok((by_intent, file.risk_stop))
+        Ok((by_intent, file.risk_stop, file.capital_reservation))
     }
 
     fn save(
         &self,
         entries: &BTreeMap<String, ExecutionLedgerEntry>,
         risk_stop: Option<&ExecutionRiskStop>,
+        capital_reservation: Option<&StrategyCapitalReservation>,
     ) -> Result<(), ExecutionLedgerError> {
         if entries.len() > self.max_records {
             return Err(ExecutionLedgerError::CapacityExceeded(self.max_records));
@@ -264,6 +340,10 @@ impl ExecutionLedgerStore {
             validate_risk_stop(stop)?;
         }
 
+        if let Some(reservation) = capital_reservation {
+            validate_capital_reservation(reservation)?;
+        }
+
         let parent = self
             .path
             .parent()
@@ -271,9 +351,10 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V6.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V7.to_owned(),
             records: entries.values().cloned().collect(),
             risk_stop: risk_stop.cloned(),
+            capital_reservation: capital_reservation.cloned(),
         })?;
 
         let temp = temp_path(&self.path);
@@ -292,6 +373,7 @@ pub struct DurableExecutionLedger {
     store: ExecutionLedgerStore,
     entries: BTreeMap<String, ExecutionLedgerEntry>,
     risk_stop: Option<ExecutionRiskStop>,
+    capital_reservation: Option<StrategyCapitalReservation>,
 }
 
 impl DurableExecutionLedger {
@@ -304,7 +386,7 @@ impl DurableExecutionLedger {
         observed_at_ms: u64,
     ) -> Result<Self, ExecutionLedgerError> {
         require_timestamp(observed_at_ms)?;
-        let (mut entries, risk_stop) = store.load()?;
+        let (mut entries, risk_stop, capital_reservation) = store.load()?;
         let mut recovered = false;
 
         for entry in entries.values_mut() {
@@ -320,13 +402,14 @@ impl DurableExecutionLedger {
         }
 
         if recovered {
-            store.save(&entries, risk_stop.as_ref())?;
+            store.save(&entries, risk_stop.as_ref(), capital_reservation.as_ref())?;
         }
 
         Ok(Self {
             store,
             entries,
             risk_stop,
+            capital_reservation,
         })
     }
 
@@ -350,13 +433,83 @@ impl DurableExecutionLedger {
             stopped_at_ms: observed_at_ms,
             reason,
         };
-        self.store.save(&self.entries, Some(&stop))?;
+        self.store
+            .save(&self.entries, Some(&stop), self.capital_reservation.as_ref())?;
         self.risk_stop = Some(stop.clone());
         Ok(stop)
     }
 
     pub fn risk_stop(&self) -> Option<&ExecutionRiskStop> {
         self.risk_stop.as_ref()
+    }
+
+    pub fn capital_reservation(&self) -> Option<&StrategyCapitalReservation> {
+        self.capital_reservation.as_ref()
+    }
+
+    /// Atomic, non-resettable reservation in the single execution ledger.
+    /// This is only a virtual upper bound, not yet a certified strategy NAV.
+    pub fn reserve_strategy_capital(
+        &mut self,
+        reservation: StrategyCapitalReservation,
+        opening: &StrategyAllocationOpening,
+        now_ms: u64,
+    ) -> Result<StrategyCapitalReservation, ExecutionLedgerError> {
+        validate_capital_reservation(&reservation)?;
+        if let Some(existing) = &self.capital_reservation {
+            return if *existing == reservation {
+                Ok(existing.clone())
+            } else {
+                Err(ExecutionLedgerError::CapitalReservationConflict)
+            };
+        }
+        let exact = reservation.account_uid_fingerprint == opening.account_uid_fingerprint
+            && reservation.account_generation == opening.account_generation
+            && reservation.operator_authority_id == opening.operator_authority_id
+            && reservation.started_at_ms == opening.observed_at_ms
+            && Decimal::from_str(&reservation.opening_account_usdt_equity).ok()
+                == Decimal::from_str(&opening.observed_usdt_equity).ok();
+        if !exact || now_ms < opening.observed_at_ms
+            || now_ms - opening.observed_at_ms > 10_000
+            || !opening.source_history_complete
+            || !opening.zero_positions
+            || !opening.zero_pending_orders
+            || !opening.zero_native_protection
+            || self.risk_stop.is_some()
+            || self.entries.values().any(|e| !e.record.state.is_terminal()
+                || e.created_at_ms >= reservation.started_at_ms)
+            || self.entries.values().any(|e| {
+                e.record.plan.account_uid_fingerprint != reservation.account_uid_fingerprint
+            })
+        {
+            return Err(ExecutionLedgerError::CapitalReservationUnattested);
+        }
+        self.store.save(&self.entries, self.risk_stop.as_ref(), Some(&reservation))?;
+        self.capital_reservation = Some(reservation.clone());
+        Ok(reservation)
+    }
+
+    /// A saved capital boundary may only admit NEW risk from its exact
+    /// origin and risk-mandate. Old unsent intents cannot cross the boundary.
+    fn validate_capital_intent(&self, record: &ExecutionRecord, created_at_ms: u64)
+        -> Result<(), ExecutionLedgerError>
+    {
+        let Some(r) = &self.capital_reservation else { return Ok(()); };
+        if !record.plan.action.is_risk_increasing() {
+            return Ok(());
+        }
+        if created_at_ms <= r.started_at_ms
+            || record.plan.account_uid_fingerprint != r.account_uid_fingerprint
+            || record.lineage.as_ref().is_none_or(|l| {
+                l.origin_schema != r.origin_schema || l.origin_version != r.origin_version
+            })
+            || record.plan.risk_binding.as_ref().is_none_or(|b| {
+                b.mandate.version != r.mandate_version
+            })
+        {
+            return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
+        }
+        Ok(())
     }
 
     pub fn require_new_risk_allowed(
@@ -540,6 +693,7 @@ impl DurableExecutionLedger {
         require_timestamp(observed_at_ms)?;
         validate_plan_identity(&record.plan)?;
         validate_reverse_link(&record)?;
+        self.validate_capital_intent(&record, observed_at_ms)?;
         // One ledger is owned by exactly one authenticated exchange UID,
         // even after FLAT or when the previous managed intents are terminal.
         if self.entries.values().any(|entry| {
@@ -686,13 +840,11 @@ impl DurableExecutionLedger {
         request_exchange_time_ms: Option<u64>,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
-        let action = self
+        let entry = self
             .get(intent_id)
-            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?
-            .record
-            .plan
-            .action;
-        self.require_new_risk_allowed(action)?;
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        self.require_new_risk_allowed(entry.record.plan.action)?;
+        self.validate_capital_intent(&entry.record, entry.created_at_ms)?;
         self.mutate(intent_id, observed_at_ms, move |record| {
             record.begin_submission_with_timing(request_exchange_time_ms)
         })
@@ -945,6 +1097,7 @@ impl DurableExecutionLedger {
             })?;
         if mutation.kind == OrderMutationKind::Amend {
             self.require_new_risk_allowed(entry.record.plan.action)?;
+            self.validate_capital_intent(&entry.record, entry.created_at_ms)?;
         }
         let mutation_id = mutation_id.to_owned();
         self.mutate(intent_id, observed_at_ms, move |record| {
@@ -1050,7 +1203,7 @@ impl DurableExecutionLedger {
         entry: ExecutionLedgerEntry,
     ) -> Result<(), ExecutionLedgerError> {
         self.entries.insert(intent_id.clone(), entry);
-        if let Err(error) = self.store.save(&self.entries, self.risk_stop.as_ref()) {
+        if let Err(error) = self.store.save(&self.entries, self.risk_stop.as_ref(), self.capital_reservation.as_ref()) {
             self.entries.remove(&intent_id);
             return Err(error);
         }
@@ -1084,7 +1237,7 @@ impl DurableExecutionLedger {
             validate_entry(entry)?;
         }
 
-        if let Err(error) = self.store.save(&self.entries, self.risk_stop.as_ref()) {
+        if let Err(error) = self.store.save(&self.entries, self.risk_stop.as_ref(), self.capital_reservation.as_ref()) {
             self.entries.insert(intent_id.to_owned(), original);
             return Err(error);
         }
@@ -1765,6 +1918,7 @@ mod tests {
                 },
             ],
             risk_stop: None,
+            capital_reservation: None,
         };
         let payload = serde_json::to_vec_pretty(&file).unwrap();
         fs::write(store.path(), &payload).unwrap();
@@ -1773,6 +1927,78 @@ mod tests {
             Err(ExecutionLedgerError::AccountScopeMismatch)
         ));
         assert_eq!(fs::read(store.path()).unwrap(), payload);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn strategy_reservation_is_durable_scoped_and_cannot_spend_twice() {
+        let root = temp_root("strategy-reservation");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).unwrap();
+        let approval = format!("sha256:{}", "b".repeat(64));
+        let reservation = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "strategy-demo-budget-20261013".to_owned(),
+            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            origin_schema: "okx.research.live-decision/v1".to_owned(),
+            origin_version: "okx.research.live-decision/2026-10-05.1".to_owned(),
+            mandate_version: "bounded-demo-v1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: "fresh-generation".to_owned(),
+            operator_authority_id: approval.clone(),
+            started_at_ms: 1000,
+        };
+        let evidence = StrategyAllocationOpening {
+            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            account_generation: "fresh-generation".to_owned(),
+            observed_usdt_equity: "1000".to_owned(),
+            observed_at_ms: 1000,
+            source_history_complete: true,
+            zero_positions: true,
+            zero_pending_orders: true,
+            zero_native_protection: true,
+            operator_authority_id: approval,
+        };
+        let mut wrong = evidence.clone();
+        wrong.zero_native_protection = false;
+        assert!(matches!(
+            ledger.reserve_strategy_capital(reservation.clone(), &wrong, 1001),
+            Err(ExecutionLedgerError::CapitalReservationUnattested)
+        ));
+        let mut inflated = reservation.clone();
+        inflated.allocated_usdt = "1001".to_owned();
+        assert!(matches!(
+            ledger.reserve_strategy_capital(inflated, &evidence, 1001),
+            Err(ExecutionLedgerError::CapitalReservationUnattested)
+        ));
+        let actual = ledger
+            .reserve_strategy_capital(reservation.clone(), &evidence, 1001)
+            .expect("original exclusive reserve");
+        assert_eq!(actual, reservation);
+        drop(ledger);
+        let mut ledger = DurableExecutionLedger::open(store, 1100).unwrap();
+        assert_eq!(ledger.capital_reservation(), Some(&reservation));
+        assert_eq!(
+            ledger.reserve_strategy_capital(reservation.clone(), &evidence, 1101),
+            Ok(reservation.clone()),
+            "duplicate identical request has no second debit"
+        );
+        let mut another = reservation;
+        another.allocation_id = "second-budget-same-account".to_owned();
+        assert!(matches!(
+            ledger.reserve_strategy_capital(another, &evidence, 1101),
+            Err(ExecutionLedgerError::CapitalReservationConflict)
+        ));
+        let mut no_provenance = plan("intent_new_risk_wrong_origin_20261013");
+        no_provenance.risk_binding = None;
+        assert!(matches!(
+            ledger.prepare(no_provenance, 1102),
+            Err(ExecutionLedgerError::CapitalReservationScopeMismatch)
+        ));
+        let close = close_plan("intent_protective_close_20261013", PositionSide::Long);
+        assert!(ledger.prepare(close, 1103).is_ok(), "safe exits are not locked");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2663,6 +2889,7 @@ mod tests {
                     schema: schema.to_owned(),
                     records: vec![entry],
                     risk_stop: None,
+                    capital_reservation: None,
                 })
                 .expect("legacy json"),
             )
@@ -2675,7 +2902,7 @@ mod tests {
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V6);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V7);
 
             let _ = fs::remove_dir_all(root);
         }

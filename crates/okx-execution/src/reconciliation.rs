@@ -13,12 +13,14 @@ use thiserror::Error;
 
 use crate::{
     DurableExecutionLedger, ExecutionAction, ExecutionState, PositionSide, ProtectiveOrderStatus,
+    StrategyCapitalReservation,
 };
 
 pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str = "okx.account-ledger-reconciliation/v1";
 const MAX_POSITION_ATTRIBUTION_ROWS: usize = 20;
 const MAX_ORIGIN_COHORT_ROWS: usize = 8;
 pub const STRATEGY_ATTRIBUTION_SCHEMA_V1: &str = "okx.strategy-exchange-attribution/v1";
+pub const STRATEGY_NAV_ASSESSMENT_SCHEMA_V1: &str = "okx.strategy-nav-assessment/v1";
 
 /// Observed *linked* exchange components; not a strategy NAV or account-equity proxy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -79,6 +81,20 @@ struct AttributionCohortAccumulator {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StrategyNavAssessment {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub usable_for_risk: bool,
+    pub allocation_id: String,
+    pub allocated_usdt: String,
+    pub exact_trade_bills: usize,
+    pub verified_realized_usdt: String,
+    pub verified_fees_usdt: String,
+    pub nav_usdt: Option<String>,
+    pub reasons: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PositionAttributionDiagnostic {
     pub instrument_id: String,
     pub position_side: String,
@@ -108,6 +124,8 @@ pub struct AccountLedgerReconciliation {
     pub consistent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strategy_attribution: Option<StrategyExchangeAttribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy_nav: Option<StrategyNavAssessment>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -204,6 +222,9 @@ pub fn reconcile_account_ledger(
         &facts.exchange_orders,
         &facts.exchange_fills,
     )?;
+    result.strategy_nav = ledger.capital_reservation()
+        .map(|capital| assess_flat_strategy_nav(capital, ledger, facts))
+        .transpose()?;
     result.strategy_attribution = Some(attribute_strategy_exchange_evidence(
         ledger,
         &facts.exchange_orders,
@@ -366,6 +387,7 @@ fn reconcile_exchange_evidence(
         position_attribution_unavailable_events,
         consistent: unexpected_orders == 0 && unexpected_fills == 0 && identity_mismatches == 0,
         strategy_attribution: None,
+        strategy_nav: None,
     })
 }
 
@@ -635,6 +657,164 @@ fn attribute_strategy_exchange_evidence(
         fills_fee_totals: linked_amounts(fees),
         linked_trade_bill_pnl_totals: linked_amounts(pnl),
         incomplete_reasons: reasons,
+    })
+}
+
+/// New-period, closed-position proof only. Any outside account event or
+/// incomplete venue history invalidates the NAV; open mark-to-market is NOT
+/// inferred from shared account equity.
+fn assess_flat_strategy_nav(
+    capital: &StrategyCapitalReservation,
+    ledger: &DurableExecutionLedger,
+    facts: &AccountLedgerFacts,
+) -> Result<StrategyNavAssessment, AccountLedgerReconciliationError> {
+    let mut reasons = Vec::new();
+    let mut pnl = Decimal::ZERO;
+    let mut fee = Decimal::ZERO;
+    let mut exact = BTreeSet::new();
+    let mut seen_trades = BTreeSet::new();
+    let mut size = BTreeMap::<(String, String), Decimal>::new();
+    if facts.summary.authority.account_uid_fingerprint != capital.account_uid_fingerprint {
+        reasons.push("nav_account_uid_changed");
+    }
+    if !facts.bills_history_complete || !facts.exchange_orders_history_complete
+        || !facts.exchange_fills_history_complete
+    {
+        reasons.push("nav_bounded_history_incomplete");
+    }
+    let now = facts.summary.current_account_as_of_ms.as_deref()
+        .and_then(|v| v.parse::<u64>().ok());
+    // Canceled/unfilled order history is documented for only two hours.
+    if !now.is_some_and(|t| t >= capital.started_at_ms
+        && t - capital.started_at_ms <= 7_200_000)
+    {
+        reasons.push("nav_epoch_outside_order_history_window");
+    }
+    if facts.nonzero_other_trading_currency_equity
+        || facts.trading_usdt_equity.is_none()
+    {
+        reasons.push("nav_native_usdt_equity_unavailable");
+    }
+    if facts.summary.pending_orders > 0 || facts.authoritative_positions.iter().any(|p| {
+        Decimal::from_str(&p.position).map_or(true, |q| q != Decimal::ZERO)
+    }) {
+        reasons.push("nav_open_position_or_pending_order");
+    }
+    let entries = ledger.entries()
+        .filter(|e| e.created_at_ms > capital.started_at_ms)
+        .collect::<Vec<_>>();
+    if entries.iter().any(|e| {
+        !e.record.state.is_terminal()
+            || e.record.plan.account_uid_fingerprint != capital.account_uid_fingerprint
+            || e.record.lineage.as_ref().is_none_or(|l| {
+                l.origin_schema != capital.origin_schema || l.origin_version != capital.origin_version
+            })
+            || e.record.plan.risk_binding.as_ref().is_none_or(|b| {
+                b.mandate.version != capital.mandate_version
+            })
+    }) {
+        reasons.push("nav_unowned_or_pending_intent");
+    }
+    for order in facts.exchange_orders.iter().filter(|o| {
+        o.update_time_ms.parse::<u64>()
+            .is_ok_and(|t| t >= capital.started_at_ms)
+    }) {
+        if !entries.iter().any(|e| e.record.order_id.as_deref() == Some(&order.order_id)
+            && e.record.plan.client_order_id == order.client_order_id
+            && e.record.plan.instrument_id == order.instrument_id)
+        {
+            reasons.push("nav_unowned_exchange_order");
+        }
+    }
+    for fill in facts.exchange_fills.iter().filter(|f| f.fill_time_ms >= capital.started_at_ms) {
+        let owner = entries.iter().filter(|e| {
+            e.record.order_id.is_some()
+                && e.record.order_id == fill.order_id
+                && e.record.plan.client_order_id == fill.client_order_id
+                && e.record.plan.instrument_id == fill.instrument_id
+                && e.record.plan.side.as_str() == fill.side
+                && e.record.plan.position_side.as_str() == fill.position_side
+                && facts.exchange_orders.iter().any(|o| o.order_id == fill.order_id.clone().unwrap_or_default()
+                    && o.client_order_id == fill.client_order_id
+                    && o.instrument_id == fill.instrument_id)
+        }).count();
+        if owner != 1 || !seen_trades.insert((&fill.instrument_id, &fill.trade_id)) {
+            reasons.push("nav_unowned_or_duplicate_fill");
+            continue;
+        }
+        let qty = decimal("nav.fill_size", &fill.fill_size)?;
+        let signed = match (fill.position_side.as_str(), fill.side.as_str()) {
+            ("long", "buy") | ("short", "sell") => qty,
+            ("long", "sell") | ("short", "buy") => -qty,
+            _ => { reasons.push("nav_invalid_position_side"); continue; }
+        };
+        if qty <= Decimal::ZERO { reasons.push("nav_invalid_size"); continue; }
+        *size.entry((fill.instrument_id.clone(), fill.position_side.clone()))
+            .or_default() += signed;
+        let bills = facts.exchange_bills.iter().filter(|b| {
+            fill.bill_id.as_deref() == Some(b.bill_id.as_str())
+                && b.instrument_id == fill.instrument_id
+                && b.trade_id.as_deref() == Some(fill.trade_id.as_str())
+                && b.order_id.as_deref().is_none_or(|id| Some(id) == fill.order_id.as_deref())
+                && b.client_order_id.as_deref().is_none_or(|id| id == fill.client_order_id)
+        }).collect::<Vec<_>>();
+        if bills.len() != 1 || bills[0].timestamp_ms < capital.started_at_ms
+            || !exact.insert(&bills[0].bill_id)
+        {
+            reasons.push("nav_missing_or_duplicate_native_bill");
+            continue;
+        }
+        let bill = bills[0];
+        if bill.currency != "USDT" || fill.fee_currency.as_deref() != Some("USDT")
+            || matches!(bill.sub_type.as_str(), "173" | "174")
+            || fill.fee.is_none() || bill.fee.is_none()
+            || fill.fill_pnl.is_none() || bill.pnl.is_none()
+        {
+            reasons.push("nav_incomplete_or_non_usdt_bill");
+            continue;
+        }
+        let a = decimal("nav.fill_fee", fill.fee.as_deref().unwrap_or_default())?;
+        let b = decimal("nav.bill_fee", bill.fee.as_deref().unwrap_or_default())?;
+        let c = decimal("nav.fill_pnl", fill.fill_pnl.as_deref().unwrap_or_default())?;
+        let d = decimal("nav.bill_pnl", bill.pnl.as_deref().unwrap_or_default())?;
+        if a != b || c != d { reasons.push("nav_bill_financial_mismatch"); continue; }
+        fee += a;
+        pnl += c;
+    }
+    if size.values().any(|v| *v != Decimal::ZERO) {
+        reasons.push("nav_fill_position_not_flat");
+    }
+    // Includes cash transfers and funding: none may inherit a strategy
+    // owner merely from the instrument or event timestamp.
+    if facts.exchange_bills.iter().any(|b| {
+        b.timestamp_ms >= capital.started_at_ms && !exact.contains(&b.bill_id)
+    }) {
+        reasons.push("nav_unowned_account_bill_or_funding");
+    }
+    let allocated = decimal("nav.allocated_usdt", &capital.allocated_usdt)?;
+    let nav = allocated + pnl + fee;
+    if let Some(current) = facts.trading_usdt_equity.as_deref() {
+        if decimal("nav.current_usdt_equity", current)?
+            - decimal("nav.opening_usdt_equity", &capital.opening_account_usdt_equity)?
+            != pnl + fee
+        {
+            reasons.push("nav_shared_account_equity_residual");
+        }
+    }
+    reasons.sort_unstable();
+    reasons.dedup();
+    let complete = reasons.is_empty();
+    Ok(StrategyNavAssessment {
+        schema: STRATEGY_NAV_ASSESSMENT_SCHEMA_V1,
+        status: if complete { "FLAT_PERIOD_RECONCILED" } else { "INCOMPLETE" },
+        usable_for_risk: false,
+        allocation_id: capital.allocation_id.clone(),
+        allocated_usdt: allocated.normalize().to_string(),
+        exact_trade_bills: exact.len(),
+        verified_realized_usdt: pnl.normalize().to_string(),
+        verified_fees_usdt: fee.normalize().to_string(),
+        nav_usdt: complete.then(|| nav.normalize().to_string()),
+        reasons,
     })
 }
 

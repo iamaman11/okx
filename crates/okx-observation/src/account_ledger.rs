@@ -153,6 +153,10 @@ pub struct AccountLedgerFacts {
     pub exchange_orders_history_complete: bool,
     /// True only if all requested venue fill histories were source-complete.
     pub exchange_fills_history_complete: bool,
+    /// Native USDT detail equity (not USD-converted totalEq).
+    pub trading_usdt_equity: Option<String>,
+    /// Never silently net other currencies into a USDT strategy NAV.
+    pub nonzero_other_trading_currency_equity: bool,
     order_history_complete: BTreeMap<String, bool>,
 }
 
@@ -196,6 +200,19 @@ impl AccountLedgerFacts {
             multi_account_inventory_complete: false,
         };
 
+        let mut trading_usdt_equity = None;
+        let mut nonzero_other_trading_currency_equity = false;
+        for detail in &snapshot.balance.details {
+            let equity = decimal_required("balance.details.eq", &detail.equity)?;
+            if detail.currency == "USDT" {
+                if trading_usdt_equity.is_some() {
+                    return Err(AccountLedgerError::DuplicateIdentity("balance.details.USDT".to_owned()));
+                }
+                trading_usdt_equity = Some(equity.normalize().to_string());
+            } else if !equity.is_zero() {
+                nonzero_other_trading_currency_equity = true;
+            }
+        }
         let total_equity = decimal_required("balance.totalEq", &snapshot.balance.total_equity_usd)?;
         let detail_equity_sum =
             snapshot
@@ -466,6 +483,8 @@ impl AccountLedgerFacts {
             bills_history_complete: bills.complete,
             exchange_orders_history_complete,
             exchange_fills_history_complete,
+            trading_usdt_equity,
+            nonzero_other_trading_currency_equity,
             order_history_complete,
         })
     }

@@ -834,3 +834,6 @@ Do not reopen without concrete evidence:
 - no permanent macro/news/on-chain/alternative-data ingestion unless a falsifiable hypothesis requires it and point-in-time provenance exists;
 - no speculative SBE/multi-exchange migration without measured need;
 - no live production trading before the explicit final gate.
+
+
+**Active 5B-1 capital slice, source only until physically accepted:** existing durable execution ledger v7 atomically reserves a single virtual USDT strategy capital budget keyed by account UID, immutable strategy origin, original mandate, evidence and operator authorization. It cannot be inferred from `TradingMandate.capital_base_usd` or OKX `totalEq` USD. A strictly bounded read-only *FLAT settlement-period* NAV requires full native order/fill/bill proof and account USDT equity residual 0; unowned fills/orders, transfers, funding, incomplete coverage and nonzero positions keep NAV `INCOMPLETE`. No new order authority; separate 5A drawdown/high-water/STOP and open-position mark-to-market acceptance still required. Original 35 legacy intents are never reattributed. CI, tested/merged tree, physical CONTROL and primary MCP are required before the functional release is accepted.
