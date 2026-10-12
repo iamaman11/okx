@@ -13,7 +13,8 @@ use okx_execution::{
     ExecutionTcaMechanicsBinding, ExecutionTransitionError, FencedProtectiveShrinkRequest,
     OrderExecutorError, OrderSide as ExecutionOrderSide, OrderType,
     PositionSide as ExecutionPositionSide, PrepareDeferral, PrepareFailure, PrepareOutcome,
-    PrepareRejection, ReverseContinuation, ReverseLeg, TradeMode, prepare_execution,
+    PrepareRejection, ReverseContinuation, ReverseLeg, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
+    StrategyAllocationOpening, StrategyCapitalReservation, TradeMode, prepare_execution,
     revalidate_amend_execution_plan, revalidate_execution_plan, revalidate_hard_risk_policy,
     revalidate_venue_execution,
 };
@@ -30,6 +31,7 @@ use crate::execution_runtime::{
 };
 
 pub const EXECUTION_PREFLIGHT_REJECTED_CODE: &str = "EXECUTION_PREFLIGHT_REJECTED";
+pub const EXECUTION_CAPITAL_OPENING_UNATTESTED_CODE: &str = "EXECUTION_CAPITAL_OPENING_UNATTESTED";
 pub const EXECUTION_PREFLIGHT_UNAVAILABLE_CODE: &str = "EXECUTION_PREFLIGHT_UNAVAILABLE";
 pub const EXECUTION_CLOCK_UNAVAILABLE_CODE: &str = "EXECUTION_CLOCK_UNAVAILABLE";
 pub const EXECUTION_CLOCK_UNSAFE_CODE: &str = "EXECUTION_CLOCK_UNSAFE";
@@ -143,6 +145,29 @@ pub(super) async fn dispatch(
         AgentOperation::ExecutorPreflight => {
             executor_preflight(request, context, generated_at).await
         }
+        AgentOperation::BeginStrategyRun {
+            allocation_id,
+            origin_schema,
+            origin_version,
+            mandate_version,
+            allocated_usdt,
+            operator_authority_id,
+        } => {
+            begin_strategy_run(
+                request,
+                context,
+                generated_at,
+                StrategyOpeningRequest {
+                    allocation_id,
+                    origin_schema,
+                    origin_version,
+                    mandate_version,
+                    allocated_usdt,
+                    operator_authority_id,
+                },
+            )
+            .await
+        }
         AgentOperation::PrepareExecution {
             intent_id,
             instrument,
@@ -185,6 +210,165 @@ pub(super) async fn dispatch(
             execution_status_response(request, context, generated_at, intent_id).await
         }
         _ => unreachable!("execution dispatcher received unsupported operation"),
+    }
+}
+
+/// Existing Demo executor owns the journal mutation. The caller supplies
+/// the *allocation choice* only; REST/WS/account/OCO proof is sourced here.
+struct StrategyOpeningRequest<'a> {
+    allocation_id: &'a str,
+    origin_schema: &'a str,
+    origin_version: &'a str,
+    mandate_version: &'a str,
+    allocated_usdt: &'a str,
+    operator_authority_id: &'a str,
+}
+
+async fn begin_strategy_run(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    input: StrategyOpeningRequest<'_>,
+) -> AgentResult<AgentResponse> {
+    let StrategyOpeningRequest {
+        allocation_id,
+        origin_schema,
+        origin_version,
+        mandate_version,
+        allocated_usdt,
+        operator_authority_id,
+    } = input;
+    let deny = |reason: String| {
+        failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_CAPITAL_OPENING_UNATTESTED_CODE,
+            reason,
+            false,
+        )
+    };
+    let Some(execution) = context.execution else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    if !execution.demo_mutation_acceptance_requested() {
+        return Ok(deny(
+            "new strategy run requires the authenticated Demo owner".to_owned(),
+        ));
+    }
+    let snapshot = match fresh_account(request, context, generated_at).await? {
+        FreshAccount::Ready(account) => account,
+        FreshAccount::Response(reply) => return Ok(*reply),
+    };
+    let preflight =
+        match executor_preflight_check(request, generated_at, execution, &snapshot).await? {
+            ExecutorPreflightCheck::Ready(value) => value,
+            ExecutorPreflightCheck::Response(reply) => return Ok(*reply),
+        };
+    if !preflight.accepted || preflight.production_environment {
+        return Ok(preflight_rejected(request, generated_at));
+    }
+    let Some(observer) = context.account_fallback else {
+        return Ok(deny(
+            "independent read-only exchange account source unavailable".to_owned(),
+        ));
+    };
+    let Some(ws) = context.private_ws else {
+        return Ok(deny(
+            "independent private WS continuity unavailable".to_owned(),
+        ));
+    };
+    let cursor = match ws.convergence_cursor().await {
+        Ok(cursor) => cursor,
+        Err(_) => return Ok(deny("private WS source cursor unavailable".to_owned())),
+    };
+    let facts = match observer.ledger_facts(&snapshot).await {
+        Ok(value) => value,
+        Err(_) => return Ok(deny("venue account history unavailable".to_owned())),
+    };
+    let protection = match observer.pending_protective_algos().await {
+        Ok(value) => value,
+        Err(_) => {
+            return Ok(deny(
+                "native pending OCO/conditional source unavailable".to_owned(),
+            ));
+        }
+    };
+    let window = match ws.convergence_window(cursor).await {
+        Ok(value) => value,
+        Err(_) => {
+            return Ok(deny(
+                "private WS generation or delta gap during opening".to_owned(),
+            ));
+        }
+    };
+    if !window.events.is_empty() {
+        return Ok(deny(
+            "account changed during independent opening readback".to_owned(),
+        ));
+    }
+    if facts.summary.authority.account_uid_fingerprint != preflight.account_uid_fingerprint
+        || facts.summary.account_generation != snapshot.account_generation
+        || facts.nonzero_other_trading_currency_equity
+        || !facts.bills_history_complete
+        || !facts.exchange_orders_history_complete
+        || !facts.exchange_fills_history_complete
+        || facts
+            .summary
+            .history_coverage
+            .iter()
+            .any(|c| !c.complete_within_bound)
+        || !protection.complete_within_bound
+        || protection.rows > 0
+        || facts.summary.open_positions > 0
+        || facts.summary.pending_orders > 0
+    {
+        return Ok(deny(
+            "opening account/coverage/OCO/other-currency proof incomplete".to_owned(),
+        ));
+    }
+    let Some(usdt_equity) = facts.trading_usdt_equity.as_deref() else {
+        return Ok(deny("native USDT trading equity unavailable".to_owned()));
+    };
+    let observed_at_ms = utc_now_ms();
+    let opening = StrategyAllocationOpening {
+        account_uid_fingerprint: preflight.account_uid_fingerprint.clone(),
+        account_generation: snapshot.account_generation.clone(),
+        observed_usdt_equity: usdt_equity.to_owned(),
+        observed_at_ms,
+        source_history_complete: true,
+        zero_positions: true,
+        zero_pending_orders: true,
+        zero_native_protection: true,
+        operator_authority_id: operator_authority_id.to_owned(),
+    };
+    let reservation = StrategyCapitalReservation {
+        schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+        allocation_id: allocation_id.to_owned(),
+        account_uid_fingerprint: opening.account_uid_fingerprint.clone(),
+        origin_schema: origin_schema.to_owned(),
+        origin_version: origin_version.to_owned(),
+        mandate_version: mandate_version.to_owned(),
+        allocated_usdt: allocated_usdt.to_owned(),
+        opening_account_usdt_equity: opening.observed_usdt_equity.clone(),
+        account_generation: opening.account_generation.clone(),
+        operator_authority_id: operator_authority_id.to_owned(),
+        started_at_ms: observed_at_ms,
+    };
+    match execution
+        .begin_strategy_run_demo_authorized(&preflight, reservation, &opening, observed_at_ms)
+        .await?
+    {
+        Some(Ok(value)) => Ok(completed(
+            request,
+            generated_at,
+            STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
+            serde_json::to_value(value)?,
+        )),
+        Some(Err(error)) => Ok(deny(format!(
+            "durable strategy allocation rejected: {error}"
+        ))),
+        None => Ok(preflight_rejected(request, generated_at)),
     }
 }
 

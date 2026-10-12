@@ -367,6 +367,19 @@ where
         &self.ledger
     }
 
+    /// Persist the single native account-scoped virtual allocation under
+    /// the same executor owner as all durable intents; no venue send.
+    pub fn reserve_strategy_capital(
+        &mut self,
+        reservation: crate::StrategyCapitalReservation,
+        opening: &crate::StrategyAllocationOpening,
+        now_ms: u64,
+    ) -> Result<crate::StrategyCapitalReservation, OrderExecutorError> {
+        Ok(self
+            .ledger
+            .reserve_strategy_capital(reservation, opening, now_ms)?)
+    }
+
     pub fn stop_new_risk(
         &mut self,
         reason: impl Into<String>,

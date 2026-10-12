@@ -958,6 +958,15 @@ pub enum AgentOperation {
         instrument: String,
     },
     ExecutorPreflight,
+    /// Local capital allocation: no native exchange mutation.
+    BeginStrategyRun {
+        allocation_id: String,
+        origin_schema: String,
+        origin_version: String,
+        mandate_version: String,
+        allocated_usdt: String,
+        operator_authority_id: String,
+    },
     PrepareExecution {
         intent_id: String,
         instrument: String,
@@ -1033,7 +1042,8 @@ impl AgentOperation {
     pub const fn direct_transport_demo_execution(&self) -> bool {
         matches!(
             self,
-            Self::PrepareExecution { .. }
+            Self::BeginStrategyRun { .. }
+                | Self::PrepareExecution { .. }
                 | Self::SubmitPreparedExecution { .. }
                 | Self::MutateExecution { .. }
                 | Self::AbortReverseExecution { .. }
@@ -1044,7 +1054,8 @@ impl AgentOperation {
     pub const fn direct_transport_read_only(&self) -> bool {
         !matches!(
             self,
-            Self::PrepareExecution { .. }
+            Self::BeginStrategyRun { .. }
+                | Self::PrepareExecution { .. }
                 | Self::SubmitPreparedExecution { .. }
                 | Self::MutateExecution { .. }
                 | Self::AbortReverseExecution { .. }
@@ -1178,6 +1189,21 @@ impl AgentOperation {
                 Ok(())
             }
             Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
+            Self::BeginStrategyRun {
+                allocation_id,
+                origin_schema,
+                origin_version,
+                mandate_version,
+                allocated_usdt,
+                operator_authority_id,
+            } => {
+                validate_request_id(allocation_id)?;
+                validate_version(origin_schema)?;
+                validate_version(origin_version)?;
+                validate_version(mandate_version)?;
+                validate_positive_decimal_text(allocated_usdt, "allocated_usdt")?;
+                validate_sha256_artifact_id(operator_authority_id, "operator_authority_id")
+            }
             Self::PrepareExecution {
                 intent_id,
                 instrument,
@@ -3556,6 +3582,38 @@ mod direct_transport_tests {
             .direct_transport_demo_execution()
         );
         assert!(!AgentOperation::AccountSummary.direct_transport_demo_execution());
+    }
+
+    #[test]
+    fn native_strategy_begin_is_strict_demo_only_and_cannot_be_replayed_as_read_only() {
+        let begin = AgentOperation::BeginStrategyRun {
+            allocation_id: "strategy_run_new_20261013_01".to_owned(),
+            origin_schema: "okx.research.live-decision/v1".to_owned(),
+            origin_version: "run-2026-10-13".to_owned(),
+            mandate_version: "demo-mandate-v1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+        };
+        begin.validate().expect("typed native opening");
+        assert!(begin.direct_transport_demo_execution());
+        assert!(!begin.direct_transport_read_only());
+        let mut bad = begin.clone();
+        if let AgentOperation::BeginStrategyRun { allocated_usdt, .. } = &mut bad {
+            *allocated_usdt = "0".to_owned();
+        }
+        assert!(bad.validate().is_err(), "zero capital cannot be reserved");
+        let mut bad = begin;
+        if let AgentOperation::BeginStrategyRun {
+            operator_authority_id,
+            ..
+        } = &mut bad
+        {
+            *operator_authority_id = "caller-witness".to_owned();
+        }
+        assert!(
+            bad.validate().is_err(),
+            "witness id format is checked at runtime too"
+        );
     }
 
     #[test]
