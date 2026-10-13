@@ -118,7 +118,11 @@ impl DurableExchangeEvidence {
             facts.exchange_orders_history_complete,
             facts.exchange_fills_history_complete,
             facts.bills_history_complete,
-            facts.summary.history_coverage.iter().all(|c| c.complete_within_bound),
+            facts
+                .summary
+                .history_coverage
+                .iter()
+                .all(|c| c.complete_within_bound),
         )
     }
 
@@ -321,7 +325,11 @@ impl DurableExchangeEvidence {
 
     pub fn summary(&self) -> ExchangeEvidenceSummary {
         let latest = self.cursors.values().max_by_key(|v| v.account_as_of_ms);
-        let mut epochs = self.cursors.values().map(|v| v.account_as_of_ms).collect::<Vec<_>>();
+        let mut epochs = self
+            .cursors
+            .values()
+            .map(|v| v.account_as_of_ms)
+            .collect::<Vec<_>>();
         epochs.sort_unstable();
         epochs.dedup();
         let largest_gap = epochs.windows(2).map(|v| v[1] - v[0]).max();
@@ -336,7 +344,8 @@ impl DurableExchangeEvidence {
             oldest_source_asof_ms: epochs.first().copied(),
             latest_source_asof_ms: epochs.last().copied(),
             largest_persisted_gap_ms: largest_gap,
-            source_gap_over_two_hours: largest_gap.is_some_and(|ms| ms > MAX_SOURCE_COVERAGE_GAP_MS),
+            source_gap_over_two_hours: largest_gap
+                .is_some_and(|ms| ms > MAX_SOURCE_COVERAGE_GAP_MS),
             remaining_source_cursors: MAX_CURSORS - self.cursors.len(),
             remaining_events: MAX_EVENTS - self.events.len(),
         }
@@ -358,12 +367,19 @@ mod tests {
         for missing in 0..4 {
             let mut complete = [true; 4];
             complete[missing] = false;
-            assert!(!complete_source_flags(complete[0], complete[1], complete[2], complete[3]));
+            assert!(!complete_source_flags(
+                complete[0],
+                complete[1],
+                complete[2],
+                complete[3]
+            ));
         }
         let mut evidence = DurableExchangeEvidence {
             schema: EXCHANGE_EVIDENCE_SCHEMA_V1.into(),
-            account_uid: "uid".into(), run_id: "run_1".into(),
-            events: BTreeMap::new(), cursors: BTreeMap::new(),
+            account_uid: "uid".into(),
+            run_id: "run_1".into(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
             checksum_sha256: String::new(),
         };
         evidence.seal().unwrap();
@@ -379,18 +395,26 @@ mod tests {
     fn source_summary_reports_gap_and_capacity_without_guessing_age() {
         let mut evidence = DurableExchangeEvidence {
             schema: EXCHANGE_EVIDENCE_SCHEMA_V1.into(),
-            account_uid: "uid".into(), run_id: "run_1".into(),
-            events: BTreeMap::new(), cursors: BTreeMap::new(),
+            account_uid: "uid".into(),
+            run_id: "run_1".into(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
             checksum_sha256: String::new(),
         };
-        for (key, time) in [("a",1000),("b",2000),("c",7_210_001)] {
-            evidence.cursors.insert(key.into(), ExchangeCoverageCursor {
-                source: "OKX_REST_ACCOUNT_HISTORY".into(),
-                source_received_at: key.into(),
-                generation: "one".into(), account_as_of_ms: time,
-                order_complete:true, fill_complete:true, bill_complete:true,
-                covered_ranges: Value::Null,
-            });
+        for (key, time) in [("a", 1000), ("b", 2000), ("c", 7_210_001)] {
+            evidence.cursors.insert(
+                key.into(),
+                ExchangeCoverageCursor {
+                    source: "OKX_REST_ACCOUNT_HISTORY".into(),
+                    source_received_at: key.into(),
+                    generation: "one".into(),
+                    account_as_of_ms: time,
+                    order_complete: true,
+                    fill_complete: true,
+                    bill_complete: true,
+                    covered_ranges: Value::Null,
+                },
+            );
         }
         evidence.seal().unwrap();
         let summary = evidence.summary();

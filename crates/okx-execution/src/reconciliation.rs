@@ -240,8 +240,8 @@ pub fn reconcile_account_ledger(
     result.financial_period = ledger.financial_period(facts, false);
     result.finalized_run = ledger.finalized_run().cloned();
     result.archived_runs_count = ledger.archived_runs_count();
-    result.archived_run_slots_remaining = crate::MAX_ARCHIVED_STRATEGY_RUNS
-        .saturating_sub(result.archived_runs_count);
+    result.archived_run_slots_remaining =
+        crate::MAX_ARCHIVED_STRATEGY_RUNS.saturating_sub(result.archived_runs_count);
     result.strategy_attribution = Some(attribute_strategy_exchange_evidence(
         ledger,
         &facts.exchange_orders,
