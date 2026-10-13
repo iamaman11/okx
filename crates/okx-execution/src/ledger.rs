@@ -575,7 +575,7 @@ impl DurableExecutionLedger {
 
     /// Financial period closure always seals a freshly observed source
     /// checkpoint, even when the prior five minutes had no trade activity.
-    pub fn capture_exchange_evidence_for_finalization(
+    pub fn capture_exchange_evidence_fresh_cursor(
         &mut self,
         facts: &AccountLedgerFacts,
     ) -> Result<ExchangeEvidenceSummary, ExecutionLedgerError> {
