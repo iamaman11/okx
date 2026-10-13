@@ -356,6 +356,16 @@ async fn capture_native_finance_on_order_events(
     execution: &ExecutionRuntime,
 ) -> Result<(), String> {
     let mut signals = private_ws.subscribe_financial_order_events();
+    // Restart proof: if a prior Demo run already exists, attempt one native
+    // source check immediately. Do not require a new order or invent a
+    // scheduler just to re-attach the persisted period after process crash.
+    if execution.strategy_financial_capture_active().await {
+        if let Err(reason) =
+            capture_one_native_financial_source(account, private_ws, execution).await
+        {
+            eprintln!("native financial evidence startup NOT_CAPTURED: {reason}");
+        }
+    }
     loop {
         signals.changed().await.map_err(|error| error.to_string())?;
         if !execution.strategy_financial_capture_active().await {
