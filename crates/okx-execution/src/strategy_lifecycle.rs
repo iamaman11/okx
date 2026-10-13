@@ -260,6 +260,54 @@ mod tests {
             archived_runs: vec![archived.clone(), archived],
         };
         assert!(duplicate_history.validate(Some(&next), None).is_err());
+        // Sixteen distinct, internally valid immutable periods are allowed.
+        // The seventeenth must be refused without evicting earlier evidence.
+        let mut accepted_archives = Vec::new();
+        for i in 0..MAX_ARCHIVED_STRATEGY_RUNS {
+            let mut distinct = run.clone();
+            distinct.allocation_id = format!("run_archive_{i:04}");
+            distinct.started_at_ms = 1000 + (i as u64) * 10_000;
+            let source = DurableExchangeEvidence::new(&distinct).unwrap();
+            let mut projection = report.clone();
+            projection.run_id = distinct.allocation_id.clone();
+            projection.evidence_sha256 = source.checksum_sha256.clone();
+            let finalization = StrategyFinalization::new(
+                &distinct,
+                &source,
+                &projection,
+                distinct.started_at_ms + 1_000,
+            )
+            .unwrap();
+            accepted_archives.push(ArchivedStrategyRun {
+                reservation: distinct,
+                evidence: source,
+                finalization,
+            });
+        }
+        let mut next_after_capacity = next.clone();
+        next_after_capacity.started_at_ms =
+            1000 + (MAX_ARCHIVED_STRATEGY_RUNS as u64) * 10_000 + 2_000;
+        let bounded_history = StrategyPeriodHistory {
+            finalized_run: None,
+            archived_runs: accepted_archives,
+        };
+        bounded_history
+            .validate(Some(&next_after_capacity), None)
+            .unwrap();
+        let original_history = serde_json::to_vec(&bounded_history).unwrap();
+        let mut over_capacity = bounded_history.clone();
+        over_capacity
+            .archived_runs
+            .push(over_capacity.archived_runs.last().unwrap().clone());
+        assert!(matches!(
+            over_capacity.validate(Some(&next_after_capacity), None),
+            Err(ExecutionLedgerError::ExchangeEvidenceCapacity)
+        ));
+        assert_eq!(
+            serde_json::to_vec(&bounded_history).unwrap(),
+            original_history
+        );
+
         let mut tampered = decoded;
         tampered.nav_usdt = "100000".into();
         assert!(matches!(

@@ -11,6 +11,9 @@ pub const EXCHANGE_EVIDENCE_SCHEMA_V1: &str = "okx.exchange-evidence/v1";
 const MAX_EVENTS: usize = 40_000;
 const MAX_CURSORS: usize = 4_096;
 pub const MAX_SOURCE_COVERAGE_GAP_MS: u64 = 7_200_000;
+/// Source-validated empty REST reads must not exhaust 4096 durable cursors.
+/// This is admission logic only, not a timer or source-continuity claim.
+const MIN_REDUNDANT_SOURCE_CURSOR_SPACING_MS: u64 = 300_000;
 const MAX_BYTES: usize = 24 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +63,7 @@ pub struct ExchangeEvidenceSummary {
     pub source_gap_over_two_hours: bool,
     pub remaining_source_cursors: usize,
     pub remaining_events: usize,
+    pub next_source_coverage_deadline_ms: Option<u64>,
 }
 
 impl DurableExchangeEvidence {
@@ -153,6 +157,7 @@ impl DurableExchangeEvidence {
         facts: &AccountLedgerFacts,
         entries: &[ExecutionLedgerEntry],
         run: &StrategyCapitalReservation,
+        require_fresh_cursor: bool,
     ) -> Result<(), ExecutionLedgerError> {
         self.validate()?;
         if !Self::complete_source_checkpoint(facts) {
@@ -172,6 +177,11 @@ impl DurableExchangeEvidence {
             .ok_or(ExecutionLedgerError::Corrupt("missing exchange as-of"))?;
         if now < run.started_at_ms {
             return Err(ExecutionLedgerError::Corrupt("exchange as-of before run"));
+        }
+        let original_events = self.events.len();
+        let last_cursor_time = self.cursors.values().map(|c| c.account_as_of_ms).max();
+        if last_cursor_time.is_some_and(|last| now < last) {
+            return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
         }
         let owner =
             |ord: Option<&str>, cl: &str, inst: &str, side: Option<&str>, pos: Option<&str>| {
@@ -296,6 +306,15 @@ impl DurableExchangeEvidence {
                 "ccy":b.currency,"subType":b.sub_type,"fee":b.fee,"pnl":b.pnl,"ts":b.timestamp_ms
             }), e, funding))?;
         }
+        let new_native_evidence = self.events.len() != original_events;
+        if !should_persist_source_cursor(
+            last_cursor_time,
+            now,
+            new_native_evidence,
+            require_fresh_cursor,
+        ) {
+            return self.seal();
+        }
         let key = format!(
             "{}:{}",
             facts.summary.account_generation, facts.summary.source_received_at
@@ -348,8 +367,25 @@ impl DurableExchangeEvidence {
                 .is_some_and(|ms| ms > MAX_SOURCE_COVERAGE_GAP_MS),
             remaining_source_cursors: MAX_CURSORS - self.cursors.len(),
             remaining_events: MAX_EVENTS - self.events.len(),
+            next_source_coverage_deadline_ms: epochs
+                .last()
+                .and_then(|last| last.checked_add(MAX_SOURCE_COVERAGE_GAP_MS)),
         }
     }
+}
+
+/// A native fill/order/bill is recorded at once; quiet snapshots use bounded
+/// checkpoint spacing. This NEVER fills a missing two-hour source interval.
+fn should_persist_source_cursor(
+    previous: Option<u64>,
+    now: u64,
+    has_new_native_event: bool,
+    require_fresh: bool,
+) -> bool {
+    require_fresh
+        || has_new_native_event
+        || previous
+            .is_none_or(|last| now.saturating_sub(last) >= MIN_REDUNDANT_SOURCE_CURSOR_SPACING_MS)
 }
 
 /// The native REST windows and every instrument/page must independently
@@ -423,6 +459,129 @@ mod tests {
         assert_eq!(summary.largest_persisted_gap_ms, Some(7_208_001));
         assert!(summary.source_gap_over_two_hours);
         assert_eq!(summary.remaining_source_cursors, MAX_CURSORS - 3);
+    }
+
+    #[test]
+    fn quiet_source_queries_do_not_exhaust_cursors_but_new_fills_write_immediately() {
+        let first = 1_000_000;
+        assert!(should_persist_source_cursor(None, first, false, false));
+        assert!(!should_persist_source_cursor(
+            Some(first),
+            first,
+            false,
+            false
+        ));
+        assert!(!should_persist_source_cursor(
+            Some(first),
+            first + 60_000,
+            false,
+            false
+        ));
+        assert!(!should_persist_source_cursor(
+            Some(first),
+            first + 299_999,
+            false,
+            false
+        ));
+        assert!(should_persist_source_cursor(
+            Some(first),
+            first + 300_000,
+            false,
+            false
+        ));
+        assert!(should_persist_source_cursor(
+            Some(first),
+            first + 1,
+            true,
+            false
+        ));
+        assert!(should_persist_source_cursor(
+            Some(first),
+            first + 1,
+            false,
+            true
+        ));
+        assert!(!should_persist_source_cursor(
+            Some(first),
+            first - 1,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn week_of_minute_spaced_read_only_snapshots_stays_below_cursor_capacity() {
+        let mut latest = None;
+        let mut persisted = 0_usize;
+        for minute in 0..(7 * 24 * 60_u64) {
+            let native_as_of = 1_000_000 + minute * 60_000;
+            if should_persist_source_cursor(latest, native_as_of, false, false) {
+                persisted += 1;
+                latest = Some(native_as_of);
+            }
+        }
+        assert_eq!(persisted, 7 * 24 * 12);
+        assert!(persisted < MAX_CURSORS);
+        // Every observed new native bill/fill still requires an immediate
+        // checkpoint even if the previous one is seconds old.
+        assert!(should_persist_source_cursor(
+            latest,
+            latest.unwrap() + 1,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn cursor_capacity_is_a_hard_limit_without_discarding_immutable_proofs() {
+        let mut evidence = DurableExchangeEvidence {
+            schema: EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
+            account_uid: "uid".into(),
+            run_id: "run_1".into(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        for i in 0..MAX_CURSORS {
+            let key = format!("cursor_{i}");
+            evidence.cursors.insert(
+                key.clone(),
+                ExchangeCoverageCursor {
+                    source: "OKX_REST_ACCOUNT_HISTORY".into(),
+                    source_received_at: key,
+                    generation: "one".into(),
+                    account_as_of_ms: 1_000_000 + (i as u64) * 300_000,
+                    order_complete: true,
+                    fill_complete: true,
+                    bill_complete: true,
+                    covered_ranges: Value::Null,
+                },
+            );
+        }
+        evidence.seal().unwrap();
+        assert_eq!(evidence.summary().remaining_source_cursors, 0);
+        let intact_hash = evidence.checksum_sha256.clone();
+        let mut rejected = evidence.clone();
+        rejected.cursors.insert(
+            "overflow".into(),
+            ExchangeCoverageCursor {
+                source: "OKX_REST_ACCOUNT_HISTORY".into(),
+                source_received_at: "overflow".into(),
+                generation: "one".into(),
+                account_as_of_ms: 1_000_000 + (MAX_CURSORS as u64) * 300_000,
+                order_complete: true,
+                fill_complete: true,
+                bill_complete: true,
+                covered_ranges: Value::Null,
+            },
+        );
+        assert!(matches!(
+            rejected.seal(),
+            Err(ExecutionLedgerError::Corrupt(_))
+        ));
+        evidence.validate().unwrap();
+        assert_eq!(evidence.checksum_sha256, intact_hash);
+        assert_eq!(evidence.cursors.len(), MAX_CURSORS);
     }
 
     #[test]

@@ -390,6 +390,18 @@ pub struct CandidateRiskContextEvidence {
     pub unsupported_daily_loss_currencies: Vec<String>,
 }
 
+/// Internal trusted ledger proof. The operator cannot supply this through
+/// the protocol. An absent or incoherent attestation always rejects new risk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrategyNavRiskEvidence {
+    pub run_id: String,
+    pub mandate_version: String,
+    pub allocation_usdt: String,
+    pub nav_usdt: String,
+    pub high_water_usdt: String,
+    pub daily_realized_loss_usdt: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CandidateRiskGate {
     pub decision: RiskPolicyDecision,
@@ -1052,6 +1064,28 @@ pub fn analyze_portfolio_risk(
     candidate: Option<PortfolioCandidate>,
     account_is_fresh: bool,
 ) -> Result<PortfolioRiskAnalysis, AnalysisError> {
+    analyze_portfolio_risk_with_strategy_nav(
+        account,
+        ledger,
+        mandate,
+        policy,
+        candidate,
+        account_is_fresh,
+        None,
+    )
+}
+
+/// Only the existing executor/ledger owner may supply this optional attestation.
+/// Ordinary portfolio queries still use the fail-closed entrypoint above.
+pub fn analyze_portfolio_risk_with_strategy_nav(
+    account: &AccountSnapshot,
+    ledger: &AccountLedgerSummary,
+    mandate: TradingMandate,
+    policy: HardRiskPolicy,
+    candidate: Option<PortfolioCandidate>,
+    account_is_fresh: bool,
+    strategy_nav: Option<&StrategyNavRiskEvidence>,
+) -> Result<PortfolioRiskAnalysis, AnalysisError> {
     let account_risk = analyze_account_risk(account)?;
     let total_equity = decimal("total_equity_usd", &account_risk.total_equity_usd)?;
     let capital_base = positive_decimal("capital_base_usd", &mandate.capital_base_usd)?;
@@ -1124,9 +1158,51 @@ pub fn analyze_portfolio_risk(
         usd_equivalent_daily_loss(&ledger.daily_realized_pnl_utc)?;
     let mut violations = Vec::new();
     if candidate.is_some() {
-        // Portfolio candidate admission has no trusted strategy-run NAV yet.
-        // Account balance size is never a substitute for this evidence.
-        require_strategy_nav_attribution(&mut violations);
+        // Source-authenticated ledger evidence is optional. It is never inferred
+        // from the much larger shared Demo account equity.
+        let proof = strategy_nav.and_then(|proof| {
+            if proof.run_id.is_empty() || proof.mandate_version != mandate.version {
+                return None;
+            }
+            let allocated = proof.allocation_usdt.parse::<Decimal>().ok()?;
+            let nav = proof.nav_usdt.parse::<Decimal>().ok()?;
+            let peak = proof.high_water_usdt.parse::<Decimal>().ok()?;
+            let loss = proof.daily_realized_loss_usdt.parse::<Decimal>().ok()?;
+            if allocated != capital_base
+                || nav <= Decimal::ZERO
+                || peak < allocated
+                || peak < nav
+                || loss < Decimal::ZERO
+            {
+                return None;
+            }
+            Some(((peak - nav) / peak, loss))
+        });
+        if let Some((run_drawdown, run_daily_loss)) = proof {
+            compare_limit(
+                &mut violations,
+                "MAX_DRAWDOWN",
+                "strategy_run",
+                run_drawdown,
+                &policy.max_drawdown_ratio,
+            )?;
+            compare_limit(
+                &mut violations,
+                "MANDATE_MAX_DRAWDOWN",
+                "strategy_run",
+                run_drawdown,
+                &mandate.max_drawdown_ratio,
+            )?;
+            compare_limit(
+                &mut violations,
+                "MAX_DAILY_REALIZED_LOSS",
+                "strategy_run_utc_day",
+                run_daily_loss,
+                &policy.max_daily_realized_loss_usd,
+            )?;
+        } else {
+            require_strategy_nav_attribution(&mut violations);
+        }
     }
     if !unsupported_daily_loss_currencies.is_empty() {
         violations.push(RiskPolicyViolation {
@@ -2307,6 +2383,78 @@ mod tests {
                 .iter()
                 .any(|v| v.code == "MAX_MARGIN_UTILIZATION_PROJECTED")
         );
+    }
+
+    #[test]
+    fn only_trusted_strategy_run_nav_can_admit_a_small_candidate() {
+        let mut snapshot = account("long_short_mode", Vec::new());
+        snapshot.balance.total_equity_usd = "103040".to_owned();
+        snapshot.balance.initial_margin_requirement_usd = Some("0".to_owned());
+        let mut mandate = mandate();
+        mandate.capital_base_usd = "100".to_owned();
+        let policy = policy();
+        let candidate = PortfolioCandidate {
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            direction: PositionDirection::Long,
+            notional_usd: "10".to_owned(),
+            worst_case_loss_usd: "0.5".to_owned(),
+            leverage: "2".to_owned(),
+        };
+        let baseline = StrategyNavRiskEvidence {
+            run_id: "run_attested_opening_0001".to_owned(),
+            mandate_version: mandate.version.clone(),
+            allocation_usdt: "100".to_owned(),
+            nav_usdt: "100".to_owned(),
+            high_water_usdt: "100".to_owned(),
+            daily_realized_loss_usdt: "0".to_owned(),
+        };
+        let evaluate = |proof: Option<&StrategyNavRiskEvidence>| {
+            analyze_portfolio_risk_with_strategy_nav(
+                &snapshot,
+                &ledger("0"),
+                mandate.clone(),
+                policy.clone(),
+                Some(candidate.clone()),
+                true,
+                proof,
+            )
+            .unwrap()
+        };
+        let nav_missing = |proof: Option<&StrategyNavRiskEvidence>| {
+            evaluate(proof)
+                .violations
+                .iter()
+                .any(|v| v.code == "STRATEGY_NAV_UNATTESTED")
+        };
+        assert!(nav_missing(None));
+        assert_eq!(
+            evaluate(Some(&baseline)).policy_decision,
+            RiskPolicyDecision::Accepted
+        );
+        let mut fake = baseline.clone();
+        fake.mandate_version = "foreign-mandate".to_owned();
+        assert!(nav_missing(Some(&fake)));
+        fake = baseline.clone();
+        fake.allocation_usdt = "103040".to_owned();
+        assert!(nav_missing(Some(&fake)));
+        fake = baseline.clone();
+        fake.high_water_usdt = "99".to_owned();
+        assert!(nav_missing(Some(&fake)));
+        fake = baseline.clone();
+        fake.nav_usdt = "89".to_owned();
+        let drawdown = evaluate(Some(&fake));
+        let hit_drawdown = drawdown
+            .violations
+            .iter()
+            .any(|v| v.code == "MAX_DRAWDOWN" && v.scope == "strategy_run");
+        assert!(!hit_drawdown);
+        fake.daily_realized_loss_usdt = "150".to_owned();
+        let rejected = evaluate(Some(&fake));
+        let hit_day_loss = rejected
+            .violations
+            .iter()
+            .any(|v| v.code == "MAX_DAILY_REALIZED_LOSS" && v.scope == "strategy_run_utc_day");
+        assert!(hit_day_loss);
     }
 
     #[test]
