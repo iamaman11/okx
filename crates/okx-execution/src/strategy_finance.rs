@@ -96,9 +96,7 @@ fn terminal_filled_coverage(
 /// from a source order row lacking native accFillSz.
 /// Use the last exact timestamped venue state. Older LIVE transitions are
 /// normal evidence and must not invalidate a later FILLED acknowledgement.
-fn latest_order_state(
-    orders: &[&crate::exchange_evidence::StoredExchangeEvent],
-) -> Option<String> {
+fn latest_order_state(orders: &[&crate::exchange_evidence::StoredExchangeEvent]) -> Option<String> {
     let mut latest: Option<(u64, String)> = None;
     for order in orders {
         let time = string(&order.payload, "uTime")?.parse::<u64>().ok()?;
@@ -106,7 +104,9 @@ fn latest_order_state(
         match &latest {
             Some((previous, _)) if time < *previous => {}
             Some((previous, prior_state)) if time == *previous => {
-                if state != *prior_state { return None; }
+                if state != *prior_state {
+                    return None;
+                }
             }
             _ => latest = Some((time, state)),
         }
@@ -892,8 +892,14 @@ mod tests {
         };
         let live = row("live", "100");
         let filled = row("filled", "200");
-        assert_eq!(latest_order_state(&[&live, &filled]).as_deref(), Some("filled"));
-        assert_eq!(latest_order_state(&[&filled, &live]).as_deref(), Some("filled"));
+        assert_eq!(
+            latest_order_state(&[&live, &filled]).as_deref(),
+            Some("filled")
+        );
+        assert_eq!(
+            latest_order_state(&[&filled, &live]).as_deref(),
+            Some("filled")
+        );
         let contradictory = row("canceled", "200");
         assert_eq!(latest_order_state(&[&filled, &contradictory]), None);
         let invalid = row("filled", "no-timestamp");

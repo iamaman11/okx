@@ -2256,7 +2256,9 @@ mod tests {
             strategy_periods: StrategyPeriodHistory {
                 finalized_run: None,
                 archived_runs: vec![ArchivedStrategyRun {
-                    reservation: prior, evidence: source, finalization,
+                    reservation: prior,
+                    evidence: source,
+                    finalization,
                 }],
             },
         };

@@ -140,7 +140,9 @@ impl StrategyPeriodHistory {
         let mut last_finalized = 0;
         for archived in &self.archived_runs {
             if archived.reservation.started_at_ms <= last_finalized {
-                return Err(ExecutionLedgerError::Corrupt("overlapping archived run boundaries"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "overlapping archived run boundaries",
+                ));
             }
             last_finalized = archived.finalization.finalized_at_ms;
             archived.validate()?;
@@ -157,7 +159,9 @@ impl StrategyPeriodHistory {
                 return Err(ExecutionLedgerError::CapitalReservationConflict);
             }
             if last_finalized > 0 && run.started_at_ms <= last_finalized {
-                return Err(ExecutionLedgerError::Corrupt("next run predates prior financial close"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "next run predates prior financial close",
+                ));
             }
         } else if evidence.is_some()
             || self.finalized_run.is_some()
