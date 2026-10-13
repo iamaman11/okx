@@ -1103,6 +1103,8 @@ mod tests {
             order_id: "ord-exact".to_owned(),
             client_order_id: plan.client_order_id.clone(),
             state: "filled".to_owned(),
+            size: "1".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
             update_time_ms: "1791828000000".to_owned(),
         };
         let fill = ExchangeFillIdentity {
@@ -1248,6 +1250,8 @@ mod tests {
             order_id: "ord-exact".to_owned(),
             client_order_id: plan.client_order_id.clone(),
             state: "filled".to_owned(),
+            size: "1".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
             update_time_ms: "1791828000000".to_owned(),
         };
         let (fill, bill) =
@@ -1351,6 +1355,8 @@ mod tests {
             order_id: "ord-exact".to_owned(),
             client_order_id: plan.client_order_id.clone(),
             state: "filled".to_owned(),
+            size: "1".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
             update_time_ms: "1791828000000".to_owned(),
         };
         let (a, ab) = linked_accounting_pair(&plan, "trade-a", "bill-a", "-0.01", "USDT", "0.13");
@@ -1440,6 +1446,8 @@ mod tests {
                 order_id: "ord-exact".to_owned(),
                 client_order_id: first.client_order_id.clone(),
                 state: "filled".to_owned(),
+                size: "1".to_owned(),
+                accumulated_fill_size: "0".to_owned(),
                 update_time_ms: "1791828000000".to_owned(),
             },
             ExchangeOrderIdentity {
@@ -1448,6 +1456,8 @@ mod tests {
                 order_id: "ord-other".to_owned(),
                 client_order_id: second.client_order_id.clone(),
                 state: "filled".to_owned(),
+                size: "1".to_owned(),
+                accumulated_fill_size: "0".to_owned(),
                 update_time_ms: "1791828000000".to_owned(),
             },
         ];
@@ -1799,6 +1809,8 @@ mod tests {
             order_id: "ord-1".to_owned(),
             client_order_id: plan.client_order_id,
             state: "live".to_owned(),
+            size: "1".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
             update_time_ms: "1790884800000".to_owned(),
         }];
         let result = reconcile_exchange_evidence(&ledger, &[], &orders, &[]).expect("reconcile");
@@ -1882,6 +1894,8 @@ mod tests {
             order_id: "manual-1".to_owned(),
             client_order_id: String::new(),
             state: "filled".to_owned(),
+            size: "1".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
             update_time_ms: "1790884800000".to_owned(),
         }];
         let fills = vec![ExchangeFillIdentity {
