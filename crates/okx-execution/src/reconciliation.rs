@@ -749,8 +749,7 @@ fn assess_flat_strategy_nav(
         !e.record.state.is_terminal()
             || e.record.plan.account_uid_fingerprint != capital.account_uid_fingerprint
             || (e.record.plan.action.is_risk_increasing()
-                && (e.record.strategy_run_id.as_deref()
-                    != Some(capital.allocation_id.as_str())
+                && (e.record.strategy_run_id.as_deref() != Some(capital.allocation_id.as_str())
                     || e.record.lineage.as_ref().is_none_or(|l| {
                         l.origin_schema != capital.origin_schema
                             || l.origin_version != capital.origin_version
@@ -760,8 +759,7 @@ fn assess_flat_strategy_nav(
                         .risk_binding
                         .as_ref()
                         .is_none_or(|b| b.mandate.version != capital.mandate_version)))
-            || (e.record.plan.action.is_risk_reducing()
-                && e.record.strategy_run_id.is_some())
+            || (e.record.plan.action.is_risk_reducing() && e.record.strategy_run_id.is_some())
     }) {
         reasons.push("nav_unowned_or_pending_intent");
     }
@@ -824,8 +822,7 @@ fn assess_flat_strategy_nav(
         }
         let owner = owners[0];
         if owner.record.plan.action.is_risk_increasing()
-            && owner.record.strategy_run_id.as_deref()
-                != Some(capital.allocation_id.as_str())
+            && owner.record.strategy_run_id.as_deref() != Some(capital.allocation_id.as_str())
         {
             reasons.push("nav_risk_fill_not_owned_by_run");
             continue;
@@ -1503,9 +1500,10 @@ mod tests {
             ),
             Err("nav_exit_exceeds_run_owned_lot")
         );
-        assert!(size
-            .get(&("BTC-USDT-SWAP".to_owned(), "long".to_owned()))
-            .is_some_and(|v| v.is_zero()));
+        assert!(
+            size.get(&("BTC-USDT-SWAP".to_owned(), "long".to_owned()))
+                .is_some_and(|v| v.is_zero())
+        );
         assert_eq!(
             apply_run_lot_fill(
                 &mut size,
