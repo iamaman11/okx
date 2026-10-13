@@ -6,17 +6,17 @@ use std::{
     str::FromStr,
 };
 
-use rust_decimal::Decimal;
 use okx_observation::AccountLedgerFacts;
+use rust_decimal::Decimal;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    DurableExchangeEvidence, ExchangeEvidenceSummary,
-    EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_PLAN_SCHEMA_V1,
-    ExchangeOrderState, ExecutionAction, ExecutionLineageBinding, ExecutionPlan, ExecutionRecord,
-    ExecutionState, ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
+    DurableExchangeEvidence, EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_LINEAGE_SCHEMA_V2,
+    EXECUTION_PLAN_SCHEMA_V1, ExchangeEvidenceSummary, ExchangeOrderState, ExecutionAction,
+    ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
+    ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
     OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
     PositionSide, ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveOrderStatus,
     ProtectiveSizeAmendState, ProtectiveTriggerPriceBasis, ReverseContinuation,
@@ -283,7 +283,9 @@ impl ExecutionLedgerStore {
         if let Some(stop) = &file.risk_stop {
             if !matches!(
                 file.schema.as_str(),
-                EXECUTION_LEDGER_SCHEMA_V6 | EXECUTION_LEDGER_SCHEMA_V7 | EXECUTION_LEDGER_SCHEMA_V8
+                EXECUTION_LEDGER_SCHEMA_V6
+                    | EXECUTION_LEDGER_SCHEMA_V7
+                    | EXECUTION_LEDGER_SCHEMA_V8
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "risk stop on legacy ledger schema",
@@ -291,7 +293,12 @@ impl ExecutionLedgerStore {
             }
             validate_risk_stop(stop)?;
         }
-        if file.capital_reservation.is_some() && !matches!(file.schema.as_str(), EXECUTION_LEDGER_SCHEMA_V7 | EXECUTION_LEDGER_SCHEMA_V8) {
+        if file.capital_reservation.is_some()
+            && !matches!(
+                file.schema.as_str(),
+                EXECUTION_LEDGER_SCHEMA_V7 | EXECUTION_LEDGER_SCHEMA_V8
+            )
+        {
             return Err(ExecutionLedgerError::Corrupt(
                 "capital reservation on legacy schema",
             ));
@@ -301,7 +308,9 @@ impl ExecutionLedgerStore {
         }
         if let Some(evidence) = &file.exchange_evidence {
             if file.schema != EXECUTION_LEDGER_SCHEMA_V8 {
-                return Err(ExecutionLedgerError::Corrupt("exchange evidence on legacy schema"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "exchange evidence on legacy schema",
+                ));
             }
             evidence.validate()?;
             if file.capital_reservation.as_ref().is_none_or(|r| {
@@ -337,7 +346,12 @@ impl ExecutionLedgerStore {
             }
         }
 
-        Ok((by_intent, file.risk_stop, file.capital_reservation, file.exchange_evidence))
+        Ok((
+            by_intent,
+            file.risk_stop,
+            file.capital_reservation,
+            file.exchange_evidence,
+        ))
     }
 
     fn save(
@@ -448,7 +462,12 @@ impl DurableExecutionLedger {
         }
 
         if recovered {
-            store.save(&entries, risk_stop.as_ref(), capital_reservation.as_ref(), exchange_evidence.as_ref())?;
+            store.save(
+                &entries,
+                risk_stop.as_ref(),
+                capital_reservation.as_ref(),
+                exchange_evidence.as_ref(),
+            )?;
         }
 
         Ok(Self {
@@ -496,24 +515,40 @@ impl DurableExecutionLedger {
         &mut self,
         facts: &AccountLedgerFacts,
     ) -> Result<ExchangeEvidenceSummary, ExecutionLedgerError> {
-        let run = self.capital_reservation.as_ref()
+        let run = self
+            .capital_reservation
+            .as_ref()
             .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
         let mut next = if let Some(old) = &self.exchange_evidence {
             old.clone()
         } else {
             DurableExchangeEvidence::new(run)?
         };
-        next.capture(facts, &self.entries.values().cloned().collect::<Vec<_>>(), run)?;
+        next.capture(
+            facts,
+            &self.entries.values().cloned().collect::<Vec<_>>(),
+            run,
+        )?;
         if self.exchange_evidence.as_ref() != Some(&next) {
-            self.store.save(&self.entries, self.risk_stop.as_ref(),
-                self.capital_reservation.as_ref(), Some(&next))?;
+            self.store.save(
+                &self.entries,
+                self.risk_stop.as_ref(),
+                self.capital_reservation.as_ref(),
+                Some(&next),
+            )?;
             self.exchange_evidence = Some(next);
         }
-        Ok(self.exchange_evidence.as_ref().expect("persisted").summary())
+        Ok(self
+            .exchange_evidence
+            .as_ref()
+            .expect("persisted")
+            .summary())
     }
 
     pub fn exchange_evidence_summary(&self) -> Option<ExchangeEvidenceSummary> {
-        self.exchange_evidence.as_ref().map(DurableExchangeEvidence::summary)
+        self.exchange_evidence
+            .as_ref()
+            .map(DurableExchangeEvidence::summary)
     }
 
     pub fn risk_stop(&self) -> Option<&ExecutionRiskStop> {
@@ -563,8 +598,12 @@ impl DurableExecutionLedger {
         {
             return Err(ExecutionLedgerError::CapitalReservationUnattested);
         }
-        self.store
-            .save(&self.entries, self.risk_stop.as_ref(), Some(&reservation), self.exchange_evidence.as_ref())?;
+        self.store.save(
+            &self.entries,
+            self.risk_stop.as_ref(),
+            Some(&reservation),
+            self.exchange_evidence.as_ref(),
+        )?;
         self.capital_reservation = Some(reservation.clone());
         Ok(reservation)
     }
@@ -3224,7 +3263,7 @@ mod tests {
                     records: vec![entry],
                     risk_stop: None,
                     capital_reservation: None,
-            exchange_evidence: None,
+                    exchange_evidence: None,
                 })
                 .expect("legacy json"),
             )

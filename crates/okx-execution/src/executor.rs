@@ -368,8 +368,10 @@ where
     }
 
     /// Only the existing executor owner persists source evidence; no gateway call.
-    pub fn capture_exchange_evidence(&mut self, facts: &okx_observation::AccountLedgerFacts)
-        -> Result<crate::ExchangeEvidenceSummary, OrderExecutorError> {
+    pub fn capture_exchange_evidence(
+        &mut self,
+        facts: &okx_observation::AccountLedgerFacts,
+    ) -> Result<crate::ExchangeEvidenceSummary, OrderExecutorError> {
         Ok(self.ledger.capture_exchange_evidence(facts)?)
     }
 

@@ -8,9 +8,9 @@ use okx_api::{
     RateBudget, RateBudgetSnapshot, TradeApi,
 };
 use okx_execution::{
-    AccountLedgerReconciliation, DurableExecutionLedger,
-    ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
-    ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
+    AccountLedgerReconciliation, DurableExecutionLedger, ExecutionLedgerEntry,
+    ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding, ExecutionPlan,
+    ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
     ManagedExecutionInventory, MutationAuthority, MutationPrepareDisposition,
     MutationSubmitDisposition, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
     StrategyAllocationOpening, StrategyCapitalReservation, SubmitDisposition,
@@ -180,7 +180,10 @@ impl ExecutionRuntime {
         let reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
         let inventory = managed_execution_inventory(executor.ledger());
         // Never capture a contradictory or private-WS-incoherent snapshot.
-        if coherent && reconciliation.consistent && executor.ledger().capital_reservation().is_some() {
+        if coherent
+            && reconciliation.consistent
+            && executor.ledger().capital_reservation().is_some()
+        {
             executor.capture_exchange_evidence(facts)?;
         }
         Ok((reconciliation, inventory))

@@ -71,26 +71,34 @@ impl DurableExchangeEvidence {
 
     fn hash(&self) -> Result<String, ExecutionLedgerError> {
         let bytes = serde_json::to_vec(&(
-            &self.schema, &self.account_uid, &self.run_id, &self.events, &self.cursors,
+            &self.schema,
+            &self.account_uid,
+            &self.run_id,
+            &self.events,
+            &self.cursors,
         ))?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 
     pub fn validate(&self) -> Result<(), ExecutionLedgerError> {
         if self.schema != EXCHANGE_EVIDENCE_SCHEMA_V1
-            || self.account_uid.trim().is_empty() || self.run_id.trim().is_empty()
+            || self.account_uid.trim().is_empty()
+            || self.run_id.trim().is_empty()
             || self.checksum_sha256 != self.hash()?
-            || self.events.len() > MAX_EVENTS || self.cursors.len() > MAX_CURSORS
+            || self.events.len() > MAX_EVENTS
+            || self.cursors.len() > MAX_CURSORS
             || serde_json::to_vec(self)?.len() > MAX_BYTES
             || self.events.values().any(|e| {
                 !matches!(e.allocation.as_str(), "RUN_OWNED" | "UNALLOCATED")
-                    || (e.allocation == "RUN_OWNED" && (
-                        e.strategy_run_id.as_deref() != Some(self.run_id.as_str())
-                        || e.source_intent_id.is_none()))
+                    || (e.allocation == "RUN_OWNED"
+                        && (e.strategy_run_id.as_deref() != Some(self.run_id.as_str())
+                            || e.source_intent_id.is_none()))
                     || (e.allocation == "UNALLOCATED" && e.strategy_run_id.is_some())
             })
         {
-            return Err(ExecutionLedgerError::Corrupt("invalid durable exchange evidence"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "invalid durable exchange evidence",
+            ));
         }
         Ok(())
     }
@@ -102,7 +110,9 @@ impl DurableExchangeEvidence {
 
     fn add(&mut self, key: String, value: StoredExchangeEvent) -> Result<(), ExecutionLedgerError> {
         if let Some(old) = self.events.get(&key) {
-            return if old == &value { Ok(()) } else {
+            return if old == &value {
+                Ok(())
+            } else {
                 Err(ExecutionLedgerError::ExchangeEvidenceConflict)
             };
         }
@@ -122,49 +132,89 @@ impl DurableExchangeEvidence {
         run: &StrategyCapitalReservation,
     ) -> Result<(), ExecutionLedgerError> {
         self.validate()?;
-        if self.run_id != run.allocation_id || self.account_uid != run.account_uid_fingerprint
-            || self.account_uid != facts.summary.authority.account_uid_fingerprint {
+        if self.run_id != run.allocation_id
+            || self.account_uid != run.account_uid_fingerprint
+            || self.account_uid != facts.summary.authority.account_uid_fingerprint
+        {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        let now = facts.summary.current_account_as_of_ms.as_deref()
+        let now = facts
+            .summary
+            .current_account_as_of_ms
+            .as_deref()
             .and_then(|v| v.parse::<u64>().ok())
             .ok_or(ExecutionLedgerError::Corrupt("missing exchange as-of"))?;
         if now < run.started_at_ms {
             return Err(ExecutionLedgerError::Corrupt("exchange as-of before run"));
         }
-        let owner = |ord: Option<&str>, cl: &str, inst: &str, side: Option<&str>, pos: Option<&str>| {
-            let matches = entries.iter().filter(|e| ord.is_some()
-                && e.record.order_id.as_deref() == ord
-                && e.record.plan.client_order_id == cl && e.record.plan.instrument_id == inst
-                && side.is_none_or(|s| e.record.plan.side.as_str() == s)
-                && pos.is_none_or(|s| e.record.plan.position_side.as_str() == s)
-            ).collect::<Vec<_>>();
-            if matches.len() > 1 { Err(ExecutionLedgerError::ExchangeEvidenceConflict) }
-            else { Ok(matches.first().copied()) }
-        };
+        let owner =
+            |ord: Option<&str>, cl: &str, inst: &str, side: Option<&str>, pos: Option<&str>| {
+                let matches = entries
+                    .iter()
+                    .filter(|e| {
+                        ord.is_some()
+                            && e.record.order_id.as_deref() == ord
+                            && e.record.plan.client_order_id == cl
+                            && e.record.plan.instrument_id == inst
+                            && side.is_none_or(|s| e.record.plan.side.as_str() == s)
+                            && pos.is_none_or(|s| e.record.plan.position_side.as_str() == s)
+                    })
+                    .collect::<Vec<_>>();
+                if matches.len() > 1 {
+                    Err(ExecutionLedgerError::ExchangeEvidenceConflict)
+                } else {
+                    Ok(matches.first().copied())
+                }
+            };
         let item = |value: Value, e: Option<&ExecutionLedgerEntry>, funding: bool| {
-            let id = if funding { None } else { e.and_then(|x| x.record.strategy_run_id.clone()) };
+            let id = if funding {
+                None
+            } else {
+                e.and_then(|x| x.record.strategy_run_id.clone())
+            };
             StoredExchangeEvent {
                 payload: value,
                 source_intent_id: e.map(|x| x.record.plan.intent_id.clone()),
-                allocation: if id.is_some() { "RUN_OWNED" } else { "UNALLOCATED" }.to_owned(),
+                allocation: if id.is_some() {
+                    "RUN_OWNED"
+                } else {
+                    "UNALLOCATED"
+                }
+                .to_owned(),
                 strategy_run_id: id,
             }
         };
         for o in &facts.exchange_orders {
-            let time = o.update_time_ms.parse::<u64>()
+            let time = o
+                .update_time_ms
+                .parse::<u64>()
                 .map_err(|_| ExecutionLedgerError::Corrupt("invalid order timestamp"))?;
-            if time < run.started_at_ms { continue; }
-            let e = owner(Some(&o.order_id), &o.client_order_id, &o.instrument_id, None, None)?;
+            if time < run.started_at_ms {
+                continue;
+            }
+            let e = owner(
+                Some(&o.order_id),
+                &o.client_order_id,
+                &o.instrument_id,
+                None,
+                None,
+            )?;
             self.add(format!("order:{}:{}", o.instrument_type, o.order_id), item(json!({
                 "source":"OKX_REST_ORDER","instType":o.instrument_type,"instId":o.instrument_id,
                 "ordId":o.order_id,"clOrdId":o.client_order_id,"state":o.state,"uTime":o.update_time_ms
             }), e, false))?;
         }
         for f in &facts.exchange_fills {
-            if f.fill_time_ms < run.started_at_ms { continue; }
-            let e = owner(f.order_id.as_deref(), &f.client_order_id, &f.instrument_id,
-                Some(&f.side), Some(&f.position_side))?;
+            if f.fill_time_ms < run.started_at_ms {
+                continue;
+            }
+            let e = owner(
+                f.order_id.as_deref(),
+                &f.client_order_id,
+                &f.instrument_id,
+                Some(&f.side),
+                Some(&f.position_side),
+            )?;
             self.add(format!("fill:{}:{}:{}", f.instrument_type, f.instrument_id, f.trade_id),
                 item(json!({
                     "source":"OKX_REST_FILL","instType":f.instrument_type,"instId":f.instrument_id,
@@ -176,27 +226,51 @@ impl DurableExchangeEvidence {
                 }), e, false))?;
         }
         for b in &facts.exchange_bills {
-            if b.timestamp_ms < run.started_at_ms { continue; }
+            if b.timestamp_ms < run.started_at_ms {
+                continue;
+            }
             let funding = matches!(b.sub_type.as_str(), "173" | "174");
-            let fills = facts.exchange_fills.iter().filter(|f|
-                f.bill_id.as_deref() == Some(b.bill_id.as_str())
-                && f.instrument_id == b.instrument_id
-                && b.trade_id.as_deref() == Some(f.trade_id.as_str())
-                && b.order_id.as_deref().is_none_or(|id| f.order_id.as_deref() == Some(id))
-                && b.client_order_id.as_deref().is_none_or(|id| f.client_order_id == id)
-            ).collect::<Vec<_>>();
-            if fills.len() > 1 { return Err(ExecutionLedgerError::ExchangeEvidenceConflict); }
-            let e = if funding { None } else if let Some(f) = fills.first() {
-                owner(f.order_id.as_deref(), &f.client_order_id, &f.instrument_id,
-                    Some(&f.side), Some(&f.position_side))?
-            } else { None };
+            let fills = facts
+                .exchange_fills
+                .iter()
+                .filter(|f| {
+                    f.bill_id.as_deref() == Some(b.bill_id.as_str())
+                        && f.instrument_id == b.instrument_id
+                        && b.trade_id.as_deref() == Some(f.trade_id.as_str())
+                        && b.order_id
+                            .as_deref()
+                            .is_none_or(|id| f.order_id.as_deref() == Some(id))
+                        && b.client_order_id
+                            .as_deref()
+                            .is_none_or(|id| f.client_order_id == id)
+                })
+                .collect::<Vec<_>>();
+            if fills.len() > 1 {
+                return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+            }
+            let e = if funding {
+                None
+            } else if let Some(f) = fills.first() {
+                owner(
+                    f.order_id.as_deref(),
+                    &f.client_order_id,
+                    &f.instrument_id,
+                    Some(&f.side),
+                    Some(&f.position_side),
+                )?
+            } else {
+                None
+            };
             self.add(format!("bill:{}", b.bill_id), item(json!({
                 "source":"OKX_REST_BILL","billId":b.bill_id,"instId":b.instrument_id,
                 "ordId":b.order_id,"clOrdId":b.client_order_id,"tradeId":b.trade_id,
                 "ccy":b.currency,"subType":b.sub_type,"fee":b.fee,"pnl":b.pnl,"ts":b.timestamp_ms
             }), e, funding))?;
         }
-        let key = format!("{}:{}", facts.summary.account_generation, facts.summary.source_received_at);
+        let key = format!(
+            "{}:{}",
+            facts.summary.account_generation, facts.summary.source_received_at
+        );
         let cursor = ExchangeCoverageCursor {
             source: "OKX_REST_ACCOUNT_HISTORY".to_owned(),
             source_received_at: facts.summary.source_received_at.clone(),
@@ -208,7 +282,9 @@ impl DurableExchangeEvidence {
             covered_ranges: serde_json::to_value(&facts.summary.history_coverage)?,
         };
         if let Some(previous) = self.cursors.get(&key) {
-            if previous != &cursor { return Err(ExecutionLedgerError::ExchangeEvidenceConflict); }
+            if previous != &cursor {
+                return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+            }
         } else {
             if self.cursors.len() >= MAX_CURSORS {
                 return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
@@ -226,8 +302,8 @@ impl DurableExchangeEvidence {
             events: self.events.len(),
             cursors: self.cursors.len(),
             checksum_sha256: self.checksum_sha256.clone(),
-            latest_source_complete: latest.is_some_and(|v|
-                v.order_complete && v.fill_complete && v.bill_complete),
+            latest_source_complete: latest
+                .is_some_and(|v| v.order_complete && v.fill_complete && v.bill_complete),
         }
     }
 }
@@ -238,27 +314,41 @@ mod tests {
     #[test]
     fn duplicate_is_idempotent_conflict_and_corruption_fail_closed() {
         let mut evidence = DurableExchangeEvidence {
-            schema: EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(), account_uid: "uid".into(),
-            run_id: "run_1".into(), events: BTreeMap::new(), cursors: BTreeMap::new(),
+            schema: EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
+            account_uid: "uid".into(),
+            run_id: "run_1".into(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
             checksum_sha256: String::new(),
         };
         evidence.seal().unwrap();
         let original = StoredExchangeEvent {
-            payload: json!({"tradeId":"9","fee":"-0.01"}), source_intent_id: None,
-            strategy_run_id: None, allocation: "UNALLOCATED".into(),
+            payload: json!({"tradeId":"9","fee":"-0.01"}),
+            source_intent_id: None,
+            strategy_run_id: None,
+            allocation: "UNALLOCATED".into(),
         };
-        evidence.add("fill:SWAP:BTC:9".into(), original.clone()).unwrap();
-        evidence.add("fill:SWAP:BTC:9".into(), original.clone()).unwrap();
+        evidence
+            .add("fill:SWAP:BTC:9".into(), original.clone())
+            .unwrap();
+        evidence
+            .add("fill:SWAP:BTC:9".into(), original.clone())
+            .unwrap();
         assert_eq!(evidence.events.len(), 1);
         let mut other = original;
         other.payload["fee"] = json!("-0.02");
-        assert!(matches!(evidence.add("fill:SWAP:BTC:9".into(), other),
-            Err(ExecutionLedgerError::ExchangeEvidenceConflict)));
+        assert!(matches!(
+            evidence.add("fill:SWAP:BTC:9".into(), other),
+            Err(ExecutionLedgerError::ExchangeEvidenceConflict)
+        ));
         evidence.seal().unwrap();
         let serialized = serde_json::to_vec(&evidence).unwrap();
         let mut reopened: DurableExchangeEvidence = serde_json::from_slice(&serialized).unwrap();
         reopened.validate().unwrap();
         reopened.events.get_mut("fill:SWAP:BTC:9").unwrap().payload["fee"] = json!("100");
-        assert!(matches!(reopened.validate(), Err(ExecutionLedgerError::Corrupt(_))));
+        assert!(matches!(
+            reopened.validate(),
+            Err(ExecutionLedgerError::Corrupt(_))
+        ));
     }
 }

@@ -68,6 +68,8 @@ pub fn classify_prepare_result(
         Err(error @ ExecutionLedgerError::CapitalReservationUnattested) => Err(error),
         Err(error @ ExecutionLedgerError::CapitalReservationConflict) => Err(error),
         Err(error @ ExecutionLedgerError::CapitalReservationScopeMismatch) => Err(error),
+        Err(error @ ExecutionLedgerError::ExchangeEvidenceConflict) => Err(error),
+        Err(error @ ExecutionLedgerError::ExchangeEvidenceCapacity) => Err(error),
         Err(error @ ExecutionLedgerError::InvalidRiskStopReason) => Err(error),
         Err(error @ ExecutionLedgerError::IntentNotFound(_)) => Err(error),
         Err(error @ ExecutionLedgerError::ReverseMismatch) => Err(error),
