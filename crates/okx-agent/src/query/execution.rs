@@ -32,6 +32,44 @@ use crate::execution_runtime::{
 
 pub const EXECUTION_PREFLIGHT_REJECTED_CODE: &str = "EXECUTION_PREFLIGHT_REJECTED";
 pub const EXECUTION_CAPITAL_OPENING_UNATTESTED_CODE: &str = "EXECUTION_CAPITAL_OPENING_UNATTESTED";
+
+ // Each check is native sourced. Return the first stable failure code and
+ // all failing predicates, without exposing account balances, UID or credentials.
+#[derive(Debug, Clone)]
+struct StrategyOpeningProof {
+    matching_uid: bool,
+    matching_generation: bool,
+    only_usdt_equity: bool,
+    bills_complete: bool,
+    orders_complete: bool,
+    fills_complete: bool,
+    bounded_history_complete: bool,
+    native_protection_complete: bool,
+    no_native_protection: bool,
+    no_positions: bool,
+    no_orders: bool,
+}
+
+impl StrategyOpeningProof {
+    fn failures(&self) -> Vec<(&'static str, &'static str)> {
+        [
+            (!self.matching_uid, "EXECUTION_CAPITAL_OPENING_UID_MISMATCH", "source account UID differs from authenticated Demo executor"),
+            (!self.matching_generation, "EXECUTION_CAPITAL_OPENING_GENERATION_MISMATCH", "source account generation changed during opening"),
+            (!self.only_usdt_equity, "EXECUTION_CAPITAL_OPENING_NON_USDT_EQUITY", "nonzero non-USDT trading equity prevents USDT-only strategy capital attribution"),
+            (!self.bills_complete, "EXECUTION_CAPITAL_OPENING_BILLS_INCOMPLETE", "native bills history is incomplete"),
+            (!self.orders_complete, "EXECUTION_CAPITAL_OPENING_ORDERS_INCOMPLETE", "native orders history is incomplete"),
+            (!self.fills_complete, "EXECUTION_CAPITAL_OPENING_FILLS_INCOMPLETE", "native fills history is incomplete"),
+            (!self.bounded_history_complete, "EXECUTION_CAPITAL_OPENING_HISTORY_TRUNCATED", "one or more native history windows is truncated"),
+            (!self.native_protection_complete, "EXECUTION_CAPITAL_OPENING_OCO_TRUNCATED", "native protective order inventory is incomplete"),
+            (!self.no_native_protection, "EXECUTION_CAPITAL_OPENING_OCO_ACTIVE", "native protective or conditional order is present"),
+            (!self.no_positions, "EXECUTION_CAPITAL_OPENING_POSITION_PRESENT", "account is not FLAT"),
+            (!self.no_orders, "EXECUTION_CAPITAL_OPENING_ORDER_PENDING", "account has a pending ordinary order"),
+        ]
+        .into_iter()
+        .filter_map(|(failed, code, message)| failed.then_some((code, message)))
+        .collect()
+    }
+}
 pub const EXECUTION_STRATEGY_CLOSE_UNATTESTED_CODE: &str = "EXECUTION_STRATEGY_CLOSE_UNATTESTED";
 pub const EXECUTION_PREFLIGHT_UNAVAILABLE_CODE: &str = "EXECUTION_PREFLIGHT_UNAVAILABLE";
 pub const EXECUTION_CLOCK_UNAVAILABLE_CODE: &str = "EXECUTION_CLOCK_UNAVAILABLE";
@@ -311,24 +349,40 @@ async fn begin_strategy_run(
             "account changed during independent opening readback".to_owned(),
         ));
     }
-    if facts.summary.authority.account_uid_fingerprint != preflight.account_uid_fingerprint
-        || facts.summary.account_generation != snapshot.account_generation
-        || facts.nonzero_other_trading_currency_equity
-        || !facts.bills_history_complete
-        || !facts.exchange_orders_history_complete
-        || !facts.exchange_fills_history_complete
-        || facts
+    let checks = StrategyOpeningProof {
+        matching_uid: facts.summary.authority.account_uid_fingerprint
+            == preflight.account_uid_fingerprint,
+        matching_generation: facts.summary.account_generation == snapshot.account_generation,
+        only_usdt_equity: !facts.nonzero_other_trading_currency_equity,
+        bills_complete: facts.bills_history_complete,
+        orders_complete: facts.exchange_orders_history_complete,
+        fills_complete: facts.exchange_fills_history_complete,
+        bounded_history_complete: facts
             .summary
             .history_coverage
             .iter()
-            .any(|c| !c.complete_within_bound)
-        || !protection.complete_within_bound
-        || protection.rows > 0
-        || facts.summary.open_positions > 0
-        || facts.summary.pending_orders > 0
-    {
-        return Ok(deny(
-            "opening account/coverage/OCO/other-currency proof incomplete".to_owned(),
+            .all(|c| c.complete_within_bound),
+        native_protection_complete: protection.complete_within_bound,
+        no_native_protection: protection.rows == 0,
+        no_positions: facts.summary.open_positions == 0,
+        no_orders: facts.summary.pending_orders == 0,
+    };
+    let failures = checks.failures();
+    if let Some((code, message)) = failures.first() {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            code,
+            format!(
+                "{message}; failed_checks={}",
+                failures
+                    .iter()
+                    .map(|(code, _)| *code)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            false,
         ));
     }
     let Some(usdt_equity) = facts.trading_usdt_equity.as_deref() else {
@@ -3598,6 +3652,78 @@ mod tests {
             start + MUTATION_REQUEST_TTL_MS + 1
         ));
         assert!(!protective_readback_in_ttl(start, start - 1));
+    }
+
+    #[test]
+    fn opening_source_denials_are_distinct_bounded_and_do_not_weaken_admission() {
+        let accepted = StrategyOpeningProof {
+            matching_uid: true,
+            matching_generation: true,
+            only_usdt_equity: true,
+            bills_complete: true,
+            orders_complete: true,
+            fills_complete: true,
+            bounded_history_complete: true,
+            native_protection_complete: true,
+            no_native_protection: true,
+            no_positions: true,
+            no_orders: true,
+        };
+        assert!(accepted.failures().is_empty());
+        let expected = [
+            "EXECUTION_CAPITAL_OPENING_UID_MISMATCH",
+            "EXECUTION_CAPITAL_OPENING_GENERATION_MISMATCH",
+            "EXECUTION_CAPITAL_OPENING_NON_USDT_EQUITY",
+            "EXECUTION_CAPITAL_OPENING_BILLS_INCOMPLETE",
+            "EXECUTION_CAPITAL_OPENING_ORDERS_INCOMPLETE",
+            "EXECUTION_CAPITAL_OPENING_FILLS_INCOMPLETE",
+            "EXECUTION_CAPITAL_OPENING_HISTORY_TRUNCATED",
+            "EXECUTION_CAPITAL_OPENING_OCO_TRUNCATED",
+            "EXECUTION_CAPITAL_OPENING_OCO_ACTIVE",
+            "EXECUTION_CAPITAL_OPENING_POSITION_PRESENT",
+            "EXECUTION_CAPITAL_OPENING_ORDER_PENDING",
+        ];
+        for (index, expected_code) in expected.into_iter().enumerate() {
+            let mut invalid = accepted.clone();
+            match index {
+                0 => invalid.matching_uid = false,
+                1 => invalid.matching_generation = false,
+                2 => invalid.only_usdt_equity = false,
+                3 => invalid.bills_complete = false,
+                4 => invalid.orders_complete = false,
+                5 => invalid.fills_complete = false,
+                6 => invalid.bounded_history_complete = false,
+                7 => invalid.native_protection_complete = false,
+                8 => invalid.no_native_protection = false,
+                9 => invalid.no_positions = false,
+                10 => invalid.no_orders = false,
+                _ => unreachable!(),
+            }
+            let failures = invalid.failures();
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].0, expected_code);
+            assert!(!failures[0].1.is_empty());
+            assert!(failures[0].1.len() < 150);
+        }
+        let all_invalid = StrategyOpeningProof {
+            matching_uid: false,
+            matching_generation: false,
+            only_usdt_equity: false,
+            bills_complete: false,
+            orders_complete: false,
+            fills_complete: false,
+            bounded_history_complete: false,
+            native_protection_complete: false,
+            no_native_protection: false,
+            no_positions: false,
+            no_orders: false,
+        };
+        let codes = all_invalid
+            .failures()
+            .iter()
+            .map(|(code, _)| *code)
+            .collect::<Vec<_>>();
+        assert_eq!(codes, expected);
     }
 
     #[test]
