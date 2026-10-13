@@ -33,8 +33,8 @@ use crate::execution_runtime::{
 pub const EXECUTION_PREFLIGHT_REJECTED_CODE: &str = "EXECUTION_PREFLIGHT_REJECTED";
 pub const EXECUTION_CAPITAL_OPENING_UNATTESTED_CODE: &str = "EXECUTION_CAPITAL_OPENING_UNATTESTED";
 
- // Each check is native sourced. Return the first stable failure code and
- // all failing predicates, without exposing account balances, UID or credentials.
+// Each check is native sourced. Return the first stable failure code and
+// all failing predicates, without exposing account balances, UID or credentials.
 #[derive(Debug, Clone)]
 struct StrategyOpeningProof {
     matching_uid: bool,
@@ -53,17 +53,61 @@ struct StrategyOpeningProof {
 impl StrategyOpeningProof {
     fn failures(&self) -> Vec<(&'static str, &'static str)> {
         [
-            (!self.matching_uid, "EXECUTION_CAPITAL_OPENING_UID_MISMATCH", "source account UID differs from authenticated Demo executor"),
-            (!self.matching_generation, "EXECUTION_CAPITAL_OPENING_GENERATION_MISMATCH", "source account generation changed during opening"),
-            (!self.only_usdt_equity, "EXECUTION_CAPITAL_OPENING_NON_USDT_EQUITY", "nonzero non-USDT trading equity prevents USDT-only strategy capital attribution"),
-            (!self.bills_complete, "EXECUTION_CAPITAL_OPENING_BILLS_INCOMPLETE", "native bills history is incomplete"),
-            (!self.orders_complete, "EXECUTION_CAPITAL_OPENING_ORDERS_INCOMPLETE", "native orders history is incomplete"),
-            (!self.fills_complete, "EXECUTION_CAPITAL_OPENING_FILLS_INCOMPLETE", "native fills history is incomplete"),
-            (!self.bounded_history_complete, "EXECUTION_CAPITAL_OPENING_HISTORY_TRUNCATED", "one or more native history windows is truncated"),
-            (!self.native_protection_complete, "EXECUTION_CAPITAL_OPENING_OCO_TRUNCATED", "native protective order inventory is incomplete"),
-            (!self.no_native_protection, "EXECUTION_CAPITAL_OPENING_OCO_ACTIVE", "native protective or conditional order is present"),
-            (!self.no_positions, "EXECUTION_CAPITAL_OPENING_POSITION_PRESENT", "account is not FLAT"),
-            (!self.no_orders, "EXECUTION_CAPITAL_OPENING_ORDER_PENDING", "account has a pending ordinary order"),
+            (
+                !self.matching_uid,
+                "EXECUTION_CAPITAL_OPENING_UID_MISMATCH",
+                "source account UID differs from authenticated Demo executor",
+            ),
+            (
+                !self.matching_generation,
+                "EXECUTION_CAPITAL_OPENING_GENERATION_MISMATCH",
+                "source account generation changed during opening",
+            ),
+            (
+                !self.only_usdt_equity,
+                "EXECUTION_CAPITAL_OPENING_NON_USDT_EQUITY",
+                "nonzero non-USDT trading equity prevents USDT-only strategy capital attribution",
+            ),
+            (
+                !self.bills_complete,
+                "EXECUTION_CAPITAL_OPENING_BILLS_INCOMPLETE",
+                "native bills history is incomplete",
+            ),
+            (
+                !self.orders_complete,
+                "EXECUTION_CAPITAL_OPENING_ORDERS_INCOMPLETE",
+                "native orders history is incomplete",
+            ),
+            (
+                !self.fills_complete,
+                "EXECUTION_CAPITAL_OPENING_FILLS_INCOMPLETE",
+                "native fills history is incomplete",
+            ),
+            (
+                !self.bounded_history_complete,
+                "EXECUTION_CAPITAL_OPENING_HISTORY_TRUNCATED",
+                "one or more native history windows is truncated",
+            ),
+            (
+                !self.native_protection_complete,
+                "EXECUTION_CAPITAL_OPENING_OCO_TRUNCATED",
+                "native protective order inventory is incomplete",
+            ),
+            (
+                !self.no_native_protection,
+                "EXECUTION_CAPITAL_OPENING_OCO_ACTIVE",
+                "native protective or conditional order is present",
+            ),
+            (
+                !self.no_positions,
+                "EXECUTION_CAPITAL_OPENING_POSITION_PRESENT",
+                "account is not FLAT",
+            ),
+            (
+                !self.no_orders,
+                "EXECUTION_CAPITAL_OPENING_ORDER_PENDING",
+                "account has a pending ordinary order",
+            ),
         ]
         .into_iter()
         .filter_map(|(failed, code, message)| failed.then_some((code, message)))
