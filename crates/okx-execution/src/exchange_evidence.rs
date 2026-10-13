@@ -203,7 +203,8 @@ impl DurableExchangeEvidence {
                 "order:{}:{}:{}", o.instrument_type, o.order_id, o.update_time_ms
             ), item(json!({
                 "source":"OKX_REST_ORDER","instType":o.instrument_type,"instId":o.instrument_id,
-                "ordId":o.order_id,"clOrdId":o.client_order_id,"state":o.state,"uTime":o.update_time_ms
+                "ordId":o.order_id,"clOrdId":o.client_order_id,"state":o.state,
+                "sz":o.size,"accFillSz":o.accumulated_fill_size,"uTime":o.update_time_ms
             }), e, false))?;
         }
         for f in &facts.exchange_fills {
