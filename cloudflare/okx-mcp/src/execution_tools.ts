@@ -92,7 +92,7 @@ export const EXECUTION_TOOLS: Json[] = [
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
-        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run"] },
+        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run"] },
         intent_id: ID, instrument: INSTRUMENT,
         trade_mode: { type: "string", enum: ["cross","isolated"] },
         order_type: { type: "string", enum: ["limit","post_only","fok","ioc"] },
@@ -184,7 +184,7 @@ export function isExecutionMutation(operationType: unknown): boolean {
   return [
     "prepare_execution", "submit_prepared_execution",
     "mutate_execution", "abort_reverse_execution", "abandon_prepared_execution",
-    "begin_strategy_run",
+    "begin_strategy_run", "finalize_strategy_run",
   ].includes(String(operationType));
 }
 
@@ -198,6 +198,10 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
   if (!token(args.intent_id,16,128) || typeof args.action !== "string") return null;
   const intent_id=args.intent_id;
   switch(args.action){
+    case "finalize_strategy_run": {
+      if (!exactKeys(args,["action","intent_id"])) return null;
+      return {type:"finalize_strategy_run",allocation_id:intent_id};
+    }
     case "begin_strategy_run": {
       if (!exactKeys(args,["action","intent_id","origin_schema","origin_version","mandate_version","allocated_usdt","operator_authority_id"])
         || ![args.origin_schema,args.origin_version,args.mandate_version].every(v =>

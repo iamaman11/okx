@@ -388,6 +388,19 @@ where
             .reserve_strategy_capital(reservation, opening, now_ms)?)
     }
 
+    /// Only the already-owned journal can commit one immutable close; no POST.
+    pub fn finalize_strategy_run(
+        &mut self,
+        facts: &okx_observation::AccountLedgerFacts,
+        coherent: bool,
+        protection_absent: bool,
+        now_ms: u64,
+    ) -> Result<crate::StrategyFinalization, OrderExecutorError> {
+        Ok(self.ledger.finalize_strategy_run(
+            facts, coherent, protection_absent, now_ms,
+        )?)
+    }
+
     pub fn stop_new_risk(
         &mut self,
         reason: impl Into<String>,

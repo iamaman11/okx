@@ -355,6 +355,7 @@ pub(crate) async fn dispatch(
         }
         AgentOperation::ExecutorPreflight
         | AgentOperation::BeginStrategyRun { .. }
+        | AgentOperation::FinalizeStrategyRun { .. }
         | AgentOperation::PrepareExecution { .. }
         | AgentOperation::SubmitPreparedExecution { .. }
         | AgentOperation::MutateExecution { .. }

@@ -91,6 +91,13 @@ for (const invalid of [
 }
 assert(isExecutionMutation("begin_strategy_run"),"capital mutation requires Demo-only owner");
 assert(!executionProfilePermitsOperation("production","begin_strategy_run"),"Production cannot allocate Demo strategy capital");
+assert(buildExecutionOperation(uidAction("finalize_strategy_run"))?.type==="finalize_strategy_run",
+  "finalization is one typed local Demo-only ledger operation");
+assert(buildExecutionOperation(uidAction("finalize_strategy_run",{new_price:"0.1"}))===null,
+  "finalization cannot accept caller asserted exchange proof or trading fields");
+assert(isExecutionMutation("finalize_strategy_run"),"finalization is a protected local ledger write");
+assert(!executionProfilePermitsOperation("production","finalize_strategy_run"),
+  "Production cannot finalize a Demo run");
 assert(buildExecutionOperation(uidAction("submit"))?.type==="submit_prepared_execution","submit must be typed");
 assert(buildExecutionOperation(uidAction("abort_reverse"))?.type==="abort_reverse_execution","reverse abort must be typed");
 assert(buildExecutionOperation(uidAction("abandon_prepared"))?.type==="abandon_prepared_execution","only local unsent abandonment admitted");
@@ -134,7 +141,7 @@ for(const x of [
   // malformed or foreign fields before sending a corresponding native request.
   if(result!==null)throw Error("malformed execution action reached runtime: "+JSON.stringify(x));
 }
-for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution","abandon_prepared_execution","begin_strategy_run"]) {
+for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution","abandon_prepared_execution","begin_strategy_run","finalize_strategy_run"]) {
   assert(isExecutionMutation(op), "all trading writes classify as uncertain on lost ACK");
   assert(executionProfilePermitsOperation("demo_acceptance",op), "verified Demo write allowed");
   for (const profile of ["production","unverified","",undefined]) {
@@ -145,6 +152,8 @@ assert(executionProfilePermitsOperation("production","account_summary"),"read is
 assert(!isExecutionMutation("account_summary"),"read must not be misclassified as exchange mutation");
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
 const advertisedActions = (EXECUTION_TOOLS[1] as any).inputSchema.properties.action.enum as string[];
+assert(advertisedActions.includes("finalize_strategy_run"),
+  "finalization must be advertised via existing Demo-only typed operation");
 assert(advertisedActions.includes("begin_strategy_run"),"native capital opening is typed and Demo only");
 assert(advertisedActions.includes("abandon_prepared"),"advertised writable action list must include the typed unsent PREPARED release");
 assert(advertisedActions.includes("confirm_protection_size"),"existing tool schema advertises exact-ID safe local confirmation");
