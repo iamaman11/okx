@@ -717,10 +717,10 @@ impl DurableExecutionLedger {
         validate_reverse_link(&record)?;
         // Bind from the single trusted ledger owner, never from ChatGPT/plan.
         // A CLOSE has no proven lot owner yet and MUST remain unattributed.
-        if record.plan.action.is_risk_increasing() {
-            if let Some(run) = &self.capital_reservation {
-                record.strategy_run_id = Some(run.allocation_id.clone());
-            }
+        if record.plan.action.is_risk_increasing()
+            && let Some(run) = &self.capital_reservation
+        {
+            record.strategy_run_id = Some(run.allocation_id.clone());
         }
         self.validate_capital_intent(&record, observed_at_ms)?;
         // One ledger is owned by exactly one authenticated exchange UID,
