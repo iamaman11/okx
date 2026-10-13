@@ -258,7 +258,7 @@ pub(super) async fn dispatch(
 
             let (reconciliation, managed_execution_intents) = match context.execution {
                 Some(execution) => match execution
-                    .reconcile_account_ledger_with_intents(&facts)
+                    .reconcile_account_ledger_with_intents(&facts, coherence.coherent)
                     .await
                 {
                     Ok((value, inventory)) => {

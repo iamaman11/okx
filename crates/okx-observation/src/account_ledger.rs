@@ -95,6 +95,8 @@ pub struct ExchangeOrderIdentity {
     pub order_id: String,
     pub client_order_id: String,
     pub state: String,
+    pub size: String,
+    pub accumulated_fill_size: String,
     pub update_time_ms: String,
 }
 
@@ -317,6 +319,8 @@ impl AccountLedgerFacts {
                 order_id: pending.order_id.clone(),
                 client_order_id: pending.client_order_id.clone().unwrap_or_default(),
                 state: pending.state.clone(),
+                size: pending.size.clone(),
+                accumulated_fill_size: pending.accumulated_fill_size.clone(),
                 update_time_ms: pending.update_time_ms.clone(),
             });
         }
@@ -345,6 +349,8 @@ impl AccountLedgerFacts {
                     order_id: order_id.to_owned(),
                     client_order_id: row.client_order_id.clone(),
                     state: required("orders_history.state", &row.state)?.to_owned(),
+                    size: row.sz.clone(),
+                    accumulated_fill_size: row.accumulated_fill_size.clone(),
                     update_time_ms: row.update_time_ms.clone(),
                 });
             }

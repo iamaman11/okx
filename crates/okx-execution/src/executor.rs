@@ -367,6 +367,14 @@ where
         &self.ledger
     }
 
+    /// Only the existing executor owner persists source evidence; no gateway call.
+    pub fn capture_exchange_evidence(
+        &mut self,
+        facts: &okx_observation::AccountLedgerFacts,
+    ) -> Result<crate::ExchangeEvidenceSummary, OrderExecutorError> {
+        Ok(self.ledger.capture_exchange_evidence(facts)?)
+    }
+
     /// Persist the single native account-scoped virtual allocation under
     /// the same executor owner as all durable intents; no venue send.
     pub fn reserve_strategy_capital(
@@ -378,6 +386,19 @@ where
         Ok(self
             .ledger
             .reserve_strategy_capital(reservation, opening, now_ms)?)
+    }
+
+    /// Only the already-owned journal can commit one immutable close; no POST.
+    pub fn finalize_strategy_run(
+        &mut self,
+        facts: &okx_observation::AccountLedgerFacts,
+        coherent: bool,
+        protection_absent: bool,
+        now_ms: u64,
+    ) -> Result<crate::StrategyFinalization, OrderExecutorError> {
+        Ok(self
+            .ledger
+            .finalize_strategy_run(facts, coherent, protection_absent, now_ms)?)
     }
 
     pub fn stop_new_risk(

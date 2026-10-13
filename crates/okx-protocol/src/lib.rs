@@ -967,6 +967,10 @@ pub enum AgentOperation {
         allocated_usdt: String,
         operator_authority_id: String,
     },
+    /// One Demo-only native financial close. ALL proof is sourced in Windows.
+    FinalizeStrategyRun {
+        allocation_id: String,
+    },
     PrepareExecution {
         intent_id: String,
         instrument: String,
@@ -1043,6 +1047,7 @@ impl AgentOperation {
         matches!(
             self,
             Self::BeginStrategyRun { .. }
+                | Self::FinalizeStrategyRun { .. }
                 | Self::PrepareExecution { .. }
                 | Self::SubmitPreparedExecution { .. }
                 | Self::MutateExecution { .. }
@@ -1055,6 +1060,7 @@ impl AgentOperation {
         !matches!(
             self,
             Self::BeginStrategyRun { .. }
+                | Self::FinalizeStrategyRun { .. }
                 | Self::PrepareExecution { .. }
                 | Self::SubmitPreparedExecution { .. }
                 | Self::MutateExecution { .. }
@@ -1204,6 +1210,7 @@ impl AgentOperation {
                 validate_positive_decimal_text(allocated_usdt, "allocated_usdt")?;
                 validate_sha256_artifact_id(operator_authority_id, "operator_authority_id")
             }
+            Self::FinalizeStrategyRun { allocation_id } => validate_request_id(allocation_id),
             Self::PrepareExecution {
                 intent_id,
                 instrument,
@@ -3595,6 +3602,16 @@ mod direct_transport_tests {
             operator_authority_id: format!("sha256:{}", "a".repeat(64)),
         };
         begin.validate().expect("typed native opening");
+        let close = AgentOperation::FinalizeStrategyRun {
+            allocation_id: "strategy_run_new_20261013_01".to_owned(),
+        };
+        close.validate().expect("typed financial finalization");
+        assert!(close.direct_transport_demo_execution());
+        assert!(!close.direct_transport_read_only());
+        let invalid_close = AgentOperation::FinalizeStrategyRun {
+            allocation_id: "invalid!".to_owned(),
+        };
+        assert!(invalid_close.validate().is_err());
         assert!(begin.direct_transport_demo_execution());
         assert!(!begin.direct_transport_read_only());
         let mut bad = begin.clone();

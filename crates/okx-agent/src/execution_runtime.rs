@@ -8,12 +8,12 @@ use okx_api::{
     RateBudget, RateBudgetSnapshot, TradeApi,
 };
 use okx_execution::{
-    AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
-    ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
-    ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
+    AccountLedgerReconciliation, DurableExecutionLedger, ExecutionLedgerEntry,
+    ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding, ExecutionPlan,
+    ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
     ManagedExecutionInventory, MutationAuthority, MutationPrepareDisposition,
     MutationSubmitDisposition, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
-    StrategyAllocationOpening, StrategyCapitalReservation, SubmitDisposition,
+    StrategyAllocationOpening, StrategyCapitalReservation, StrategyFinalization, SubmitDisposition,
     execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
 };
 use okx_observation::{
@@ -174,13 +174,20 @@ impl ExecutionRuntime {
     pub async fn reconcile_account_ledger_with_intents(
         &self,
         facts: &AccountLedgerFacts,
-    ) -> Result<
-        (AccountLedgerReconciliation, ManagedExecutionInventory),
-        AccountLedgerReconciliationError,
-    > {
-        let executor = self.executor.lock().await;
-        let reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
+        coherent: bool,
+    ) -> AgentResult<(AccountLedgerReconciliation, ManagedExecutionInventory)> {
+        let mut executor = self.executor.lock().await;
+        let mut reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
         let inventory = managed_execution_inventory(executor.ledger());
+        // Never capture a contradictory or private-WS-incoherent snapshot.
+        if coherent
+            && reconciliation.consistent
+            && executor.ledger().capital_reservation().is_some()
+        {
+            executor.capture_exchange_evidence(facts)?;
+        }
+        reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary();
+        reconciliation.financial_period = executor.ledger().financial_period(facts, coherent);
         Ok((reconciliation, inventory))
     }
 
@@ -264,6 +271,41 @@ impl ExecutionRuntime {
             reservation,
             opening,
             now_ms,
+        )))
+    }
+
+    /// The single Demo executor captures the coherent source before the
+    /// atomic FINALIZED write. Caller cannot supply the exchange witness.
+    pub async fn finalize_strategy_run_demo_authorized(
+        &self,
+        preflight: &ExecutorCredentialPreflight,
+        expected_run_id: &str,
+        facts: &AccountLedgerFacts,
+        coherent: bool,
+        protection_absent: bool,
+        observed_at_ms: u64,
+    ) -> AgentResult<Option<Result<StrategyFinalization, OrderExecutorError>>> {
+        let mut executor = self.executor.lock().await;
+        if !self.environment.demo
+            || self.mode != ExecutionRuntimeMode::DemoAcceptance
+            || !preflight.accepted
+            || preflight.production_environment
+            || preflight.account_uid_fingerprint != facts.summary.authority.account_uid_fingerprint
+            || executor.ledger().capital_reservation().is_none_or(|run| {
+                run.allocation_id != expected_run_id
+                    || run.account_uid_fingerprint != preflight.account_uid_fingerprint
+            })
+        {
+            return Ok(None);
+        }
+        if executor.ledger().finalized_run().is_none() {
+            executor.capture_exchange_evidence(facts)?;
+        }
+        Ok(Some(executor.finalize_strategy_run(
+            facts,
+            coherent,
+            protection_absent,
+            observed_at_ms,
         )))
     }
 

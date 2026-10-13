@@ -126,6 +126,14 @@ pub struct AccountLedgerReconciliation {
     pub strategy_attribution: Option<StrategyExchangeAttribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strategy_nav: Option<StrategyNavAssessment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchange_evidence: Option<crate::ExchangeEvidenceSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub financial_period: Option<crate::StrategyFinancialPeriod>,
+    /// Immutable past result; independent of current source-window age.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalized_run: Option<crate::StrategyFinalization>,
+    pub archived_runs_count: usize,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -226,6 +234,10 @@ pub fn reconcile_account_ledger(
         .capital_reservation()
         .map(|capital| assess_flat_strategy_nav(capital, ledger, facts))
         .transpose()?;
+    result.exchange_evidence = ledger.exchange_evidence_summary();
+    result.financial_period = ledger.financial_period(facts, false);
+    result.finalized_run = ledger.finalized_run().cloned();
+    result.archived_runs_count = ledger.archived_runs_count();
     result.strategy_attribution = Some(attribute_strategy_exchange_evidence(
         ledger,
         &facts.exchange_orders,
@@ -389,6 +401,10 @@ fn reconcile_exchange_evidence(
         consistent: unexpected_orders == 0 && unexpected_fills == 0 && identity_mismatches == 0,
         strategy_attribution: None,
         strategy_nav: None,
+        exchange_evidence: None,
+        financial_period: None,
+        finalized_run: None,
+        archived_runs_count: 0,
     })
 }
 
@@ -661,6 +677,43 @@ fn attribute_strategy_exchange_evidence(
     })
 }
 
+/// Changes in run-owned lots must be causally possible. A CLOSE or REDUCE
+/// cannot establish ownership by itself; it may only consume a previously
+/// observed run-owned OPEN/ADD/HEDGE fill in the same instrument/Hedge side.
+/// Neither order timestamp proximity nor shared account equity creates ownership.
+fn apply_run_lot_fill(
+    outstanding: &mut BTreeMap<(String, String), Decimal>,
+    instrument: &str,
+    position_side: &str,
+    side: &str,
+    action: ExecutionAction,
+    quantity: Decimal,
+) -> Result<(), &'static str> {
+    if quantity <= Decimal::ZERO {
+        return Err("nav_invalid_size");
+    }
+    let increasing = match (position_side, side) {
+        ("long", "buy") | ("short", "sell") => true,
+        ("long", "sell") | ("short", "buy") => false,
+        _ => return Err("nav_invalid_position_side"),
+    };
+    if increasing != action.is_risk_increasing() {
+        return Err("nav_fill_action_side_mismatch");
+    }
+    let position = outstanding
+        .entry((instrument.to_owned(), position_side.to_owned()))
+        .or_default();
+    if !increasing && *position < quantity {
+        return Err("nav_exit_exceeds_run_owned_lot");
+    }
+    if increasing {
+        *position += quantity;
+    } else {
+        *position -= quantity;
+    }
+    Ok(())
+}
+
 /// New-period, closed-position proof only. Any outside account event or
 /// incomplete venue history invalidates the NAV; open mark-to-market is NOT
 /// inferred from shared account equity.
@@ -711,15 +764,18 @@ fn assess_flat_strategy_nav(
     if entries.iter().any(|e| {
         !e.record.state.is_terminal()
             || e.record.plan.account_uid_fingerprint != capital.account_uid_fingerprint
-            || e.record.lineage.as_ref().is_none_or(|l| {
-                l.origin_schema != capital.origin_schema
-                    || l.origin_version != capital.origin_version
-            })
-            || e.record
-                .plan
-                .risk_binding
-                .as_ref()
-                .is_none_or(|b| b.mandate.version != capital.mandate_version)
+            || (e.record.plan.action.is_risk_increasing()
+                && (e.record.strategy_run_id.as_deref() != Some(capital.allocation_id.as_str())
+                    || e.record.lineage.as_ref().is_none_or(|l| {
+                        l.origin_schema != capital.origin_schema
+                            || l.origin_version != capital.origin_version
+                    })
+                    || e.record
+                        .plan
+                        .risk_binding
+                        .as_ref()
+                        .is_none_or(|b| b.mandate.version != capital.mandate_version)))
+            || (e.record.plan.action.is_risk_reducing() && e.record.strategy_run_id.is_some())
     }) {
         reasons.push("nav_unowned_or_pending_intent");
     }
@@ -736,47 +792,69 @@ fn assess_flat_strategy_nav(
             reasons.push("nav_unowned_exchange_order");
         }
     }
-    for fill in facts
+    let mut ordered_fills = facts
         .exchange_fills
         .iter()
         .filter(|f| f.fill_time_ms >= capital.started_at_ms)
-    {
-        let owner = entries
+        .collect::<Vec<_>>();
+    ordered_fills.sort_by(|a, b| {
+        a.fill_time_ms
+            .cmp(&b.fill_time_ms)
+            .then_with(|| a.instrument_id.cmp(&b.instrument_id))
+            .then_with(|| a.trade_id.cmp(&b.trade_id))
+    });
+    // OKX millisecond timestamps alone do not establish the ordering of
+    // opposite executions at the same instant. Do not invent a close-after-open
+    // sequence merely from lexicographic trade IDs.
+    for pair in ordered_fills.windows(2) {
+        if pair[0].fill_time_ms == pair[1].fill_time_ms
+            && pair[0].instrument_id == pair[1].instrument_id
+            && pair[0].position_side == pair[1].position_side
+            && pair[0].side != pair[1].side
+        {
+            reasons.push("nav_fill_sequence_ambiguous");
+        }
+    }
+    for fill in ordered_fills {
+        let owners = entries
             .iter()
             .filter(|e| {
-                e.record.order_id.is_some()
-                    && e.record.order_id == fill.order_id
+                e.record.order_id.as_deref() == fill.order_id.as_deref()
+                    && e.record.order_id.is_some()
                     && e.record.plan.client_order_id == fill.client_order_id
                     && e.record.plan.instrument_id == fill.instrument_id
                     && e.record.plan.side.as_str() == fill.side
                     && e.record.plan.position_side.as_str() == fill.position_side
                     && facts.exchange_orders.iter().any(|o| {
-                        o.order_id == fill.order_id.clone().unwrap_or_default()
+                        Some(o.order_id.as_str()) == fill.order_id.as_deref()
                             && o.client_order_id == fill.client_order_id
                             && o.instrument_id == fill.instrument_id
                     })
             })
-            .count();
-        if owner != 1 || !seen_trades.insert((&fill.instrument_id, &fill.trade_id)) {
+            .collect::<Vec<_>>();
+        if owners.len() != 1 || !seen_trades.insert((&fill.instrument_id, &fill.trade_id)) {
             reasons.push("nav_unowned_or_duplicate_fill");
             continue;
         }
-        let qty = decimal("nav.fill_size", &fill.fill_size)?;
-        let signed = match (fill.position_side.as_str(), fill.side.as_str()) {
-            ("long", "buy") | ("short", "sell") => qty,
-            ("long", "sell") | ("short", "buy") => -qty,
-            _ => {
-                reasons.push("nav_invalid_position_side");
-                continue;
-            }
-        };
-        if qty <= Decimal::ZERO {
-            reasons.push("nav_invalid_size");
+        let owner = owners[0];
+        if owner.record.plan.action.is_risk_increasing()
+            && owner.record.strategy_run_id.as_deref() != Some(capital.allocation_id.as_str())
+        {
+            reasons.push("nav_risk_fill_not_owned_by_run");
             continue;
         }
-        *size
-            .entry((fill.instrument_id.clone(), fill.position_side.clone()))
-            .or_default() += signed;
+        let qty = decimal("nav.fill_size", &fill.fill_size)?;
+        if let Err(reason) = apply_run_lot_fill(
+            &mut size,
+            &fill.instrument_id,
+            &fill.position_side,
+            &fill.side,
+            owner.record.plan.action,
+            qty,
+        ) {
+            reasons.push(reason);
+            continue;
+        }
         let bills = facts
             .exchange_bills
             .iter()
@@ -1025,6 +1103,8 @@ mod tests {
             order_id: "ord-exact".to_owned(),
             client_order_id: plan.client_order_id.clone(),
             state: "filled".to_owned(),
+            size: "1".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
             update_time_ms: "1791828000000".to_owned(),
         };
         let fill = ExchangeFillIdentity {
@@ -1170,6 +1250,8 @@ mod tests {
             order_id: "ord-exact".to_owned(),
             client_order_id: plan.client_order_id.clone(),
             state: "filled".to_owned(),
+            size: "1".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
             update_time_ms: "1791828000000".to_owned(),
         };
         let (fill, bill) =
@@ -1273,6 +1355,8 @@ mod tests {
             order_id: "ord-exact".to_owned(),
             client_order_id: plan.client_order_id.clone(),
             state: "filled".to_owned(),
+            size: "1".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
             update_time_ms: "1791828000000".to_owned(),
         };
         let (a, ab) = linked_accounting_pair(&plan, "trade-a", "bill-a", "-0.01", "USDT", "0.13");
@@ -1362,6 +1446,8 @@ mod tests {
                 order_id: "ord-exact".to_owned(),
                 client_order_id: first.client_order_id.clone(),
                 state: "filled".to_owned(),
+                size: "1".to_owned(),
+                accumulated_fill_size: "0".to_owned(),
                 update_time_ms: "1791828000000".to_owned(),
             },
             ExchangeOrderIdentity {
@@ -1370,6 +1456,8 @@ mod tests {
                 order_id: "ord-other".to_owned(),
                 client_order_id: second.client_order_id.clone(),
                 state: "filled".to_owned(),
+                size: "1".to_owned(),
+                accumulated_fill_size: "0".to_owned(),
                 update_time_ms: "1791828000000".to_owned(),
             },
         ];
@@ -1421,6 +1509,162 @@ mod tests {
         assert_eq!(report.status, "INCOMPLETE");
         assert!(!report.strategy_nav_available);
         let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn run_lot_causality_refuses_unowned_exit_and_double_reduction() {
+        let mut size = BTreeMap::new();
+        let d = |v: &str| Decimal::from_str(v).expect("test decimal");
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "long",
+                "sell",
+                ExecutionAction::Close,
+                d("1")
+            ),
+            Err("nav_exit_exceeds_run_owned_lot")
+        );
+        assert!(
+            size.get(&("BTC-USDT-SWAP".to_owned(), "long".to_owned()))
+                .is_some_and(|v| v.is_zero())
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "long",
+                "buy",
+                ExecutionAction::Open,
+                d("2")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "long",
+                "sell",
+                ExecutionAction::Reduce,
+                d("1.25")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "long",
+                "sell",
+                ExecutionAction::Close,
+                d("1")
+            ),
+            Err("nav_exit_exceeds_run_owned_lot")
+        );
+        assert_eq!(
+            size.get(&("BTC-USDT-SWAP".to_owned(), "long".to_owned())),
+            Some(&d("0.75"))
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "long",
+                "sell",
+                ExecutionAction::Close,
+                d("0.75")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            size.get(&("BTC-USDT-SWAP".to_owned(), "long".to_owned())),
+            Some(&Decimal::ZERO)
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Close,
+                d("1")
+            ),
+            Err("nav_exit_exceeds_run_owned_lot")
+        );
+    }
+
+    #[test]
+    fn run_lot_causality_refuses_hedge_side_mismatch_and_invalid_size() {
+        let mut size = BTreeMap::new();
+        let d = |v: &str| Decimal::from_str(v).expect("test decimal");
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Hedge,
+                d("1")
+            ),
+            Err("nav_fill_action_side_mismatch")
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "sell",
+                ExecutionAction::Hedge,
+                d("1")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Close,
+                d("0")
+            ),
+            Err("nav_invalid_size")
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Close,
+                d("1")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Open,
+                d("1")
+            ),
+            Err("nav_fill_action_side_mismatch")
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "net",
+                "buy",
+                ExecutionAction::Open,
+                d("1")
+            ),
+            Err("nav_invalid_position_side")
+        );
     }
 
     #[test]
@@ -1565,6 +1809,8 @@ mod tests {
             order_id: "ord-1".to_owned(),
             client_order_id: plan.client_order_id,
             state: "live".to_owned(),
+            size: "1".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
             update_time_ms: "1790884800000".to_owned(),
         }];
         let result = reconcile_exchange_evidence(&ledger, &[], &orders, &[]).expect("reconcile");
@@ -1648,6 +1894,8 @@ mod tests {
             order_id: "manual-1".to_owned(),
             client_order_id: String::new(),
             state: "filled".to_owned(),
+            size: "1".to_owned(),
+            accumulated_fill_size: "0".to_owned(),
             update_time_ms: "1790884800000".to_owned(),
         }];
         let fills = vec![ExchangeFillIdentity {
