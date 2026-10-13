@@ -1,14 +1,14 @@
 use std::path::Path;
 
 use chrono::{SecondsFormat, Utc};
-use okx_analysis::{PortfolioRiskAnalysis, durable_account_stop_reason};
+use okx_analysis::{PortfolioRiskAnalysis, StrategyNavRiskEvidence, durable_account_stop_reason};
 use okx_api::{
     AccountApi, AccountRateLimitEvidence, ClockEvidence, Credentials, MarginMode, MutationTiming,
     OkxEnvironment, OkxPublicClient, OkxRestClient, PendingProtectiveAlgoInventory, PublicDataApi,
     RateBudget, RateBudgetSnapshot, TradeApi,
 };
 use okx_execution::{
-    AccountLedgerReconciliation, DurableExecutionLedger, ExecutionLedgerEntry,
+    AccountLedgerReconciliation, DurableExecutionLedger, ExecutionAction, ExecutionLedgerEntry,
     ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding, ExecutionPlan,
     ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
     ManagedExecutionInventory, MutationAuthority, MutationPrepareDisposition,
@@ -204,6 +204,69 @@ impl ExecutionRuntime {
         reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary();
         reconciliation.financial_period = executor.ledger().financial_period(facts, coherent);
         Ok((reconciliation, inventory))
+    }
+
+    /// Conservative FIRST-OPEN-only NAV admission. The full strategy NAV
+    /// high-water/day-loss time series is not yet attested; after the first
+    /// managed execution, further risk increases stay fail-closed.
+    /// This proof is built by the one executor from immutable run and source
+    /// evidence; no operator/transport-supplied NAV is accepted.
+    pub async fn initial_strategy_nav_for_risk(
+        &self,
+        facts: &AccountLedgerFacts,
+        plan: &ExecutionPlan,
+        coherent: bool,
+    ) -> Option<StrategyNavRiskEvidence> {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance
+            || !self.environment.demo
+            || !coherent
+            || plan.action != ExecutionAction::Open
+            || !DurableExchangeEvidence::complete_source_checkpoint(facts)
+            || facts.summary.open_positions != 0
+            || facts.summary.pending_orders != 0
+        {
+            return None;
+        }
+        let mut executor = self.executor.lock().await;
+        let ledger = executor.ledger();
+        let run = ledger.capital_reservation()?.clone();
+        let binding = plan.risk_binding.as_ref()?;
+        if ledger.finalized_run().is_some()
+            || ledger.risk_stop().is_some()
+            || run.account_uid_fingerprint != facts.summary.authority.account_uid_fingerprint
+            || run.account_uid_fingerprint != plan.account_uid_fingerprint
+            || run.mandate_version != binding.mandate.version
+            || run.allocated_usdt != binding.mandate.capital_base_usd
+            || ledger.entries().any(|e| e.created_at_ms >= run.started_at_ms)
+            || !reconcile_account_ledger(ledger, facts).ok()?.consistent
+        {
+            return None;
+        }
+        // A captured initial source cursor is persisted atomically before
+        // the policy is evaluated. Missing/raced windows never mint NAV.
+        executor.capture_exchange_evidence(facts).ok()?;
+        let projection = executor.ledger().financial_period(facts, coherent)?;
+        if projection.state != "FLAT_RECONCILED"
+            || !projection.reasons.is_empty()
+            || projection.linked_fills != 0
+            || projection.linked_bills != 0
+            || !projection.positions.is_empty()
+            || projection.nav_usdt.as_deref() != Some(run.allocated_usdt.as_str())
+            || projection.realized_usdt != "0"
+            || projection.fees_usdt != "0"
+            || projection.unrealized_usdt.as_deref() != Some("0")
+            || projection.funding_usdt.is_some()
+        {
+            return None;
+        }
+        Some(StrategyNavRiskEvidence {
+            run_id: run.allocation_id,
+            mandate_version: run.mandate_version,
+            allocation_usdt: run.allocated_usdt.clone(),
+            nav_usdt: run.allocated_usdt.clone(),
+            high_water_usdt: run.allocated_usdt,
+            daily_realized_loss_usdt: "0".to_owned(),
+        })
     }
 
     pub async fn preflight(
