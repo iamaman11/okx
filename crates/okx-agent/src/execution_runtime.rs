@@ -237,7 +237,7 @@ impl ExecutionRuntime {
         // opening reserve. External cash transfers are not strategy PnL.
         let current_equity = facts.trading_usdt_equity.as_deref()?;
         if ledger.finalized_run().is_some()
-            || current_equity != run.opening_account_usdt_equity
+            || current_equity != run.opening_account_usdt_equity.as_str()
             || ledger.risk_stop().is_some()
             || run.account_uid_fingerprint != facts.summary.authority.account_uid_fingerprint
             || run.account_uid_fingerprint != plan.account_uid_fingerprint
