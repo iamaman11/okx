@@ -2420,45 +2420,41 @@ mod tests {
             )
             .unwrap()
         };
-        let missing = evaluate(None);
-        assert!(missing
-            .violations
-            .iter()
-            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
-        let admitted = evaluate(Some(&baseline));
-        assert_eq!(admitted.policy_decision, RiskPolicyDecision::Accepted);
+        let nav_missing = |proof: Option<&StrategyNavRiskEvidence>| {
+            evaluate(proof)
+                .violations
+                .iter()
+                .any(|v| v.code == "STRATEGY_NAV_UNATTESTED")
+        };
+        assert!(nav_missing(None));
+        assert_eq!(
+            evaluate(Some(&baseline)).policy_decision,
+            RiskPolicyDecision::Accepted
+        );
         let mut fake = baseline.clone();
         fake.mandate_version = "foreign-mandate".to_owned();
-        assert!(evaluate(Some(&fake))
-            .violations
-            .iter()
-            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
+        assert!(nav_missing(Some(&fake)));
         fake = baseline.clone();
         fake.allocation_usdt = "103040".to_owned();
-        assert!(evaluate(Some(&fake))
-            .violations
-            .iter()
-            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
+        assert!(nav_missing(Some(&fake)));
         fake = baseline.clone();
         fake.high_water_usdt = "99".to_owned();
-        assert!(evaluate(Some(&fake))
-            .violations
-            .iter()
-            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
+        assert!(nav_missing(Some(&fake)));
         fake = baseline.clone();
         fake.nav_usdt = "89".to_owned();
-        fake.high_water_usdt = "100".to_owned();
         let drawdown = evaluate(Some(&fake));
-        assert!(drawdown
+        let hit_drawdown = drawdown
             .violations
             .iter()
-            .any(|v| v.code == "MAX_DRAWDOWN" && v.scope == "strategy_run")
-            == false);
+            .any(|v| v.code == "MAX_DRAWDOWN" && v.scope == "strategy_run");
+        assert!(!hit_drawdown);
         fake.daily_realized_loss_usdt = "150".to_owned();
-        assert!(evaluate(Some(&fake))
+        let rejected = evaluate(Some(&fake));
+        let hit_day_loss = rejected
             .violations
             .iter()
-            .any(|v| v.code == "MAX_DAILY_REALIZED_LOSS" && v.scope == "strategy_run_utc_day"));
+            .any(|v| v.code == "MAX_DAILY_REALIZED_LOSS" && v.scope == "strategy_run_utc_day");
+        assert!(hit_day_loss);
     }
 
     #[test]
