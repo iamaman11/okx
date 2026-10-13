@@ -1,12 +1,12 @@
 mod contract;
 mod exchange_evidence;
-mod strategy_lifecycle;
 mod executor;
 mod ledger;
 mod model;
 mod reconciliation;
 mod state;
 mod strategy_finance;
+mod strategy_lifecycle;
 mod validation;
 
 pub use contract::{
@@ -24,8 +24,6 @@ pub use executor::{
     ExecutionGateway, FencedProtectiveShrinkRequest, MutationAuthority, MutationSubmitDisposition,
     OrderExecutor, OrderExecutorError, ReconcileDisposition, SubmitDisposition,
 };
-pub use strategy_lifecycle::{ArchivedStrategyRun, StrategyFinalization,
-    StrategyPeriodHistory, STRATEGY_FINALIZATION_SCHEMA_V1, MAX_ARCHIVED_STRATEGY_RUNS};
 pub use ledger::{
     DurableExecutionLedger, EXECUTION_LEDGER_SCHEMA_V1, EXECUTION_LEDGER_SCHEMA_V2,
     EXECUTION_LEDGER_SCHEMA_V3, EXECUTION_LEDGER_SCHEMA_V4, EXECUTION_LEDGER_SCHEMA_V5,
@@ -63,6 +61,10 @@ pub use state::{
 pub use strategy_finance::{
     RunOwnedPosition, STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1, StrategyFinancialPeriod,
     assess_persisted_financial_period,
+};
+pub use strategy_lifecycle::{
+    ArchivedStrategyRun, MAX_ARCHIVED_STRATEGY_RUNS, STRATEGY_FINALIZATION_SCHEMA_V1,
+    StrategyFinalization, StrategyPeriodHistory,
 };
 pub use validation::{
     ExecutionValidationError, PreMutationRiskDisposition, prepare_execution,

@@ -77,7 +77,6 @@ fn timestamp(payload: &Value, key: &str) -> Option<u64> {
     payload.get(key)?.as_u64()
 }
 
-
 fn terminal_filled_coverage(
     expected: Decimal,
     sizes: &[Option<Decimal>],
@@ -101,43 +100,72 @@ fn validate_terminal_order_coverage(
     run_started_at_ms: u64,
     reasons: &mut BTreeSet<&'static str>,
 ) {
-    for entry in entries.iter().filter(|entry| entry.created_at_ms > run_started_at_ms) {
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.created_at_ms > run_started_at_ms)
+    {
         let record = &entry.record;
-        let Some(order_id) = record.order_id.as_deref() else { continue };
-        let orders = evidence.events.values()
-            .filter(|event| event.payload["source"] == "OKX_REST_ORDER"
-                && string(&event.payload, "ordId") == Some(order_id)
-                && string(&event.payload, "clOrdId") == Some(record.plan.client_order_id.as_str())
-                && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
-                && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str()))
+        let Some(order_id) = record.order_id.as_deref() else {
+            continue;
+        };
+        let orders = evidence
+            .events
+            .values()
+            .filter(|event| {
+                event.payload["source"] == "OKX_REST_ORDER"
+                    && string(&event.payload, "ordId") == Some(order_id)
+                    && string(&event.payload, "clOrdId")
+                        == Some(record.plan.client_order_id.as_str())
+                    && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
+                    && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str())
+            })
             .collect::<Vec<_>>();
         if orders.is_empty() {
             reasons.insert("managed_exchange_order_missing");
             continue;
         }
-        let terminal = orders.iter().any(|o|
-            matches!(string(&o.payload, "state"), Some("filled" | "canceled" | "mmp_canceled")));
-        let nonterminal = orders.iter().any(|o|
-            !matches!(string(&o.payload, "state"), Some("filled" | "canceled" | "mmp_canceled")));
+        let terminal = orders.iter().any(|o| {
+            matches!(
+                string(&o.payload, "state"),
+                Some("filled" | "canceled" | "mmp_canceled")
+            )
+        });
+        let nonterminal = orders.iter().any(|o| {
+            !matches!(
+                string(&o.payload, "state"),
+                Some("filled" | "canceled" | "mmp_canceled")
+            )
+        });
         if nonterminal || !terminal || !record.state.is_terminal() {
             reasons.insert("managed_order_terminal_state_unproven");
             continue;
         }
-        let fills = evidence.events.values()
-            .filter(|event| event.payload["source"] == "OKX_REST_FILL"
-                && string(&event.payload, "ordId") == Some(order_id)
-                && string(&event.payload, "clOrdId") == Some(record.plan.client_order_id.as_str())
-                && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
-                && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str()))
+        let fills = evidence
+            .events
+            .values()
+            .filter(|event| {
+                event.payload["source"] == "OKX_REST_FILL"
+                    && string(&event.payload, "ordId") == Some(order_id)
+                    && string(&event.payload, "clOrdId")
+                        == Some(record.plan.client_order_id.as_str())
+                    && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
+                    && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str())
+            })
             .collect::<Vec<_>>();
-        if orders.iter().any(|o| string(&o.payload, "state") == Some("filled")) {
+        if orders
+            .iter()
+            .any(|o| string(&o.payload, "state") == Some("filled"))
+        {
             let Some(expected) = Decimal::from_str(&record.plan.size).ok() else {
                 reasons.insert("invalid_managed_order_size");
                 continue;
             };
             // Amended orders require independently persisted final accFillSz,
             // not their original PREPARED size.
-            let sizes = fills.iter().map(|f| amount(&f.payload, "fillSz")).collect::<Vec<_>>();
+            let sizes = fills
+                .iter()
+                .map(|f| amount(&f.payload, "fillSz"))
+                .collect::<Vec<_>>();
             if !terminal_filled_coverage(expected, &sizes, !record.mutations.is_empty()) {
                 reasons.insert("filled_order_native_coverage_not_proven");
             }
@@ -145,8 +173,12 @@ fn validate_terminal_order_coverage(
         // The account order history does not expose accumulated fill quantity
         // in this journal schema; accepting canceled/part-filled would be an
         // unsupported assertion that no extra fees or PnL were omitted.
-        if orders.iter().any(|o| matches!(string(&o.payload, "state"),
-            Some("canceled" | "mmp_canceled"))) {
+        if orders.iter().any(|o| {
+            matches!(
+                string(&o.payload, "state"),
+                Some("canceled" | "mmp_canceled")
+            )
+        }) {
             reasons.insert("canceled_order_accumulated_fill_unattested");
         }
     }
@@ -273,11 +305,16 @@ pub fn assess_persisted_financial_period(
     if e.cursors.is_empty() {
         reasons.insert("source_coverage_missing");
     }
-    let current_as_of = facts.summary.current_account_as_of_ms.as_deref()
+    let current_as_of = facts
+        .summary
+        .current_account_as_of_ms
+        .as_deref()
         .and_then(|s| s.parse::<u64>().ok());
     let newest = e.cursors.values().map(|c| c.account_as_of_ms).max();
-    if current_as_of.zip(newest).is_none_or(|(current,last)| current < last
-        || current - last > 30_000) {
+    if current_as_of
+        .zip(newest)
+        .is_none_or(|(current, last)| current < last || current - last > 30_000)
+    {
         reasons.insert("financial_source_asof_not_current");
     }
     let mut cursor_times = e
@@ -768,10 +805,9 @@ mod tests {
         );
     }
 
-
     #[test]
     fn filled_order_without_complete_native_fill_fails_closed() {
-        use crate::{StoredExchangeEvent, EXCHANGE_EVIDENCE_SCHEMA_V1};
+        use crate::{EXCHANGE_EVIDENCE_SCHEMA_V1, StoredExchangeEvent};
         use serde_json::json;
         // Source-exact terminal state with no fills cannot be treated as
         // an accounted zero-result strategy period.
@@ -783,30 +819,59 @@ mod tests {
             cursors: BTreeMap::new(),
             checksum_sha256: String::new(),
         };
-        evidence.events.insert("order:SWAP:123:1".into(), StoredExchangeEvent {
-            payload: json!({"source":"OKX_REST_ORDER","ordId":"123",
+        evidence.events.insert(
+            "order:SWAP:123:1".into(),
+            StoredExchangeEvent {
+                payload: json!({"source":"OKX_REST_ORDER","ordId":"123",
                 "clOrdId":"cl_1","instId":"BTC-USDT-SWAP","state":"filled"}),
-            source_intent_id: None,
-            strategy_run_id: None,
-            allocation: "UNALLOCATED".into(),
-        });
+                source_intent_id: None,
+                strategy_run_id: None,
+                allocation: "UNALLOCATED".into(),
+            },
+        );
         let no_entries: Vec<ExecutionLedgerEntry> = vec![];
         let mut reasons = BTreeSet::new();
         validate_terminal_order_coverage(&evidence, &no_entries, 1, &mut reasons);
-        assert!(reasons.is_empty(), "no invented owner from account-only history");
+        assert!(
+            reasons.is_empty(),
+            "no invented owner from account-only history"
+        );
     }
-
 
     #[test]
     fn source_terminal_fill_completeness_requires_exact_positive_native_parts() {
         let d = |s: i64| Some(Decimal::new(s, 0));
-        assert!(terminal_filled_coverage(Decimal::new(5, 0), &[d(2), d(3)], false));
+        assert!(terminal_filled_coverage(
+            Decimal::new(5, 0),
+            &[d(2), d(3)],
+            false
+        ));
         assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[], false));
-        assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[d(3)], false));
-        assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[d(2), None], false));
-        assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[d(2), d(4)], false));
-        assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[d(0), d(5)], false));
-        assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[d(2), d(3)], true));
+        assert!(!terminal_filled_coverage(
+            Decimal::new(5, 0),
+            &[d(3)],
+            false
+        ));
+        assert!(!terminal_filled_coverage(
+            Decimal::new(5, 0),
+            &[d(2), None],
+            false
+        ));
+        assert!(!terminal_filled_coverage(
+            Decimal::new(5, 0),
+            &[d(2), d(4)],
+            false
+        ));
+        assert!(!terminal_filled_coverage(
+            Decimal::new(5, 0),
+            &[d(0), d(5)],
+            false
+        ));
+        assert!(!terminal_filled_coverage(
+            Decimal::new(5, 0),
+            &[d(2), d(3)],
+            true
+        ));
     }
     #[test]
     fn cross_currency_and_wrong_hedge_never_create_owned_lots() {

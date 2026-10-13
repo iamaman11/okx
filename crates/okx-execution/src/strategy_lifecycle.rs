@@ -6,7 +6,10 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{DurableExchangeEvidence, ExecutionLedgerError, StrategyCapitalReservation, StrategyFinancialPeriod};
+use crate::{
+    DurableExchangeEvidence, ExecutionLedgerError, StrategyCapitalReservation,
+    StrategyFinancialPeriod,
+};
 
 pub const STRATEGY_FINALIZATION_SCHEMA_V1: &str = "okx.strategy-finalization/v1";
 pub const MAX_ARCHIVED_STRATEGY_RUNS: usize = 16;
@@ -50,7 +53,9 @@ impl StrategyFinalization {
         {
             return Err(ExecutionLedgerError::StrategyRunNotFinalizable);
         }
-        let nav_usdt = report.nav_usdt.clone()
+        let nav_usdt = report
+            .nav_usdt
+            .clone()
             .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
         let mut value = Self {
             schema: STRATEGY_FINALIZATION_SCHEMA_V1.to_owned(),
@@ -70,9 +75,14 @@ impl StrategyFinalization {
 
     fn hash(&self) -> Result<String, ExecutionLedgerError> {
         let payload = serde_json::to_vec(&(
-            &self.schema, &self.run_id, &self.account_uid, self.finalized_at_ms,
-            &self.evidence_sha256, &self.nav_usdt,
-            &self.realized_usdt, &self.fees_usdt,
+            &self.schema,
+            &self.run_id,
+            &self.account_uid,
+            self.finalized_at_ms,
+            &self.evidence_sha256,
+            &self.nav_usdt,
+            &self.realized_usdt,
+            &self.fees_usdt,
         ))?;
         Ok(format!("{:x}", Sha256::digest(payload)))
     }
@@ -92,7 +102,8 @@ impl StrategyFinalization {
             || self.finalized_at_ms <= run.started_at_ms
             || self.checksum_sha256 != self.hash()?
             || [&self.nav_usdt, &self.realized_usdt, &self.fees_usdt]
-                .into_iter().any(|v| Decimal::from_str(v).is_err())
+                .into_iter()
+                .any(|v| Decimal::from_str(v).is_err())
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "strategy finalization is invalid or exchange evidence was rewritten",
@@ -104,10 +115,10 @@ impl StrategyFinalization {
 
 impl ArchivedStrategyRun {
     pub fn validate(&self) -> Result<(), ExecutionLedgerError> {
-        self.finalization.validate(&self.reservation, &self.evidence)
+        self.finalization
+            .validate(&self.reservation, &self.evidence)
     }
 }
-
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,8 +140,9 @@ impl StrategyPeriodHistory {
         for archived in &self.archived_runs {
             archived.validate()?;
             if !seen.insert(archived.reservation.allocation_id.as_str())
-                || active.is_some_and(|a|
-                    a.account_uid_fingerprint != archived.reservation.account_uid_fingerprint)
+                || active.is_some_and(|a| {
+                    a.account_uid_fingerprint != archived.reservation.account_uid_fingerprint
+                })
             {
                 return Err(ExecutionLedgerError::AccountScopeMismatch);
             }
@@ -139,12 +151,19 @@ impl StrategyPeriodHistory {
             if seen.contains(run.allocation_id.as_str()) {
                 return Err(ExecutionLedgerError::CapitalReservationConflict);
             }
-        } else if evidence.is_some() || self.finalized_run.is_some() || !self.archived_runs.is_empty() {
-            return Err(ExecutionLedgerError::Corrupt("orphaned financial run state"));
+        } else if evidence.is_some()
+            || self.finalized_run.is_some()
+            || !self.archived_runs.is_empty()
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "orphaned financial run state",
+            ));
         }
         if let Some(finalized) = &self.finalized_run {
             let (Some(run), Some(source)) = (active, evidence) else {
-                return Err(ExecutionLedgerError::Corrupt("finalized period without source events"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "finalized period without source events",
+                ));
             };
             finalized.validate(run, source)?;
         }
@@ -200,7 +219,10 @@ mod tests {
         decoded.validate(&run, &evidence).unwrap();
         let mut tampered = decoded;
         tampered.nav_usdt = "100000".into();
-        assert!(matches!(tampered.validate(&run, &evidence), Err(ExecutionLedgerError::Corrupt(_))));
+        assert!(matches!(
+            tampered.validate(&run, &evidence),
+            Err(ExecutionLedgerError::Corrupt(_))
+        ));
     }
 
     #[test]
@@ -224,7 +246,9 @@ mod tests {
             usable_for_new_risk: false,
             reasons: vec!["funding_unallocated"],
         };
-        assert!(matches!(StrategyFinalization::new(&run, &evidence, &base, 2000),
-            Err(ExecutionLedgerError::StrategyRunNotFinalizable)));
+        assert!(matches!(
+            StrategyFinalization::new(&run, &evidence, &base, 2000),
+            Err(ExecutionLedgerError::StrategyRunNotFinalizable)
+        ));
     }
 }
