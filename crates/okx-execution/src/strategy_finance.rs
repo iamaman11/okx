@@ -85,16 +85,18 @@ fn timestamp(payload: &Value, key: &str) -> Option<u64> {
 fn validate_terminal_order_coverage(
     evidence: &DurableExchangeEvidence,
     entries: &[ExecutionLedgerEntry],
+    run_started_at_ms: u64,
     reasons: &mut BTreeSet<&'static str>,
 ) {
-    for entry in entries {
+    for entry in entries.iter().filter(|entry| entry.created_at_ms > run_started_at_ms) {
         let record = &entry.record;
         let Some(order_id) = record.order_id.as_deref() else { continue };
         let orders = evidence.events.values()
             .filter(|event| event.payload["source"] == "OKX_REST_ORDER"
                 && string(&event.payload, "ordId") == Some(order_id)
                 && string(&event.payload, "clOrdId") == Some(record.plan.client_order_id.as_str())
-                && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str()))
+                && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
+                && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str()))
             .collect::<Vec<_>>();
         if orders.is_empty() {
             reasons.insert("managed_exchange_order_missing");
@@ -112,7 +114,8 @@ fn validate_terminal_order_coverage(
             .filter(|event| event.payload["source"] == "OKX_REST_FILL"
                 && string(&event.payload, "ordId") == Some(order_id)
                 && string(&event.payload, "clOrdId") == Some(record.plan.client_order_id.as_str())
-                && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str()))
+                && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
+                && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str()))
             .collect::<Vec<_>>();
         if orders.iter().any(|o| string(&o.payload, "state") == Some("filled")) {
             let Some(expected) = Decimal::from_str(&record.plan.size).ok() else {
@@ -300,7 +303,7 @@ pub fn assess_persisted_financial_period(
         .iter()
         .map(|x| (x.record.plan.intent_id.as_str(), x))
         .collect::<BTreeMap<_, _>>();
-    validate_terminal_order_coverage(e, entries, &mut reasons);
+    validate_terminal_order_coverage(e, entries, run.started_at_ms, &mut reasons);
     let mut fills = Vec::<FilledLeg>::new();
     for item in e
         .events
@@ -779,7 +782,7 @@ mod tests {
         });
         let no_entries: Vec<ExecutionLedgerEntry> = vec![];
         let mut reasons = BTreeSet::new();
-        validate_terminal_order_coverage(&evidence, &no_entries, &mut reasons);
+        validate_terminal_order_coverage(&evidence, &no_entries, 1, &mut reasons);
         assert!(reasons.is_empty(), "no invented owner from account-only history");
     }
 
