@@ -249,7 +249,7 @@ impl ExecutionRuntime {
         }
         // A captured initial source cursor is persisted atomically before
         // the policy is evaluated. Missing/raced windows never mint NAV.
-        executor.capture_exchange_evidence(facts).ok()?;
+        executor.capture_exchange_evidence_fresh_cursor(facts).ok()?;
         let source = executor.ledger().exchange_evidence_summary()?;
         if source.events != 0
             || !source.latest_source_complete
@@ -406,7 +406,7 @@ impl ExecutionRuntime {
             return Ok(None);
         }
         if executor.ledger().finalized_run().is_none() {
-            executor.capture_exchange_evidence_for_finalization(facts)?;
+            executor.capture_exchange_evidence_fresh_cursor(facts)?;
         }
         Ok(Some(executor.finalize_strategy_run(
             facts,
