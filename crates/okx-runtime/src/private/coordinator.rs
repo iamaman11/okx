@@ -27,6 +27,7 @@ const SERVICE_UPGRADE_NOTICE_CODE: &str = "64008";
 #[derive(Clone)]
 pub struct PrivateWsHandle {
     state: Arc<RwLock<PrivateRuntimeState>>,
+    financial_source_signal: watch::Receiver<u64>,
 }
 
 pub struct PrivateWsCoordinator {
@@ -35,6 +36,7 @@ pub struct PrivateWsCoordinator {
     state: Arc<RwLock<PrivateRuntimeState>>,
     generation: u64,
     rate_budget: RateBudget,
+    financial_source_signal: watch::Sender<u64>,
 }
 
 #[derive(Debug)]
@@ -44,6 +46,12 @@ enum GenerationOutcome {
 }
 
 impl PrivateWsHandle {
+    /// Event-driven notification only. It carries no trading authority, no
+    /// exchange-side completeness claim and no order payload.
+    pub fn subscribe_financial_source_events(&self) -> watch::Receiver<u64> {
+        self.financial_source_signal.clone()
+    }
+
     pub async fn status(&self) -> PrivateWsStatus {
         self.state.read().await.status()
     }
@@ -95,6 +103,7 @@ impl PrivateWsCoordinator {
         rate_budget: RateBudget,
     ) -> (Self, PrivateWsHandle) {
         let state = Arc::new(RwLock::new(PrivateRuntimeState::new()));
+        let (financial_source_signal, financial_source_receiver) = watch::channel(0);
         (
             Self {
                 environment,
@@ -102,8 +111,12 @@ impl PrivateWsCoordinator {
                 state: Arc::clone(&state),
                 generation: 0,
                 rate_budget,
+                financial_source_signal,
             },
-            PrivateWsHandle { state },
+            PrivateWsHandle {
+                state,
+                financial_source_signal: financial_source_receiver,
+            },
         )
     }
 
@@ -345,11 +358,22 @@ impl PrivateWsCoordinator {
                                     }
                                 };
 
+                                // Orders and subsequent account/position
+                                // updates can arrive on separate WS frames.
+                                // Any nonempty authenticated financial delta
+                                // wakes the one ledger owner for REST readback.
+                                // WS itself is never asserted as full fill/bill proof.
+                                let source_update = signals_financial_source_capture(&event);
                                 saw_data = true;
                                 self.state
                                     .write()
                                     .await
                                     .observe_event(event, now_ms());
+                                if source_update {
+                                    let next = self.financial_source_signal
+                                        .borrow().saturating_add(1);
+                                    self.financial_source_signal.send_replace(next);
+                                }
                             }
                             PrivateInboundMessage::Other(_) => {}
                         },
@@ -459,6 +483,17 @@ impl PrivateWsCoordinator {
     }
 }
 
+/// Only authenticated, nonempty account, position or order WS deltas
+/// trigger a native REST financial readback. WS itself is never a
+/// fill/bill completeness witness.
+fn signals_financial_source_capture(event: &PrivateWsEvent) -> bool {
+    match event {
+        PrivateWsEvent::Account(rows) => !rows.is_empty(),
+        PrivateWsEvent::Positions(rows) => !rows.is_empty(),
+        PrivateWsEvent::Orders(rows) => !rows.is_empty(),
+    }
+}
+
 pub fn private_reconnect_delay(attempt: usize) -> Duration {
     let index = attempt.min(PRIVATE_RECONNECT_BACKOFF_SECONDS.len() - 1);
     Duration::from_secs(PRIVATE_RECONNECT_BACKOFF_SECONDS[index])
@@ -484,6 +519,47 @@ impl From<PrivateWsError> for PrivateRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_private_events_never_trigger_financial_checkpoint() {
+        assert!(!signals_financial_source_capture(&PrivateWsEvent::Account(
+            vec![]
+        )));
+        assert!(!signals_financial_source_capture(
+            &PrivateWsEvent::Positions(vec![])
+        ));
+        assert!(!signals_financial_source_capture(&PrivateWsEvent::Orders(
+            vec![]
+        )));
+        let order = serde_json::from_value::<PendingOrder>(serde_json::json!({
+            "instId": "BTC-USDT-SWAP", "ordId": "native-order-123",
+            "state": "filled", "accFillSz": "1"
+        }))
+        .unwrap();
+        assert!(signals_financial_source_capture(&PrivateWsEvent::Orders(
+            vec![order]
+        )));
+        let account = serde_json::from_value::<BalanceSnapshot>(serde_json::json!({
+            "totalEq": "5000", "uTime": "1791920000000"
+        }))
+        .unwrap();
+        assert!(signals_financial_source_capture(&PrivateWsEvent::Account(
+            vec![account]
+        )));
+    }
+
+    #[test]
+    fn watch_events_coalesce_without_claiming_intermediate_financial_proof() {
+        let (sender, mut receiver) = watch::channel(0_u64);
+        sender.send_replace(1);
+        sender.send_replace(2);
+        assert!(receiver.has_changed().unwrap());
+        assert_eq!(*receiver.borrow_and_update(), 2);
+        assert!(!receiver.has_changed().unwrap());
+        sender.send_replace(3);
+        assert_eq!(*receiver.borrow_and_update(), 3);
+        // The wakeup carries only an event count, never a fill/bill amount.
+    }
 
     #[test]
     fn private_reconnect_backoff_is_bounded() {
