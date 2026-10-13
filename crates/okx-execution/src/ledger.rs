@@ -15,6 +15,7 @@ use thiserror::Error;
 use crate::{
     DurableExchangeEvidence, EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_LINEAGE_SCHEMA_V2,
     EXECUTION_PLAN_SCHEMA_V1, ExchangeEvidenceSummary, ExchangeOrderState, ExecutionAction,
+    StrategyFinancialPeriod,
     ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
     ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
     OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
@@ -543,6 +544,22 @@ impl DurableExecutionLedger {
             .as_ref()
             .expect("persisted")
             .summary())
+    }
+
+    /// Recompute the run from the same immutable source events after restart.
+    /// This NEVER authorizes trading; unproven source history is INCOMPLETE.
+    pub fn financial_period(
+        &self,
+        facts: &AccountLedgerFacts,
+        coherent: bool,
+    ) -> Option<StrategyFinancialPeriod> {
+        self.capital_reservation.as_ref().map(|run| {
+            crate::assess_persisted_financial_period(
+                run, self.exchange_evidence.as_ref(),
+                &self.entries.values().cloned().collect::<Vec<_>>(),
+                facts, coherent,
+            )
+        })
     }
 
     pub fn exchange_evidence_summary(&self) -> Option<ExchangeEvidenceSummary> {

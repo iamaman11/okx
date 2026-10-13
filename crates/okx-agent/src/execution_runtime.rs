@@ -187,6 +187,7 @@ impl ExecutionRuntime {
             executor.capture_exchange_evidence(facts)?;
         }
         reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary();
+        reconciliation.financial_period = executor.ledger().financial_period(facts, coherent);
         Ok((reconciliation, inventory))
     }
 
