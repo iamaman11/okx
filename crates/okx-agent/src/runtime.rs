@@ -359,12 +359,11 @@ async fn capture_native_finance_on_private_events(
     // Restart proof: if a prior Demo run already exists, attempt one native
     // source check immediately. Do not require a new order or invent a
     // scheduler just to re-attach the persisted period after process crash.
-    if execution.strategy_financial_capture_active().await {
-        if let Err(reason) =
+    if execution.strategy_financial_capture_active().await
+        && let Err(reason) =
             capture_one_native_financial_source(account, private_ws, execution).await
-        {
-            eprintln!("native financial evidence startup NOT_CAPTURED: {reason}");
-        }
+    {
+        eprintln!("native financial evidence startup NOT_CAPTURED: {reason}");
     }
     loop {
         signals.changed().await.map_err(|error| error.to_string())?;
