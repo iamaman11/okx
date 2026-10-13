@@ -177,8 +177,7 @@ fn validate_capital_reservation(
     let allocated = Decimal::from_str(&r.allocated_usdt).ok();
     let equity = Decimal::from_str(&r.opening_account_usdt_equity).ok();
     if r.schema != STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1
-        || r.allocation_id.trim().is_empty()
-        || r.allocation_id.len() > 128
+        || !valid_intent_id(&r.allocation_id)
         || r.account_uid_fingerprint.trim().is_empty()
         || r.account_generation.trim().is_empty()
         || r.origin_schema.trim().is_empty()
@@ -303,6 +302,7 @@ impl ExecutionLedgerStore {
             }
             ledger_uid = Some(uid.clone());
             validate_entry(&entry)?;
+            validate_strategy_run_binding(&entry, file.capital_reservation.as_ref())?;
             let intent_id = entry.record.plan.intent_id.clone();
             if by_intent.insert(intent_id, entry.clone()).is_some() {
                 return Err(ExecutionLedgerError::Corrupt("duplicate intent_id"));
@@ -334,6 +334,7 @@ impl ExecutionLedgerStore {
             }
             ledger_uid = Some(uid);
             validate_entry(entry)?;
+            validate_strategy_run_binding(entry, capital_reservation)?;
             if intent_id != &entry.record.plan.intent_id {
                 return Err(ExecutionLedgerError::Corrupt(
                     "map key does not match intent_id",
@@ -526,6 +527,7 @@ impl DurableExecutionLedger {
                 .risk_binding
                 .as_ref()
                 .is_none_or(|b| b.mandate.version != r.mandate_version)
+            || record.strategy_run_id.as_deref() != Some(r.allocation_id.as_str())
         {
             return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
         }
@@ -705,7 +707,7 @@ impl DurableExecutionLedger {
 
     fn prepare_record(
         &mut self,
-        record: ExecutionRecord,
+        mut record: ExecutionRecord,
         reverse_root_bypass: Option<&str>,
         observed_at_ms: u64,
         confirmed_coverage: bool,
@@ -713,6 +715,13 @@ impl DurableExecutionLedger {
         require_timestamp(observed_at_ms)?;
         validate_plan_identity(&record.plan)?;
         validate_reverse_link(&record)?;
+        // Bind from the single trusted ledger owner, never from ChatGPT/plan.
+        // A CLOSE has no proven lot owner yet and MUST remain unattributed.
+        if record.plan.action.is_risk_increasing()
+            && let Some(run) = &self.capital_reservation
+        {
+            record.strategy_run_id = Some(run.allocation_id.clone());
+        }
         self.validate_capital_intent(&record, observed_at_ms)?;
         // One ledger is owned by exactly one authenticated exchange UID,
         // even after FLAT or when the previous managed intents are terminal.
@@ -1276,6 +1285,41 @@ impl DurableExecutionLedger {
             .expect("persisted entry exists")
             .clone())
     }
+}
+
+/// One run owns an intent only when this ledger itself recorded its opening
+/// and the exact execution origin/mandate matches the opening. This check
+/// rejects forged, orphaned, foreign and backdated run links on disk.
+fn validate_strategy_run_binding(
+    entry: &ExecutionLedgerEntry,
+    active_run: Option<&StrategyCapitalReservation>,
+) -> Result<(), ExecutionLedgerError> {
+    let Some(run_id) = entry.record.strategy_run_id.as_deref() else {
+        // Historical executions must remain readable but not retroactively
+        // become attributed merely because a newer run was opened.
+        return Ok(());
+    };
+    let Some(run) = active_run else {
+        return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
+    };
+    if !valid_intent_id(run_id)
+        || run_id != run.allocation_id
+        || !entry.record.plan.action.is_risk_increasing()
+        || entry.created_at_ms <= run.started_at_ms
+        || entry.record.plan.account_uid_fingerprint != run.account_uid_fingerprint
+        || entry.record.lineage.as_ref().is_none_or(|l| {
+            l.origin_schema != run.origin_schema || l.origin_version != run.origin_version
+        })
+        || entry
+            .record
+            .plan
+            .risk_binding
+            .as_ref()
+            .is_none_or(|b| b.mandate.version != run.mandate_version)
+    {
+        return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
+    }
+    Ok(())
 }
 
 fn validate_entry(entry: &ExecutionLedgerEntry) -> Result<(), ExecutionLedgerError> {
@@ -2030,6 +2074,196 @@ mod tests {
         assert!(
             ledger.prepare(close, 1103).is_ok(),
             "safe exits are not locked"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn strategy_run_id_is_owner_derived_durable_and_rejects_tampering() {
+        use okx_analysis::{
+            HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy, RiskDegradedMode, RiskMinimumQuality,
+            TRADING_MANDATE_SCHEMA_V1, TradingMandate,
+        };
+
+        let root = temp_root("strategy-run-id-owner");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let authority = format!("sha256:{}", "a".repeat(64));
+        let run = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "run_owner_test_20261013".to_owned(),
+            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            origin_schema: "okx.research.live-decision/v1".to_owned(),
+            origin_version: "okx.research.live-decision/2026-10-05.1".to_owned(),
+            mandate_version: "run-owner-mandate/v1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: "fresh-generation".to_owned(),
+            operator_authority_id: authority.clone(),
+            started_at_ms: 1000,
+        };
+        let opening = StrategyAllocationOpening {
+            account_uid_fingerprint: run.account_uid_fingerprint.clone(),
+            account_generation: run.account_generation.clone(),
+            observed_usdt_equity: run.opening_account_usdt_equity.clone(),
+            observed_at_ms: run.started_at_ms,
+            source_history_complete: true,
+            zero_positions: true,
+            zero_pending_orders: true,
+            zero_native_protection: true,
+            operator_authority_id: authority,
+        };
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).expect("open");
+        // A historical execution is NEVER attributed retroactively.
+        let historical = "legacy_before_run_0123456";
+        ledger.prepare(plan(historical), 101).expect("legacy");
+        ledger
+            .abandon_prepared(historical, 102)
+            .expect("retire old prepared");
+        ledger
+            .reserve_strategy_capital(run.clone(), &opening, 1001)
+            .expect("independently witnessed opening");
+        assert!(
+            ledger
+                .get(historical)
+                .unwrap()
+                .record
+                .strategy_run_id
+                .is_none()
+        );
+
+        let mut owned = plan("intent_run_owner_verified_0123456");
+        owned.risk_binding = Some(crate::ExecutionRiskBinding {
+            mandate: TradingMandate {
+                schema: TRADING_MANDATE_SCHEMA_V1.to_owned(),
+                version: run.mandate_version.clone(),
+                capital_base_usd: "100".to_owned(),
+                decision_horizon_hours: 1,
+                benchmark: None,
+                allowed_instruments: vec![owned.instrument_id.clone()],
+                max_drawdown_ratio: "0.2".to_owned(),
+                leverage_ceiling: "3".to_owned(),
+                minimum_liquidity_notional_usd: "0".to_owned(),
+                max_turnover_ratio: "5".to_owned(),
+            },
+            policy: HardRiskPolicy {
+                schema: HARD_RISK_POLICY_SCHEMA_V1.to_owned(),
+                version: "run-owner-policy/v1".to_owned(),
+                max_account_gross_notional_usd: "100".to_owned(),
+                max_instrument_gross_notional_usd: "100".to_owned(),
+                max_margin_utilization_ratio: "0.5".to_owned(),
+                max_loss_per_trade_usd: "10".to_owned(),
+                max_daily_realized_loss_usd: "10".to_owned(),
+                max_drawdown_ratio: "0.2".to_owned(),
+                max_leverage: "3".to_owned(),
+                allowed_instruments: vec![owned.instrument_id.clone()],
+                minimum_quality: RiskMinimumQuality::Fresh,
+                degraded_mode: RiskDegradedMode::Reject,
+                correlated_clusters: Vec::new(),
+            },
+        });
+        let owned_id = owned.intent_id.clone();
+        let created = ledger
+            .prepare_with_lineage(owned.clone(), Some(lineage('b')), 1002)
+            .expect("bind owner in ledger");
+        let PrepareDisposition::Created(entry) = created else {
+            panic!("first preparation must create one entry");
+        };
+        assert_eq!(
+            entry.record.strategy_run_id.as_deref(),
+            Some(run.allocation_id.as_str())
+        );
+        assert!(matches!(
+            ledger
+                .prepare_with_lineage(owned, Some(lineage('b')), 1003)
+                .expect("same input is idempotent"),
+            PrepareDisposition::Existing(_)
+        ));
+        drop(ledger);
+
+        let mut reopened = DurableExecutionLedger::open(store.clone(), 1100).expect("restart");
+        assert_eq!(
+            reopened
+                .get(&owned_id)
+                .unwrap()
+                .record
+                .strategy_run_id
+                .as_deref(),
+            Some(run.allocation_id.as_str())
+        );
+        assert!(
+            reopened
+                .get(historical)
+                .unwrap()
+                .record
+                .strategy_run_id
+                .is_none()
+        );
+        reopened
+            .abandon_prepared(&owned_id, 1101)
+            .expect("retire unsent new-risk intent");
+        // Safe CLOSE can still be prepared without claiming ownership of
+        // an arbitrary existing or foreign position.
+        let close_id = "intent_run_owner_safe_close_012345";
+        reopened
+            .prepare(close_plan(close_id, PositionSide::Long), 1102)
+            .expect("exit remains allowed");
+        assert!(
+            reopened
+                .get(close_id)
+                .unwrap()
+                .record
+                .strategy_run_id
+                .is_none()
+        );
+        drop(reopened);
+
+        let intact = fs::read(store.path()).expect("persisted ledger");
+        let mut forged: serde_json::Value =
+            serde_json::from_slice(&intact).expect("readable ledger");
+        let entries = forged["records"].as_array_mut().expect("records");
+        let owner = entries
+            .iter_mut()
+            .find(|entry| entry["record"]["plan"]["intent_id"] == owned_id)
+            .expect("owned intent");
+        owner["record"]["strategy_run_id"] =
+            serde_json::Value::String("different_run_0123456789".to_owned());
+        let tampered = serde_json::to_vec_pretty(&forged).expect("tamper only fixture");
+        fs::write(store.path(), &tampered).expect("save tampered fixture");
+        assert!(matches!(
+            DurableExecutionLedger::open(store.clone(), 1200),
+            Err(ExecutionLedgerError::CapitalReservationScopeMismatch)
+        ));
+        assert_eq!(
+            fs::read(store.path()).expect("failed load may not rewrite"),
+            tampered
+        );
+
+        fs::write(store.path(), &intact).expect("restore fixture");
+        let mut unbound: serde_json::Value = serde_json::from_slice(&intact).expect("read fixture");
+        let entries = unbound["records"].as_array_mut().expect("records");
+        let owner = entries
+            .iter_mut()
+            .find(|entry| entry["record"]["plan"]["intent_id"] == owned_id)
+            .expect("owned intent");
+        owner["record"]["strategy_run_id"] = serde_json::Value::Null;
+        fs::write(
+            store.path(),
+            serde_json::to_vec_pretty(&unbound).expect("strip fixture owner"),
+        )
+        .expect("save legacy-like fixture");
+        // Old missing links can be recovered without backfilling false PnL,
+        // but the unowned risk-increasing intent cannot be submitted.
+        let mut unowned = DurableExecutionLedger::open(store.clone(), 1200)
+            .expect("old ledger must remain readable for exits");
+        assert!(matches!(
+            unowned.begin_submission(&owned_id, 1201),
+            Err(ExecutionLedgerError::CapitalReservationScopeMismatch)
+        ));
+        assert!(
+            unowned
+                .require_new_risk_allowed(ExecutionAction::Close)
+                .is_ok()
         );
         let _ = fs::remove_dir_all(root);
     }
