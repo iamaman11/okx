@@ -10,6 +10,7 @@ use crate::{ExecutionLedgerEntry, ExecutionLedgerError, StrategyCapitalReservati
 pub const EXCHANGE_EVIDENCE_SCHEMA_V1: &str = "okx.exchange-evidence/v1";
 const MAX_EVENTS: usize = 40_000;
 const MAX_CURSORS: usize = 4_096;
+pub const MAX_SOURCE_COVERAGE_GAP_MS: u64 = 7_200_000;
 const MAX_BYTES: usize = 24 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +54,12 @@ pub struct ExchangeEvidenceSummary {
     pub cursors: usize,
     pub checksum_sha256: String,
     pub latest_source_complete: bool,
+    pub oldest_source_asof_ms: Option<u64>,
+    pub latest_source_asof_ms: Option<u64>,
+    pub largest_persisted_gap_ms: Option<u64>,
+    pub source_gap_over_two_hours: bool,
+    pub remaining_source_cursors: usize,
+    pub remaining_events: usize,
 }
 
 impl DurableExchangeEvidence {
@@ -103,6 +110,18 @@ impl DurableExchangeEvidence {
         Ok(())
     }
 
+    /// The caller may never permanently poison a run with an incomplete
+    /// transient REST snapshot. Preserve earlier proofs unchanged and report
+    /// missing coverage through the public account summary.
+    pub fn complete_source_checkpoint(facts: &AccountLedgerFacts) -> bool {
+        complete_source_flags(
+            facts.exchange_orders_history_complete,
+            facts.exchange_fills_history_complete,
+            facts.bills_history_complete,
+            facts.summary.history_coverage.iter().all(|c| c.complete_within_bound),
+        )
+    }
+
     fn seal(&mut self) -> Result<(), ExecutionLedgerError> {
         self.checksum_sha256 = self.hash()?;
         self.validate()
@@ -132,6 +151,9 @@ impl DurableExchangeEvidence {
         run: &StrategyCapitalReservation,
     ) -> Result<(), ExecutionLedgerError> {
         self.validate()?;
+        if !Self::complete_source_checkpoint(facts) {
+            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+        }
         if self.run_id != run.allocation_id
             || self.account_uid != run.account_uid_fingerprint
             || self.account_uid != facts.summary.authority.account_uid_fingerprint
@@ -299,6 +321,10 @@ impl DurableExchangeEvidence {
 
     pub fn summary(&self) -> ExchangeEvidenceSummary {
         let latest = self.cursors.values().max_by_key(|v| v.account_as_of_ms);
+        let mut epochs = self.cursors.values().map(|v| v.account_as_of_ms).collect::<Vec<_>>();
+        epochs.sort_unstable();
+        epochs.dedup();
+        let largest_gap = epochs.windows(2).map(|v| v[1] - v[0]).max();
         ExchangeEvidenceSummary {
             schema: EXCHANGE_EVIDENCE_SCHEMA_V1,
             run_id: self.run_id.clone(),
@@ -307,13 +333,74 @@ impl DurableExchangeEvidence {
             checksum_sha256: self.checksum_sha256.clone(),
             latest_source_complete: latest
                 .is_some_and(|v| v.order_complete && v.fill_complete && v.bill_complete),
+            oldest_source_asof_ms: epochs.first().copied(),
+            latest_source_asof_ms: epochs.last().copied(),
+            largest_persisted_gap_ms: largest_gap,
+            source_gap_over_two_hours: largest_gap.is_some_and(|ms| ms > MAX_SOURCE_COVERAGE_GAP_MS),
+            remaining_source_cursors: MAX_CURSORS - self.cursors.len(),
+            remaining_events: MAX_EVENTS - self.events.len(),
         }
     }
+}
+
+/// The native REST windows and every instrument/page must independently
+/// attest completeness. Missing any leg is not an empty trade interval.
+fn complete_source_flags(orders: bool, fills: bool, bills: bool, ranges: bool) -> bool {
+    orders && fills && bills && ranges
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incomplete_account_source_never_becomes_permanent_financial_checkpoint() {
+        assert!(complete_source_flags(true, true, true, true));
+        for missing in 0..4 {
+            let mut complete = [true; 4];
+            complete[missing] = false;
+            assert!(!complete_source_flags(complete[0], complete[1], complete[2], complete[3]));
+        }
+        let mut evidence = DurableExchangeEvidence {
+            schema: EXCHANGE_EVIDENCE_SCHEMA_V1.into(),
+            account_uid: "uid".into(), run_id: "run_1".into(),
+            events: BTreeMap::new(), cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        evidence.seal().unwrap();
+        let original_hash = evidence.checksum_sha256.clone();
+        assert!(evidence.cursors.is_empty());
+        assert_eq!(evidence.summary().remaining_source_cursors, MAX_CURSORS);
+        assert_eq!(evidence.summary().remaining_events, MAX_EVENTS);
+        assert_eq!(evidence.summary().oldest_source_asof_ms, None);
+        assert_eq!(evidence.checksum_sha256, original_hash);
+    }
+
+    #[test]
+    fn source_summary_reports_gap_and_capacity_without_guessing_age() {
+        let mut evidence = DurableExchangeEvidence {
+            schema: EXCHANGE_EVIDENCE_SCHEMA_V1.into(),
+            account_uid: "uid".into(), run_id: "run_1".into(),
+            events: BTreeMap::new(), cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        for (key, time) in [("a",1000),("b",2000),("c",7_210_001)] {
+            evidence.cursors.insert(key.into(), ExchangeCoverageCursor {
+                source: "OKX_REST_ACCOUNT_HISTORY".into(),
+                source_received_at: key.into(),
+                generation: "one".into(), account_as_of_ms: time,
+                order_complete:true, fill_complete:true, bill_complete:true,
+                covered_ranges: Value::Null,
+            });
+        }
+        evidence.seal().unwrap();
+        let summary = evidence.summary();
+        assert_eq!(summary.oldest_source_asof_ms, Some(1000));
+        assert_eq!(summary.latest_source_asof_ms, Some(7_210_001));
+        assert_eq!(summary.largest_persisted_gap_ms, Some(7_208_001));
+        assert!(summary.source_gap_over_two_hours);
+        assert_eq!(summary.remaining_source_cursors, MAX_CURSORS - 3);
+    }
+
     #[test]
     fn duplicate_is_idempotent_conflict_and_corruption_fail_closed() {
         let mut evidence = DurableExchangeEvidence {

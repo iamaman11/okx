@@ -1,4 +1,5 @@
 import { buildExecutionOperation, EXECUTION_TOOLS, executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
+import { TOOL_CONTRACT_VERSION } from "./shared.js";
 function assert(condition: boolean, detail: string): void {
   if (!condition) throw Error(detail);
 }
@@ -152,6 +153,8 @@ assert(executionProfilePermitsOperation("production","account_summary"),"read is
 assert(!isExecutionMutation("account_summary"),"read must not be misclassified as exchange mutation");
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
 const advertisedActions = (EXECUTION_TOOLS[1] as any).inputSchema.properties.action.enum as string[];
+assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-13.2",
+  "typed action schema changed; the advertised MCP contract version must advance");
 assert(advertisedActions.includes("finalize_strategy_run"),
   "finalization must be advertised via existing Demo-only typed operation");
 assert(advertisedActions.includes("begin_strategy_run"),"native capital opening is typed and Demo only");

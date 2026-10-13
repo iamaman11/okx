@@ -127,6 +127,9 @@ pub enum ExecutionLedgerError {
     #[error("durable exchange evidence capacity exhausted; no proven evidence is discarded")]
     ExchangeEvidenceCapacity,
 
+    #[error("exchange REST order/fill/bill source coverage incomplete; no checkpoint persisted")]
+    ExchangeSourceIncomplete,
+
     #[error("execution ledger capacity of {0} records is exhausted")]
     CapacityExceeded(usize),
 

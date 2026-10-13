@@ -180,11 +180,15 @@ impl ExecutionRuntime {
         let mut reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
         let inventory = managed_execution_inventory(executor.ledger());
         // Never capture a contradictory or private-WS-incoherent snapshot.
-        if coherent
-            && reconciliation.consistent
-            && executor.ledger().capital_reservation().is_some()
-        {
-            executor.capture_exchange_evidence(facts)?;
+        if executor.ledger().capital_reservation().is_some() {
+            if coherent
+                && reconciliation.consistent
+                && okx_execution::DurableExchangeEvidence::complete_source_checkpoint(facts)
+            {
+                executor.capture_exchange_evidence(facts)?;
+            } else {
+                reconciliation.source_checkpoint_deferred = true;
+            }
         }
         reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary();
         reconciliation.financial_period = executor.ledger().financial_period(facts, coherent);
