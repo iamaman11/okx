@@ -10,7 +10,7 @@ use okx_api::{
 use okx_execution::{
     AccountLedgerReconciliation, DurableExecutionLedger, ExecutionAction, ExecutionLedgerEntry,
     ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding, ExecutionPlan,
-    ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
+    ExecutionRiskStop, ExecutionState, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
     ManagedExecutionInventory, MutationAuthority, MutationPrepareDisposition,
     MutationSubmitDisposition, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
     StrategyAllocationOpening, StrategyCapitalReservation, StrategyFinalization, SubmitDisposition,
@@ -237,7 +237,12 @@ impl ExecutionRuntime {
             || run.account_uid_fingerprint != plan.account_uid_fingerprint
             || run.mandate_version != binding.mandate.version
             || run.allocated_usdt != binding.mandate.capital_base_usd
-            || ledger.entries().any(|e| e.created_at_ms >= run.started_at_ms)
+            || ledger.entries().any(|e| {
+                e.created_at_ms >= run.started_at_ms
+                    && (e.record.plan.intent_id != plan.intent_id
+                        || e.record.plan != *plan
+                        || e.record.state != ExecutionState::Prepared)
+            })
             || !reconcile_account_ledger(ledger, facts).ok()?.consistent
         {
             return None;
