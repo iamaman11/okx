@@ -94,6 +94,26 @@ fn terminal_filled_coverage(
 /// source IDs and the sum of native fills must cover exactly the submitted size.
 /// Amend/cancel and unresolved exchange states cannot claim exact period closure
 /// from a source order row lacking native accFillSz.
+/// Use the last exact timestamped venue state. Older LIVE transitions are
+/// normal evidence and must not invalidate a later FILLED acknowledgement.
+fn latest_order_state(
+    orders: &[&crate::exchange_evidence::StoredExchangeEvent],
+) -> Option<String> {
+    let mut latest: Option<(u64, String)> = None;
+    for order in orders {
+        let time = string(&order.payload, "uTime")?.parse::<u64>().ok()?;
+        let state = string(&order.payload, "state")?.to_owned();
+        match &latest {
+            Some((previous, prior_state)) if time < *previous => {}
+            Some((previous, prior_state)) if time == *previous => {
+                if state != *prior_state { return None; }
+            }
+            _ => latest = Some((time, state)),
+        }
+    }
+    latest.map(|(_, state)| state)
+}
+
 fn validate_terminal_order_coverage(
     evidence: &DurableExchangeEvidence,
     entries: &[ExecutionLedgerEntry],
@@ -124,19 +144,13 @@ fn validate_terminal_order_coverage(
             reasons.insert("managed_exchange_order_missing");
             continue;
         }
-        let terminal = orders.iter().any(|o| {
-            matches!(
-                string(&o.payload, "state"),
-                Some("filled" | "canceled" | "mmp_canceled")
-            )
-        });
-        let nonterminal = orders.iter().any(|o| {
-            !matches!(
-                string(&o.payload, "state"),
-                Some("filled" | "canceled" | "mmp_canceled")
-            )
-        });
-        if nonterminal || !terminal || !record.state.is_terminal() {
+        let Some(last_state) = latest_order_state(&orders) else {
+            reasons.insert("managed_order_terminal_state_unproven");
+            continue;
+        };
+        if !matches!(last_state.as_str(), "filled" | "canceled" | "mmp_canceled")
+            || !record.state.is_terminal()
+        {
             reasons.insert("managed_order_terminal_state_unproven");
             continue;
         }
@@ -152,10 +166,7 @@ fn validate_terminal_order_coverage(
                     && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str())
             })
             .collect::<Vec<_>>();
-        if orders
-            .iter()
-            .any(|o| string(&o.payload, "state") == Some("filled"))
-        {
+        if last_state == "filled" {
             let Some(expected) = Decimal::from_str(&record.plan.size).ok() else {
                 reasons.insert("invalid_managed_order_size");
                 continue;
@@ -173,12 +184,7 @@ fn validate_terminal_order_coverage(
         // The account order history does not expose accumulated fill quantity
         // in this journal schema; accepting canceled/part-filled would be an
         // unsupported assertion that no extra fees or PnL were omitted.
-        if orders.iter().any(|o| {
-            matches!(
-                string(&o.payload, "state"),
-                Some("canceled" | "mmp_canceled")
-            )
-        }) {
+        if matches!(last_state.as_str(), "canceled" | "mmp_canceled") {
             reasons.insert("canceled_order_accumulated_fill_unattested");
         }
     }
@@ -872,6 +878,26 @@ mod tests {
             &[d(2), d(3)],
             true
         ));
+    }
+
+    #[test]
+    fn latest_order_history_allows_live_then_filled_but_rejects_same_timestamp_conflict() {
+        use crate::exchange_evidence::StoredExchangeEvent;
+        use serde_json::json;
+        let row = |state: &str, ts: &str| StoredExchangeEvent {
+            payload: json!({"source":"OKX_REST_ORDER","ordId":"1","state":state,"uTime":ts}),
+            source_intent_id: Some("intent".into()),
+            strategy_run_id: None,
+            allocation: "UNALLOCATED".into(),
+        };
+        let live = row("live", "100");
+        let filled = row("filled", "200");
+        assert_eq!(latest_order_state(&[&live, &filled]).as_deref(), Some("filled"));
+        assert_eq!(latest_order_state(&[&filled, &live]).as_deref(), Some("filled"));
+        let contradictory = row("canceled", "200");
+        assert_eq!(latest_order_state(&[&filled, &contradictory]), None);
+        let invalid = row("filled", "no-timestamp");
+        assert_eq!(latest_order_state(&[&invalid]), None);
     }
     #[test]
     fn cross_currency_and_wrong_hedge_never_create_owned_lots() {
