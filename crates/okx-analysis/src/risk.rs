@@ -1756,10 +1756,12 @@ mod tests {
         )
         .expect("risk");
         assert_eq!(result.decision, RiskPolicyDecision::Rejected);
-        assert!(result
-            .violations
-            .iter()
-            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| v.code == "STRATEGY_NAV_UNATTESTED")
+        );
         assert_eq!(
             result.projected_margin_utilization_ratio.as_deref(),
             Some("0.1")
@@ -2290,10 +2292,12 @@ mod tests {
         )
         .expect("account below mandate is not source-attested NAV");
         assert_eq!(below_budget.policy_decision, RiskPolicyDecision::Rejected);
-        assert!(below_budget
-            .violations
-            .iter()
-            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
+        assert!(
+            below_budget
+                .violations
+                .iter()
+                .any(|v| v.code == "STRATEGY_NAV_UNATTESTED")
+        );
 
         let mut context = replay_context();
         context.total_equity_usd = snapshot.balance.total_equity_usd.clone();
