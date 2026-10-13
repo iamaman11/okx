@@ -1,5 +1,6 @@
 mod contract;
 mod exchange_evidence;
+mod strategy_lifecycle;
 mod executor;
 mod ledger;
 mod model;
@@ -23,6 +24,8 @@ pub use executor::{
     ExecutionGateway, FencedProtectiveShrinkRequest, MutationAuthority, MutationSubmitDisposition,
     OrderExecutor, OrderExecutorError, ReconcileDisposition, SubmitDisposition,
 };
+pub use strategy_lifecycle::{ArchivedStrategyRun, StrategyFinalization,
+    StrategyPeriodHistory, STRATEGY_FINALIZATION_SCHEMA_V1, MAX_ARCHIVED_STRATEGY_RUNS};
 pub use ledger::{
     DurableExecutionLedger, EXECUTION_LEDGER_SCHEMA_V1, EXECUTION_LEDGER_SCHEMA_V2,
     EXECUTION_LEDGER_SCHEMA_V3, EXECUTION_LEDGER_SCHEMA_V4, EXECUTION_LEDGER_SCHEMA_V5,
