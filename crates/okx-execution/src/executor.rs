@@ -381,7 +381,9 @@ where
         &mut self,
         facts: &okx_observation::AccountLedgerFacts,
     ) -> Result<crate::ExchangeEvidenceSummary, OrderExecutorError> {
-        Ok(self.ledger.capture_exchange_evidence_for_finalization(facts)?)
+        Ok(self
+            .ledger
+            .capture_exchange_evidence_for_finalization(facts)?)
     }
 
     /// Persist the single native account-scoped virtual allocation under
