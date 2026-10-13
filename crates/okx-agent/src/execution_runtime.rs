@@ -217,6 +217,8 @@ impl ExecutionRuntime {
         facts: &AccountLedgerFacts,
         plan: &ExecutionPlan,
         coherent: bool,
+        settle_currency: Option<&str>,
+        contract_type: Option<&str>,
     ) -> Option<StrategyNavRiskEvidence> {
         if self.mode != ExecutionRuntimeMode::DemoAcceptance
             || !self.environment.demo
@@ -225,7 +227,9 @@ impl ExecutionRuntime {
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
             || facts.summary.open_positions != 0
             || facts.summary.pending_orders != 0
-            || facts.nonzero_other_trading_currency_equity
+            || !facts.usdt_margin_excludes_other_currencies()
+            || settle_currency != Some("USDT")
+            || contract_type != Some("linear")
         {
             return None;
         }
