@@ -927,22 +927,18 @@ pub fn durable_account_stop_reason(
     )
 }
 
-// Exchange equity is not a verified strategy NAV. A larger shared account
-// balance cannot prove that this strategy has avoided drawdown.
-// A candidate-only denial must not become a permanent account risk stop.
-fn require_strategy_nav_attribution(
-    violations: &mut Vec<RiskPolicyViolation>,
-    account_equity: Decimal,
-    mandate_capital: Decimal,
-) {
-    if account_equity > mandate_capital {
-        violations.push(RiskPolicyViolation {
-            code: "STRATEGY_NAV_UNATTESTED",
-            scope: "capital_base".to_owned(),
-            observed: "shared_account_equity_exceeds_mandate_capital".to_owned(),
-            limit: "independent_strategy_nav_and_drawdown_evidence".to_owned(),
-        });
-    }
+// Account equity cannot prove strategy NAV at ANY account/mandate ratio.
+// Until an immutable strategy-run NAV, peak and UTC-day evidence is bound by
+// the trusted observer/ledger (rather than supplied by the request), new-risk
+// candidate admission must fail closed. This is not a durable loss STOP;
+// legitimate risk-reducing exits remain governed by the execution owner.
+fn require_strategy_nav_attribution(violations: &mut Vec<RiskPolicyViolation>) {
+    violations.push(RiskPolicyViolation {
+        code: "STRATEGY_NAV_UNATTESTED",
+        scope: "capital_base".to_owned(),
+        observed: "source_attested_strategy_nav_missing".to_owned(),
+        limit: "independent_strategy_nav_and_drawdown_evidence".to_owned(),
+    });
 }
 
 pub fn evaluate_candidate_risk(
@@ -974,8 +970,9 @@ pub fn evaluate_candidate_risk(
     )?;
 
     let mut violations = Vec::new();
-    let mandate_capital = positive_decimal("capital_base_usd", &mandate.capital_base_usd)?;
-    require_strategy_nav_attribution(&mut violations, total_equity, mandate_capital);
+    // The ordinary account equity and declared mandate cannot certify a run.
+    // Source-specific NAV is not yet plumbed into this admission context.
+    require_strategy_nav_attribution(&mut violations);
     if matches!(policy.minimum_quality, RiskMinimumQuality::Fresh) && !context.account_is_fresh {
         violations.push(RiskPolicyViolation {
             code: "MINIMUM_DATA_QUALITY",
@@ -1124,9 +1121,9 @@ pub fn analyze_portfolio_risk(
         usd_equivalent_daily_loss(&ledger.daily_realized_pnl_utc)?;
     let mut violations = Vec::new();
     if candidate.is_some() {
-        // Account equity beyond the allocated mandate cannot attest that
-        // strategy-specific NAV has avoided drawdown.
-        require_strategy_nav_attribution(&mut violations, total_equity, capital_base);
+        // Portfolio candidate admission has no trusted strategy-run NAV yet.
+        // Account balance size is never a substitute for this evidence.
+        require_strategy_nav_attribution(&mut violations);
     }
     if !unsupported_daily_loss_currencies.is_empty() {
         violations.push(RiskPolicyViolation {
@@ -1743,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn reusable_candidate_risk_gate_accepts_bounded_candidate() {
+    fn reusable_candidate_gate_projects_bounded_order_but_denies_unattested_nav() {
         let candidate = PortfolioCandidate {
             instrument: "BTC-USDT-SWAP".to_owned(),
             direction: PositionDirection::Long,
@@ -1758,7 +1755,11 @@ mod tests {
             &replay_context(),
         )
         .expect("risk");
-        assert_eq!(result.decision, RiskPolicyDecision::Accepted);
+        assert_eq!(result.decision, RiskPolicyDecision::Rejected);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
         assert_eq!(
             result.projected_margin_utilization_ratio.as_deref(),
             Some("0.1")
@@ -2270,12 +2271,29 @@ mod tests {
                 .as_deref(),
             Some("0.2")
         );
+        assert_eq!(exact_budget.policy_decision, RiskPolicyDecision::Rejected);
         assert!(
-            !exact_budget
+            exact_budget
                 .violations
                 .iter()
                 .any(|v| v.code == "STRATEGY_NAV_UNATTESTED")
         );
+        // A smaller account must not silently be mistaken for a strategy NAV.
+        bounded_account.balance.total_equity_usd = "75".to_owned();
+        let below_budget = analyze_portfolio_risk(
+            &bounded_account,
+            &ledger("0"),
+            mandate.clone(),
+            policy.clone(),
+            Some(candidate("40")),
+            true,
+        )
+        .expect("account below mandate is not source-attested NAV");
+        assert_eq!(below_budget.policy_decision, RiskPolicyDecision::Rejected);
+        assert!(below_budget
+            .violations
+            .iter()
+            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
 
         let mut context = replay_context();
         context.total_equity_usd = snapshot.balance.total_equity_usd.clone();
