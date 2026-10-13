@@ -2382,11 +2382,7 @@ mod tests {
     #[test]
     fn missing_strategy_nav_does_not_latch_global_stop_without_true_breach() {
         let mut violations = Vec::new();
-        require_strategy_nav_attribution(
-            &mut violations,
-            Decimal::from(100_000u64),
-            Decimal::from(100u64),
-        );
+        require_strategy_nav_attribution(&mut violations);
         assert_eq!(violations[0].code, "STRATEGY_NAV_UNATTESTED");
         assert_eq!(durable_account_stop_reason(&violations, true), None);
         violations.push(RiskPolicyViolation {
