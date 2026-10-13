@@ -12,10 +12,18 @@ struct AccountSummaryCoherence {
 }
 
 #[derive(serde::Serialize)]
+struct StrategyOpeningSourcePreview {
+    scope: &'static str,
+    status: &'static str,
+    blockers: Vec<&'static str>,
+}
+
+#[derive(serde::Serialize)]
 struct AccountSummaryResult {
     schema: &'static str,
     account_ledger: okx_observation::AccountLedgerSummary,
     pending_protective_algos: okx_api::PendingProtectiveAlgoInventory,
+    strategy_run_opening_source: StrategyOpeningSourcePreview,
     reconciliation: Option<okx_execution::AccountLedgerReconciliation>,
     managed_execution_intents: Option<okx_execution::ManagedExecutionInventory>,
     coherence: AccountSummaryCoherence,
@@ -363,6 +371,27 @@ pub(super) async fn dispatch(
                 }
             };
 
+            // Same native source predicates as the Demo BEGIN operation,
+            // but this is only read-only observer proof, never trading authority.
+            let mut opening_blockers = super::execution::strategy_opening_source_blockers(
+                &facts,
+                &pending_protective_algos,
+                &assembled.snapshot.account_generation,
+                &assembled.snapshot.account_uid_fingerprint,
+            );
+            if !coherence.coherent {
+                opening_blockers.push("PRIVATE_WS_NOT_COHERENT");
+            }
+            let strategy_run_opening_source = StrategyOpeningSourcePreview {
+                scope: "OBSERVER_SOURCE_ONLY_NO_TRADE_PERMISSION",
+                status: if opening_blockers.is_empty() {
+                    "SOURCE_READY"
+                } else {
+                    "BLOCKED"
+                },
+                blockers: opening_blockers,
+            };
+
             Ok(AgentResponse {
                 schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
                 request_id: request.request_id.clone(),
@@ -374,6 +403,7 @@ pub(super) async fn dispatch(
                     schema: ACCOUNT_SUMMARY_SCHEMA_V1,
                     account_ledger: facts.summary,
                     pending_protective_algos,
+                    strategy_run_opening_source,
                     reconciliation,
                     managed_execution_intents,
                     coherence,
