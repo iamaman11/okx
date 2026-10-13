@@ -655,7 +655,11 @@ impl DurableExecutionLedger {
             || !facts.exchange_orders_history_complete
             || !facts.exchange_fills_history_complete
             || !facts.bills_history_complete
-            || facts.summary.history_coverage.iter().any(|c| !c.complete_within_bound)
+            || facts
+                .summary
+                .history_coverage
+                .iter()
+                .any(|c| !c.complete_within_bound)
         {
             return Err(ExecutionLedgerError::StrategyRunNotFinalizable);
         }
