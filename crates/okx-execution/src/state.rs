@@ -384,6 +384,10 @@ impl ReverseExecutionLink {
 #[serde(deny_unknown_fields)]
 pub struct ExecutionRecord {
     pub plan: ExecutionPlan,
+    /// Single ledger-derived allocation/run identity; never caller-supplied.
+    /// None means historical/otherwise unowned, NOT zero PnL for this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_run_id: Option<String>,
     pub state: ExecutionState,
     pub order_id: Option<String>,
     pub exchange_state: Option<ExchangeOrderState>,
@@ -493,6 +497,7 @@ impl ExecutionRecord {
         let protection = ProtectiveOrderLink::from_plan(&plan);
         Self {
             plan,
+            strategy_run_id: None,
             state: ExecutionState::Prepared,
             order_id: None,
             exchange_state: None,
