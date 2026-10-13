@@ -98,6 +98,17 @@ pub async fn run_mailbox_until_shutdown(
     let research_shutdown_rx = runtime_shutdown_tx.subscribe();
     let mut research_session_task =
         tokio::spawn(research_session_runtime.run(research_shutdown_rx));
+    // Integrated event-driven native financial checkpoint. This future
+    // shares the same single runtime and single ledger mutex, not a second
+    // agent/service, scheduler or polling task.
+    let mut private_financial_capture = Box::pin(async {
+        match (account, private_ws, execution) {
+            (Some(account), Some(private_ws), Some(execution)) => {
+                capture_native_finance_on_order_events(account, private_ws, execution).await
+            }
+            _ => std::future::pending::<Result<(), String>>().await,
+        }
+    });
     let mut private_runtime_task = private_ws_coordinator.map(|coordinator| {
         let private_shutdown_rx = runtime_shutdown_tx.subscribe();
         tokio::spawn(async move {
@@ -148,6 +159,13 @@ pub async fn run_mailbox_until_shutdown(
             result = tokio::signal::ctrl_c() => {
                 result?;
                 break;
+            }
+            result = &mut private_financial_capture => {
+                // Unavailable capture is an observable fail-closed runtime
+                // condition, never an alternate REST submit or a quiet PASS.
+                return Err(AgentError::PublicRuntimeTask(format!(
+                    "native financial source capture owner exited: {result:?}"
+                )));
             }
             runtime_result = &mut public_runtime_task => {
                 emit(
@@ -322,6 +340,81 @@ pub async fn run_mailbox_until_shutdown(
         identity,
         Some(mailbox_issue),
     )?;
+    Ok(())
+}
+
+/// A private order update, not a timer or ChatGPT query, wakes this
+/// observer. It obtains a fresh REST baseline and complete exact native
+/// orders/fills/bills, then checks both private WS convergence fences before
+/// persisting under the already existing one execution-ledger mutex.
+/// 
+/// Failed or incomplete attempts are diagnostic only: no fabricated cursor,
+/// no fake fill/bill, and no acknowledgement of source completeness.
+async fn capture_native_finance_on_order_events(
+    account: &AccountBootstrapper,
+    private_ws: &PrivateWsHandle,
+    execution: &ExecutionRuntime,
+) -> Result<(), String> {
+    let mut signals = private_ws.subscribe_financial_order_events();
+    loop {
+        signals.changed().await.map_err(|error| error.to_string())?;
+        if !execution.strategy_financial_capture_active().await {
+            continue;
+        }
+        if let Err(reason) =
+            capture_one_native_financial_source(account, private_ws, execution).await
+        {
+            // Do not terminate the private stream on a transient REST/WS race;
+            // subsequent authenticated order events can retry, while source
+            // gap and incomplete period remain independently visible.
+            eprintln!("native financial evidence NOT_CAPTURED: {reason}");
+        }
+    }
+}
+
+async fn capture_one_native_financial_source(
+    account: &AccountBootstrapper,
+    private_ws: &PrivateWsHandle,
+    execution: &ExecutionRuntime,
+) -> Result<(), String> {
+    let cursor = private_ws.convergence_cursor().await
+        .map_err(|error| format!("initial private WS not ready: {error}"))?;
+    let rest = account.snapshot().await
+        .map_err(|error| format!("independent REST account: {error}"))?;
+    let first = private_ws.convergence_window(cursor).await
+        .map_err(|error| format!("initial WS source changed: {error}"))?;
+    if !first.events.is_empty() {
+        return Err("private order/account events during REST bootstrap".into());
+    }
+    let fingerprint = first.status.connection_id_fingerprint.as_deref()
+        .ok_or("private WS connection fingerprint unavailable")?;
+    let received = first.status.last_inbound_ms
+        .ok_or("private WS last inbound time missing")?;
+    let snapshot = rest.converge_private_ws(
+        first.generation, fingerprint, received, &first.events,
+    ).map_err(|error| format!("REST+WS convergence: {error}"))?;
+    let history_cursor = private_ws.convergence_cursor().await
+        .map_err(|error| format!("private history cursor: {error}"))?;
+    let facts = account.ledger_facts(&snapshot).await
+        .map_err(|error| format!("native order/fill/bill readback: {error}"))?;
+    let window = private_ws.convergence_window(history_cursor).await
+        .map_err(|error| format!("private history read interrupted: {error}"))?;
+    if !window.events.is_empty()
+        || window.generation != first.generation
+        || facts.summary.account_generation != snapshot.account_generation
+        || facts.summary.authority.account_uid_fingerprint
+            != snapshot.authority.account_uid_fingerprint
+        || !okx_execution::DurableExchangeEvidence::complete_source_checkpoint(&facts)
+    {
+        return Err("native financial history/account/WS proof incomplete".into());
+    }
+    let (assessment, _) = execution
+        .reconcile_account_ledger_with_intents(&facts, true)
+        .await
+        .map_err(|error| format!("durable native financial capture: {error}"))?;
+    if !assessment.consistent {
+        return Err("native financial reconciliation inconsistent".into());
+    }
     Ok(())
 }
 

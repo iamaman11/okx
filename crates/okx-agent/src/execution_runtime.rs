@@ -171,6 +171,17 @@ impl ExecutionRuntime {
     /// Return the exchange reconciliation and exact identity inventory under
     /// one ledger lock so the two views cannot observe different intent sets.
     /// This does not perform a gateway send or a mutation.
+    /// Read-only admission for the in-process private-order event source.
+    /// The executor ledger remains the sole owner of durable evidence.
+    pub async fn strategy_financial_capture_active(&self) -> bool {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !self.environment.demo {
+            return false;
+        }
+        let executor = self.executor.lock().await;
+        executor.ledger().capital_reservation().is_some()
+            && executor.ledger().finalized_run().is_none()
+    }
+
     pub async fn reconcile_account_ledger_with_intents(
         &self,
         facts: &AccountLedgerFacts,

@@ -27,6 +27,7 @@ const SERVICE_UPGRADE_NOTICE_CODE: &str = "64008";
 #[derive(Clone)]
 pub struct PrivateWsHandle {
     state: Arc<RwLock<PrivateRuntimeState>>,
+    financial_order_signal: watch::Receiver<u64>,
 }
 
 pub struct PrivateWsCoordinator {
@@ -35,6 +36,7 @@ pub struct PrivateWsCoordinator {
     state: Arc<RwLock<PrivateRuntimeState>>,
     generation: u64,
     rate_budget: RateBudget,
+    financial_order_signal: watch::Sender<u64>,
 }
 
 #[derive(Debug)]
@@ -44,6 +46,12 @@ enum GenerationOutcome {
 }
 
 impl PrivateWsHandle {
+    /// Event-driven notification only. It carries no trading authority, no
+    /// exchange-side completeness claim and no order payload.
+    pub fn subscribe_financial_order_events(&self) -> watch::Receiver<u64> {
+        self.financial_order_signal.clone()
+    }
+
     pub async fn status(&self) -> PrivateWsStatus {
         self.state.read().await.status()
     }
@@ -95,6 +103,7 @@ impl PrivateWsCoordinator {
         rate_budget: RateBudget,
     ) -> (Self, PrivateWsHandle) {
         let state = Arc::new(RwLock::new(PrivateRuntimeState::new()));
+        let (financial_order_signal, financial_order_receiver) = watch::channel(0);
         (
             Self {
                 environment,
@@ -102,8 +111,9 @@ impl PrivateWsCoordinator {
                 state: Arc::clone(&state),
                 generation: 0,
                 rate_budget,
+                financial_order_signal,
             },
-            PrivateWsHandle { state },
+            PrivateWsHandle { state, financial_order_signal: financial_order_receiver },
         )
     }
 
@@ -345,11 +355,22 @@ impl PrivateWsCoordinator {
                                     }
                                 };
 
+                                // The account/position events are not full
+                                // fill/bill source proof. Only a real order
+                                // update wakes the same Windows ledger owner;
+                                // the owner re-reads REST history and fences WS.
+                                let order_update = matches!(&event,
+                                    PrivateWsEvent::Orders(orders) if !orders.is_empty());
                                 saw_data = true;
                                 self.state
                                     .write()
                                     .await
                                     .observe_event(event, now_ms());
+                                if order_update {
+                                    let next = self.financial_order_signal
+                                        .borrow().saturating_add(1);
+                                    self.financial_order_signal.send_replace(next);
+                                }
                             }
                             PrivateInboundMessage::Other(_) => {}
                         },
