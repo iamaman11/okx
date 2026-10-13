@@ -46,6 +46,9 @@ pub enum AgentError {
     #[error("research session runtime task failed: {0}")]
     ResearchSessionTask(String),
 
+    #[error("native financial evidence capture task failed: {0}")]
+    FinancialCaptureTask(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

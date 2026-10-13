@@ -163,8 +163,8 @@ pub async fn run_mailbox_until_shutdown(
             result = &mut private_financial_capture => {
                 // Unavailable capture is an observable fail-closed runtime
                 // condition, never an alternate REST submit or a quiet PASS.
-                return Err(AgentError::PublicRuntimeTask(format!(
-                    "native financial source capture owner exited: {result:?}"
+                return Err(AgentError::FinancialCaptureTask(format!(
+                    "event-driven financial source capture exited: {result:?}"
                 )));
             }
             runtime_result = &mut public_runtime_task => {

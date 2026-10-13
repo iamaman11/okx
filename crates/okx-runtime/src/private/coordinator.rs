@@ -483,8 +483,9 @@ impl PrivateWsCoordinator {
     }
 }
 
-/// Only an authenticated, nonempty order delta is a native ledger
-/// capture trigger. It is NOT a bill/fill completeness witness itself.
+/// Only authenticated, nonempty account, position or order WS deltas
+/// trigger a native REST financial readback. WS itself is never a
+/// fill/bill completeness witness.
 fn signals_financial_source_capture(event: &PrivateWsEvent) -> bool {
     match event {
         PrivateWsEvent::Account(rows) => !rows.is_empty(),
@@ -545,6 +546,19 @@ mod tests {
         assert!(signals_financial_source_capture(&PrivateWsEvent::Account(
             vec![account]
         )));
+    }
+
+    #[test]
+    fn watch_events_coalesce_without_claiming_intermediate_financial_proof() {
+        let (sender, mut receiver) = watch::channel(0_u64);
+        sender.send_replace(1);
+        sender.send_replace(2);
+        assert!(receiver.has_changed().unwrap());
+        assert_eq!(*receiver.borrow_and_update(), 2);
+        assert!(!receiver.has_changed().unwrap());
+        sender.send_replace(3);
+        assert_eq!(*receiver.borrow_and_update(), 3);
+        // The wakeup carries only an event count, never a fill/bill amount.
     }
 
     #[test]
