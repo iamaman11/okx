@@ -1489,6 +1489,161 @@ mod tests {
     }
 
     #[test]
+    fn run_lot_causality_refuses_unowned_exit_and_double_reduction() {
+        let mut size = BTreeMap::new();
+        let d = |v: &str| Decimal::from_str(v).expect("test decimal");
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "long",
+                "sell",
+                ExecutionAction::Close,
+                d("1")
+            ),
+            Err("nav_exit_exceeds_run_owned_lot")
+        );
+        assert!(size
+            .get(&("BTC-USDT-SWAP".to_owned(), "long".to_owned()))
+            .is_some_and(|v| v.is_zero()));
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "long",
+                "buy",
+                ExecutionAction::Open,
+                d("2")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "long",
+                "sell",
+                ExecutionAction::Reduce,
+                d("1.25")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "long",
+                "sell",
+                ExecutionAction::Close,
+                d("1")
+            ),
+            Err("nav_exit_exceeds_run_owned_lot")
+        );
+        assert_eq!(
+            size.get(&("BTC-USDT-SWAP".to_owned(), "long".to_owned())),
+            Some(&d("0.75"))
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "long",
+                "sell",
+                ExecutionAction::Close,
+                d("0.75")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            size.get(&("BTC-USDT-SWAP".to_owned(), "long".to_owned())),
+            Some(&Decimal::ZERO)
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Close,
+                d("1")
+            ),
+            Err("nav_exit_exceeds_run_owned_lot")
+        );
+    }
+
+    #[test]
+    fn run_lot_causality_refuses_hedge_side_mismatch_and_invalid_size() {
+        let mut size = BTreeMap::new();
+        let d = |v: &str| Decimal::from_str(v).expect("test decimal");
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Hedge,
+                d("1")
+            ),
+            Err("nav_fill_action_side_mismatch")
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "sell",
+                ExecutionAction::Hedge,
+                d("1")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Close,
+                d("0")
+            ),
+            Err("nav_invalid_size")
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Close,
+                d("1")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Open,
+                d("1")
+            ),
+            Err("nav_fill_action_side_mismatch")
+        );
+        assert_eq!(
+            apply_run_lot_fill(
+                &mut size,
+                "BTC-USDT-SWAP",
+                "net",
+                "buy",
+                ExecutionAction::Open,
+                d("1")
+            ),
+            Err("nav_invalid_position_side")
+        );
+    }
+
+    #[test]
     fn old_fills_without_original_lineage_are_not_retroactively_attributed() {
         let p = path("strategy-attribution-legacy");
         let _ = std::fs::remove_file(&p);
