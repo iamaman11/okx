@@ -31,7 +31,7 @@ explicit optional live activation gate
 The final live activation gate is not a sixth development stage. Production live trading remains fail-closed until separately authorized after Stages 1–5 pass.
 
 
-**ACTIVE SINGLE CODE SLICE (draft [PR #316](https://github.com/iamaman11/okx/pull/316), following merged/installed #315):** #314 is already merged and physically installed: unique ledger-derived strategy_run_id for new risk. Current work remains within Stage 5B-1 and this ONE draft PR until complete source-exact owned fill/bill/fee/funding/PnL and durable event-source continuity, open-position NAV marks, finalized run and safe next epoch are proven. Interim CI or a standalone FLAT report cannot close 5B-1 or permit new-risk POST. After exact 6-job CI, tested/merged tree parity and CONTROL physical install, execute read-only and bounded Demo T1–T5 acceptance, then return to 5A daily STOP, then 5B-2/5C. No extra stage/process/transport or repeat of accepted OPEN/CLOSE baseline.
+**ACTIVE SINGLE CODE SLICE: draft [PR #317](https://github.com/iamaman11/okx/pull/317) following verified merged+installed #316:** in the same authenticated Windows private-WS coordinator, native order updates now signal the one ledger owner to acquire REST order/fill/bill and persist only source-complete WS-fenced evidence. No new scheduler, daemon, transport, executor or fake accounting result. #316 merged/installed, #315 merged/installed. Missing 2-hour quiet-window evidence, unsupported ambiguous funding, >16-run retention, high-water/day STOP and physical Demo financial lifecycle remain NOT_ACCEPTED. #160 is the only acceptance authority.
 
 ## One operative cursor — Stage 5B-1 owner-bound intents after installed #313 (2026-10-13)
 
