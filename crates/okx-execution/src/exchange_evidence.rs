@@ -510,6 +510,24 @@ mod tests {
     }
 
     #[test]
+    fn week_of_minute_spaced_read_only_snapshots_stays_below_cursor_capacity() {
+        let mut latest = None;
+        let mut persisted = 0_usize;
+        for minute in 0..(7 * 24 * 60_u64) {
+            let native_as_of = 1_000_000 + minute * 60_000;
+            if should_persist_source_cursor(latest, native_as_of, false, false) {
+                persisted += 1;
+                latest = Some(native_as_of);
+            }
+        }
+        assert_eq!(persisted, 7 * 24 * 12);
+        assert!(persisted < MAX_CURSORS);
+        // Every observed new native bill/fill still requires an immediate
+        // checkpoint even if the previous one is seconds old.
+        assert!(should_persist_source_cursor(latest, latest.unwrap() + 1, true, false));
+    }
+
+    #[test]
     fn duplicate_is_idempotent_conflict_and_corruption_fail_closed() {
         let mut evidence = DurableExchangeEvidence {
             schema: EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
