@@ -347,7 +347,7 @@ pub async fn run_mailbox_until_shutdown(
 /// observer. It obtains a fresh REST baseline and complete exact native
 /// orders/fills/bills, then checks both private WS convergence fences before
 /// persisting under the already existing one execution-ledger mutex.
-/// 
+///
 /// Failed or incomplete attempts are diagnostic only: no fabricated cursor,
 /// no fake fill/bill, and no acknowledgement of source completeness.
 async fn capture_native_finance_on_order_events(
@@ -377,27 +377,44 @@ async fn capture_one_native_financial_source(
     private_ws: &PrivateWsHandle,
     execution: &ExecutionRuntime,
 ) -> Result<(), String> {
-    let cursor = private_ws.convergence_cursor().await
+    let cursor = private_ws
+        .convergence_cursor()
+        .await
         .map_err(|error| format!("initial private WS not ready: {error}"))?;
-    let rest = account.snapshot().await
+    let rest = account
+        .snapshot()
+        .await
         .map_err(|error| format!("independent REST account: {error}"))?;
-    let first = private_ws.convergence_window(cursor).await
+    let first = private_ws
+        .convergence_window(cursor)
+        .await
         .map_err(|error| format!("initial WS source changed: {error}"))?;
     if !first.events.is_empty() {
         return Err("private order/account events during REST bootstrap".into());
     }
-    let fingerprint = first.status.connection_id_fingerprint.as_deref()
+    let fingerprint = first
+        .status
+        .connection_id_fingerprint
+        .as_deref()
         .ok_or("private WS connection fingerprint unavailable")?;
-    let received = first.status.last_inbound_ms
+    let received = first
+        .status
+        .last_inbound_ms
         .ok_or("private WS last inbound time missing")?;
-    let snapshot = rest.converge_private_ws(
-        first.generation, fingerprint, received, &first.events,
-    ).map_err(|error| format!("REST+WS convergence: {error}"))?;
-    let history_cursor = private_ws.convergence_cursor().await
+    let snapshot = rest
+        .converge_private_ws(first.generation, fingerprint, received, &first.events)
+        .map_err(|error| format!("REST+WS convergence: {error}"))?;
+    let history_cursor = private_ws
+        .convergence_cursor()
+        .await
         .map_err(|error| format!("private history cursor: {error}"))?;
-    let facts = account.ledger_facts(&snapshot).await
+    let facts = account
+        .ledger_facts(&snapshot)
+        .await
         .map_err(|error| format!("native order/fill/bill readback: {error}"))?;
-    let window = private_ws.convergence_window(history_cursor).await
+    let window = private_ws
+        .convergence_window(history_cursor)
+        .await
         .map_err(|error| format!("private history read interrupted: {error}"))?;
     if !window.events.is_empty()
         || window.generation != first.generation

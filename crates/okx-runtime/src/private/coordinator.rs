@@ -113,7 +113,10 @@ impl PrivateWsCoordinator {
                 rate_budget,
                 financial_order_signal,
             },
-            PrivateWsHandle { state, financial_order_signal: financial_order_receiver },
+            PrivateWsHandle {
+                state,
+                financial_order_signal: financial_order_receiver,
+            },
         )
     }
 
@@ -513,14 +516,23 @@ mod tests {
 
     #[test]
     fn private_account_chatter_never_triggers_financial_checkpoint() {
-        assert!(!signals_financial_order_capture(&PrivateWsEvent::Account(vec![])));
-        assert!(!signals_financial_order_capture(&PrivateWsEvent::Positions(vec![])));
-        assert!(!signals_financial_order_capture(&PrivateWsEvent::Orders(vec![])));
+        assert!(!signals_financial_order_capture(&PrivateWsEvent::Account(
+            vec![]
+        )));
+        assert!(!signals_financial_order_capture(
+            &PrivateWsEvent::Positions(vec![])
+        ));
+        assert!(!signals_financial_order_capture(&PrivateWsEvent::Orders(
+            vec![]
+        )));
         let order = serde_json::from_value::<PendingOrder>(serde_json::json!({
             "instId": "BTC-USDT-SWAP", "ordId": "native-order-123",
             "state": "filled", "accFillSz": "1"
-        })).unwrap();
-        assert!(signals_financial_order_capture(&PrivateWsEvent::Orders(vec![order])));
+        }))
+        .unwrap();
+        assert!(signals_financial_order_capture(&PrivateWsEvent::Orders(
+            vec![order]
+        )));
     }
 
     #[test]
