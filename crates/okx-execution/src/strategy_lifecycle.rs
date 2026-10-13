@@ -137,7 +137,12 @@ impl StrategyPeriodHistory {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
         }
         let mut seen = std::collections::BTreeSet::new();
+        let mut last_finalized = 0;
         for archived in &self.archived_runs {
+            if archived.reservation.started_at_ms <= last_finalized {
+                return Err(ExecutionLedgerError::Corrupt("overlapping archived run boundaries"));
+            }
+            last_finalized = archived.finalization.finalized_at_ms;
             archived.validate()?;
             if !seen.insert(archived.reservation.allocation_id.as_str())
                 || active.is_some_and(|a| {
@@ -150,6 +155,9 @@ impl StrategyPeriodHistory {
         if let Some(run) = active {
             if seen.contains(run.allocation_id.as_str()) {
                 return Err(ExecutionLedgerError::CapitalReservationConflict);
+            }
+            if last_finalized > 0 && run.started_at_ms <= last_finalized {
+                return Err(ExecutionLedgerError::Corrupt("next run predates prior financial close"));
             }
         } else if evidence.is_some()
             || self.finalized_run.is_some()
@@ -217,6 +225,37 @@ mod tests {
         let decoded: StrategyFinalization =
             serde_json::from_slice(&serde_json::to_vec(&finalization).unwrap()).unwrap();
         decoded.validate(&run, &evidence).unwrap();
+        let archived = ArchivedStrategyRun {
+            reservation: run.clone(),
+            evidence: evidence.clone(),
+            finalization: decoded.clone(),
+        };
+        let mut next = run.clone();
+        next.allocation_id = "run_finalization_demo_next_01".to_owned();
+        next.started_at_ms = 3000;
+        let history = StrategyPeriodHistory {
+            finalized_run: None,
+            archived_runs: vec![archived.clone()],
+        };
+        history.validate(Some(&next), None).unwrap();
+        let round_trip: StrategyPeriodHistory =
+            serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
+        round_trip.validate(Some(&next), None).unwrap();
+        assert!(matches!(
+            history.validate(Some(&run), None),
+            Err(ExecutionLedgerError::CapitalReservationConflict)
+        ));
+        let mut premature_next = next.clone();
+        premature_next.started_at_ms = 2000;
+        assert!(matches!(
+            history.validate(Some(&premature_next), None),
+            Err(ExecutionLedgerError::Corrupt(_))
+        ));
+        let duplicate_history = StrategyPeriodHistory {
+            finalized_run: None,
+            archived_runs: vec![archived.clone(), archived],
+        };
+        assert!(duplicate_history.validate(Some(&next), None).is_err());
         let mut tampered = decoded;
         tampered.nav_usdt = "100000".into();
         assert!(matches!(
