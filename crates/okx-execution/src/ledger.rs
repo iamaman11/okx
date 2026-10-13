@@ -177,8 +177,7 @@ fn validate_capital_reservation(
     let allocated = Decimal::from_str(&r.allocated_usdt).ok();
     let equity = Decimal::from_str(&r.opening_account_usdt_equity).ok();
     if r.schema != STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1
-        || r.allocation_id.trim().is_empty()
-        || r.allocation_id.len() > 128
+        || !valid_intent_id(&r.allocation_id)
         || r.account_uid_fingerprint.trim().is_empty()
         || r.account_generation.trim().is_empty()
         || r.origin_schema.trim().is_empty()
@@ -303,6 +302,7 @@ impl ExecutionLedgerStore {
             }
             ledger_uid = Some(uid.clone());
             validate_entry(&entry)?;
+            validate_strategy_run_binding(&entry, file.capital_reservation.as_ref())?;
             let intent_id = entry.record.plan.intent_id.clone();
             if by_intent.insert(intent_id, entry.clone()).is_some() {
                 return Err(ExecutionLedgerError::Corrupt("duplicate intent_id"));
@@ -334,6 +334,7 @@ impl ExecutionLedgerStore {
             }
             ledger_uid = Some(uid);
             validate_entry(entry)?;
+            validate_strategy_run_binding(entry, capital_reservation)?;
             if intent_id != &entry.record.plan.intent_id {
                 return Err(ExecutionLedgerError::Corrupt(
                     "map key does not match intent_id",
@@ -526,6 +527,7 @@ impl DurableExecutionLedger {
                 .risk_binding
                 .as_ref()
                 .is_none_or(|b| b.mandate.version != r.mandate_version)
+            || record.strategy_run_id.as_deref() != Some(r.allocation_id.as_str())
         {
             return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
         }
@@ -705,7 +707,7 @@ impl DurableExecutionLedger {
 
     fn prepare_record(
         &mut self,
-        record: ExecutionRecord,
+        mut record: ExecutionRecord,
         reverse_root_bypass: Option<&str>,
         observed_at_ms: u64,
         confirmed_coverage: bool,
@@ -713,6 +715,13 @@ impl DurableExecutionLedger {
         require_timestamp(observed_at_ms)?;
         validate_plan_identity(&record.plan)?;
         validate_reverse_link(&record)?;
+        // Bind from the single trusted ledger owner, never from ChatGPT/plan.
+        // A CLOSE has no proven lot owner yet and MUST remain unattributed.
+        if record.plan.action.is_risk_increasing() {
+            if let Some(run) = &self.capital_reservation {
+                record.strategy_run_id = Some(run.allocation_id.clone());
+            }
+        }
         self.validate_capital_intent(&record, observed_at_ms)?;
         // One ledger is owned by exactly one authenticated exchange UID,
         // even after FLAT or when the previous managed intents are terminal.
@@ -1276,6 +1285,41 @@ impl DurableExecutionLedger {
             .expect("persisted entry exists")
             .clone())
     }
+}
+
+/// One run owns an intent only when this ledger itself recorded its opening
+/// and the exact execution origin/mandate matches the opening. This check
+/// rejects forged, orphaned, foreign and backdated run links on disk.
+fn validate_strategy_run_binding(
+    entry: &ExecutionLedgerEntry,
+    active_run: Option<&StrategyCapitalReservation>,
+) -> Result<(), ExecutionLedgerError> {
+    let Some(run_id) = entry.record.strategy_run_id.as_deref() else {
+        // Historical executions must remain readable but not retroactively
+        // become attributed merely because a newer run was opened.
+        return Ok(());
+    };
+    let Some(run) = active_run else {
+        return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
+    };
+    if !valid_intent_id(run_id)
+        || run_id != run.allocation_id
+        || !entry.record.plan.action.is_risk_increasing()
+        || entry.created_at_ms <= run.started_at_ms
+        || entry.record.plan.account_uid_fingerprint != run.account_uid_fingerprint
+        || entry.record.lineage.as_ref().is_none_or(|l| {
+            l.origin_schema != run.origin_schema || l.origin_version != run.origin_version
+        })
+        || entry
+            .record
+            .plan
+            .risk_binding
+            .as_ref()
+            .is_none_or(|b| b.mandate.version != run.mandate_version)
+    {
+        return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
+    }
+    Ok(())
 }
 
 fn validate_entry(entry: &ExecutionLedgerEntry) -> Result<(), ExecutionLedgerError> {
