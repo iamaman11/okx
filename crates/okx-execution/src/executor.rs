@@ -396,9 +396,9 @@ where
         protection_absent: bool,
         now_ms: u64,
     ) -> Result<crate::StrategyFinalization, OrderExecutorError> {
-        Ok(self.ledger.finalize_strategy_run(
-            facts, coherent, protection_absent, now_ms,
-        )?)
+        Ok(self
+            .ledger
+            .finalize_strategy_run(facts, coherent, protection_absent, now_ms)?)
     }
 
     pub fn stop_new_risk(

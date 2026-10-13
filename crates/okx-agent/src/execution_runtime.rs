@@ -13,8 +13,7 @@ use okx_execution::{
     ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
     ManagedExecutionInventory, MutationAuthority, MutationPrepareDisposition,
     MutationSubmitDisposition, OrderExecutor, OrderExecutorError, PositionSide, PrepareOutcome,
-    StrategyAllocationOpening, StrategyCapitalReservation, StrategyFinalization,
-    SubmitDisposition,
+    StrategyAllocationOpening, StrategyCapitalReservation, StrategyFinalization, SubmitDisposition,
     execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
 };
 use okx_observation::{
@@ -291,8 +290,7 @@ impl ExecutionRuntime {
             || self.mode != ExecutionRuntimeMode::DemoAcceptance
             || !preflight.accepted
             || preflight.production_environment
-            || preflight.account_uid_fingerprint
-                != facts.summary.authority.account_uid_fingerprint
+            || preflight.account_uid_fingerprint != facts.summary.authority.account_uid_fingerprint
             || executor.ledger().capital_reservation().is_none_or(|run| {
                 run.allocation_id != expected_run_id
                     || run.account_uid_fingerprint != preflight.account_uid_fingerprint
@@ -304,7 +302,10 @@ impl ExecutionRuntime {
             executor.capture_exchange_evidence(facts)?;
         }
         Ok(Some(executor.finalize_strategy_run(
-            facts, coherent, protection_absent, observed_at_ms,
+            facts,
+            coherent,
+            protection_absent,
+            observed_at_ms,
         )))
     }
 

@@ -103,13 +103,17 @@ fn terminal_native_coverage(
 fn native_terminal_quantities(
     orders: &[&crate::exchange_evidence::StoredExchangeEvent],
 ) -> Option<(Decimal, Decimal)> {
-    let latest = orders.iter()
+    let latest = orders
+        .iter()
         .filter_map(|e| string(&e.payload, "uTime").and_then(|v| v.parse::<u64>().ok()))
         .max()?;
     let mut quantities: Option<(Decimal, Decimal)> = None;
     for order in orders {
         if string(&order.payload, "uTime")?.parse::<u64>().ok()? == latest {
-            let pair = (amount(&order.payload, "sz")?, amount(&order.payload, "accFillSz")?);
+            let pair = (
+                amount(&order.payload, "sz")?,
+                amount(&order.payload, "accFillSz")?,
+            );
             if quantities.is_some_and(|earlier| earlier != pair) {
                 return None;
             }
@@ -203,12 +207,19 @@ fn validate_terminal_order_coverage(
             reasons.insert("native_order_accumulated_fill_missing_or_conflicting");
             continue;
         };
-        let parts = fills.iter().map(|f| amount(&f.payload, "fillSz")).collect::<Vec<_>>();
+        let parts = fills
+            .iter()
+            .map(|f| amount(&f.payload, "fillSz"))
+            .collect::<Vec<_>>();
         // Native final accFillSz proves zero or partial fills before cancel.
         // An amendment still requires independently proved final size lineage.
         if !terminal_native_coverage(
-            &last_state, expected, exchange_size, accumulated,
-            &parts, !record.mutations.is_empty(),
+            &last_state,
+            expected,
+            exchange_size,
+            accumulated,
+            &parts,
+            !record.mutations.is_empty(),
         ) {
             reasons.insert("terminal_order_native_fill_coverage_not_proven");
         }
@@ -873,19 +884,25 @@ mod tests {
     fn native_terminal_quantity_accepts_only_exact_native_canceled_coverage() {
         let d = |n: i64| Some(Decimal::new(n, 0));
         let ok = |state, qty, acc, fills: Vec<Option<Decimal>>, amended| {
-            terminal_native_coverage(state, Decimal::new(5,0),
-                Decimal::new(qty,0), Decimal::new(acc,0), &fills, amended)
+            terminal_native_coverage(
+                state,
+                Decimal::new(5, 0),
+                Decimal::new(qty, 0),
+                Decimal::new(acc, 0),
+                &fills,
+                amended,
+            )
         };
-        assert!(ok("filled",5,5,vec![d(2),d(3)],false));
-        assert!(ok("canceled",5,0,vec![],false));
-        assert!(ok("canceled",5,3,vec![d(1),d(2)],false));
-        assert!(!ok("canceled",5,3,vec![d(1)],false));
-        assert!(!ok("canceled",5,3,vec![d(1),None],false));
-        assert!(!ok("filled",5,3,vec![d(3)],false));
-        assert!(!ok("canceled",5,6,vec![d(6)],false));
-        assert!(!ok("canceled",6,3,vec![d(3)],false));
-        assert!(!ok("filled",5,5,vec![d(5)],true));
-        assert!(!ok("live",5,0,vec![],false));
+        assert!(ok("filled", 5, 5, vec![d(2), d(3)], false));
+        assert!(ok("canceled", 5, 0, vec![], false));
+        assert!(ok("canceled", 5, 3, vec![d(1), d(2)], false));
+        assert!(!ok("canceled", 5, 3, vec![d(1)], false));
+        assert!(!ok("canceled", 5, 3, vec![d(1), None], false));
+        assert!(!ok("filled", 5, 3, vec![d(3)], false));
+        assert!(!ok("canceled", 5, 6, vec![d(6)], false));
+        assert!(!ok("canceled", 6, 3, vec![d(3)], false));
+        assert!(!ok("filled", 5, 5, vec![d(5)], true));
+        assert!(!ok("live", 5, 0, vec![], false));
     }
 
     #[test]

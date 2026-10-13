@@ -386,26 +386,31 @@ async fn finalize_strategy_run(
 ) -> AgentResult<AgentResponse> {
     let deny = |reason: &str| {
         failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
-            EXECUTION_STRATEGY_CLOSE_UNATTESTED_CODE, reason.to_owned(), false,
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_STRATEGY_CLOSE_UNATTESTED_CODE,
+            reason.to_owned(),
+            false,
         )
     };
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
     if !execution.demo_mutation_acceptance_requested() {
-        return Ok(deny("only the authenticated Demo owner can finalize a strategy run"));
+        return Ok(deny(
+            "only the authenticated Demo owner can finalize a strategy run",
+        ));
     }
     let snapshot = match fresh_account(request, context, generated_at).await? {
         FreshAccount::Ready(account) => account,
         FreshAccount::Response(reply) => return Ok(*reply),
     };
-    let preflight = match executor_preflight_check(
-        request, generated_at, execution, &snapshot,
-    ).await? {
-        ExecutorPreflightCheck::Ready(value) => value,
-        ExecutorPreflightCheck::Response(reply) => return Ok(*reply),
-    };
+    let preflight =
+        match executor_preflight_check(request, generated_at, execution, &snapshot).await? {
+            ExecutorPreflightCheck::Ready(value) => value,
+            ExecutorPreflightCheck::Response(reply) => return Ok(*reply),
+        };
     if !preflight.accepted || preflight.production_environment {
         return Ok(preflight_rejected(request, generated_at));
     }
@@ -437,23 +442,35 @@ async fn finalize_strategy_run(
         || !facts.exchange_orders_history_complete
         || !facts.exchange_fills_history_complete
         || !facts.bills_history_complete
-        || facts.summary.history_coverage.iter().any(|c| !c.complete_within_bound)
-        || !protection.complete_within_bound || protection.rows != 0
+        || facts
+            .summary
+            .history_coverage
+            .iter()
+            .any(|c| !c.complete_within_bound)
+        || !protection.complete_within_bound
+        || protection.rows != 0
     {
-        return Ok(deny("account FLAT, source coverage, native protection or WS coherence not proved"));
+        return Ok(deny(
+            "account FLAT, source coverage, native protection or WS coherence not proved",
+        ));
     }
     let now = utc_now_ms();
     match execution
-        .finalize_strategy_run_demo_authorized(
-            &preflight, allocation_id, &facts, true, true, now,
-        ).await?
+        .finalize_strategy_run_demo_authorized(&preflight, allocation_id, &facts, true, true, now)
+        .await?
     {
         Some(Ok(done)) => Ok(completed(
-            request, generated_at, okx_execution::STRATEGY_FINALIZATION_SCHEMA_V1,
+            request,
+            generated_at,
+            okx_execution::STRATEGY_FINALIZATION_SCHEMA_V1,
             serde_json::to_value(done)?,
         )),
-        Some(Err(error)) => Ok(deny(&format!("durable financial period incomplete: {error}"))),
-        None => Ok(deny("exact active strategy run or Demo account identity not verified")),
+        Some(Err(error)) => Ok(deny(&format!(
+            "durable financial period incomplete: {error}"
+        ))),
+        None => Ok(deny(
+            "exact active strategy run or Demo account identity not verified",
+        )),
     }
 }
 
