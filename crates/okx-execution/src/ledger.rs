@@ -2207,6 +2207,78 @@ mod tests {
     }
 
     #[test]
+    fn archived_run_is_reopened_from_disk_and_tampered_final_nav_refused_without_rewrite() {
+        let root = temp_root("archived-run-tamper");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let prior = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "run_archived_source_0123456789".to_owned(),
+            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            origin_schema: "okx.research.live-decision/v1".to_owned(),
+            origin_version: "v1".to_owned(),
+            mandate_version: "mandate-v1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: "generation".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1000,
+        };
+        let source = DurableExchangeEvidence::new(&prior).unwrap();
+        let report = crate::StrategyFinancialPeriod {
+            schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+            run_id: prior.allocation_id.clone(),
+            state: "FLAT_RECONCILED",
+            evidence_sha256: source.checksum_sha256.clone(),
+            allocation_usdt: "100".to_owned(),
+            linked_fills: 0,
+            linked_bills: 0,
+            realized_usdt: "0".to_owned(),
+            fees_usdt: "0".to_owned(),
+            funding_usdt: None,
+            unrealized_usdt: Some("0".to_owned()),
+            nav_usdt: Some("100".to_owned()),
+            positions: Vec::new(),
+            usable_for_new_risk: false,
+            reasons: Vec::new(),
+        };
+        let finalization = StrategyFinalization::new(&prior, &source, &report, 2000).unwrap();
+        let mut next = prior.clone();
+        next.allocation_id = "run_next_source_0123456789".to_owned();
+        next.started_at_ms = 3000;
+        let file = ExecutionLedgerFile {
+            schema: EXECUTION_LEDGER_SCHEMA_V9.to_owned(),
+            records: Vec::new(),
+            risk_stop: None,
+            capital_reservation: Some(next),
+            exchange_evidence: None,
+            strategy_periods: StrategyPeriodHistory {
+                finalized_run: None,
+                archived_runs: vec![ArchivedStrategyRun {
+                    reservation: prior, evidence: source, finalization,
+                }],
+            },
+        };
+        fs::write(store.path(), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+        let reopened = DurableExecutionLedger::open(store.clone(), 3200).unwrap();
+        assert_eq!(reopened.archived_runs_count(), 1);
+        assert!(reopened.finalized_run().is_none());
+        drop(reopened);
+        let mut altered = serde_json::to_value(&file).unwrap();
+        altered["strategy_periods"]["archived_runs"][0]["finalization"]["nav_usdt"] =
+            serde_json::json!("1000000");
+        let tampered = serde_json::to_vec_pretty(&altered).unwrap();
+        fs::write(store.path(), &tampered).unwrap();
+        assert!(matches!(
+            DurableExecutionLedger::open(store.clone(), 3300),
+            Err(ExecutionLedgerError::Corrupt(_))
+        ));
+        assert_eq!(fs::read(store.path()).unwrap(), tampered);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn missing_ledger_opens_empty_and_prepare_round_trips() {
         let root = temp_root("roundtrip");
         let _ = fs::remove_dir_all(&root);
