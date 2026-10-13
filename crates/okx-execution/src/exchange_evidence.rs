@@ -524,7 +524,12 @@ mod tests {
         assert!(persisted < MAX_CURSORS);
         // Every observed new native bill/fill still requires an immediate
         // checkpoint even if the previous one is seconds old.
-        assert!(should_persist_source_cursor(latest, latest.unwrap() + 1, true, false));
+        assert!(should_persist_source_cursor(
+            latest,
+            latest.unwrap() + 1,
+            true,
+            false
+        ));
     }
 
     #[test]
