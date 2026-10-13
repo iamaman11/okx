@@ -272,7 +272,7 @@ pub(super) fn strategy_opening_source_blockers(
     source_opening_blockers(StrategyOpeningSourceChecks {
         uid_matches: facts.summary.authority.account_uid_fingerprint == expected_uid,
         generation_matches: facts.summary.account_generation == account_generation,
-        usdt_only: !facts.nonzero_other_trading_currency_equity,
+        usdt_only: facts.usdt_margin_excludes_other_currencies(),
         native_usdt_equity_available: facts.trading_usdt_equity.is_some(),
         bills_complete: facts.bills_history_complete,
         orders_complete: facts.exchange_orders_history_complete,
@@ -502,7 +502,7 @@ async fn finalize_strategy_run(
         || facts.summary.account_generation != snapshot.account_generation
         || facts.summary.open_positions != 0
         || facts.summary.pending_orders != 0
-        || facts.nonzero_other_trading_currency_equity
+        || !facts.usdt_margin_excludes_other_currencies()
         || !facts.exchange_orders_history_complete
         || !facts.exchange_fills_history_complete
         || !facts.bills_history_complete
@@ -2666,7 +2666,13 @@ async fn pre_mutation_admission(
     // run-specific high-water and day loss become independently provable.
     let initial_strategy_nav = if plan.action.is_risk_increasing() {
         execution
-            .initial_strategy_nav_for_risk(&risk_facts, &plan, true)
+            .initial_strategy_nav_for_risk(
+                &risk_facts,
+                &plan,
+                true,
+                rules.instrument.settle_currency.as_deref(),
+                rules.instrument.contract_type.as_deref(),
+            )
             .await
     } else {
         None
