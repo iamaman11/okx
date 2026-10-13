@@ -359,8 +359,7 @@ impl PrivateWsCoordinator {
                                 // fill/bill source proof. Only a real order
                                 // update wakes the same Windows ledger owner;
                                 // the owner re-reads REST history and fences WS.
-                                let order_update = matches!(&event,
-                                    PrivateWsEvent::Orders(orders) if !orders.is_empty());
+                                let order_update = signals_financial_order_capture(&event);
                                 saw_data = true;
                                 self.state
                                     .write()
@@ -480,6 +479,12 @@ impl PrivateWsCoordinator {
     }
 }
 
+/// Only an authenticated, nonempty order delta is a native ledger
+/// capture trigger. It is NOT a bill/fill completeness witness itself.
+fn signals_financial_order_capture(event: &PrivateWsEvent) -> bool {
+    matches!(event, PrivateWsEvent::Orders(rows) if !rows.is_empty())
+}
+
 pub fn private_reconnect_delay(attempt: usize) -> Duration {
     let index = attempt.min(PRIVATE_RECONNECT_BACKOFF_SECONDS.len() - 1);
     Duration::from_secs(PRIVATE_RECONNECT_BACKOFF_SECONDS[index])
@@ -505,6 +510,18 @@ impl From<PrivateWsError> for PrivateRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_account_chatter_never_triggers_financial_checkpoint() {
+        assert!(!signals_financial_order_capture(&PrivateWsEvent::Account(vec![])));
+        assert!(!signals_financial_order_capture(&PrivateWsEvent::Positions(vec![])));
+        assert!(!signals_financial_order_capture(&PrivateWsEvent::Orders(vec![])));
+        let order = serde_json::from_value::<PendingOrder>(serde_json::json!({
+            "instId": "BTC-USDT-SWAP", "ordId": "native-order-123",
+            "state": "filled", "accFillSz": "1"
+        })).unwrap();
+        assert!(signals_financial_order_capture(&PrivateWsEvent::Orders(vec![order])));
+    }
 
     #[test]
     fn private_reconnect_backoff_is_bounded() {
