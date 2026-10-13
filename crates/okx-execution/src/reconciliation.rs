@@ -661,6 +661,43 @@ fn attribute_strategy_exchange_evidence(
     })
 }
 
+/// Changes in run-owned lots must be causally possible. A CLOSE or REDUCE
+/// cannot establish ownership by itself; it may only consume a previously
+/// observed run-owned OPEN/ADD/HEDGE fill in the same instrument/Hedge side.
+/// Neither order timestamp proximity nor shared account equity creates ownership.
+fn apply_run_lot_fill(
+    outstanding: &mut BTreeMap<(String, String), Decimal>,
+    instrument: &str,
+    position_side: &str,
+    side: &str,
+    action: ExecutionAction,
+    quantity: Decimal,
+) -> Result<(), &'static str> {
+    if quantity <= Decimal::ZERO {
+        return Err("nav_invalid_size");
+    }
+    let increasing = match (position_side, side) {
+        ("long", "buy") | ("short", "sell") => true,
+        ("long", "sell") | ("short", "buy") => false,
+        _ => return Err("nav_invalid_position_side"),
+    };
+    if increasing != action.is_risk_increasing() {
+        return Err("nav_fill_action_side_mismatch");
+    }
+    let position = outstanding
+        .entry((instrument.to_owned(), position_side.to_owned()))
+        .or_default();
+    if !increasing && *position < quantity {
+        return Err("nav_exit_exceeds_run_owned_lot");
+    }
+    if increasing {
+        *position += quantity;
+    } else {
+        *position -= quantity;
+    }
+    Ok(())
+}
+
 /// New-period, closed-position proof only. Any outside account event or
 /// incomplete venue history invalidates the NAV; open mark-to-market is NOT
 /// inferred from shared account equity.
@@ -711,15 +748,20 @@ fn assess_flat_strategy_nav(
     if entries.iter().any(|e| {
         !e.record.state.is_terminal()
             || e.record.plan.account_uid_fingerprint != capital.account_uid_fingerprint
-            || e.record.lineage.as_ref().is_none_or(|l| {
-                l.origin_schema != capital.origin_schema
-                    || l.origin_version != capital.origin_version
-            })
-            || e.record
-                .plan
-                .risk_binding
-                .as_ref()
-                .is_none_or(|b| b.mandate.version != capital.mandate_version)
+            || (e.record.plan.action.is_risk_increasing()
+                && (e.record.strategy_run_id.as_deref()
+                    != Some(capital.allocation_id.as_str())
+                    || e.record.lineage.as_ref().is_none_or(|l| {
+                        l.origin_schema != capital.origin_schema
+                            || l.origin_version != capital.origin_version
+                    })
+                    || e.record
+                        .plan
+                        .risk_binding
+                        .as_ref()
+                        .is_none_or(|b| b.mandate.version != capital.mandate_version)))
+            || (e.record.plan.action.is_risk_reducing()
+                && e.record.strategy_run_id.is_some())
     }) {
         reasons.push("nav_unowned_or_pending_intent");
     }
@@ -736,47 +778,70 @@ fn assess_flat_strategy_nav(
             reasons.push("nav_unowned_exchange_order");
         }
     }
-    for fill in facts
+    let mut ordered_fills = facts
         .exchange_fills
         .iter()
         .filter(|f| f.fill_time_ms >= capital.started_at_ms)
-    {
-        let owner = entries
+        .collect::<Vec<_>>();
+    ordered_fills.sort_by(|a, b| {
+        a.fill_time_ms
+            .cmp(&b.fill_time_ms)
+            .then_with(|| a.instrument_id.cmp(&b.instrument_id))
+            .then_with(|| a.trade_id.cmp(&b.trade_id))
+    });
+    // OKX millisecond timestamps alone do not establish the ordering of
+    // opposite executions at the same instant. Do not invent a close-after-open
+    // sequence merely from lexicographic trade IDs.
+    for pair in ordered_fills.windows(2) {
+        if pair[0].fill_time_ms == pair[1].fill_time_ms
+            && pair[0].instrument_id == pair[1].instrument_id
+            && pair[0].position_side == pair[1].position_side
+            && pair[0].side != pair[1].side
+        {
+            reasons.push("nav_fill_sequence_ambiguous");
+        }
+    }
+    for fill in ordered_fills {
+        let owners = entries
             .iter()
             .filter(|e| {
-                e.record.order_id.is_some()
-                    && e.record.order_id == fill.order_id
+                e.record.order_id.as_deref() == fill.order_id.as_deref()
+                    && e.record.order_id.is_some()
                     && e.record.plan.client_order_id == fill.client_order_id
                     && e.record.plan.instrument_id == fill.instrument_id
                     && e.record.plan.side.as_str() == fill.side
                     && e.record.plan.position_side.as_str() == fill.position_side
                     && facts.exchange_orders.iter().any(|o| {
-                        o.order_id == fill.order_id.clone().unwrap_or_default()
+                        Some(o.order_id.as_str()) == fill.order_id.as_deref()
                             && o.client_order_id == fill.client_order_id
                             && o.instrument_id == fill.instrument_id
                     })
             })
-            .count();
-        if owner != 1 || !seen_trades.insert((&fill.instrument_id, &fill.trade_id)) {
+            .collect::<Vec<_>>();
+        if owners.len() != 1 || !seen_trades.insert((&fill.instrument_id, &fill.trade_id)) {
             reasons.push("nav_unowned_or_duplicate_fill");
             continue;
         }
-        let qty = decimal("nav.fill_size", &fill.fill_size)?;
-        let signed = match (fill.position_side.as_str(), fill.side.as_str()) {
-            ("long", "buy") | ("short", "sell") => qty,
-            ("long", "sell") | ("short", "buy") => -qty,
-            _ => {
-                reasons.push("nav_invalid_position_side");
-                continue;
-            }
-        };
-        if qty <= Decimal::ZERO {
-            reasons.push("nav_invalid_size");
+        let owner = owners[0];
+        if owner.record.plan.action.is_risk_increasing()
+            && owner.record.strategy_run_id.as_deref()
+                != Some(capital.allocation_id.as_str())
+        {
+            reasons.push("nav_risk_fill_not_owned_by_run");
             continue;
         }
-        *size
-            .entry((fill.instrument_id.clone(), fill.position_side.clone()))
-            .or_default() += signed;
+        let qty = decimal("nav.fill_size", &fill.fill_size)?;
+        if let Err(reason) = apply_run_lot_fill(
+            &mut size,
+            &fill.instrument_id,
+            &fill.position_side,
+            &fill.side,
+            owner.record.plan.action,
+            qty,
+        ) {
+            reasons.push(reason);
+            continue;
+        }
         let bills = facts
             .exchange_bills
             .iter()
