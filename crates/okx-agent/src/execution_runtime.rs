@@ -235,14 +235,9 @@ impl ExecutionRuntime {
         let binding = plan.risk_binding.as_ref()?;
         // Trading equity must remain equal to the source-authenticated
         // opening reserve. External cash transfers are not strategy PnL.
-        let opening_equity = run.opening_account_usdt_equity.parse::<rust_decimal::Decimal>().ok()?;
-        let current_equity = facts
-            .trading_usdt_equity
-            .as_deref()?
-            .parse::<rust_decimal::Decimal>()
-            .ok()?;
+        let current_equity = facts.trading_usdt_equity.as_deref()?;
         if ledger.finalized_run().is_some()
-            || current_equity != opening_equity
+            || current_equity != run.opening_account_usdt_equity
             || ledger.risk_stop().is_some()
             || run.account_uid_fingerprint != facts.summary.authority.account_uid_fingerprint
             || run.account_uid_fingerprint != plan.account_uid_fingerprint
