@@ -941,6 +941,10 @@ fn require_strategy_nav_attribution(violations: &mut Vec<RiskPolicyViolation>) {
     });
 }
 
+/// Pure deterministic counterfactual risk screening for research/PAPER.
+/// An "Accepted" result here is *never* exchange submission authority:
+/// the native executor uses analyze_portfolio_risk and revalidates its
+/// independent account/ledger/NAV evidence before any real Demo POST.
 pub fn evaluate_candidate_risk(
     mandate: &TradingMandate,
     policy: &HardRiskPolicy,
@@ -970,9 +974,8 @@ pub fn evaluate_candidate_risk(
     )?;
 
     let mut violations = Vec::new();
-    // The ordinary account equity and declared mandate cannot certify a run.
-    // Source-specific NAV is not yet plumbed into this admission context.
-    require_strategy_nav_attribution(&mut violations);
+    // Counterfactual simulations account for their own deterministic capital.
+    // Never use this result as a substitute for the venue-side NAV proof.
     if matches!(policy.minimum_quality, RiskMinimumQuality::Fresh) && !context.account_is_fresh {
         violations.push(RiskPolicyViolation {
             code: "MINIMUM_DATA_QUALITY",
@@ -1740,7 +1743,7 @@ mod tests {
     }
 
     #[test]
-    fn reusable_candidate_gate_projects_bounded_order_but_denies_unattested_nav() {
+    fn research_candidate_gate_accepts_bounded_modelled_portfolio() {
         let candidate = PortfolioCandidate {
             instrument: "BTC-USDT-SWAP".to_owned(),
             direction: PositionDirection::Long,
@@ -1755,13 +1758,7 @@ mod tests {
             &replay_context(),
         )
         .expect("risk");
-        assert_eq!(result.decision, RiskPolicyDecision::Rejected);
-        assert!(
-            result
-                .violations
-                .iter()
-                .any(|v| v.code == "STRATEGY_NAV_UNATTESTED")
-        );
+        assert_eq!(result.decision, RiskPolicyDecision::Accepted);
         assert_eq!(
             result.projected_margin_utilization_ratio.as_deref(),
             Some("0.1")
