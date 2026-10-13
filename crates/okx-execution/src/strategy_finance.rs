@@ -807,7 +807,7 @@ mod tests {
 
     #[test]
     fn filled_order_without_complete_native_fill_fails_closed() {
-        use crate::{EXCHANGE_EVIDENCE_SCHEMA_V1, StoredExchangeEvent};
+        use crate::{EXCHANGE_EVIDENCE_SCHEMA_V1, exchange_evidence::StoredExchangeEvent};
         use serde_json::json;
         // Source-exact terminal state with no fills cannot be treated as
         // an accounted zero-result strategy period.
