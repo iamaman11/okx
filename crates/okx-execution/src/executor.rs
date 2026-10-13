@@ -377,13 +377,13 @@ where
 
     /// Source-exact financial close: bypasses only redundant quiet cursor
     /// coalescing; account/WS/source safety checks are never bypassed.
-    pub fn capture_exchange_evidence_for_finalization(
+    pub fn capture_exchange_evidence_fresh_cursor(
         &mut self,
         facts: &okx_observation::AccountLedgerFacts,
     ) -> Result<crate::ExchangeEvidenceSummary, OrderExecutorError> {
         Ok(self
             .ledger
-            .capture_exchange_evidence_for_finalization(facts)?)
+            .capture_exchange_evidence_fresh_cursor(facts)?)
     }
 
     /// Persist the single native account-scoped virtual allocation under
