@@ -104,7 +104,7 @@ fn latest_order_state(
         let time = string(&order.payload, "uTime")?.parse::<u64>().ok()?;
         let state = string(&order.payload, "state")?.to_owned();
         match &latest {
-            Some((previous, prior_state)) if time < *previous => {}
+            Some((previous, _)) if time < *previous => {}
             Some((previous, prior_state)) if time == *previous => {
                 if state != *prior_state { return None; }
             }
