@@ -1,6 +1,9 @@
 //! Pure, fail-closed strategy financial projection from the SINGLE persisted execution ledger.
 //! Never assign shared account equity, foreign fills or ambiguous funding to a run.
-use std::{collections::{BTreeMap, BTreeSet}, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+};
 
 use okx_observation::AccountLedgerFacts;
 use rust_decimal::Decimal;
@@ -100,7 +103,11 @@ fn put_lot(
         if book.iter().any(|l| l.contract_value != ct) {
             return Err("conflicting_contract_mechanics");
         }
-        book.push(Lot { contracts: size, price, contract_value: ct });
+        book.push(Lot {
+            contracts: size,
+            price,
+            contract_value: ct,
+        });
         return Ok(());
     }
     let available = book.iter().map(|l| l.contracts).sum::<Decimal>();
@@ -113,7 +120,9 @@ fn put_lot(
         let used = remaining.min(lot.contracts);
         lot.contracts -= used;
         remaining -= used;
-        if remaining == Decimal::ZERO { break; }
+        if remaining == Decimal::ZERO {
+            break;
+        }
     }
     book.retain(|l| l.contracts > Decimal::ZERO);
     Ok(())
@@ -133,70 +142,143 @@ pub fn assess_persisted_financial_period(
     let mut linked_bills = BTreeSet::<String>::new();
     let mut processed = 0usize;
     let allocation = Decimal::from_str(&run.allocated_usdt).unwrap_or(Decimal::ZERO);
-    let evidence_sha256 = evidence.map(|e| e.checksum_sha256.clone()).unwrap_or_default();
-    if !coherent { reasons.insert("account_snapshot_not_coherent"); }
+    let evidence_sha256 = evidence
+        .map(|e| e.checksum_sha256.clone())
+        .unwrap_or_default();
+    if !coherent {
+        reasons.insert("account_snapshot_not_coherent");
+    }
     if facts.summary.authority.account_uid_fingerprint != run.account_uid_fingerprint {
         reasons.insert("financial_account_uid_mismatch");
     }
     let Some(e) = evidence else {
         reasons.insert("durable_exchange_evidence_absent");
-        return incomplete(run, allocation, evidence_sha256, 0, 0, realized, fees,
-            Vec::new(), reasons);
+        return incomplete(
+            run,
+            allocation,
+            evidence_sha256,
+            0,
+            0,
+            realized,
+            fees,
+            Vec::new(),
+            reasons,
+        );
     };
-    if e.validate().is_err() || e.run_id != run.allocation_id
-        || e.account_uid != run.account_uid_fingerprint {
+    if e.validate().is_err()
+        || e.run_id != run.allocation_id
+        || e.account_uid != run.account_uid_fingerprint
+    {
         reasons.insert("invalid_persisted_source_integrity");
-        return incomplete(run, allocation, evidence_sha256, 0, 0, realized, fees,
-            Vec::new(), reasons);
+        return incomplete(
+            run,
+            allocation,
+            evidence_sha256,
+            0,
+            0,
+            realized,
+            fees,
+            Vec::new(),
+            reasons,
+        );
     }
-    if e.cursors.is_empty() { reasons.insert("source_coverage_missing"); }
-    let mut cursor_times = e.cursors.values().map(|c| c.account_as_of_ms).collect::<Vec<_>>();
+    if e.cursors.is_empty() {
+        reasons.insert("source_coverage_missing");
+    }
+    let mut cursor_times = e
+        .cursors
+        .values()
+        .map(|c| c.account_as_of_ms)
+        .collect::<Vec<_>>();
     cursor_times.sort_unstable();
     cursor_times.dedup();
     // Canceled unfilled exchange orders may vanish after 2 hours. Gaps cannot
     // be silently bridged by a later historical query or an empty response.
-    if cursor_times.first().is_none_or(|t| *t < run.started_at_ms ||
-        *t - run.started_at_ms > 7_200_000)
+    if cursor_times
+        .first()
+        .is_none_or(|t| *t < run.started_at_ms || *t - run.started_at_ms > 7_200_000)
         || cursor_times.windows(2).any(|v| v[1] - v[0] > 7_200_000)
     {
         reasons.insert("source_continuity_not_proven");
     }
-    if e.cursors.values().any(|c| !c.order_complete || !c.fill_complete || !c.bill_complete) {
+    if e.cursors
+        .values()
+        .any(|c| !c.order_complete || !c.fill_complete || !c.bill_complete)
+    {
         reasons.insert("persisted_source_window_truncated");
     }
-    if !facts.exchange_orders_history_complete || !facts.exchange_fills_history_complete
-        || !facts.bills_history_complete {
+    if !facts.exchange_orders_history_complete
+        || !facts.exchange_fills_history_complete
+        || !facts.bills_history_complete
+    {
         reasons.insert("current_source_window_truncated");
     }
 
-    let by_intent = entries.iter().map(|x| (x.record.plan.intent_id.as_str(), x))
+    let by_intent = entries
+        .iter()
+        .map(|x| (x.record.plan.intent_id.as_str(), x))
         .collect::<BTreeMap<_, _>>();
     let mut fills = Vec::<FilledLeg>::new();
-    for item in e.events.values().filter(|v| v.payload["source"] == "OKX_REST_FILL") {
+    for item in e
+        .events
+        .values()
+        .filter(|v| v.payload["source"] == "OKX_REST_FILL")
+    {
         let p = &item.payload;
         match (
-            timestamp(p, "ts"), string(p, "instId"), string(p, "posSide"),
-            string(p, "side"), string(p, "ordId"), string(p, "clOrdId"),
-            string(p, "tradeId"), string(p, "billId"),
-            amount(p, "fillSz"), amount(p, "fillPx"),
+            timestamp(p, "ts"),
+            string(p, "instId"),
+            string(p, "posSide"),
+            string(p, "side"),
+            string(p, "ordId"),
+            string(p, "clOrdId"),
+            string(p, "tradeId"),
+            string(p, "billId"),
+            amount(p, "fillSz"),
+            amount(p, "fillPx"),
         ) {
-            (Some(ts), Some(inst), Some(pos), Some(side), Some(ord),
-                Some(client), Some(trade), Some(bill), Some(size), Some(price))
-                if ts >= run.started_at_ms && size > Decimal::ZERO && price > Decimal::ZERO =>
-            {
+            (
+                Some(ts),
+                Some(inst),
+                Some(pos),
+                Some(side),
+                Some(ord),
+                Some(client),
+                Some(trade),
+                Some(bill),
+                Some(size),
+                Some(price),
+            ) if ts >= run.started_at_ms && size > Decimal::ZERO && price > Decimal::ZERO => {
                 fills.push(FilledLeg {
-                    source: item, ts, inst: inst.to_owned(), pos: pos.to_owned(),
-                    side: side.to_owned(), ord: ord.to_owned(), client: client.to_owned(),
-                    trade: trade.to_owned(), bill: bill.to_owned(), size, price
+                    source: item,
+                    ts,
+                    inst: inst.to_owned(),
+                    pos: pos.to_owned(),
+                    side: side.to_owned(),
+                    ord: ord.to_owned(),
+                    client: client.to_owned(),
+                    trade: trade.to_owned(),
+                    bill: bill.to_owned(),
+                    size,
+                    price,
                 });
             }
-            _ => { reasons.insert("missing_source_fill_identity"); }
+            _ => {
+                reasons.insert("missing_source_fill_identity");
+            }
         }
     }
-    fills.sort_by(|a,b| a.ts.cmp(&b.ts).then(a.inst.cmp(&b.inst)).then(a.trade.cmp(&b.trade)));
+    fills.sort_by(|a, b| {
+        a.ts.cmp(&b.ts)
+            .then(a.inst.cmp(&b.inst))
+            .then(a.trade.cmp(&b.trade))
+    });
     for pair in fills.windows(2) {
-        if pair[0].ts == pair[1].ts && pair[0].inst == pair[1].inst
-            && pair[0].pos == pair[1].pos && pair[0].side != pair[1].side {
+        if pair[0].ts == pair[1].ts
+            && pair[0].inst == pair[1].inst
+            && pair[0].pos == pair[1].pos
+            && pair[0].side != pair[1].side
+        {
             reasons.insert("same_timestamp_opposite_fill_sequence");
         }
     }
@@ -212,50 +294,69 @@ pub fn assess_persisted_financial_period(
         };
         let plan = &entry.record.plan;
         if entry.record.order_id.as_deref() != Some(f.ord.as_str())
-            || plan.client_order_id != f.client || plan.instrument_id != f.inst
-            || plan.side.as_str() != f.side || plan.position_side.as_str() != f.pos
+            || plan.client_order_id != f.client
+            || plan.instrument_id != f.inst
+            || plan.side.as_str() != f.side
+            || plan.position_side.as_str() != f.pos
             || plan.account_uid_fingerprint != run.account_uid_fingerprint
-            || entry.created_at_ms <= run.started_at_ms {
+            || entry.created_at_ms <= run.started_at_ms
+        {
             reasons.insert("source_order_intent_identity_mismatch");
             continue;
         }
-        if plan.action.is_risk_increasing() &&
-            (item.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
+        if plan.action.is_risk_increasing()
+            && (item.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
                 || entry.record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
-                || entry.record.lineage.as_ref().is_none_or(|l|
-                    l.origin_schema != run.origin_schema || l.origin_version != run.origin_version)
-                || plan.risk_binding.as_ref().is_none_or(|b|
-                    b.mandate.version != run.mandate_version)) {
+                || entry.record.lineage.as_ref().is_none_or(|l| {
+                    l.origin_schema != run.origin_schema || l.origin_version != run.origin_version
+                })
+                || plan
+                    .risk_binding
+                    .as_ref()
+                    .is_none_or(|b| b.mandate.version != run.mandate_version))
+        {
             reasons.insert("risk_increase_not_owned_by_run");
             continue;
         }
-        if plan.action.is_risk_reducing() &&
-            (item.strategy_run_id.is_some() || entry.record.strategy_run_id.is_some()) {
+        if plan.action.is_risk_reducing()
+            && (item.strategy_run_id.is_some() || entry.record.strategy_run_id.is_some())
+        {
             reasons.insert("unsupported_reducer_run_binding");
             continue;
         }
         // Only exact originating order identity and native fill source can
         // establish this leg. A shared instrument is not a sufficient link.
-        let matching_order = e.events.values().any(|x|
+        let matching_order = e.events.values().any(|x| {
             x.payload["source"] == "OKX_REST_ORDER"
                 && string(&x.payload, "ordId") == Some(f.ord.as_str())
                 && string(&x.payload, "clOrdId") == Some(f.client.as_str())
                 && string(&x.payload, "instId") == Some(f.inst.as_str())
-                && x.source_intent_id.as_deref() == Some(intent));
+                && x.source_intent_id.as_deref() == Some(intent)
+        });
         if !matching_order {
             reasons.insert("exact_source_order_missing");
             continue;
         }
-        let mechanics = entry.record.lineage.as_ref().and_then(|l| l.tca_mechanics.as_ref());
+        let mechanics = entry
+            .record
+            .lineage
+            .as_ref()
+            .and_then(|l| l.tca_mechanics.as_ref());
         let ct = if let Some(m) = mechanics {
             if m.settle_currency == "USDT" && m.contract_type.eq_ignore_ascii_case("linear") {
                 Decimal::from_str(&m.contract_value).ok()
-            } else { None }
-        } else { None };
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         // Reduction can reuse the original owned lot's mechanics; the exit
         // must not invent a contract value from its own missing lineage.
-        let ct = ct.or_else(|| lots.get(&(f.inst.clone(), f.pos.clone()))
-            .and_then(|v| v.first().map(|l| l.contract_value)));
+        let ct = ct.or_else(|| {
+            lots.get(&(f.inst.clone(), f.pos.clone()))
+                .and_then(|v| v.first().map(|l| l.contract_value))
+        });
         let Some(ct) = ct else {
             reasons.insert("linear_contract_mechanics_unattested");
             continue;
@@ -281,8 +382,10 @@ pub fn assess_persisted_financial_period(
             continue;
         }
         let (Some(native_fee), Some(bill_fee), Some(native_pnl), Some(bill_pnl)) = (
-            amount(&item.payload, "fee"), amount(bp, "fee"),
-            amount(&item.payload, "fillPnl"), amount(bp, "pnl")
+            amount(&item.payload, "fee"),
+            amount(bp, "fee"),
+            amount(&item.payload, "fillPnl"),
+            amount(bp, "pnl"),
         ) else {
             reasons.insert("missing_native_fee_or_pnl");
             continue;
@@ -295,8 +398,16 @@ pub fn assess_persisted_financial_period(
             reasons.insert("duplicate_bill_consumption");
             continue;
         }
-        if let Err(reason) = put_lot(&mut lots, &f.inst, &f.pos, &f.side,
-            plan.action, f.size, f.price, ct) {
+        if let Err(reason) = put_lot(
+            &mut lots,
+            &f.inst,
+            &f.pos,
+            &f.side,
+            plan.action,
+            f.size,
+            f.price,
+            ct,
+        ) {
             reasons.insert(reason);
             continue;
         }
@@ -308,7 +419,9 @@ pub fn assess_persisted_financial_period(
     // A separate bill, even for the same symbol, is not strategy-owned.
     // Funding subTypes carry no exact strategy/side link; never allocate them.
     for (key, bill) in &e.events {
-        if !key.starts_with("bill:") { continue; }
+        if !key.starts_with("bill:") {
+            continue;
+        }
         if matches!(string(&bill.payload, "subType"), Some("173" | "174")) {
             reasons.insert("funding_unallocated");
         } else if !linked_bills.contains(key.trim_start_matches("bill:")) {
@@ -318,37 +431,64 @@ pub fn assess_persisted_financial_period(
 
     let mut open_positions = Vec::new();
     let mut unrealized = Decimal::ZERO;
-    for ((inst,pos), book) in &lots {
+    for ((inst, pos), book) in &lots {
         let qty = book.iter().map(|l| l.contracts).sum::<Decimal>();
-        if qty == Decimal::ZERO { continue; }
-        let matches = facts.authoritative_positions.iter()
+        if qty == Decimal::ZERO {
+            continue;
+        }
+        let matches = facts
+            .authoritative_positions
+            .iter()
             .filter(|p| p.instrument_id == *inst && p.position_side == *pos)
             .collect::<Vec<_>>();
         let mut mark = None;
         let mut upl = None;
-        if matches.len() == 1 && Decimal::from_str(&matches[0].position)
-            .is_ok_and(|v| v.abs() == qty) {
+        if matches.len() == 1
+            && Decimal::from_str(&matches[0].position).is_ok_and(|v| v.abs() == qty)
+        {
             let position = matches[0];
-            if let Some(px) = position.mark_price.as_deref()
-                .and_then(|p| Decimal::from_str(p).ok()).filter(|p| *p > Decimal::ZERO) {
-                let computed = book.iter().map(|l|
-                    (px - l.price) * l.contracts * l.contract_value
-                        * if pos == "long" { Decimal::ONE } else { -Decimal::ONE }
-                ).sum::<Decimal>();
-                if position.unrealized_pnl.as_deref().and_then(|v| Decimal::from_str(v).ok())
-                    .is_some_and(|reported| (reported - computed).abs() <=
-                        Decimal::new(1, 6)) {
+            if let Some(px) = position
+                .mark_price
+                .as_deref()
+                .and_then(|p| Decimal::from_str(p).ok())
+                .filter(|p| *p > Decimal::ZERO)
+            {
+                let computed = book
+                    .iter()
+                    .map(|l| {
+                        (px - l.price)
+                            * l.contracts
+                            * l.contract_value
+                            * if pos == "long" {
+                                Decimal::ONE
+                            } else {
+                                -Decimal::ONE
+                            }
+                    })
+                    .sum::<Decimal>();
+                if position
+                    .unrealized_pnl
+                    .as_deref()
+                    .and_then(|v| Decimal::from_str(v).ok())
+                    .is_some_and(|reported| (reported - computed).abs() <= Decimal::new(1, 6))
+                {
                     unrealized += computed;
                     mark = Some(px.normalize().to_string());
                     upl = Some(computed.normalize().to_string());
                 } else {
                     reasons.insert("native_mark_or_contract_math_mismatch");
                 }
-            } else { reasons.insert("mark_price_unavailable"); }
-        } else { reasons.insert("run_position_not_exclusive_on_exchange"); }
+            } else {
+                reasons.insert("mark_price_unavailable");
+            }
+        } else {
+            reasons.insert("run_position_not_exclusive_on_exchange");
+        }
         open_positions.push(RunOwnedPosition {
-            instrument_id: inst.clone(), position_side: pos.clone(),
-            contracts: qty.normalize().to_string(), mark_price: mark,
+            instrument_id: inst.clone(),
+            position_side: pos.clone(),
+            contracts: qty.normalize().to_string(),
+            mark_price: mark,
             unrealized_usdt: upl,
         });
     }
@@ -359,9 +499,13 @@ pub fn assess_persisted_financial_period(
     }) {
         reasons.insert("external_exchange_position");
     }
-    if facts.summary.pending_orders != 0 { reasons.insert("pending_exchange_orders"); }
-    if entries.iter().any(|entry| entry.created_at_ms > run.started_at_ms
-        && !entry.record.state.is_terminal()) {
+    if facts.summary.pending_orders != 0 {
+        reasons.insert("pending_exchange_orders");
+    }
+    if entries
+        .iter()
+        .any(|entry| entry.created_at_ms > run.started_at_ms && !entry.record.state.is_terminal())
+    {
         reasons.insert("unresolved_managed_execution");
     }
     let complete = reasons.is_empty();
@@ -369,8 +513,13 @@ pub fn assess_persisted_financial_period(
     StrategyFinancialPeriod {
         schema: STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
         run_id: run.allocation_id.clone(),
-        state: if complete && open_positions.is_empty() { "FLAT_RECONCILED" }
-            else if complete { "ACTIVE_VALUED" } else { "INCOMPLETE" },
+        state: if complete && open_positions.is_empty() {
+            "FLAT_RECONCILED"
+        } else if complete {
+            "ACTIVE_VALUED"
+        } else {
+            "INCOMPLETE"
+        },
         evidence_sha256,
         allocation_usdt: allocation.normalize().to_string(),
         linked_fills: processed,
@@ -406,7 +555,8 @@ fn incomplete(
         state: "INCOMPLETE",
         evidence_sha256,
         allocation_usdt: allocation.normalize().to_string(),
-        linked_fills, linked_bills,
+        linked_fills,
+        linked_bills,
         realized_usdt: realized.normalize().to_string(),
         fees_usdt: fees.normalize().to_string(),
         funding_usdt: None,
@@ -425,37 +575,116 @@ mod tests {
     #[test]
     fn fifo_partial_fills_and_cross_side_cannot_double_spend() {
         let mut lots = BTreeMap::new();
-        put_lot(&mut lots, "BTC-USDT-SWAP", "long", "buy",
-            ExecutionAction::Open, Decimal::new(3, 0), Decimal::new(100,0),
-            Decimal::new(1,2)).unwrap();
-        put_lot(&mut lots, "BTC-USDT-SWAP", "long", "buy",
-            ExecutionAction::Add, Decimal::new(2,0), Decimal::new(105,0),
-            Decimal::new(1,2)).unwrap();
-        put_lot(&mut lots, "BTC-USDT-SWAP", "long", "sell",
-            ExecutionAction::Reduce, Decimal::new(4,0), Decimal::new(110,0),
-            Decimal::new(1,2)).unwrap();
-        assert_eq!(lots[&("BTC-USDT-SWAP".into(),"long".into())][0].contracts, Decimal::ONE);
-        assert_eq!(lots[&("BTC-USDT-SWAP".into(),"long".into())][0].price,
-            Decimal::new(105,0));
-        assert_eq!(put_lot(&mut lots, "BTC-USDT-SWAP", "long", "sell",
-            ExecutionAction::Close, Decimal::new(2,0), Decimal::new(110,0),
-            Decimal::new(1,2)), Err("exit_exceeds_run_owned_lot"));
-        assert_eq!(put_lot(&mut lots, "BTC-USDT-SWAP", "short", "buy",
-            ExecutionAction::Close, Decimal::ONE, Decimal::new(110,0),
-            Decimal::new(1,2)), Err("exit_exceeds_run_owned_lot"));
-        assert_eq!(put_lot(&mut lots, "BTC-USDT-SWAP", "long", "buy",
-            ExecutionAction::Close, Decimal::ONE, Decimal::new(110,0),
-            Decimal::new(1,2)), Err("fill_action_side_mismatch"));
+        put_lot(
+            &mut lots,
+            "BTC-USDT-SWAP",
+            "long",
+            "buy",
+            ExecutionAction::Open,
+            Decimal::new(3, 0),
+            Decimal::new(100, 0),
+            Decimal::new(1, 2),
+        )
+        .unwrap();
+        put_lot(
+            &mut lots,
+            "BTC-USDT-SWAP",
+            "long",
+            "buy",
+            ExecutionAction::Add,
+            Decimal::new(2, 0),
+            Decimal::new(105, 0),
+            Decimal::new(1, 2),
+        )
+        .unwrap();
+        put_lot(
+            &mut lots,
+            "BTC-USDT-SWAP",
+            "long",
+            "sell",
+            ExecutionAction::Reduce,
+            Decimal::new(4, 0),
+            Decimal::new(110, 0),
+            Decimal::new(1, 2),
+        )
+        .unwrap();
+        assert_eq!(
+            lots[&("BTC-USDT-SWAP".into(), "long".into())][0].contracts,
+            Decimal::ONE
+        );
+        assert_eq!(
+            lots[&("BTC-USDT-SWAP".into(), "long".into())][0].price,
+            Decimal::new(105, 0)
+        );
+        assert_eq!(
+            put_lot(
+                &mut lots,
+                "BTC-USDT-SWAP",
+                "long",
+                "sell",
+                ExecutionAction::Close,
+                Decimal::new(2, 0),
+                Decimal::new(110, 0),
+                Decimal::new(1, 2)
+            ),
+            Err("exit_exceeds_run_owned_lot")
+        );
+        assert_eq!(
+            put_lot(
+                &mut lots,
+                "BTC-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Close,
+                Decimal::ONE,
+                Decimal::new(110, 0),
+                Decimal::new(1, 2)
+            ),
+            Err("exit_exceeds_run_owned_lot")
+        );
+        assert_eq!(
+            put_lot(
+                &mut lots,
+                "BTC-USDT-SWAP",
+                "long",
+                "buy",
+                ExecutionAction::Close,
+                Decimal::ONE,
+                Decimal::new(110, 0),
+                Decimal::new(1, 2)
+            ),
+            Err("fill_action_side_mismatch")
+        );
     }
 
     #[test]
     fn cross_currency_and_wrong_hedge_never_create_owned_lots() {
         let mut lots = BTreeMap::new();
-        assert_eq!(put_lot(&mut lots, "ETH-USDT-SWAP", "short", "buy",
-            ExecutionAction::Open, Decimal::ONE, Decimal::new(3000,0),
-            Decimal::ONE), Err("fill_action_side_mismatch"));
-        assert_eq!(put_lot(&mut lots, "ETH-USDT-SWAP", "net", "buy",
-            ExecutionAction::Open, Decimal::ONE, Decimal::new(3000,0),
-            Decimal::ONE), Err("invalid_hedge_position_side"));
+        assert_eq!(
+            put_lot(
+                &mut lots,
+                "ETH-USDT-SWAP",
+                "short",
+                "buy",
+                ExecutionAction::Open,
+                Decimal::ONE,
+                Decimal::new(3000, 0),
+                Decimal::ONE
+            ),
+            Err("fill_action_side_mismatch")
+        );
+        assert_eq!(
+            put_lot(
+                &mut lots,
+                "ETH-USDT-SWAP",
+                "net",
+                "buy",
+                ExecutionAction::Open,
+                Decimal::ONE,
+                Decimal::new(3000, 0),
+                Decimal::ONE
+            ),
+            Err("invalid_hedge_position_side")
+        );
     }
 }

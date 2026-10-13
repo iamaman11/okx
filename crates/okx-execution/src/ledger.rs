@@ -15,14 +15,13 @@ use thiserror::Error;
 use crate::{
     DurableExchangeEvidence, EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_LINEAGE_SCHEMA_V2,
     EXECUTION_PLAN_SCHEMA_V1, ExchangeEvidenceSummary, ExchangeOrderState, ExecutionAction,
-    StrategyFinancialPeriod,
     ExecutionLineageBinding, ExecutionPlan, ExecutionRecord, ExecutionState,
     ExecutionTransitionError, MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind,
     OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
     PositionSide, ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveOrderStatus,
     ProtectiveSizeAmendState, ProtectiveTriggerPriceBasis, ReverseContinuation,
-    ReverseExecutionLink, ReverseLeg, derive_amend_request_id, derive_client_order_id,
-    derive_protective_algo_client_id, derive_reverse_open_intent_id,
+    ReverseExecutionLink, ReverseLeg, StrategyFinancialPeriod, derive_amend_request_id,
+    derive_client_order_id, derive_protective_algo_client_id, derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
@@ -555,9 +554,11 @@ impl DurableExecutionLedger {
     ) -> Option<StrategyFinancialPeriod> {
         self.capital_reservation.as_ref().map(|run| {
             crate::assess_persisted_financial_period(
-                run, self.exchange_evidence.as_ref(),
+                run,
+                self.exchange_evidence.as_ref(),
                 &self.entries.values().cloned().collect::<Vec<_>>(),
-                facts, coherent,
+                facts,
+                coherent,
             )
         })
     }
