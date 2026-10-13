@@ -2,7 +2,8 @@ use okx_analysis::{
     CandidateOrderAssumptions, ExecutionTcaReport, HARD_RISK_POLICY_SCHEMA_V1,
     LiquidityRole as AnalysisLiquidityRole, PortfolioCandidate, PositionDirection,
     PositionOracleEvidence, TRADING_MANDATE_SCHEMA_V1, TcaFillOutcome, TcaReference, TcaSide,
-    analyze_candidate_order, analyze_execution_tca_report, analyze_portfolio_risk,
+    analyze_candidate_order, analyze_execution_tca_report,
+    analyze_portfolio_risk_with_strategy_nav,
     conservative_account_with_position_oracle,
 };
 use okx_api::{InstrumentType, MUTATION_REQUEST_TTL_MS, MarginMode, MutationTiming};
@@ -2595,13 +2596,26 @@ async fn pre_mutation_admission(
         None
     };
 
-    let risk_analysis = match analyze_portfolio_risk(
+    // The only positive NAV path is the existing executor's persisted
+    // opening-run evidence. This same admission is invoked at prepare AND
+    // pre-submit, with the private WS and reference fences still enforced.
+    // All later ADD/HEDGE/second OPEN risk remains denied until durable
+    // run-specific high-water and day loss become independently provable.
+    let initial_strategy_nav = if plan.action.is_risk_increasing() {
+        execution
+            .initial_strategy_nav_for_risk(&risk_facts, &plan, true)
+            .await
+    } else {
+        None
+    };
+    let risk_analysis = match analyze_portfolio_risk_with_strategy_nav(
         &conservative_account,
         &risk_facts.summary,
         risk_binding.mandate.clone(),
         risk_binding.policy.clone(),
         risk_candidate,
         true,
+        initial_strategy_nav.as_ref(),
     ) {
         Ok(value) => value,
         Err(error) => {
