@@ -1079,9 +1079,10 @@ mod tests {
         .expect("portfolio risk");
 
         assert_eq!(
-            revalidate_hard_risk_policy(&plan, &analysis, &account.account_generation, Some("5"),)
-                .expect("matching analysis"),
-            PreMutationRiskDisposition::Accepted
+            revalidate_hard_risk_policy(&plan, &analysis, &account.account_generation, Some("5")),
+            Err(ExecutionValidationError::HardRiskPolicyRejected(
+                "STRATEGY_NAV_UNATTESTED".to_owned()
+            ))
         );
 
         let mut wrong_binding = analysis.clone();
@@ -1113,7 +1114,7 @@ mod tests {
         );
 
         let mut inconsistent = analysis;
-        inconsistent.policy_decision = RiskPolicyDecision::Rejected;
+        inconsistent.policy_decision = RiskPolicyDecision::Accepted;
         assert_eq!(
             revalidate_hard_risk_policy(
                 &plan,
