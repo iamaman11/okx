@@ -159,10 +159,22 @@ pub struct AccountLedgerFacts {
     pub trading_usdt_equity: Option<String>,
     /// Never silently net other currencies into a USDT strategy NAV.
     pub nonzero_other_trading_currency_equity: bool,
+    /// Both independent REST account config and private account snapshot
+    /// attest acctLv=2. OKX Futures cross margin is currency-specific;
+    /// non-USDT balances cannot support USDT-settled derivatives.
+    pub futures_single_currency_margin: bool,
     order_history_complete: BTreeMap<String, bool>,
 }
 
 impl AccountLedgerFacts {
+    /// Admission must never convert totalEq/foreign currency to USDT NAV.
+    /// For acctLv=2, futures margin is separated by settlement currency.
+    /// For all other/unknown/mismatched account modes, other-currency equity
+    /// remains a hard blocker.
+    pub fn usdt_margin_excludes_other_currencies(&self) -> bool {
+        !self.nonzero_other_trading_currency_equity || self.futures_single_currency_margin
+    }
+
     pub fn order_history_complete(&self, instrument_type: &str) -> bool {
         self.order_history_complete
             .get(instrument_type)
@@ -202,6 +214,10 @@ impl AccountLedgerFacts {
             multi_account_inventory_complete: false,
         };
 
+        // Two independently sourced account-level observations must agree;
+        // a stale or unrecognized mode never authorizes collateral separation.
+        let futures_single_currency_margin =
+            config.account_level == "2" && snapshot.account_level == "2";
         let mut trading_usdt_equity = None;
         let mut nonzero_other_trading_currency_equity = false;
         for detail in &snapshot.balance.details {
@@ -493,6 +509,7 @@ impl AccountLedgerFacts {
             exchange_fills_history_complete,
             trading_usdt_equity,
             nonzero_other_trading_currency_equity,
+            futures_single_currency_margin,
             order_history_complete,
         })
     }
@@ -1087,6 +1104,67 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn futures_mode_usdt_margin_separation_requires_both_native_account_sources() {
+        let facts_for = |config_level: &str, snapshot_level: &str, other_equity: &str| {
+            let mut account = snapshot();
+            account.account_level = snapshot_level.to_owned();
+            account.positions.clear();
+            account.pending_orders.clear();
+            account.balance.details.push(AccountBalanceDetail {
+                currency: "BTC".to_owned(),
+                equity: other_equity.to_owned(),
+                cash_balance: None,
+                available_equity: None,
+                available_balance: None,
+                frozen_balance: None,
+                equity_usd: Some("1".to_owned()),
+                unrealized_pnl: None,
+                update_time_ms: Some("1790884800000".to_owned()),
+            });
+            account.balance.total_equity_usd = "101.5".to_owned();
+            let mut settings = config();
+            settings.account_level = config_level.to_owned();
+            AccountLedgerFacts::from_okx(
+                "2026-10-01T20:00:01.000Z",
+                &account,
+                settings,
+                Vec::new(),
+                vec![
+                    ("SWAP".to_owned(), bounded(Vec::new())),
+                    ("FUTURES".to_owned(), bounded(Vec::new())),
+                ],
+                vec![
+                    ("SWAP".to_owned(), bounded(Vec::new())),
+                    ("FUTURES".to_owned(), bounded(Vec::new())),
+                ],
+                vec![
+                    ("SWAP".to_owned(), bounded(Vec::new())),
+                    ("FUTURES".to_owned(), bounded(Vec::new())),
+                ],
+                bounded(Vec::new()),
+            )
+            .expect("native source facts")
+        };
+        let futures = facts_for("2", "2", "0.01");
+        assert!(futures.nonzero_other_trading_currency_equity);
+        assert!(futures.futures_single_currency_margin);
+        assert!(futures.usdt_margin_excludes_other_currencies());
+        assert_eq!(futures.trading_usdt_equity.as_deref(), Some("100.5"));
+
+        // 3=multi-currency; 4=portfolio. Neither allows native asset
+        // separation of its cross-margin collateral.
+        for (cfg, snap) in [("3", "3"), ("4", "4"), ("2", "3"), ("3", "2"), ("", "2")] {
+            let facts = facts_for(cfg, snap, "0.01");
+            assert!(facts.nonzero_other_trading_currency_equity);
+            assert!(!facts.usdt_margin_excludes_other_currencies());
+        }
+        // No external currency equity: previously valid admission unchanged.
+        let empty_other = facts_for("3", "3", "0");
+        assert!(!empty_other.nonzero_other_trading_currency_equity);
+        assert!(empty_other.usdt_margin_excludes_other_currencies());
     }
 
     #[test]
