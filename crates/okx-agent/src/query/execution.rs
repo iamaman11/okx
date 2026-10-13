@@ -3,8 +3,7 @@ use okx_analysis::{
     LiquidityRole as AnalysisLiquidityRole, PortfolioCandidate, PositionDirection,
     PositionOracleEvidence, TRADING_MANDATE_SCHEMA_V1, TcaFillOutcome, TcaReference, TcaSide,
     analyze_candidate_order, analyze_execution_tca_report,
-    analyze_portfolio_risk_with_strategy_nav,
-    conservative_account_with_position_oracle,
+    analyze_portfolio_risk_with_strategy_nav, conservative_account_with_position_oracle,
 };
 use okx_api::{InstrumentType, MUTATION_REQUEST_TTL_MS, MarginMode, MutationTiming};
 use okx_execution::{
