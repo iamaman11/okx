@@ -2386,6 +2386,82 @@ mod tests {
     }
 
     #[test]
+    fn only_trusted_strategy_run_nav_can_admit_a_small_candidate() {
+        let mut snapshot = account("long_short_mode", Vec::new());
+        snapshot.balance.total_equity_usd = "103040".to_owned();
+        snapshot.balance.initial_margin_requirement_usd = Some("0".to_owned());
+        let mut mandate = mandate();
+        mandate.capital_base_usd = "100".to_owned();
+        let policy = policy();
+        let candidate = PortfolioCandidate {
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            direction: PositionDirection::Long,
+            notional_usd: "10".to_owned(),
+            worst_case_loss_usd: "0.5".to_owned(),
+            leverage: "2".to_owned(),
+        };
+        let baseline = StrategyNavRiskEvidence {
+            run_id: "run_attested_opening_0001".to_owned(),
+            mandate_version: mandate.version.clone(),
+            allocation_usdt: "100".to_owned(),
+            nav_usdt: "100".to_owned(),
+            high_water_usdt: "100".to_owned(),
+            daily_realized_loss_usdt: "0".to_owned(),
+        };
+        let evaluate = |proof: Option<&StrategyNavRiskEvidence>| {
+            analyze_portfolio_risk_with_strategy_nav(
+                &snapshot,
+                &ledger("0"),
+                mandate.clone(),
+                policy.clone(),
+                Some(candidate.clone()),
+                true,
+                proof,
+            )
+            .unwrap()
+        };
+        let missing = evaluate(None);
+        assert!(missing
+            .violations
+            .iter()
+            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
+        let admitted = evaluate(Some(&baseline));
+        assert_eq!(admitted.policy_decision, RiskPolicyDecision::Accepted);
+        let mut fake = baseline.clone();
+        fake.mandate_version = "foreign-mandate".to_owned();
+        assert!(evaluate(Some(&fake))
+            .violations
+            .iter()
+            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
+        fake = baseline.clone();
+        fake.allocation_usdt = "103040".to_owned();
+        assert!(evaluate(Some(&fake))
+            .violations
+            .iter()
+            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
+        fake = baseline.clone();
+        fake.high_water_usdt = "99".to_owned();
+        assert!(evaluate(Some(&fake))
+            .violations
+            .iter()
+            .any(|v| v.code == "STRATEGY_NAV_UNATTESTED"));
+        fake = baseline.clone();
+        fake.nav_usdt = "89".to_owned();
+        fake.high_water_usdt = "100".to_owned();
+        let drawdown = evaluate(Some(&fake));
+        assert!(drawdown
+            .violations
+            .iter()
+            .any(|v| v.code == "MAX_DRAWDOWN" && v.scope == "strategy_run")
+            == false);
+        fake.daily_realized_loss_usdt = "150".to_owned();
+        assert!(evaluate(Some(&fake))
+            .violations
+            .iter()
+            .any(|v| v.code == "MAX_DAILY_REALIZED_LOSS" && v.scope == "strategy_run_utc_day"));
+    }
+
+    #[test]
     fn missing_margin_with_open_position_denies_new_risk_but_flat_is_exempt() {
         let mut snapshot = account(
             "long_short_mode",
