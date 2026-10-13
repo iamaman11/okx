@@ -130,6 +130,10 @@ pub struct AccountLedgerReconciliation {
     pub exchange_evidence: Option<crate::ExchangeEvidenceSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub financial_period: Option<crate::StrategyFinancialPeriod>,
+    /// Immutable past result; independent of current source-window age.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalized_run: Option<crate::StrategyFinalization>,
+    pub archived_runs_count: usize,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -232,6 +236,8 @@ pub fn reconcile_account_ledger(
         .transpose()?;
     result.exchange_evidence = ledger.exchange_evidence_summary();
     result.financial_period = ledger.financial_period(facts, false);
+    result.finalized_run = ledger.finalized_run().cloned();
+    result.archived_runs_count = ledger.archived_runs_count();
     result.strategy_attribution = Some(attribute_strategy_exchange_evidence(
         ledger,
         &facts.exchange_orders,
@@ -397,6 +403,8 @@ fn reconcile_exchange_evidence(
         strategy_nav: None,
         exchange_evidence: None,
         financial_period: None,
+        finalized_run: None,
+        archived_runs_count: 0,
     })
 }
 

@@ -640,9 +640,6 @@ impl DurableExecutionLedger {
         native_protection_empty: bool,
         observed_at_ms: u64,
     ) -> Result<StrategyFinalization, ExecutionLedgerError> {
-        if let Some(done) = &self.strategy_periods.finalized_run {
-            return Ok(done.clone());
-        }
         let as_of = facts
             .summary
             .current_account_as_of_ms
@@ -653,6 +650,12 @@ impl DurableExecutionLedger {
             || !native_protection_empty
             || observed_at_ms < as_of
             || observed_at_ms - as_of > 30_000
+            || facts.summary.open_positions != 0
+            || facts.summary.pending_orders != 0
+            || !facts.exchange_orders_history_complete
+            || !facts.exchange_fills_history_complete
+            || !facts.bills_history_complete
+            || facts.summary.history_coverage.iter().any(|c| !c.complete_within_bound)
         {
             return Err(ExecutionLedgerError::StrategyRunNotFinalizable);
         }
@@ -660,6 +663,12 @@ impl DurableExecutionLedger {
             .capital_reservation
             .as_ref()
             .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
+        if facts.summary.authority.account_uid_fingerprint != reservation.account_uid_fingerprint {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        if let Some(done) = &self.strategy_periods.finalized_run {
+            return Ok(done.clone());
+        }
         let evidence = self
             .exchange_evidence
             .as_ref()
