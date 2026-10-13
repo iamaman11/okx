@@ -27,7 +27,7 @@ const SERVICE_UPGRADE_NOTICE_CODE: &str = "64008";
 #[derive(Clone)]
 pub struct PrivateWsHandle {
     state: Arc<RwLock<PrivateRuntimeState>>,
-    financial_order_signal: watch::Receiver<u64>,
+    financial_source_signal: watch::Receiver<u64>,
 }
 
 pub struct PrivateWsCoordinator {
@@ -36,7 +36,7 @@ pub struct PrivateWsCoordinator {
     state: Arc<RwLock<PrivateRuntimeState>>,
     generation: u64,
     rate_budget: RateBudget,
-    financial_order_signal: watch::Sender<u64>,
+    financial_source_signal: watch::Sender<u64>,
 }
 
 #[derive(Debug)]
@@ -48,8 +48,8 @@ enum GenerationOutcome {
 impl PrivateWsHandle {
     /// Event-driven notification only. It carries no trading authority, no
     /// exchange-side completeness claim and no order payload.
-    pub fn subscribe_financial_order_events(&self) -> watch::Receiver<u64> {
-        self.financial_order_signal.clone()
+    pub fn subscribe_financial_source_events(&self) -> watch::Receiver<u64> {
+        self.financial_source_signal.clone()
     }
 
     pub async fn status(&self) -> PrivateWsStatus {
@@ -103,7 +103,7 @@ impl PrivateWsCoordinator {
         rate_budget: RateBudget,
     ) -> (Self, PrivateWsHandle) {
         let state = Arc::new(RwLock::new(PrivateRuntimeState::new()));
-        let (financial_order_signal, financial_order_receiver) = watch::channel(0);
+        let (financial_source_signal, financial_source_receiver) = watch::channel(0);
         (
             Self {
                 environment,
@@ -111,11 +111,11 @@ impl PrivateWsCoordinator {
                 state: Arc::clone(&state),
                 generation: 0,
                 rate_budget,
-                financial_order_signal,
+                financial_source_signal,
             },
             PrivateWsHandle {
                 state,
-                financial_order_signal: financial_order_receiver,
+                financial_source_signal: financial_source_receiver,
             },
         )
     }
@@ -358,20 +358,21 @@ impl PrivateWsCoordinator {
                                     }
                                 };
 
-                                // The account/position events are not full
-                                // fill/bill source proof. Only a real order
-                                // update wakes the same Windows ledger owner;
-                                // the owner re-reads REST history and fences WS.
-                                let order_update = signals_financial_order_capture(&event);
+                                // Orders and subsequent account/position
+                                // updates can arrive on separate WS frames.
+                                // Any nonempty authenticated financial delta
+                                // wakes the one ledger owner for REST readback.
+                                // WS itself is never asserted as full fill/bill proof.
+                                let source_update = signals_financial_source_capture(&event);
                                 saw_data = true;
                                 self.state
                                     .write()
                                     .await
                                     .observe_event(event, now_ms());
-                                if order_update {
-                                    let next = self.financial_order_signal
+                                if source_update {
+                                    let next = self.financial_source_signal
                                         .borrow().saturating_add(1);
-                                    self.financial_order_signal.send_replace(next);
+                                    self.financial_source_signal.send_replace(next);
                                 }
                             }
                             PrivateInboundMessage::Other(_) => {}
@@ -484,8 +485,12 @@ impl PrivateWsCoordinator {
 
 /// Only an authenticated, nonempty order delta is a native ledger
 /// capture trigger. It is NOT a bill/fill completeness witness itself.
-fn signals_financial_order_capture(event: &PrivateWsEvent) -> bool {
-    matches!(event, PrivateWsEvent::Orders(rows) if !rows.is_empty())
+fn signals_financial_source_capture(event: &PrivateWsEvent) -> bool {
+    match event {
+        PrivateWsEvent::Account(rows) => !rows.is_empty(),
+        PrivateWsEvent::Positions(rows) => !rows.is_empty(),
+        PrivateWsEvent::Orders(rows) => !rows.is_empty(),
+    }
 }
 
 pub fn private_reconnect_delay(attempt: usize) -> Duration {
@@ -515,14 +520,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn private_account_chatter_never_triggers_financial_checkpoint() {
-        assert!(!signals_financial_order_capture(&PrivateWsEvent::Account(
+    fn empty_private_events_never_trigger_financial_checkpoint() {
+        assert!(!signals_financial_source_capture(&PrivateWsEvent::Account(
             vec![]
         )));
-        assert!(!signals_financial_order_capture(
+        assert!(!signals_financial_source_capture(
             &PrivateWsEvent::Positions(vec![])
         ));
-        assert!(!signals_financial_order_capture(&PrivateWsEvent::Orders(
+        assert!(!signals_financial_source_capture(&PrivateWsEvent::Orders(
             vec![]
         )));
         let order = serde_json::from_value::<PendingOrder>(serde_json::json!({
@@ -530,9 +535,13 @@ mod tests {
             "state": "filled", "accFillSz": "1"
         }))
         .unwrap();
-        assert!(signals_financial_order_capture(&PrivateWsEvent::Orders(
+        assert!(signals_financial_source_capture(&PrivateWsEvent::Orders(
             vec![order]
         )));
+        let account = serde_json::from_value::<BalanceSnapshot>(serde_json::json!({
+            "totalEq": "5000", "uTime": "1791920000000"
+        })).unwrap();
+        assert!(signals_financial_source_capture(&PrivateWsEvent::Account(vec![account])));
     }
 
     #[test]

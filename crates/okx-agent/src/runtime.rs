@@ -104,7 +104,7 @@ pub async fn run_mailbox_until_shutdown(
     let mut private_financial_capture = Box::pin(async {
         match (account, private_ws, execution) {
             (Some(account), Some(private_ws), Some(execution)) => {
-                capture_native_finance_on_order_events(account, private_ws, execution).await
+                capture_native_finance_on_private_events(account, private_ws, execution).await
             }
             _ => std::future::pending::<Result<(), String>>().await,
         }
@@ -343,19 +343,19 @@ pub async fn run_mailbox_until_shutdown(
     Ok(())
 }
 
-/// A private order update, not a timer or ChatGPT query, wakes this
+/// A real nonempty private financial event, not a timer or ChatGPT query, wakes this
 /// observer. It obtains a fresh REST baseline and complete exact native
 /// orders/fills/bills, then checks both private WS convergence fences before
 /// persisting under the already existing one execution-ledger mutex.
 ///
 /// Failed or incomplete attempts are diagnostic only: no fabricated cursor,
 /// no fake fill/bill, and no acknowledgement of source completeness.
-async fn capture_native_finance_on_order_events(
+async fn capture_native_finance_on_private_events(
     account: &AccountBootstrapper,
     private_ws: &PrivateWsHandle,
     execution: &ExecutionRuntime,
 ) -> Result<(), String> {
-    let mut signals = private_ws.subscribe_financial_order_events();
+    let mut signals = private_ws.subscribe_financial_source_events();
     // Restart proof: if a prior Demo run already exists, attempt one native
     // source check immediately. Do not require a new order or invent a
     // scheduler just to re-attach the persisted period after process crash.
