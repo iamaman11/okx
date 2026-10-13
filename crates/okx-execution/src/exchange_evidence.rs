@@ -307,7 +307,12 @@ impl DurableExchangeEvidence {
             }), e, funding))?;
         }
         let new_native_evidence = self.events.len() != original_events;
-        if !should_persist_source_cursor(last_cursor_time, now, new_native_evidence, require_fresh_cursor) {
+        if !should_persist_source_cursor(
+            last_cursor_time,
+            now,
+            new_native_evidence,
+            require_fresh_cursor,
+        ) {
             return self.seal();
         }
         let key = format!(
@@ -362,7 +367,8 @@ impl DurableExchangeEvidence {
                 .is_some_and(|ms| ms > MAX_SOURCE_COVERAGE_GAP_MS),
             remaining_source_cursors: MAX_CURSORS - self.cursors.len(),
             remaining_events: MAX_EVENTS - self.events.len(),
-            next_source_coverage_deadline_ms: epochs.last()
+            next_source_coverage_deadline_ms: epochs
+                .last()
                 .and_then(|last| last.checked_add(MAX_SOURCE_COVERAGE_GAP_MS)),
         }
     }
@@ -378,7 +384,8 @@ fn should_persist_source_cursor(
 ) -> bool {
     require_fresh
         || has_new_native_event
-        || previous.is_none_or(|last| now.saturating_sub(last) >= MIN_REDUNDANT_SOURCE_CURSOR_SPACING_MS)
+        || previous
+            .is_none_or(|last| now.saturating_sub(last) >= MIN_REDUNDANT_SOURCE_CURSOR_SPACING_MS)
 }
 
 /// The native REST windows and every instrument/page must independently
@@ -458,13 +465,48 @@ mod tests {
     fn quiet_source_queries_do_not_exhaust_cursors_but_new_fills_write_immediately() {
         let first = 1_000_000;
         assert!(should_persist_source_cursor(None, first, false, false));
-        assert!(!should_persist_source_cursor(Some(first), first, false, false));
-        assert!(!should_persist_source_cursor(Some(first), first + 60_000, false, false));
-        assert!(!should_persist_source_cursor(Some(first), first + 299_999, false, false));
-        assert!(should_persist_source_cursor(Some(first), first + 300_000, false, false));
-        assert!(should_persist_source_cursor(Some(first), first + 1, true, false));
-        assert!(should_persist_source_cursor(Some(first), first + 1, false, true));
-        assert!(!should_persist_source_cursor(Some(first), first - 1, false, false));
+        assert!(!should_persist_source_cursor(
+            Some(first),
+            first,
+            false,
+            false
+        ));
+        assert!(!should_persist_source_cursor(
+            Some(first),
+            first + 60_000,
+            false,
+            false
+        ));
+        assert!(!should_persist_source_cursor(
+            Some(first),
+            first + 299_999,
+            false,
+            false
+        ));
+        assert!(should_persist_source_cursor(
+            Some(first),
+            first + 300_000,
+            false,
+            false
+        ));
+        assert!(should_persist_source_cursor(
+            Some(first),
+            first + 1,
+            true,
+            false
+        ));
+        assert!(should_persist_source_cursor(
+            Some(first),
+            first + 1,
+            false,
+            true
+        ));
+        assert!(!should_persist_source_cursor(
+            Some(first),
+            first - 1,
+            false,
+            false
+        ));
     }
 
     #[test]
