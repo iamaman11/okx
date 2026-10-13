@@ -420,7 +420,7 @@ pub fn assess_persisted_financial_period(
                 action: plan.action,
                 size: f.size,
                 price: f.price,
-                ct: ct,
+                ct,
             },
         ) {
             reasons.insert(reason);
