@@ -177,7 +177,7 @@ impl ExecutionRuntime {
         coherent: bool,
     ) -> AgentResult<(AccountLedgerReconciliation, ManagedExecutionInventory)> {
         let mut executor = self.executor.lock().await;
-        let reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
+        let mut reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
         let inventory = managed_execution_inventory(executor.ledger());
         // Never capture a contradictory or private-WS-incoherent snapshot.
         if coherent
@@ -186,6 +186,7 @@ impl ExecutionRuntime {
         {
             executor.capture_exchange_evidence(facts)?;
         }
+        reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary();
         Ok((reconciliation, inventory))
     }
 

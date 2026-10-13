@@ -199,7 +199,9 @@ impl DurableExchangeEvidence {
                 None,
                 None,
             )?;
-            self.add(format!("order:{}:{}", o.instrument_type, o.order_id), item(json!({
+            self.add(format!(
+                "order:{}:{}:{}", o.instrument_type, o.order_id, o.update_time_ms
+            ), item(json!({
                 "source":"OKX_REST_ORDER","instType":o.instrument_type,"instId":o.instrument_id,
                 "ordId":o.order_id,"clOrdId":o.client_order_id,"state":o.state,"uTime":o.update_time_ms
             }), e, false))?;

@@ -126,6 +126,8 @@ pub struct AccountLedgerReconciliation {
     pub strategy_attribution: Option<StrategyExchangeAttribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strategy_nav: Option<StrategyNavAssessment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchange_evidence: Option<crate::ExchangeEvidenceSummary>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -226,6 +228,7 @@ pub fn reconcile_account_ledger(
         .capital_reservation()
         .map(|capital| assess_flat_strategy_nav(capital, ledger, facts))
         .transpose()?;
+    result.exchange_evidence = ledger.exchange_evidence_summary();
     result.strategy_attribution = Some(attribute_strategy_exchange_evidence(
         ledger,
         &facts.exchange_orders,
@@ -389,6 +392,7 @@ fn reconcile_exchange_evidence(
         consistent: unexpected_orders == 0 && unexpected_fills == 0 && identity_mismatches == 0,
         strategy_attribution: None,
         strategy_nav: None,
+        exchange_evidence: None,
     })
 }
 
