@@ -367,6 +367,12 @@ where
         &self.ledger
     }
 
+    /// Only the existing executor owner persists source evidence; no gateway call.
+    pub fn capture_exchange_evidence(&mut self, facts: &okx_observation::AccountLedgerFacts)
+        -> Result<crate::ExchangeEvidenceSummary, OrderExecutorError> {
+        Ok(self.ledger.capture_exchange_evidence(facts)?)
+    }
+
     /// Persist the single native account-scoped virtual allocation under
     /// the same executor owner as all durable intents; no venue send.
     pub fn reserve_strategy_capital(

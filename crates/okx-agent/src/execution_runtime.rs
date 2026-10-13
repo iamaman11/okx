@@ -8,7 +8,7 @@ use okx_api::{
     RateBudget, RateBudgetSnapshot, TradeApi,
 };
 use okx_execution::{
-    AccountLedgerReconciliation, AccountLedgerReconciliationError, DurableExecutionLedger,
+    AccountLedgerReconciliation, DurableExecutionLedger,
     ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
     ExecutionPlan, ExecutionRiskStop, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
     ManagedExecutionInventory, MutationAuthority, MutationPrepareDisposition,
@@ -174,13 +174,15 @@ impl ExecutionRuntime {
     pub async fn reconcile_account_ledger_with_intents(
         &self,
         facts: &AccountLedgerFacts,
-    ) -> Result<
-        (AccountLedgerReconciliation, ManagedExecutionInventory),
-        AccountLedgerReconciliationError,
-    > {
-        let executor = self.executor.lock().await;
+        coherent: bool,
+    ) -> AgentResult<(AccountLedgerReconciliation, ManagedExecutionInventory)> {
+        let mut executor = self.executor.lock().await;
         let reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
         let inventory = managed_execution_inventory(executor.ledger());
+        // Never capture a contradictory or private-WS-incoherent snapshot.
+        if coherent && reconciliation.consistent && executor.ledger().capital_reservation().is_some() {
+            executor.capture_exchange_evidence(facts)?;
+        }
         Ok((reconciliation, inventory))
     }
 

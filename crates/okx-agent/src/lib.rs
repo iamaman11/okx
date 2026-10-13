@@ -133,6 +133,9 @@ pub enum AgentError {
     #[error("response budget invariant failed")]
     ResponseBudgetInvariant,
 
+    #[error("account ledger reconciliation error: {0}")]
+    AccountReconciliation(#[from] okx_execution::AccountLedgerReconciliationError),
+
     #[error("execution ledger error: {0}")]
     ExecutionLedger(#[from] okx_execution::ExecutionLedgerError),
 
