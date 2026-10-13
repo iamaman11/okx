@@ -303,7 +303,10 @@ mod tests {
             over_capacity.validate(Some(&next_after_capacity), None),
             Err(ExecutionLedgerError::ExchangeEvidenceCapacity)
         ));
-        assert_eq!(serde_json::to_vec(&bounded_history).unwrap(), original_history);
+        assert_eq!(
+            serde_json::to_vec(&bounded_history).unwrap(),
+            original_history
+        );
 
         let mut tampered = decoded;
         tampered.nav_usdt = "100000".into();
