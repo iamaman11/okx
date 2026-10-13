@@ -8,7 +8,8 @@ use okx_api::{
     RateBudget, RateBudgetSnapshot, TradeApi,
 };
 use okx_execution::{
-    AccountLedgerReconciliation, DurableExecutionLedger, ExecutionAction, ExecutionLedgerEntry,
+    AccountLedgerReconciliation, DurableExchangeEvidence, DurableExecutionLedger,
+    ExecutionAction, ExecutionLedgerEntry,
     ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding, ExecutionPlan,
     ExecutionRiskStop, ExecutionState, ExecutionStatusEnvelope, FencedProtectiveShrinkRequest,
     ManagedExecutionInventory, MutationAuthority, MutationPrepareDisposition,
