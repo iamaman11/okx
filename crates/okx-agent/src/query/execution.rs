@@ -217,6 +217,78 @@ pub(super) async fn dispatch(
     }
 }
 
+/// Native source-only readiness shared by read-only account diagnostics and
+/// the authoritative Demo BEGIN operation. Does not attest executor credentials,
+/// WS convergence, or capital allocation. No financial values are disclosed.
+#[derive(Debug, Clone, Copy)]
+struct StrategyOpeningSourceChecks {
+    uid_matches: bool,
+    generation_matches: bool,
+    usdt_only: bool,
+    native_usdt_equity_available: bool,
+    bills_complete: bool,
+    orders_complete: bool,
+    fills_complete: bool,
+    history_complete: bool,
+    native_protection_complete: bool,
+    no_native_protection: bool,
+    flat: bool,
+    no_pending_orders: bool,
+}
+
+fn source_opening_blockers(checks: StrategyOpeningSourceChecks) -> Vec<&'static str> {
+    let candidates = [
+        ("UID_MISMATCH", checks.uid_matches),
+        ("ACCOUNT_GENERATION_MISMATCH", checks.generation_matches),
+        ("NON_USDT_TRADING_EQUITY", checks.usdt_only),
+        (
+            "NATIVE_USDT_EQUITY_UNAVAILABLE",
+            checks.native_usdt_equity_available,
+        ),
+        ("BILLS_HISTORY_INCOMPLETE", checks.bills_complete),
+        ("ORDERS_HISTORY_INCOMPLETE", checks.orders_complete),
+        ("FILLS_HISTORY_INCOMPLETE", checks.fills_complete),
+        ("HISTORY_COVERAGE_TRUNCATED", checks.history_complete),
+        (
+            "PROTECTION_INVENTORY_INCOMPLETE",
+            checks.native_protection_complete,
+        ),
+        ("PENDING_NATIVE_PROTECTION", checks.no_native_protection),
+        ("ACCOUNT_NOT_FLAT", checks.flat),
+        ("PENDING_ORDERS", checks.no_pending_orders),
+    ];
+    candidates
+        .into_iter()
+        .filter_map(|(reason, accepted)| (!accepted).then_some(reason))
+        .collect()
+}
+
+pub(super) fn strategy_opening_source_blockers(
+    facts: &okx_observation::AccountLedgerFacts,
+    protection: &okx_api::PendingProtectiveAlgoInventory,
+    account_generation: &str,
+    expected_uid: &str,
+) -> Vec<&'static str> {
+    source_opening_blockers(StrategyOpeningSourceChecks {
+        uid_matches: facts.summary.authority.account_uid_fingerprint == expected_uid,
+        generation_matches: facts.summary.account_generation == account_generation,
+        usdt_only: !facts.nonzero_other_trading_currency_equity,
+        native_usdt_equity_available: facts.trading_usdt_equity.is_some(),
+        bills_complete: facts.bills_history_complete,
+        orders_complete: facts.exchange_orders_history_complete,
+        fills_complete: facts.exchange_fills_history_complete,
+        history_complete: facts
+            .summary
+            .history_coverage
+            .iter()
+            .all(|row| row.complete_within_bound),
+        native_protection_complete: protection.complete_within_bound,
+        no_native_protection: protection.rows == 0,
+        flat: facts.summary.open_positions == 0,
+        no_pending_orders: facts.summary.pending_orders == 0,
+    })
+}
+
 /// Existing Demo executor owns the journal mutation. The caller supplies
 /// the *allocation choice* only; REST/WS/account/OCO proof is sourced here.
 struct StrategyOpeningRequest<'a> {
@@ -311,25 +383,17 @@ async fn begin_strategy_run(
             "account changed during independent opening readback".to_owned(),
         ));
     }
-    if facts.summary.authority.account_uid_fingerprint != preflight.account_uid_fingerprint
-        || facts.summary.account_generation != snapshot.account_generation
-        || facts.nonzero_other_trading_currency_equity
-        || !facts.bills_history_complete
-        || !facts.exchange_orders_history_complete
-        || !facts.exchange_fills_history_complete
-        || facts
-            .summary
-            .history_coverage
-            .iter()
-            .any(|c| !c.complete_within_bound)
-        || !protection.complete_within_bound
-        || protection.rows > 0
-        || facts.summary.open_positions > 0
-        || facts.summary.pending_orders > 0
-    {
-        return Ok(deny(
-            "opening account/coverage/OCO/other-currency proof incomplete".to_owned(),
-        ));
+    let blockers = strategy_opening_source_blockers(
+        &facts,
+        &protection,
+        &snapshot.account_generation,
+        &preflight.account_uid_fingerprint,
+    );
+    if !blockers.is_empty() {
+        return Ok(deny(format!(
+            "native opening source gate failed: {}",
+            blockers.join(",")
+        )));
     }
     let Some(usdt_equity) = facts.trading_usdt_equity.as_deref() else {
         return Ok(deny("native USDT trading equity unavailable".to_owned()));
@@ -3959,5 +4023,81 @@ mod tests {
             );
             assert!(response.failure.is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod strategy_opening_source_tests {
+    use super::*;
+
+    fn complete() -> StrategyOpeningSourceChecks {
+        StrategyOpeningSourceChecks {
+            uid_matches: true,
+            generation_matches: true,
+            usdt_only: true,
+            native_usdt_equity_available: true,
+            bills_complete: true,
+            orders_complete: true,
+            fills_complete: true,
+            history_complete: true,
+            native_protection_complete: true,
+            no_native_protection: true,
+            flat: true,
+            no_pending_orders: true,
+        }
+    }
+
+    #[test]
+    fn every_missing_native_source_has_one_exact_stable_denial() {
+        assert!(source_opening_blockers(complete()).is_empty());
+        let names = [
+            "UID_MISMATCH",
+            "ACCOUNT_GENERATION_MISMATCH",
+            "NON_USDT_TRADING_EQUITY",
+            "NATIVE_USDT_EQUITY_UNAVAILABLE",
+            "BILLS_HISTORY_INCOMPLETE",
+            "ORDERS_HISTORY_INCOMPLETE",
+            "FILLS_HISTORY_INCOMPLETE",
+            "HISTORY_COVERAGE_TRUNCATED",
+            "PROTECTION_INVENTORY_INCOMPLETE",
+            "PENDING_NATIVE_PROTECTION",
+            "ACCOUNT_NOT_FLAT",
+            "PENDING_ORDERS",
+        ];
+        for (i, expected) in names.into_iter().enumerate() {
+            let mut flags = complete();
+            match i {
+                0 => flags.uid_matches = false,
+                1 => flags.generation_matches = false,
+                2 => flags.usdt_only = false,
+                3 => flags.native_usdt_equity_available = false,
+                4 => flags.bills_complete = false,
+                5 => flags.orders_complete = false,
+                6 => flags.fills_complete = false,
+                7 => flags.history_complete = false,
+                8 => flags.native_protection_complete = false,
+                9 => flags.no_native_protection = false,
+                10 => flags.flat = false,
+                11 => flags.no_pending_orders = false,
+                _ => unreachable!(),
+            }
+            assert_eq!(source_opening_blockers(flags), [expected]);
+        }
+    }
+
+    #[test]
+    fn multiple_independent_diagnostics_remain_visible_without_values() {
+        let mut flags = complete();
+        flags.usdt_only = false;
+        flags.bills_complete = false;
+        flags.no_native_protection = false;
+        assert_eq!(
+            source_opening_blockers(flags),
+            [
+                "NON_USDT_TRADING_EQUITY",
+                "BILLS_HISTORY_INCOMPLETE",
+                "PENDING_NATIVE_PROTECTION"
+            ]
+        );
     }
 }
