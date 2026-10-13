@@ -570,6 +570,23 @@ impl DurableExecutionLedger {
         &mut self,
         facts: &AccountLedgerFacts,
     ) -> Result<ExchangeEvidenceSummary, ExecutionLedgerError> {
+        self.capture_exchange_evidence_with_freshness(facts, false)
+    }
+
+    /// Financial period closure always seals a freshly observed source
+    /// checkpoint, even when the prior five minutes had no trade activity.
+    pub fn capture_exchange_evidence_for_finalization(
+        &mut self,
+        facts: &AccountLedgerFacts,
+    ) -> Result<ExchangeEvidenceSummary, ExecutionLedgerError> {
+        self.capture_exchange_evidence_with_freshness(facts, true)
+    }
+
+    fn capture_exchange_evidence_with_freshness(
+        &mut self,
+        facts: &AccountLedgerFacts,
+        require_fresh_cursor: bool,
+    ) -> Result<ExchangeEvidenceSummary, ExecutionLedgerError> {
         if self.strategy_periods.finalized_run.is_some() {
             return self
                 .exchange_evidence
@@ -590,6 +607,7 @@ impl DurableExecutionLedger {
             facts,
             &self.entries.values().cloned().collect::<Vec<_>>(),
             run,
+            require_fresh_cursor,
         )?;
         if self.exchange_evidence.as_ref() != Some(&next) {
             self.store.save(
