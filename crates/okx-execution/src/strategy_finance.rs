@@ -91,7 +91,15 @@ fn put_lot(
     lots: &mut BTreeMap<(String, String), Vec<Lot>>,
     change: LotChange<'_>,
 ) -> Result<(), &'static str> {
-    let LotChange { inst, pos, side, action, size, price, ct } = change;
+    let LotChange {
+        inst,
+        pos,
+        side,
+        action,
+        size,
+        price,
+        ct,
+    } = change;
     if size <= Decimal::ZERO || price <= Decimal::ZERO || ct <= Decimal::ZERO {
         return Err("invalid_lot_financial_terms");
     }
@@ -404,17 +412,17 @@ pub fn assess_persisted_financial_period(
             continue;
         }
         if let Err(reason) = put_lot(
-&mut lots,
-LotChange {
-    inst: &f.inst,
-    pos: &f.pos,
-    side: &f.side,
-    action: plan.action,
-    size: f.size,
-    price: f.price,
-    ct: ct,
-},
-) {
+            &mut lots,
+            LotChange {
+                inst: &f.inst,
+                pos: &f.pos,
+                side: &f.side,
+                action: plan.action,
+                size: f.size,
+                price: f.price,
+                ct: ct,
+            },
+        ) {
             reasons.insert(reason);
             continue;
         }
@@ -583,43 +591,43 @@ mod tests {
     fn fifo_partial_fills_and_cross_side_cannot_double_spend() {
         let mut lots = BTreeMap::new();
         put_lot(
-&mut lots,
-LotChange {
-    inst: "BTC-USDT-SWAP",
-    pos: "long",
-    side: "buy",
-    action: ExecutionAction::Open,
-    size: Decimal::new(3, 0),
-    price: Decimal::new(100, 0),
-    ct: Decimal::new(1, 2),
-},
-)
+            &mut lots,
+            LotChange {
+                inst: "BTC-USDT-SWAP",
+                pos: "long",
+                side: "buy",
+                action: ExecutionAction::Open,
+                size: Decimal::new(3, 0),
+                price: Decimal::new(100, 0),
+                ct: Decimal::new(1, 2),
+            },
+        )
         .unwrap();
         put_lot(
-&mut lots,
-LotChange {
-    inst: "BTC-USDT-SWAP",
-    pos: "long",
-    side: "buy",
-    action: ExecutionAction::Add,
-    size: Decimal::new(2, 0),
-    price: Decimal::new(105, 0),
-    ct: Decimal::new(1, 2),
-},
-)
+            &mut lots,
+            LotChange {
+                inst: "BTC-USDT-SWAP",
+                pos: "long",
+                side: "buy",
+                action: ExecutionAction::Add,
+                size: Decimal::new(2, 0),
+                price: Decimal::new(105, 0),
+                ct: Decimal::new(1, 2),
+            },
+        )
         .unwrap();
         put_lot(
-&mut lots,
-LotChange {
-    inst: "BTC-USDT-SWAP",
-    pos: "long",
-    side: "sell",
-    action: ExecutionAction::Reduce,
-    size: Decimal::new(4, 0),
-    price: Decimal::new(110, 0),
-    ct: Decimal::new(1, 2),
-},
-)
+            &mut lots,
+            LotChange {
+                inst: "BTC-USDT-SWAP",
+                pos: "long",
+                side: "sell",
+                action: ExecutionAction::Reduce,
+                size: Decimal::new(4, 0),
+                price: Decimal::new(110, 0),
+                ct: Decimal::new(1, 2),
+            },
+        )
         .unwrap();
         assert_eq!(
             lots[&("BTC-USDT-SWAP".into(), "long".into())][0].contracts,
@@ -631,47 +639,47 @@ LotChange {
         );
         assert_eq!(
             put_lot(
-&mut lots,
-LotChange {
-    inst: "BTC-USDT-SWAP",
-    pos: "long",
-    side: "sell",
-    action: ExecutionAction::Close,
-    size: Decimal::new(2, 0),
-    price: Decimal::new(110, 0),
-    ct: Decimal::new(1, 2),
-},
-),
+                &mut lots,
+                LotChange {
+                    inst: "BTC-USDT-SWAP",
+                    pos: "long",
+                    side: "sell",
+                    action: ExecutionAction::Close,
+                    size: Decimal::new(2, 0),
+                    price: Decimal::new(110, 0),
+                    ct: Decimal::new(1, 2),
+                },
+            ),
             Err("exit_exceeds_run_owned_lot")
         );
         assert_eq!(
             put_lot(
-&mut lots,
-LotChange {
-    inst: "BTC-USDT-SWAP",
-    pos: "short",
-    side: "buy",
-    action: ExecutionAction::Close,
-    size: Decimal::ONE,
-    price: Decimal::new(110, 0),
-    ct: Decimal::new(1, 2),
-},
-),
+                &mut lots,
+                LotChange {
+                    inst: "BTC-USDT-SWAP",
+                    pos: "short",
+                    side: "buy",
+                    action: ExecutionAction::Close,
+                    size: Decimal::ONE,
+                    price: Decimal::new(110, 0),
+                    ct: Decimal::new(1, 2),
+                },
+            ),
             Err("exit_exceeds_run_owned_lot")
         );
         assert_eq!(
             put_lot(
-&mut lots,
-LotChange {
-    inst: "BTC-USDT-SWAP",
-    pos: "long",
-    side: "buy",
-    action: ExecutionAction::Close,
-    size: Decimal::ONE,
-    price: Decimal::new(110, 0),
-    ct: Decimal::new(1, 2),
-},
-),
+                &mut lots,
+                LotChange {
+                    inst: "BTC-USDT-SWAP",
+                    pos: "long",
+                    side: "buy",
+                    action: ExecutionAction::Close,
+                    size: Decimal::ONE,
+                    price: Decimal::new(110, 0),
+                    ct: Decimal::new(1, 2),
+                },
+            ),
             Err("fill_action_side_mismatch")
         );
     }
@@ -681,32 +689,32 @@ LotChange {
         let mut lots = BTreeMap::new();
         assert_eq!(
             put_lot(
-&mut lots,
-LotChange {
-    inst: "ETH-USDT-SWAP",
-    pos: "short",
-    side: "buy",
-    action: ExecutionAction::Open,
-    size: Decimal::ONE,
-    price: Decimal::new(3000, 0),
-    ct: Decimal::ONE,
-},
-),
+                &mut lots,
+                LotChange {
+                    inst: "ETH-USDT-SWAP",
+                    pos: "short",
+                    side: "buy",
+                    action: ExecutionAction::Open,
+                    size: Decimal::ONE,
+                    price: Decimal::new(3000, 0),
+                    ct: Decimal::ONE,
+                },
+            ),
             Err("fill_action_side_mismatch")
         );
         assert_eq!(
             put_lot(
-&mut lots,
-LotChange {
-    inst: "ETH-USDT-SWAP",
-    pos: "net",
-    side: "buy",
-    action: ExecutionAction::Open,
-    size: Decimal::ONE,
-    price: Decimal::new(3000, 0),
-    ct: Decimal::ONE,
-},
-),
+                &mut lots,
+                LotChange {
+                    inst: "ETH-USDT-SWAP",
+                    pos: "net",
+                    side: "buy",
+                    action: ExecutionAction::Open,
+                    size: Decimal::ONE,
+                    price: Decimal::new(3000, 0),
+                    ct: Decimal::ONE,
+                },
+            ),
             Err("invalid_hedge_position_side")
         );
     }
