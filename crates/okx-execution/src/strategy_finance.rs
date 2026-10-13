@@ -78,6 +78,19 @@ fn timestamp(payload: &Value, key: &str) -> Option<u64> {
 }
 
 
+fn terminal_filled_coverage(
+    expected: Decimal,
+    sizes: &[Option<Decimal>],
+    was_amended: bool,
+) -> bool {
+    !was_amended
+        && expected > Decimal::ZERO
+        && !sizes.is_empty()
+        && sizes.iter().all(Option::is_some)
+        && sizes.iter().flatten().all(|size| *size > Decimal::ZERO)
+        && sizes.iter().flatten().copied().sum::<Decimal>() == expected
+}
+
 /// A terminal exchange order is never financial proof by itself. For FULL fills,
 /// source IDs and the sum of native fills must cover exactly the submitted size.
 /// Amend/cancel and unresolved exchange states cannot claim exact period closure
@@ -122,13 +135,10 @@ fn validate_terminal_order_coverage(
                 reasons.insert("invalid_managed_order_size");
                 continue;
             };
-            let total = fills.iter().filter_map(|f| amount(&f.payload, "fillSz")).sum::<Decimal>();
             // Amended orders require independently persisted final accFillSz,
             // not their original PREPARED size.
-            if fills.iter().any(|f| amount(&f.payload, "fillSz").is_none())
-                || total != expected
-                || !record.mutations.is_empty()
-            {
+            let sizes = fills.iter().map(|f| amount(&f.payload, "fillSz")).collect::<Vec<_>>();
+            if !terminal_filled_coverage(expected, &sizes, !record.mutations.is_empty()) {
                 reasons.insert("filled_order_native_coverage_not_proven");
             }
         }
@@ -786,6 +796,18 @@ mod tests {
         assert!(reasons.is_empty(), "no invented owner from account-only history");
     }
 
+
+    #[test]
+    fn source_terminal_fill_completeness_requires_exact_positive_native_parts() {
+        let d = |s: i64| Some(Decimal::new(s, 0));
+        assert!(terminal_filled_coverage(Decimal::new(5, 0), &[d(2), d(3)], false));
+        assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[], false));
+        assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[d(3)], false));
+        assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[d(2), None], false));
+        assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[d(2), d(4)], false));
+        assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[d(0), d(5)], false));
+        assert!(!terminal_filled_coverage(Decimal::new(5, 0), &[d(2), d(3)], true));
+    }
     #[test]
     fn cross_currency_and_wrong_hedge_never_create_owned_lots() {
         let mut lots = BTreeMap::new();
