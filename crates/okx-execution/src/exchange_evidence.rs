@@ -533,6 +533,58 @@ mod tests {
     }
 
     #[test]
+    fn cursor_capacity_is_a_hard_limit_without_discarding_immutable_proofs() {
+        let mut evidence = DurableExchangeEvidence {
+            schema: EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
+            account_uid: "uid".into(),
+            run_id: "run_1".into(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        for i in 0..MAX_CURSORS {
+            let key = format!("cursor_{i}");
+            evidence.cursors.insert(
+                key.clone(),
+                ExchangeCoverageCursor {
+                    source: "OKX_REST_ACCOUNT_HISTORY".into(),
+                    source_received_at: key,
+                    generation: "one".into(),
+                    account_as_of_ms: 1_000_000 + (i as u64) * 300_000,
+                    order_complete: true,
+                    fill_complete: true,
+                    bill_complete: true,
+                    covered_ranges: Value::Null,
+                },
+            );
+        }
+        evidence.seal().unwrap();
+        assert_eq!(evidence.summary().remaining_source_cursors, 0);
+        let intact_hash = evidence.checksum_sha256.clone();
+        let mut rejected = evidence.clone();
+        rejected.cursors.insert(
+            "overflow".into(),
+            ExchangeCoverageCursor {
+                source: "OKX_REST_ACCOUNT_HISTORY".into(),
+                source_received_at: "overflow".into(),
+                generation: "one".into(),
+                account_as_of_ms: 1_000_000 + (MAX_CURSORS as u64) * 300_000,
+                order_complete: true,
+                fill_complete: true,
+                bill_complete: true,
+                covered_ranges: Value::Null,
+            },
+        );
+        assert!(matches!(
+            rejected.seal(),
+            Err(ExecutionLedgerError::Corrupt(_))
+        ));
+        evidence.validate().unwrap();
+        assert_eq!(evidence.checksum_sha256, intact_hash);
+        assert_eq!(evidence.cursors.len(), MAX_CURSORS);
+    }
+
+    #[test]
     fn duplicate_is_idempotent_conflict_and_corruption_fail_closed() {
         let mut evidence = DurableExchangeEvidence {
             schema: EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
