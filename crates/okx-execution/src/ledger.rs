@@ -2081,8 +2081,8 @@ mod tests {
     #[test]
     fn strategy_run_id_is_owner_derived_durable_and_rejects_tampering() {
         use okx_analysis::{
-            HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy, RiskDegradedMode,
-            RiskMinimumQuality, TRADING_MANDATE_SCHEMA_V1, TradingMandate,
+            HARD_RISK_POLICY_SCHEMA_V1, HardRiskPolicy, RiskDegradedMode, RiskMinimumQuality,
+            TRADING_MANDATE_SCHEMA_V1, TradingMandate,
         };
 
         let root = temp_root("strategy-run-id-owner");
@@ -2123,7 +2123,14 @@ mod tests {
         ledger
             .reserve_strategy_capital(run.clone(), &opening, 1001)
             .expect("independently witnessed opening");
-        assert!(ledger.get(historical).unwrap().record.strategy_run_id.is_none());
+        assert!(
+            ledger
+                .get(historical)
+                .unwrap()
+                .record
+                .strategy_run_id
+                .is_none()
+        );
 
         let mut owned = plan("intent_run_owner_verified_0123456");
         owned.risk_binding = Some(crate::ExecutionRiskBinding {
@@ -2184,7 +2191,14 @@ mod tests {
                 .as_deref(),
             Some(run.allocation_id.as_str())
         );
-        assert!(reopened.get(historical).unwrap().record.strategy_run_id.is_none());
+        assert!(
+            reopened
+                .get(historical)
+                .unwrap()
+                .record
+                .strategy_run_id
+                .is_none()
+        );
         reopened
             .abandon_prepared(&owned_id, 1101)
             .expect("retire unsent new-risk intent");
@@ -2194,7 +2208,14 @@ mod tests {
         reopened
             .prepare(close_plan(close_id, PositionSide::Long), 1102)
             .expect("exit remains allowed");
-        assert!(reopened.get(close_id).unwrap().record.strategy_run_id.is_none());
+        assert!(
+            reopened
+                .get(close_id)
+                .unwrap()
+                .record
+                .strategy_run_id
+                .is_none()
+        );
         drop(reopened);
 
         let intact = fs::read(store.path()).expect("persisted ledger");
@@ -2219,8 +2240,7 @@ mod tests {
         );
 
         fs::write(store.path(), &intact).expect("restore fixture");
-        let mut unbound: serde_json::Value =
-            serde_json::from_slice(&intact).expect("read fixture");
+        let mut unbound: serde_json::Value = serde_json::from_slice(&intact).expect("read fixture");
         let entries = unbound["records"].as_array_mut().expect("records");
         let owner = entries
             .iter_mut()
@@ -2240,7 +2260,11 @@ mod tests {
             unowned.begin_submission(&owned_id, 1201),
             Err(ExecutionLedgerError::CapitalReservationScopeMismatch)
         ));
-        assert!(unowned.require_new_risk_allowed(ExecutionAction::Close).is_ok());
+        assert!(
+            unowned
+                .require_new_risk_allowed(ExecutionAction::Close)
+                .is_ok()
+        );
         let _ = fs::remove_dir_all(root);
     }
 
