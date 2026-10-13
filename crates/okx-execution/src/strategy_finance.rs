@@ -764,9 +764,15 @@ mod tests {
         let hour = 3_600_000_u64;
         let start = 1_000_000_u64;
         assert!(!source_continuity_attested(&[], start));
-        assert!(source_continuity_attested(&[start, start + hour, start + 2 * hour], start));
+        assert!(source_continuity_attested(
+            &[start, start + hour, start + 2 * hour],
+            start
+        ));
         // An exact boundary is still independently covered.
-        assert!(source_continuity_attested(&[start, start + 2 * hour], start));
+        assert!(source_continuity_attested(
+            &[start, start + 2 * hour],
+            start
+        ));
         // A subsequent complete REST snapshot cannot invent missing orders.
         assert!(!source_continuity_attested(
             &[start, start + 2 * hour + 1],
