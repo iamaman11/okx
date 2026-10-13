@@ -540,8 +540,11 @@ mod tests {
         )));
         let account = serde_json::from_value::<BalanceSnapshot>(serde_json::json!({
             "totalEq": "5000", "uTime": "1791920000000"
-        })).unwrap();
-        assert!(signals_financial_source_capture(&PrivateWsEvent::Account(vec![account])));
+        }))
+        .unwrap();
+        assert!(signals_financial_source_capture(&PrivateWsEvent::Account(
+            vec![account]
+        )));
     }
 
     #[test]
