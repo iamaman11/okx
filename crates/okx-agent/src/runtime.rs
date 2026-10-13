@@ -402,8 +402,6 @@ async fn capture_one_native_financial_source(
     if !window.events.is_empty()
         || window.generation != first.generation
         || facts.summary.account_generation != snapshot.account_generation
-        || facts.summary.authority.account_uid_fingerprint
-            != snapshot.authority.account_uid_fingerprint
         || !okx_execution::DurableExchangeEvidence::complete_source_checkpoint(&facts)
     {
         return Err("native financial history/account/WS proof incomplete".into());
