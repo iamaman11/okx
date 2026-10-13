@@ -249,11 +249,11 @@ impl ExecutionRuntime {
         }
         // A captured initial source cursor is persisted atomically before
         // the policy is evaluated. Missing/raced windows never mint NAV.
-        executor.capture_exchange_evidence_fresh_cursor(facts).ok()?;
+        executor
+            .capture_exchange_evidence_fresh_cursor(facts)
+            .ok()?;
         let source = executor.ledger().exchange_evidence_summary()?;
-        if source.events != 0
-            || !source.latest_source_complete
-            || source.source_gap_over_two_hours
+        if source.events != 0 || !source.latest_source_complete || source.source_gap_over_two_hours
         {
             return None;
         }
