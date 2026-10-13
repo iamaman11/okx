@@ -290,6 +290,19 @@ fn put_lot(
     Ok(())
 }
 
+/// An observed quiet interval is only supported when source-complete
+/// checkpoints cover it. Neither REST pagination nor a later WS reconnect
+/// can retroactively prove a missing >2-hour canceled-order window.
+fn source_continuity_attested(sorted_cursor_times: &[u64], run_started_at_ms: u64) -> bool {
+    sorted_cursor_times.first().is_some_and(|first| {
+        *first >= run_started_at_ms
+            && first - run_started_at_ms <= crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
+    }) && sorted_cursor_times.windows(2).all(|pair| {
+        pair[1] >= pair[0]
+            && pair[1] - pair[0] <= crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
+    })
+}
+
 pub fn assess_persisted_financial_period(
     run: &StrategyCapitalReservation,
     evidence: Option<&DurableExchangeEvidence>,
@@ -368,11 +381,7 @@ pub fn assess_persisted_financial_period(
     cursor_times.dedup();
     // Canceled unfilled exchange orders may vanish after 2 hours. Gaps cannot
     // be silently bridged by a later historical query or an empty response.
-    if cursor_times
-        .first()
-        .is_none_or(|t| *t < run.started_at_ms || *t - run.started_at_ms > 7_200_000)
-        || cursor_times.windows(2).any(|v| v[1] - v[0] > 7_200_000)
-    {
+    if !source_continuity_attested(&cursor_times, run.started_at_ms) {
         reasons.insert("source_continuity_not_proven");
     }
     if e.cursors
@@ -749,6 +758,25 @@ fn incomplete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_two_hour_venue_window_stays_incomplete_after_restart() {
+        let hour = 3_600_000_u64;
+        let start = 1_000_000_u64;
+        assert!(!source_continuity_attested(&[], start));
+        assert!(source_continuity_attested(&[start, start + hour, start + 2 * hour], start));
+        // An exact boundary is still independently covered.
+        assert!(source_continuity_attested(&[start, start + 2 * hour], start));
+        // A subsequent complete REST snapshot cannot invent missing orders.
+        assert!(!source_continuity_attested(
+            &[start, start + 2 * hour + 1],
+            start
+        ));
+        assert!(!source_continuity_attested(&[start + 2 * hour + 1], start));
+        assert!(!source_continuity_attested(&[start + hour, start], start));
+        // Source readback after reconnect is not an accounting rewind.
+        assert!(!source_continuity_attested(&[start - 1], start));
+    }
 
     #[test]
     fn fifo_partial_fills_and_cross_side_cannot_double_spend() {
