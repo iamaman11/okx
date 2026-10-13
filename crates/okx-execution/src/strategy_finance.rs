@@ -77,6 +77,68 @@ fn timestamp(payload: &Value, key: &str) -> Option<u64> {
     payload.get(key)?.as_u64()
 }
 
+
+/// A terminal exchange order is never financial proof by itself. For FULL fills,
+/// source IDs and the sum of native fills must cover exactly the submitted size.
+/// Amend/cancel and unresolved exchange states cannot claim exact period closure
+/// from a source order row lacking native accFillSz.
+fn validate_terminal_order_coverage(
+    evidence: &DurableExchangeEvidence,
+    entries: &[ExecutionLedgerEntry],
+    reasons: &mut BTreeSet<&'static str>,
+) {
+    for entry in entries {
+        let record = &entry.record;
+        let Some(order_id) = record.order_id.as_deref() else { continue };
+        let orders = evidence.events.values()
+            .filter(|event| event.payload["source"] == "OKX_REST_ORDER"
+                && string(&event.payload, "ordId") == Some(order_id)
+                && string(&event.payload, "clOrdId") == Some(record.plan.client_order_id.as_str())
+                && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str()))
+            .collect::<Vec<_>>();
+        if orders.is_empty() {
+            reasons.insert("managed_exchange_order_missing");
+            continue;
+        }
+        let terminal = orders.iter().any(|o|
+            matches!(string(&o.payload, "state"), Some("filled" | "canceled" | "mmp_canceled")));
+        let nonterminal = orders.iter().any(|o|
+            !matches!(string(&o.payload, "state"), Some("filled" | "canceled" | "mmp_canceled")));
+        if nonterminal || !terminal || !record.state.is_terminal() {
+            reasons.insert("managed_order_terminal_state_unproven");
+            continue;
+        }
+        let fills = evidence.events.values()
+            .filter(|event| event.payload["source"] == "OKX_REST_FILL"
+                && string(&event.payload, "ordId") == Some(order_id)
+                && string(&event.payload, "clOrdId") == Some(record.plan.client_order_id.as_str())
+                && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str()))
+            .collect::<Vec<_>>();
+        if orders.iter().any(|o| string(&o.payload, "state") == Some("filled")) {
+            let Some(expected) = Decimal::from_str(&record.plan.size).ok() else {
+                reasons.insert("invalid_managed_order_size");
+                continue;
+            };
+            let total = fills.iter().filter_map(|f| amount(&f.payload, "fillSz")).sum::<Decimal>();
+            // Amended orders require independently persisted final accFillSz,
+            // not their original PREPARED size.
+            if fills.iter().any(|f| amount(&f.payload, "fillSz").is_none())
+                || total != expected
+                || !record.mutations.is_empty()
+            {
+                reasons.insert("filled_order_native_coverage_not_proven");
+            }
+        }
+        // The account order history does not expose accumulated fill quantity
+        // in this journal schema; accepting canceled/part-filled would be an
+        // unsupported assertion that no extra fees or PnL were omitted.
+        if orders.iter().any(|o| matches!(string(&o.payload, "state"),
+            Some("canceled" | "mmp_canceled"))) {
+            reasons.insert("canceled_order_accumulated_fill_unattested");
+        }
+    }
+}
+
 struct LotChange<'a> {
     inst: &'a str,
     pos: &'a str,
@@ -198,6 +260,13 @@ pub fn assess_persisted_financial_period(
     if e.cursors.is_empty() {
         reasons.insert("source_coverage_missing");
     }
+    let current_as_of = facts.summary.current_account_as_of_ms.as_deref()
+        .and_then(|s| s.parse::<u64>().ok());
+    let newest = e.cursors.values().map(|c| c.account_as_of_ms).max();
+    if current_as_of.zip(newest).is_none_or(|(current,last)| current < last
+        || current - last > 30_000) {
+        reasons.insert("financial_source_asof_not_current");
+    }
     let mut cursor_times = e
         .cursors
         .values()
@@ -231,6 +300,7 @@ pub fn assess_persisted_financial_period(
         .iter()
         .map(|x| (x.record.plan.intent_id.as_str(), x))
         .collect::<BTreeMap<_, _>>();
+    validate_terminal_order_coverage(e, entries, &mut reasons);
     let mut fills = Vec::<FilledLeg>::new();
     for item in e
         .events
@@ -407,7 +477,7 @@ pub fn assess_persisted_financial_period(
             reasons.insert("native_bill_fee_or_pnl_mismatch");
             continue;
         }
-        if !linked_bills.insert(f.bill.clone()) {
+        if linked_bills.contains(&f.bill) {
             reasons.insert("duplicate_bill_consumption");
             continue;
         }
@@ -426,6 +496,7 @@ pub fn assess_persisted_financial_period(
             reasons.insert(reason);
             continue;
         }
+        linked_bills.insert(f.bill.clone());
         realized += native_pnl;
         fees += native_fee;
         processed += 1;
@@ -682,6 +753,34 @@ mod tests {
             ),
             Err("fill_action_side_mismatch")
         );
+    }
+
+
+    #[test]
+    fn filled_order_without_complete_native_fill_fails_closed() {
+        use crate::{StoredExchangeEvent, EXCHANGE_EVIDENCE_SCHEMA_V1};
+        use serde_json::json;
+        // Source-exact terminal state with no fills cannot be treated as
+        // an accounted zero-result strategy period.
+        let mut evidence = DurableExchangeEvidence {
+            schema: EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
+            account_uid: "demo".into(),
+            run_id: "run".into(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        evidence.events.insert("order:SWAP:123:1".into(), StoredExchangeEvent {
+            payload: json!({"source":"OKX_REST_ORDER","ordId":"123",
+                "clOrdId":"cl_1","instId":"BTC-USDT-SWAP","state":"filled"}),
+            source_intent_id: None,
+            strategy_run_id: None,
+            allocation: "UNALLOCATED".into(),
+        });
+        let no_entries: Vec<ExecutionLedgerEntry> = vec![];
+        let mut reasons = BTreeSet::new();
+        validate_terminal_order_coverage(&evidence, &no_entries, &mut reasons);
+        assert!(reasons.is_empty(), "no invented owner from account-only history");
     }
 
     #[test]
