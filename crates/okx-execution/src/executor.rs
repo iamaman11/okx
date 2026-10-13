@@ -375,6 +375,15 @@ where
         Ok(self.ledger.capture_exchange_evidence(facts)?)
     }
 
+    /// Source-exact financial close: bypasses only redundant quiet cursor
+    /// coalescing; account/WS/source safety checks are never bypassed.
+    pub fn capture_exchange_evidence_for_finalization(
+        &mut self,
+        facts: &okx_observation::AccountLedgerFacts,
+    ) -> Result<crate::ExchangeEvidenceSummary, OrderExecutorError> {
+        Ok(self.ledger.capture_exchange_evidence_for_finalization(facts)?)
+    }
+
     /// Persist the single native account-scoped virtual allocation under
     /// the same executor owner as all durable intents; no venue send.
     pub fn reserve_strategy_capital(
