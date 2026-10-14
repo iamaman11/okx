@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
     InstrumentType, MarketDataApi, OkxPublicClient, PublicDataApi, PublicMarketDataHistory,
@@ -16,6 +18,7 @@ pub struct MarketBootstrapper {
     api: MarketDataApi,
     public_data: PublicDataApi,
     simulated_market: bool,
+    rest_api_base_url: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -85,11 +88,12 @@ pub enum MarketBootstrapError {
 
 impl MarketBootstrapper {
     pub fn new(client: OkxPublicClient) -> Self {
-        let simulated_market = client.environment().demo;
+        let environment = client.environment();
         Self {
             api: MarketDataApi::new(client.clone()),
             public_data: PublicDataApi::new(client),
-            simulated_market,
+            simulated_market: environment.demo,
+            rest_api_base_url: environment.rest_base_url(),
         }
     }
 
@@ -98,6 +102,29 @@ impl MarketBootstrapper {
     /// independent observations of production open interest/liquidity.
     pub const fn source_is_simulated(&self) -> bool {
         self.simulated_market
+    }
+
+    /// Bind the actual public REST environment into each immutable source
+    /// capture before computing its content-addressed manifest hashes.
+    /// Retained old captures without these fields are NOT production-attested.
+    pub fn attest_source_parameters(
+        &self,
+        mut parameters: BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        parameters.insert(
+            "source_environment".to_owned(),
+            if self.simulated_market {
+                "demo_simulated"
+            } else {
+                "production_public"
+            }
+            .to_owned(),
+        );
+        parameters.insert(
+            "rest_api_base_url".to_owned(),
+            self.rest_api_base_url.to_owned(),
+        );
+        parameters
     }
 
     pub async fn research_candles_page(
@@ -397,6 +424,15 @@ mod tests {
                     .unwrap();
             let bootstrap = MarketBootstrapper::new(client);
             assert_eq!(bootstrap.source_is_simulated(), demo);
+            let provenance = bootstrap.attest_source_parameters(BTreeMap::new());
+            assert_eq!(
+                provenance.get("source_environment").map(String::as_str),
+                Some(if demo { "demo_simulated" } else { "production_public" }),
+            );
+            assert_eq!(
+                provenance.get("rest_api_base_url").map(String::as_str),
+                Some("https://openapi.okx.com"),
+            );
         }
     }
 
