@@ -71,7 +71,10 @@ impl StrategyNavPoint {
             || !self.evidence_sha256.bytes().all(|b| b.is_ascii_hexdigit())
             || self.source_cursor_key.trim().is_empty()
             || self.source_cursor_sha256.len() != 64
-            || !self.source_cursor_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || !self
+                .source_cursor_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
             || nav.is_none()
             || peak.zip(nav).is_none_or(|(peak, nav)| peak < nav)
             || loss.is_none_or(|v| v < Decimal::ZERO)
@@ -288,7 +291,8 @@ impl StrategyPeriodHistory {
             let owner = active
                 .filter(|r| r.allocation_id == point.run_id)
                 .and_then(|r| {
-                    evidence.map(|source| (r.started_at_ms, None, r.allocated_usdt.as_str(), source))
+                    evidence
+                        .map(|source| (r.started_at_ms, None, r.allocated_usdt.as_str(), source))
                 })
                 .or_else(|| {
                     self.archived_runs
@@ -308,15 +312,20 @@ impl StrategyPeriodHistory {
                     "NAV checkpoint has no run owner",
                 ));
             };
-            let cursor_proven = source.cursors.get(&point.source_cursor_key).is_some_and(|c| {
-                c.order_complete && c.fill_complete && c.bill_complete
-                    && c.account_as_of_ms <= point.account_as_of_ms
-                    && point.account_as_of_ms - c.account_as_of_ms
-                        <= crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
-                    && serde_json::to_vec(c).ok().is_some_and(|data| {
-                        format!("{:x}", Sha256::digest(data)) == point.source_cursor_sha256
-                    })
-            });
+            let cursor_proven = source
+                .cursors
+                .get(&point.source_cursor_key)
+                .is_some_and(|c| {
+                    c.order_complete
+                        && c.fill_complete
+                        && c.bill_complete
+                        && c.account_as_of_ms <= point.account_as_of_ms
+                        && point.account_as_of_ms - c.account_as_of_ms
+                            <= crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
+                        && serde_json::to_vec(c).ok().is_some_and(|data| {
+                            format!("{:x}", Sha256::digest(data)) == point.source_cursor_sha256
+                        })
+                });
             if point.account_as_of_ms < started_at_ms
                 || ended_at_ms.is_some_and(|end| point.observed_at_ms > end)
                 || previous.is_some_and(|p| {
@@ -395,9 +404,13 @@ mod tests {
 
     fn seal_source_for_test(source: &mut DurableExchangeEvidence) {
         let bytes = serde_json::to_vec(&(
-            &source.schema, &source.account_uid, &source.run_id,
-            &source.events, &source.cursors,
-        )).unwrap();
+            &source.schema,
+            &source.account_uid,
+            &source.run_id,
+            &source.events,
+            &source.cursors,
+        ))
+        .unwrap();
         source.checksum_sha256 = format!("{:x}", Sha256::digest(bytes));
     }
 
@@ -410,7 +423,9 @@ mod tests {
         previous: &str,
     ) -> StrategyNavPoint {
         let as_of = at_ms.saturating_sub(200);
-        let (cursor_key, cursor) = source.cursors.iter()
+        let (cursor_key, cursor) = source
+            .cursors
+            .iter()
             .filter(|(_, c)| c.account_as_of_ms <= as_of)
             .max_by_key(|(_, c)| c.account_as_of_ms)
             .unwrap();
@@ -421,7 +436,10 @@ mod tests {
             account_as_of_ms: as_of,
             evidence_sha256: source.checksum_sha256.clone(),
             source_cursor_key: cursor_key.clone(),
-            source_cursor_sha256: format!("{:x}", Sha256::digest(serde_json::to_vec(cursor).unwrap())),
+            source_cursor_sha256: format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(cursor).unwrap())
+            ),
             nav_usdt: nav.to_owned(),
             high_water_usdt: peak.to_owned(),
             daily_gross_loss_usdt: "0".to_owned(),
@@ -451,8 +469,14 @@ mod tests {
         let mut first = nav_point(&run, &source, 86_399_900, "95", "100", "");
         first.daily_gross_loss_usdt = "5".to_owned();
         first.checksum_sha256 = first.hash().unwrap();
-        let mut second =
-            nav_point(&run, &source, 86_400_500, "-1", "100", &first.checksum_sha256);
+        let mut second = nav_point(
+            &run,
+            &source,
+            86_400_500,
+            "-1",
+            "100",
+            &first.checksum_sha256,
+        );
         second.daily_gross_loss_usdt = "0".to_owned();
         second.checksum_sha256 = second.hash().unwrap();
         let history = StrategyPeriodHistory {
@@ -497,15 +521,24 @@ mod tests {
         bad.nav_points[1].checksum_sha256 = bad.nav_points[1].hash().unwrap();
         bad.nav_points[2].previous_sha256 = bad.nav_points[1].checksum_sha256.clone();
         bad.nav_points[2].checksum_sha256 = bad.nav_points[2].hash().unwrap();
-        assert!(bad.validate(Some(&run), Some(&source)).is_err(), "daily loss cannot go backward");
+        assert!(
+            bad.validate(Some(&run), Some(&source)).is_err(),
+            "daily loss cannot go backward"
+        );
         bad = restored.clone();
         bad.nav_points[1].account_as_of_ms = 1600;
         bad.nav_points[1].checksum_sha256 = bad.nav_points[1].hash().unwrap();
-        assert!(bad.validate(Some(&run), Some(&source)).is_err(), "invalid UTC stamp");
+        assert!(
+            bad.validate(Some(&run), Some(&source)).is_err(),
+            "invalid UTC stamp"
+        );
         bad = restored.clone();
         bad.nav_points[1].source_cursor_sha256 = "f".repeat(64);
         bad.nav_points[1].checksum_sha256 = bad.nav_points[1].hash().unwrap();
-        assert!(bad.validate(Some(&run), Some(&source)).is_err(), "cursor substitution rejected");
+        assert!(
+            bad.validate(Some(&run), Some(&source)).is_err(),
+            "cursor substitution rejected"
+        );
         let mut bad = restored.clone();
         bad.nav_points[1].nav_usdt = "300".to_owned();
         assert!(bad.validate(Some(&run), Some(&source)).is_err());
