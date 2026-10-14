@@ -497,7 +497,8 @@ impl ExecutionLedgerStore {
             file.capital_reservation.as_ref(),
             file.exchange_evidence.as_ref(),
         )?;
-        if !file.leverage_attempts.is_empty() && file.schema != EXECUTION_LEDGER_SCHEMA_V12 {
+        if !file.leverage_attempts.is_empty()
+            && !matches!(file.schema.as_str(), EXECUTION_LEDGER_SCHEMA_V12 | EXECUTION_LEDGER_SCHEMA_V13) {
             return Err(ExecutionLedgerError::Corrupt(
                 "leverage journal requires ledger schema v12",
             ));
@@ -3239,7 +3240,7 @@ mod tests {
         );
         let raw: serde_json::Value =
             serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-        assert_eq!(raw["schema"], EXECUTION_LEDGER_SCHEMA_V12);
+        assert_eq!(raw["schema"], EXECUTION_LEDGER_SCHEMA_V13);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -4679,7 +4680,7 @@ mod tests {
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V12);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V13);
 
             let _ = fs::remove_dir_all(root);
         }
