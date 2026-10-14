@@ -320,6 +320,7 @@ impl ExecutionRuntime {
         reconciliation.strategy_nav_watermark = executor.ledger().strategy_nav_watermark().cloned();
         reconciliation.strategy_nav_checkpoint_count = executor.ledger().strategy_nav_point_count();
         reconciliation.strategy_risk_stop = executor.ledger().risk_stop().cloned();
+        reconciliation.strategy_stop_rearm_proofs = executor.ledger().stop_rearm_proofs();
         reconciliation.unverified_run = executor.ledger().unverified_run().cloned();
         reconciliation.unverified_run_proofs = executor.ledger().archived_unverified_proofs();
         Ok((reconciliation, inventory))
