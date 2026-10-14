@@ -582,7 +582,6 @@ async fn set_leverage(
     match execution
         .lower_cross_leverage_authorized(
             &preflight,
-            &snapshot.account_generation,
             mutation_id,
             instrument,
             leverage,
