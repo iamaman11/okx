@@ -130,6 +130,11 @@ pub struct AccountLedgerReconciliation {
     pub exchange_evidence: Option<crate::ExchangeEvidenceSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub financial_period: Option<crate::StrategyFinancialPeriod>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy_nav_watermark: Option<crate::StrategyNavPoint>,
+    pub strategy_nav_checkpoint_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy_risk_stop: Option<crate::ExecutionRiskStop>,
     /// Immutable past result; independent of current source-window age.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalized_run: Option<crate::StrategyFinalization>,
@@ -239,6 +244,9 @@ pub fn reconcile_account_ledger(
         .map(|capital| assess_flat_strategy_nav(capital, ledger, facts))
         .transpose()?;
     result.exchange_evidence = ledger.exchange_evidence_summary();
+    result.strategy_nav_watermark = ledger.strategy_nav_watermark().cloned();
+    result.strategy_nav_checkpoint_count = ledger.strategy_nav_point_count();
+    result.strategy_risk_stop = ledger.risk_stop().cloned();
     result.financial_period = ledger.financial_period(facts, false);
     result.finalized_run = ledger.finalized_run().cloned();
     result.archived_runs_count = ledger.archived_runs_count();
@@ -410,6 +418,9 @@ fn reconcile_exchange_evidence(
         strategy_nav: None,
         exchange_evidence: None,
         financial_period: None,
+        strategy_nav_watermark: None,
+        strategy_nav_checkpoint_count: 0,
+        strategy_risk_stop: None,
         finalized_run: None,
         archived_runs_count: 0,
         archived_run_proofs: Vec::new(),

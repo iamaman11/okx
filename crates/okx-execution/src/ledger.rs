@@ -8,6 +8,7 @@ use std::{
 
 use okx_observation::AccountLedgerFacts;
 use rust_decimal::Decimal;
+use sha2::{Digest, Sha256};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -17,13 +18,14 @@ use crate::{
     EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_PLAN_SCHEMA_V1, ExchangeEvidenceSummary,
     ExchangeOrderState, ExecutionAction, ExecutionLineageBinding, ExecutionPlan, ExecutionRecord,
     ExecutionState, ExecutionTransitionError, MAX_ARCHIVED_STRATEGY_RUNS,
-    MAX_ORDER_MUTATIONS_PER_EXECUTION, OrderMutationKind, OrderMutationRecord,
-    OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1, PositionSide,
-    ProductionMarkEvidence, ProtectiveCleanupState, ProtectiveOrderResolution,
+    MAX_ORDER_MUTATIONS_PER_EXECUTION, MAX_STRATEGY_NAV_POINTS, OrderMutationKind,
+    OrderMutationRecord, OrderMutationResolution, OrderMutationState, PROTECTIVE_ORDER_POLICY_V1,
+    PositionSide, ProductionMarkEvidence, ProtectiveCleanupState, ProtectiveOrderResolution,
     ProtectiveOrderStatus, ProtectiveSizeAmendState, ProtectiveTriggerPriceBasis,
-    ReverseContinuation, ReverseExecutionLink, ReverseLeg, StrategyFinalization,
-    StrategyFinancialPeriod, StrategyPeriodHistory, derive_amend_request_id,
-    derive_client_order_id, derive_protective_algo_client_id, derive_reverse_open_intent_id,
+    ReverseContinuation, ReverseExecutionLink, ReverseLeg, STRATEGY_NAV_POINT_SCHEMA_V1,
+    StrategyFinalization, StrategyFinancialPeriod, StrategyNavPoint, StrategyPeriodHistory,
+    derive_amend_request_id, derive_client_order_id, derive_protective_algo_client_id,
+    derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
@@ -36,6 +38,7 @@ pub const EXECUTION_LEDGER_SCHEMA_V6: &str = "okx.execution-ledger/v6";
 pub const EXECUTION_LEDGER_SCHEMA_V7: &str = "okx.execution-ledger/v7";
 pub const EXECUTION_LEDGER_SCHEMA_V8: &str = "okx.execution-ledger/v8";
 pub const EXECUTION_LEDGER_SCHEMA_V9: &str = "okx.execution-ledger/v9";
+pub const EXECUTION_LEDGER_SCHEMA_V10: &str = "okx.execution-ledger/v10";
 pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1: &str = "okx.strategy-capital-reservation/v1";
 pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
@@ -299,6 +302,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V7
                 | EXECUTION_LEDGER_SCHEMA_V8
                 | EXECUTION_LEDGER_SCHEMA_V9
+                | EXECUTION_LEDGER_SCHEMA_V10
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
@@ -309,6 +313,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V7
                     | EXECUTION_LEDGER_SCHEMA_V8
                     | EXECUTION_LEDGER_SCHEMA_V9
+                    | EXECUTION_LEDGER_SCHEMA_V10
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "risk stop on legacy ledger schema",
@@ -322,6 +327,7 @@ impl ExecutionLedgerStore {
                 EXECUTION_LEDGER_SCHEMA_V7
                     | EXECUTION_LEDGER_SCHEMA_V8
                     | EXECUTION_LEDGER_SCHEMA_V9
+                    | EXECUTION_LEDGER_SCHEMA_V10
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -334,7 +340,9 @@ impl ExecutionLedgerStore {
         if let Some(evidence) = &file.exchange_evidence {
             if !matches!(
                 file.schema.as_str(),
-                EXECUTION_LEDGER_SCHEMA_V8 | EXECUTION_LEDGER_SCHEMA_V9
+                EXECUTION_LEDGER_SCHEMA_V8
+                    | EXECUTION_LEDGER_SCHEMA_V9
+                    | EXECUTION_LEDGER_SCHEMA_V10
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "exchange evidence on legacy schema",
@@ -348,11 +356,20 @@ impl ExecutionLedgerStore {
                 return Err(ExecutionLedgerError::AccountScopeMismatch);
             }
         }
-        if file.schema != EXECUTION_LEDGER_SCHEMA_V9
-            && file.strategy_periods != StrategyPeriodHistory::default()
+        if !matches!(
+            file.schema.as_str(),
+            EXECUTION_LEDGER_SCHEMA_V9 | EXECUTION_LEDGER_SCHEMA_V10
+        ) && file.strategy_periods != StrategyPeriodHistory::default()
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "strategy closure on legacy ledger",
+            ));
+        }
+        if !file.strategy_periods.nav_points.is_empty()
+            && file.schema != EXECUTION_LEDGER_SCHEMA_V10
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "NAV points must use ledger schema v10",
             ));
         }
         file.strategy_periods.validate(
@@ -455,7 +472,7 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V9.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V10.to_owned(),
             records: entries.values().cloned().collect(),
             risk_stop: risk_stop.cloned(),
             capital_reservation: capital_reservation.cloned(),
@@ -654,6 +671,226 @@ impl DurableExecutionLedger {
                 production_marks,
             )
         })
+    }
+
+    /// The caller's current REST/WS source was just checked and captured
+    /// under the same ledger lock; quiet cursors may have been coalesced.
+    pub fn financial_period_with_verified_source(
+        &self,
+        facts: &AccountLedgerFacts,
+        coherent: bool,
+        marks: &BTreeMap<String, ProductionMarkEvidence>,
+        captured: bool,
+    ) -> Option<StrategyFinancialPeriod> {
+        self.capital_reservation.as_ref().map(|run| {
+            crate::assess_persisted_financial_period_with_verified_source(
+                run,
+                self.exchange_evidence.as_ref(),
+                &self.entries.values().cloned().collect::<Vec<_>>(),
+                facts,
+                coherent,
+                marks,
+                captured,
+            )
+        })
+    }
+
+    /// One atomic writer for NAV, high-water, source-exact daily gross loss
+    /// and any irreversible breach STOP. No new risk permission is minted.
+    pub fn observe_strategy_nav(
+        &mut self,
+        report: &StrategyFinancialPeriod,
+        facts: &AccountLedgerFacts,
+        now: u64,
+    ) -> Result<Option<StrategyNavPoint>, ExecutionLedgerError> {
+        let Some(run) = &self.capital_reservation else {
+            return Ok(None);
+        };
+        if self.strategy_periods.finalized_run.is_some()
+            || report.run_id != run.allocation_id
+            || !report.reasons.is_empty()
+            || !matches!(report.state, "FLAT_RECONCILED" | "ACTIVE_VALUED")
+            || report.usable_for_new_risk
+            || facts.summary.authority.account_uid_fingerprint != run.account_uid_fingerprint
+            || !DurableExchangeEvidence::complete_source_checkpoint(facts)
+            || self
+                .exchange_evidence
+                .as_ref()
+                .is_none_or(|e| e.checksum_sha256 != report.evidence_sha256)
+        {
+            return Ok(None);
+        }
+        let Some(nav) = report
+            .nav_usdt
+            .as_deref()
+            .and_then(|v| Decimal::from_str(v).ok())
+        else {
+            return Ok(None);
+        };
+        let as_of = facts
+            .summary
+            .current_account_as_of_ms
+            .as_deref()
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or(ExecutionLedgerError::Corrupt(
+                "missing NAV account source time",
+            ))?;
+        if now.saturating_add(2_000) < as_of || now.abs_diff(as_of) > 30_000 {
+            return Ok(None);
+        }
+        // A depleted or negative NAV is an auditable terminal observation:
+        // persist both the value and the irreversible STOP in one file.
+        let evidence = self
+            .exchange_evidence
+            .as_ref()
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        let (source_cursor_key, source_cursor) = evidence
+            .cursors
+            .iter()
+            .filter(|(_, cursor)| cursor.account_as_of_ms <= as_of)
+            .max_by_key(|(_, cursor)| cursor.account_as_of_ms)
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        if as_of - source_cursor.account_as_of_ms
+            > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
+        {
+            return Ok(None);
+        }
+        let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(source_cursor)?));
+        let day = as_of / 86_400_000 * 86_400_000;
+        let mut gross_loss = Decimal::ZERO;
+        for event in evidence.events.values() {
+            if event.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
+                || event.payload["source"] != "OKX_REST_BILL"
+                || event.payload["ts"]
+                    .as_u64()
+                    .is_none_or(|ts| ts < day || ts > as_of)
+            {
+                continue;
+            }
+            if event.payload["ccy"] != "USDT" {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "strategy daily loss currency",
+                ));
+            }
+            for field in ["fee", "pnl"] {
+                let amount = event.payload[field]
+                    .as_str()
+                    .and_then(|v| Decimal::from_str(v).ok())
+                    .ok_or(ExecutionLedgerError::Corrupt(
+                        "invalid run-owned daily bill",
+                    ))?;
+                if amount < Decimal::ZERO {
+                    gross_loss -= amount;
+                }
+            }
+        }
+        let prior = self.strategy_periods.nav_points.last();
+        if prior.is_some_and(|p| p.observed_at_ms >= now) {
+            return Ok(None);
+        }
+        let allocation = Decimal::from_str(&run.allocated_usdt)
+            .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?;
+        let peak = prior
+            .filter(|p| p.run_id == run.allocation_id)
+            .and_then(|p| Decimal::from_str(&p.high_water_usdt).ok())
+            .unwrap_or(allocation)
+            .max(nav);
+        if prior.is_some_and(|p| {
+            p.run_id == run.allocation_id
+                && p.nav_usdt == nav.normalize().to_string()
+                && p.daily_gross_loss_usdt == gross_loss.normalize().to_string()
+                && p.utc_day_start_ms == day
+                && p.evidence_sha256 == report.evidence_sha256
+        }) {
+            return Ok(None);
+        }
+        if self.strategy_periods.nav_points.len() >= MAX_STRATEGY_NAV_POINTS {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+        let mut point = StrategyNavPoint {
+            schema: STRATEGY_NAV_POINT_SCHEMA_V1.to_owned(),
+            run_id: run.allocation_id.clone(),
+            observed_at_ms: now,
+            account_as_of_ms: as_of,
+            evidence_sha256: report.evidence_sha256.clone(),
+            source_cursor_key: source_cursor_key.clone(),
+            source_cursor_sha256: cursor_sha256,
+            nav_usdt: nav.normalize().to_string(),
+            high_water_usdt: peak.normalize().to_string(),
+            daily_gross_loss_usdt: gross_loss.normalize().to_string(),
+            utc_day_start_ms: day,
+            previous_sha256: prior.map_or("", |p| p.checksum_sha256.as_str()).to_owned(),
+            checksum_sha256: String::new(),
+        };
+        point.checksum_sha256 = point.hash()?;
+        point.validate()?;
+        let mut reason = (nav <= Decimal::ZERO).then_some("STRATEGY_NAV_DEPLETED");
+        // Only exact immutable run-bound plans may supply risk limits.
+        for entry in self.entries.values() {
+            if entry.record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
+                || !entry.record.plan.action.is_risk_increasing()
+            {
+                continue;
+            }
+            let binding = entry
+                .record
+                .plan
+                .risk_binding
+                .as_ref()
+                .ok_or(ExecutionLedgerError::Corrupt("missing run risk policy"))?;
+            if binding.mandate.version != run.mandate_version {
+                return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
+            }
+            let mandate_dd = Decimal::from_str(&binding.mandate.max_drawdown_ratio)
+                .map_err(|_| ExecutionLedgerError::Corrupt("invalid mandate drawdown"))?;
+            let policy_dd = Decimal::from_str(&binding.policy.max_drawdown_ratio)
+                .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy drawdown"))?;
+            let daily = Decimal::from_str(&binding.policy.max_daily_realized_loss_usd)
+                .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy daily loss"))?;
+            if reason.is_none() {
+                reason =
+                    strategy_nav_stop_reason(nav, peak, gross_loss, mandate_dd, policy_dd, daily);
+            }
+        }
+        let mut next = self.strategy_periods.clone();
+        next.nav_points.push(point.clone());
+        next.validate(
+            self.capital_reservation.as_ref(),
+            self.exchange_evidence.as_ref(),
+        )?;
+        let new_stop = if self.risk_stop.is_none() {
+            reason.map(|value| ExecutionRiskStop {
+                schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
+                stopped_at_ms: now,
+                reason: value.to_owned(),
+            })
+        } else {
+            None
+        };
+        self.store.save(
+            &self.entries,
+            new_stop.as_ref().or(self.risk_stop.as_ref()),
+            self.capital_reservation.as_ref(),
+            self.exchange_evidence.as_ref(),
+            &next,
+        )?;
+        self.strategy_periods = next;
+        if let Some(stop) = new_stop {
+            self.risk_stop = Some(stop);
+        }
+        Ok(Some(point))
+    }
+
+    pub fn strategy_nav_watermark(&self) -> Option<&StrategyNavPoint> {
+        self.strategy_periods.nav_points.last().filter(|p| {
+            self.capital_reservation
+                .as_ref()
+                .is_some_and(|r| r.allocation_id == p.run_id)
+        })
+    }
+
+    pub fn strategy_nav_point_count(&self) -> usize {
+        self.strategy_periods.nav_points.len()
     }
 
     pub fn finalized_run(&self) -> Option<&StrategyFinalization> {
@@ -2169,9 +2406,74 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), ExecutionLedg
     Ok(())
 }
 
+/// Stop classification is deterministic and cannot be used to grant risk.
+fn strategy_nav_stop_reason(
+    nav: Decimal,
+    peak: Decimal,
+    gross_loss: Decimal,
+    mandate_drawdown: Decimal,
+    policy_drawdown: Decimal,
+    daily_limit: Decimal,
+) -> Option<&'static str> {
+    if peak <= Decimal::ZERO || nav <= Decimal::ZERO {
+        return Some("STRATEGY_NAV_DEPLETED");
+    }
+    if gross_loss > daily_limit {
+        return Some("STRATEGY_UTC_DAILY_GROSS_LOSS");
+    }
+    if (peak - nav) / peak > mandate_drawdown.min(policy_drawdown) {
+        return Some("STRATEGY_MAX_DRAWDOWN");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strategy_nav_stop_thresholds_are_conservative_and_do_not_mask_losses() {
+        let d = |value| Decimal::from_str(value).unwrap();
+        assert_eq!(
+            strategy_nav_stop_reason(d("100"), d("100"), d("0"), d("0.2"), d("0.1"), d("10")),
+            None
+        );
+        assert_eq!(
+            strategy_nav_stop_reason(d("89.99"), d("100"), d("0"), d("0.2"), d("0.1"), d("10")),
+            Some("STRATEGY_MAX_DRAWDOWN")
+        );
+        assert_eq!(
+            strategy_nav_stop_reason(
+                d("89.99"),
+                d("100"),
+                d("10.01"),
+                d("0.2"),
+                d("0.1"),
+                d("10")
+            ),
+            Some("STRATEGY_UTC_DAILY_GROSS_LOSS")
+        );
+        assert_eq!(
+            strategy_nav_stop_reason(d("90"), d("100"), d("10"), d("0.2"), d("0.1"), d("10")),
+            None
+        );
+        assert_eq!(
+            strategy_nav_stop_reason(d("0"), d("100"), d("0"), d("0.2"), d("0.1"), d("10")),
+            Some("STRATEGY_NAV_DEPLETED")
+        );
+        assert_eq!(
+            strategy_nav_stop_reason(
+                d("100"),
+                d("100"),
+                d("10.000001"),
+                d("0.2"),
+                d("0.1"),
+                d("10")
+            ),
+            Some("STRATEGY_UTC_DAILY_GROSS_LOSS")
+        );
+    }
+
     use crate::{
         EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_PLAN_SCHEMA_V1, ExecutionAction,
         ExecutionDecisionReference, ExecutionLineageBinding, OrderSide, OrderType, PositionSide,
@@ -2316,6 +2618,7 @@ mod tests {
                     evidence: source,
                     finalization,
                 }],
+                nav_points: Vec::new(),
             },
         };
         fs::write(store.path(), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
@@ -3608,7 +3911,7 @@ mod tests {
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V9);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V10);
 
             let _ = fs::remove_dir_all(root);
         }

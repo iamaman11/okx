@@ -1,5 +1,7 @@
 # Roadmap and acceptance cursor
 
+**Active Stage 5A durable NAV slice (2026-10-14):** [#326](https://github.com/iamaman11/okx/pull/326) is MERGED and physically CONTROL/MCP ACCEPTED for single-source Production-public mark-to-market, with no Demo analytical feed. [#327](https://github.com/iamaman11/okx/pull/327) is one DRAFT functional PR using the existing atomic ledger for bounded, hash-linked NAV/high-water checkpoints and conservative UTC-day gross-realized-outflow STOP, with compact readback and no new service/agent/transport. A coherent source read may attest an unchanged quiet interval without forcing extra persistent cursor writes; missing native events, uncertain bills, stale Production mark or broken source coverage still fail closed. Neither sparse observed peaks nor a code-only STOP is full Stage 5A acceptance: require exact CI, verified Windows CONTROL/MCP, restart/tamper/day-boundary tests and physical OPEN valuation before Stage 5A can close. Production Live OFF, no new risk permissions.
+
 ## Single canonical plan
 
 **#160 — Industrial trading platform roadmap**
