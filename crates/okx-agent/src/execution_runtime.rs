@@ -663,7 +663,10 @@ impl ExecutionRuntime {
             return Ok(None);
         }
         Ok(Some(executor.reserve_strategy_capital_with_rearm(
-            reservation, opening, rearm, now_ms,
+            reservation,
+            opening,
+            rearm,
+            now_ms,
         )))
     }
 
