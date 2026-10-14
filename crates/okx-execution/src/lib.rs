@@ -62,11 +62,13 @@ pub use strategy_finance::{
     ProductionMarkEvidence, RunOwnedPosition, STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
     StrategyFinancialPeriod, assess_persisted_financial_period,
     assess_persisted_financial_period_with_production_marks,
+    assess_persisted_financial_period_with_verified_source,
 };
 pub use strategy_lifecycle::{
     ARCHIVED_STRATEGY_PROOF_SCHEMA_V1, ArchivedStrategyProof, ArchivedStrategyRun,
     MAX_ARCHIVED_STRATEGY_RUNS, STRATEGY_FINALIZATION_SCHEMA_V1, StrategyFinalization,
-    StrategyPeriodHistory,
+    StrategyNavPoint, StrategyPeriodHistory, STRATEGY_NAV_POINT_SCHEMA_V1,
+    MAX_STRATEGY_NAV_POINTS,
 };
 pub use validation::{
     ExecutionValidationError, PreMutationRiskDisposition, prepare_execution,
