@@ -76,7 +76,6 @@ pub struct DemoLeverageProof {
     pub account_uid_fingerprint: String,
 }
 
-
 /// The immutable short-lived canceled-order source window is two hours.
 /// For quiet runs, refresh from the existing authenticated REST/WS owner
 /// halfway through that window. This is not a timer, a new owner, or a
@@ -481,9 +480,10 @@ impl ExecutionRuntime {
                     || r.account_generation != account_generation
             })
             || executor.ledger().entries().any(|e| {
-                executor.ledger().capital_reservation().is_some_and(|r| {
-                    e.created_at_ms >= r.started_at_ms
-                })
+                executor
+                    .ledger()
+                    .capital_reservation()
+                    .is_some_and(|r| e.created_at_ms >= r.started_at_ms)
             })
         {
             return None;
@@ -492,9 +492,15 @@ impl ExecutionRuntime {
         if desired <= rust_decimal::Decimal::ZERO {
             return None;
         }
-        let current_rows = match self.executor_account.leverage(instrument, MarginMode::Cross).await {
+        let current_rows = match self
+            .executor_account
+            .leverage(instrument, MarginMode::Cross)
+            .await
+        {
             Ok(value) => value,
-            Err(error) => return Some(Err(format!("pre-write leverage read unavailable: {error}"))),
+            Err(error) => {
+                return Some(Err(format!("pre-write leverage read unavailable: {error}")));
+            }
         };
         let Some(current) = exact_hedge_cross_leverage(&current_rows, instrument) else {
             return Some(Err("initial long/short leverage is not exact".to_owned()));
@@ -505,17 +511,26 @@ impl ExecutionRuntime {
         if desired != current {
             // Exactly one POST. If the ACK is lost, independent GET may still
             // prove the final state; otherwise report UNKNOWN, never re-POST.
-            let _post_result = self.executor_account
-                .set_cross_swap_leverage(instrument, requested).await;
-            let verification = match self.executor_account.leverage(instrument, MarginMode::Cross).await {
+            let _post_result = self
+                .executor_account
+                .set_cross_swap_leverage(instrument, requested)
+                .await;
+            let verification = match self
+                .executor_account
+                .leverage(instrument, MarginMode::Cross)
+                .await
+            {
                 Ok(value) => value,
-                Err(error) => return Some(Err(format!(
-                    "UNKNOWN: post-write leverage readback unavailable: {error}"
-                ))),
+                Err(error) => {
+                    return Some(Err(format!(
+                        "UNKNOWN: post-write leverage readback unavailable: {error}"
+                    )));
+                }
             };
             if exact_hedge_cross_leverage(&verification, instrument) != Some(desired) {
                 return Some(Err(
-                    "UNKNOWN: requested leverage not independently verified; do not replay POST".to_owned()
+                    "UNKNOWN: requested leverage not independently verified; do not replay POST"
+                        .to_owned(),
                 ));
             }
         }
@@ -1542,12 +1557,29 @@ mod leverage_configuration_tests {
     #[test]
     fn hedge_leverage_requires_distinct_equal_sides() {
         let both = [row("long", "3"), row("short", "3.0")];
-        assert_eq!(exact_hedge_cross_leverage(&both, "BTC-USDT-SWAP").unwrap().to_string(), "3");
+        assert_eq!(
+            exact_hedge_cross_leverage(&both, "BTC-USDT-SWAP")
+                .unwrap()
+                .to_string(),
+            "3"
+        );
         assert!(exact_hedge_cross_leverage(&both[..1], "BTC-USDT-SWAP").is_none());
-        assert!(exact_hedge_cross_leverage(&[row("long","3"),row("long","3")],"BTC-USDT-SWAP").is_none());
-        assert!(exact_hedge_cross_leverage(&[row("long","3"),row("short","2")],"BTC-USDT-SWAP").is_none());
-        assert!(exact_hedge_cross_leverage(&[row("long","3"),row("net","3")],"BTC-USDT-SWAP").is_none());
-        assert!(exact_hedge_cross_leverage(&[row("long","oops"),row("short","3")],"BTC-USDT-SWAP").is_none());
-        assert!(exact_hedge_cross_leverage(&both,"ETH-USDT-SWAP").is_none());
+        assert!(
+            exact_hedge_cross_leverage(&[row("long", "3"), row("long", "3")], "BTC-USDT-SWAP")
+                .is_none()
+        );
+        assert!(
+            exact_hedge_cross_leverage(&[row("long", "3"), row("short", "2")], "BTC-USDT-SWAP")
+                .is_none()
+        );
+        assert!(
+            exact_hedge_cross_leverage(&[row("long", "3"), row("net", "3")], "BTC-USDT-SWAP")
+                .is_none()
+        );
+        assert!(
+            exact_hedge_cross_leverage(&[row("long", "oops"), row("short", "3")], "BTC-USDT-SWAP")
+                .is_none()
+        );
+        assert!(exact_hedge_cross_leverage(&both, "ETH-USDT-SWAP").is_none());
     }
 }
