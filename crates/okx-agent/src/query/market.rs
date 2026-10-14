@@ -1345,7 +1345,10 @@ mod tests {
             "PRODUCTION_SOURCE"
         );
         let serialized = serde_json::to_value(demo).unwrap();
-        assert_eq!(serialized["production_open_interest_comparability"], "NOT_ATTESTED");
+        assert_eq!(
+            serialized["production_open_interest_comparability"],
+            "NOT_ATTESTED"
+        );
         assert_ne!(serialized["source_scope"], production.source_scope);
     }
 
