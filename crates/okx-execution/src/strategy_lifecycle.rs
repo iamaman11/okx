@@ -757,7 +757,8 @@ mod tests {
         let mut gap = complete.clone();
         let mut next_cursor = gap.cursors.values().next().unwrap().clone();
         next_cursor.account_as_of_ms = 7_400_000;
-        gap.cursors.insert("source:after-unobserved-gap".to_owned(), next_cursor);
+        gap.cursors
+            .insert("source:after-unobserved-gap".to_owned(), next_cursor);
         seal_source_for_test(&mut gap);
         assert!(gap.summary().source_gap_over_two_hours);
         let closed = StrategyUnverifiedClosure::new(&run, &gap, 7_600_000).unwrap();
@@ -785,7 +786,9 @@ mod tests {
         next.started_at_ms = closed.closed_at_ms + 1;
         let archived = StrategyPeriodHistory {
             unverified_runs: vec![UnverifiedStrategyRun {
-                reservation: run.clone(), evidence: gap.clone(), closure: closed.clone(),
+                reservation: run.clone(),
+                evidence: gap.clone(),
+                closure: closed.clone(),
             }],
             ..StrategyPeriodHistory::default()
         };
@@ -793,7 +796,12 @@ mod tests {
         let proof = archived.unverified_runs[0].proof();
         assert_eq!(proof.status, "UNVERIFIED");
         assert_eq!(proof.reason, "SOURCE_CONTINUITY_NOT_PROVEN");
-        assert!(serde_json::to_value(proof).unwrap().get("nav_usdt").is_none());
+        assert!(
+            serde_json::to_value(proof)
+                .unwrap()
+                .get("nav_usdt")
+                .is_none()
+        );
         let mut reused = next.clone();
         reused.allocation_id = run.allocation_id.clone();
         assert!(archived.validate(Some(&reused), None).is_err());
