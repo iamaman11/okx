@@ -498,7 +498,11 @@ impl ExecutionLedgerStore {
             file.exchange_evidence.as_ref(),
         )?;
         if !file.leverage_attempts.is_empty()
-            && !matches!(file.schema.as_str(), EXECUTION_LEDGER_SCHEMA_V12 | EXECUTION_LEDGER_SCHEMA_V13) {
+            && !matches!(
+                file.schema.as_str(),
+                EXECUTION_LEDGER_SCHEMA_V12 | EXECUTION_LEDGER_SCHEMA_V13
+            )
+        {
             return Err(ExecutionLedgerError::Corrupt(
                 "leverage journal requires ledger schema v12",
             ));
@@ -1466,15 +1470,22 @@ impl DurableExecutionLedger {
         }
         let mut next = self.strategy_periods.clone();
         let stop_rearm = if let Some(rearm) = rearm {
-            let stop = self.risk_stop.as_ref()
+            let stop = self
+                .risk_stop
+                .as_ref()
                 .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
-            let prior = self.capital_reservation.as_ref()
+            let prior = self
+                .capital_reservation
+                .as_ref()
                 .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
-            let finalized = next.finalized_run.as_ref()
+            let finalized = next
+                .finalized_run
+                .as_ref()
                 .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
-            if !matches!(stop.reason.as_str(),
-                    "STRATEGY_MAX_DRAWDOWN" | "STRATEGY_UTC_DAILY_GROSS_LOSS" | "STRATEGY_NAV_DEPLETED")
-                || stop.stopped_at_ms != rearm.expected_stopped_at_ms
+            if !matches!(
+                stop.reason.as_str(),
+                "STRATEGY_MAX_DRAWDOWN" | "STRATEGY_UTC_DAILY_GROSS_LOSS" | "STRATEGY_NAV_DEPLETED"
+            ) || stop.stopped_at_ms != rearm.expected_stopped_at_ms
                 || finalized.checksum_sha256 != rearm.prior_finalization_sha256
                 || finalized.run_id != prior.allocation_id
                 || finalized.finalized_at_ms < stop.stopped_at_ms
