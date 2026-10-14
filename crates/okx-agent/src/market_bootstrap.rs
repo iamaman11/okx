@@ -15,6 +15,7 @@ use thiserror::Error;
 pub struct MarketBootstrapper {
     api: MarketDataApi,
     public_data: PublicDataApi,
+    simulated_market: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -84,10 +85,19 @@ pub enum MarketBootstrapError {
 
 impl MarketBootstrapper {
     pub fn new(client: OkxPublicClient) -> Self {
+        let simulated_market = client.environment().demo;
         Self {
             api: MarketDataApi::new(client.clone()),
             public_data: PublicDataApi::new(client),
+            simulated_market,
         }
+    }
+
+    /// The native REST and WS market sources are environment-scoped.
+    /// Demo's x-simulated-trading and wspap feeds must not be represented as
+    /// independent observations of production open interest/liquidity.
+    pub const fn source_is_simulated(&self) -> bool {
+        self.simulated_market
     }
 
     pub async fn research_candles_page(
