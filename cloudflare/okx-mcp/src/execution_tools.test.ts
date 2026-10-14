@@ -173,12 +173,13 @@ assert(executionProfilePermitsOperation("production","account_summary"),"read is
 assert(!isExecutionMutation("account_summary"),"read must not be misclassified as exchange mutation");
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
 const advertisedActions = (EXECUTION_TOOLS[1] as any).inputSchema.properties.action.enum as string[];
-assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-14.1",
+assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-14.2",
   "typed action schema changed; the advertised MCP contract version must advance");
 assert(advertisedActions.includes("quarantine_unverified_strategy_run"),
   "UNVERIFIED must be distinct from financial FINALIZED");
 assert(advertisedActions.includes("finalize_strategy_run"),
   "finalization must be advertised via existing Demo-only typed operation");
+assert(advertisedActions.includes("set_leverage"),"native leverage lowering is exposed via same typed action");
 assert(advertisedActions.includes("begin_strategy_run"),"native capital opening is typed and Demo only");
 assert(advertisedActions.includes("abandon_prepared"),"advertised writable action list must include the typed unsent PREPARED release");
 assert(advertisedActions.includes("confirm_protection_size"),"existing tool schema advertises exact-ID safe local confirmation");
