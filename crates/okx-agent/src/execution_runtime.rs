@@ -254,7 +254,10 @@ impl ExecutionRuntime {
             None
         } else {
             executor.ledger().financial_period_with_verified_source(
-                facts, coherent, production_marks, current_source_captured,
+                facts,
+                coherent,
+                production_marks,
+                current_source_captured,
             )
         };
         if current_source_captured && let Some(report) = reconciliation.financial_period.as_ref() {
@@ -515,7 +518,10 @@ impl ExecutionRuntime {
             return Ok(None);
         }
         Ok(Some(executor.quarantine_unverified_strategy_run(
-            facts, coherent, protection_absent, now_ms,
+            facts,
+            coherent,
+            protection_absent,
+            now_ms,
         )))
     }
 
