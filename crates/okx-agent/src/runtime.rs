@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use chrono::Utc;
+
 use okx_github::GitHubBackoff;
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator, PublicWsHandle};
 use serde::Serialize;
@@ -29,6 +31,16 @@ pub enum RuntimeState {
     DegradedMailbox,
     ReadyMailbox,
     ShuttingDown,
+}
+
+// Reuse the existing heartbeat; never spin a new timer or retry task.
+// A failed venue proof can be retried only at a bounded cadence.
+const MIN_QUIET_SOURCE_RETRY_MS: u64 = 300_000;
+
+fn quiet_source_retry_allowed(last_attempt_ms: Option<u64>, now_ms: u64) -> bool {
+    last_attempt_ms.is_none_or(|last| {
+        now_ms >= last && now_ms - last >= MIN_QUIET_SOURCE_RETRY_MS
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +155,7 @@ pub async fn run_mailbox_until_shutdown(
     let mut identity_published = false;
     let mut ready_emitted = false;
     let mut github_backoff = GitHubBackoff::default();
+    let mut last_quiet_source_attempt_ms = None;
 
     emit(
         RuntimeState::DegradedMailbox,
@@ -212,6 +225,29 @@ pub async fn run_mailbox_until_shutdown(
                 };
             }
             _ = ticker.tick() => {
+                // Same single native event loop; no second timer, worker,
+                // scheduler or exchange-POST path. Native private WS events
+                // remain the immediate capture trigger. The pre-existing
+                // mailbox heartbeat covers truly QUIET source intervals,
+                // which WS events alone cannot prove stayed event-free.
+                // The 1h source deadline is strictly below the 2h venue
+                // window for short-lived canceled/unfilled order evidence.
+                let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+                if quiet_source_retry_allowed(last_quiet_source_attempt_ms, now_ms)
+                    && let (Some(account), Some(private_ws), Some(execution)) =
+                        (account, private_ws, execution)
+                    && execution.strategy_quiet_source_capture_due(now_ms).await
+                {
+                    last_quiet_source_attempt_ms = Some(now_ms);
+                    if let Err(reason) =
+                        capture_one_native_financial_source(account, private_ws, execution).await
+                    {
+                        // No false cursor, no eventual replays, no fabricated
+                        // zero-event proof. Missing >2h past remains INCOMPLETE.
+                        eprintln!("native quiet financial source NOT_CAPTURED: {reason}");
+                    }
+                }
+
                 if !github_backoff.ready() {
                     continue;
                 }
@@ -463,6 +499,16 @@ fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_financial_source_retry_is_bounded_in_existing_heartbeat() {
+        let t = 1_790_000_000_000_u64;
+        assert!(quiet_source_retry_allowed(None, t));
+        assert!(!quiet_source_retry_allowed(Some(t), t));
+        assert!(!quiet_source_retry_allowed(Some(t), t + 299_999));
+        assert!(quiet_source_retry_allowed(Some(t), t + 300_000));
+        assert!(!quiet_source_retry_allowed(Some(t + 1), t));
+    }
 
     #[test]
     fn runtime_event_contains_only_public_identity() {
