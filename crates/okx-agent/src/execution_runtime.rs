@@ -214,9 +214,7 @@ impl ExecutionRuntime {
             production_marks,
             current_source_captured,
         );
-        if current_source_captured
-            && let Some(report) = reconciliation.financial_period.as_ref()
-        {
+        if current_source_captured && let Some(report) = reconciliation.financial_period.as_ref() {
             // Only a completely reconciled read may append a NAV watermark.
             // The stop, if triggered, is saved in the SAME atomic file.
             executor.observe_strategy_nav(report, facts, utc_now_ms())?;
