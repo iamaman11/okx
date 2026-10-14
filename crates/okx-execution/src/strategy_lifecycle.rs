@@ -342,6 +342,55 @@ impl ArchivedStrategyRun {
     }
 }
 
+pub const STRATEGY_STOP_REARM_SCHEMA_V1: &str = "okx.strategy-stop-rearm/v1";
+
+/// Exact, hash-linked STOP transition between two immutable strategy runs.
+/// Not a bypass: a new UTC day, a FINALIZED prior run and explicit operator
+/// authorization are required before the single ledger writer records this.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyStopRearm {
+    pub schema: String,
+    pub stopped_run_id: String,
+    pub prior_finalization_sha256: String,
+    pub stopped_at_ms: u64,
+    pub stop_reason: String,
+    pub next_run_id: String,
+    pub next_run_started_at_ms: u64,
+    pub account_uid: String,
+    pub operator_authority_id: String,
+    pub previous_sha256: String,
+    pub checksum_sha256: String,
+}
+impl StrategyStopRearm {
+    pub fn hash(&self) -> Result<String, ExecutionLedgerError> {
+        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&(
+            &self.schema, &self.stopped_run_id, &self.prior_finalization_sha256,
+            self.stopped_at_ms, &self.stop_reason, &self.next_run_id,
+            self.next_run_started_at_ms, &self.account_uid, &self.operator_authority_id,
+            &self.previous_sha256,
+        ))?)))
+    }
+    pub fn validate(&self) -> Result<(), ExecutionLedgerError> {
+        if self.schema != STRATEGY_STOP_REARM_SCHEMA_V1
+            || self.stopped_at_ms == 0
+            || self.next_run_started_at_ms / 86_400_000 <= self.stopped_at_ms / 86_400_000
+            || !matches!(self.stop_reason.as_str(),
+                "STRATEGY_MAX_DRAWDOWN" | "STRATEGY_DAILY_LOSS_LIMIT" | "STRATEGY_NAV_DEPLETED")
+            || self.stopped_run_id.is_empty() || self.next_run_id.is_empty()
+            || self.stopped_run_id == self.next_run_id || self.account_uid.is_empty()
+            || !self.operator_authority_id.starts_with("sha256:")
+            || self.operator_authority_id.len() != 71
+            || self.prior_finalization_sha256.len() != 64
+            || !self.prior_finalization_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || self.checksum_sha256 != self.hash()?
+        {
+            return Err(ExecutionLedgerError::Corrupt("invalid strategy STOP rearm proof"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategyPeriodHistory {
@@ -353,6 +402,8 @@ pub struct StrategyPeriodHistory {
     pub unverified_runs: Vec<UnverifiedStrategyRun>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nav_points: Vec<StrategyNavPoint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_rearms: Vec<StrategyStopRearm>,
 }
 
 impl StrategyPeriodHistory {
@@ -442,6 +493,35 @@ impl StrategyPeriodHistory {
                 ));
             };
             unverified.validate(run, source)?;
+        }
+        if self.stop_rearms.len() > MAX_ARCHIVED_STRATEGY_RUNS {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+        let mut previous_rearm: Option<&StrategyStopRearm> = None;
+        for rearm in &self.stop_rearms {
+            rearm.validate()?;
+            let prior = self.archived_runs.iter()
+                .find(|r| r.reservation.allocation_id == rearm.stopped_run_id)
+                .ok_or(ExecutionLedgerError::Corrupt("rearm STOP missing archived run"))?;
+            let next = active.filter(|r| r.allocation_id == rearm.next_run_id)
+                .or_else(|| self.archived_runs.iter()
+                    .find(|r| r.reservation.allocation_id == rearm.next_run_id)
+                    .map(|r| &r.reservation));
+            if prior.finalization.checksum_sha256 != rearm.prior_finalization_sha256
+                || prior.finalization.finalized_at_ms < rearm.stopped_at_ms
+                || prior.reservation.account_uid_fingerprint != rearm.account_uid
+                || prior.reservation.operator_authority_id != rearm.operator_authority_id
+                || next.is_none_or(|r| {
+                    r.account_uid_fingerprint != rearm.account_uid
+                        || r.operator_authority_id != rearm.operator_authority_id
+                        || r.started_at_ms != rearm.next_run_started_at_ms
+                })
+                || rearm.previous_sha256 != previous_rearm.map_or("", |r| &r.checksum_sha256)
+                || previous_rearm.is_some_and(|r| r.next_run_started_at_ms >= rearm.stopped_at_ms)
+            {
+                return Err(ExecutionLedgerError::Corrupt("rearm does not bind exact financial epochs"));
+            }
+            previous_rearm = Some(rearm);
         }
         let mut previous: Option<&StrategyNavPoint> = None;
         for point in &self.nav_points {
@@ -852,6 +932,7 @@ mod tests {
             unverified_run: None,
             unverified_runs: Vec::new(),
             nav_points: Vec::new(),
+            stop_rearms: Vec::new(),
         };
         history.validate(Some(&next), None).unwrap();
         let proof = history.archived_runs[0].proof();
@@ -884,6 +965,7 @@ mod tests {
             unverified_run: None,
             unverified_runs: Vec::new(),
             nav_points: Vec::new(),
+            stop_rearms: Vec::new(),
         };
         assert!(duplicate_history.validate(Some(&next), None).is_err());
         // Sixteen distinct, internally valid immutable periods are allowed.
@@ -919,6 +1001,7 @@ mod tests {
             unverified_run: None,
             unverified_runs: Vec::new(),
             nav_points: Vec::new(),
+            stop_rearms: Vec::new(),
         };
         bounded_history
             .validate(Some(&next_after_capacity), None)
