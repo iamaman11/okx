@@ -544,7 +544,7 @@ impl AccountApi {
     }
 
     /// A non-order configuration write. Caller must hold the single native
-    /// Demo executor mutex and independently verify both long/short sides.
+    /// execution-owner mutex and independently verify both long/short sides.
     /// Never replay a possibly-sent request after an uncertain outcome.
     pub async fn set_cross_swap_leverage(
         &self,

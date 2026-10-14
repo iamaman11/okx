@@ -184,7 +184,7 @@ export function isExecutionMutation(operationType: unknown): boolean {
   return [
     "prepare_execution", "submit_prepared_execution",
     "mutate_execution", "abort_reverse_execution", "abandon_prepared_execution",
-    "begin_strategy_run", "finalize_strategy_run", "quarantine_unverified_strategy_run", "set_demo_leverage",
+    "begin_strategy_run", "finalize_strategy_run", "quarantine_unverified_strategy_run", "set_leverage",
   ].includes(String(operationType));
 }
 
@@ -203,7 +203,7 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
         || !token(args.instrument,3,64)
         || !String(args.instrument).endsWith("-USDT-SWAP")
         || args.trade_mode!=="cross" || !decimal(args.leverage)) return null;
-      return {type:"set_demo_leverage",mutation_id:intent_id,
+      return {type:"set_leverage",mutation_id:intent_id,
         instrument:args.instrument,margin_mode:"cross",leverage:args.leverage};
     }
     case "finalize_strategy_run": {

@@ -93,7 +93,7 @@ for (const invalid of [
 assert(buildExecutionOperation({
   action:"set_leverage",intent_id:"stage5a_leverage_20261014",instrument:"BTC-USDT-SWAP",
   trade_mode:"cross",leverage:"2",
-})?.type==="set_demo_leverage", "typed leverage reduction lives in existing write surface");
+})?.type==="set_leverage", "typed leverage reduction lives in existing write surface");
 for (const invalid of [
   {trade_mode:"isolated",leverage:"2",instrument:"BTC-USDT-SWAP"},
   {trade_mode:"cross",leverage:"-2",instrument:"BTC-USDT-SWAP"},
@@ -102,8 +102,8 @@ for (const invalid of [
   assert(buildExecutionOperation({action:"set_leverage",intent_id:"stage5a_leverage_20261014",...invalid})===null,
     "unsafe leverage wire shape rejected");
 }
-assert(isExecutionMutation("set_demo_leverage"),"leverage POST must require Demo profile");
-assert(!executionProfilePermitsOperation("production","set_demo_leverage"),"Production leverage always read-only");
+assert(isExecutionMutation("set_leverage"),"leverage POST must require Demo profile");
+assert(!executionProfilePermitsOperation("production","set_leverage"),"Production leverage always read-only");
 assert(isExecutionMutation("begin_strategy_run"),"capital mutation requires Demo-only owner");
 assert(!executionProfilePermitsOperation("production","begin_strategy_run"),"Production cannot allocate Demo strategy capital");
 assert(buildExecutionOperation(uidAction("finalize_strategy_run"))?.type==="finalize_strategy_run",
@@ -162,7 +162,7 @@ for(const x of [
   // malformed or foreign fields before sending a corresponding native request.
   if(result!==null)throw Error("malformed execution action reached runtime: "+JSON.stringify(x));
 }
-for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution","abandon_prepared_execution","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_demo_leverage"]) {
+for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution","abandon_prepared_execution","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage"]) {
   assert(isExecutionMutation(op), "all trading writes classify as uncertain on lost ACK");
   assert(executionProfilePermitsOperation("demo_acceptance",op), "verified Demo write allowed");
   for (const profile of ["production","unverified","",undefined]) {

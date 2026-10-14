@@ -175,13 +175,13 @@ pub(super) async fn dispatch(
         AgentOperation::QuarantineUnverifiedStrategyRun { allocation_id } => {
             quarantine_unverified_strategy_run(request, context, generated_at, allocation_id).await
         }
-        AgentOperation::SetDemoLeverage {
+        AgentOperation::SetLeverage {
             mutation_id,
             instrument,
             margin_mode,
             leverage,
         } => {
-            set_demo_leverage(
+            set_leverage(
                 request,
                 context,
                 generated_at,
@@ -462,9 +462,9 @@ async fn begin_strategy_run(
 
 /// One explicit administrative close with independent Windows-sourced REST,
 /// private WS and native pending protection evidence; no exchange mutation.
-/// One Demo-only leverage reduction through the native executor. Exactly one
+/// One Leverage reduction through the native executor. Exactly one
 /// possible set-leverage POST; only exchange GET can independently confirm it.
-async fn set_demo_leverage(
+async fn set_leverage(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
     generated_at: &str,
@@ -580,7 +580,7 @@ async fn set_demo_leverage(
         ));
     }
     match execution
-        .lower_demo_cross_leverage_authorized(
+        .lower_cross_leverage_authorized(
             &preflight,
             &snapshot.account_generation,
             mutation_id,
@@ -592,7 +592,7 @@ async fn set_demo_leverage(
         Some(Ok(proof)) => Ok(completed(
             request,
             generated_at,
-            crate::execution_runtime::DEMO_LEVERAGE_PROOF_SCHEMA_V1,
+            crate::execution_runtime::LEVERAGE_CHANGE_PROOF_SCHEMA_V1,
             serde_json::to_value(proof)?,
         )),
         Some(Err(reason)) => Ok(failure_response(
@@ -605,7 +605,7 @@ async fn set_demo_leverage(
         )),
         None => Ok(deny(
             EXECUTION_MUTATION_UNSAFE_CODE,
-            "Demo leverage authority or active run account generation unavailable",
+            "Leverage configuration permission or active run account generation unavailable",
         )),
     }
 }

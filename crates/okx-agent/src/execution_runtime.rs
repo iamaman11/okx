@@ -33,7 +33,7 @@ use crate::{
 };
 
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
-pub const DEMO_LEVERAGE_PROOF_SCHEMA_V1: &str = "okx.demo-leverage-proof/v1";
+pub const LEVERAGE_CHANGE_PROOF_SCHEMA_V1: &str = "okx.leverage-change-proof/v1";
 
 /// A Hedge Cross setting is accepted only when BOTH distinct sides are
 /// individually verified and have the same exact, positive leverage.
@@ -64,7 +64,7 @@ fn exact_hedge_cross_leverage(
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DemoLeverageProof {
+pub struct LeverageChangeProof {
     pub schema: &'static str,
     pub mutation_id: String,
     pub instrument: String,
@@ -457,14 +457,14 @@ impl ExecutionRuntime {
 
     /// One existing native executor mutex spans read/one optional POST/readback.
     /// Never retry an uncertain POST, never use Production credentials.
-    pub async fn lower_demo_cross_leverage_authorized(
+    pub async fn lower_cross_leverage_authorized(
         &self,
         preflight: &ExecutorCredentialPreflight,
         account_generation: &str,
         mutation_id: &str,
         instrument: &str,
         requested: &str,
-    ) -> Option<Result<DemoLeverageProof, String>> {
+    ) -> Option<Result<LeverageChangeProof, String>> {
         let executor = self.executor.lock().await;
         if !self.environment.demo
             || self.mode != ExecutionRuntimeMode::DemoAcceptance
@@ -534,8 +534,8 @@ impl ExecutionRuntime {
                 ));
             }
         }
-        Some(Ok(DemoLeverageProof {
-            schema: DEMO_LEVERAGE_PROOF_SCHEMA_V1,
+        Some(Ok(LeverageChangeProof {
+            schema: LEVERAGE_CHANGE_PROOF_SCHEMA_V1,
             mutation_id: mutation_id.to_owned(),
             instrument: instrument.to_owned(),
             margin_mode: "cross",

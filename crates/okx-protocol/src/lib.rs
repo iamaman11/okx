@@ -975,8 +975,8 @@ pub enum AgentOperation {
     QuarantineUnverifiedStrategyRun {
         allocation_id: String,
     },
-    /// Demo-only, reduction-only account configuration.
-    SetDemoLeverage {
+    /// Account leverage configuration: capability is venue-neutral; mutation policy is profile-gated.
+    SetLeverage {
         mutation_id: String,
         instrument: String,
         margin_mode: TradingMarginMode,
@@ -1058,7 +1058,7 @@ impl AgentOperation {
         matches!(
             self,
             Self::BeginStrategyRun { .. }
-                | Self::SetDemoLeverage { .. }
+                | Self::SetLeverage { .. }
                 | Self::FinalizeStrategyRun { .. }
                 | Self::QuarantineUnverifiedStrategyRun { .. }
                 | Self::PrepareExecution { .. }
@@ -1073,7 +1073,7 @@ impl AgentOperation {
         !matches!(
             self,
             Self::BeginStrategyRun { .. }
-                | Self::SetDemoLeverage { .. }
+                | Self::SetLeverage { .. }
                 | Self::FinalizeStrategyRun { .. }
                 | Self::QuarantineUnverifiedStrategyRun { .. }
                 | Self::PrepareExecution { .. }
@@ -1210,7 +1210,7 @@ impl AgentOperation {
                 Ok(())
             }
             Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
-            Self::SetDemoLeverage {
+            Self::SetLeverage {
                 mutation_id,
                 instrument,
                 margin_mode,
