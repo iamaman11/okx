@@ -40,12 +40,15 @@ pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
 /// promise that an agent stopped for two hours can recover old history.
 const QUIET_SOURCE_COVERAGE_REFRESH_MS: u64 = 3_600_000;
 
-fn quiet_source_capture_due(run_started_ms: u64, latest_source_ms: Option<u64>, now_ms: u64) -> bool {
+fn quiet_source_capture_due(
+    run_started_ms: u64,
+    latest_source_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
     now_ms >= run_started_ms
         && now_ms.saturating_sub(latest_source_ms.unwrap_or(run_started_ms))
             >= QUIET_SOURCE_COVERAGE_REFRESH_MS
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionReconciliation {
@@ -1051,7 +1054,11 @@ mod tests {
         assert!(!quiet_source_capture_due(start, None, start));
         assert!(!quiet_source_capture_due(start, None, start + one_hour - 1));
         assert!(quiet_source_capture_due(start, None, start + one_hour));
-        assert!(!quiet_source_capture_due(start, Some(start + 500), start + one_hour));
+        assert!(!quiet_source_capture_due(
+            start,
+            Some(start + 500),
+            start + one_hour
+        ));
         assert!(quiet_source_capture_due(
             start,
             Some(start + 500),
@@ -1059,9 +1066,17 @@ mod tests {
         ));
         // An unavailable source owner never acquires its own timer or
         // assigns a historical zero-event proof.
-        assert!(quiet_source_capture_due(start, Some(start), start + 9 * one_hour));
+        assert!(quiet_source_capture_due(
+            start,
+            Some(start),
+            start + 9 * one_hour
+        ));
         assert!(!quiet_source_capture_due(start, Some(start), start - 1));
-        assert!(!quiet_source_capture_due(start, Some(start + 100_000), start + one_hour));
+        assert!(!quiet_source_capture_due(
+            start,
+            Some(start + 100_000),
+            start + one_hour
+        ));
     }
 
     #[test]
