@@ -24,7 +24,7 @@ use crate::{
     ProtectiveOrderStatus, ProtectiveSizeAmendState, ProtectiveTriggerPriceBasis,
     ReverseContinuation, ReverseExecutionLink, ReverseLeg, STRATEGY_NAV_POINT_SCHEMA_V1,
     StrategyFinalization, StrategyFinancialPeriod, StrategyNavPoint, StrategyPeriodHistory,
-    StrategyUnverifiedClosure, UnverifiedStrategyRun, UnverifiedStrategyProof,
+    StrategyUnverifiedClosure, UnverifiedStrategyProof, UnverifiedStrategyRun,
     derive_amend_request_id, derive_client_order_id, derive_protective_algo_client_id,
     derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
@@ -123,7 +123,9 @@ pub enum ExecutionLedgerError {
     #[error("cannot FINALIZE: exact flat and native evidence conditions absent")]
     StrategyRunNotFinalizable,
 
-    #[error("unverified strategy closure requires a fresh FLAT account, no native protection, and no run-owned execution")]
+    #[error(
+        "unverified strategy closure requires a fresh FLAT account, no native protection, and no run-owned execution"
+    )]
     StrategyRunNotQuarantinable,
 
     #[error("strategy period is FINALIZED; no new-risk mutation admitted")]
@@ -320,7 +322,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V8
                     | EXECUTION_LEDGER_SCHEMA_V9
                     | EXECUTION_LEDGER_SCHEMA_V10
-                | EXECUTION_LEDGER_SCHEMA_V11
+                    | EXECUTION_LEDGER_SCHEMA_V11
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "risk stop on legacy ledger schema",
@@ -335,7 +337,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V8
                     | EXECUTION_LEDGER_SCHEMA_V9
                     | EXECUTION_LEDGER_SCHEMA_V10
-                | EXECUTION_LEDGER_SCHEMA_V11
+                    | EXECUTION_LEDGER_SCHEMA_V11
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -351,7 +353,7 @@ impl ExecutionLedgerStore {
                 EXECUTION_LEDGER_SCHEMA_V8
                     | EXECUTION_LEDGER_SCHEMA_V9
                     | EXECUTION_LEDGER_SCHEMA_V10
-                | EXECUTION_LEDGER_SCHEMA_V11
+                    | EXECUTION_LEDGER_SCHEMA_V11
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "exchange evidence on legacy schema",
@@ -367,8 +369,7 @@ impl ExecutionLedgerStore {
         }
         if !matches!(
             file.schema.as_str(),
-            EXECUTION_LEDGER_SCHEMA_V9 | EXECUTION_LEDGER_SCHEMA_V10
-                | EXECUTION_LEDGER_SCHEMA_V11
+            EXECUTION_LEDGER_SCHEMA_V9 | EXECUTION_LEDGER_SCHEMA_V10 | EXECUTION_LEDGER_SCHEMA_V11
         ) && file.strategy_periods != StrategyPeriodHistory::default()
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -459,7 +460,10 @@ impl ExecutionLedgerStore {
             ledger_uid = Some(uid);
             validate_entry(entry)?;
             validate_strategy_run_binding(
-                entry, capital_reservation, &history.archived_runs, &history.unverified_runs,
+                entry,
+                capital_reservation,
+                &history.archived_runs,
+                &history.unverified_runs,
             )?;
             if intent_id != &entry.record.plan.intent_id {
                 return Err(ExecutionLedgerError::Corrupt(
@@ -922,8 +926,11 @@ impl DurableExecutionLedger {
     }
 
     pub fn archived_unverified_proofs(&self) -> Vec<UnverifiedStrategyProof> {
-        self.strategy_periods.unverified_runs.iter()
-            .map(UnverifiedStrategyRun::proof).collect()
+        self.strategy_periods
+            .unverified_runs
+            .iter()
+            .map(UnverifiedStrategyRun::proof)
+            .collect()
     }
 
     pub fn quarantine_unverified_strategy_run(
@@ -933,15 +940,22 @@ impl DurableExecutionLedger {
         native_protection_empty: bool,
         observed_at_ms: u64,
     ) -> Result<StrategyUnverifiedClosure, ExecutionLedgerError> {
-        let run = self.capital_reservation.as_ref()
+        let run = self
+            .capital_reservation
+            .as_ref()
             .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
-        let source = self.exchange_evidence.as_ref()
+        let source = self
+            .exchange_evidence
+            .as_ref()
             .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
         if let Some(closed) = self.strategy_periods.unverified_run.as_ref() {
             closed.validate(run, source)?;
             return Ok(closed.clone());
         }
-        let as_of = facts.summary.current_account_as_of_ms.as_deref()
+        let as_of = facts
+            .summary
+            .current_account_as_of_ms
+            .as_deref()
             .and_then(|s| s.parse::<u64>().ok())
             .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
         if self.strategy_periods.finalized_run.is_some()
@@ -956,13 +970,24 @@ impl DurableExecutionLedger {
             || !source.summary().source_gap_over_two_hours
             || !source.events.is_empty()
             || self.risk_stop.is_some()
-            || self.entries.values().any(|e| e.created_at_ms >= run.started_at_ms
-                || e.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
-                || !e.record.state.is_terminal())
-            || facts.exchange_fills.iter().any(|f| f.fill_time_ms >= run.started_at_ms)
-            || facts.exchange_bills.iter().any(|b| b.timestamp_ms >= run.started_at_ms)
-            || facts.exchange_orders.iter().any(|o| o.update_time_ms.parse::<u64>()
-                .is_ok_and(|ms| ms >= run.started_at_ms))
+            || self.entries.values().any(|e| {
+                e.created_at_ms >= run.started_at_ms
+                    || e.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
+                    || !e.record.state.is_terminal()
+            })
+            || facts
+                .exchange_fills
+                .iter()
+                .any(|f| f.fill_time_ms >= run.started_at_ms)
+            || facts
+                .exchange_bills
+                .iter()
+                .any(|b| b.timestamp_ms >= run.started_at_ms)
+            || facts.exchange_orders.iter().any(|o| {
+                o.update_time_ms
+                    .parse::<u64>()
+                    .is_ok_and(|ms| ms >= run.started_at_ms)
+            })
         {
             return Err(ExecutionLedgerError::StrategyRunNotQuarantinable);
         }
@@ -971,10 +996,16 @@ impl DurableExecutionLedger {
         let closed = StrategyUnverifiedClosure::new(run, source, observed_at_ms)?;
         let mut next = self.strategy_periods.clone();
         next.unverified_run = Some(closed.clone());
-        next.validate(self.capital_reservation.as_ref(), self.exchange_evidence.as_ref())?;
+        next.validate(
+            self.capital_reservation.as_ref(),
+            self.exchange_evidence.as_ref(),
+        )?;
         self.store.save(
-            &self.entries, self.risk_stop.as_ref(),
-            self.capital_reservation.as_ref(), self.exchange_evidence.as_ref(), &next,
+            &self.entries,
+            self.risk_stop.as_ref(),
+            self.capital_reservation.as_ref(),
+            self.exchange_evidence.as_ref(),
+            &next,
         )?;
         self.strategy_periods = next;
         Ok(closed)
@@ -1102,7 +1133,10 @@ impl DurableExecutionLedger {
             .archived_runs
             .iter()
             .any(|item| item.reservation.allocation_id == reservation.allocation_id)
-            || self.strategy_periods.unverified_runs.iter()
+            || self
+                .strategy_periods
+                .unverified_runs
+                .iter()
                 .any(|item| item.reservation.allocation_id == reservation.allocation_id)
         {
             return Err(ExecutionLedgerError::CapitalReservationConflict);
@@ -1132,12 +1166,12 @@ impl DurableExecutionLedger {
         }
         let mut next = self.strategy_periods.clone();
         if let Some(prior) = &self.capital_reservation {
-            if next.archived_runs.len() + next.unverified_runs.len()
-                >= MAX_ARCHIVED_STRATEGY_RUNS
-            {
+            if next.archived_runs.len() + next.unverified_runs.len() >= MAX_ARCHIVED_STRATEGY_RUNS {
                 return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
             }
-            let old_source = self.exchange_evidence.clone()
+            let old_source = self
+                .exchange_evidence
+                .clone()
                 .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
             if let Some(finalized) = next.finalized_run.take() {
                 next.archived_runs.push(ArchivedStrategyRun {
@@ -1985,9 +2019,12 @@ fn validate_strategy_run_binding(
                 .find(|v| v.reservation.allocation_id == run_id)
                 .map(|v| &v.reservation)
         });
-    let run = run.or_else(|| unverified.iter()
-        .find(|v| v.reservation.allocation_id == run_id)
-        .map(|v| &v.reservation));
+    let run = run.or_else(|| {
+        unverified
+            .iter()
+            .find(|v| v.reservation.allocation_id == run_id)
+            .map(|v| &v.reservation)
+    });
     let Some(run) = run else {
         return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
     };
