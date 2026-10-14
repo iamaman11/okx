@@ -1520,7 +1520,7 @@ mod tests {
         )
         .expect("read-only owner");
         assert!(
-            ro.begin_strategy_run_demo_authorized(&credential, reservation.clone(), &opening, 102,)
+            ro.begin_strategy_run_demo_authorized(&credential, reservation.clone(), &opening, 102, None)
                 .await
                 .expect("read-only refused")
                 .is_none()
@@ -1545,7 +1545,7 @@ mod tests {
         .expect("Demo owner");
         let rejected = preflight(false).credential;
         assert!(
-            demo.begin_strategy_run_demo_authorized(&rejected, reservation, &opening, 102,)
+            demo.begin_strategy_run_demo_authorized(&rejected, reservation, &opening, 102, None)
                 .await
                 .expect("rejected preflight")
                 .is_none()
