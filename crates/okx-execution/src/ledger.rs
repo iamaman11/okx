@@ -440,7 +440,6 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V10
                 | EXECUTION_LEDGER_SCHEMA_V11
                 | EXECUTION_LEDGER_SCHEMA_V12
-                | EXECUTION_LEDGER_SCHEMA_V12
         ) && file.strategy_periods != StrategyPeriodHistory::default()
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -450,7 +449,9 @@ impl ExecutionLedgerStore {
         if !file.strategy_periods.nav_points.is_empty()
             && !matches!(
                 file.schema.as_str(),
-                EXECUTION_LEDGER_SCHEMA_V10 | EXECUTION_LEDGER_SCHEMA_V11
+                EXECUTION_LEDGER_SCHEMA_V10
+                    | EXECUTION_LEDGER_SCHEMA_V11
+                    | EXECUTION_LEDGER_SCHEMA_V12
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
