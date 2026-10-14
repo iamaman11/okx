@@ -1173,7 +1173,7 @@ impl DurableExecutionLedger {
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
             || !source.summary().source_gap_over_two_hours
             || !source.events.is_empty()
-            || self.risk_stop.is_some() != rearm.is_some()
+            || self.risk_stop.is_some()
             || self.entries.values().any(|e| {
                 e.created_at_ms >= run.started_at_ms
                     || e.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
@@ -1461,7 +1461,7 @@ impl DurableExecutionLedger {
             || !opening.zero_positions
             || !opening.zero_pending_orders
             || !opening.zero_native_protection
-            || self.risk_stop.is_some()
+            || self.risk_stop.is_some() != rearm.is_some()
             || self.entries.values().any(|e| {
                 !e.record.state.is_terminal() || e.created_at_ms >= reservation.started_at_ms
             })
