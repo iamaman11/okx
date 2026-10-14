@@ -393,7 +393,8 @@ mod tests {
         bad.nav_points[1].account_as_of_ms = 0;
         assert!(bad.validate(Some(&run), None).is_err());
         bad = restored;
-        bad.nav_points.resize(MAX_STRATEGY_NAV_POINTS + 1, bad.nav_points[2].clone());
+        let last = bad.nav_points[2].clone();
+        bad.nav_points.resize(MAX_STRATEGY_NAV_POINTS + 1, last);
         assert!(bad.validate(Some(&run), None).is_err());
         assert!(!bytes.is_empty());
     }
