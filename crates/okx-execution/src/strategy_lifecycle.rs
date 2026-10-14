@@ -373,19 +373,55 @@ impl StrategyPeriodHistory {
 mod tests {
     use super::*;
 
+    fn attested_source(run: &StrategyCapitalReservation) -> DurableExchangeEvidence {
+        let mut source = DurableExchangeEvidence::new(run).unwrap();
+        source.cursors.insert(
+            "source:1".to_owned(),
+            crate::exchange_evidence::ExchangeCoverageCursor {
+                source: "OKX_REST_ACCOUNT_HISTORY".to_owned(),
+                source_received_at: "2026-10-14T00:00:00Z".to_owned(),
+                generation: "source-test-generation".to_owned(),
+                account_as_of_ms: 1500,
+                order_complete: true,
+                fill_complete: true,
+                bill_complete: true,
+                covered_ranges: serde_json::json!({}),
+            },
+        );
+        seal_source_for_test(&mut source);
+        source.validate().unwrap();
+        source
+    }
+
+    fn seal_source_for_test(source: &mut DurableExchangeEvidence) {
+        let bytes = serde_json::to_vec(&(
+            &source.schema, &source.account_uid, &source.run_id,
+            &source.events, &source.cursors,
+        )).unwrap();
+        source.checksum_sha256 = format!("{:x}", Sha256::digest(bytes));
+    }
+
     fn nav_point(
         run: &StrategyCapitalReservation,
+        source: &DurableExchangeEvidence,
         at_ms: u64,
         nav: &str,
         peak: &str,
         previous: &str,
     ) -> StrategyNavPoint {
+        let as_of = at_ms.saturating_sub(200);
+        let (cursor_key, cursor) = source.cursors.iter()
+            .filter(|(_, c)| c.account_as_of_ms <= as_of)
+            .max_by_key(|(_, c)| c.account_as_of_ms)
+            .unwrap();
         let mut point = StrategyNavPoint {
             schema: STRATEGY_NAV_POINT_SCHEMA_V1.to_owned(),
             run_id: run.allocation_id.clone(),
             observed_at_ms: at_ms,
-            account_as_of_ms: at_ms.saturating_sub(200),
-            evidence_sha256: "a".repeat(64),
+            account_as_of_ms: as_of,
+            evidence_sha256: source.checksum_sha256.clone(),
+            source_cursor_key: cursor_key.clone(),
+            source_cursor_sha256: format!("{:x}", Sha256::digest(serde_json::to_vec(cursor).unwrap())),
             nav_usdt: nav.to_owned(),
             high_water_usdt: peak.to_owned(),
             daily_gross_loss_usdt: "0".to_owned(),
@@ -400,36 +436,51 @@ mod tests {
     #[test]
     fn nav_high_water_chain_is_durable_bounded_and_fails_closed_on_tampering() {
         let run = reservation();
-        let first = nav_point(&run, 2000, "100", "100", "");
-        let second = nav_point(&run, 3000, "103", "103", &first.checksum_sha256);
-        let third = nav_point(&run, 4000, "98", "103", &second.checksum_sha256);
+        let source = attested_source(&run);
+        let first = nav_point(&run, &source, 2000, "100", "100", "");
+        let second = nav_point(&run, &source, 3000, "103", "103", &first.checksum_sha256);
+        let third = nav_point(&run, &source, 4000, "98", "103", &second.checksum_sha256);
         let history = StrategyPeriodHistory {
             nav_points: vec![first, second, third],
             ..StrategyPeriodHistory::default()
         };
-        history.validate(Some(&run), None).unwrap();
+        history.validate(Some(&run), Some(&source)).unwrap();
         let bytes = serde_json::to_vec(&history).unwrap();
         let restored: StrategyPeriodHistory = serde_json::from_slice(&bytes).unwrap();
-        restored.validate(Some(&run), None).unwrap();
+        restored.validate(Some(&run), Some(&source)).unwrap();
         assert_eq!(restored.nav_points[2].high_water_usdt, "103");
         let mut bad = restored.clone();
+        bad.nav_points[1].daily_gross_loss_usdt = "2".to_owned();
+        bad.nav_points[1].checksum_sha256 = bad.nav_points[1].hash().unwrap();
+        bad.nav_points[2].previous_sha256 = bad.nav_points[1].checksum_sha256.clone();
+        bad.nav_points[2].checksum_sha256 = bad.nav_points[2].hash().unwrap();
+        assert!(bad.validate(Some(&run), Some(&source)).is_err(), "daily loss cannot go backward");
+        bad = restored.clone();
+        bad.nav_points[1].account_as_of_ms = 1600;
+        bad.nav_points[1].checksum_sha256 = bad.nav_points[1].hash().unwrap();
+        assert!(bad.validate(Some(&run), Some(&source)).is_err(), "invalid UTC stamp");
+        bad = restored.clone();
+        bad.nav_points[1].source_cursor_sha256 = "f".repeat(64);
+        bad.nav_points[1].checksum_sha256 = bad.nav_points[1].hash().unwrap();
+        assert!(bad.validate(Some(&run), Some(&source)).is_err(), "cursor substitution rejected");
+        let mut bad = restored.clone();
         bad.nav_points[1].nav_usdt = "300".to_owned();
-        assert!(bad.validate(Some(&run), None).is_err());
+        assert!(bad.validate(Some(&run), Some(&source)).is_err());
         bad = restored.clone();
         bad.nav_points[2].high_water_usdt = "98".to_owned();
         bad.nav_points[2].checksum_sha256 = bad.nav_points[2].hash().unwrap();
-        assert!(bad.validate(Some(&run), None).is_err());
+        assert!(bad.validate(Some(&run), Some(&source)).is_err());
         bad = restored.clone();
         bad.nav_points[2].previous_sha256 = "foreign".to_owned();
         bad.nav_points[2].checksum_sha256 = bad.nav_points[2].hash().unwrap();
-        assert!(bad.validate(Some(&run), None).is_err());
+        assert!(bad.validate(Some(&run), Some(&source)).is_err());
         bad = restored.clone();
         bad.nav_points[1].account_as_of_ms = 0;
-        assert!(bad.validate(Some(&run), None).is_err());
+        assert!(bad.validate(Some(&run), Some(&source)).is_err());
         bad = restored;
         let last = bad.nav_points[2].clone();
         bad.nav_points.resize(MAX_STRATEGY_NAV_POINTS + 1, last);
-        assert!(bad.validate(Some(&run), None).is_err());
+        assert!(bad.validate(Some(&run), Some(&source)).is_err());
         assert!(!bytes.is_empty());
     }
 
