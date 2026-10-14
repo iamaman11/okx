@@ -277,11 +277,12 @@ fn validate_leverage_attempts(
             || !seen.insert(attempt.mutation_id.as_str())
             || (attempt.state == LeverageAttemptState::Pending
                 && !pending.insert(attempt.instrument.as_str()))
-            || capital_reservation.is_some_and(|r| {
-                r.account_uid_fingerprint != attempt.account_uid_fingerprint
-            })
+            || capital_reservation
+                .is_some_and(|r| r.account_uid_fingerprint != attempt.account_uid_fingerprint)
         {
-            return Err(ExecutionLedgerError::Corrupt("invalid leverage change journal"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "invalid leverage change journal",
+            ));
         }
     }
     Ok(())
@@ -435,7 +436,11 @@ impl ExecutionLedgerStore {
         }
         if !matches!(
             file.schema.as_str(),
-            EXECUTION_LEDGER_SCHEMA_V9 | EXECUTION_LEDGER_SCHEMA_V10 | EXECUTION_LEDGER_SCHEMA_V11 | EXECUTION_LEDGER_SCHEMA_V12 | EXECUTION_LEDGER_SCHEMA_V12
+            EXECUTION_LEDGER_SCHEMA_V9
+                | EXECUTION_LEDGER_SCHEMA_V10
+                | EXECUTION_LEDGER_SCHEMA_V11
+                | EXECUTION_LEDGER_SCHEMA_V12
+                | EXECUTION_LEDGER_SCHEMA_V12
         ) && file.strategy_periods != StrategyPeriodHistory::default()
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -454,7 +459,10 @@ impl ExecutionLedgerStore {
         }
         if (file.strategy_periods.unverified_run.is_some()
             || !file.strategy_periods.unverified_runs.is_empty())
-            && !matches!(file.schema.as_str(), EXECUTION_LEDGER_SCHEMA_V11 | EXECUTION_LEDGER_SCHEMA_V12)
+            && !matches!(
+                file.schema.as_str(),
+                EXECUTION_LEDGER_SCHEMA_V11 | EXECUTION_LEDGER_SCHEMA_V12
+            )
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "unverified closure requires ledger schema v11",
@@ -619,8 +627,14 @@ impl DurableExecutionLedger {
         observed_at_ms: u64,
     ) -> Result<Self, ExecutionLedgerError> {
         require_timestamp(observed_at_ms)?;
-        let (mut entries, risk_stop, capital_reservation, exchange_evidence, strategy_periods, leverage_attempts) =
-            store.load()?;
+        let (
+            mut entries,
+            risk_stop,
+            capital_reservation,
+            exchange_evidence,
+            strategy_periods,
+            leverage_attempts,
+        ) = store.load()?;
         let mut recovered = false;
 
         for entry in entries.values_mut() {
@@ -1194,7 +1208,9 @@ impl DurableExecutionLedger {
     }
 
     pub fn leverage_change_attempt(&self, mutation_id: &str) -> Option<&LeverageChangeAttempt> {
-        self.leverage_attempts.iter().find(|a| a.mutation_id == mutation_id)
+        self.leverage_attempts
+            .iter()
+            .find(|a| a.mutation_id == mutation_id)
     }
 
     /// Atomic PRE-POST fence; if the caller crashes afterward, PENDING remains
@@ -1210,7 +1226,9 @@ impl DurableExecutionLedger {
     ) -> Result<LeverageChangeAttempt, ExecutionLedgerError> {
         require_timestamp(observed_at_ms)?;
         if self.leverage_attempts.len() >= MAX_LEVERAGE_ATTEMPTS {
-            return Err(ExecutionLedgerError::CapacityExceeded(MAX_LEVERAGE_ATTEMPTS));
+            return Err(ExecutionLedgerError::CapacityExceeded(
+                MAX_LEVERAGE_ATTEMPTS,
+            ));
         }
         if self.leverage_attempts.iter().any(|a| {
             a.mutation_id == mutation_id
@@ -1218,9 +1236,11 @@ impl DurableExecutionLedger {
         }) {
             return Err(ExecutionLedgerError::IntentConflict);
         }
-        if self.capital_reservation.as_ref().is_none_or(|r| {
-            r.account_uid_fingerprint != account_uid
-        }) {
+        if self
+            .capital_reservation
+            .as_ref()
+            .is_none_or(|r| r.account_uid_fingerprint != account_uid)
+        {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
         let attempt = LeverageChangeAttempt {
@@ -2823,39 +2843,85 @@ mod tests {
         let mutation_id = "stage5a_set_leverage_012345";
         {
             let mut ledger = DurableExecutionLedger::open(store.clone(), 1100).unwrap();
-            ledger.reserve_strategy_capital(reservation, &opening, 1100).unwrap();
-            let fence = ledger.begin_leverage_change(
-                mutation_id, "BTC-USDT-SWAP", "2", "3", "uid-fingerprint", 1200,
-            ).unwrap();
+            ledger
+                .reserve_strategy_capital(reservation, &opening, 1100)
+                .unwrap();
+            let fence = ledger
+                .begin_leverage_change(
+                    mutation_id,
+                    "BTC-USDT-SWAP",
+                    "2",
+                    "3",
+                    "uid-fingerprint",
+                    1200,
+                )
+                .unwrap();
             assert_eq!(fence.state, LeverageAttemptState::Pending);
-            assert!(ledger.begin_leverage_change(
-                mutation_id, "BTC-USDT-SWAP", "2", "3", "uid-fingerprint", 1201,
-            ).is_err());
-            assert!(ledger.begin_leverage_change(
-                "other_leverage_01234567", "BTC-USDT-SWAP", "2", "3", "uid-fingerprint", 1202,
-            ).is_err());
+            assert!(
+                ledger
+                    .begin_leverage_change(
+                        mutation_id,
+                        "BTC-USDT-SWAP",
+                        "2",
+                        "3",
+                        "uid-fingerprint",
+                        1201,
+                    )
+                    .is_err()
+            );
+            assert!(
+                ledger
+                    .begin_leverage_change(
+                        "other_leverage_01234567",
+                        "BTC-USDT-SWAP",
+                        "2",
+                        "3",
+                        "uid-fingerprint",
+                        1202,
+                    )
+                    .is_err()
+            );
         }
         {
             let mut recovered = DurableExecutionLedger::open(store.clone(), 1300).unwrap();
             assert_eq!(
-                recovered.leverage_change_attempt(mutation_id).unwrap().state,
+                recovered
+                    .leverage_change_attempt(mutation_id)
+                    .unwrap()
+                    .state,
                 LeverageAttemptState::Pending
             );
-            assert!(recovered.begin_leverage_change(
-                mutation_id, "BTC-USDT-SWAP", "2", "3", "uid-fingerprint", 1400,
-            ).is_err());
+            assert!(
+                recovered
+                    .begin_leverage_change(
+                        mutation_id,
+                        "BTC-USDT-SWAP",
+                        "2",
+                        "3",
+                        "uid-fingerprint",
+                        1400,
+                    )
+                    .is_err()
+            );
             recovered.verify_leverage_change(mutation_id).unwrap();
             assert_eq!(
-                recovered.leverage_change_attempt(mutation_id).unwrap().state,
+                recovered
+                    .leverage_change_attempt(mutation_id)
+                    .unwrap()
+                    .state,
                 LeverageAttemptState::Verified
             );
         }
         let recovered = DurableExecutionLedger::open(store.clone(), 1500).unwrap();
         assert_eq!(
-            recovered.leverage_change_attempt(mutation_id).unwrap().state,
+            recovered
+                .leverage_change_attempt(mutation_id)
+                .unwrap()
+                .state,
             LeverageAttemptState::Verified
         );
-        let raw: serde_json::Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(raw["schema"], EXECUTION_LEDGER_SCHEMA_V12);
         let _ = fs::remove_dir_all(&root);
     }

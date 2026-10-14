@@ -11,12 +11,12 @@ use okx_execution::{
     AccountLedgerReconciliation, DurableExchangeEvidence, DurableExecutionLedger, ExecutionAction,
     ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
     ExecutionPlan, ExecutionRiskStop, ExecutionState, ExecutionStatusEnvelope,
-    LeverageAttemptState,
-    FencedProtectiveShrinkRequest, ManagedExecutionInventory, MutationAuthority,
-    MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor, OrderExecutorError,
-    PositionSide, PrepareOutcome, ProductionMarkEvidence, StrategyAllocationOpening,
-    StrategyCapitalReservation, StrategyFinalization, StrategyUnverifiedClosure, SubmitDisposition,
-    execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
+    FencedProtectiveShrinkRequest, LeverageAttemptState, ManagedExecutionInventory,
+    MutationAuthority, MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor,
+    OrderExecutorError, PositionSide, PrepareOutcome, ProductionMarkEvidence,
+    StrategyAllocationOpening, StrategyCapitalReservation, StrategyFinalization,
+    StrategyUnverifiedClosure, SubmitDisposition, execution_status_with_ledger,
+    managed_execution_inventory, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -505,13 +505,18 @@ impl ExecutionRuntime {
         // A PENDING attempt was durably saved before the first POST. On any
         // later invocation, including after restart, the only allowed work
         // for that id is independent GET and a local state transition.
-        let prior_attempt = executor.ledger().leverage_change_attempt(mutation_id).cloned();
+        let prior_attempt = executor
+            .ledger()
+            .leverage_change_attempt(mutation_id)
+            .cloned();
         if prior_attempt.as_ref().is_some_and(|a| {
             a.account_uid_fingerprint != preflight.account_uid_fingerprint
                 || a.instrument != instrument
                 || rust_decimal::Decimal::from_str(&a.requested_leverage).ok() != Some(desired)
         }) {
-            return Some(Err("leverage mutation id is bound to a different immutable request".to_owned()));
+            return Some(Err(
+                "leverage mutation id is bound to a different immutable request".to_owned(),
+            ));
         }
         let current_rows = match self
             .executor_account
@@ -529,12 +534,15 @@ impl ExecutionRuntime {
         if let Some(existing) = prior_attempt {
             if current != desired {
                 return Some(Err(
-                    "UNKNOWN: prior durable leverage POST may have executed; no replay is allowed".to_owned(),
+                    "UNKNOWN: prior durable leverage POST may have executed; no replay is allowed"
+                        .to_owned(),
                 ));
             }
             if existing.state == LeverageAttemptState::Pending {
                 if let Err(error) = executor.verify_leverage_change(mutation_id) {
-                    return Some(Err(format!("UNKNOWN: leverage proven but receipt not persisted: {error}")));
+                    return Some(Err(format!(
+                        "UNKNOWN: leverage proven but receipt not persisted: {error}"
+                    )));
                 }
             }
             return Some(Ok(LeverageChangeProof {
@@ -558,7 +566,9 @@ impl ExecutionRuntime {
             // for this instrument while UNKNOWN.
             let observed_at_ms = chrono::Utc::now().timestamp_millis();
             let Some(observed_at_ms) = u64::try_from(observed_at_ms).ok() else {
-                return Some(Err("system clock invalid for durable leverage fence".to_owned()));
+                return Some(Err(
+                    "system clock invalid for durable leverage fence".to_owned()
+                ));
             };
             if let Err(error) = executor.begin_leverage_change(
                 mutation_id,
@@ -568,7 +578,9 @@ impl ExecutionRuntime {
                 &preflight.account_uid_fingerprint,
                 observed_at_ms,
             ) {
-                return Some(Err(format!("durable pre-POST leverage fence rejected: {error}")));
+                return Some(Err(format!(
+                    "durable pre-POST leverage fence rejected: {error}"
+                )));
             }
             let _post_result = self
                 .executor_account
@@ -593,7 +605,9 @@ impl ExecutionRuntime {
                 ));
             }
             if let Err(error) = executor.verify_leverage_change(mutation_id) {
-                return Some(Err(format!("UNKNOWN: verified exchange setting but durable receipt failed: {error}")));
+                return Some(Err(format!(
+                    "UNKNOWN: verified exchange setting but durable receipt failed: {error}"
+                )));
             }
         }
         Some(Ok(LeverageChangeProof {

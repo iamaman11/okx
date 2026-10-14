@@ -378,7 +378,12 @@ where
         observed_at_ms: u64,
     ) -> Result<crate::LeverageChangeAttempt, OrderExecutorError> {
         Ok(self.ledger.begin_leverage_change(
-            mutation_id, instrument, requested, previous, uid, observed_at_ms,
+            mutation_id,
+            instrument,
+            requested,
+            previous,
+            uid,
+            observed_at_ms,
         )?)
     }
 
