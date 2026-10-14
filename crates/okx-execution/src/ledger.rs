@@ -639,8 +639,7 @@ fn verified_daily_strategy_bill_loss(
         {
             continue;
         }
-        let direct_run = event.strategy_run_id.as_deref()
-            == Some(run.allocation_id.as_str())
+        let direct_run = event.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
             && entry.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str());
         let run_reducer = entry.record.plan.action.is_risk_reducing()
             && event.strategy_run_id.is_none()
@@ -983,14 +982,9 @@ impl DurableExecutionLedger {
         }
         let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(source_cursor)?));
         let day = as_of / 86_400_000 * 86_400_000;
-        let Some(gross_loss) = verified_daily_strategy_bill_loss(
-            evidence,
-            &self.entries,
-            run,
-            report,
-            day,
-            as_of,
-        )? else {
+        let Some(gross_loss) =
+            verified_daily_strategy_bill_loss(evidence, &self.entries, run, report, day, as_of)?
+        else {
             return Ok(None);
         };
         let prior = self.strategy_periods.nav_points.last();
@@ -2874,16 +2868,22 @@ mod tests {
         let closing = ExecutionRecord::new(closing_plan);
         assert!(closing.strategy_run_id.is_none());
         let entries = [
-            (open_intent.to_owned(), ExecutionLedgerEntry {
-                record: opening,
-                created_at_ms: run.started_at_ms + 1,
-                updated_at_ms: run.started_at_ms + 2,
-            }),
-            (close_intent.to_owned(), ExecutionLedgerEntry {
-                record: closing,
-                created_at_ms: run.started_at_ms + 3,
-                updated_at_ms: run.started_at_ms + 4,
-            }),
+            (
+                open_intent.to_owned(),
+                ExecutionLedgerEntry {
+                    record: opening,
+                    created_at_ms: run.started_at_ms + 1,
+                    updated_at_ms: run.started_at_ms + 2,
+                },
+            ),
+            (
+                close_intent.to_owned(),
+                ExecutionLedgerEntry {
+                    record: closing,
+                    created_at_ms: run.started_at_ms + 3,
+                    updated_at_ms: run.started_at_ms + 4,
+                },
+            ),
         ]
         .into_iter()
         .collect::<BTreeMap<_, _>>();
@@ -2895,7 +2895,12 @@ mod tests {
                     "fee": fee, "pnl": pnl, "ts": ts
                 }),
                 source_intent_id: Some(intent.to_owned()),
-                allocation: if owner.is_some() { "RUN_OWNED" } else { "UNALLOCATED" }.to_owned(),
+                allocation: if owner.is_some() {
+                    "RUN_OWNED"
+                } else {
+                    "UNALLOCATED"
+                }
+                .to_owned(),
                 strategy_run_id: owner,
             }
         };
@@ -2921,7 +2926,9 @@ mod tests {
         );
         // Prior buggy strategy_run_id-only scan sees only the opening fee.
         assert_eq!(
-            evidence.events.values()
+            evidence
+                .events
+                .values()
                 .filter(|e| e.strategy_run_id.as_deref() == Some(run.allocation_id.as_str()))
                 .count(),
             1
@@ -2944,7 +2951,12 @@ mod tests {
             reasons: Vec::new(),
         };
         let gross_loss = verified_daily_strategy_bill_loss(
-            &evidence, &entries, &run, &report, start_of_day, account_as_of,
+            &evidence,
+            &entries,
+            &run,
+            &report,
+            start_of_day,
+            account_as_of,
         )
         .unwrap();
         assert_eq!(gross_loss, Some(Decimal::from_str("0.016791335").unwrap()));
@@ -2953,13 +2965,23 @@ mod tests {
         incomplete.linked_bills = 1;
         assert!(matches!(
             verified_daily_strategy_bill_loss(
-                &evidence, &entries, &run, &incomplete, start_of_day, account_as_of,
+                &evidence,
+                &entries,
+                &run,
+                &incomplete,
+                start_of_day,
+                account_as_of,
             ),
             Err(ExecutionLedgerError::ExchangeSourceIncomplete)
         ));
         assert_eq!(
             verified_daily_strategy_bill_loss(
-                &evidence, &entries, &run, &report, start_of_day, run.started_at_ms + 15,
+                &evidence,
+                &entries,
+                &run,
+                &report,
+                start_of_day,
+                run.started_at_ms + 15,
             )
             .unwrap(),
             None
