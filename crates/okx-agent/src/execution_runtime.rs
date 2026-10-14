@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, str::FromStr};
 
 use chrono::{SecondsFormat, Utc};
 use okx_analysis::{PortfolioRiskAnalysis, StrategyNavRiskEvidence, durable_account_stop_reason};
@@ -33,6 +33,49 @@ use crate::{
 };
 
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
+pub const DEMO_LEVERAGE_PROOF_SCHEMA_V1: &str = "okx.demo-leverage-proof/v1";
+
+/// A Hedge Cross setting is accepted only when BOTH distinct sides are
+/// individually verified and have the same exact, positive leverage.
+fn exact_hedge_cross_leverage(
+    rows: &[okx_api::LeverageInfo],
+    instrument: &str,
+) -> Option<rust_decimal::Decimal> {
+    if rows.len() != 2 {
+        return None;
+    }
+    let mut long = None;
+    let mut short = None;
+    for row in rows {
+        if row.instrument_id != instrument || row.margin_mode != "cross" {
+            return None;
+        }
+        let value = rust_decimal::Decimal::from_str(&row.lever).ok()?;
+        if value <= rust_decimal::Decimal::ZERO {
+            return None;
+        }
+        match row.position_side.as_str() {
+            "long" if long.replace(value).is_none() => {}
+            "short" if short.replace(value).is_none() => {}
+            _ => return None,
+        }
+    }
+    long.filter(|value| Some(*value) == short)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DemoLeverageProof {
+    pub schema: &'static str,
+    pub mutation_id: String,
+    pub instrument: String,
+    pub margin_mode: &'static str,
+    pub previous_leverage: String,
+    pub verified_leverage: String,
+    pub changed: bool,
+    pub verified_both_sides: bool,
+    pub account_uid_fingerprint: String,
+}
+
 
 /// The immutable short-lived canceled-order source window is two hours.
 /// For quiet runs, refresh from the existing authenticated REST/WS owner
@@ -411,6 +454,82 @@ impl ExecutionRuntime {
 
     pub async fn mutation_authority(&self) -> MutationAuthority {
         self.executor.lock().await.mutation_authority()
+    }
+
+    /// One existing native executor mutex spans read/one optional POST/readback.
+    /// Never retry an uncertain POST, never use Production credentials.
+    pub async fn lower_demo_cross_leverage_authorized(
+        &self,
+        preflight: &ExecutorCredentialPreflight,
+        account_generation: &str,
+        mutation_id: &str,
+        instrument: &str,
+        requested: &str,
+    ) -> Option<Result<DemoLeverageProof, String>> {
+        let executor = self.executor.lock().await;
+        if !self.environment.demo
+            || self.mode != ExecutionRuntimeMode::DemoAcceptance
+            || !preflight.accepted
+            || preflight.production_environment
+            || !preflight.futures_mode
+            || !preflight.long_short_mode
+            || !preflight.executor_trade_permission
+            || preflight.account_uid_fingerprint.is_empty()
+            || !instrument.ends_with("-USDT-SWAP")
+            || executor.ledger().capital_reservation().is_none_or(|r| {
+                r.account_uid_fingerprint != preflight.account_uid_fingerprint
+                    || r.account_generation != account_generation
+            })
+            || executor.ledger().entries().any(|e| {
+                executor.ledger().capital_reservation().is_some_and(|r| {
+                    e.created_at_ms >= r.started_at_ms
+                })
+            })
+        {
+            return None;
+        }
+        let desired = rust_decimal::Decimal::from_str(requested).ok()?;
+        if desired <= rust_decimal::Decimal::ZERO {
+            return None;
+        }
+        let current_rows = match self.executor_account.leverage(instrument, MarginMode::Cross).await {
+            Ok(value) => value,
+            Err(error) => return Some(Err(format!("pre-write leverage read unavailable: {error}"))),
+        };
+        let Some(current) = exact_hedge_cross_leverage(&current_rows, instrument) else {
+            return Some(Err("initial long/short leverage is not exact".to_owned()));
+        };
+        if desired > current {
+            return Some(Err("leverage increases are not supported".to_owned()));
+        }
+        if desired != current {
+            // Exactly one POST. If the ACK is lost, independent GET may still
+            // prove the final state; otherwise report UNKNOWN, never re-POST.
+            let _post_result = self.executor_account
+                .set_cross_swap_leverage(instrument, requested).await;
+            let verification = match self.executor_account.leverage(instrument, MarginMode::Cross).await {
+                Ok(value) => value,
+                Err(error) => return Some(Err(format!(
+                    "UNKNOWN: post-write leverage readback unavailable: {error}"
+                ))),
+            };
+            if exact_hedge_cross_leverage(&verification, instrument) != Some(desired) {
+                return Some(Err(
+                    "UNKNOWN: requested leverage not independently verified; do not replay POST".to_owned()
+                ));
+            }
+        }
+        Some(Ok(DemoLeverageProof {
+            schema: DEMO_LEVERAGE_PROOF_SCHEMA_V1,
+            mutation_id: mutation_id.to_owned(),
+            instrument: instrument.to_owned(),
+            margin_mode: "cross",
+            previous_leverage: current.to_string(),
+            verified_leverage: desired.to_string(),
+            changed: current != desired,
+            verified_both_sides: true,
+            account_uid_fingerprint: preflight.account_uid_fingerprint.clone(),
+        }))
     }
 
     /// Called only after the query owner has verified private account and
@@ -1404,5 +1523,31 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod leverage_configuration_tests {
+    use super::*;
+
+    fn row(side: &str, lever: &str) -> okx_api::LeverageInfo {
+        okx_api::LeverageInfo {
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            margin_mode: "cross".to_owned(),
+            position_side: side.to_owned(),
+            lever: lever.to_owned(),
+        }
+    }
+
+    #[test]
+    fn hedge_leverage_requires_distinct_equal_sides() {
+        let both = [row("long", "3"), row("short", "3.0")];
+        assert_eq!(exact_hedge_cross_leverage(&both, "BTC-USDT-SWAP").unwrap().to_string(), "3");
+        assert!(exact_hedge_cross_leverage(&both[..1], "BTC-USDT-SWAP").is_none());
+        assert!(exact_hedge_cross_leverage(&[row("long","3"),row("long","3")],"BTC-USDT-SWAP").is_none());
+        assert!(exact_hedge_cross_leverage(&[row("long","3"),row("short","2")],"BTC-USDT-SWAP").is_none());
+        assert!(exact_hedge_cross_leverage(&[row("long","3"),row("net","3")],"BTC-USDT-SWAP").is_none());
+        assert!(exact_hedge_cross_leverage(&[row("long","oops"),row("short","3")],"BTC-USDT-SWAP").is_none());
+        assert!(exact_hedge_cross_leverage(&both,"ETH-USDT-SWAP").is_none());
     }
 }
