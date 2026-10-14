@@ -384,6 +384,16 @@ where
         Ok(self.ledger.capture_exchange_evidence_fresh_cursor(facts)?)
     }
 
+    /// Existing owner, one atomic file, no venue POST or competing engine.
+    pub fn observe_strategy_nav(
+        &mut self,
+        report: &crate::StrategyFinancialPeriod,
+        facts: &okx_observation::AccountLedgerFacts,
+        now: u64,
+    ) -> Result<Option<crate::StrategyNavPoint>, OrderExecutorError> {
+        Ok(self.ledger.observe_strategy_nav(report, facts, now)?)
+    }
+
     /// Persist the single native account-scoped virtual allocation under
     /// the same executor owner as all durable intents; no venue send.
     pub fn reserve_strategy_capital(
