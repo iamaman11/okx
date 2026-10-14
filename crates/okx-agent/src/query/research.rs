@@ -678,7 +678,10 @@ async fn inspect_tier_a(
             reference_through_ms.to_string(),
         )
         .expect("one millisecond reference capture range"),
-        parameters: market.attest_source_parameters(BTreeMap::from([("semantics".to_owned(), "current_snapshot_only".to_owned())])),
+        parameters: market.attest_source_parameters(BTreeMap::from([(
+            "semantics".to_owned(),
+            "current_snapshot_only".to_owned(),
+        )])),
     };
     let (reference_chunk, reference_window) = match build_reference_chunk(
         reference_source,
