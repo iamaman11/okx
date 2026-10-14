@@ -3340,6 +3340,132 @@ mod tests {
     }
 
     #[test]
+    fn operator_rearm_rejects_same_day_and_forged_stop_then_preserves_history_on_restart() {
+        let root = temp_root("operator-stop-rearm");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let prior = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "stage5a_old_finalized_123456".to_owned(),
+            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            origin_schema: "origin/v1".to_owned(),
+            origin_version: "origin/2026-10-14".to_owned(),
+            mandate_version: "mandate/2026-10-14".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: "old-generation".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1000,
+        };
+        let source = DurableExchangeEvidence::new(&prior).unwrap();
+        let report = crate::StrategyFinancialPeriod {
+            schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+            run_id: prior.allocation_id.clone(),
+            state: "FLAT_RECONCILED",
+            evidence_sha256: source.checksum_sha256.clone(),
+            allocation_usdt: "100".to_owned(),
+            linked_fills: 0,
+            linked_bills: 0,
+            realized_usdt: "0".to_owned(),
+            fees_usdt: "0".to_owned(),
+            funding_usdt: None,
+            unrealized_usdt: Some("0".to_owned()),
+            nav_usdt: Some("100".to_owned()),
+            positions: Vec::new(),
+            usable_for_new_risk: false,
+            reasons: Vec::new(),
+        };
+        let finalization = StrategyFinalization::new(&prior, &source, &report, 2000).unwrap();
+        let stop = ExecutionRiskStop {
+            schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
+            stopped_at_ms: 1500,
+            reason: "STRATEGY_MAX_DRAWDOWN".to_owned(),
+        };
+        let attempt = LeverageChangeAttempt {
+            schema: LEVERAGE_ATTEMPT_SCHEMA_V1.to_owned(),
+            mutation_id: "rearm_test_leverage_12345".to_owned(),
+            account_uid_fingerprint: prior.account_uid_fingerprint.clone(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            requested_leverage: "2".to_owned(),
+            previous_leverage: "3".to_owned(),
+            state: LeverageAttemptState::Verified,
+            started_at_ms: 1200,
+        };
+        let file = ExecutionLedgerFile {
+            schema: EXECUTION_LEDGER_SCHEMA_V12.to_owned(),
+            records: Vec::new(),
+            risk_stop: Some(stop.clone()),
+            capital_reservation: Some(prior.clone()),
+            exchange_evidence: Some(source),
+            strategy_periods: StrategyPeriodHistory {
+                finalized_run: Some(finalization.clone()),
+                ..StrategyPeriodHistory::default()
+            },
+            leverage_attempts: vec![attempt.clone()],
+        };
+        fs::write(store.path(), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 2200).unwrap();
+        let next_at = 86_400_101;
+        let opening = StrategyAllocationOpening {
+            account_uid_fingerprint: prior.account_uid_fingerprint.clone(),
+            account_generation: "new-generation".to_owned(),
+            observed_usdt_equity: "1000".to_owned(),
+            observed_at_ms: next_at,
+            source_history_complete: true,
+            zero_positions: true,
+            zero_pending_orders: true,
+            zero_native_protection: true,
+            operator_authority_id: prior.operator_authority_id.clone(),
+        };
+        let mut next = prior.clone();
+        next.allocation_id = "stage5a_next_daily_123456".to_owned();
+        next.started_at_ms = next_at;
+        next.account_generation = opening.account_generation.clone();
+        let rearm = StrategyStopRearmRequest {
+            expected_stopped_at_ms: stop.stopped_at_ms,
+            prior_finalization_sha256: finalization.checksum_sha256.clone(),
+        };
+        let before = fs::read(store.path()).unwrap();
+        assert!(ledger.reserve_strategy_capital(next.clone(), &opening, next_at + 1).is_err());
+        let mut wrong = rearm.clone();
+        wrong.prior_finalization_sha256 = "b".repeat(64);
+        assert!(ledger.reserve_strategy_capital_with_rearm(
+            next.clone(), &opening, Some(&wrong), next_at + 1,
+        ).is_err());
+        let mut same_day = next.clone();
+        same_day.started_at_ms = 2001;
+        let mut same_open = opening.clone();
+        same_open.observed_at_ms = same_day.started_at_ms;
+        assert!(ledger.reserve_strategy_capital_with_rearm(
+            same_day, &same_open, Some(&rearm), 2002,
+        ).is_err());
+        assert_eq!(fs::read(store.path()).unwrap(), before, "rejections cannot rewrite STOP");
+        ledger.reserve_strategy_capital_with_rearm(
+            next.clone(), &opening, Some(&rearm), next_at + 1,
+        ).unwrap();
+        assert!(ledger.risk_stop().is_none());
+        assert_eq!(ledger.strategy_periods.stop_rearms.len(), 1);
+        assert_eq!(ledger.strategy_periods.stop_rearms[0].stop_reason, stop.reason);
+        let reopened = DurableExecutionLedger::open(store.clone(), next_at + 2).unwrap();
+        assert!(reopened.risk_stop().is_none());
+        assert_eq!(reopened.strategy_periods.stop_rearms.len(), 1);
+        assert_eq!(reopened.archived_runs_count(), 1);
+        assert_eq!(reopened.archived_strategy_proofs()[0].finalization_sha256,
+                   finalization.checksum_sha256);
+        assert_eq!(reopened.leverage_change_attempt(&attempt.mutation_id), Some(&attempt));
+        assert_eq!(reopened.capital_reservation(), Some(&next));
+        let mut tampered: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        tampered["strategy_periods"]["stop_rearms"][0]["prior_finalization_sha256"]
+            = serde_json::json!("c".repeat(64));
+        fs::write(store.path(), serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+        assert!(DurableExecutionLedger::open(store.clone(), next_at + 3).is_err(),
+                "tampering with archived STOP must fail closed");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn archived_run_is_reopened_from_disk_and_tampered_final_nav_refused_without_rewrite() {
         let root = temp_root("archived-run-tamper");
         let _ = fs::remove_dir_all(&root);
@@ -3396,6 +3522,7 @@ mod tests {
                 nav_points: Vec::new(),
                 unverified_run: None,
                 unverified_runs: Vec::new(),
+                stop_rearms: Vec::new(),
             },
             leverage_attempts: Vec::new(),
         };
