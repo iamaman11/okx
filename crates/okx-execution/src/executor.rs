@@ -428,7 +428,10 @@ where
         now_ms: u64,
     ) -> Result<crate::StrategyUnverifiedClosure, OrderExecutorError> {
         Ok(self.ledger.quarantine_unverified_strategy_run(
-            facts, coherent, protection_absent, now_ms,
+            facts,
+            coherent,
+            protection_absent,
+            now_ms,
         )?)
     }
 
