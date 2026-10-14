@@ -99,6 +99,10 @@ export const EXECUTION_TOOLS: Json[] = [
         spec, risk, lineage, mutation_id: MUTATION_ID, new_size: POSITIVE, new_price: POSITIVE,
         origin_schema: VERSION, origin_version: VERSION, mandate_version: VERSION,
         allocated_usdt: POSITIVE, operator_authority_id: EVIDENCE_ID, leverage: POSITIVE,
+        rearm: { type: "object", additionalProperties: false, properties: {
+          expected_stopped_at_ms: { type: "integer", minimum: 1 },
+          prior_finalization_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" }
+        }, required: ["expected_stopped_at_ms","prior_finalization_sha256"] },
       },
       required: ["action","intent_id"],
     },
@@ -215,16 +219,23 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
       return {type:"quarantine_unverified_strategy_run",allocation_id:intent_id};
     }
     case "begin_strategy_run": {
-      if (!exactKeys(args,["action","intent_id","origin_schema","origin_version","mandate_version","allocated_usdt","operator_authority_id"])
+      if (!exactKeys(args,["action","intent_id","origin_schema","origin_version","mandate_version","allocated_usdt","operator_authority_id","rearm"])
         || ![args.origin_schema,args.origin_version,args.mandate_version].every(v =>
           typeof v==="string" && v.length>0 && v.length<=64 && /^[A-Za-z0-9._/-]+$/.test(v))
         || !decimal(args.allocated_usdt)
         || typeof args.operator_authority_id!=="string"
-        || !/^sha256:[0-9a-f]{64}$/.test(args.operator_authority_id)) return null;
+        || !/^sha256:[0-9a-f]{64}$/.test(args.operator_authority_id)
+        || (args.rearm !== undefined
+          && (!isObject(args.rearm)
+            || !exactKeys(args.rearm,["expected_stopped_at_ms","prior_finalization_sha256"])
+            || !Number.isSafeInteger(args.rearm.expected_stopped_at_ms)
+            || Number(args.rearm.expected_stopped_at_ms) <= 0
+            || !/^[0-9a-f]{64}$/.test(String(args.rearm.prior_finalization_sha256))))) return null;
       return {type:"begin_strategy_run",allocation_id:intent_id,
         origin_schema:args.origin_schema,origin_version:args.origin_version,
         mandate_version:args.mandate_version,allocated_usdt:args.allocated_usdt,
-        operator_authority_id:args.operator_authority_id};
+        operator_authority_id:args.operator_authority_id,
+        ...(args.rearm===undefined?{}:{rearm:args.rearm})};
     }
     case "prepare": {
       if (!exactKeys(args,["action","intent_id","instrument","trade_mode","order_type","spec","risk","lineage"])
