@@ -2310,7 +2310,8 @@ mod tests {
         let reopened = DurableExecutionLedger::open(store.clone(), 3200).unwrap();
         assert_eq!(reopened.archived_runs_count(), 1);
         assert!(reopened.finalized_run().is_none());
-        let proof = &reopened.archived_strategy_proofs()[0];
+        let proofs = reopened.archived_strategy_proofs();
+        let proof = &proofs[0];
         assert_eq!(proof.run_id, "run_archived_source_0123456789");
         assert_eq!(proof.nav_usdt, "100");
         assert_eq!(proof.source_events, 0);
