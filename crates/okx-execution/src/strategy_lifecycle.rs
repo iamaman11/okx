@@ -738,6 +738,62 @@ mod tests {
     }
 
     #[test]
+    fn unverified_source_gap_is_never_financially_finalized_or_rewritten() {
+        let run = reservation();
+        let complete = attested_source(&run);
+        assert!(StrategyUnverifiedClosure::new(&run, &complete, 8_000_000).is_err());
+        let mut gap = complete.clone();
+        let mut next_cursor = gap.cursors.values().next().unwrap().clone();
+        next_cursor.account_as_of_ms = 7_400_000;
+        gap.cursors.insert("source:after-unobserved-gap".to_owned(), next_cursor);
+        seal_source_for_test(&mut gap);
+        assert!(gap.summary().source_gap_over_two_hours);
+        let closed = StrategyUnverifiedClosure::new(&run, &gap, 7_600_000).unwrap();
+        let json = serde_json::to_value(&closed).unwrap();
+        assert!(json.get("nav_usdt").is_none());
+        assert!(json.get("realized_usdt").is_none());
+        assert!(json.get("fees_usdt").is_none());
+        closed.validate(&run, &gap).unwrap();
+        let history = StrategyPeriodHistory {
+            unverified_run: Some(closed.clone()),
+            ..StrategyPeriodHistory::default()
+        };
+        history.validate(Some(&run), Some(&gap)).unwrap();
+        let decoded: StrategyPeriodHistory =
+            serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
+        decoded.validate(Some(&run), Some(&gap)).unwrap();
+        let mut tampered = decoded.clone();
+        tampered.unverified_run.as_mut().unwrap().reason = "FINANCIAL_FINALIZED".into();
+        assert!(tampered.validate(Some(&run), Some(&gap)).is_err());
+        let mut tampered = decoded.clone();
+        tampered.unverified_run.as_mut().unwrap().evidence_sha256 = "f".repeat(64);
+        assert!(tampered.validate(Some(&run), Some(&gap)).is_err());
+        let mut next = run.clone();
+        next.allocation_id = "run_after_unverified_0123456".into();
+        next.started_at_ms = closed.closed_at_ms + 1;
+        let archived = StrategyPeriodHistory {
+            unverified_runs: vec![UnverifiedStrategyRun {
+                reservation: run.clone(), evidence: gap.clone(), closure: closed.clone(),
+            }],
+            ..StrategyPeriodHistory::default()
+        };
+        archived.validate(Some(&next), None).unwrap();
+        let proof = archived.unverified_runs[0].proof();
+        assert_eq!(proof.status, "UNVERIFIED");
+        assert_eq!(proof.reason, "SOURCE_CONTINUITY_NOT_PROVEN");
+        assert!(serde_json::to_value(proof).unwrap().get("nav_usdt").is_none());
+        let mut reused = next.clone();
+        reused.allocation_id = run.allocation_id.clone();
+        assert!(archived.validate(Some(&reused), None).is_err());
+        let mut overlap = next;
+        overlap.started_at_ms = closed.closed_at_ms;
+        assert!(archived.validate(Some(&overlap), None).is_err());
+        let mut mutated_archive = archived;
+        mutated_archive.unverified_runs[0].evidence.cursors.clear();
+        assert!(mutated_archive.validate(None, None).is_err());
+    }
+
+    #[test]
     fn closure_identity_survives_serde_and_rejects_rewritten_financials() {
         let run = reservation();
         let evidence = DurableExchangeEvidence::new(&run).unwrap();
