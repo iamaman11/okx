@@ -2790,6 +2790,76 @@ mod tests {
         TcaReferencePriceBasis, TradeMode,
     };
 
+    #[test]
+    fn leverage_attempt_is_persisted_before_post_and_remains_unreplayable_after_restart() {
+        let root = temp_root("leverage-no-replay");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let opening = StrategyAllocationOpening {
+            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            account_generation: "opening_generation".to_owned(),
+            observed_usdt_equity: "1000".to_owned(),
+            observed_at_ms: 1000,
+            source_history_complete: true,
+            zero_positions: true,
+            zero_pending_orders: true,
+            zero_native_protection: true,
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+        };
+        let reservation = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "stage5a_ledger_leverage_run_1234".to_owned(),
+            account_uid_fingerprint: opening.account_uid_fingerprint.clone(),
+            origin_schema: "origin/v1".to_owned(),
+            origin_version: "origin/2026-10-14".to_owned(),
+            mandate_version: "risk/2026-10-14".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: opening.account_generation.clone(),
+            operator_authority_id: opening.operator_authority_id.clone(),
+            started_at_ms: 1000,
+        };
+        let mutation_id = "stage5a_set_leverage_012345";
+        {
+            let mut ledger = DurableExecutionLedger::open(store.clone(), 1100).unwrap();
+            ledger.reserve_strategy_capital(reservation, &opening, 1100).unwrap();
+            let fence = ledger.begin_leverage_change(
+                mutation_id, "BTC-USDT-SWAP", "2", "3", "uid-fingerprint", 1200,
+            ).unwrap();
+            assert_eq!(fence.state, LeverageAttemptState::Pending);
+            assert!(ledger.begin_leverage_change(
+                mutation_id, "BTC-USDT-SWAP", "2", "3", "uid-fingerprint", 1201,
+            ).is_err());
+            assert!(ledger.begin_leverage_change(
+                "other_leverage_01234567", "BTC-USDT-SWAP", "2", "3", "uid-fingerprint", 1202,
+            ).is_err());
+        }
+        {
+            let mut recovered = DurableExecutionLedger::open(store.clone(), 1300).unwrap();
+            assert_eq!(
+                recovered.leverage_change_attempt(mutation_id).unwrap().state,
+                LeverageAttemptState::Pending
+            );
+            assert!(recovered.begin_leverage_change(
+                mutation_id, "BTC-USDT-SWAP", "2", "3", "uid-fingerprint", 1400,
+            ).is_err());
+            recovered.verify_leverage_change(mutation_id).unwrap();
+            assert_eq!(
+                recovered.leverage_change_attempt(mutation_id).unwrap().state,
+                LeverageAttemptState::Verified
+            );
+        }
+        let recovered = DurableExecutionLedger::open(store.clone(), 1500).unwrap();
+        assert_eq!(
+            recovered.leverage_change_attempt(mutation_id).unwrap().state,
+            LeverageAttemptState::Verified
+        );
+        let raw: serde_json::Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(raw["schema"], EXECUTION_LEDGER_SCHEMA_V12);
+        let _ = fs::remove_dir_all(&root);
+    }
+
     fn temp_root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "okx-execution-ledger-{name}-{}",
