@@ -63,8 +63,9 @@ pub use strategy_finance::{
     assess_persisted_financial_period,
 };
 pub use strategy_lifecycle::{
-    ArchivedStrategyRun, MAX_ARCHIVED_STRATEGY_RUNS, STRATEGY_FINALIZATION_SCHEMA_V1,
-    StrategyFinalization, StrategyPeriodHistory,
+    ARCHIVED_STRATEGY_PROOF_SCHEMA_V1, ArchivedStrategyProof, ArchivedStrategyRun,
+    MAX_ARCHIVED_STRATEGY_RUNS, STRATEGY_FINALIZATION_SCHEMA_V1, StrategyFinalization,
+    StrategyPeriodHistory,
 };
 pub use validation::{
     ExecutionValidationError, PreMutationRiskDisposition, prepare_execution,

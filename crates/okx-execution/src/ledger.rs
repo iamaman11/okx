@@ -652,6 +652,16 @@ impl DurableExecutionLedger {
         self.strategy_periods.archived_runs.len()
     }
 
+    /// Exact immutable per-period NAV and checksum, without raw private
+    /// exchange events. Every record is validated at ledger open/save.
+    pub fn archived_strategy_proofs(&self) -> Vec<crate::ArchivedStrategyProof> {
+        self.strategy_periods
+            .archived_runs
+            .iter()
+            .map(crate::ArchivedStrategyRun::proof)
+            .collect()
+    }
+
     /// Explicit immutable close: protectiveness/WS/account coherence must
     /// already have been proved independently by the caller.
     pub fn finalize_strategy_run(
@@ -2300,6 +2310,23 @@ mod tests {
         let reopened = DurableExecutionLedger::open(store.clone(), 3200).unwrap();
         assert_eq!(reopened.archived_runs_count(), 1);
         assert!(reopened.finalized_run().is_none());
+        let proofs = reopened.archived_strategy_proofs();
+        let proof = &proofs[0];
+        assert_eq!(proof.run_id, "run_archived_source_0123456789");
+        assert_eq!(proof.nav_usdt, "100");
+        assert_eq!(proof.source_events, 0);
+        assert_eq!(
+            proof.finalization_sha256,
+            file.strategy_periods.archived_runs[0]
+                .finalization
+                .checksum_sha256
+        );
+        assert_eq!(
+            proof.evidence_sha256,
+            file.strategy_periods.archived_runs[0]
+                .evidence
+                .checksum_sha256
+        );
         drop(reopened);
         let mut altered = serde_json::to_value(&file).unwrap();
         altered["strategy_periods"]["archived_runs"][0]["finalization"]["nav_usdt"] =

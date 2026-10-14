@@ -36,6 +36,25 @@ pub struct ArchivedStrategyRun {
     pub finalization: StrategyFinalization,
 }
 
+pub const ARCHIVED_STRATEGY_PROOF_SCHEMA_V1: &str = "okx.archived-strategy-proof/v1";
+
+/// Bounded read-only historical proof. Every field comes from the validated
+/// immutable archive, not a fresh account projection or reconstructed fills.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArchivedStrategyProof {
+    pub schema: &'static str,
+    pub run_id: String,
+    pub started_at_ms: u64,
+    pub finalized_at_ms: u64,
+    pub nav_usdt: String,
+    pub realized_usdt: String,
+    pub fees_usdt: String,
+    pub finalization_sha256: String,
+    pub evidence_sha256: String,
+    pub source_events: usize,
+    pub source_cursors: usize,
+}
+
 impl StrategyFinalization {
     pub fn new(
         run: &StrategyCapitalReservation,
@@ -114,6 +133,22 @@ impl StrategyFinalization {
 }
 
 impl ArchivedStrategyRun {
+    pub fn proof(&self) -> ArchivedStrategyProof {
+        ArchivedStrategyProof {
+            schema: ARCHIVED_STRATEGY_PROOF_SCHEMA_V1,
+            run_id: self.reservation.allocation_id.clone(),
+            started_at_ms: self.reservation.started_at_ms,
+            finalized_at_ms: self.finalization.finalized_at_ms,
+            nav_usdt: self.finalization.nav_usdt.clone(),
+            realized_usdt: self.finalization.realized_usdt.clone(),
+            fees_usdt: self.finalization.fees_usdt.clone(),
+            finalization_sha256: self.finalization.checksum_sha256.clone(),
+            evidence_sha256: self.evidence.checksum_sha256.clone(),
+            source_events: self.evidence.events.len(),
+            source_cursors: self.evidence.cursors.len(),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ExecutionLedgerError> {
         self.finalization
             .validate(&self.reservation, &self.evidence)
@@ -242,6 +277,17 @@ mod tests {
             archived_runs: vec![archived.clone()],
         };
         history.validate(Some(&next), None).unwrap();
+        let proof = history.archived_runs[0].proof();
+        assert_eq!(proof.schema, ARCHIVED_STRATEGY_PROOF_SCHEMA_V1);
+        assert_eq!(proof.run_id, run.allocation_id);
+        assert_eq!(proof.finalization_sha256, decoded.checksum_sha256);
+        assert_eq!(proof.evidence_sha256, evidence.checksum_sha256);
+        assert_eq!(proof.nav_usdt, "100");
+        assert_eq!(proof.source_events, 0);
+        assert_eq!(proof.source_cursors, 0);
+        let encoded = serde_json::to_value(&proof).unwrap();
+        assert!(encoded.get("reservation").is_none());
+        assert!(encoded.get("payload").is_none());
         let round_trip: StrategyPeriodHistory =
             serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
         round_trip.validate(Some(&next), None).unwrap();
