@@ -34,6 +34,19 @@ use crate::{
 
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
 
+/// The immutable short-lived canceled-order source window is two hours.
+/// For quiet runs, refresh from the existing authenticated REST/WS owner
+/// halfway through that window. This is not a timer, a new owner, or a
+/// promise that an agent stopped for two hours can recover old history.
+const QUIET_SOURCE_COVERAGE_REFRESH_MS: u64 = 3_600_000;
+
+fn quiet_source_capture_due(run_started_ms: u64, latest_source_ms: Option<u64>, now_ms: u64) -> bool {
+    now_ms >= run_started_ms
+        && now_ms.saturating_sub(latest_source_ms.unwrap_or(run_started_ms))
+            >= QUIET_SOURCE_COVERAGE_REFRESH_MS
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionReconciliation {
     NotRequired,
@@ -183,6 +196,29 @@ impl ExecutionRuntime {
         let executor = self.executor.lock().await;
         executor.ledger().capital_reservation().is_some()
             && executor.ledger().finalized_run().is_none()
+    }
+
+    /// Read-only, bounded decision for the EXISTING mailbox heartbeat.
+    /// Never accepts a request-supplied cursor or treats a >2h gap as healed.
+    pub async fn strategy_quiet_source_capture_due(&self, now_ms: u64) -> bool {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !self.environment.demo {
+            return false;
+        }
+        let executor = self.executor.lock().await;
+        let ledger = executor.ledger();
+        let Some(run) = ledger.capital_reservation() else {
+            return false;
+        };
+        if ledger.finalized_run().is_some() {
+            return false;
+        }
+        quiet_source_capture_due(
+            run.started_at_ms,
+            ledger
+                .exchange_evidence_summary()
+                .and_then(|source| source.latest_source_asof_ms),
+            now_ms,
+        )
     }
 
     pub async fn reconcile_account_ledger_with_intents(
@@ -1006,6 +1042,26 @@ mod tests {
 
     fn timing() -> MutationTiming {
         MutationTiming::from_exchange_time_ms(1_790_000_000_000, 5_000).expect("timing")
+    }
+
+    #[test]
+    fn quiet_source_capture_admission_never_relaxes_two_hour_coverage() {
+        let start = 100_000;
+        let one_hour = QUIET_SOURCE_COVERAGE_REFRESH_MS;
+        assert!(!quiet_source_capture_due(start, None, start));
+        assert!(!quiet_source_capture_due(start, None, start + one_hour - 1));
+        assert!(quiet_source_capture_due(start, None, start + one_hour));
+        assert!(!quiet_source_capture_due(start, Some(start + 500), start + one_hour));
+        assert!(quiet_source_capture_due(
+            start,
+            Some(start + 500),
+            start + one_hour + 500
+        ));
+        // An unavailable source owner never acquires its own timer or
+        // assigns a historical zero-event proof.
+        assert!(quiet_source_capture_due(start, Some(start), start + 9 * one_hour));
+        assert!(!quiet_source_capture_due(start, Some(start), start - 1));
+        assert!(!quiet_source_capture_due(start, Some(start + 100_000), start + one_hour));
     }
 
     #[test]
