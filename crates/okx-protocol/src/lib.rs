@@ -1219,7 +1219,7 @@ impl AgentOperation {
             Self::FinalizeStrategyRun { allocation_id }
             | Self::QuarantineUnverifiedStrategyRun { allocation_id } => {
                 validate_request_id(allocation_id)
-            },
+            }
             Self::PrepareExecution {
                 intent_id,
                 instrument,
@@ -3621,9 +3621,13 @@ mod direct_transport_tests {
         quarantine.validate().expect("typed NON-financial closure");
         assert!(quarantine.direct_transport_demo_execution());
         assert!(!quarantine.direct_transport_read_only());
-        assert!(AgentOperation::QuarantineUnverifiedStrategyRun {
-            allocation_id: "invalid!".to_owned(),
-        }.validate().is_err());
+        assert!(
+            AgentOperation::QuarantineUnverifiedStrategyRun {
+                allocation_id: "invalid!".to_owned(),
+            }
+            .validate()
+            .is_err()
+        );
         assert!(close.direct_transport_demo_execution());
         assert!(!close.direct_transport_read_only());
         let invalid_close = AgentOperation::FinalizeStrategyRun {
