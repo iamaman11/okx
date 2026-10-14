@@ -72,6 +72,7 @@ pub fn classify_prepare_result(
         Err(error @ ExecutionLedgerError::ExchangeEvidenceCapacity) => Err(error),
         Err(error @ ExecutionLedgerError::ExchangeSourceIncomplete) => Err(error),
         Err(error @ ExecutionLedgerError::StrategyRunNotFinalizable) => Err(error),
+        Err(error @ ExecutionLedgerError::StrategyRunNotQuarantinable) => Err(error),
         Err(error @ ExecutionLedgerError::StrategyRunFinalized) => Err(error),
         Err(error @ ExecutionLedgerError::InvalidRiskStopReason) => Err(error),
         Err(error @ ExecutionLedgerError::IntentNotFound(_)) => Err(error),
