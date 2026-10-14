@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::auth::timestamp_now;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -539,6 +541,39 @@ impl AccountApi {
                 ],
             )
             .await
+    }
+
+    /// A non-order configuration write. Caller must hold the single native
+    /// Demo executor mutex and independently verify both long/short sides.
+    /// Never replay a possibly-sent request after an uncertain outcome.
+    pub async fn set_cross_swap_leverage(
+        &self,
+        instrument_id: &str,
+        lever: &str,
+    ) -> Result<Vec<LeverageInfo>, OkxError> {
+        let path = "/api/v5/account/set-leverage";
+        let body = serde_json::json!({
+            "instId": instrument_id,
+            "mgnMode": "cross",
+            "lever": lever,
+        });
+        let plan = self.client.rate_budget().private_rest_plan(path, &[]);
+        let reply: crate::client::ApiEnvelope<LeverageInfo> = self
+            .client
+            .private_post(path, &body, &timestamp_now(), None, &plan)
+            .await?;
+        if reply.code != "0" {
+            return Err(OkxError::Api {
+                code: reply.code,
+                message: reply.msg,
+            });
+        }
+        if reply.data.is_empty() {
+            return Err(OkxError::Response(
+                "set-leverage returned no acknowledgement rows".to_owned(),
+            ));
+        }
+        Ok(reply.data)
     }
 
     pub async fn fee_rates(
