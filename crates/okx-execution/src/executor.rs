@@ -367,6 +367,28 @@ where
         &self.ledger
     }
 
+    /// The existing single executor owns the configuration POST fence.
+    pub fn begin_leverage_change(
+        &mut self,
+        mutation_id: &str,
+        instrument: &str,
+        requested: &str,
+        previous: &str,
+        uid: &str,
+        observed_at_ms: u64,
+    ) -> Result<crate::LeverageChangeAttempt, OrderExecutorError> {
+        Ok(self.ledger.begin_leverage_change(
+            mutation_id, instrument, requested, previous, uid, observed_at_ms,
+        )?)
+    }
+
+    pub fn verify_leverage_change(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<crate::LeverageChangeAttempt, OrderExecutorError> {
+        Ok(self.ledger.verify_leverage_change(mutation_id)?)
+    }
+
     /// Only the existing executor owner persists source evidence; no gateway call.
     pub fn capture_exchange_evidence(
         &mut self,

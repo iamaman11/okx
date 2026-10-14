@@ -680,7 +680,6 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &self.strategy_periods,
-
             &self.leverage_attempts,
         )?;
         self.risk_stop = Some(stop.clone());
@@ -739,7 +738,6 @@ impl DurableExecutionLedger {
                 self.capital_reservation.as_ref(),
                 Some(&next),
                 &self.strategy_periods,
-
                 &self.leverage_attempts,
             )?;
             self.exchange_evidence = Some(next);
@@ -981,7 +979,6 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &next,
-
             &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
@@ -1088,7 +1085,6 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &next,
-
             &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
@@ -1174,7 +1170,6 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &next,
-
             &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
@@ -1360,7 +1355,6 @@ impl DurableExecutionLedger {
             Some(&reservation),
             None,
             &next,
-
             &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
@@ -2111,7 +2105,6 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &self.strategy_periods,
-
             &self.leverage_attempts,
         ) {
             self.entries.remove(&intent_id);
@@ -2153,7 +2146,6 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &self.strategy_periods,
-
             &self.leverage_attempts,
         ) {
             self.entries.insert(intent_id.to_owned(), original);
