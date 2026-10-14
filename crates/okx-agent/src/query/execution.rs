@@ -551,31 +551,35 @@ async fn quarantine_unverified_strategy_run(
 ) -> AgentResult<AgentResponse> {
     let deny = |reason: String| {
         failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
-            EXECUTION_STRATEGY_CLOSE_UNATTESTED_CODE, reason, false,
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_STRATEGY_CLOSE_UNATTESTED_CODE,
+            reason,
+            false,
         )
     };
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
     if !execution.demo_mutation_acceptance_requested() {
-        return Ok(deny("unverified closure requires exact Demo owner".to_owned()));
+        return Ok(deny(
+            "unverified closure requires exact Demo owner".to_owned(),
+        ));
     }
     let snapshot = match fresh_account(request, context, generated_at).await? {
         FreshAccount::Ready(account) => account,
         FreshAccount::Response(reply) => return Ok(*reply),
     };
-    let preflight = match executor_preflight_check(
-        request, generated_at, execution, &snapshot,
-    ).await? {
-        ExecutorPreflightCheck::Ready(value) => value,
-        ExecutorPreflightCheck::Response(reply) => return Ok(*reply),
-    };
+    let preflight =
+        match executor_preflight_check(request, generated_at, execution, &snapshot).await? {
+            ExecutorPreflightCheck::Ready(value) => value,
+            ExecutorPreflightCheck::Response(reply) => return Ok(*reply),
+        };
     if !preflight.accepted || preflight.production_environment {
         return Ok(preflight_rejected(request, generated_at));
     }
-    let (Some(observer), Some(ws)) = (context.account_fallback, context.private_ws)
-    else {
+    let (Some(observer), Some(ws)) = (context.account_fallback, context.private_ws) else {
         return Ok(deny("private REST and WS sources required".to_owned()));
     };
     let cursor = match ws.convergence_cursor().await {
@@ -601,21 +605,34 @@ async fn quarantine_unverified_strategy_run(
         || !protection.complete_within_bound
         || protection.rows != 0
     {
-        return Ok(deny("FLAT/USDT/account/OCO/WS witness incomplete".to_owned()));
+        return Ok(deny(
+            "FLAT/USDT/account/OCO/WS witness incomplete".to_owned(),
+        ));
     }
     let now_ms = utc_now_ms();
-    match execution.quarantine_unverified_strategy_run_demo_authorized(
-        &preflight, allocation_id, &facts, true, true, now_ms,
-    ).await? {
+    match execution
+        .quarantine_unverified_strategy_run_demo_authorized(
+            &preflight,
+            allocation_id,
+            &facts,
+            true,
+            true,
+            now_ms,
+        )
+        .await?
+    {
         Some(Ok(value)) => Ok(completed(
-            request, generated_at,
+            request,
+            generated_at,
             okx_execution::STRATEGY_UNVERIFIED_CLOSURE_SCHEMA_V1,
             serde_json::to_value(value)?,
         )),
         Some(Err(error)) => Ok(deny(format!(
             "unverified closure is not independently attested: {error}"
         ))),
-        None => Ok(deny("exact Demo source identity or run mismatch".to_owned())),
+        None => Ok(deny(
+            "exact Demo source identity or run mismatch".to_owned(),
+        )),
     }
 }
 
