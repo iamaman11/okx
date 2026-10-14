@@ -4057,7 +4057,7 @@ mod tests {
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V10);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V11);
 
             let _ = fs::remove_dir_all(root);
         }
