@@ -19,6 +19,19 @@ Core rules:
 - uncertain mutation outcome is reconciled, never blindly replayed.
 
 
+## Permanent source/venue separation — one engine (2026-10-14)
+
+**This is an enforceable system design constraint, not a temporary Demo test plan.**
+
+- One Rust/Tokio process and one Production-public OKX market/reference source own all signals, market snapshots, order books, OI, mark/index, funding estimates, historical candles/trades, market risk inputs, research and PAPER/SHADOW decisions, independent of the selected trading account. The public REST client does **not** send `x-simulated-trading`; the public WS uses the production endpoint for the configured region. Missing Production-public data is `NOT_READY`, never silently replaced with Demo public data.
+- The selected **account venue** (Demo for physical exchange acceptance, Production for authenticated read-only) alone controls private REST/WS, execution credentials, exchange orders, fills, bills, protective OCO, leverage/fee account terms, UID and durable account ledger. A venue-specific private fill may be valued using an attested Production-market reference; do not confuse market price with a Demo execution fill. Where venue order/price constraints differ, revalidate independently at the same order owner and fail closed, never silently import Demo market depth as a replacement.
+- The two roots `C:\\okx-runtime\\demo` and `C:\\okx-runtime` isolate **account evidence** and historical order journals, not market engines or trading strategies. One `OrderExecutor`, analysis/research implementation, runtime owner, Cloudflare MCP endpoint, and transport policy remain.
+- Source-manifest acquisition attests `source_environment=production_public` plus `rest_api_base_url` from the actual source client before immutable hashes are computed. Old hash-addressed artifacts with missing origin attestation remain **legacy/unverified**, never retroactively relabeled or deemed Production-grade for strategy promotion. Recapture and verify before a future live hypothesis admission; prohibit silent promotion of unproven datasets.
+- The native account/market profiles are deliberately asymmetric in Demo: **Production-public market plus Demo-private account**. A successful simulated order is proof of Demo execution behavior, not proof of production liquidity/OI or profitable live strategy.
+- Production LIVE writes stay disabled until the separate Stage 5C/Live authorization gate; this change must not add a Live mutation authority, new daemon/scheduler, parallel executor, research pipeline, WebSocket process or fallback transport.
+
+**Acceptance required for the boundary:** code-level negative tests of each region, current CI 6/6 and exact tested=merged tree, one CONTROL-installed Windows artifact, primary MCP independent readback of Production-public market provenance under the Demo-private account, FLAT 0/0/0 and unchanged immutable financial archive. No new Demo trade is needed for public-source migration.
+
 ## Current operating authority — 2026-10-11
 
 **One current authority [#160](https://github.com/iamaman11/okx/issues/160)**; [exchange evidence #223](https://github.com/iamaman11/okx/issues/223). **Installed baseline:** `main eb1da12add28f3bdcee909c09339f6515e2558ce`; PR #297 6/6 CI PASS; exact Windows artifact `11713135973` installed with CONTROL `READY_RUNNING`; primary Cloudflare Demo MCP `PASS/session_fresh`, tool contract `okx.mcp.tools/2026-10-11.2`. Authenticated account FRESH FLAT (positions=0, regular orders=0, native OCO=0, unresolved=0, reconciled). One FOK OPEN plus attached protection and one FOK CLOSE physically passed. ADD/HEDGE/REDUCE/REVERSE physical PASS **not proven**. Live **OFF**.
