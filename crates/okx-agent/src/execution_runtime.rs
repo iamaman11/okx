@@ -15,8 +15,7 @@ use okx_execution::{
     MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor, OrderExecutorError,
     PositionSide, PrepareOutcome, ProductionMarkEvidence, StrategyAllocationOpening,
     StrategyCapitalReservation, StrategyFinalization, SubmitDisposition,
-    execution_status_with_ledger,
-    managed_execution_inventory, reconcile_account_ledger,
+    execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -207,9 +206,11 @@ impl ExecutionRuntime {
             }
         }
         reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary();
-        reconciliation.financial_period = executor
-            .ledger()
-            .financial_period_with_production_marks(facts, coherent, production_marks);
+        reconciliation.financial_period = executor.ledger().financial_period_with_production_marks(
+            facts,
+            coherent,
+            production_marks,
+        );
         Ok((reconciliation, inventory))
     }
 
