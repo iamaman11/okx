@@ -13,6 +13,64 @@ use crate::{
 
 pub const STRATEGY_FINALIZATION_SCHEMA_V1: &str = "okx.strategy-finalization/v1";
 pub const MAX_ARCHIVED_STRATEGY_RUNS: usize = 16;
+pub const STRATEGY_NAV_POINT_SCHEMA_V1: &str = "okx.strategy-nav-point/v1";
+pub const MAX_STRATEGY_NAV_POINTS: usize = 4096;
+
+/// Bounded, append-only, hash-linked observations owned by the SAME
+/// execution ledger. Sparse observations are not proof of intraday peak
+/// coverage or permission to increase trading risk.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyNavPoint {
+    pub schema: String,
+    pub run_id: String,
+    pub observed_at_ms: u64,
+    pub account_as_of_ms: u64,
+    pub evidence_sha256: String,
+    pub nav_usdt: String,
+    pub high_water_usdt: String,
+    pub daily_gross_loss_usdt: String,
+    pub utc_day_start_ms: u64,
+    pub previous_sha256: String,
+    pub checksum_sha256: String,
+}
+
+impl StrategyNavPoint {
+    pub fn hash(&self) -> Result<String, ExecutionLedgerError> {
+        let bytes = serde_json::to_vec(&(
+            &self.schema, &self.run_id, self.observed_at_ms,
+            self.account_as_of_ms, &self.evidence_sha256,
+            &self.nav_usdt, &self.high_water_usdt,
+            &self.daily_gross_loss_usdt, self.utc_day_start_ms,
+            &self.previous_sha256,
+        ))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    pub fn validate(&self) -> Result<(), ExecutionLedgerError> {
+        let nav = Decimal::from_str(&self.nav_usdt).ok();
+        let peak = Decimal::from_str(&self.high_water_usdt).ok();
+        let loss = Decimal::from_str(&self.daily_gross_loss_usdt).ok();
+        if self.schema != STRATEGY_NAV_POINT_SCHEMA_V1
+            || self.run_id.is_empty()
+            || self.observed_at_ms == 0
+            || self.account_as_of_ms == 0
+            || self.observed_at_ms < self.account_as_of_ms
+            || self.observed_at_ms - self.account_as_of_ms > 30_000
+            || self.utc_day_start_ms != (self.account_as_of_ms / 86_400_000) * 86_400_000
+            || self.evidence_sha256.len() != 64
+            || !self.evidence_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || nav.is_none_or(|v| v <= Decimal::ZERO)
+            || peak.zip(nav).is_none_or(|(peak, nav)| peak < nav)
+            || loss.is_none_or(|v| v < Decimal::ZERO)
+            || self.checksum_sha256 != self.hash()?
+        {
+            return Err(ExecutionLedgerError::Corrupt("invalid strategy NAV checkpoint"));
+        }
+        Ok(())
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +218,8 @@ impl ArchivedStrategyRun {
 pub struct StrategyPeriodHistory {
     pub finalized_run: Option<StrategyFinalization>,
     pub archived_runs: Vec<ArchivedStrategyRun>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nav_points: Vec<StrategyNavPoint>,
 }
 
 impl StrategyPeriodHistory {
@@ -169,6 +229,9 @@ impl StrategyPeriodHistory {
         evidence: Option<&DurableExchangeEvidence>,
     ) -> Result<(), ExecutionLedgerError> {
         if self.archived_runs.len() > MAX_ARCHIVED_STRATEGY_RUNS {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+        if self.nav_points.len() > MAX_STRATEGY_NAV_POINTS {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
         }
         let mut seen = std::collections::BTreeSet::new();
@@ -205,6 +268,35 @@ impl StrategyPeriodHistory {
             return Err(ExecutionLedgerError::Corrupt(
                 "orphaned financial run state",
             ));
+        }
+        let mut previous: Option<&StrategyNavPoint> = None;
+        for point in &self.nav_points {
+            point.validate()?;
+            let owner = active.filter(|r| r.allocation_id == point.run_id)
+                .map(|r| (r.started_at_ms, None))
+                .or_else(|| self.archived_runs.iter()
+                    .find(|r| r.reservation.allocation_id == point.run_id)
+                    .map(|r| (r.reservation.started_at_ms, Some(r.finalization.finalized_at_ms))));
+            let Some((started_at_ms, ended_at_ms)) = owner else {
+                return Err(ExecutionLedgerError::Corrupt("NAV checkpoint has no run owner"));
+            };
+            if point.account_as_of_ms < started_at_ms
+                || ended_at_ms.is_some_and(|end| point.observed_at_ms > end)
+                || previous.is_some_and(|p| point.observed_at_ms <= p.observed_at_ms)
+                || point.previous_sha256 != previous.map_or("", |p| &p.checksum_sha256)
+            {
+                return Err(ExecutionLedgerError::Corrupt("invalid NAV checkpoint lineage"));
+            }
+            if let Some(prior) = previous.filter(|p| p.run_id == point.run_id) {
+                let prior_peak = Decimal::from_str(&prior.high_water_usdt)
+                    .map_err(|_| ExecutionLedgerError::Corrupt("invalid prior NAV peak"))?;
+                let nav = Decimal::from_str(&point.nav_usdt)
+                    .map_err(|_| ExecutionLedgerError::Corrupt("invalid checkpoint NAV"))?;
+                if Decimal::from_str(&point.high_water_usdt).ok() != Some(prior_peak.max(nav)) {
+                    return Err(ExecutionLedgerError::Corrupt("NAV peak rewound or invented"));
+                }
+            }
+            previous = Some(point);
         }
         if let Some(finalized) = &self.finalized_run {
             let (Some(run), Some(source)) = (active, evidence) else {
@@ -275,6 +367,7 @@ mod tests {
         let history = StrategyPeriodHistory {
             finalized_run: None,
             archived_runs: vec![archived.clone()],
+            nav_points: Vec::new(),
         };
         history.validate(Some(&next), None).unwrap();
         let proof = history.archived_runs[0].proof();
@@ -304,6 +397,7 @@ mod tests {
         let duplicate_history = StrategyPeriodHistory {
             finalized_run: None,
             archived_runs: vec![archived.clone(), archived],
+            nav_points: Vec::new(),
         };
         assert!(duplicate_history.validate(Some(&next), None).is_err());
         // Sixteen distinct, internally valid immutable periods are allowed.
@@ -336,6 +430,7 @@ mod tests {
         let bounded_history = StrategyPeriodHistory {
             finalized_run: None,
             archived_runs: accepted_archives,
+            nav_points: Vec::new(),
         };
         bounded_history
             .validate(Some(&next_after_capacity), None)
