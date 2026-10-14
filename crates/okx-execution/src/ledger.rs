@@ -417,6 +417,7 @@ impl ExecutionLedgerStore {
                 &entry,
                 file.capital_reservation.as_ref(),
                 &file.strategy_periods.archived_runs,
+                &file.strategy_periods.unverified_runs,
             )?;
             let intent_id = entry.record.plan.intent_id.clone();
             if by_intent.insert(intent_id, entry.clone()).is_some() {
@@ -457,7 +458,9 @@ impl ExecutionLedgerStore {
             }
             ledger_uid = Some(uid);
             validate_entry(entry)?;
-            validate_strategy_run_binding(entry, capital_reservation, &history.archived_runs)?;
+            validate_strategy_run_binding(
+                entry, capital_reservation, &history.archived_runs, &history.unverified_runs,
+            )?;
             if intent_id != &entry.record.plan.intent_id {
                 return Err(ExecutionLedgerError::Corrupt(
                     "map key does not match intent_id",
@@ -1174,7 +1177,9 @@ impl DurableExecutionLedger {
         if !record.plan.action.is_risk_increasing() {
             return Ok(());
         }
-        if self.strategy_periods.finalized_run.is_some() {
+        if self.strategy_periods.finalized_run.is_some()
+            || self.strategy_periods.unverified_run.is_some()
+        {
             return Err(ExecutionLedgerError::StrategyRunFinalized);
         }
         if created_at_ms <= r.started_at_ms
@@ -1961,6 +1966,7 @@ fn validate_strategy_run_binding(
     entry: &ExecutionLedgerEntry,
     active_run: Option<&StrategyCapitalReservation>,
     archived: &[ArchivedStrategyRun],
+    unverified: &[UnverifiedStrategyRun],
 ) -> Result<(), ExecutionLedgerError> {
     let Some(run_id) = entry.record.strategy_run_id.as_deref() else {
         // Historical executions must remain readable but not retroactively
@@ -1975,6 +1981,9 @@ fn validate_strategy_run_binding(
                 .find(|v| v.reservation.allocation_id == run_id)
                 .map(|v| &v.reservation)
         });
+    let run = run.or_else(|| unverified.iter()
+        .find(|v| v.reservation.allocation_id == run_id)
+        .map(|v| &v.reservation));
     let Some(run) = run else {
         return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
     };
