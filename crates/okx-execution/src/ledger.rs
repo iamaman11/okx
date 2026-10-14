@@ -24,7 +24,8 @@ use crate::{
     ProtectiveOrderStatus, ProtectiveSizeAmendState, ProtectiveTriggerPriceBasis,
     ReverseContinuation, ReverseExecutionLink, ReverseLeg, STRATEGY_NAV_POINT_SCHEMA_V1,
     StrategyFinalization, StrategyFinancialPeriod, StrategyNavPoint, StrategyPeriodHistory,
-    StrategyUnverifiedClosure, UnverifiedStrategyProof, UnverifiedStrategyRun,
+    StrategyUnverifiedClosure, StrategyStopRearm, STRATEGY_STOP_REARM_SCHEMA_V1,
+    UnverifiedStrategyProof, UnverifiedStrategyRun,
     derive_amend_request_id, derive_client_order_id, derive_protective_algo_client_id,
     derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
@@ -42,6 +43,7 @@ pub const EXECUTION_LEDGER_SCHEMA_V9: &str = "okx.execution-ledger/v9";
 pub const EXECUTION_LEDGER_SCHEMA_V10: &str = "okx.execution-ledger/v10";
 pub const EXECUTION_LEDGER_SCHEMA_V11: &str = "okx.execution-ledger/v11";
 pub const EXECUTION_LEDGER_SCHEMA_V12: &str = "okx.execution-ledger/v12";
+pub const EXECUTION_LEDGER_SCHEMA_V13: &str = "okx.execution-ledger/v13";
 pub const LEVERAGE_ATTEMPT_SCHEMA_V1: &str = "okx.leverage-change-attempt/v1";
 const MAX_LEVERAGE_ATTEMPTS: usize = 256;
 pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1: &str = "okx.strategy-capital-reservation/v1";
@@ -151,6 +153,13 @@ pub enum ExecutionLedgerError {
 
     #[error(transparent)]
     Transition(#[from] ExecutionTransitionError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyStopRearmRequest {
+    pub expected_stopped_at_ms: u64,
+    pub prior_finalization_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,6 +384,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V10
                 | EXECUTION_LEDGER_SCHEMA_V11
                 | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
@@ -388,6 +398,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V10
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "risk stop on legacy ledger schema",
@@ -404,6 +415,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V10
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -421,6 +433,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V10
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "exchange evidence on legacy schema",
@@ -440,6 +453,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V10
                 | EXECUTION_LEDGER_SCHEMA_V11
                 | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
         ) && file.strategy_periods != StrategyPeriodHistory::default()
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -452,6 +466,7 @@ impl ExecutionLedgerStore {
                 EXECUTION_LEDGER_SCHEMA_V10
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -462,12 +477,16 @@ impl ExecutionLedgerStore {
             || !file.strategy_periods.unverified_runs.is_empty())
             && !matches!(
                 file.schema.as_str(),
-                EXECUTION_LEDGER_SCHEMA_V11 | EXECUTION_LEDGER_SCHEMA_V12
+                EXECUTION_LEDGER_SCHEMA_V11 | EXECUTION_LEDGER_SCHEMA_V12 | EXECUTION_LEDGER_SCHEMA_V13
+                    | EXECUTION_LEDGER_SCHEMA_V13
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "unverified closure requires ledger schema v11",
             ));
+        }
+        if !file.strategy_periods.stop_rearms.is_empty() && file.schema != EXECUTION_LEDGER_SCHEMA_V13 {
+            return Err(ExecutionLedgerError::Corrupt("STOP rearm requires ledger v13"));
         }
         file.strategy_periods.validate(
             file.capital_reservation.as_ref(),
@@ -584,7 +603,7 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V12.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V13.to_owned(),
             records: entries.values().cloned().collect(),
             risk_stop: risk_stop.cloned(),
             capital_reservation: capital_reservation.cloned(),
