@@ -389,6 +389,19 @@ mod tests {
     use super::*;
     use okx_api::PublicInstrument;
 
+    #[test]
+    fn market_source_scope_is_bound_to_native_public_client_environment() {
+        for demo in [false, true] {
+            let client = OkxPublicClient::new(okx_api::OkxEnvironment::new(
+                okx_api::Region::Global,
+                demo,
+            ))
+            .unwrap();
+            let bootstrap = MarketBootstrapper::new(client);
+            assert_eq!(bootstrap.source_is_simulated(), demo);
+        }
+    }
+
     fn reference() -> ReferenceRegistry {
         ReferenceRegistry::from_public(
             "2026-09-27T00:00:00.000Z",
