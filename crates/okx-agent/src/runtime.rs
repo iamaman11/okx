@@ -38,9 +38,7 @@ pub enum RuntimeState {
 const MIN_QUIET_SOURCE_RETRY_MS: u64 = 300_000;
 
 fn quiet_source_retry_allowed(last_attempt_ms: Option<u64>, now_ms: u64) -> bool {
-    last_attempt_ms.is_none_or(|last| {
-        now_ms >= last && now_ms - last >= MIN_QUIET_SOURCE_RETRY_MS
-    })
+    last_attempt_ms.is_none_or(|last| now_ms >= last && now_ms - last >= MIN_QUIET_SOURCE_RETRY_MS)
 }
 
 #[derive(Debug, Serialize)]
