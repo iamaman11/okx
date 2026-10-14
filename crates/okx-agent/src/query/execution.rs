@@ -580,12 +580,7 @@ async fn set_leverage(
         ));
     }
     match execution
-        .lower_cross_leverage_authorized(
-            &preflight,
-            mutation_id,
-            instrument,
-            leverage,
-        )
+        .lower_cross_leverage_authorized(&preflight, mutation_id, instrument, leverage)
         .await
     {
         Some(Ok(proof)) => Ok(completed(
