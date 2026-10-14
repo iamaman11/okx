@@ -256,9 +256,7 @@ pub(super) async fn dispatch(
                     if public_ws.demand_instrument(inst.clone()).await.is_err() {
                         continue;
                     }
-                    let quality = public_ws
-                        .quality_snapshot(inst, now_ms, 30_000, true)
-                        .await;
+                    let quality = public_ws.quality_snapshot(inst, now_ms, 30_000, true).await;
                     if !quality.is_ok_and(|status| status.quality == MarketReadiness::Fresh) {
                         continue;
                     }
