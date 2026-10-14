@@ -1086,10 +1086,16 @@ mod tests {
         let mut wrong_reason = valid.clone();
         wrong_reason.stop_reason = "ACCOUNT_RISK_STOP".to_owned();
         wrong_reason.checksum_sha256 = wrong_reason.hash().unwrap();
-        assert!(wrong_reason.validate().is_err(), "account-wide stops cannot be rearmed as strategy STOP");
+        assert!(
+            wrong_reason.validate().is_err(),
+            "account-wide stops cannot be rearmed as strategy STOP"
+        );
         let mut forged = valid;
         forged.prior_finalization_sha256 = "b".repeat(64);
-        assert!(forged.validate().is_err(), "tampered financial hash breaks rearm chain");
+        assert!(
+            forged.validate().is_err(),
+            "tampered financial hash breaks rearm chain"
+        );
     }
 
     #[test]
