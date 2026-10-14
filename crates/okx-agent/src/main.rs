@@ -119,7 +119,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(cli: Cli) -> AgentResult<()> {
     let config = AgentConfig::new(cli.root, cli.key_id.clone());
+    // Account venue is Demo for physical acceptance or Production for read-only.
+    // Market observation, reference registry and research always use one
+    // production-public source. Never couple signal truth to the account switch.
     let environment = OkxEnvironment::new(Region::from_str(&cli.region)?, cli.demo);
+    let market_environment = environment.production_public();
 
     match cli.command {
         Command::InitKey => {
@@ -220,7 +224,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let mut private_key = load_native_private_key(&config.key_id)?;
             let rate_budget = RateBudget::new();
             let public_client =
-                OkxPublicClient::with_rate_budget(environment, rate_budget.clone())?;
+                OkxPublicClient::with_rate_budget(market_environment, rate_budget.clone())?;
             let reference = bootstrap_reference(public_client.clone()).await?;
             let market = MarketBootstrapper::new(public_client);
             let account = optional_account_bootstrapper(environment, rate_budget);
@@ -254,7 +258,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 let mailbox = GitHubMailboxClient::new(mailbox_issue, token, &config.root)?;
                 let rate_budget = RateBudget::new();
                 let public_client =
-                    OkxPublicClient::with_rate_budget(environment, rate_budget.clone())?;
+                    OkxPublicClient::with_rate_budget(market_environment, rate_budget.clone())?;
                 let reference = bootstrap_reference(public_client.clone()).await?;
                 eprintln!(
                     "reference registry ready generation={} instruments={}",
@@ -265,7 +269,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 let (account, private_ws_coordinator, private_ws) =
                     optional_private_components(environment, rate_budget.clone());
                 let (public_ws_coordinator, public_ws) = PublicWsCoordinator::new_with_rate_budget(
-                    environment,
+                    market_environment,
                     reference,
                     rate_budget.clone(),
                 );
