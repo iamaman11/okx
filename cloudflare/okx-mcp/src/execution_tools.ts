@@ -92,13 +92,13 @@ export const EXECUTION_TOOLS: Json[] = [
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
-        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run"] },
+        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage"] },
         intent_id: ID, instrument: INSTRUMENT,
         trade_mode: { type: "string", enum: ["cross","isolated"] },
         order_type: { type: "string", enum: ["limit","post_only","fok","ioc"] },
         spec, risk, lineage, mutation_id: MUTATION_ID, new_size: POSITIVE, new_price: POSITIVE,
         origin_schema: VERSION, origin_version: VERSION, mandate_version: VERSION,
-        allocated_usdt: POSITIVE, operator_authority_id: EVIDENCE_ID,
+        allocated_usdt: POSITIVE, operator_authority_id: EVIDENCE_ID, leverage: POSITIVE,
       },
       required: ["action","intent_id"],
     },
@@ -184,7 +184,7 @@ export function isExecutionMutation(operationType: unknown): boolean {
   return [
     "prepare_execution", "submit_prepared_execution",
     "mutate_execution", "abort_reverse_execution", "abandon_prepared_execution",
-    "begin_strategy_run", "finalize_strategy_run", "quarantine_unverified_strategy_run",
+    "begin_strategy_run", "finalize_strategy_run", "quarantine_unverified_strategy_run", "set_demo_leverage",
   ].includes(String(operationType));
 }
 
@@ -198,6 +198,14 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
   if (!token(args.intent_id,16,128) || typeof args.action !== "string") return null;
   const intent_id=args.intent_id;
   switch(args.action){
+    case "set_leverage": {
+      if (!exactKeys(args,["action","intent_id","instrument","trade_mode","leverage"])
+        || !token(args.instrument,3,64)
+        || !String(args.instrument).endsWith("-USDT-SWAP")
+        || args.trade_mode!=="cross" || !decimal(args.leverage)) return null;
+      return {type:"set_demo_leverage",mutation_id:intent_id,
+        instrument:args.instrument,margin_mode:"cross",leverage:args.leverage};
+    }
     case "finalize_strategy_run": {
       if (!exactKeys(args,["action","intent_id"])) return null;
       return {type:"finalize_strategy_run",allocation_id:intent_id};
