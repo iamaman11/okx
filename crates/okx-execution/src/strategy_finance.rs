@@ -27,7 +27,10 @@ pub struct ProductionMarkEvidence {
 
 const MAX_STRATEGY_MARK_AGE_MS: u64 = 30_000;
 
-fn attested_production_mark(mark: &ProductionMarkEvidence, account_as_of_ms: u64) -> Option<Decimal> {
+fn attested_production_mark(
+    mark: &ProductionMarkEvidence,
+    account_as_of_ms: u64,
+) -> Option<Decimal> {
     if mark.exchange_timestamp_ms == 0
         || mark.received_at_ms == 0
         || mark.exchange_timestamp_ms > mark.received_at_ms
