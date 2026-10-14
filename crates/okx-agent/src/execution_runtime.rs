@@ -37,6 +37,14 @@ pub const LEVERAGE_CHANGE_PROOF_SCHEMA_V1: &str = "okx.leverage-change-proof/v1"
 
 /// A Hedge Cross setting is accepted only when BOTH distinct sides are
 /// individually verified and have the same exact, positive leverage.
+/// Account generations hash mutable snapshots and legitimately advance during a
+/// financial run. Only UID is stable across refreshes. The *current* snapshot
+/// generation is separately fenced against exchange ledger facts and private WS
+/// in the query admission before entering this executor-owned critical section.
+fn same_leverage_account(opened_uid: &str, observed_uid: &str) -> bool {
+    !opened_uid.is_empty() && opened_uid == observed_uid
+}
+
 fn exact_hedge_cross_leverage(
     rows: &[okx_api::LeverageInfo],
     instrument: &str,
@@ -460,7 +468,6 @@ impl ExecutionRuntime {
     pub async fn lower_cross_leverage_authorized(
         &self,
         preflight: &ExecutorCredentialPreflight,
-        account_generation: &str,
         mutation_id: &str,
         instrument: &str,
         requested: &str,
@@ -476,8 +483,10 @@ impl ExecutionRuntime {
             || preflight.account_uid_fingerprint.is_empty()
             || !instrument.ends_with("-USDT-SWAP")
             || executor.ledger().capital_reservation().is_none_or(|r| {
-                r.account_uid_fingerprint != preflight.account_uid_fingerprint
-                    || r.account_generation != account_generation
+                !same_leverage_account(
+                    &r.account_uid_fingerprint,
+                    &preflight.account_uid_fingerprint,
+                )
             })
             || executor.ledger().entries().any(|e| {
                 executor
@@ -1552,6 +1561,15 @@ mod leverage_configuration_tests {
             position_side: side.to_owned(),
             lever: lever.to_owned(),
         }
+    }
+
+    #[test]
+    fn refreshed_account_generation_does_not_rebind_account_uid() {
+        // A strategy reservation binds to one UID, not to a frozen account
+        // snapshot generation: routine REST/WS refreshes change that hash.
+        assert!(same_leverage_account("auth_uid_a", "auth_uid_a"));
+        assert!(!same_leverage_account("auth_uid_a", "auth_uid_b"));
+        assert!(!same_leverage_account("", ""));
     }
 
     #[test]
