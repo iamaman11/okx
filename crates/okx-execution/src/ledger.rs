@@ -2895,8 +2895,8 @@ mod tests {
                     "fee": fee, "pnl": pnl, "ts": ts
                 }),
                 source_intent_id: Some(intent.to_owned()),
+                allocation: if owner.is_some() { "RUN_OWNED" } else { "UNALLOCATED" }.to_owned(),
                 strategy_run_id: owner,
-                allocation: "RUN_OWNED".to_owned(),
             }
         };
         evidence.events.insert(
