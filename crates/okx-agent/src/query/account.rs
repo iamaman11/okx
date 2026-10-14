@@ -237,6 +237,7 @@ pub(super) async fn dispatch(
             // No REST fallback or simulated feed is accepted for open NAV.
             // Mark reads are inside the existing private WS coherence fence.
             let mut production_marks = std::collections::BTreeMap::new();
+            let mut mark_instruments_attempted = std::collections::BTreeSet::new();
             if context
                 .market_fallback
                 .is_some_and(|market| !market.source_is_simulated())
@@ -248,9 +249,14 @@ pub(super) async fn dispatch(
                         .position
                         .parse::<rust_decimal::Decimal>()
                         .is_ok_and(|qty| qty != rust_decimal::Decimal::ZERO)
-                        || production_marks.contains_key(&position.instrument_id)
+                        || !mark_instruments_attempted.insert(position.instrument_id.clone())
                     {
                         continue;
+                    }
+                    // Bound extra WS queries. Unquoted positions remain
+                    // INCOMPLETE, never silently valued from Demo.
+                    if mark_instruments_attempted.len() > 8 {
+                        break;
                     }
                     let inst = &position.instrument_id;
                     if public_ws.demand_instrument(inst.clone()).await.is_err() {
