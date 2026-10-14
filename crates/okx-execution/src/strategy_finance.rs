@@ -367,6 +367,25 @@ pub fn assess_persisted_financial_period_with_production_marks(
     coherent: bool,
     production_marks: &BTreeMap<String, ProductionMarkEvidence>,
 ) -> StrategyFinancialPeriod {
+    assess_persisted_financial_period_with_verified_source(
+        run, evidence, entries, facts, coherent, production_marks, false,
+    )
+}
+
+/// A complete, coherent private REST/WS account read has just been captured
+/// by the SINGLE ledger writer. New native events are durably appended; an
+/// unchanged quiet REST window may legitimately coalesce its *cursor*.
+/// Do not confuse an old persisted cursor with stale current account facts.
+#[allow(clippy::too_many_arguments)]
+pub fn assess_persisted_financial_period_with_verified_source(
+    run: &StrategyCapitalReservation,
+    evidence: Option<&DurableExchangeEvidence>,
+    entries: &[ExecutionLedgerEntry],
+    facts: &AccountLedgerFacts,
+    coherent: bool,
+    production_marks: &BTreeMap<String, ProductionMarkEvidence>,
+    current_source_captured: bool,
+) -> StrategyFinancialPeriod {
     let mut reasons = BTreeSet::new();
     let mut realized = Decimal::ZERO;
     let mut fees = Decimal::ZERO;
@@ -423,9 +442,13 @@ pub fn assess_persisted_financial_period_with_production_marks(
         .as_deref()
         .and_then(|s| s.parse::<u64>().ok());
     let newest = e.cursors.values().map(|c| c.account_as_of_ms).max();
-    if current_as_of
-        .zip(newest)
-        .is_none_or(|(current, last)| current < last || current - last > 30_000)
+    let coalesced_source_attested = current_source_captured
+        && coherent
+        && DurableExchangeEvidence::complete_source_checkpoint(facts);
+    if !coalesced_source_attested
+        && current_as_of
+            .zip(newest)
+            .is_none_or(|(current, last)| current < last || current - last > 30_000)
     {
         reasons.insert("financial_source_asof_not_current");
     }
