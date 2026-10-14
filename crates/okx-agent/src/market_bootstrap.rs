@@ -427,7 +427,11 @@ mod tests {
             let provenance = bootstrap.attest_source_parameters(BTreeMap::new());
             assert_eq!(
                 provenance.get("source_environment").map(String::as_str),
-                Some(if demo { "demo_simulated" } else { "production_public" }),
+                Some(if demo {
+                    "demo_simulated"
+                } else {
+                    "production_public"
+                }),
             );
             assert_eq!(
                 provenance.get("rest_api_base_url").map(String::as_str),
