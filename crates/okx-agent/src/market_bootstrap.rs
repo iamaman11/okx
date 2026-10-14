@@ -392,11 +392,9 @@ mod tests {
     #[test]
     fn market_source_scope_is_bound_to_native_public_client_environment() {
         for demo in [false, true] {
-            let client = OkxPublicClient::new(okx_api::OkxEnvironment::new(
-                okx_api::Region::Global,
-                demo,
-            ))
-            .unwrap();
+            let client =
+                OkxPublicClient::new(okx_api::OkxEnvironment::new(okx_api::Region::Global, demo))
+                    .unwrap();
             let bootstrap = MarketBootstrapper::new(client);
             assert_eq!(bootstrap.source_is_simulated(), demo);
         }
