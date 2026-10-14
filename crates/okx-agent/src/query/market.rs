@@ -7,6 +7,7 @@ struct MarketIntelligenceResult {
     schema: &'static str,
     as_of: String,
     market_source: &'static str,
+    market_data_provenance: MarketDataProvenance,
     observed_evidence_label: &'static str,
     impact_evidence_label: &'static str,
     sequence_continuity_proven: bool,
@@ -46,6 +47,7 @@ struct MarketResearchResult {
     as_of_ms: u64,
     bar: String,
     history_limit: u16,
+    market_data_provenance: MarketDataProvenance,
     observed_evidence_label: &'static str,
     derived_evidence_label: &'static str,
     feature_versions: MarketResearchFeatureVersions,
@@ -597,6 +599,7 @@ pub(super) async fn dispatch(
                     market: live.market,
                     quality,
                     market_source: "websocket",
+                    market_data_provenance: MarketDataProvenance::from_context(context),
                 };
                 return Ok(AgentResponse {
                     schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
@@ -657,6 +660,7 @@ pub(super) async fn dispatch(
                         market: snapshot,
                         quality,
                         market_source: "rest_fallback",
+                        market_data_provenance: MarketDataProvenance::from_context(context),
                     };
                     Ok(AgentResponse {
                         schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
@@ -778,6 +782,7 @@ pub(super) async fn dispatch(
                 schema: MARKET_INTELLIGENCE_SCHEMA_V1,
                 as_of: generated_at.to_owned(),
                 market_source: "websocket",
+                market_data_provenance: MarketDataProvenance::from_context(context),
                 observed_evidence_label: "OBSERVED",
                 impact_evidence_label: "MODELLED",
                 sequence_continuity_proven: quality.sequence_continuity_proven,
@@ -1172,6 +1177,7 @@ pub(super) async fn dispatch(
                 as_of_ms: research_as_of_ms,
                 bar: bar.clone(),
                 history_limit,
+                market_data_provenance: MarketDataProvenance::from_context(context),
                 observed_evidence_label: "OBSERVED",
                 derived_evidence_label: "MODELLED",
                 feature_versions: MarketResearchFeatureVersions {
@@ -1327,6 +1333,25 @@ pub(super) async fn dispatch(
 mod tests {
     use super::*;
 
+    #[test]
+    fn fresh_demo_market_never_claims_production_oi_comparability() {
+        let demo = MarketDataProvenance::from_simulated_source(true);
+        let production = MarketDataProvenance::from_simulated_source(false);
+        assert_eq!(demo.source_scope, "OKX_DEMO_SIMULATED");
+        assert_eq!(demo.production_open_interest_comparability, "NOT_ATTESTED");
+        assert_eq!(production.source_scope, "OKX_PRODUCTION_PUBLIC");
+        assert_eq!(
+            production.production_open_interest_comparability,
+            "PRODUCTION_SOURCE"
+        );
+        let serialized = serde_json::to_value(demo).unwrap();
+        assert_eq!(
+            serialized["production_open_interest_comparability"],
+            "NOT_ATTESTED"
+        );
+        assert_ne!(serialized["source_scope"], production.source_scope);
+    }
+
     fn fixture(index: usize) -> MarketResearchInstrumentResult {
         MarketResearchInstrumentResult {
             instrument_id: format!("ASSET{index:02}-USDT-SWAP"),
@@ -1394,6 +1419,7 @@ mod tests {
             as_of_ms: 1_790_553_602_000,
             bar: "1H".to_owned(),
             history_limit: 100,
+            market_data_provenance: MarketDataProvenance::from_simulated_source(true),
             observed_evidence_label: "OBSERVED",
             derived_evidence_label: "MODELLED",
             feature_versions: MarketResearchFeatureVersions {
@@ -1529,6 +1555,7 @@ mod tests {
             schema: MARKET_INTELLIGENCE_SCHEMA_V1,
             as_of: "2026-10-02T16:49:59.426Z".to_owned(),
             market_source: "websocket",
+            market_data_provenance: MarketDataProvenance::from_simulated_source(true),
             observed_evidence_label: "OBSERVED",
             impact_evidence_label: "MODELLED",
             sequence_continuity_proven: true,

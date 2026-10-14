@@ -119,12 +119,47 @@ const CURRENT_COST_MARK_OBSERVATION_WARNING: &str = "current cost uses the curre
 pub const PUBLIC_MARKET_MAX_AGE_MS: u64 = 120_000;
 pub const MARKET_INTELLIGENCE_MAX_AGE_MS: u64 = 60_000;
 
+/// Provenance is independent of feed freshness. A fresh Demo book is
+/// still not independent evidence of production open interest or liquidity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+struct MarketDataProvenance {
+    source_scope: &'static str,
+    production_open_interest_comparability: &'static str,
+}
+
+impl MarketDataProvenance {
+    const fn from_simulated_source(simulated: bool) -> Self {
+        if simulated {
+            Self {
+                source_scope: "OKX_DEMO_SIMULATED",
+                production_open_interest_comparability: "NOT_ATTESTED",
+            }
+        } else {
+            Self {
+                source_scope: "OKX_PRODUCTION_PUBLIC",
+                production_open_interest_comparability: "PRODUCTION_SOURCE",
+            }
+        }
+    }
+
+    fn from_context(context: ObservationQueryContext<'_>) -> Self {
+        match context.market_fallback {
+            Some(market) => Self::from_simulated_source(market.source_is_simulated()),
+            None => Self {
+                source_scope: "UNATTESTED",
+                production_open_interest_comparability: "NOT_ATTESTED",
+            },
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 struct MarketOverviewResult {
     instrument_rules: InstrumentRulesSnapshot,
     market: MarketSnapshot,
     quality: PublicQualitySnapshot,
     market_source: &'static str,
+    market_data_provenance: MarketDataProvenance,
 }
 
 #[derive(Clone, Copy)]
