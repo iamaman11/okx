@@ -607,6 +607,108 @@ impl ExecutionLedgerStore {
     }
 }
 
+/// Financially attributed REDUCE/CLOSE bills have no direct strategy_run_id:
+/// their ownership is proven by the run's exact FIFO fill→bill reconciliation.
+/// Reconcile this source-bill set back to the attested financial totals before
+/// deriving the *daily* gross debits. Never guess ownership from an instrument.
+fn verified_daily_strategy_bill_loss(
+    evidence: &DurableExchangeEvidence,
+    entries: &BTreeMap<String, ExecutionLedgerEntry>,
+    run: &StrategyCapitalReservation,
+    report: &StrategyFinancialPeriod,
+    day: u64,
+    as_of: u64,
+) -> Result<Option<Decimal>, ExecutionLedgerError> {
+    let mut linked = 0usize;
+    let mut all_fees = Decimal::ZERO;
+    let mut all_pnl = Decimal::ZERO;
+    let mut gross_loss = Decimal::ZERO;
+    for event in evidence.events.values() {
+        if event.payload["source"] != "OKX_REST_BILL" {
+            continue;
+        }
+        let Some(entry) = event
+            .source_intent_id
+            .as_deref()
+            .and_then(|id| entries.get(id))
+        else {
+            continue;
+        };
+        if entry.created_at_ms <= run.started_at_ms
+            || entry.record.plan.account_uid_fingerprint != run.account_uid_fingerprint
+        {
+            continue;
+        }
+        let direct_run = event.strategy_run_id.as_deref()
+            == Some(run.allocation_id.as_str())
+            && entry.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str());
+        let run_reducer = entry.record.plan.action.is_risk_reducing()
+            && event.strategy_run_id.is_none()
+            && entry.record.strategy_run_id.is_none();
+        if !direct_run && !run_reducer {
+            continue;
+        }
+        // The financial projection already matched every trade bill to one
+        // exact native fill and proven lot. The 3 totals below must match it.
+        if event.payload["ccy"] != "USDT" {
+            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+        }
+        let fee = event.payload["fee"]
+            .as_str()
+            .and_then(|v| Decimal::from_str(v).ok())
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        let pnl = event.payload["pnl"]
+            .as_str()
+            .and_then(|v| Decimal::from_str(v).ok())
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        let ts = event.payload["ts"]
+            .as_u64()
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        if ts < run.started_at_ms {
+            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+        }
+        // Account REST snapshot can precede a bill already in the bounded
+        // history response. Defer the checkpoint rather than undercounting.
+        if ts > as_of {
+            return Ok(None);
+        }
+        linked += 1;
+        all_fees += fee;
+        all_pnl += pnl;
+        if ts >= day {
+            if fee < Decimal::ZERO {
+                gross_loss -= fee;
+            }
+            if pnl < Decimal::ZERO {
+                gross_loss -= pnl;
+            }
+        }
+    }
+    if linked != report.linked_bills
+        || Decimal::from_str(&report.fees_usdt).ok() != Some(all_fees)
+        || Decimal::from_str(&report.realized_usdt).ok() != Some(all_pnl)
+    {
+        return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+    }
+    // For a run opened today and now FLAT, all negative cashflow is bounded
+    // by the gross debit sum. Refuse a false low-loss watermark if not.
+    if run.started_at_ms >= day && report.state == "FLAT_RECONCILED" {
+        let allocation = Decimal::from_str(&run.allocated_usdt)
+            .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?;
+        let nav = Decimal::from_str(
+            report
+                .nav_usdt
+                .as_deref()
+                .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?,
+        )
+        .map_err(|_| ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        if gross_loss < (allocation - nav).max(Decimal::ZERO) {
+            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+        }
+    }
+    Ok(Some(gross_loss))
+}
+
 #[derive(Debug)]
 pub struct DurableExecutionLedger {
     store: ExecutionLedgerStore,
@@ -881,33 +983,16 @@ impl DurableExecutionLedger {
         }
         let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(source_cursor)?));
         let day = as_of / 86_400_000 * 86_400_000;
-        let mut gross_loss = Decimal::ZERO;
-        for event in evidence.events.values() {
-            if event.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
-                || event.payload["source"] != "OKX_REST_BILL"
-                || event.payload["ts"]
-                    .as_u64()
-                    .is_none_or(|ts| ts < day || ts > as_of)
-            {
-                continue;
-            }
-            if event.payload["ccy"] != "USDT" {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "strategy daily loss currency",
-                ));
-            }
-            for field in ["fee", "pnl"] {
-                let amount = event.payload[field]
-                    .as_str()
-                    .and_then(|v| Decimal::from_str(v).ok())
-                    .ok_or(ExecutionLedgerError::Corrupt(
-                        "invalid run-owned daily bill",
-                    ))?;
-                if amount < Decimal::ZERO {
-                    gross_loss -= amount;
-                }
-            }
-        }
+        let Some(gross_loss) = verified_daily_strategy_bill_loss(
+            evidence,
+            &self.entries,
+            run,
+            report,
+            day,
+            as_of,
+        )? else {
+            return Ok(None);
+        };
         let prior = self.strategy_periods.nav_points.last();
         if prior.is_some_and(|p| p.observed_at_ms >= now) {
             return Ok(None);
@@ -2761,6 +2846,125 @@ fn strategy_nav_stop_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daily_strategy_loss_counts_fifo_attributed_exit_bills_and_rejects_partial_source() {
+        let run = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "stage5a_daily_loss_fixture_012345".to_owned(),
+            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            origin_schema: "origin/v1".to_owned(),
+            origin_version: "origin/2026-10-14".to_owned(),
+            mandate_version: "mandate/2026-10-14".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: "generation".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1_792_010_000_000,
+        };
+        let start_of_day = 1_791_936_000_000;
+        let account_as_of = 1_792_015_000_000;
+        let open_intent = "daily_open_exact_012345";
+        let close_intent = "daily_close_exact_012345";
+        let mut opening = ExecutionRecord::new(plan(open_intent));
+        opening.strategy_run_id = Some(run.allocation_id.clone());
+        let mut closing_plan = plan(close_intent);
+        closing_plan.action = ExecutionAction::Close;
+        closing_plan.side = OrderSide::Sell;
+        let closing = ExecutionRecord::new(closing_plan);
+        assert!(closing.strategy_run_id.is_none());
+        let entries = [
+            (open_intent.to_owned(), ExecutionLedgerEntry {
+                record: opening,
+                created_at_ms: run.started_at_ms + 1,
+                updated_at_ms: run.started_at_ms + 2,
+            }),
+            (close_intent.to_owned(), ExecutionLedgerEntry {
+                record: closing,
+                created_at_ms: run.started_at_ms + 3,
+                updated_at_ms: run.started_at_ms + 4,
+            }),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+        let mut evidence = DurableExchangeEvidence::new(&run).unwrap();
+        let make_bill = |intent: &str, owner: Option<String>, fee: &str, pnl: &str, ts: u64| {
+            crate::exchange_evidence::StoredExchangeEvent {
+                payload: serde_json::json!({
+                    "source": "OKX_REST_BILL", "ccy": "USDT",
+                    "fee": fee, "pnl": pnl, "ts": ts
+                }),
+                source_intent_id: Some(intent.to_owned()),
+                strategy_run_id: owner,
+                allocation: "RUN_OWNED".to_owned(),
+            }
+        };
+        evidence.events.insert(
+            "bill:open".to_owned(),
+            make_bill(
+                open_intent,
+                Some(run.allocation_id.clone()),
+                "-0.00409282",
+                "0",
+                run.started_at_ms + 10,
+            ),
+        );
+        evidence.events.insert(
+            "bill:close".to_owned(),
+            make_bill(
+                close_intent,
+                None,
+                "-0.004088515",
+                "-0.00861",
+                run.started_at_ms + 20,
+            ),
+        );
+        // Prior buggy strategy_run_id-only scan sees only the opening fee.
+        assert_eq!(
+            evidence.events.values()
+                .filter(|e| e.strategy_run_id.as_deref() == Some(run.allocation_id.as_str()))
+                .count(),
+            1
+        );
+        let report = StrategyFinancialPeriod {
+            schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+            run_id: run.allocation_id.clone(),
+            state: "FLAT_RECONCILED",
+            evidence_sha256: "sha256:source".to_owned(),
+            allocation_usdt: "100".to_owned(),
+            linked_fills: 2,
+            linked_bills: 2,
+            realized_usdt: "-0.00861".to_owned(),
+            fees_usdt: "-0.008181335".to_owned(),
+            funding_usdt: None,
+            unrealized_usdt: Some("0".to_owned()),
+            nav_usdt: Some("99.983208665".to_owned()),
+            positions: Vec::new(),
+            usable_for_new_risk: false,
+            reasons: Vec::new(),
+        };
+        let gross_loss = verified_daily_strategy_bill_loss(
+            &evidence, &entries, &run, &report, start_of_day, account_as_of,
+        )
+        .unwrap();
+        assert_eq!(gross_loss, Some(Decimal::from_str("0.016791335").unwrap()));
+        // A missing exit fee or its realized PnL cannot be silently accepted.
+        let mut incomplete = report.clone();
+        incomplete.linked_bills = 1;
+        assert!(matches!(
+            verified_daily_strategy_bill_loss(
+                &evidence, &entries, &run, &incomplete, start_of_day, account_as_of,
+            ),
+            Err(ExecutionLedgerError::ExchangeSourceIncomplete)
+        ));
+        assert_eq!(
+            verified_daily_strategy_bill_loss(
+                &evidence, &entries, &run, &report, start_of_day, run.started_at_ms + 15,
+            )
+            .unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn strategy_nav_stop_thresholds_are_conservative_and_do_not_mask_losses() {
