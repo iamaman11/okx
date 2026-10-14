@@ -60,8 +60,8 @@ impl StrategyNavPoint {
             || self.run_id.is_empty()
             || self.observed_at_ms == 0
             || self.account_as_of_ms == 0
-            || self.observed_at_ms < self.account_as_of_ms
-            || self.observed_at_ms - self.account_as_of_ms > 30_000
+            || self.observed_at_ms.saturating_add(2_000) < self.account_as_of_ms
+            || self.observed_at_ms.abs_diff(self.account_as_of_ms) > 30_000
             || self.utc_day_start_ms != (self.account_as_of_ms / 86_400_000) * 86_400_000
             || self.evidence_sha256.len() != 64
             || !self.evidence_sha256.bytes().all(|b| b.is_ascii_hexdigit())
@@ -280,7 +280,7 @@ impl StrategyPeriodHistory {
             point.validate()?;
             let owner = active
                 .filter(|r| r.allocation_id == point.run_id)
-                .map(|r| (r.started_at_ms, None))
+                .map(|r| (r.started_at_ms, None, r.allocated_usdt.as_str()))
                 .or_else(|| {
                     self.archived_runs
                         .iter()
@@ -289,10 +289,11 @@ impl StrategyPeriodHistory {
                             (
                                 r.reservation.started_at_ms,
                                 Some(r.finalization.finalized_at_ms),
+                                r.reservation.allocated_usdt.as_str(),
                             )
                         })
                 });
-            let Some((started_at_ms, ended_at_ms)) = owner else {
+            let Some((started_at_ms, ended_at_ms, allocation_usdt)) = owner else {
                 return Err(ExecutionLedgerError::Corrupt(
                     "NAV checkpoint has no run owner",
                 ));
@@ -316,6 +317,14 @@ impl StrategyPeriodHistory {
                         "NAV peak rewound or invented",
                     ));
                 }
+            } else {
+                let initial = Decimal::from_str(allocation_usdt)
+                    .map_err(|_| ExecutionLedgerError::Corrupt("invalid NAV allocation"))?;
+                let nav = Decimal::from_str(&point.nav_usdt)
+                    .map_err(|_| ExecutionLedgerError::Corrupt("invalid initial NAV"))?;
+                if Decimal::from_str(&point.high_water_usdt).ok() != Some(initial.max(nav)) {
+                    return Err(ExecutionLedgerError::Corrupt("invalid first NAV peak"));
+                }
             }
             previous = Some(point);
         }
@@ -334,6 +343,61 @@ impl StrategyPeriodHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nav_point(run: &StrategyCapitalReservation, at_ms: u64, nav: &str, peak: &str,
+        previous: &str) -> StrategyNavPoint {
+        let mut point = StrategyNavPoint {
+            schema: STRATEGY_NAV_POINT_SCHEMA_V1.to_owned(),
+            run_id: run.allocation_id.clone(),
+            observed_at_ms: at_ms,
+            account_as_of_ms: at_ms.saturating_sub(200),
+            evidence_sha256: "a".repeat(64),
+            nav_usdt: nav.to_owned(),
+            high_water_usdt: peak.to_owned(),
+            daily_gross_loss_usdt: "0".to_owned(),
+            utc_day_start_ms: at_ms.saturating_sub(200) / 86_400_000 * 86_400_000,
+            previous_sha256: previous.to_owned(),
+            checksum_sha256: String::new(),
+        };
+        point.checksum_sha256 = point.hash().unwrap();
+        point
+    }
+
+    #[test]
+    fn nav_high_water_chain_is_durable_bounded_and_fails_closed_on_tampering() {
+        let run = reservation();
+        let first = nav_point(&run, 2000, "100", "100", "");
+        let second = nav_point(&run, 3000, "103", "103", &first.checksum_sha256);
+        let third = nav_point(&run, 4000, "98", "103", &second.checksum_sha256);
+        let history = StrategyPeriodHistory {
+            nav_points: vec![first, second, third],
+            ..StrategyPeriodHistory::default()
+        };
+        history.validate(Some(&run), None).unwrap();
+        let bytes = serde_json::to_vec(&history).unwrap();
+        let restored: StrategyPeriodHistory = serde_json::from_slice(&bytes).unwrap();
+        restored.validate(Some(&run), None).unwrap();
+        assert_eq!(restored.nav_points[2].high_water_usdt, "103");
+        let mut bad = restored.clone();
+        bad.nav_points[1].nav_usdt = "300".to_owned();
+        assert!(bad.validate(Some(&run), None).is_err());
+        bad = restored.clone();
+        bad.nav_points[2].high_water_usdt = "98".to_owned();
+        bad.nav_points[2].checksum_sha256 = bad.nav_points[2].hash().unwrap();
+        assert!(bad.validate(Some(&run), None).is_err());
+        bad = restored.clone();
+        bad.nav_points[2].previous_sha256 = "foreign".to_owned();
+        bad.nav_points[2].checksum_sha256 = bad.nav_points[2].hash().unwrap();
+        assert!(bad.validate(Some(&run), None).is_err());
+        bad = restored.clone();
+        bad.nav_points[1].account_as_of_ms = 0;
+        assert!(bad.validate(Some(&run), None).is_err());
+        bad = restored;
+        bad.nav_points.resize(MAX_STRATEGY_NAV_POINTS + 1, bad.nav_points[2].clone());
+        assert!(bad.validate(Some(&run), None).is_err());
+        assert!(!bytes.is_empty());
+    }
+
     use crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1;
 
     fn reservation() -> StrategyCapitalReservation {
