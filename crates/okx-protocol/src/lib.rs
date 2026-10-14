@@ -1252,7 +1252,10 @@ impl AgentOperation {
                 if let Some(proof) = rearm {
                     if proof.expected_stopped_at_ms == 0
                         || proof.prior_finalization_sha256.len() != 64
-                        || !proof.prior_finalization_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                        || !proof
+                            .prior_finalization_sha256
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit())
                     {
                         return Err(ProtocolError::InvalidAnalyticalQuery("rearm"));
                     }
