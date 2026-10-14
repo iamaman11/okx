@@ -2317,11 +2317,15 @@ mod tests {
         assert_eq!(proof.source_events, 0);
         assert_eq!(
             proof.finalization_sha256,
-            file.strategy_periods.archived_runs[0].finalization.checksum_sha256
+            file.strategy_periods.archived_runs[0]
+                .finalization
+                .checksum_sha256
         );
         assert_eq!(
             proof.evidence_sha256,
-            file.strategy_periods.archived_runs[0].evidence.checksum_sha256
+            file.strategy_periods.archived_runs[0]
+                .evidence
+                .checksum_sha256
         );
         drop(reopened);
         let mut altered = serde_json::to_value(&file).unwrap();
