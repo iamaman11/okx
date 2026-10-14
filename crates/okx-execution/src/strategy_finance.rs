@@ -26,6 +26,7 @@ pub struct ProductionMarkEvidence {
 }
 
 const MAX_STRATEGY_MARK_AGE_MS: u64 = 30_000;
+const MAX_STRATEGY_MARK_CLOCK_SKEW_MS: u64 = 2_000;
 
 fn attested_production_mark(
     mark: &ProductionMarkEvidence,
@@ -33,8 +34,10 @@ fn attested_production_mark(
 ) -> Option<Decimal> {
     if mark.exchange_timestamp_ms == 0
         || mark.received_at_ms == 0
-        || mark.exchange_timestamp_ms > mark.received_at_ms
-        || mark.received_at_ms - mark.exchange_timestamp_ms > MAX_STRATEGY_MARK_AGE_MS
+        || mark.exchange_timestamp_ms
+            > mark.received_at_ms.saturating_add(MAX_STRATEGY_MARK_CLOCK_SKEW_MS)
+        || mark.received_at_ms.saturating_sub(mark.exchange_timestamp_ms)
+            > MAX_STRATEGY_MARK_AGE_MS
         || account_as_of_ms.abs_diff(mark.received_at_ms) > MAX_STRATEGY_MARK_AGE_MS
     {
         return None;
@@ -817,6 +820,12 @@ mod tests {
         bad.price = "0".to_owned();
         assert_eq!(attested_production_mark(&bad, 100_300), None);
         bad = mark.clone();
+        bad.exchange_timestamp_ms = 101_500;
+        // Native exchange time may be marginally ahead of the host UTC clock.
+        assert_eq!(
+            attested_production_mark(&bad, 100_300),
+            Some(Decimal::new(836368, 1))
+        );
         bad.exchange_timestamp_ms = 130_000;
         assert_eq!(attested_production_mark(&bad, 100_300), None);
         bad = mark.clone();
