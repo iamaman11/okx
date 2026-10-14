@@ -195,22 +195,32 @@ impl ExecutionRuntime {
         let mut reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
         let inventory = managed_execution_inventory(executor.ledger());
         // Never capture a contradictory or private-WS-incoherent snapshot.
+        let mut current_source_captured = false;
         if executor.ledger().capital_reservation().is_some() {
             if coherent
                 && reconciliation.consistent
                 && okx_execution::DurableExchangeEvidence::complete_source_checkpoint(facts)
             {
                 executor.capture_exchange_evidence(facts)?;
+                current_source_captured = true;
             } else {
                 reconciliation.source_checkpoint_deferred = true;
             }
         }
         reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary();
-        reconciliation.financial_period = executor.ledger().financial_period_with_production_marks(
+        reconciliation.financial_period = executor.ledger().financial_period_with_verified_source(
             facts,
             coherent,
             production_marks,
+            current_source_captured,
         );
+        if current_source_captured
+            && let Some(report) = reconciliation.financial_period.as_ref()
+        {
+            // Only a completely reconciled read may append a NAV watermark.
+            // The stop, if triggered, is saved in the SAME atomic file.
+            executor.observe_strategy_nav(report, facts, utc_now_ms())?;
+        }
         Ok((reconciliation, inventory))
     }
 
