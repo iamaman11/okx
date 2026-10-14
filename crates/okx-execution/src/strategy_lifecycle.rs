@@ -165,6 +165,7 @@ impl StrategyUnverifiedClosure {
             || evidence.account_uid != run.account_uid_fingerprint
             || self.closed_at_ms <= run.started_at_ms
             || self.evidence_sha256 != evidence.checksum_sha256
+            || !evidence.summary().source_gap_over_two_hours
             || self.reason != "SOURCE_CONTINUITY_NOT_PROVEN"
             || self.checksum_sha256 != self.hash()?
         {
