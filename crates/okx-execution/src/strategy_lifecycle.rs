@@ -146,10 +146,17 @@ impl StrategyUnverifiedClosure {
     }
 
     fn hash(&self) -> Result<String, ExecutionLedgerError> {
-        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&(
-            &self.schema, &self.run_id, &self.account_uid,
-            self.closed_at_ms, &self.evidence_sha256, &self.reason,
-        ))?)))
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(
+                &self.schema,
+                &self.run_id,
+                &self.account_uid,
+                self.closed_at_ms,
+                &self.evidence_sha256,
+                &self.reason,
+            ))?)
+        ))
     }
 
     pub fn validate(
@@ -378,7 +385,9 @@ impl StrategyPeriodHistory {
                 return Err(ExecutionLedgerError::AccountScopeMismatch);
             }
         }
-        let mut bounds = self.archived_runs.iter()
+        let mut bounds = self
+            .archived_runs
+            .iter()
             .map(|r| (r.reservation.started_at_ms, r.finalization.finalized_at_ms))
             .collect::<Vec<_>>();
         for unverified in &self.unverified_runs {
@@ -457,14 +466,17 @@ impl StrategyPeriodHistory {
                         })
                 })
                 .or_else(|| {
-                    self.unverified_runs.iter()
+                    self.unverified_runs
+                        .iter()
                         .find(|r| r.reservation.allocation_id == point.run_id)
-                        .map(|r| (
-                            r.reservation.started_at_ms,
-                            Some(r.closure.closed_at_ms),
-                            r.reservation.allocated_usdt.as_str(),
-                            &r.evidence,
-                        ))
+                        .map(|r| {
+                            (
+                                r.reservation.started_at_ms,
+                                Some(r.closure.closed_at_ms),
+                                r.reservation.allocated_usdt.as_str(),
+                                &r.evidence,
+                            )
+                        })
                 });
             let Some((started_at_ms, ended_at_ms, allocation_usdt, source)) = owner else {
                 return Err(ExecutionLedgerError::Corrupt(
