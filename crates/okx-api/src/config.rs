@@ -237,9 +237,18 @@ mod tests {
             assert_eq!(demo.production_public(), production);
             assert_eq!(production.production_public(), production);
             assert!(!demo.production_public().demo);
-            assert_ne!(demo.private_ws_url(), demo.production_public().private_ws_url());
-            assert_ne!(demo.public_ws_url(), demo.production_public().public_ws_url());
-            assert_eq!(demo.production_public().rest_base_url(), demo.rest_base_url());
+            assert_ne!(
+                demo.private_ws_url(),
+                demo.production_public().private_ws_url()
+            );
+            assert_ne!(
+                demo.public_ws_url(),
+                demo.production_public().public_ws_url()
+            );
+            assert_eq!(
+                demo.production_public().rest_base_url(),
+                demo.rest_base_url()
+            );
         }
     }
 
