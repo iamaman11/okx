@@ -364,12 +364,21 @@ pub struct StrategyStopRearm {
 }
 impl StrategyStopRearm {
     pub fn hash(&self) -> Result<String, ExecutionLedgerError> {
-        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&(
-            &self.schema, &self.stopped_run_id, &self.prior_finalization_sha256,
-            self.stopped_at_ms, &self.stop_reason, &self.next_run_id,
-            self.next_run_started_at_ms, &self.account_uid, &self.operator_authority_id,
-            &self.previous_sha256,
-        ))?)))
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(
+                &self.schema,
+                &self.stopped_run_id,
+                &self.prior_finalization_sha256,
+                self.stopped_at_ms,
+                &self.stop_reason,
+                &self.next_run_id,
+                self.next_run_started_at_ms,
+                &self.account_uid,
+                &self.operator_authority_id,
+                &self.previous_sha256,
+            ))?)
+        ))
     }
     pub fn validate(&self) -> Result<(), ExecutionLedgerError> {
         if self.schema != STRATEGY_STOP_REARM_SCHEMA_V1
@@ -382,10 +391,15 @@ impl StrategyStopRearm {
             || !self.operator_authority_id.starts_with("sha256:")
             || self.operator_authority_id.len() != 71
             || self.prior_finalization_sha256.len() != 64
-            || !self.prior_finalization_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || !self
+                .prior_finalization_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
             || self.checksum_sha256 != self.hash()?
         {
-            return Err(ExecutionLedgerError::Corrupt("invalid strategy STOP rearm proof"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "invalid strategy STOP rearm proof",
+            ));
         }
         Ok(())
     }
@@ -500,13 +514,21 @@ impl StrategyPeriodHistory {
         let mut previous_rearm: Option<&StrategyStopRearm> = None;
         for rearm in &self.stop_rearms {
             rearm.validate()?;
-            let prior = self.archived_runs.iter()
+            let prior = self
+                .archived_runs
+                .iter()
                 .find(|r| r.reservation.allocation_id == rearm.stopped_run_id)
-                .ok_or(ExecutionLedgerError::Corrupt("rearm STOP missing archived run"))?;
-            let next = active.filter(|r| r.allocation_id == rearm.next_run_id)
-                .or_else(|| self.archived_runs.iter()
-                    .find(|r| r.reservation.allocation_id == rearm.next_run_id)
-                    .map(|r| &r.reservation));
+                .ok_or(ExecutionLedgerError::Corrupt(
+                    "rearm STOP missing archived run",
+                ))?;
+            let next = active
+                .filter(|r| r.allocation_id == rearm.next_run_id)
+                .or_else(|| {
+                    self.archived_runs
+                        .iter()
+                        .find(|r| r.reservation.allocation_id == rearm.next_run_id)
+                        .map(|r| &r.reservation)
+                });
             if prior.finalization.checksum_sha256 != rearm.prior_finalization_sha256
                 || prior.finalization.finalized_at_ms < rearm.stopped_at_ms
                 || prior.reservation.account_uid_fingerprint != rearm.account_uid
@@ -519,7 +541,9 @@ impl StrategyPeriodHistory {
                 || rearm.previous_sha256 != previous_rearm.map_or("", |r| &r.checksum_sha256)
                 || previous_rearm.is_some_and(|r| r.next_run_started_at_ms >= rearm.stopped_at_ms)
             {
-                return Err(ExecutionLedgerError::Corrupt("rearm does not bind exact financial epochs"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "rearm does not bind exact financial epochs",
+                ));
             }
             previous_rearm = Some(rearm);
         }
