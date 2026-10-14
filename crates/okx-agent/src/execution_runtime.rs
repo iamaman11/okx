@@ -320,6 +320,7 @@ impl ExecutionRuntime {
         reconciliation.strategy_nav_watermark = executor.ledger().strategy_nav_watermark().cloned();
         reconciliation.strategy_nav_checkpoint_count = executor.ledger().strategy_nav_point_count();
         reconciliation.strategy_risk_stop = executor.ledger().risk_stop().cloned();
+        reconciliation.strategy_stop_rearm_proofs = executor.ledger().stop_rearm_proofs();
         reconciliation.unverified_run = executor.ledger().unverified_run().cloned();
         reconciliation.unverified_run_proofs = executor.ledger().archived_unverified_proofs();
         Ok((reconciliation, inventory))
@@ -647,6 +648,7 @@ impl ExecutionRuntime {
         reservation: StrategyCapitalReservation,
         opening: &StrategyAllocationOpening,
         now_ms: u64,
+        rearm: Option<&okx_execution::StrategyStopRearmRequest>,
     ) -> Result<Option<Result<StrategyCapitalReservation, OrderExecutorError>>, AgentError> {
         let mut executor = self.executor.lock().await;
         if !self.environment.demo
@@ -661,9 +663,10 @@ impl ExecutionRuntime {
         {
             return Ok(None);
         }
-        Ok(Some(executor.reserve_strategy_capital(
+        Ok(Some(executor.reserve_strategy_capital_with_rearm(
             reservation,
             opening,
+            rearm,
             now_ms,
         )))
     }
@@ -1517,10 +1520,16 @@ mod tests {
         )
         .expect("read-only owner");
         assert!(
-            ro.begin_strategy_run_demo_authorized(&credential, reservation.clone(), &opening, 102,)
-                .await
-                .expect("read-only refused")
-                .is_none()
+            ro.begin_strategy_run_demo_authorized(
+                &credential,
+                reservation.clone(),
+                &opening,
+                102,
+                None
+            )
+            .await
+            .expect("read-only refused")
+            .is_none()
         );
         assert!(
             ro.executor
@@ -1542,7 +1551,7 @@ mod tests {
         .expect("Demo owner");
         let rejected = preflight(false).credential;
         assert!(
-            demo.begin_strategy_run_demo_authorized(&rejected, reservation, &opening, 102,)
+            demo.begin_strategy_run_demo_authorized(&rejected, reservation, &opening, 102, None)
                 .await
                 .expect("rejected preflight")
                 .is_none()

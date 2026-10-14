@@ -23,10 +23,10 @@ use crate::{
     PositionSide, ProductionMarkEvidence, ProtectiveCleanupState, ProtectiveOrderResolution,
     ProtectiveOrderStatus, ProtectiveSizeAmendState, ProtectiveTriggerPriceBasis,
     ReverseContinuation, ReverseExecutionLink, ReverseLeg, STRATEGY_NAV_POINT_SCHEMA_V1,
-    StrategyFinalization, StrategyFinancialPeriod, StrategyNavPoint, StrategyPeriodHistory,
-    StrategyUnverifiedClosure, UnverifiedStrategyProof, UnverifiedStrategyRun,
-    derive_amend_request_id, derive_client_order_id, derive_protective_algo_client_id,
-    derive_reverse_open_intent_id,
+    STRATEGY_STOP_REARM_SCHEMA_V1, StrategyFinalization, StrategyFinancialPeriod, StrategyNavPoint,
+    StrategyPeriodHistory, StrategyStopRearm, StrategyUnverifiedClosure, UnverifiedStrategyProof,
+    UnverifiedStrategyRun, derive_amend_request_id, derive_client_order_id,
+    derive_protective_algo_client_id, derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
@@ -42,6 +42,7 @@ pub const EXECUTION_LEDGER_SCHEMA_V9: &str = "okx.execution-ledger/v9";
 pub const EXECUTION_LEDGER_SCHEMA_V10: &str = "okx.execution-ledger/v10";
 pub const EXECUTION_LEDGER_SCHEMA_V11: &str = "okx.execution-ledger/v11";
 pub const EXECUTION_LEDGER_SCHEMA_V12: &str = "okx.execution-ledger/v12";
+pub const EXECUTION_LEDGER_SCHEMA_V13: &str = "okx.execution-ledger/v13";
 pub const LEVERAGE_ATTEMPT_SCHEMA_V1: &str = "okx.leverage-change-attempt/v1";
 const MAX_LEVERAGE_ATTEMPTS: usize = 256;
 pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1: &str = "okx.strategy-capital-reservation/v1";
@@ -151,6 +152,13 @@ pub enum ExecutionLedgerError {
 
     #[error(transparent)]
     Transition(#[from] ExecutionTransitionError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyStopRearmRequest {
+    pub expected_stopped_at_ms: u64,
+    pub prior_finalization_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,6 +383,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V10
                 | EXECUTION_LEDGER_SCHEMA_V11
                 | EXECUTION_LEDGER_SCHEMA_V12
+                | EXECUTION_LEDGER_SCHEMA_V13
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
@@ -388,6 +397,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V10
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "risk stop on legacy ledger schema",
@@ -404,6 +414,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V10
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -421,6 +432,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V10
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "exchange evidence on legacy schema",
@@ -440,6 +452,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V10
                 | EXECUTION_LEDGER_SCHEMA_V11
                 | EXECUTION_LEDGER_SCHEMA_V12
+                | EXECUTION_LEDGER_SCHEMA_V13
         ) && file.strategy_periods != StrategyPeriodHistory::default()
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -452,6 +465,7 @@ impl ExecutionLedgerStore {
                 EXECUTION_LEDGER_SCHEMA_V10
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -462,18 +476,32 @@ impl ExecutionLedgerStore {
             || !file.strategy_periods.unverified_runs.is_empty())
             && !matches!(
                 file.schema.as_str(),
-                EXECUTION_LEDGER_SCHEMA_V11 | EXECUTION_LEDGER_SCHEMA_V12
+                EXECUTION_LEDGER_SCHEMA_V11
+                    | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "unverified closure requires ledger schema v11",
             ));
         }
+        if !file.strategy_periods.stop_rearms.is_empty()
+            && file.schema != EXECUTION_LEDGER_SCHEMA_V13
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "STOP rearm requires ledger v13",
+            ));
+        }
         file.strategy_periods.validate(
             file.capital_reservation.as_ref(),
             file.exchange_evidence.as_ref(),
         )?;
-        if !file.leverage_attempts.is_empty() && file.schema != EXECUTION_LEDGER_SCHEMA_V12 {
+        if !file.leverage_attempts.is_empty()
+            && !matches!(
+                file.schema.as_str(),
+                EXECUTION_LEDGER_SCHEMA_V12 | EXECUTION_LEDGER_SCHEMA_V13
+            )
+        {
             return Err(ExecutionLedgerError::Corrupt(
                 "leverage journal requires ledger schema v12",
             ));
@@ -584,7 +612,7 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V12.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V13.to_owned(),
             records: entries.values().cloned().collect(),
             risk_stop: risk_stop.cloned(),
             capital_reservation: capital_reservation.cloned(),
@@ -1283,6 +1311,10 @@ impl DurableExecutionLedger {
         self.risk_stop.as_ref()
     }
 
+    pub fn stop_rearm_proofs(&self) -> Vec<StrategyStopRearm> {
+        self.strategy_periods.stop_rearms.clone()
+    }
+
     pub fn capital_reservation(&self) -> Option<&StrategyCapitalReservation> {
         self.capital_reservation.as_ref()
     }
@@ -1380,6 +1412,18 @@ impl DurableExecutionLedger {
         opening: &StrategyAllocationOpening,
         now_ms: u64,
     ) -> Result<StrategyCapitalReservation, ExecutionLedgerError> {
+        self.reserve_strategy_capital_with_rearm(reservation, opening, None, now_ms)
+    }
+
+    /// Explicit, next-UTC-day epoch transition and new allocation are saved
+    /// ATOMICALLY. There is never an unlocked old epoch or exchange POST.
+    pub fn reserve_strategy_capital_with_rearm(
+        &mut self,
+        reservation: StrategyCapitalReservation,
+        opening: &StrategyAllocationOpening,
+        rearm: Option<&StrategyStopRearmRequest>,
+        now_ms: u64,
+    ) -> Result<StrategyCapitalReservation, ExecutionLedgerError> {
         validate_capital_reservation(&reservation)?;
         if let Some(existing) = &self.capital_reservation {
             if *existing == reservation {
@@ -1417,7 +1461,7 @@ impl DurableExecutionLedger {
             || !opening.zero_positions
             || !opening.zero_pending_orders
             || !opening.zero_native_protection
-            || self.risk_stop.is_some()
+            || self.risk_stop.is_some() != rearm.is_some()
             || self.entries.values().any(|e| {
                 !e.record.state.is_terminal() || e.created_at_ms >= reservation.started_at_ms
             })
@@ -1428,6 +1472,56 @@ impl DurableExecutionLedger {
             return Err(ExecutionLedgerError::CapitalReservationUnattested);
         }
         let mut next = self.strategy_periods.clone();
+        let stop_rearm = if let Some(rearm) = rearm {
+            let stop = self
+                .risk_stop
+                .as_ref()
+                .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
+            let prior = self
+                .capital_reservation
+                .as_ref()
+                .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
+            let finalized = next
+                .finalized_run
+                .as_ref()
+                .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
+            if !matches!(
+                stop.reason.as_str(),
+                "STRATEGY_MAX_DRAWDOWN" | "STRATEGY_UTC_DAILY_GROSS_LOSS" | "STRATEGY_NAV_DEPLETED"
+            ) || stop.stopped_at_ms != rearm.expected_stopped_at_ms
+                || finalized.checksum_sha256 != rearm.prior_finalization_sha256
+                || finalized.run_id != prior.allocation_id
+                || finalized.finalized_at_ms < stop.stopped_at_ms
+                || prior.operator_authority_id != reservation.operator_authority_id
+                || prior.account_uid_fingerprint != reservation.account_uid_fingerprint
+                || reservation.started_at_ms / 86_400_000 <= stop.stopped_at_ms / 86_400_000
+                || next.stop_rearms.len() >= MAX_ARCHIVED_STRATEGY_RUNS
+            {
+                return Err(ExecutionLedgerError::CapitalReservationUnattested);
+            }
+            let mut proof = StrategyStopRearm {
+                schema: STRATEGY_STOP_REARM_SCHEMA_V1.to_owned(),
+                stopped_run_id: prior.allocation_id.clone(),
+                prior_finalization_sha256: finalized.checksum_sha256.clone(),
+                stopped_at_ms: stop.stopped_at_ms,
+                stop_reason: stop.reason.clone(),
+                next_run_id: reservation.allocation_id.clone(),
+                next_run_started_at_ms: reservation.started_at_ms,
+                account_uid: prior.account_uid_fingerprint.clone(),
+                operator_authority_id: reservation.operator_authority_id.clone(),
+                previous_sha256: next
+                    .stop_rearms
+                    .last()
+                    .map_or("", |item| &item.checksum_sha256)
+                    .to_owned(),
+                checksum_sha256: String::new(),
+            };
+            proof.checksum_sha256 = proof.hash()?;
+            proof.validate()?;
+            Some(proof)
+        } else {
+            None
+        };
         if let Some(prior) = &self.capital_reservation {
             if next.archived_runs.len() + next.unverified_runs.len() >= MAX_ARCHIVED_STRATEGY_RUNS {
                 return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
@@ -1452,15 +1546,26 @@ impl DurableExecutionLedger {
                 return Err(ExecutionLedgerError::CapitalReservationConflict);
             }
         }
+        if let Some(proof) = stop_rearm {
+            next.stop_rearms.push(proof);
+        }
+        next.validate(Some(&reservation), None)?;
         self.store.save(
             &self.entries,
-            self.risk_stop.as_ref(),
+            if rearm.is_some() {
+                None
+            } else {
+                self.risk_stop.as_ref()
+            },
             Some(&reservation),
             None,
             &next,
             &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
+        if rearm.is_some() {
+            self.risk_stop = None;
+        }
         self.exchange_evidence = None;
         self.capital_reservation = Some(reservation.clone());
         Ok(reservation)
@@ -3149,7 +3254,7 @@ mod tests {
         );
         let raw: serde_json::Value =
             serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-        assert_eq!(raw["schema"], EXECUTION_LEDGER_SCHEMA_V12);
+        assert_eq!(raw["schema"], EXECUTION_LEDGER_SCHEMA_V13);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -3238,6 +3343,159 @@ mod tests {
     }
 
     #[test]
+    fn operator_rearm_rejects_same_day_and_forged_stop_then_preserves_history_on_restart() {
+        let root = temp_root("operator-stop-rearm");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let prior = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "stage5a_old_finalized_123456".to_owned(),
+            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            origin_schema: "origin/v1".to_owned(),
+            origin_version: "origin/2026-10-14".to_owned(),
+            mandate_version: "mandate/2026-10-14".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: "old-generation".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1000,
+        };
+        let source = DurableExchangeEvidence::new(&prior).unwrap();
+        let report = crate::StrategyFinancialPeriod {
+            schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+            run_id: prior.allocation_id.clone(),
+            state: "FLAT_RECONCILED",
+            evidence_sha256: source.checksum_sha256.clone(),
+            allocation_usdt: "100".to_owned(),
+            linked_fills: 0,
+            linked_bills: 0,
+            realized_usdt: "0".to_owned(),
+            fees_usdt: "0".to_owned(),
+            funding_usdt: None,
+            unrealized_usdt: Some("0".to_owned()),
+            nav_usdt: Some("100".to_owned()),
+            positions: Vec::new(),
+            usable_for_new_risk: false,
+            reasons: Vec::new(),
+        };
+        let finalization = StrategyFinalization::new(&prior, &source, &report, 2000).unwrap();
+        let stop = ExecutionRiskStop {
+            schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
+            stopped_at_ms: 1500,
+            reason: "STRATEGY_MAX_DRAWDOWN".to_owned(),
+        };
+        let attempt = LeverageChangeAttempt {
+            schema: LEVERAGE_ATTEMPT_SCHEMA_V1.to_owned(),
+            mutation_id: "rearm_test_leverage_12345".to_owned(),
+            account_uid_fingerprint: prior.account_uid_fingerprint.clone(),
+            instrument: "BTC-USDT-SWAP".to_owned(),
+            requested_leverage: "2".to_owned(),
+            previous_leverage: "3".to_owned(),
+            state: LeverageAttemptState::Verified,
+            started_at_ms: 1200,
+        };
+        let file = ExecutionLedgerFile {
+            schema: EXECUTION_LEDGER_SCHEMA_V12.to_owned(),
+            records: Vec::new(),
+            risk_stop: Some(stop.clone()),
+            capital_reservation: Some(prior.clone()),
+            exchange_evidence: Some(source),
+            strategy_periods: StrategyPeriodHistory {
+                finalized_run: Some(finalization.clone()),
+                ..StrategyPeriodHistory::default()
+            },
+            leverage_attempts: vec![attempt.clone()],
+        };
+        fs::write(store.path(), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 2200).unwrap();
+        let next_at = 86_400_101;
+        let opening = StrategyAllocationOpening {
+            account_uid_fingerprint: prior.account_uid_fingerprint.clone(),
+            account_generation: "new-generation".to_owned(),
+            observed_usdt_equity: "1000".to_owned(),
+            observed_at_ms: next_at,
+            source_history_complete: true,
+            zero_positions: true,
+            zero_pending_orders: true,
+            zero_native_protection: true,
+            operator_authority_id: prior.operator_authority_id.clone(),
+        };
+        let mut next = prior.clone();
+        next.allocation_id = "stage5a_next_daily_123456".to_owned();
+        next.started_at_ms = next_at;
+        next.account_generation = opening.account_generation.clone();
+        let rearm = StrategyStopRearmRequest {
+            expected_stopped_at_ms: stop.stopped_at_ms,
+            prior_finalization_sha256: finalization.checksum_sha256.clone(),
+        };
+        let before = fs::read(store.path()).unwrap();
+        assert!(
+            ledger
+                .reserve_strategy_capital(next.clone(), &opening, next_at + 1)
+                .is_err()
+        );
+        let mut wrong = rearm.clone();
+        wrong.prior_finalization_sha256 = "b".repeat(64);
+        assert!(
+            ledger
+                .reserve_strategy_capital_with_rearm(
+                    next.clone(),
+                    &opening,
+                    Some(&wrong),
+                    next_at + 1,
+                )
+                .is_err()
+        );
+        let mut same_day = next.clone();
+        same_day.started_at_ms = 2001;
+        let mut same_open = opening.clone();
+        same_open.observed_at_ms = same_day.started_at_ms;
+        assert!(
+            ledger
+                .reserve_strategy_capital_with_rearm(same_day, &same_open, Some(&rearm), 2002,)
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(store.path()).unwrap(),
+            before,
+            "rejections cannot rewrite STOP"
+        );
+        ledger
+            .reserve_strategy_capital_with_rearm(next.clone(), &opening, Some(&rearm), next_at + 1)
+            .unwrap();
+        assert!(ledger.risk_stop().is_none());
+        assert_eq!(ledger.strategy_periods.stop_rearms.len(), 1);
+        assert_eq!(
+            ledger.strategy_periods.stop_rearms[0].stop_reason,
+            stop.reason
+        );
+        let reopened = DurableExecutionLedger::open(store.clone(), next_at + 2).unwrap();
+        assert!(reopened.risk_stop().is_none());
+        assert_eq!(reopened.stop_rearm_proofs().len(), 1);
+        assert_eq!(reopened.archived_runs_count(), 1);
+        assert_eq!(
+            reopened.archived_strategy_proofs()[0].finalization_sha256,
+            finalization.checksum_sha256
+        );
+        assert_eq!(
+            reopened.leverage_change_attempt(&attempt.mutation_id),
+            Some(&attempt)
+        );
+        assert_eq!(reopened.capital_reservation(), Some(&next));
+        let mut tampered: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        tampered["strategy_periods"]["stop_rearms"][0]["prior_finalization_sha256"] =
+            serde_json::json!("c".repeat(64));
+        fs::write(store.path(), serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+        assert!(
+            DurableExecutionLedger::open(store.clone(), next_at + 3).is_err(),
+            "tampering with archived STOP must fail closed"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn archived_run_is_reopened_from_disk_and_tampered_final_nav_refused_without_rewrite() {
         let root = temp_root("archived-run-tamper");
         let _ = fs::remove_dir_all(&root);
@@ -3294,6 +3552,7 @@ mod tests {
                 nav_points: Vec::new(),
                 unverified_run: None,
                 unverified_runs: Vec::new(),
+                stop_rearms: Vec::new(),
             },
             leverage_attempts: Vec::new(),
         };
@@ -4589,7 +4848,7 @@ mod tests {
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V12);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V13);
 
             let _ = fs::remove_dir_all(root);
         }

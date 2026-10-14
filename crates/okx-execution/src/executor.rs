@@ -434,6 +434,18 @@ where
             .reserve_strategy_capital(reservation, opening, now_ms)?)
     }
 
+    pub fn reserve_strategy_capital_with_rearm(
+        &mut self,
+        reservation: crate::StrategyCapitalReservation,
+        opening: &crate::StrategyAllocationOpening,
+        rearm: Option<&crate::StrategyStopRearmRequest>,
+        now_ms: u64,
+    ) -> Result<crate::StrategyCapitalReservation, OrderExecutorError> {
+        Ok(self
+            .ledger
+            .reserve_strategy_capital_with_rearm(reservation, opening, rearm, now_ms)?)
+    }
+
     /// Only the already-owned journal can commit one immutable close; no POST.
     pub fn finalize_strategy_run(
         &mut self,

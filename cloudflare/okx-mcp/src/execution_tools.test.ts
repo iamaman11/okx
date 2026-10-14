@@ -90,6 +90,22 @@ for (const invalid of [
   assert(buildExecutionOperation(invalid)===null,
     "malformed run must fail before runtime admission");
 }
+const explicitRearm = {
+  expected_stopped_at_ms:1792017080203,
+  prior_finalization_sha256:"f".repeat(64),
+};
+const newRunWithRearm = buildExecutionOperation({...begin,rearm:explicitRearm});
+assert(newRunWithRearm?.type==="begin_strategy_run"
+  && (newRunWithRearm.rearm as {expected_stopped_at_ms:number}|undefined)?.expected_stopped_at_ms===1792017080203,
+  "explicit rearm must stay on the same typed opening and never become an untyped RPC");
+for(const rearm of [
+  {expected_stopped_at_ms:0,prior_finalization_sha256:"f".repeat(64)},
+  {expected_stopped_at_ms:1792017080203,prior_finalization_sha256:"bad"},
+  {expected_stopped_at_ms:1792017080203,prior_finalization_sha256:"f".repeat(64),override_stop:true},
+]){
+  assert(buildExecutionOperation({...begin,rearm})===null,
+    "malformed or forged rearm rejected before native runtime");
+}
 assert(buildExecutionOperation({
   action:"set_leverage",intent_id:"stage5a_leverage_20261014",instrument:"BTC-USDT-SWAP",
   trade_mode:"cross",leverage:"2",
@@ -173,7 +189,7 @@ assert(executionProfilePermitsOperation("production","account_summary"),"read is
 assert(!isExecutionMutation("account_summary"),"read must not be misclassified as exchange mutation");
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
 const advertisedActions = (EXECUTION_TOOLS[1] as any).inputSchema.properties.action.enum as string[];
-assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-14.2",
+assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-15.1",
   "typed action schema changed; the advertised MCP contract version must advance");
 assert(advertisedActions.includes("quarantine_unverified_strategy_run"),
   "UNVERIFIED must be distinct from financial FINALIZED");

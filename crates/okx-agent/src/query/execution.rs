@@ -153,6 +153,7 @@ pub(super) async fn dispatch(
             mandate_version,
             allocated_usdt,
             operator_authority_id,
+            rearm,
         } => {
             begin_strategy_run(
                 request,
@@ -165,6 +166,7 @@ pub(super) async fn dispatch(
                     mandate_version,
                     allocated_usdt,
                     operator_authority_id,
+                    rearm: rearm.as_ref(),
                 },
             )
             .await
@@ -318,6 +320,7 @@ struct StrategyOpeningRequest<'a> {
     mandate_version: &'a str,
     allocated_usdt: &'a str,
     operator_authority_id: &'a str,
+    rearm: Option<&'a okx_protocol::StrategyStopRearmInput>,
 }
 
 async fn begin_strategy_run(
@@ -333,6 +336,7 @@ async fn begin_strategy_run(
         mandate_version,
         allocated_usdt,
         operator_authority_id,
+        rearm,
     } = input;
     let deny = |reason: String| {
         failure_response(
@@ -444,7 +448,18 @@ async fn begin_strategy_run(
         started_at_ms: observed_at_ms,
     };
     match execution
-        .begin_strategy_run_demo_authorized(&preflight, reservation, &opening, observed_at_ms)
+        .begin_strategy_run_demo_authorized(
+            &preflight,
+            reservation,
+            &opening,
+            observed_at_ms,
+            rearm
+                .map(|p| okx_execution::StrategyStopRearmRequest {
+                    expected_stopped_at_ms: p.expected_stopped_at_ms,
+                    prior_finalization_sha256: p.prior_finalization_sha256.clone(),
+                })
+                .as_ref(),
+        )
         .await?
     {
         Some(Ok(value)) => Ok(completed(

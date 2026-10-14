@@ -910,6 +910,13 @@ pub enum ExecutionMutationRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyStopRearmInput {
+    pub expected_stopped_at_ms: u64,
+    pub prior_finalization_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentOperation {
     MarketSnapshot {
@@ -966,6 +973,8 @@ pub enum AgentOperation {
         mandate_version: String,
         allocated_usdt: String,
         operator_authority_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rearm: Option<StrategyStopRearmInput>,
     },
     /// One Demo-only native financial close. ALL proof is sourced in Windows.
     FinalizeStrategyRun {
@@ -1232,13 +1241,25 @@ impl AgentOperation {
                 mandate_version,
                 allocated_usdt,
                 operator_authority_id,
+                rearm,
             } => {
                 validate_request_id(allocation_id)?;
                 validate_version(origin_schema)?;
                 validate_version(origin_version)?;
                 validate_version(mandate_version)?;
                 validate_positive_decimal_text(allocated_usdt, "allocated_usdt")?;
-                validate_sha256_artifact_id(operator_authority_id, "operator_authority_id")
+                validate_sha256_artifact_id(operator_authority_id, "operator_authority_id")?;
+                if let Some(proof) = rearm
+                    && (proof.expected_stopped_at_ms == 0
+                        || proof.prior_finalization_sha256.len() != 64
+                        || !proof
+                            .prior_finalization_sha256
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit()))
+                {
+                    return Err(ProtocolError::InvalidAnalyticalQuery("rearm"));
+                }
+                Ok(())
             }
             Self::FinalizeStrategyRun { allocation_id }
             | Self::QuarantineUnverifiedStrategyRun { allocation_id } => {
@@ -3633,6 +3654,7 @@ mod direct_transport_tests {
             mandate_version: "demo-mandate-v1".to_owned(),
             allocated_usdt: "100".to_owned(),
             operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            rearm: None,
         };
         begin.validate().expect("typed native opening");
         let close = AgentOperation::FinalizeStrategyRun {
