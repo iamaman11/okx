@@ -217,7 +217,8 @@ impl ExecutionRuntime {
         if current_source_captured && let Some(report) = reconciliation.financial_period.as_ref() {
             // Only a completely reconciled read may append a NAV watermark.
             // The stop, if triggered, is saved in the SAME atomic file.
-            executor.observe_strategy_nav(report, facts, u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default())?;
+            let now = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+            executor.observe_strategy_nav(report, facts, now)?;
         }
         reconciliation.strategy_nav_watermark = executor.ledger().strategy_nav_watermark().cloned();
         reconciliation.strategy_nav_checkpoint_count = executor.ledger().strategy_nav_point_count();
