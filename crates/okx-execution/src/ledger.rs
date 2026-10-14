@@ -955,6 +955,7 @@ impl DurableExecutionLedger {
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
             || !source.summary().source_gap_over_two_hours
             || !source.events.is_empty()
+            || self.risk_stop.is_some()
             || self.entries.values().any(|e| e.created_at_ms >= run.started_at_ms
                 || e.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
                 || !e.record.state.is_terminal())
@@ -1035,6 +1036,9 @@ impl DurableExecutionLedger {
             .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
         if facts.summary.authority.account_uid_fingerprint != reservation.account_uid_fingerprint {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        if self.strategy_periods.unverified_run.is_some() {
+            return Err(ExecutionLedgerError::StrategyRunNotFinalizable);
         }
         if let Some(done) = &self.strategy_periods.finalized_run {
             return Ok(done.clone());
@@ -2722,6 +2726,8 @@ mod tests {
                     finalization,
                 }],
                 nav_points: Vec::new(),
+                unverified_run: None,
+                unverified_runs: Vec::new(),
             },
         };
         fs::write(store.path(), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
