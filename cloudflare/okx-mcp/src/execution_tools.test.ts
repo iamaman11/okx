@@ -97,6 +97,12 @@ assert(buildExecutionOperation(uidAction("finalize_strategy_run"))?.type==="fina
 assert(buildExecutionOperation(uidAction("finalize_strategy_run",{new_price:"0.1"}))===null,
   "finalization cannot accept caller asserted exchange proof or trading fields");
 assert(isExecutionMutation("finalize_strategy_run"),"finalization is a protected local ledger write");
+assert(buildExecutionOperation(uidAction("quarantine_unverified_strategy_run"))?.type==="quarantine_unverified_strategy_run",
+  "UNVERIFIED closure must use an exact typed non-financial local operation");
+assert(buildExecutionOperation(uidAction("quarantine_unverified_strategy_run",{new_price:"99"}))===null,
+  "caller cannot inject synthetic NAV or any trading fields in UNVERIFIED");
+assert(!executionProfilePermitsOperation("production","quarantine_unverified_strategy_run"),
+  "Production cannot quarantine Demo strategy runs");
 assert(!executionProfilePermitsOperation("production","finalize_strategy_run"),
   "Production cannot finalize a Demo run");
 assert(buildExecutionOperation(uidAction("submit"))?.type==="submit_prepared_execution","submit must be typed");
@@ -142,7 +148,7 @@ for(const x of [
   // malformed or foreign fields before sending a corresponding native request.
   if(result!==null)throw Error("malformed execution action reached runtime: "+JSON.stringify(x));
 }
-for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution","abandon_prepared_execution","begin_strategy_run","finalize_strategy_run"]) {
+for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution","abandon_prepared_execution","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run"]) {
   assert(isExecutionMutation(op), "all trading writes classify as uncertain on lost ACK");
   assert(executionProfilePermitsOperation("demo_acceptance",op), "verified Demo write allowed");
   for (const profile of ["production","unverified","",undefined]) {
@@ -153,8 +159,10 @@ assert(executionProfilePermitsOperation("production","account_summary"),"read is
 assert(!isExecutionMutation("account_summary"),"read must not be misclassified as exchange mutation");
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
 const advertisedActions = (EXECUTION_TOOLS[1] as any).inputSchema.properties.action.enum as string[];
-assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-13.2",
+assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-14.1",
   "typed action schema changed; the advertised MCP contract version must advance");
+assert(advertisedActions.includes("quarantine_unverified_strategy_run"),
+  "UNVERIFIED must be distinct from financial FINALIZED");
 assert(advertisedActions.includes("finalize_strategy_run"),
   "finalization must be advertised via existing Demo-only typed operation");
 assert(advertisedActions.includes("begin_strategy_run"),"native capital opening is typed and Demo only");
