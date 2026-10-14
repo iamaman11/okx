@@ -38,10 +38,15 @@ pub struct StrategyNavPoint {
 impl StrategyNavPoint {
     pub fn hash(&self) -> Result<String, ExecutionLedgerError> {
         let bytes = serde_json::to_vec(&(
-            &self.schema, &self.run_id, self.observed_at_ms,
-            self.account_as_of_ms, &self.evidence_sha256,
-            &self.nav_usdt, &self.high_water_usdt,
-            &self.daily_gross_loss_usdt, self.utc_day_start_ms,
+            &self.schema,
+            &self.run_id,
+            self.observed_at_ms,
+            self.account_as_of_ms,
+            &self.evidence_sha256,
+            &self.nav_usdt,
+            &self.high_water_usdt,
+            &self.daily_gross_loss_usdt,
+            self.utc_day_start_ms,
             &self.previous_sha256,
         ))?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -65,12 +70,13 @@ impl StrategyNavPoint {
             || loss.is_none_or(|v| v < Decimal::ZERO)
             || self.checksum_sha256 != self.hash()?
         {
-            return Err(ExecutionLedgerError::Corrupt("invalid strategy NAV checkpoint"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "invalid strategy NAV checkpoint",
+            ));
         }
         Ok(())
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -272,20 +278,33 @@ impl StrategyPeriodHistory {
         let mut previous: Option<&StrategyNavPoint> = None;
         for point in &self.nav_points {
             point.validate()?;
-            let owner = active.filter(|r| r.allocation_id == point.run_id)
+            let owner = active
+                .filter(|r| r.allocation_id == point.run_id)
                 .map(|r| (r.started_at_ms, None))
-                .or_else(|| self.archived_runs.iter()
-                    .find(|r| r.reservation.allocation_id == point.run_id)
-                    .map(|r| (r.reservation.started_at_ms, Some(r.finalization.finalized_at_ms))));
+                .or_else(|| {
+                    self.archived_runs
+                        .iter()
+                        .find(|r| r.reservation.allocation_id == point.run_id)
+                        .map(|r| {
+                            (
+                                r.reservation.started_at_ms,
+                                Some(r.finalization.finalized_at_ms),
+                            )
+                        })
+                });
             let Some((started_at_ms, ended_at_ms)) = owner else {
-                return Err(ExecutionLedgerError::Corrupt("NAV checkpoint has no run owner"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "NAV checkpoint has no run owner",
+                ));
             };
             if point.account_as_of_ms < started_at_ms
                 || ended_at_ms.is_some_and(|end| point.observed_at_ms > end)
                 || previous.is_some_and(|p| point.observed_at_ms <= p.observed_at_ms)
                 || point.previous_sha256 != previous.map_or("", |p| &p.checksum_sha256)
             {
-                return Err(ExecutionLedgerError::Corrupt("invalid NAV checkpoint lineage"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "invalid NAV checkpoint lineage",
+                ));
             }
             if let Some(prior) = previous.filter(|p| p.run_id == point.run_id) {
                 let prior_peak = Decimal::from_str(&prior.high_water_usdt)
@@ -293,7 +312,9 @@ impl StrategyPeriodHistory {
                 let nav = Decimal::from_str(&point.nav_usdt)
                     .map_err(|_| ExecutionLedgerError::Corrupt("invalid checkpoint NAV"))?;
                 if Decimal::from_str(&point.high_water_usdt).ok() != Some(prior_peak.max(nav)) {
-                    return Err(ExecutionLedgerError::Corrupt("NAV peak rewound or invented"));
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "NAV peak rewound or invented",
+                    ));
                 }
             }
             previous = Some(point);
