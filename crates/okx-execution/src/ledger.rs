@@ -1467,7 +1467,7 @@ impl DurableExecutionLedger {
             let finalized = next.finalized_run.as_ref()
                 .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
             if !matches!(stop.reason.as_str(),
-                    "STRATEGY_MAX_DRAWDOWN" | "STRATEGY_DAILY_LOSS_LIMIT" | "STRATEGY_NAV_DEPLETED")
+                    "STRATEGY_MAX_DRAWDOWN" | "STRATEGY_UTC_DAILY_GROSS_LOSS" | "STRATEGY_NAV_DEPLETED")
                 || stop.stopped_at_ms != rearm.expected_stopped_at_ms
                 || finalized.checksum_sha256 != rearm.prior_finalization_sha256
                 || finalized.run_id != prior.allocation_id
