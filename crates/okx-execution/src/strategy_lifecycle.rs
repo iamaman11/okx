@@ -27,6 +27,8 @@ pub struct StrategyNavPoint {
     pub observed_at_ms: u64,
     pub account_as_of_ms: u64,
     pub evidence_sha256: String,
+    pub source_cursor_key: String,
+    pub source_cursor_sha256: String,
     pub nav_usdt: String,
     pub high_water_usdt: String,
     pub daily_gross_loss_usdt: String,
@@ -43,6 +45,8 @@ impl StrategyNavPoint {
             self.observed_at_ms,
             self.account_as_of_ms,
             &self.evidence_sha256,
+            &self.source_cursor_key,
+            &self.source_cursor_sha256,
             &self.nav_usdt,
             &self.high_water_usdt,
             &self.daily_gross_loss_usdt,
@@ -65,7 +69,10 @@ impl StrategyNavPoint {
             || self.utc_day_start_ms != (self.account_as_of_ms / 86_400_000) * 86_400_000
             || self.evidence_sha256.len() != 64
             || !self.evidence_sha256.bytes().all(|b| b.is_ascii_hexdigit())
-            || nav.is_none_or(|v| v <= Decimal::ZERO)
+            || self.source_cursor_key.trim().is_empty()
+            || self.source_cursor_sha256.len() != 64
+            || !self.source_cursor_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || nav.is_none()
             || peak.zip(nav).is_none_or(|(peak, nav)| peak < nav)
             || loss.is_none_or(|v| v < Decimal::ZERO)
             || self.checksum_sha256 != self.hash()?
@@ -280,7 +287,9 @@ impl StrategyPeriodHistory {
             point.validate()?;
             let owner = active
                 .filter(|r| r.allocation_id == point.run_id)
-                .map(|r| (r.started_at_ms, None, r.allocated_usdt.as_str()))
+                .and_then(|r| {
+                    evidence.map(|source| (r.started_at_ms, None, r.allocated_usdt.as_str(), source))
+                })
                 .or_else(|| {
                     self.archived_runs
                         .iter()
@@ -290,24 +299,44 @@ impl StrategyPeriodHistory {
                                 r.reservation.started_at_ms,
                                 Some(r.finalization.finalized_at_ms),
                                 r.reservation.allocated_usdt.as_str(),
+                                &r.evidence,
                             )
                         })
                 });
-            let Some((started_at_ms, ended_at_ms, allocation_usdt)) = owner else {
+            let Some((started_at_ms, ended_at_ms, allocation_usdt, source)) = owner else {
                 return Err(ExecutionLedgerError::Corrupt(
                     "NAV checkpoint has no run owner",
                 ));
             };
+            let cursor_proven = source.cursors.get(&point.source_cursor_key).is_some_and(|c| {
+                c.order_complete && c.fill_complete && c.bill_complete
+                    && c.account_as_of_ms <= point.account_as_of_ms
+                    && point.account_as_of_ms - c.account_as_of_ms
+                        <= crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
+                    && serde_json::to_vec(c).ok().is_some_and(|data| {
+                        format!("{:x}", Sha256::digest(data)) == point.source_cursor_sha256
+                    })
+            });
             if point.account_as_of_ms < started_at_ms
                 || ended_at_ms.is_some_and(|end| point.observed_at_ms > end)
-                || previous.is_some_and(|p| point.observed_at_ms <= p.observed_at_ms)
+                || previous.is_some_and(|p| {
+                    point.observed_at_ms <= p.observed_at_ms
+                        || point.account_as_of_ms < p.account_as_of_ms
+                })
                 || point.previous_sha256 != previous.map_or("", |p| &p.checksum_sha256)
+                || !cursor_proven
             {
                 return Err(ExecutionLedgerError::Corrupt(
                     "invalid NAV checkpoint lineage",
                 ));
             }
             if let Some(prior) = previous.filter(|p| p.run_id == point.run_id) {
+                if point.utc_day_start_ms == prior.utc_day_start_ms
+                    && Decimal::from_str(&point.daily_gross_loss_usdt).ok()
+                        < Decimal::from_str(&prior.daily_gross_loss_usdt).ok()
+                {
+                    return Err(ExecutionLedgerError::Corrupt("strategy daily loss rewound"));
+                }
                 let prior_peak = Decimal::from_str(&prior.high_water_usdt)
                     .map_err(|_| ExecutionLedgerError::Corrupt("invalid prior NAV peak"))?;
                 let nav = Decimal::from_str(&point.nav_usdt)
