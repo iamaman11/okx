@@ -1164,7 +1164,7 @@ impl DurableExecutionLedger {
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
             || !source.summary().source_gap_over_two_hours
             || !source.events.is_empty()
-            || self.risk_stop.is_some()
+            || self.risk_stop.is_some() != rearm.is_some()
             || self.entries.values().any(|e| {
                 e.created_at_ms >= run.started_at_ms
                     || e.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
@@ -1399,6 +1399,18 @@ impl DurableExecutionLedger {
         opening: &StrategyAllocationOpening,
         now_ms: u64,
     ) -> Result<StrategyCapitalReservation, ExecutionLedgerError> {
+        self.reserve_strategy_capital_with_rearm(reservation, opening, None, now_ms)
+    }
+
+    /// Explicit, next-UTC-day epoch transition and new allocation are saved
+    /// ATOMICALLY. There is never an unlocked old epoch or exchange POST.
+    pub fn reserve_strategy_capital_with_rearm(
+        &mut self,
+        reservation: StrategyCapitalReservation,
+        opening: &StrategyAllocationOpening,
+        rearm: Option<&StrategyStopRearmRequest>,
+        now_ms: u64,
+    ) -> Result<StrategyCapitalReservation, ExecutionLedgerError> {
         validate_capital_reservation(&reservation)?;
         if let Some(existing) = &self.capital_reservation {
             if *existing == reservation {
@@ -1447,6 +1459,46 @@ impl DurableExecutionLedger {
             return Err(ExecutionLedgerError::CapitalReservationUnattested);
         }
         let mut next = self.strategy_periods.clone();
+        let stop_rearm = if let Some(rearm) = rearm {
+            let stop = self.risk_stop.as_ref()
+                .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
+            let prior = self.capital_reservation.as_ref()
+                .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
+            let finalized = next.finalized_run.as_ref()
+                .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
+            if !matches!(stop.reason.as_str(),
+                    "STRATEGY_MAX_DRAWDOWN" | "STRATEGY_DAILY_LOSS_LIMIT" | "STRATEGY_NAV_DEPLETED")
+                || stop.stopped_at_ms != rearm.expected_stopped_at_ms
+                || finalized.checksum_sha256 != rearm.prior_finalization_sha256
+                || finalized.run_id != prior.allocation_id
+                || finalized.finalized_at_ms < stop.stopped_at_ms
+                || prior.operator_authority_id != reservation.operator_authority_id
+                || prior.account_uid_fingerprint != reservation.account_uid_fingerprint
+                || reservation.started_at_ms / 86_400_000 <= stop.stopped_at_ms / 86_400_000
+                || next.stop_rearms.len() >= MAX_ARCHIVED_STRATEGY_RUNS
+            {
+                return Err(ExecutionLedgerError::CapitalReservationUnattested);
+            }
+            let mut proof = StrategyStopRearm {
+                schema: STRATEGY_STOP_REARM_SCHEMA_V1.to_owned(),
+                stopped_run_id: prior.allocation_id.clone(),
+                prior_finalization_sha256: finalized.checksum_sha256.clone(),
+                stopped_at_ms: stop.stopped_at_ms,
+                stop_reason: stop.reason.clone(),
+                next_run_id: reservation.allocation_id.clone(),
+                next_run_started_at_ms: reservation.started_at_ms,
+                account_uid: prior.account_uid_fingerprint.clone(),
+                operator_authority_id: reservation.operator_authority_id.clone(),
+                previous_sha256: next.stop_rearms.last()
+                    .map_or("", |item| &item.checksum_sha256).to_owned(),
+                checksum_sha256: String::new(),
+            };
+            proof.checksum_sha256 = proof.hash()?;
+            proof.validate()?;
+            Some(proof)
+        } else {
+            None
+        };
         if let Some(prior) = &self.capital_reservation {
             if next.archived_runs.len() + next.unverified_runs.len() >= MAX_ARCHIVED_STRATEGY_RUNS {
                 return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
@@ -1471,15 +1523,22 @@ impl DurableExecutionLedger {
                 return Err(ExecutionLedgerError::CapitalReservationConflict);
             }
         }
+        if let Some(proof) = stop_rearm {
+            next.stop_rearms.push(proof);
+        }
+        next.validate(Some(&reservation), None)?;
         self.store.save(
             &self.entries,
-            self.risk_stop.as_ref(),
+            if rearm.is_some() { None } else { self.risk_stop.as_ref() },
             Some(&reservation),
             None,
             &next,
             &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
+        if rearm.is_some() {
+            self.risk_stop = None;
+        }
         self.exchange_evidence = None;
         self.capital_reservation = Some(reservation.clone());
         Ok(reservation)
