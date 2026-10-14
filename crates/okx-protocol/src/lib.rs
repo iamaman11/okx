@@ -1249,16 +1249,15 @@ impl AgentOperation {
                 validate_version(mandate_version)?;
                 validate_positive_decimal_text(allocated_usdt, "allocated_usdt")?;
                 validate_sha256_artifact_id(operator_authority_id, "operator_authority_id")?;
-                if let Some(proof) = rearm {
-                    if proof.expected_stopped_at_ms == 0
+                if let Some(proof) = rearm
+                    && (proof.expected_stopped_at_ms == 0
                         || proof.prior_finalization_sha256.len() != 64
                         || !proof
                             .prior_finalization_sha256
                             .bytes()
-                            .all(|b| b.is_ascii_hexdigit())
-                    {
-                        return Err(ProtocolError::InvalidAnalyticalQuery("rearm"));
-                    }
+                            .all(|b| b.is_ascii_hexdigit()))
+                {
+                    return Err(ProtocolError::InvalidAnalyticalQuery("rearm"));
                 }
                 Ok(())
             }
