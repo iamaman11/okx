@@ -453,10 +453,12 @@ async fn begin_strategy_run(
             reservation,
             &opening,
             observed_at_ms,
-            rearm.map(|p| okx_execution::StrategyStopRearmRequest {
-                expected_stopped_at_ms: p.expected_stopped_at_ms,
-                prior_finalization_sha256: p.prior_finalization_sha256.clone(),
-            }).as_ref(),
+            rearm
+                .map(|p| okx_execution::StrategyStopRearmRequest {
+                    expected_stopped_at_ms: p.expected_stopped_at_ms,
+                    prior_finalization_sha256: p.prior_finalization_sha256.clone(),
+                })
+                .as_ref(),
         )
         .await?
     {
