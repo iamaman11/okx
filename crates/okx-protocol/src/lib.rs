@@ -1224,7 +1224,7 @@ impl AgentOperation {
                     ));
                 }
                 validate_positive_decimal_text(leverage, "leverage")
-            },
+            }
             Self::BeginStrategyRun {
                 allocation_id,
                 origin_schema,
