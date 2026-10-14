@@ -971,6 +971,10 @@ pub enum AgentOperation {
     FinalizeStrategyRun {
         allocation_id: String,
     },
+    /// Explicit Demo-only NON-financial closure; NAV remains unknown.
+    QuarantineUnverifiedStrategyRun {
+        allocation_id: String,
+    },
     PrepareExecution {
         intent_id: String,
         instrument: String,
@@ -1048,6 +1052,7 @@ impl AgentOperation {
             self,
             Self::BeginStrategyRun { .. }
                 | Self::FinalizeStrategyRun { .. }
+                | Self::QuarantineUnverifiedStrategyRun { .. }
                 | Self::PrepareExecution { .. }
                 | Self::SubmitPreparedExecution { .. }
                 | Self::MutateExecution { .. }
@@ -1061,6 +1066,7 @@ impl AgentOperation {
             self,
             Self::BeginStrategyRun { .. }
                 | Self::FinalizeStrategyRun { .. }
+                | Self::QuarantineUnverifiedStrategyRun { .. }
                 | Self::PrepareExecution { .. }
                 | Self::SubmitPreparedExecution { .. }
                 | Self::MutateExecution { .. }
@@ -1210,7 +1216,10 @@ impl AgentOperation {
                 validate_positive_decimal_text(allocated_usdt, "allocated_usdt")?;
                 validate_sha256_artifact_id(operator_authority_id, "operator_authority_id")
             }
-            Self::FinalizeStrategyRun { allocation_id } => validate_request_id(allocation_id),
+            Self::FinalizeStrategyRun { allocation_id }
+            | Self::QuarantineUnverifiedStrategyRun { allocation_id } => {
+                validate_request_id(allocation_id)
+            }
             Self::PrepareExecution {
                 intent_id,
                 instrument,
@@ -3606,6 +3615,19 @@ mod direct_transport_tests {
             allocation_id: "strategy_run_new_20261013_01".to_owned(),
         };
         close.validate().expect("typed financial finalization");
+        let quarantine = AgentOperation::QuarantineUnverifiedStrategyRun {
+            allocation_id: "strategy_run_new_20261013_01".to_owned(),
+        };
+        quarantine.validate().expect("typed NON-financial closure");
+        assert!(quarantine.direct_transport_demo_execution());
+        assert!(!quarantine.direct_transport_read_only());
+        assert!(
+            AgentOperation::QuarantineUnverifiedStrategyRun {
+                allocation_id: "invalid!".to_owned(),
+            }
+            .validate()
+            .is_err()
+        );
         assert!(close.direct_transport_demo_execution());
         assert!(!close.direct_transport_read_only());
         let invalid_close = AgentOperation::FinalizeStrategyRun {

@@ -169,6 +169,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         | AgentOperation::ExecutorPreflight
         | AgentOperation::BeginStrategyRun { .. }
         | AgentOperation::FinalizeStrategyRun { .. }
+        | AgentOperation::QuarantineUnverifiedStrategyRun { .. }
         | AgentOperation::SubmitPreparedExecution { .. }
         | AgentOperation::MutateExecution { .. }
         | AgentOperation::AbortReverseExecution { .. }

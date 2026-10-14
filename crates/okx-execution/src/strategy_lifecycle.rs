@@ -12,6 +12,7 @@ use crate::{
 };
 
 pub const STRATEGY_FINALIZATION_SCHEMA_V1: &str = "okx.strategy-finalization/v1";
+pub const STRATEGY_UNVERIFIED_CLOSURE_SCHEMA_V1: &str = "okx.strategy-unverified-closure/v1";
 pub const MAX_ARCHIVED_STRATEGY_RUNS: usize = 16;
 pub const STRATEGY_NAV_POINT_SCHEMA_V1: &str = "okx.strategy-nav-point/v1";
 pub const MAX_STRATEGY_NAV_POINTS: usize = 4096;
@@ -108,6 +109,118 @@ pub struct ArchivedStrategyRun {
     pub reservation: StrategyCapitalReservation,
     pub evidence: DurableExchangeEvidence,
     pub finalization: StrategyFinalization,
+}
+
+/// A non-financial closure. It NEVER supplies NAV, realized PnL, fees,
+/// or financial acceptance. Preserves exactly the active run and source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyUnverifiedClosure {
+    pub schema: String,
+    pub run_id: String,
+    pub account_uid: String,
+    pub closed_at_ms: u64,
+    pub evidence_sha256: String,
+    pub reason: String,
+    pub checksum_sha256: String,
+}
+
+impl StrategyUnverifiedClosure {
+    pub fn new(
+        run: &StrategyCapitalReservation,
+        evidence: &DurableExchangeEvidence,
+        closed_at_ms: u64,
+    ) -> Result<Self, ExecutionLedgerError> {
+        let mut value = Self {
+            schema: STRATEGY_UNVERIFIED_CLOSURE_SCHEMA_V1.to_owned(),
+            run_id: run.allocation_id.clone(),
+            account_uid: run.account_uid_fingerprint.clone(),
+            closed_at_ms,
+            evidence_sha256: evidence.checksum_sha256.clone(),
+            reason: "SOURCE_CONTINUITY_NOT_PROVEN".to_owned(),
+            checksum_sha256: String::new(),
+        };
+        value.checksum_sha256 = value.hash()?;
+        value.validate(run, evidence)?;
+        Ok(value)
+    }
+
+    fn hash(&self) -> Result<String, ExecutionLedgerError> {
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(
+                &self.schema,
+                &self.run_id,
+                &self.account_uid,
+                self.closed_at_ms,
+                &self.evidence_sha256,
+                &self.reason,
+            ))?)
+        ))
+    }
+
+    pub fn validate(
+        &self,
+        run: &StrategyCapitalReservation,
+        evidence: &DurableExchangeEvidence,
+    ) -> Result<(), ExecutionLedgerError> {
+        evidence.validate()?;
+        if self.schema != STRATEGY_UNVERIFIED_CLOSURE_SCHEMA_V1
+            || self.run_id != run.allocation_id
+            || self.account_uid != run.account_uid_fingerprint
+            || evidence.run_id != run.allocation_id
+            || evidence.account_uid != run.account_uid_fingerprint
+            || self.closed_at_ms <= run.started_at_ms
+            || self.evidence_sha256 != evidence.checksum_sha256
+            || !evidence.summary().source_gap_over_two_hours
+            || self.reason != "SOURCE_CONTINUITY_NOT_PROVEN"
+            || self.checksum_sha256 != self.hash()?
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "unverified strategy closure lost provenance",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnverifiedStrategyRun {
+    pub reservation: StrategyCapitalReservation,
+    pub evidence: DurableExchangeEvidence,
+    pub closure: StrategyUnverifiedClosure,
+}
+
+impl UnverifiedStrategyRun {
+    pub fn validate(&self) -> Result<(), ExecutionLedgerError> {
+        self.closure.validate(&self.reservation, &self.evidence)
+    }
+
+    pub fn proof(&self) -> UnverifiedStrategyProof {
+        UnverifiedStrategyProof {
+            schema: "okx.unverified-strategy-proof/v1",
+            run_id: self.reservation.allocation_id.clone(),
+            started_at_ms: self.reservation.started_at_ms,
+            closed_at_ms: self.closure.closed_at_ms,
+            status: "UNVERIFIED",
+            reason: self.closure.reason.clone(),
+            evidence_sha256: self.evidence.checksum_sha256.clone(),
+            closure_sha256: self.closure.checksum_sha256.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnverifiedStrategyProof {
+    pub schema: &'static str,
+    pub run_id: String,
+    pub started_at_ms: u64,
+    pub closed_at_ms: u64,
+    pub status: &'static str,
+    pub reason: String,
+    pub evidence_sha256: String,
+    pub closure_sha256: String,
 }
 
 pub const ARCHIVED_STRATEGY_PROOF_SCHEMA_V1: &str = "okx.archived-strategy-proof/v1";
@@ -234,6 +347,10 @@ impl ArchivedStrategyRun {
 pub struct StrategyPeriodHistory {
     pub finalized_run: Option<StrategyFinalization>,
     pub archived_runs: Vec<ArchivedStrategyRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unverified_run: Option<StrategyUnverifiedClosure>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unverified_runs: Vec<UnverifiedStrategyRun>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nav_points: Vec<StrategyNavPoint>,
 }
@@ -244,7 +361,7 @@ impl StrategyPeriodHistory {
         active: Option<&StrategyCapitalReservation>,
         evidence: Option<&DurableExchangeEvidence>,
     ) -> Result<(), ExecutionLedgerError> {
-        if self.archived_runs.len() > MAX_ARCHIVED_STRATEGY_RUNS {
+        if self.archived_runs.len() + self.unverified_runs.len() > MAX_ARCHIVED_STRATEGY_RUNS {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
         }
         if self.nav_points.len() > MAX_STRATEGY_NAV_POINTS {
@@ -268,11 +385,37 @@ impl StrategyPeriodHistory {
                 return Err(ExecutionLedgerError::AccountScopeMismatch);
             }
         }
+        let mut bounds = self
+            .archived_runs
+            .iter()
+            .map(|r| (r.reservation.started_at_ms, r.finalization.finalized_at_ms))
+            .collect::<Vec<_>>();
+        for unverified in &self.unverified_runs {
+            unverified.validate()?;
+            if !seen.insert(unverified.reservation.allocation_id.as_str())
+                || active.is_some_and(|a| {
+                    a.account_uid_fingerprint != unverified.reservation.account_uid_fingerprint
+                })
+            {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+            bounds.push((
+                unverified.reservation.started_at_ms,
+                unverified.closure.closed_at_ms,
+            ));
+        }
+        bounds.sort_unstable();
+        if bounds.windows(2).any(|pair| pair[1].0 <= pair[0].1) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "financial and unverified history overlap",
+            ));
+        }
+        let final_boundary = bounds.last().map_or(0, |(_, end)| *end);
         if let Some(run) = active {
             if seen.contains(run.allocation_id.as_str()) {
                 return Err(ExecutionLedgerError::CapitalReservationConflict);
             }
-            if last_finalized > 0 && run.started_at_ms <= last_finalized {
+            if final_boundary > 0 && run.started_at_ms <= final_boundary {
                 return Err(ExecutionLedgerError::Corrupt(
                     "next run predates prior financial close",
                 ));
@@ -280,10 +423,25 @@ impl StrategyPeriodHistory {
         } else if evidence.is_some()
             || self.finalized_run.is_some()
             || !self.archived_runs.is_empty()
+            || !self.unverified_runs.is_empty()
+            || self.unverified_run.is_some()
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "orphaned financial run state",
             ));
+        }
+        if self.finalized_run.is_some() && self.unverified_run.is_some() {
+            return Err(ExecutionLedgerError::Corrupt(
+                "financial finalization and unverified closure both active",
+            ));
+        }
+        if let Some(unverified) = &self.unverified_run {
+            let (Some(run), Some(source)) = (active, evidence) else {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "orphaned unverified strategy closure",
+                ));
+            };
+            unverified.validate(run, source)?;
         }
         let mut previous: Option<&StrategyNavPoint> = None;
         for point in &self.nav_points {
@@ -302,6 +460,19 @@ impl StrategyPeriodHistory {
                             (
                                 r.reservation.started_at_ms,
                                 Some(r.finalization.finalized_at_ms),
+                                r.reservation.allocated_usdt.as_str(),
+                                &r.evidence,
+                            )
+                        })
+                })
+                .or_else(|| {
+                    self.unverified_runs
+                        .iter()
+                        .find(|r| r.reservation.allocation_id == point.run_id)
+                        .map(|r| {
+                            (
+                                r.reservation.started_at_ms,
+                                Some(r.closure.closed_at_ms),
                                 r.reservation.allocated_usdt.as_str(),
                                 &r.evidence,
                             )
@@ -579,6 +750,70 @@ mod tests {
     }
 
     #[test]
+    fn unverified_source_gap_is_never_financially_finalized_or_rewritten() {
+        let run = reservation();
+        let complete = attested_source(&run);
+        assert!(StrategyUnverifiedClosure::new(&run, &complete, 8_000_000).is_err());
+        let mut gap = complete.clone();
+        let mut next_cursor = gap.cursors.values().next().unwrap().clone();
+        next_cursor.account_as_of_ms = 7_400_000;
+        gap.cursors
+            .insert("source:after-unobserved-gap".to_owned(), next_cursor);
+        seal_source_for_test(&mut gap);
+        assert!(gap.summary().source_gap_over_two_hours);
+        let closed = StrategyUnverifiedClosure::new(&run, &gap, 7_600_000).unwrap();
+        let json = serde_json::to_value(&closed).unwrap();
+        assert!(json.get("nav_usdt").is_none());
+        assert!(json.get("realized_usdt").is_none());
+        assert!(json.get("fees_usdt").is_none());
+        closed.validate(&run, &gap).unwrap();
+        let history = StrategyPeriodHistory {
+            unverified_run: Some(closed.clone()),
+            ..StrategyPeriodHistory::default()
+        };
+        history.validate(Some(&run), Some(&gap)).unwrap();
+        let decoded: StrategyPeriodHistory =
+            serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
+        decoded.validate(Some(&run), Some(&gap)).unwrap();
+        let mut tampered = decoded.clone();
+        tampered.unverified_run.as_mut().unwrap().reason = "FINANCIAL_FINALIZED".into();
+        assert!(tampered.validate(Some(&run), Some(&gap)).is_err());
+        let mut tampered = decoded.clone();
+        tampered.unverified_run.as_mut().unwrap().evidence_sha256 = "f".repeat(64);
+        assert!(tampered.validate(Some(&run), Some(&gap)).is_err());
+        let mut next = run.clone();
+        next.allocation_id = "run_after_unverified_0123456".into();
+        next.started_at_ms = closed.closed_at_ms + 1;
+        let archived = StrategyPeriodHistory {
+            unverified_runs: vec![UnverifiedStrategyRun {
+                reservation: run.clone(),
+                evidence: gap.clone(),
+                closure: closed.clone(),
+            }],
+            ..StrategyPeriodHistory::default()
+        };
+        archived.validate(Some(&next), None).unwrap();
+        let proof = archived.unverified_runs[0].proof();
+        assert_eq!(proof.status, "UNVERIFIED");
+        assert_eq!(proof.reason, "SOURCE_CONTINUITY_NOT_PROVEN");
+        assert!(
+            serde_json::to_value(proof)
+                .unwrap()
+                .get("nav_usdt")
+                .is_none()
+        );
+        let mut reused = next.clone();
+        reused.allocation_id = run.allocation_id.clone();
+        assert!(archived.validate(Some(&reused), None).is_err());
+        let mut overlap = next;
+        overlap.started_at_ms = closed.closed_at_ms;
+        assert!(archived.validate(Some(&overlap), None).is_err());
+        let mut mutated_archive = archived;
+        mutated_archive.unverified_runs[0].evidence.cursors.clear();
+        assert!(mutated_archive.validate(None, None).is_err());
+    }
+
+    #[test]
     fn closure_identity_survives_serde_and_rejects_rewritten_financials() {
         let run = reservation();
         let evidence = DurableExchangeEvidence::new(&run).unwrap();
@@ -614,6 +849,8 @@ mod tests {
         let history = StrategyPeriodHistory {
             finalized_run: None,
             archived_runs: vec![archived.clone()],
+            unverified_run: None,
+            unverified_runs: Vec::new(),
             nav_points: Vec::new(),
         };
         history.validate(Some(&next), None).unwrap();
@@ -644,6 +881,8 @@ mod tests {
         let duplicate_history = StrategyPeriodHistory {
             finalized_run: None,
             archived_runs: vec![archived.clone(), archived],
+            unverified_run: None,
+            unverified_runs: Vec::new(),
             nav_points: Vec::new(),
         };
         assert!(duplicate_history.validate(Some(&next), None).is_err());
@@ -677,6 +916,8 @@ mod tests {
         let bounded_history = StrategyPeriodHistory {
             finalized_run: None,
             archived_runs: accepted_archives,
+            unverified_run: None,
+            unverified_runs: Vec::new(),
             nav_points: Vec::new(),
         };
         bounded_history

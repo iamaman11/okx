@@ -14,7 +14,7 @@ use okx_execution::{
     FencedProtectiveShrinkRequest, ManagedExecutionInventory, MutationAuthority,
     MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor, OrderExecutorError,
     PositionSide, PrepareOutcome, ProductionMarkEvidence, StrategyAllocationOpening,
-    StrategyCapitalReservation, StrategyFinalization, SubmitDisposition,
+    StrategyCapitalReservation, StrategyFinalization, StrategyUnverifiedClosure, SubmitDisposition,
     execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
 };
 use okx_observation::{
@@ -199,6 +199,7 @@ impl ExecutionRuntime {
         let executor = self.executor.lock().await;
         executor.ledger().capital_reservation().is_some()
             && executor.ledger().finalized_run().is_none()
+            && executor.ledger().unverified_run().is_none()
     }
 
     /// Read-only, bounded decision for the EXISTING mailbox heartbeat.
@@ -212,7 +213,7 @@ impl ExecutionRuntime {
         let Some(run) = ledger.capital_reservation() else {
             return false;
         };
-        if ledger.finalized_run().is_some() {
+        if ledger.finalized_run().is_some() || ledger.unverified_run().is_some() {
             return false;
         }
         quiet_source_capture_due(
@@ -235,7 +236,9 @@ impl ExecutionRuntime {
         let inventory = managed_execution_inventory(executor.ledger());
         // Never capture a contradictory or private-WS-incoherent snapshot.
         let mut current_source_captured = false;
-        if executor.ledger().capital_reservation().is_some() {
+        if executor.ledger().capital_reservation().is_some()
+            && executor.ledger().unverified_run().is_none()
+        {
             if coherent
                 && reconciliation.consistent
                 && okx_execution::DurableExchangeEvidence::complete_source_checkpoint(facts)
@@ -247,12 +250,16 @@ impl ExecutionRuntime {
             }
         }
         reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary();
-        reconciliation.financial_period = executor.ledger().financial_period_with_verified_source(
-            facts,
-            coherent,
-            production_marks,
-            current_source_captured,
-        );
+        reconciliation.financial_period = if executor.ledger().unverified_run().is_some() {
+            None
+        } else {
+            executor.ledger().financial_period_with_verified_source(
+                facts,
+                coherent,
+                production_marks,
+                current_source_captured,
+            )
+        };
         if current_source_captured && let Some(report) = reconciliation.financial_period.as_ref() {
             // Only a completely reconciled read may append a NAV watermark.
             // The stop, if triggered, is saved in the SAME atomic file.
@@ -262,6 +269,8 @@ impl ExecutionRuntime {
         reconciliation.strategy_nav_watermark = executor.ledger().strategy_nav_watermark().cloned();
         reconciliation.strategy_nav_checkpoint_count = executor.ledger().strategy_nav_point_count();
         reconciliation.strategy_risk_stop = executor.ledger().risk_stop().cloned();
+        reconciliation.unverified_run = executor.ledger().unverified_run().cloned();
+        reconciliation.unverified_run_proofs = executor.ledger().archived_unverified_proofs();
         Ok((reconciliation, inventory))
     }
 
@@ -481,6 +490,38 @@ impl ExecutionRuntime {
             coherent,
             protection_absent,
             observed_at_ms,
+        )))
+    }
+
+    /// Exact authorized Demo administrative quarantine; never an exchange
+    /// order, never inferred from a private account balance.
+    pub async fn quarantine_unverified_strategy_run_demo_authorized(
+        &self,
+        preflight: &ExecutorCredentialPreflight,
+        expected_run_id: &str,
+        facts: &AccountLedgerFacts,
+        coherent: bool,
+        protection_absent: bool,
+        now_ms: u64,
+    ) -> AgentResult<Option<Result<StrategyUnverifiedClosure, OrderExecutorError>>> {
+        let mut executor = self.executor.lock().await;
+        if !self.environment.demo
+            || self.mode != ExecutionRuntimeMode::DemoAcceptance
+            || !preflight.accepted
+            || preflight.production_environment
+            || preflight.account_uid_fingerprint != facts.summary.authority.account_uid_fingerprint
+            || executor.ledger().capital_reservation().is_none_or(|run| {
+                run.allocation_id != expected_run_id
+                    || run.account_uid_fingerprint != preflight.account_uid_fingerprint
+            })
+        {
+            return Ok(None);
+        }
+        Ok(Some(executor.quarantine_unverified_strategy_run(
+            facts,
+            coherent,
+            protection_absent,
+            now_ms,
         )))
     }
 
