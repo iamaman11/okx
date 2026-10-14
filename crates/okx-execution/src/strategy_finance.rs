@@ -368,7 +368,13 @@ pub fn assess_persisted_financial_period_with_production_marks(
     production_marks: &BTreeMap<String, ProductionMarkEvidence>,
 ) -> StrategyFinancialPeriod {
     assess_persisted_financial_period_with_verified_source(
-        run, evidence, entries, facts, coherent, production_marks, false,
+        run,
+        evidence,
+        entries,
+        facts,
+        coherent,
+        production_marks,
+        false,
     )
 }
 
