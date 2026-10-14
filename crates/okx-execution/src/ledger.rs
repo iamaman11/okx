@@ -23,11 +23,10 @@ use crate::{
     PositionSide, ProductionMarkEvidence, ProtectiveCleanupState, ProtectiveOrderResolution,
     ProtectiveOrderStatus, ProtectiveSizeAmendState, ProtectiveTriggerPriceBasis,
     ReverseContinuation, ReverseExecutionLink, ReverseLeg, STRATEGY_NAV_POINT_SCHEMA_V1,
-    StrategyFinalization, StrategyFinancialPeriod, StrategyNavPoint, StrategyPeriodHistory,
-    StrategyUnverifiedClosure, StrategyStopRearm, STRATEGY_STOP_REARM_SCHEMA_V1,
-    UnverifiedStrategyProof, UnverifiedStrategyRun,
-    derive_amend_request_id, derive_client_order_id, derive_protective_algo_client_id,
-    derive_reverse_open_intent_id,
+    STRATEGY_STOP_REARM_SCHEMA_V1, StrategyFinalization, StrategyFinancialPeriod, StrategyNavPoint,
+    StrategyPeriodHistory, StrategyStopRearm, StrategyUnverifiedClosure, UnverifiedStrategyProof,
+    UnverifiedStrategyRun, derive_amend_request_id, derive_client_order_id,
+    derive_protective_algo_client_id, derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
 };
 
@@ -384,7 +383,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V10
                 | EXECUTION_LEDGER_SCHEMA_V11
                 | EXECUTION_LEDGER_SCHEMA_V12
-                    | EXECUTION_LEDGER_SCHEMA_V13
+                | EXECUTION_LEDGER_SCHEMA_V13
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
@@ -453,7 +452,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V10
                 | EXECUTION_LEDGER_SCHEMA_V11
                 | EXECUTION_LEDGER_SCHEMA_V12
-                    | EXECUTION_LEDGER_SCHEMA_V13
+                | EXECUTION_LEDGER_SCHEMA_V13
         ) && file.strategy_periods != StrategyPeriodHistory::default()
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -477,7 +476,9 @@ impl ExecutionLedgerStore {
             || !file.strategy_periods.unverified_runs.is_empty())
             && !matches!(
                 file.schema.as_str(),
-                EXECUTION_LEDGER_SCHEMA_V11 | EXECUTION_LEDGER_SCHEMA_V12 | EXECUTION_LEDGER_SCHEMA_V13
+                EXECUTION_LEDGER_SCHEMA_V11
+                    | EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
                     | EXECUTION_LEDGER_SCHEMA_V13
             )
         {
@@ -485,8 +486,12 @@ impl ExecutionLedgerStore {
                 "unverified closure requires ledger schema v11",
             ));
         }
-        if !file.strategy_periods.stop_rearms.is_empty() && file.schema != EXECUTION_LEDGER_SCHEMA_V13 {
-            return Err(ExecutionLedgerError::Corrupt("STOP rearm requires ledger v13"));
+        if !file.strategy_periods.stop_rearms.is_empty()
+            && file.schema != EXECUTION_LEDGER_SCHEMA_V13
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "STOP rearm requires ledger v13",
+            ));
         }
         file.strategy_periods.validate(
             file.capital_reservation.as_ref(),
@@ -1489,8 +1494,11 @@ impl DurableExecutionLedger {
                 next_run_started_at_ms: reservation.started_at_ms,
                 account_uid: prior.account_uid_fingerprint.clone(),
                 operator_authority_id: reservation.operator_authority_id.clone(),
-                previous_sha256: next.stop_rearms.last()
-                    .map_or("", |item| &item.checksum_sha256).to_owned(),
+                previous_sha256: next
+                    .stop_rearms
+                    .last()
+                    .map_or("", |item| &item.checksum_sha256)
+                    .to_owned(),
                 checksum_sha256: String::new(),
             };
             proof.checksum_sha256 = proof.hash()?;
@@ -1529,7 +1537,11 @@ impl DurableExecutionLedger {
         next.validate(Some(&reservation), None)?;
         self.store.save(
             &self.entries,
-            if rearm.is_some() { None } else { self.risk_stop.as_ref() },
+            if rearm.is_some() {
+                None
+            } else {
+                self.risk_stop.as_ref()
+            },
             Some(&reservation),
             None,
             &next,
