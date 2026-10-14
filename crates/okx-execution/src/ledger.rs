@@ -3068,6 +3068,7 @@ mod tests {
                 unverified_run: None,
                 unverified_runs: Vec::new(),
             },
+            leverage_attempts: Vec::new(),
         };
         fs::write(store.path(), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
         let reopened = DurableExecutionLedger::open(store.clone(), 3200).unwrap();
@@ -3180,6 +3181,7 @@ mod tests {
             capital_reservation: None,
             exchange_evidence: None,
             strategy_periods: StrategyPeriodHistory::default(),
+            leverage_attempts: Vec::new(),
         };
         let payload = serde_json::to_vec_pretty(&file).unwrap();
         fs::write(store.path(), &payload).unwrap();
@@ -4347,6 +4349,7 @@ mod tests {
                     capital_reservation: None,
                     exchange_evidence: None,
                     strategy_periods: StrategyPeriodHistory::default(),
+                    leverage_attempts: Vec::new(),
                 })
                 .expect("legacy json"),
             )
