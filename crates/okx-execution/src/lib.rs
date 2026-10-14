@@ -66,9 +66,8 @@ pub use strategy_finance::{
 };
 pub use strategy_lifecycle::{
     ARCHIVED_STRATEGY_PROOF_SCHEMA_V1, ArchivedStrategyProof, ArchivedStrategyRun,
-    MAX_ARCHIVED_STRATEGY_RUNS, STRATEGY_FINALIZATION_SCHEMA_V1, StrategyFinalization,
-    StrategyNavPoint, StrategyPeriodHistory, STRATEGY_NAV_POINT_SCHEMA_V1,
-    MAX_STRATEGY_NAV_POINTS,
+    MAX_ARCHIVED_STRATEGY_RUNS, MAX_STRATEGY_NAV_POINTS, STRATEGY_FINALIZATION_SCHEMA_V1,
+    STRATEGY_NAV_POINT_SCHEMA_V1, StrategyFinalization, StrategyNavPoint, StrategyPeriodHistory,
 };
 pub use validation::{
     ExecutionValidationError, PreMutationRiskDisposition, prepare_execution,
