@@ -1057,6 +1057,36 @@ mod tests {
     }
 
     #[test]
+    fn stop_rearm_evidence_is_hash_linked_and_strictly_next_utc_day() {
+        let mut proof = StrategyStopRearm {
+            schema: STRATEGY_STOP_REARM_SCHEMA_V1.to_owned(),
+            stopped_run_id: "stage5a_finalized_prior_run_1234".to_owned(),
+            prior_finalization_sha256: "a".repeat(64),
+            stopped_at_ms: 1792017080203,
+            stop_reason: "STRATEGY_MAX_DRAWDOWN".to_owned(),
+            next_run_id: "stage5a_next_daily_run_20261015".to_owned(),
+            next_run_started_at_ms: 1792022400001,
+            account_uid: "account-uid".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            previous_sha256: String::new(),
+            checksum_sha256: String::new(),
+        };
+        proof.checksum_sha256 = proof.hash().unwrap();
+        proof.validate().unwrap();
+        let valid = proof.clone();
+        proof.next_run_started_at_ms = 1792019000000;
+        proof.checksum_sha256 = proof.hash().unwrap();
+        assert!(proof.validate().is_err(), "same UTC day cannot rearm STOP");
+        let mut wrong_reason = valid.clone();
+        wrong_reason.stop_reason = "ACCOUNT_RISK_STOP".to_owned();
+        wrong_reason.checksum_sha256 = wrong_reason.hash().unwrap();
+        assert!(wrong_reason.validate().is_err(), "account-wide stops cannot be rearmed as strategy STOP");
+        let mut forged = valid;
+        forged.prior_finalization_sha256 = "b".repeat(64);
+        assert!(forged.validate().is_err(), "tampered financial hash breaks rearm chain");
+    }
+
+    #[test]
     fn incomplete_or_unallocated_funding_cannot_be_finalized() {
         let run = reservation();
         let evidence = DurableExchangeEvidence::new(&run).unwrap();
