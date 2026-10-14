@@ -1421,6 +1421,7 @@ dependencies = [
  "okx-protocol",
  "okx-research",
  "okx-runtime",
+ "rust_decimal",
  "serde",
  "serde_json",
  "thiserror",
