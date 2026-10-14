@@ -479,7 +479,6 @@ impl ExecutionLedgerStore {
                 EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
                     | EXECUTION_LEDGER_SCHEMA_V13
-                    | EXECUTION_LEDGER_SCHEMA_V13
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
