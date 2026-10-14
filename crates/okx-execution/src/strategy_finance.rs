@@ -35,8 +35,12 @@ fn attested_production_mark(
     if mark.exchange_timestamp_ms == 0
         || mark.received_at_ms == 0
         || mark.exchange_timestamp_ms
-            > mark.received_at_ms.saturating_add(MAX_STRATEGY_MARK_CLOCK_SKEW_MS)
-        || mark.received_at_ms.saturating_sub(mark.exchange_timestamp_ms)
+            > mark
+                .received_at_ms
+                .saturating_add(MAX_STRATEGY_MARK_CLOCK_SKEW_MS)
+        || mark
+            .received_at_ms
+            .saturating_sub(mark.exchange_timestamp_ms)
             > MAX_STRATEGY_MARK_AGE_MS
         || account_as_of_ms.abs_diff(mark.received_at_ms) > MAX_STRATEGY_MARK_AGE_MS
     {
