@@ -134,6 +134,8 @@ pub struct AccountLedgerReconciliation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalized_run: Option<crate::StrategyFinalization>,
     pub archived_runs_count: usize,
+    /// Immutable archived period hashes and financial totals (maximum 16).
+    pub archived_run_proofs: Vec<crate::ArchivedStrategyProof>,
     pub archived_run_slots_remaining: usize,
     pub source_checkpoint_deferred: bool,
 }
@@ -240,6 +242,7 @@ pub fn reconcile_account_ledger(
     result.financial_period = ledger.financial_period(facts, false);
     result.finalized_run = ledger.finalized_run().cloned();
     result.archived_runs_count = ledger.archived_runs_count();
+    result.archived_run_proofs = ledger.archived_strategy_proofs();
     result.archived_run_slots_remaining =
         crate::MAX_ARCHIVED_STRATEGY_RUNS.saturating_sub(result.archived_runs_count);
     result.strategy_attribution = Some(attribute_strategy_exchange_evidence(
@@ -409,6 +412,7 @@ fn reconcile_exchange_evidence(
         financial_period: None,
         finalized_run: None,
         archived_runs_count: 0,
+        archived_run_proofs: Vec::new(),
         archived_run_slots_remaining: crate::MAX_ARCHIVED_STRATEGY_RUNS,
         source_checkpoint_deferred: false,
     })
