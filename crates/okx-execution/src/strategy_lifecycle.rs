@@ -532,6 +532,12 @@ impl StrategyPeriodHistory {
                         .iter()
                         .find(|r| r.reservation.allocation_id == rearm.next_run_id)
                         .map(|r| &r.reservation)
+                })
+                .or_else(|| {
+                    self.unverified_runs
+                        .iter()
+                        .find(|r| r.reservation.allocation_id == rearm.next_run_id)
+                        .map(|r| &r.reservation)
                 });
             if prior.finalization.checksum_sha256 != rearm.prior_finalization_sha256
                 || prior.finalization.finalized_at_ms < rearm.stopped_at_ms
