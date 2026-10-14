@@ -96,7 +96,7 @@ const explicitRearm = {
 };
 const newRunWithRearm = buildExecutionOperation({...begin,rearm:explicitRearm});
 assert(newRunWithRearm?.type==="begin_strategy_run"
-  && newRunWithRearm.rearm?.expected_stopped_at_ms===1792017080203,
+  && (newRunWithRearm.rearm as {expected_stopped_at_ms:number}|undefined)?.expected_stopped_at_ms===1792017080203,
   "explicit rearm must stay on the same typed opening and never become an untyped RPC");
 for(const rearm of [
   {expected_stopped_at_ms:0,prior_finalization_sha256:"f".repeat(64)},
