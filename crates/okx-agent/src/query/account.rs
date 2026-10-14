@@ -231,6 +231,59 @@ pub(super) async fn dispatch(
                 );
             }
 
+            // OPEN NAV must be valued against the same single Production-
+            // public market as all strategy signals. Demo-private position
+            // marks/UPL are execution evidence only, never market-price proof.
+            // No REST fallback or simulated feed is accepted for open NAV.
+            // Mark reads are inside the existing private WS coherence fence.
+            let mut production_marks = std::collections::BTreeMap::new();
+            let mut mark_instruments_attempted = std::collections::BTreeSet::new();
+            if context
+                .market_fallback
+                .is_some_and(|market| !market.source_is_simulated())
+                && let Some(public_ws) = context.public_ws
+            {
+                let now_ms = super::utc_now_ms();
+                for position in &facts.authoritative_positions {
+                    if !position
+                        .position
+                        .parse::<rust_decimal::Decimal>()
+                        .is_ok_and(|qty| qty != rust_decimal::Decimal::ZERO)
+                        || !mark_instruments_attempted.insert(position.instrument_id.clone())
+                    {
+                        continue;
+                    }
+                    // Bound extra WS queries. Unquoted positions remain
+                    // INCOMPLETE, never silently valued from Demo.
+                    if mark_instruments_attempted.len() > 8 {
+                        break;
+                    }
+                    let inst = &position.instrument_id;
+                    if public_ws.demand_instrument(inst.clone()).await.is_err() {
+                        continue;
+                    }
+                    let quality = public_ws.quality_snapshot(inst, now_ms, 30_000, true).await;
+                    if !quality.is_ok_and(|status| status.quality == MarketReadiness::Fresh) {
+                        continue;
+                    }
+                    if let Ok(live) = public_ws
+                        .fresh_snapshot(inst, now_ms, 30_000, generated_at.to_owned())
+                        .await
+                        && let Ok(exchange_timestamp_ms) =
+                            live.market.mark_price.exchange_timestamp_ms.parse::<u64>()
+                    {
+                        production_marks.insert(
+                            inst.clone(),
+                            okx_execution::ProductionMarkEvidence {
+                                price: live.market.mark_price.price,
+                                exchange_timestamp_ms,
+                                received_at_ms: super::utc_now_ms(),
+                            },
+                        );
+                    }
+                }
+            }
+
             let mut coherence = AccountSummaryCoherence {
                 account_snapshot_source_received_at: assembled.snapshot.source_received_at.clone(),
                 current_account_as_of_ms: facts.summary.current_account_as_of_ms.clone(),
@@ -266,7 +319,11 @@ pub(super) async fn dispatch(
 
             let (reconciliation, managed_execution_intents) = match context.execution {
                 Some(execution) => match execution
-                    .reconcile_account_ledger_with_intents(&facts, coherence.coherent)
+                    .reconcile_account_ledger_with_intents(
+                        &facts,
+                        coherence.coherent,
+                        &production_marks,
+                    )
                     .await
                 {
                     Ok((value, inventory)) => {

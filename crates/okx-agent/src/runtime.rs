@@ -433,7 +433,7 @@ async fn capture_one_native_financial_source(
         return Err("native financial history/account/WS proof incomplete".into());
     }
     let (assessment, _) = execution
-        .reconcile_account_ledger_with_intents(&facts, true)
+        .reconcile_account_ledger_with_intents(&facts, true, &std::collections::BTreeMap::new())
         .await
         .map_err(|error| format!("durable native financial capture: {error}"))?;
     if !assessment.consistent {

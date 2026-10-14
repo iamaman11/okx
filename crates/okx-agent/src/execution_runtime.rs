@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use chrono::{SecondsFormat, Utc};
 use okx_analysis::{PortfolioRiskAnalysis, StrategyNavRiskEvidence, durable_account_stop_reason};
@@ -13,9 +13,9 @@ use okx_execution::{
     ExecutionPlan, ExecutionRiskStop, ExecutionState, ExecutionStatusEnvelope,
     FencedProtectiveShrinkRequest, ManagedExecutionInventory, MutationAuthority,
     MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor, OrderExecutorError,
-    PositionSide, PrepareOutcome, StrategyAllocationOpening, StrategyCapitalReservation,
-    StrategyFinalization, SubmitDisposition, execution_status_with_ledger,
-    managed_execution_inventory, reconcile_account_ledger,
+    PositionSide, PrepareOutcome, ProductionMarkEvidence, StrategyAllocationOpening,
+    StrategyCapitalReservation, StrategyFinalization, SubmitDisposition,
+    execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -189,6 +189,7 @@ impl ExecutionRuntime {
         &self,
         facts: &AccountLedgerFacts,
         coherent: bool,
+        production_marks: &BTreeMap<String, ProductionMarkEvidence>,
     ) -> AgentResult<(AccountLedgerReconciliation, ManagedExecutionInventory)> {
         let mut executor = self.executor.lock().await;
         let mut reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
@@ -205,7 +206,11 @@ impl ExecutionRuntime {
             }
         }
         reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary();
-        reconciliation.financial_period = executor.ledger().financial_period(facts, coherent);
+        reconciliation.financial_period = executor.ledger().financial_period_with_production_marks(
+            facts,
+            coherent,
+            production_marks,
+        );
         Ok((reconciliation, inventory))
     }
 

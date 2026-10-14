@@ -16,6 +16,41 @@ use crate::{
 
 pub const STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1: &str = "okx.strategy-financial-period/v1";
 
+/// Production-public WS mark supplied by the single observation owner.
+/// Demo/private account marks and UPL must NEVER be used as strategy signal NAV.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionMarkEvidence {
+    pub price: String,
+    pub exchange_timestamp_ms: u64,
+    pub received_at_ms: u64,
+}
+
+const MAX_STRATEGY_MARK_AGE_MS: u64 = 30_000;
+const MAX_STRATEGY_MARK_CLOCK_SKEW_MS: u64 = 2_000;
+
+fn attested_production_mark(
+    mark: &ProductionMarkEvidence,
+    account_as_of_ms: u64,
+) -> Option<Decimal> {
+    if mark.exchange_timestamp_ms == 0
+        || mark.received_at_ms == 0
+        || mark.exchange_timestamp_ms
+            > mark
+                .received_at_ms
+                .saturating_add(MAX_STRATEGY_MARK_CLOCK_SKEW_MS)
+        || mark
+            .received_at_ms
+            .saturating_sub(mark.exchange_timestamp_ms)
+            > MAX_STRATEGY_MARK_AGE_MS
+        || account_as_of_ms.abs_diff(mark.received_at_ms) > MAX_STRATEGY_MARK_AGE_MS
+    {
+        return None;
+    }
+    Decimal::from_str(&mark.price)
+        .ok()
+        .filter(|price| *price > Decimal::ZERO)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunOwnedPosition {
     pub instrument_id: String,
@@ -303,12 +338,34 @@ fn source_continuity_attested(sorted_cursor_times: &[u64], run_started_at_ms: u6
     })
 }
 
+/// Conservative default used by settlement/finalization paths. It never
+/// values an OPEN lot from the Demo-private position mark.
 pub fn assess_persisted_financial_period(
     run: &StrategyCapitalReservation,
     evidence: Option<&DurableExchangeEvidence>,
     entries: &[ExecutionLedgerEntry],
     facts: &AccountLedgerFacts,
     coherent: bool,
+) -> StrategyFinancialPeriod {
+    assess_persisted_financial_period_with_production_marks(
+        run,
+        evidence,
+        entries,
+        facts,
+        coherent,
+        &BTreeMap::new(),
+    )
+}
+
+/// Production-public mark input is observation-owned and NOT supplied by
+/// an operator, private Demo account or trade request.
+pub fn assess_persisted_financial_period_with_production_marks(
+    run: &StrategyCapitalReservation,
+    evidence: Option<&DurableExchangeEvidence>,
+    entries: &[ExecutionLedgerEntry],
+    facts: &AccountLedgerFacts,
+    coherent: bool,
+    production_marks: &BTreeMap<String, ProductionMarkEvidence>,
 ) -> StrategyFinancialPeriod {
     let mut reasons = BTreeSet::new();
     let mut realized = Decimal::ZERO;
@@ -633,13 +690,15 @@ pub fn assess_persisted_financial_period(
         if matches.len() == 1
             && Decimal::from_str(&matches[0].position).is_ok_and(|v| v.abs() == qty)
         {
-            let position = matches[0];
-            if let Some(px) = position
-                .mark_price
-                .as_deref()
-                .and_then(|p| Decimal::from_str(p).ok())
-                .filter(|p| *p > Decimal::ZERO)
-            {
+            // The private OKX position belongs to the selected execution
+            // venue (Demo here). Only its exact identity and contract size
+            // attest lot ownership. Its mark and reported UPL are *not* the
+            // Production-public market's valuation of this position.
+            if let Some(px) = current_as_of.and_then(|as_of| {
+                production_marks
+                    .get(inst)
+                    .and_then(|quote| attested_production_mark(quote, as_of))
+            }) {
                 let computed = book
                     .iter()
                     .map(|l| {
@@ -653,20 +712,11 @@ pub fn assess_persisted_financial_period(
                             }
                     })
                     .sum::<Decimal>();
-                if position
-                    .unrealized_pnl
-                    .as_deref()
-                    .and_then(|v| Decimal::from_str(v).ok())
-                    .is_some_and(|reported| (reported - computed).abs() <= Decimal::new(1, 6))
-                {
-                    unrealized += computed;
-                    mark = Some(px.normalize().to_string());
-                    upl = Some(computed.normalize().to_string());
-                } else {
-                    reasons.insert("native_mark_or_contract_math_mismatch");
-                }
+                unrealized += computed;
+                mark = Some(px.normalize().to_string());
+                upl = Some(computed.normalize().to_string());
             } else {
-                reasons.insert("mark_price_unavailable");
+                reasons.insert("production_public_mark_unattested");
             }
         } else {
             reasons.insert("run_position_not_exclusive_on_exchange");
@@ -758,6 +808,38 @@ fn incomplete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_fresh_production_public_mark_can_value_owned_lots() {
+        let mark = ProductionMarkEvidence {
+            price: "83636.8".to_owned(),
+            exchange_timestamp_ms: 100_000,
+            received_at_ms: 100_200,
+        };
+        assert_eq!(
+            attested_production_mark(&mark, 100_300),
+            Some(Decimal::new(836368, 1))
+        );
+        let mut bad = mark.clone();
+        bad.price = "0".to_owned();
+        assert_eq!(attested_production_mark(&bad, 100_300), None);
+        bad = mark.clone();
+        bad.exchange_timestamp_ms = 101_500;
+        // Native exchange time may be marginally ahead of the host UTC clock.
+        assert_eq!(
+            attested_production_mark(&bad, 100_300),
+            Some(Decimal::new(836368, 1))
+        );
+        bad.exchange_timestamp_ms = 130_000;
+        assert_eq!(attested_production_mark(&bad, 100_300), None);
+        bad = mark.clone();
+        bad.received_at_ms = 160_201;
+        assert_eq!(attested_production_mark(&bad, 100_300), None);
+        bad = mark.clone();
+        bad.exchange_timestamp_ms = 50_000;
+        assert_eq!(attested_production_mark(&bad, 100_300), None);
+        assert_eq!(attested_production_mark(&mark, 130_201), None);
+    }
 
     #[test]
     fn missing_two_hour_venue_window_stays_incomplete_after_restart() {
