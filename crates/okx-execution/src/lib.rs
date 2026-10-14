@@ -59,8 +59,9 @@ pub use state::{
     ReverseContinuation, ReverseExecutionLink, ReverseLeg, require_live_trading_enabled,
 };
 pub use strategy_finance::{
-    RunOwnedPosition, STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1, StrategyFinancialPeriod,
-    assess_persisted_financial_period,
+    ProductionMarkEvidence, RunOwnedPosition, STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+    StrategyFinancialPeriod, assess_persisted_financial_period,
+    assess_persisted_financial_period_with_production_marks,
 };
 pub use strategy_lifecycle::{
     ARCHIVED_STRATEGY_PROOF_SCHEMA_V1, ArchivedStrategyProof, ArchivedStrategyRun,
