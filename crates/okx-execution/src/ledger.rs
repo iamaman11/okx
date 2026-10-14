@@ -3427,41 +3427,68 @@ mod tests {
             prior_finalization_sha256: finalization.checksum_sha256.clone(),
         };
         let before = fs::read(store.path()).unwrap();
-        assert!(ledger.reserve_strategy_capital(next.clone(), &opening, next_at + 1).is_err());
+        assert!(
+            ledger
+                .reserve_strategy_capital(next.clone(), &opening, next_at + 1)
+                .is_err()
+        );
         let mut wrong = rearm.clone();
         wrong.prior_finalization_sha256 = "b".repeat(64);
-        assert!(ledger.reserve_strategy_capital_with_rearm(
-            next.clone(), &opening, Some(&wrong), next_at + 1,
-        ).is_err());
+        assert!(
+            ledger
+                .reserve_strategy_capital_with_rearm(
+                    next.clone(),
+                    &opening,
+                    Some(&wrong),
+                    next_at + 1,
+                )
+                .is_err()
+        );
         let mut same_day = next.clone();
         same_day.started_at_ms = 2001;
         let mut same_open = opening.clone();
         same_open.observed_at_ms = same_day.started_at_ms;
-        assert!(ledger.reserve_strategy_capital_with_rearm(
-            same_day, &same_open, Some(&rearm), 2002,
-        ).is_err());
-        assert_eq!(fs::read(store.path()).unwrap(), before, "rejections cannot rewrite STOP");
-        ledger.reserve_strategy_capital_with_rearm(
-            next.clone(), &opening, Some(&rearm), next_at + 1,
-        ).unwrap();
+        assert!(
+            ledger
+                .reserve_strategy_capital_with_rearm(same_day, &same_open, Some(&rearm), 2002,)
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(store.path()).unwrap(),
+            before,
+            "rejections cannot rewrite STOP"
+        );
+        ledger
+            .reserve_strategy_capital_with_rearm(next.clone(), &opening, Some(&rearm), next_at + 1)
+            .unwrap();
         assert!(ledger.risk_stop().is_none());
         assert_eq!(ledger.strategy_periods.stop_rearms.len(), 1);
-        assert_eq!(ledger.strategy_periods.stop_rearms[0].stop_reason, stop.reason);
+        assert_eq!(
+            ledger.strategy_periods.stop_rearms[0].stop_reason,
+            stop.reason
+        );
         let reopened = DurableExecutionLedger::open(store.clone(), next_at + 2).unwrap();
         assert!(reopened.risk_stop().is_none());
         assert_eq!(reopened.strategy_periods.stop_rearms.len(), 1);
         assert_eq!(reopened.archived_runs_count(), 1);
-        assert_eq!(reopened.archived_strategy_proofs()[0].finalization_sha256,
-                   finalization.checksum_sha256);
-        assert_eq!(reopened.leverage_change_attempt(&attempt.mutation_id), Some(&attempt));
+        assert_eq!(
+            reopened.archived_strategy_proofs()[0].finalization_sha256,
+            finalization.checksum_sha256
+        );
+        assert_eq!(
+            reopened.leverage_change_attempt(&attempt.mutation_id),
+            Some(&attempt)
+        );
         assert_eq!(reopened.capital_reservation(), Some(&next));
         let mut tampered: serde_json::Value =
             serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-        tampered["strategy_periods"]["stop_rearms"][0]["prior_finalization_sha256"]
-            = serde_json::json!("c".repeat(64));
+        tampered["strategy_periods"]["stop_rearms"][0]["prior_finalization_sha256"] =
+            serde_json::json!("c".repeat(64));
         fs::write(store.path(), serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
-        assert!(DurableExecutionLedger::open(store.clone(), next_at + 3).is_err(),
-                "tampering with archived STOP must fail closed");
+        assert!(
+            DurableExecutionLedger::open(store.clone(), next_at + 3).is_err(),
+            "tampering with archived STOP must fail closed"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
