@@ -1520,10 +1520,16 @@ mod tests {
         )
         .expect("read-only owner");
         assert!(
-            ro.begin_strategy_run_demo_authorized(&credential, reservation.clone(), &opening, 102, None)
-                .await
-                .expect("read-only refused")
-                .is_none()
+            ro.begin_strategy_run_demo_authorized(
+                &credential,
+                reservation.clone(),
+                &opening,
+                102,
+                None
+            )
+            .await
+            .expect("read-only refused")
+            .is_none()
         );
         assert!(
             ro.executor
