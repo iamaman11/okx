@@ -392,6 +392,7 @@ pub(crate) async fn dispatch(
         | AgentOperation::BeginStrategyRun { .. }
         | AgentOperation::FinalizeStrategyRun { .. }
         | AgentOperation::QuarantineUnverifiedStrategyRun { .. }
+        | AgentOperation::SetDemoLeverage { .. }
         | AgentOperation::PrepareExecution { .. }
         | AgentOperation::SubmitPreparedExecution { .. }
         | AgentOperation::MutateExecution { .. }
