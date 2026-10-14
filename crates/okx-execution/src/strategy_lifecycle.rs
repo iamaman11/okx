@@ -376,7 +376,7 @@ impl StrategyStopRearm {
             || self.stopped_at_ms == 0
             || self.next_run_started_at_ms / 86_400_000 <= self.stopped_at_ms / 86_400_000
             || !matches!(self.stop_reason.as_str(),
-                "STRATEGY_MAX_DRAWDOWN" | "STRATEGY_DAILY_LOSS_LIMIT" | "STRATEGY_NAV_DEPLETED")
+                "STRATEGY_MAX_DRAWDOWN" | "STRATEGY_UTC_DAILY_GROSS_LOSS" | "STRATEGY_NAV_DEPLETED")
             || self.stopped_run_id.is_empty() || self.next_run_id.is_empty()
             || self.stopped_run_id == self.next_run_id || self.account_uid.is_empty()
             || !self.operator_authority_id.starts_with("sha256:")
