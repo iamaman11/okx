@@ -582,10 +582,10 @@ async fn inspect_tier_a(
         instrument_id: instrument.to_owned(),
         bar: Some(bar.to_owned()),
         range: range.clone(),
-        parameters: BTreeMap::from([
+        parameters: market.attest_source_parameters(BTreeMap::from([
             ("limit".to_owned(), candle_limit.to_string()),
             ("selection".to_owned(), "latest_page".to_owned()),
-        ]),
+        ])),
     };
     let candle_chunk = match build_candle_chunk(
         candle_source,
@@ -621,13 +621,13 @@ async fn inspect_tier_a(
         instrument_id: instrument.to_owned(),
         bar: None,
         range: range.clone(),
-        parameters: BTreeMap::from([
+        parameters: market.attest_source_parameters(BTreeMap::from([
             ("limit".to_owned(), funding_limit.to_string()),
             (
                 "selection".to_owned(),
                 "events_within_candle_range".to_owned(),
             ),
-        ]),
+        ])),
     };
     let funding_chunk = match build_funding_chunk(
         funding_source,
@@ -678,7 +678,7 @@ async fn inspect_tier_a(
             reference_through_ms.to_string(),
         )
         .expect("one millisecond reference capture range"),
-        parameters: BTreeMap::from([("semantics".to_owned(), "current_snapshot_only".to_owned())]),
+        parameters: market.attest_source_parameters(BTreeMap::from([("semantics".to_owned(), "current_snapshot_only".to_owned())])),
     };
     let (reference_chunk, reference_window) = match build_reference_chunk(
         reference_source,
@@ -1085,11 +1085,11 @@ async fn inspect_tier_b(
         instrument_id: instrument.to_owned(),
         bar: None,
         range: range.clone(),
-        parameters: BTreeMap::from([
+        parameters: market.attest_source_parameters(BTreeMap::from([
             ("limit".to_owned(), trade_limit.to_string()),
             ("pagination".to_owned(), "trade_id".to_owned()),
             ("type".to_owned(), "1".to_owned()),
-        ]),
+        ])),
     };
     let chunk = match build_tier_b_trade_chunk(
         source,
