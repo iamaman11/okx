@@ -386,6 +386,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V9
                     | EXECUTION_LEDGER_SCHEMA_V10
                     | EXECUTION_LEDGER_SCHEMA_V11
+                    | EXECUTION_LEDGER_SCHEMA_V12
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "risk stop on legacy ledger schema",
@@ -401,6 +402,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V9
                     | EXECUTION_LEDGER_SCHEMA_V10
                     | EXECUTION_LEDGER_SCHEMA_V11
+                    | EXECUTION_LEDGER_SCHEMA_V12
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -417,6 +419,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V9
                     | EXECUTION_LEDGER_SCHEMA_V10
                     | EXECUTION_LEDGER_SCHEMA_V11
+                    | EXECUTION_LEDGER_SCHEMA_V12
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "exchange evidence on legacy schema",
@@ -432,7 +435,7 @@ impl ExecutionLedgerStore {
         }
         if !matches!(
             file.schema.as_str(),
-            EXECUTION_LEDGER_SCHEMA_V9 | EXECUTION_LEDGER_SCHEMA_V10 | EXECUTION_LEDGER_SCHEMA_V11
+            EXECUTION_LEDGER_SCHEMA_V9 | EXECUTION_LEDGER_SCHEMA_V10 | EXECUTION_LEDGER_SCHEMA_V11 | EXECUTION_LEDGER_SCHEMA_V12 | EXECUTION_LEDGER_SCHEMA_V12
         ) && file.strategy_periods != StrategyPeriodHistory::default()
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -451,7 +454,7 @@ impl ExecutionLedgerStore {
         }
         if (file.strategy_periods.unverified_run.is_some()
             || !file.strategy_periods.unverified_runs.is_empty())
-            && file.schema != EXECUTION_LEDGER_SCHEMA_V11
+            && !matches!(file.schema.as_str(), EXECUTION_LEDGER_SCHEMA_V11 | EXECUTION_LEDGER_SCHEMA_V12)
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "unverified closure requires ledger schema v11",
@@ -4220,7 +4223,7 @@ mod tests {
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V11);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V12);
 
             let _ = fs::remove_dir_all(root);
         }
