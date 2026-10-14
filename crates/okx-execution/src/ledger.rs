@@ -41,6 +41,9 @@ pub const EXECUTION_LEDGER_SCHEMA_V8: &str = "okx.execution-ledger/v8";
 pub const EXECUTION_LEDGER_SCHEMA_V9: &str = "okx.execution-ledger/v9";
 pub const EXECUTION_LEDGER_SCHEMA_V10: &str = "okx.execution-ledger/v10";
 pub const EXECUTION_LEDGER_SCHEMA_V11: &str = "okx.execution-ledger/v11";
+pub const EXECUTION_LEDGER_SCHEMA_V12: &str = "okx.execution-ledger/v12";
+pub const LEVERAGE_ATTEMPT_SCHEMA_V1: &str = "okx.leverage-change-attempt/v1";
+const MAX_LEVERAGE_ATTEMPTS: usize = 256;
 pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1: &str = "okx.strategy-capital-reservation/v1";
 pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
@@ -229,6 +232,61 @@ fn validate_capital_reservation(
     Ok(())
 }
 
+/// Persisted BEFORE the only permitted exchange POST. PENDING is deliberately
+/// unreplayable across an ACK loss, crash or ChatGPT transport retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeverageAttemptState {
+    Pending,
+    Verified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeverageChangeAttempt {
+    pub schema: String,
+    pub mutation_id: String,
+    pub account_uid_fingerprint: String,
+    pub instrument: String,
+    pub requested_leverage: String,
+    pub previous_leverage: String,
+    pub state: LeverageAttemptState,
+    pub started_at_ms: u64,
+}
+
+fn validate_leverage_attempts(
+    attempts: &[LeverageChangeAttempt],
+    capital_reservation: Option<&StrategyCapitalReservation>,
+) -> Result<(), ExecutionLedgerError> {
+    if attempts.len() > MAX_LEVERAGE_ATTEMPTS {
+        return Err(ExecutionLedgerError::Corrupt("leverage journal capacity"));
+    }
+    let mut seen = BTreeSet::new();
+    let mut pending = BTreeSet::new();
+    for attempt in attempts {
+        let prior = Decimal::from_str(&attempt.previous_leverage).ok();
+        let target = Decimal::from_str(&attempt.requested_leverage).ok();
+        if attempt.schema != LEVERAGE_ATTEMPT_SCHEMA_V1
+            || !valid_mutation_id(&attempt.mutation_id)
+            || attempt.account_uid_fingerprint.is_empty()
+            || !attempt.instrument.ends_with("-USDT-SWAP")
+            || attempt.started_at_ms == 0
+            || prior.is_none_or(|v| v <= Decimal::ZERO)
+            || target.is_none_or(|v| v <= Decimal::ZERO)
+            || target.zip(prior).is_none_or(|(t, p)| t >= p)
+            || !seen.insert(attempt.mutation_id.as_str())
+            || (attempt.state == LeverageAttemptState::Pending
+                && !pending.insert(attempt.instrument.as_str()))
+            || capital_reservation.is_some_and(|r| {
+                r.account_uid_fingerprint != attempt.account_uid_fingerprint
+            })
+        {
+            return Err(ExecutionLedgerError::Corrupt("invalid leverage change journal"));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecutionLedgerFile {
@@ -242,6 +300,8 @@ struct ExecutionLedgerFile {
     exchange_evidence: Option<DurableExchangeEvidence>,
     #[serde(default)]
     strategy_periods: StrategyPeriodHistory,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    leverage_attempts: Vec<LeverageChangeAttempt>,
 }
 
 type LoadedExecutionLedger = (
@@ -250,6 +310,7 @@ type LoadedExecutionLedger = (
     Option<StrategyCapitalReservation>,
     Option<DurableExchangeEvidence>,
     StrategyPeriodHistory,
+    Vec<LeverageChangeAttempt>,
 );
 
 #[derive(Debug, Clone)]
@@ -293,6 +354,7 @@ impl ExecutionLedgerStore {
                 None,
                 None,
                 StrategyPeriodHistory::default(),
+                Vec::new(),
             ));
         }
 
@@ -311,6 +373,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V9
                 | EXECUTION_LEDGER_SCHEMA_V10
                 | EXECUTION_LEDGER_SCHEMA_V11
+                | EXECUTION_LEDGER_SCHEMA_V12
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
@@ -398,6 +461,12 @@ impl ExecutionLedgerStore {
             file.capital_reservation.as_ref(),
             file.exchange_evidence.as_ref(),
         )?;
+        if !file.leverage_attempts.is_empty() && file.schema != EXECUTION_LEDGER_SCHEMA_V12 {
+            return Err(ExecutionLedgerError::Corrupt(
+                "leverage journal requires ledger schema v12",
+            ));
+        }
+        validate_leverage_attempts(&file.leverage_attempts, file.capital_reservation.as_ref())?;
         if file.records.len() > self.max_records {
             return Err(ExecutionLedgerError::Corrupt(
                 "record count exceeds capacity",
@@ -435,6 +504,7 @@ impl ExecutionLedgerStore {
             file.capital_reservation,
             file.exchange_evidence,
             file.strategy_periods,
+            file.leverage_attempts,
         ))
     }
 
@@ -445,6 +515,7 @@ impl ExecutionLedgerStore {
         capital_reservation: Option<&StrategyCapitalReservation>,
         exchange_evidence: Option<&DurableExchangeEvidence>,
         history: &StrategyPeriodHistory,
+        leverage_attempts: &[LeverageChangeAttempt],
     ) -> Result<(), ExecutionLedgerError> {
         if entries.len() > self.max_records {
             return Err(ExecutionLedgerError::CapacityExceeded(self.max_records));
@@ -493,6 +564,7 @@ impl ExecutionLedgerStore {
             }
         }
         history.validate(capital_reservation, exchange_evidence)?;
+        validate_leverage_attempts(leverage_attempts, capital_reservation)?;
         let parent = self
             .path
             .parent()
@@ -500,12 +572,13 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V11.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V12.to_owned(),
             records: entries.values().cloned().collect(),
             risk_stop: risk_stop.cloned(),
             capital_reservation: capital_reservation.cloned(),
             exchange_evidence: exchange_evidence.cloned(),
             strategy_periods: history.clone(),
+            leverage_attempts: leverage_attempts.to_vec(),
         })?;
         if payload.len() > 128 * 1024 * 1024 {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
@@ -530,6 +603,7 @@ pub struct DurableExecutionLedger {
     capital_reservation: Option<StrategyCapitalReservation>,
     exchange_evidence: Option<DurableExchangeEvidence>,
     strategy_periods: StrategyPeriodHistory,
+    leverage_attempts: Vec<LeverageChangeAttempt>,
 }
 
 impl DurableExecutionLedger {
@@ -542,7 +616,7 @@ impl DurableExecutionLedger {
         observed_at_ms: u64,
     ) -> Result<Self, ExecutionLedgerError> {
         require_timestamp(observed_at_ms)?;
-        let (mut entries, risk_stop, capital_reservation, exchange_evidence, strategy_periods) =
+        let (mut entries, risk_stop, capital_reservation, exchange_evidence, strategy_periods, leverage_attempts) =
             store.load()?;
         let mut recovered = false;
 
@@ -565,6 +639,7 @@ impl DurableExecutionLedger {
                 capital_reservation.as_ref(),
                 exchange_evidence.as_ref(),
                 &strategy_periods,
+                &leverage_attempts,
             )?;
         }
 
@@ -575,6 +650,7 @@ impl DurableExecutionLedger {
             capital_reservation,
             exchange_evidence,
             strategy_periods,
+            leverage_attempts,
         })
     }
 
@@ -604,6 +680,8 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &self.strategy_periods,
+
+            &self.leverage_attempts,
         )?;
         self.risk_stop = Some(stop.clone());
         Ok(stop)
@@ -661,6 +739,8 @@ impl DurableExecutionLedger {
                 self.capital_reservation.as_ref(),
                 Some(&next),
                 &self.strategy_periods,
+
+                &self.leverage_attempts,
             )?;
             self.exchange_evidence = Some(next);
         }
@@ -901,6 +981,8 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &next,
+
+            &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
         if let Some(stop) = new_stop {
@@ -1006,6 +1088,8 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &next,
+
+            &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
         Ok(closed)
@@ -1090,6 +1174,8 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &next,
+
+            &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
         Ok(closed)
@@ -1107,6 +1193,85 @@ impl DurableExecutionLedger {
 
     pub fn capital_reservation(&self) -> Option<&StrategyCapitalReservation> {
         self.capital_reservation.as_ref()
+    }
+
+    pub fn leverage_change_attempt(&self, mutation_id: &str) -> Option<&LeverageChangeAttempt> {
+        self.leverage_attempts.iter().find(|a| a.mutation_id == mutation_id)
+    }
+
+    /// Atomic PRE-POST fence; if the caller crashes afterward, PENDING remains
+    /// on disk. Re-executing this mutation ID can only read/reconcile, never POST.
+    pub fn begin_leverage_change(
+        &mut self,
+        mutation_id: &str,
+        instrument: &str,
+        requested: &str,
+        previous: &str,
+        account_uid: &str,
+        observed_at_ms: u64,
+    ) -> Result<LeverageChangeAttempt, ExecutionLedgerError> {
+        require_timestamp(observed_at_ms)?;
+        if self.leverage_attempts.len() >= MAX_LEVERAGE_ATTEMPTS {
+            return Err(ExecutionLedgerError::CapacityExceeded(MAX_LEVERAGE_ATTEMPTS));
+        }
+        if self.leverage_attempts.iter().any(|a| {
+            a.mutation_id == mutation_id
+                || (a.instrument == instrument && a.state == LeverageAttemptState::Pending)
+        }) {
+            return Err(ExecutionLedgerError::IntentConflict);
+        }
+        if self.capital_reservation.as_ref().is_none_or(|r| {
+            r.account_uid_fingerprint != account_uid
+        }) {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        let attempt = LeverageChangeAttempt {
+            schema: LEVERAGE_ATTEMPT_SCHEMA_V1.to_owned(),
+            mutation_id: mutation_id.to_owned(),
+            account_uid_fingerprint: account_uid.to_owned(),
+            instrument: instrument.to_owned(),
+            requested_leverage: requested.to_owned(),
+            previous_leverage: previous.to_owned(),
+            state: LeverageAttemptState::Pending,
+            started_at_ms: observed_at_ms,
+        };
+        let mut next = self.leverage_attempts.clone();
+        next.push(attempt.clone());
+        self.store.save(
+            &self.entries,
+            self.risk_stop.as_ref(),
+            self.capital_reservation.as_ref(),
+            self.exchange_evidence.as_ref(),
+            &self.strategy_periods,
+            &next,
+        )?;
+        self.leverage_attempts = next;
+        Ok(attempt)
+    }
+
+    /// Only an independently observed native exchange readback may close the
+    /// pending entry. This is a ledger mutation, NEVER an exchange POST.
+    pub fn verify_leverage_change(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<LeverageChangeAttempt, ExecutionLedgerError> {
+        let mut next = self.leverage_attempts.clone();
+        let entry = next
+            .iter_mut()
+            .find(|a| a.mutation_id == mutation_id)
+            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(mutation_id.to_owned()))?;
+        entry.state = LeverageAttemptState::Verified;
+        let result = entry.clone();
+        self.store.save(
+            &self.entries,
+            self.risk_stop.as_ref(),
+            self.capital_reservation.as_ref(),
+            self.exchange_evidence.as_ref(),
+            &self.strategy_periods,
+            &next,
+        )?;
+        self.leverage_attempts = next;
+        Ok(result)
     }
 
     /// Atomic, non-resettable reservation in the single execution ledger.
@@ -1195,6 +1360,8 @@ impl DurableExecutionLedger {
             Some(&reservation),
             None,
             &next,
+
+            &self.leverage_attempts,
         )?;
         self.strategy_periods = next;
         self.exchange_evidence = None;
@@ -1944,6 +2111,8 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &self.strategy_periods,
+
+            &self.leverage_attempts,
         ) {
             self.entries.remove(&intent_id);
             return Err(error);
@@ -1984,6 +2153,8 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
             &self.strategy_periods,
+
+            &self.leverage_attempts,
         ) {
             self.entries.insert(intent_id.to_owned(), original);
             return Err(error);
