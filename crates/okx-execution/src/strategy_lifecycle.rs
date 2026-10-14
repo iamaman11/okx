@@ -434,6 +434,49 @@ mod tests {
     }
 
     #[test]
+    fn nav_checkpoint_allows_terminal_negative_nav_and_utc_day_loss_reset() {
+        let mut run = reservation();
+        run.started_at_ms = 86_390_000;
+        let mut source = attested_source(&run);
+        let original = source.cursors.remove("source:1").unwrap();
+        let mut day_one = original.clone();
+        day_one.account_as_of_ms = 86_390_000;
+        source.cursors.insert("day:one".to_owned(), day_one);
+        let mut day_two = original;
+        day_two.account_as_of_ms = 86_400_100;
+        source.cursors.insert("day:two".to_owned(), day_two);
+        seal_source_for_test(&mut source);
+        source.validate().unwrap();
+
+        let mut first = nav_point(&run, &source, 86_399_900, "95", "100", "");
+        first.daily_gross_loss_usdt = "5".to_owned();
+        first.checksum_sha256 = first.hash().unwrap();
+        let mut second =
+            nav_point(&run, &source, 86_400_500, "-1", "100", &first.checksum_sha256);
+        second.daily_gross_loss_usdt = "0".to_owned();
+        second.checksum_sha256 = second.hash().unwrap();
+        let history = StrategyPeriodHistory {
+            nav_points: vec![first, second],
+            ..StrategyPeriodHistory::default()
+        };
+        history.validate(Some(&run), Some(&source)).unwrap();
+        assert_eq!(history.nav_points[1].utc_day_start_ms, 86_400_000);
+        assert_ne!(
+            history.nav_points[0].source_cursor_sha256,
+            history.nav_points[1].source_cursor_sha256,
+        );
+        let mut bad = history.clone();
+        bad.nav_points[1].account_as_of_ms = 86_399_700;
+        bad.nav_points[1].checksum_sha256 = bad.nav_points[1].hash().unwrap();
+        assert!(bad.validate(Some(&run), Some(&source)).is_err());
+
+        let mut missing_source = source.clone();
+        missing_source.cursors.remove("day:one");
+        seal_source_for_test(&mut missing_source);
+        assert!(history.validate(Some(&run), Some(&missing_source)).is_err());
+    }
+
+    #[test]
     fn nav_high_water_chain_is_durable_bounded_and_fails_closed_on_tampering() {
         let run = reservation();
         let source = attested_source(&run);
