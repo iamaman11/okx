@@ -652,6 +652,16 @@ impl DurableExecutionLedger {
         self.strategy_periods.archived_runs.len()
     }
 
+    /// Exact immutable per-period NAV and checksum, without raw private
+    /// exchange events. Every record is validated at ledger open/save.
+    pub fn archived_strategy_proofs(&self) -> Vec<crate::ArchivedStrategyProof> {
+        self.strategy_periods
+            .archived_runs
+            .iter()
+            .map(crate::ArchivedStrategyRun::proof)
+            .collect()
+    }
+
     /// Explicit immutable close: protectiveness/WS/account coherence must
     /// already have been proved independently by the caller.
     pub fn finalize_strategy_run(
