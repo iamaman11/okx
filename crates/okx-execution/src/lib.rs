@@ -29,8 +29,9 @@ pub use ledger::{
     EXECUTION_LEDGER_SCHEMA_V3, EXECUTION_LEDGER_SCHEMA_V4, EXECUTION_LEDGER_SCHEMA_V5,
     EXECUTION_LEDGER_SCHEMA_V6, EXECUTION_LEDGER_SCHEMA_V7, EXECUTION_LEDGER_SCHEMA_V8,
     EXECUTION_LEDGER_SCHEMA_V9, EXECUTION_LEDGER_SCHEMA_V10, EXECUTION_LEDGER_SCHEMA_V11,
-    EXECUTION_RISK_STOP_SCHEMA_V1, ExecutionLedgerEntry, ExecutionLedgerError,
-    ExecutionLedgerStore, ExecutionRiskStop, MAX_EXECUTION_LEDGER_RECORDS,
+    EXECUTION_LEDGER_SCHEMA_V12, EXECUTION_RISK_STOP_SCHEMA_V1, ExecutionLedgerEntry,
+    ExecutionLedgerError, ExecutionLedgerStore, ExecutionRiskStop, LEVERAGE_ATTEMPT_SCHEMA_V1,
+    LeverageAttemptState, LeverageChangeAttempt, MAX_EXECUTION_LEDGER_RECORDS,
     MutationPrepareDisposition, PrepareDisposition, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
     StrategyAllocationOpening, StrategyCapitalReservation,
 };

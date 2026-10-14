@@ -90,6 +90,20 @@ for (const invalid of [
   assert(buildExecutionOperation(invalid)===null,
     "malformed run must fail before runtime admission");
 }
+assert(buildExecutionOperation({
+  action:"set_leverage",intent_id:"stage5a_leverage_20261014",instrument:"BTC-USDT-SWAP",
+  trade_mode:"cross",leverage:"2",
+})?.type==="set_leverage", "typed leverage reduction lives in existing write surface");
+for (const invalid of [
+  {trade_mode:"isolated",leverage:"2",instrument:"BTC-USDT-SWAP"},
+  {trade_mode:"cross",leverage:"-2",instrument:"BTC-USDT-SWAP"},
+  {trade_mode:"cross",leverage:"2",instrument:"BTC-USD-SWAP"},
+]) {
+  assert(buildExecutionOperation({action:"set_leverage",intent_id:"stage5a_leverage_20261014",...invalid})===null,
+    "unsafe leverage wire shape rejected");
+}
+assert(isExecutionMutation("set_leverage"),"leverage POST must require Demo profile");
+assert(!executionProfilePermitsOperation("production","set_leverage"),"Production leverage always read-only");
 assert(isExecutionMutation("begin_strategy_run"),"capital mutation requires Demo-only owner");
 assert(!executionProfilePermitsOperation("production","begin_strategy_run"),"Production cannot allocate Demo strategy capital");
 assert(buildExecutionOperation(uidAction("finalize_strategy_run"))?.type==="finalize_strategy_run",
@@ -148,7 +162,7 @@ for(const x of [
   // malformed or foreign fields before sending a corresponding native request.
   if(result!==null)throw Error("malformed execution action reached runtime: "+JSON.stringify(x));
 }
-for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution","abandon_prepared_execution","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run"]) {
+for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution","abandon_prepared_execution","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage"]) {
   assert(isExecutionMutation(op), "all trading writes classify as uncertain on lost ACK");
   assert(executionProfilePermitsOperation("demo_acceptance",op), "verified Demo write allowed");
   for (const profile of ["production","unverified","",undefined]) {
@@ -159,12 +173,13 @@ assert(executionProfilePermitsOperation("production","account_summary"),"read is
 assert(!isExecutionMutation("account_summary"),"read must not be misclassified as exchange mutation");
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
 const advertisedActions = (EXECUTION_TOOLS[1] as any).inputSchema.properties.action.enum as string[];
-assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-14.1",
+assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-14.2",
   "typed action schema changed; the advertised MCP contract version must advance");
 assert(advertisedActions.includes("quarantine_unverified_strategy_run"),
   "UNVERIFIED must be distinct from financial FINALIZED");
 assert(advertisedActions.includes("finalize_strategy_run"),
   "finalization must be advertised via existing Demo-only typed operation");
+assert(advertisedActions.includes("set_leverage"),"native leverage lowering is exposed via same typed action");
 assert(advertisedActions.includes("begin_strategy_run"),"native capital opening is typed and Demo only");
 assert(advertisedActions.includes("abandon_prepared"),"advertised writable action list must include the typed unsent PREPARED release");
 assert(advertisedActions.includes("confirm_protection_size"),"existing tool schema advertises exact-ID safe local confirmation");

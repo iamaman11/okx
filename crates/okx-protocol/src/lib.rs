@@ -975,6 +975,13 @@ pub enum AgentOperation {
     QuarantineUnverifiedStrategyRun {
         allocation_id: String,
     },
+    /// Account leverage configuration: capability is venue-neutral; mutation policy is profile-gated.
+    SetLeverage {
+        mutation_id: String,
+        instrument: String,
+        margin_mode: TradingMarginMode,
+        leverage: String,
+    },
     PrepareExecution {
         intent_id: String,
         instrument: String,
@@ -1051,6 +1058,7 @@ impl AgentOperation {
         matches!(
             self,
             Self::BeginStrategyRun { .. }
+                | Self::SetLeverage { .. }
                 | Self::FinalizeStrategyRun { .. }
                 | Self::QuarantineUnverifiedStrategyRun { .. }
                 | Self::PrepareExecution { .. }
@@ -1065,6 +1073,7 @@ impl AgentOperation {
         !matches!(
             self,
             Self::BeginStrategyRun { .. }
+                | Self::SetLeverage { .. }
                 | Self::FinalizeStrategyRun { .. }
                 | Self::QuarantineUnverifiedStrategyRun { .. }
                 | Self::PrepareExecution { .. }
@@ -1201,6 +1210,21 @@ impl AgentOperation {
                 Ok(())
             }
             Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
+            Self::SetLeverage {
+                mutation_id,
+                instrument,
+                margin_mode,
+                leverage,
+            } => {
+                validate_mutation_id(mutation_id)?;
+                validate_instrument(instrument)?;
+                if *margin_mode != TradingMarginMode::Cross {
+                    return Err(ProtocolError::InvalidAnalyticalQuery(
+                        "Demo leverage lowering supports cross only",
+                    ));
+                }
+                validate_positive_decimal_text(leverage, "leverage")
+            }
             Self::BeginStrategyRun {
                 allocation_id,
                 origin_schema,
