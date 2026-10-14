@@ -181,7 +181,16 @@ pub(super) async fn dispatch(
             margin_mode,
             leverage,
         } => {
-            set_demo_leverage(request, context, generated_at, mutation_id, instrument, *margin_mode, leverage).await
+            set_demo_leverage(
+                request,
+                context,
+                generated_at,
+                mutation_id,
+                instrument,
+                *margin_mode,
+                leverage,
+            )
+            .await
         }
         AgentOperation::PrepareExecution {
             intent_id,
@@ -464,78 +473,140 @@ async fn set_demo_leverage(
     margin_mode: okx_protocol::TradingMarginMode,
     leverage: &str,
 ) -> AgentResult<AgentResponse> {
-    let deny = |code: &str, reason: &str| failure_response(
-        request, generated_at, AgentResponseStatus::Rejected,
-        code, reason.to_owned(), false,
-    );
-    if margin_mode != okx_protocol::TradingMarginMode::Cross
-        || !instrument.ends_with("-USDT-SWAP")
+    let deny = |code: &str, reason: &str| {
+        failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            code,
+            reason.to_owned(),
+            false,
+        )
+    };
+    if margin_mode != okx_protocol::TradingMarginMode::Cross || !instrument.ends_with("-USDT-SWAP")
     {
-        return Ok(deny(EXECUTION_MUTATION_UNSAFE_CODE,
-            "only Cross USDT-settled SWAP leverage reductions are supported"));
+        return Ok(deny(
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            "only Cross USDT-settled SWAP leverage reductions are supported",
+        ));
     }
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
     if !execution.demo_mutation_acceptance_requested() {
-        return Ok(deny(LIVE_TRADING_DISABLED_CODE, "Production leverage mutation is disabled"));
+        return Ok(deny(
+            LIVE_TRADING_DISABLED_CODE,
+            "Production leverage mutation is disabled",
+        ));
     }
     let snapshot = match fresh_account(request, context, generated_at).await? {
         FreshAccount::Ready(value) => value,
         FreshAccount::Response(value) => return Ok(*value),
     };
-    let preflight = match executor_preflight_check(request, generated_at, execution, &snapshot).await? {
-        ExecutorPreflightCheck::Ready(value) => value,
-        ExecutorPreflightCheck::Response(value) => return Ok(*value),
-    };
-    if !preflight.accepted || preflight.production_environment
-        || !preflight.futures_mode || !preflight.long_short_mode
+    let preflight =
+        match executor_preflight_check(request, generated_at, execution, &snapshot).await? {
+            ExecutorPreflightCheck::Ready(value) => value,
+            ExecutorPreflightCheck::Response(value) => return Ok(*value),
+        };
+    if !preflight.accepted
+        || preflight.production_environment
+        || !preflight.futures_mode
+        || !preflight.long_short_mode
     {
         return Ok(preflight_rejected(request, generated_at));
     }
     let (Some(observer), Some(ws)) = (context.account_fallback, context.private_ws) else {
-        return Ok(deny(EXECUTION_MUTATION_UNSAFE_CODE, "private source unavailable"));
+        return Ok(deny(
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            "private source unavailable",
+        ));
     };
     let cursor = match ws.convergence_cursor().await {
         Ok(value) => value,
-        Err(_) => return Ok(deny(EXECUTION_MUTATION_UNSAFE_CODE, "private WS cursor unavailable")),
+        Err(_) => {
+            return Ok(deny(
+                EXECUTION_MUTATION_UNSAFE_CODE,
+                "private WS cursor unavailable",
+            ));
+        }
     };
     let facts = match observer.ledger_facts(&snapshot).await {
         Ok(value) => value,
-        Err(_) => return Ok(deny(EXECUTION_MUTATION_UNSAFE_CODE, "private source history unavailable")),
+        Err(_) => {
+            return Ok(deny(
+                EXECUTION_MUTATION_UNSAFE_CODE,
+                "private source history unavailable",
+            ));
+        }
     };
     let protection = match observer.pending_protective_algos().await {
         Ok(value) => value,
-        Err(_) => return Ok(deny(EXECUTION_MUTATION_UNSAFE_CODE, "native OCO proof unavailable")),
+        Err(_) => {
+            return Ok(deny(
+                EXECUTION_MUTATION_UNSAFE_CODE,
+                "native OCO proof unavailable",
+            ));
+        }
     };
     let window = match ws.convergence_window(cursor).await {
         Ok(value) => value,
-        Err(_) => return Ok(deny(EXECUTION_MUTATION_UNSAFE_CODE, "private WS generation changed")),
+        Err(_) => {
+            return Ok(deny(
+                EXECUTION_MUTATION_UNSAFE_CODE,
+                "private WS generation changed",
+            ));
+        }
     };
     if !window.events.is_empty()
         || facts.summary.account_generation != snapshot.account_generation
         || facts.summary.authority.account_uid_fingerprint != preflight.account_uid_fingerprint
-        || facts.summary.open_positions != 0 || facts.summary.pending_orders != 0
+        || facts.summary.open_positions != 0
+        || facts.summary.pending_orders != 0
         || !facts.usdt_margin_excludes_other_currencies()
         || !facts.exchange_orders_history_complete
         || !facts.exchange_fills_history_complete
         || !facts.bills_history_complete
-        || facts.summary.history_coverage.iter().any(|c| !c.complete_within_bound)
-        || !protection.complete_within_bound || protection.rows != 0
+        || facts
+            .summary
+            .history_coverage
+            .iter()
+            .any(|c| !c.complete_within_bound)
+        || !protection.complete_within_bound
+        || protection.rows != 0
     {
-        return Ok(deny(EXECUTION_MUTATION_UNSAFE_CODE,
-            "FLAT/UID/history/OCO/WS admission not independently proven"));
+        return Ok(deny(
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            "FLAT/UID/history/OCO/WS admission not independently proven",
+        ));
     }
-    match execution.lower_demo_cross_leverage_authorized(
-        &preflight, &snapshot.account_generation, mutation_id, instrument, leverage
-    ).await {
-        Some(Ok(proof)) => Ok(completed(request, generated_at,
-            crate::execution_runtime::DEMO_LEVERAGE_PROOF_SCHEMA_V1, serde_json::to_value(proof)?)),
+    match execution
+        .lower_demo_cross_leverage_authorized(
+            &preflight,
+            &snapshot.account_generation,
+            mutation_id,
+            instrument,
+            leverage,
+        )
+        .await
+    {
+        Some(Ok(proof)) => Ok(completed(
+            request,
+            generated_at,
+            crate::execution_runtime::DEMO_LEVERAGE_PROOF_SCHEMA_V1,
+            serde_json::to_value(proof)?,
+        )),
         Some(Err(reason)) => Ok(failure_response(
-            request, generated_at, AgentResponseStatus::Rejected,
-            "EXECUTION_LEVERAGE_UNVERIFIED", reason, false)),
-        None => Ok(deny(EXECUTION_MUTATION_UNSAFE_CODE,
-            "Demo leverage authority or active run account generation unavailable")),
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            "EXECUTION_LEVERAGE_UNVERIFIED",
+            reason,
+            false,
+        )),
+        None => Ok(deny(
+            EXECUTION_MUTATION_UNSAFE_CODE,
+            "Demo leverage authority or active run account generation unavailable",
+        )),
     }
 }
 
