@@ -752,7 +752,10 @@ fn assess_flat_strategy_nav(
     if !now.is_some_and(|t| t >= capital.started_at_ms && t - capital.started_at_ms <= 7_200_000) {
         reasons.push("nav_epoch_outside_order_history_window");
     }
-    if facts.nonzero_other_trading_currency_equity || facts.trading_usdt_equity.is_none() {
+    // Keep strategy NAV on the same independently attested Futures-mode
+    // currency boundary as BEGIN, first-risk admission and FINALIZED.
+    // Native USDT equity is still mandatory; foreign balances never enter NAV.
+    if !facts.usdt_margin_excludes_other_currencies() || facts.trading_usdt_equity.is_none() {
         reasons.push("nav_native_usdt_equity_unavailable");
     }
     if facts.summary.pending_orders > 0
