@@ -8,6 +8,7 @@ use std::{
 
 use okx_observation::AccountLedgerFacts;
 use rust_decimal::Decimal;
+use sha2::{Digest, Sha256};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -710,6 +711,7 @@ impl DurableExecutionLedger {
             || !report.reasons.is_empty()
             || !matches!(report.state, "FLAT_RECONCILED" | "ACTIVE_VALUED")
             || report.usable_for_new_risk
+            || facts.summary.authority.account_uid_fingerprint != run.account_uid_fingerprint
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
             || self
                 .exchange_evidence
@@ -736,14 +738,25 @@ impl DurableExecutionLedger {
         if now.saturating_add(2_000) < as_of || now.abs_diff(as_of) > 30_000 {
             return Ok(None);
         }
-        if nav <= Decimal::ZERO {
-            self.stop_new_risk("STRATEGY_NAV_DEPLETED", now)?;
-            return Ok(None);
-        }
+        // A depleted or negative NAV is an auditable terminal observation:
+        // persist both the value and the irreversible STOP in one file.
         let evidence = self
             .exchange_evidence
             .as_ref()
             .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        let (source_cursor_key, source_cursor) = evidence.cursors.iter()
+            .filter(|(_, cursor)| cursor.account_as_of_ms <= as_of)
+            .max_by_key(|(_, cursor)| cursor.account_as_of_ms)
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        if as_of - source_cursor.account_as_of_ms
+            > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
+        {
+            return Ok(None);
+        }
+        let cursor_sha256 = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(source_cursor)?)
+        );
         let day = as_of / 86_400_000 * 86_400_000;
         let mut gross_loss = Decimal::ZERO;
         for event in evidence.events.values() {
@@ -801,6 +814,8 @@ impl DurableExecutionLedger {
             observed_at_ms: now,
             account_as_of_ms: as_of,
             evidence_sha256: report.evidence_sha256.clone(),
+            source_cursor_key: source_cursor_key.clone(),
+            source_cursor_sha256: cursor_sha256,
             nav_usdt: nav.normalize().to_string(),
             high_water_usdt: peak.normalize().to_string(),
             daily_gross_loss_usdt: gross_loss.normalize().to_string(),
@@ -810,7 +825,7 @@ impl DurableExecutionLedger {
         };
         point.checksum_sha256 = point.hash()?;
         point.validate()?;
-        let mut reason = None;
+        let mut reason = (nav <= Decimal::ZERO).then_some("STRATEGY_NAV_DEPLETED");
         // Only exact immutable run-bound plans may supply risk limits.
         for entry in self.entries.values() {
             if entry.record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
@@ -833,10 +848,9 @@ impl DurableExecutionLedger {
                 .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy drawdown"))?;
             let daily = Decimal::from_str(&binding.policy.max_daily_realized_loss_usd)
                 .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy daily loss"))?;
-            if let Some(breach) =
-                strategy_nav_stop_reason(nav, peak, gross_loss, mandate_dd, policy_dd, daily)
-            {
-                reason = Some(breach);
+            if reason.is_none() {
+                reason =
+                    strategy_nav_stop_reason(nav, peak, gross_loss, mandate_dd, policy_dd, daily);
             }
         }
         let mut next = self.strategy_periods.clone();
