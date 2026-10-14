@@ -344,8 +344,13 @@ impl StrategyPeriodHistory {
 mod tests {
     use super::*;
 
-    fn nav_point(run: &StrategyCapitalReservation, at_ms: u64, nav: &str, peak: &str,
-        previous: &str) -> StrategyNavPoint {
+    fn nav_point(
+        run: &StrategyCapitalReservation,
+        at_ms: u64,
+        nav: &str,
+        peak: &str,
+        previous: &str,
+    ) -> StrategyNavPoint {
         let mut point = StrategyNavPoint {
             schema: STRATEGY_NAV_POINT_SCHEMA_V1.to_owned(),
             run_id: run.allocation_id.clone(),
