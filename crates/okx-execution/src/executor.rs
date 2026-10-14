@@ -420,6 +420,18 @@ where
             .finalize_strategy_run(facts, coherent, protection_absent, now_ms)?)
     }
 
+    pub fn quarantine_unverified_strategy_run(
+        &mut self,
+        facts: &okx_observation::AccountLedgerFacts,
+        coherent: bool,
+        protection_absent: bool,
+        now_ms: u64,
+    ) -> Result<crate::StrategyUnverifiedClosure, OrderExecutorError> {
+        Ok(self.ledger.quarantine_unverified_strategy_run(
+            facts, coherent, protection_absent, now_ms,
+        )?)
+    }
+
     pub fn stop_new_risk(
         &mut self,
         reason: impl Into<String>,
