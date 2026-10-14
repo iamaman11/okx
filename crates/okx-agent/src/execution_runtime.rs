@@ -538,12 +538,12 @@ impl ExecutionRuntime {
                         .to_owned(),
                 ));
             }
-            if existing.state == LeverageAttemptState::Pending {
-                if let Err(error) = executor.verify_leverage_change(mutation_id) {
-                    return Some(Err(format!(
-                        "UNKNOWN: leverage proven but receipt not persisted: {error}"
-                    )));
-                }
+            if existing.state == LeverageAttemptState::Pending
+                && let Err(error) = executor.verify_leverage_change(mutation_id)
+            {
+                return Some(Err(format!(
+                    "UNKNOWN: leverage proven but receipt not persisted: {error}"
+                )));
             }
             return Some(Ok(LeverageChangeProof {
                 schema: LEVERAGE_CHANGE_PROOF_SCHEMA_V1,
