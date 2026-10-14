@@ -744,7 +744,9 @@ impl DurableExecutionLedger {
             .exchange_evidence
             .as_ref()
             .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        let (source_cursor_key, source_cursor) = evidence.cursors.iter()
+        let (source_cursor_key, source_cursor) = evidence
+            .cursors
+            .iter()
             .filter(|(_, cursor)| cursor.account_as_of_ms <= as_of)
             .max_by_key(|(_, cursor)| cursor.account_as_of_ms)
             .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
@@ -753,10 +755,7 @@ impl DurableExecutionLedger {
         {
             return Ok(None);
         }
-        let cursor_sha256 = format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(source_cursor)?)
-        );
+        let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(source_cursor)?));
         let day = as_of / 86_400_000 * 86_400_000;
         let mut gross_loss = Decimal::ZERO;
         for event in evidence.events.values() {
