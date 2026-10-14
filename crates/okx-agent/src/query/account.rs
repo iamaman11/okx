@@ -277,7 +277,7 @@ pub(super) async fn dispatch(
                             okx_execution::ProductionMarkEvidence {
                                 price: live.market.mark_price.price,
                                 exchange_timestamp_ms,
-                                received_at_ms: now_ms,
+                                received_at_ms: super::utc_now_ms(),
                             },
                         );
                     }
