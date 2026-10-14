@@ -116,8 +116,10 @@ impl ExecutionRuntime {
         rate_budget: RateBudget,
         mode: ExecutionRuntimeMode,
     ) -> AgentResult<Self> {
+        // Market/reference and venue-public risk inputs are always real
+        // Production public data; Demo is ONLY the private order/account venue.
         let public_data = PublicDataApi::new(OkxPublicClient::with_rate_budget(
-            environment,
+            environment.production_public(),
             rate_budget.clone(),
         )?);
         let rest = OkxRestClient::with_rate_budget(environment, executor_credentials, rate_budget)?;

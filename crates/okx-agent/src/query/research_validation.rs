@@ -223,7 +223,7 @@ pub(super) async fn prepare_validation_dataset(
                     instrument_id: instrument.to_owned(),
                     bar: Some(bar.to_owned()),
                     range: page_range,
-                    parameters,
+                    parameters: market.attest_source_parameters(parameters),
                 };
                 let chunk = match build_candle_chunk(
                     source,
@@ -359,14 +359,14 @@ pub(super) async fn prepare_validation_dataset(
                 bar: None,
                 range: ResearchRange::new(observed_ms.to_string(), observed_through.to_string())
                     .expect("one millisecond reference capture range"),
-                parameters: BTreeMap::from([
+                parameters: market.attest_source_parameters(BTreeMap::from([
                     ("semantics".to_owned(), "current_snapshot_only".to_owned()),
                     (
                         "reference_generation".to_owned(),
                         reference_generation.clone(),
                     ),
                     ("available_from_ms".to_owned(), observed_ms.to_string()),
-                ]),
+                ])),
             };
             let (reference_chunk, _) = match build_reference_chunk(
                 reference_source,
@@ -495,7 +495,7 @@ pub(super) async fn prepare_validation_dataset(
                     instrument_id: instrument.to_owned(),
                     bar: None,
                     range: range.clone(),
-                    parameters,
+                    parameters: market.attest_source_parameters(parameters),
                 };
                 let chunk = match build_funding_chunk(
                     source,

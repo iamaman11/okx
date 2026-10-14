@@ -39,6 +39,16 @@ impl OkxEnvironment {
         Self { region, demo }
     }
 
+    /// One production-public market source regardless of the selected
+    /// authenticated Demo/Production account. This does NOT switch account,
+    /// private WebSocket, bills or order execution environment.
+    pub const fn production_public(self) -> Self {
+        Self {
+            region: self.region,
+            demo: false,
+        }
+    }
+
     pub const fn rest_base_url(self) -> &'static str {
         match self.region {
             Region::Global => "https://openapi.okx.com",
@@ -217,6 +227,29 @@ mod tests {
             error.to_string(),
             "configuration error: API secret is invalid"
         );
+    }
+
+    #[test]
+    fn production_public_market_is_independent_of_demo_account_for_all_regions() {
+        for region in [Region::Global, Region::Eea, Region::UsAu] {
+            let production = OkxEnvironment::new(region, false);
+            let demo = OkxEnvironment::new(region, true);
+            assert_eq!(demo.production_public(), production);
+            assert_eq!(production.production_public(), production);
+            assert!(!demo.production_public().demo);
+            assert_ne!(
+                demo.private_ws_url(),
+                demo.production_public().private_ws_url()
+            );
+            assert_ne!(
+                demo.public_ws_url(),
+                demo.production_public().public_ws_url()
+            );
+            assert_eq!(
+                demo.production_public().rest_base_url(),
+                demo.rest_base_url()
+            );
+        }
     }
 
     #[test]
