@@ -2406,18 +2406,44 @@ mod tests {
     #[test]
     fn strategy_nav_stop_thresholds_are_conservative_and_do_not_mask_losses() {
         let d = |value| Decimal::from_str(value).unwrap();
-        assert_eq!(strategy_nav_stop_reason(d("100"), d("100"), d("0"),
-                d("0.2"), d("0.1"), d("10")), None);
-        assert_eq!(strategy_nav_stop_reason(d("89.99"), d("100"), d("0"),
-                d("0.2"), d("0.1"), d("10")), Some("STRATEGY_MAX_DRAWDOWN"));
-        assert_eq!(strategy_nav_stop_reason(d("89.99"), d("100"), d("10.01"),
-                d("0.2"), d("0.1"), d("10")), Some("STRATEGY_UTC_DAILY_GROSS_LOSS"));
-        assert_eq!(strategy_nav_stop_reason(d("90"), d("100"), d("10"),
-                d("0.2"), d("0.1"), d("10")), None);
-        assert_eq!(strategy_nav_stop_reason(d("0"), d("100"), d("0"),
-                d("0.2"), d("0.1"), d("10")), Some("STRATEGY_NAV_DEPLETED"));
-        assert_eq!(strategy_nav_stop_reason(d("100"), d("100"), d("10.000001"),
-                d("0.2"), d("0.1"), d("10")), Some("STRATEGY_UTC_DAILY_GROSS_LOSS"));
+        assert_eq!(
+            strategy_nav_stop_reason(d("100"), d("100"), d("0"), d("0.2"), d("0.1"), d("10")),
+            None
+        );
+        assert_eq!(
+            strategy_nav_stop_reason(d("89.99"), d("100"), d("0"), d("0.2"), d("0.1"), d("10")),
+            Some("STRATEGY_MAX_DRAWDOWN")
+        );
+        assert_eq!(
+            strategy_nav_stop_reason(
+                d("89.99"),
+                d("100"),
+                d("10.01"),
+                d("0.2"),
+                d("0.1"),
+                d("10")
+            ),
+            Some("STRATEGY_UTC_DAILY_GROSS_LOSS")
+        );
+        assert_eq!(
+            strategy_nav_stop_reason(d("90"), d("100"), d("10"), d("0.2"), d("0.1"), d("10")),
+            None
+        );
+        assert_eq!(
+            strategy_nav_stop_reason(d("0"), d("100"), d("0"), d("0.2"), d("0.1"), d("10")),
+            Some("STRATEGY_NAV_DEPLETED")
+        );
+        assert_eq!(
+            strategy_nav_stop_reason(
+                d("100"),
+                d("100"),
+                d("10.000001"),
+                d("0.2"),
+                d("0.1"),
+                d("10")
+            ),
+            Some("STRATEGY_UTC_DAILY_GROSS_LOSS")
+        );
     }
 
     use crate::{
