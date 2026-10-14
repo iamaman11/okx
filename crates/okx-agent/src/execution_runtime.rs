@@ -221,6 +221,11 @@ impl ExecutionRuntime {
             // The stop, if triggered, is saved in the SAME atomic file.
             executor.observe_strategy_nav(report, facts, utc_now_ms())?;
         }
+        reconciliation.strategy_nav_watermark =
+            executor.ledger().strategy_nav_watermark().cloned();
+        reconciliation.strategy_nav_checkpoint_count =
+            executor.ledger().strategy_nav_point_count();
+        reconciliation.strategy_risk_stop = executor.ledger().risk_stop().cloned();
         Ok((reconciliation, inventory))
     }
 
