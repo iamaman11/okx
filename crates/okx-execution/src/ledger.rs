@@ -22,7 +22,7 @@ use crate::{
     ProtectiveCleanupState, ProtectiveOrderResolution, ProtectiveOrderStatus,
     ProtectiveSizeAmendState, ProtectiveTriggerPriceBasis, ReverseContinuation,
     ReverseExecutionLink, ReverseLeg, StrategyFinalization, StrategyFinancialPeriod,
-    StrategyPeriodHistory, derive_amend_request_id, derive_client_order_id,
+    ProductionMarkEvidence, StrategyPeriodHistory, derive_amend_request_id, derive_client_order_id,
     derive_protective_algo_client_id, derive_reverse_open_intent_id,
     model::{valid_intent_id, valid_mutation_id},
 };
@@ -626,20 +626,32 @@ impl DurableExecutionLedger {
             .summary())
     }
 
-    /// Recompute the run from the same immutable source events after restart.
-    /// This NEVER authorizes trading; unproven source history is INCOMPLETE.
+    /// Recompute the run from immutable source events after restart.
+    /// No market-price authority is inferred from the private Demo account.
     pub fn financial_period(
         &self,
         facts: &AccountLedgerFacts,
         coherent: bool,
     ) -> Option<StrategyFinancialPeriod> {
+        self.financial_period_with_production_marks(facts, coherent, &BTreeMap::new())
+    }
+
+    /// Source-attested Production marks are supplied only by the single
+    /// public observation owner. Missing marks make open NAV INCOMPLETE.
+    pub fn financial_period_with_production_marks(
+        &self,
+        facts: &AccountLedgerFacts,
+        coherent: bool,
+        production_marks: &BTreeMap<String, ProductionMarkEvidence>,
+    ) -> Option<StrategyFinancialPeriod> {
         self.capital_reservation.as_ref().map(|run| {
-            crate::assess_persisted_financial_period(
+            crate::assess_persisted_financial_period_with_production_marks(
                 run,
                 self.exchange_evidence.as_ref(),
                 &self.entries.values().cloned().collect::<Vec<_>>(),
                 facts,
                 coherent,
+                production_marks,
             )
         })
     }
