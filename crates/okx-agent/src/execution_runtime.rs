@@ -647,6 +647,7 @@ impl ExecutionRuntime {
         reservation: StrategyCapitalReservation,
         opening: &StrategyAllocationOpening,
         now_ms: u64,
+        rearm: Option<&okx_execution::StrategyStopRearmRequest>,
     ) -> Result<Option<Result<StrategyCapitalReservation, OrderExecutorError>>, AgentError> {
         let mut executor = self.executor.lock().await;
         if !self.environment.demo
@@ -661,10 +662,8 @@ impl ExecutionRuntime {
         {
             return Ok(None);
         }
-        Ok(Some(executor.reserve_strategy_capital(
-            reservation,
-            opening,
-            now_ms,
+        Ok(Some(executor.reserve_strategy_capital_with_rearm(
+            reservation, opening, rearm, now_ms,
         )))
     }
 
