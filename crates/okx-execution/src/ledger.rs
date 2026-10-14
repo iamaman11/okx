@@ -796,7 +796,6 @@ impl DurableExecutionLedger {
         point.checksum_sha256 = point.hash()?;
         point.validate()?;
         let mut reason = None;
-        let drawdown = (peak - nav) / peak;
         // Only exact immutable run-bound plans may supply risk limits.
         for entry in self.entries.values() {
             if entry.record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
@@ -819,11 +818,10 @@ impl DurableExecutionLedger {
                 .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy drawdown"))?;
             let daily = Decimal::from_str(&binding.policy.max_daily_realized_loss_usd)
                 .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy daily loss"))?;
-            if drawdown > mandate_dd.min(policy_dd) {
-                reason = Some("STRATEGY_MAX_DRAWDOWN");
-            }
-            if gross_loss > daily {
-                reason = Some("STRATEGY_UTC_DAILY_GROSS_LOSS");
+            if let Some(breach) =
+                strategy_nav_stop_reason(nav, peak, gross_loss, mandate_dd, policy_dd, daily)
+            {
+                reason = Some(breach);
             }
         }
         let mut next = self.strategy_periods.clone();
@@ -2380,9 +2378,48 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), ExecutionLedg
     Ok(())
 }
 
+/// Stop classification is deterministic and cannot be used to grant risk.
+fn strategy_nav_stop_reason(
+    nav: Decimal,
+    peak: Decimal,
+    gross_loss: Decimal,
+    mandate_drawdown: Decimal,
+    policy_drawdown: Decimal,
+    daily_limit: Decimal,
+) -> Option<&'static str> {
+    if peak <= Decimal::ZERO || nav <= Decimal::ZERO {
+        return Some("STRATEGY_NAV_DEPLETED");
+    }
+    if gross_loss > daily_limit {
+        return Some("STRATEGY_UTC_DAILY_GROSS_LOSS");
+    }
+    if (peak - nav) / peak > mandate_drawdown.min(policy_drawdown) {
+        return Some("STRATEGY_MAX_DRAWDOWN");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strategy_nav_stop_thresholds_are_conservative_and_do_not_mask_losses() {
+        let d = |value| Decimal::from_str(value).unwrap();
+        assert_eq!(strategy_nav_stop_reason(d("100"), d("100"), d("0"),
+                d("0.2"), d("0.1"), d("10")), None);
+        assert_eq!(strategy_nav_stop_reason(d("89.99"), d("100"), d("0"),
+                d("0.2"), d("0.1"), d("10")), Some("STRATEGY_MAX_DRAWDOWN"));
+        assert_eq!(strategy_nav_stop_reason(d("89.99"), d("100"), d("10.01"),
+                d("0.2"), d("0.1"), d("10")), Some("STRATEGY_UTC_DAILY_GROSS_LOSS"));
+        assert_eq!(strategy_nav_stop_reason(d("90"), d("100"), d("10"),
+                d("0.2"), d("0.1"), d("10")), None);
+        assert_eq!(strategy_nav_stop_reason(d("0"), d("100"), d("0"),
+                d("0.2"), d("0.1"), d("10")), Some("STRATEGY_NAV_DEPLETED"));
+        assert_eq!(strategy_nav_stop_reason(d("100"), d("100"), d("10.000001"),
+                d("0.2"), d("0.1"), d("10")), Some("STRATEGY_UTC_DAILY_GROSS_LOSS"));
+    }
+
     use crate::{
         EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_PLAN_SCHEMA_V1, ExecutionAction,
         ExecutionDecisionReference, ExecutionLineageBinding, OrderSide, OrderType, PositionSide,
