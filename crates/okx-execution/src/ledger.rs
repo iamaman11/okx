@@ -312,7 +312,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V7
                     | EXECUTION_LEDGER_SCHEMA_V8
                     | EXECUTION_LEDGER_SCHEMA_V9
-                | EXECUTION_LEDGER_SCHEMA_V10
+                    | EXECUTION_LEDGER_SCHEMA_V10
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "risk stop on legacy ledger schema",
@@ -326,7 +326,7 @@ impl ExecutionLedgerStore {
                 EXECUTION_LEDGER_SCHEMA_V7
                     | EXECUTION_LEDGER_SCHEMA_V8
                     | EXECUTION_LEDGER_SCHEMA_V9
-                | EXECUTION_LEDGER_SCHEMA_V10
+                    | EXECUTION_LEDGER_SCHEMA_V10
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -339,8 +339,9 @@ impl ExecutionLedgerStore {
         if let Some(evidence) = &file.exchange_evidence {
             if !matches!(
                 file.schema.as_str(),
-                EXECUTION_LEDGER_SCHEMA_V8 | EXECUTION_LEDGER_SCHEMA_V9 | EXECUTION_LEDGER_SCHEMA_V10
-                | EXECUTION_LEDGER_SCHEMA_V10
+                EXECUTION_LEDGER_SCHEMA_V8
+                    | EXECUTION_LEDGER_SCHEMA_V9
+                    | EXECUTION_LEDGER_SCHEMA_V10
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "exchange evidence on legacy schema",
