@@ -37,6 +37,7 @@ pub const EXECUTION_LEDGER_SCHEMA_V6: &str = "okx.execution-ledger/v6";
 pub const EXECUTION_LEDGER_SCHEMA_V7: &str = "okx.execution-ledger/v7";
 pub const EXECUTION_LEDGER_SCHEMA_V8: &str = "okx.execution-ledger/v8";
 pub const EXECUTION_LEDGER_SCHEMA_V9: &str = "okx.execution-ledger/v9";
+pub const EXECUTION_LEDGER_SCHEMA_V10: &str = "okx.execution-ledger/v10";
 pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1: &str = "okx.strategy-capital-reservation/v1";
 pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
@@ -300,6 +301,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V7
                 | EXECUTION_LEDGER_SCHEMA_V8
                 | EXECUTION_LEDGER_SCHEMA_V9
+                | EXECUTION_LEDGER_SCHEMA_V10
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
@@ -310,6 +312,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V7
                     | EXECUTION_LEDGER_SCHEMA_V8
                     | EXECUTION_LEDGER_SCHEMA_V9
+                | EXECUTION_LEDGER_SCHEMA_V10
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "risk stop on legacy ledger schema",
@@ -323,6 +326,7 @@ impl ExecutionLedgerStore {
                 EXECUTION_LEDGER_SCHEMA_V7
                     | EXECUTION_LEDGER_SCHEMA_V8
                     | EXECUTION_LEDGER_SCHEMA_V9
+                | EXECUTION_LEDGER_SCHEMA_V10
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -335,7 +339,8 @@ impl ExecutionLedgerStore {
         if let Some(evidence) = &file.exchange_evidence {
             if !matches!(
                 file.schema.as_str(),
-                EXECUTION_LEDGER_SCHEMA_V8 | EXECUTION_LEDGER_SCHEMA_V9
+                EXECUTION_LEDGER_SCHEMA_V8 | EXECUTION_LEDGER_SCHEMA_V9 | EXECUTION_LEDGER_SCHEMA_V10
+                | EXECUTION_LEDGER_SCHEMA_V10
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "exchange evidence on legacy schema",
@@ -349,11 +354,20 @@ impl ExecutionLedgerStore {
                 return Err(ExecutionLedgerError::AccountScopeMismatch);
             }
         }
-        if file.schema != EXECUTION_LEDGER_SCHEMA_V9
-            && file.strategy_periods != StrategyPeriodHistory::default()
+        if !matches!(
+            file.schema.as_str(),
+            EXECUTION_LEDGER_SCHEMA_V9 | EXECUTION_LEDGER_SCHEMA_V10
+        ) && file.strategy_periods != StrategyPeriodHistory::default()
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "strategy closure on legacy ledger",
+            ));
+        }
+        if !file.strategy_periods.nav_points.is_empty()
+            && file.schema != EXECUTION_LEDGER_SCHEMA_V10
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "NAV points must use ledger schema v10",
             ));
         }
         file.strategy_periods.validate(
@@ -456,7 +470,7 @@ impl ExecutionLedgerStore {
         fs::create_dir_all(parent)?;
 
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V9.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V10.to_owned(),
             records: entries.values().cloned().collect(),
             risk_stop: risk_stop.cloned(),
             capital_reservation: capital_reservation.cloned(),
@@ -3883,7 +3897,7 @@ mod tests {
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V9);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V10);
 
             let _ = fs::remove_dir_all(root);
         }
