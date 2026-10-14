@@ -1311,6 +1311,10 @@ impl DurableExecutionLedger {
         self.risk_stop.as_ref()
     }
 
+    pub fn stop_rearm_proofs(&self) -> Vec<StrategyStopRearm> {
+        self.strategy_periods.stop_rearms.clone()
+    }
+
     pub fn capital_reservation(&self) -> Option<&StrategyCapitalReservation> {
         self.capital_reservation.as_ref()
     }
@@ -3468,7 +3472,7 @@ mod tests {
         );
         let reopened = DurableExecutionLedger::open(store.clone(), next_at + 2).unwrap();
         assert!(reopened.risk_stop().is_none());
-        assert_eq!(reopened.strategy_periods.stop_rearms.len(), 1);
+        assert_eq!(reopened.stop_rearm_proofs().len(), 1);
         assert_eq!(reopened.archived_runs_count(), 1);
         assert_eq!(
             reopened.archived_strategy_proofs()[0].finalization_sha256,
