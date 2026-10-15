@@ -146,6 +146,23 @@ pub(super) async fn dispatch(
         AgentOperation::ExecutorPreflight => {
             executor_preflight(request, context, generated_at).await
         }
+        AgentOperation::MigrateFinalizedLedgerStorage {
+            allocation_id,
+            expected_manifest_sha256,
+            expected_finalized_checksum_sha256,
+            expected_stopped_at_ms,
+        } => {
+            migrate_finalized_storage(
+                request,
+                context,
+                generated_at,
+                allocation_id,
+                expected_manifest_sha256,
+                expected_finalized_checksum_sha256,
+                *expected_stopped_at_ms,
+            )
+            .await
+        }
         AgentOperation::BeginStrategyRun {
             allocation_id,
             origin_schema,
@@ -236,6 +253,66 @@ pub(super) async fn dispatch(
             execution_status_response(request, context, generated_at, intent_id).await
         }
         _ => unreachable!("execution dispatcher received unsupported operation"),
+    }
+}
+
+/// Locally migrate only the exact FINALIZED, stopped and hash-pinned
+/// financial storage. No OKX REST/WS, orders, risk rearm or new strategy run.
+async fn migrate_finalized_storage(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    run_id: &str,
+    expected_manifest_sha256: &str,
+    expected_finalized_checksum_sha256: &str,
+    expected_stopped_at_ms: u64,
+) -> AgentResult<AgentResponse> {
+    let Some(owner) = context.execution else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    if !owner.demo_mutation_acceptance_requested() {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            LIVE_TRADING_DISABLED_CODE,
+            "storage maintenance requires the verified active Demo owner; Production remains read-only".to_owned(),
+            false,
+        ));
+    }
+    match owner
+        .migrate_finalized_storage_v14_demo(
+            run_id,
+            expected_manifest_sha256,
+            expected_finalized_checksum_sha256,
+            expected_stopped_at_ms,
+        )
+        .await
+    {
+        Ok(Some(proof)) => Ok(completed(
+            request,
+            generated_at,
+            okx_execution::LEDGER_STORAGE_ATTESTATION_SCHEMA_V1,
+            serde_json::to_value(proof)?,
+        )),
+        Ok(None) => Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            LIVE_TRADING_DISABLED_CODE,
+            "storage maintenance forbidden outside native Demo profile".to_owned(),
+            false,
+        )),
+        Err(error) => Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Failed,
+            EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE,
+            format!(
+                "storage migration failed or result uncertain; read-only storage audit required before any repeat: {error}"
+            ),
+            false,
+        )),
     }
 }
 

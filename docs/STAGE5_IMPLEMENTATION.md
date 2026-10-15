@@ -43,6 +43,38 @@ Avoid artificial trading POST or bypass of account-safety STOP to create
 a migration proof.
 
 
+## Stage 5B native one-time v13 → v14 storage migration (PR #336)
+
+On the **existing single Windows agent/executor** only, an explicit Demo-profile
+`execution_action` with `action="migrate_finalized_ledger_storage"` migrates
+a stopped FINALIZED v13 to its v14 manifest and detached archives. Inputs
+are **only** `intent_id` (the precise finalized run),
+`expected_manifest_sha256` (from a live `account_summary(view="storage")`),
+`expected_finalized_checksum_sha256`, and `expected_stopped_at_ms`.
+No generic shell, raw JSON RPC, extra agent, database, executor, polling loop,
+exchange API call, strategy rearm, fresh run, PnL recalculation or trade.
+
+Fail-closed predicates: authenticated direct transport Demo profile, local
+Demo execution mode, exact original on-disk v13 hash, exact run-final checksum,
+exact stored STOP timestamp, and **equal on-disk/in-memory financial state**.
+The same original executor mutex serializes the operation with all other
+ledger mutations. The original ledger writer first retains byte-identical
+`.pre-v14.json`, seals old FINALIZED/UNVERIFIED runs in content-hashed
+`.archive` files, then atomically publishes the new v14 manifest.
+
+After writing, the same native owner verifies actual storage layout and
+immutable STOP/finalization IDs again. The existing `view="storage"` supplies
+independent read-only cold validation. A repeated matching request after lost
+ACK is a read-only verification that the preserved pre-v14 SHA matches the
+original hash; it never performs a second write. A mismatched request is
+rejected rather than applying a stale snapshot. On uncertain failure **read
+storage first**; never blindly repeat.
+
+This is storage maintenance, not proof of a completed external backup or
+live trading admission. The account-specific finalized NAV/checksum, durable
+STOP and no-position state must match before and after actual CONTROL/MCP
+acceptance. Production Live stays disabled. A new day is not a prerequisite.
+
 ## Stage 5B recovery audit without Demo trading (integrated acceptance slice)
 
 `account_summary({view:"storage"})` calls a **distinct, explicitly requested

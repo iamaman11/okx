@@ -92,11 +92,14 @@ export const EXECUTION_TOOLS: Json[] = [
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
-        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage"] },
+        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage","migrate_finalized_ledger_storage"] },
         intent_id: ID, instrument: INSTRUMENT,
         trade_mode: { type: "string", enum: ["cross","isolated"] },
         order_type: { type: "string", enum: ["limit","post_only","fok","ioc"] },
         spec, risk, lineage, mutation_id: MUTATION_ID, new_size: POSITIVE, new_price: POSITIVE,
+        expected_manifest_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+        expected_finalized_checksum_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+        expected_stopped_at_ms: { type: "integer", minimum: 1 },
         origin_schema: VERSION, origin_version: VERSION, mandate_version: VERSION,
         allocated_usdt: POSITIVE, operator_authority_id: EVIDENCE_ID, leverage: POSITIVE,
         rearm: { type: "object", additionalProperties: false, properties: {
@@ -189,6 +192,7 @@ export function isExecutionMutation(operationType: unknown): boolean {
     "prepare_execution", "submit_prepared_execution",
     "mutate_execution", "abort_reverse_execution", "abandon_prepared_execution",
     "begin_strategy_run", "finalize_strategy_run", "quarantine_unverified_strategy_run", "set_leverage",
+    "migrate_finalized_ledger_storage",
   ].includes(String(operationType));
 }
 
@@ -202,6 +206,24 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
   if (!token(args.intent_id,16,128) || typeof args.action !== "string") return null;
   const intent_id=args.intent_id;
   switch(args.action){
+    case "migrate_finalized_ledger_storage": {
+      if (!exactKeys(args,[
+        "action","intent_id","expected_manifest_sha256",
+        "expected_finalized_checksum_sha256","expected_stopped_at_ms"
+      ]) || typeof args.expected_manifest_sha256 !== "string"
+        || !/^[0-9a-f]{64}$/.test(args.expected_manifest_sha256)
+        || typeof args.expected_finalized_checksum_sha256 !== "string"
+        || !/^[0-9a-f]{64}$/.test(args.expected_finalized_checksum_sha256)
+        || !Number.isSafeInteger(args.expected_stopped_at_ms)
+        || Number(args.expected_stopped_at_ms) <= 0) return null;
+      return {
+        type:"migrate_finalized_ledger_storage",
+        allocation_id:intent_id,
+        expected_manifest_sha256:args.expected_manifest_sha256,
+        expected_finalized_checksum_sha256:args.expected_finalized_checksum_sha256,
+        expected_stopped_at_ms:args.expected_stopped_at_ms,
+      };
+    }
     case "set_leverage": {
       if (!exactKeys(args,["action","intent_id","instrument","trade_mode","leverage"])
         || !token(args.instrument,3,64)

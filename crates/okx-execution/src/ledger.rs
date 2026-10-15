@@ -1093,6 +1093,104 @@ impl DurableExecutionLedger {
         self.store.attest_storage()
     }
 
+    /// One explicitly authorized *storage-only* migration. Keep all financial
+    /// states and STOP byte-for-byte equivalent. No clock, exchange or policy
+    /// mutation is permitted. The caller must supply the exact observed legacy
+    /// source hash, FINALIZED checksum, run identity, and STOP identity.
+    ///
+    /// The same executor mutex that serializes all financial writes must own
+    /// this operation. If ACK is lost, an identical request only verifies the
+    /// already committed v14 and immutable legacy snapshot: never repeats a
+    /// trading operation or fabricates another run.
+    pub fn migrate_finalized_storage_v14(
+        &self,
+        run_id: &str,
+        expected_manifest_sha256: &str,
+        expected_finalized_checksum_sha256: &str,
+        expected_stopped_at_ms: u64,
+    ) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
+        let before = self.store.attest_storage()?;
+        let stop = self
+            .risk_stop
+            .as_ref()
+            .ok_or(ExecutionLedgerError::NewRiskStopped)?;
+        let finalized = self
+            .strategy_periods
+            .finalized_run
+            .as_ref()
+            .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
+        if expected_stopped_at_ms == 0
+            || stop.stopped_at_ms != expected_stopped_at_ms
+            || finalized.run_id != run_id
+            || finalized.checksum_sha256 != expected_finalized_checksum_sha256
+            || self
+                .capital_reservation
+                .as_ref()
+                .is_none_or(|run| run.allocation_id != run_id)
+            || before.active_risk_stop_reason.as_deref() != Some(stop.reason.as_str())
+            || before.finalized_run_checksum_sha256.as_deref()
+                != Some(expected_finalized_checksum_sha256)
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "storage migration STOP/finalization identity mismatch",
+            ));
+        }
+        // POST-commit duplicate is a verified read, not a second writer.
+        if before.on_disk_schema == EXECUTION_LEDGER_SCHEMA_V14 {
+            if before.original_snapshot_sha256.as_deref() == Some(expected_manifest_sha256)
+                && before.original_snapshot == "PRE_V14_SNAPSHOT_PRESENT"
+            {
+                return Ok(before);
+            }
+            return Err(ExecutionLedgerError::Corrupt(
+                "migration replay has mismatched original source",
+            ));
+        }
+        if before.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V13
+            || before.manifest_sha256 != expected_manifest_sha256
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "storage migration legacy source hash/schema mismatch",
+            ));
+        }
+        // Do not silently migrate a stale disk snapshot over the active owner.
+        let (entries, disk_stop, reservation, evidence, periods, leverage) = self.store.load()?;
+        if entries != self.entries
+            || disk_stop.as_ref() != self.risk_stop.as_ref()
+            || reservation.as_ref() != self.capital_reservation.as_ref()
+            || evidence.as_ref() != self.exchange_evidence.as_ref()
+            || periods != self.strategy_periods
+            || leverage != self.leverage_attempts
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "in-memory ledger differs from migration source",
+            ));
+        }
+        self.store.save(
+            &self.entries,
+            self.risk_stop.as_ref(),
+            self.capital_reservation.as_ref(),
+            self.exchange_evidence.as_ref(),
+            &self.strategy_periods,
+            &self.leverage_attempts,
+        )?;
+        let after = self.store.attest_storage()?;
+        if after.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V14
+            || after.original_snapshot_sha256.as_deref() != Some(expected_manifest_sha256)
+            || after.original_snapshot != "PRE_V14_SNAPSHOT_PRESENT"
+            || after.active_risk_stop_reason != before.active_risk_stop_reason
+            || after.finalized_run_checksum_sha256 != before.finalized_run_checksum_sha256
+            || after.sealed_finalized_runs + after.sealed_unverified_runs
+                != self.strategy_periods.archived_runs.len()
+                    + self.strategy_periods.unverified_runs.len()
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "storage migration post-commit financial proof failed",
+            ));
+        }
+        Ok(after)
+    }
+
     pub fn canonical(observed_at_ms: u64) -> Result<Self, ExecutionLedgerError> {
         Self::open(ExecutionLedgerStore::canonical(), observed_at_ms)
     }
@@ -3700,6 +3798,157 @@ mod tests {
             PositionSide::Short => OrderSide::Sell,
         };
         value
+    }
+
+    #[test]
+    fn explicit_finalized_storage_migration_preserves_stop_and_is_idempotent() {
+        let root = temp_root("explicit-finalized-storage-v14");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let run = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "storage_migrate_finalized_0123456789".to_owned(),
+            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            origin_schema: "okx.research.live-decision/v1".to_owned(),
+            origin_version: "v1".to_owned(),
+            mandate_version: "mandate-v1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: "generation".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1000,
+        };
+        let source = DurableExchangeEvidence::new(&run).unwrap();
+        let report = StrategyFinancialPeriod {
+            schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+            run_id: run.allocation_id.clone(),
+            state: "FLAT_RECONCILED",
+            evidence_sha256: source.checksum_sha256.clone(),
+            allocation_usdt: "100".to_owned(),
+            linked_fills: 0,
+            linked_bills: 0,
+            realized_usdt: "0".to_owned(),
+            fees_usdt: "0".to_owned(),
+            funding_usdt: None,
+            unrealized_usdt: Some("0".to_owned()),
+            nav_usdt: Some("100".to_owned()),
+            positions: Vec::new(),
+            usable_for_new_risk: false,
+            reasons: Vec::new(),
+        };
+        let finalization = StrategyFinalization::new(&run, &source, &report, 2000).unwrap();
+        let stop = ExecutionRiskStop {
+            schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
+            stopped_at_ms: 1500,
+            reason: "STRATEGY_UTC_DAILY_GROSS_LOSS".to_owned(),
+        };
+        let history = StrategyPeriodHistory {
+            finalized_run: Some(finalization.clone()),
+            ..StrategyPeriodHistory::default()
+        };
+        let legacy = ExecutionLedgerFile {
+            schema: EXECUTION_LEDGER_SCHEMA_V13.to_owned(),
+            records: Vec::new(),
+            risk_stop: Some(stop.clone()),
+            capital_reservation: Some(run.clone()),
+            exchange_evidence: Some(source),
+            strategy_periods: history,
+            archive_refs: Vec::new(),
+            leverage_attempts: Vec::new(),
+        };
+        fs::write(store.path(), serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        let ledger = DurableExecutionLedger::open(store.clone(), 3000).unwrap();
+        let old = store.attest_storage().unwrap();
+        let original = fs::read(store.path()).unwrap();
+        assert_eq!(old.on_disk_schema, EXECUTION_LEDGER_SCHEMA_V13);
+
+        for (hash, check, ts) in [
+            (
+                "b".repeat(64),
+                finalization.checksum_sha256.clone(),
+                stop.stopped_at_ms,
+            ),
+            (
+                old.manifest_sha256.clone(),
+                "f".repeat(64),
+                stop.stopped_at_ms,
+            ),
+            (
+                old.manifest_sha256.clone(),
+                finalization.checksum_sha256.clone(),
+                1,
+            ),
+        ] {
+            assert!(
+                ledger
+                    .migrate_finalized_storage_v14(&run.allocation_id, &hash, &check, ts)
+                    .is_err(),
+                "incorrect supplied identity must not touch financial storage"
+            );
+            assert_eq!(fs::read(store.path()).unwrap(), original);
+            assert!(!store.path().with_extension("pre-v14.json").exists());
+        }
+        assert!(
+            ledger
+                .migrate_finalized_storage_v14(
+                    "foreign_strategy_run_0123456789",
+                    &old.manifest_sha256,
+                    &finalization.checksum_sha256,
+                    stop.stopped_at_ms,
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), original);
+
+        let after = ledger
+            .migrate_finalized_storage_v14(
+                &run.allocation_id,
+                &old.manifest_sha256,
+                &finalization.checksum_sha256,
+                stop.stopped_at_ms,
+            )
+            .unwrap();
+        assert_eq!(after.on_disk_schema, EXECUTION_LEDGER_SCHEMA_V14);
+        assert_eq!(
+            after.original_snapshot_sha256.as_deref(),
+            Some(old.manifest_sha256.as_str())
+        );
+        assert_eq!(
+            fs::read(store.path().with_extension("pre-v14.json")).unwrap(),
+            original
+        );
+        assert_eq!(after.active_risk_stop_reason, old.active_risk_stop_reason);
+        assert_eq!(
+            after.finalized_run_checksum_sha256,
+            old.finalized_run_checksum_sha256
+        );
+        let after_bytes = fs::read(store.path()).unwrap();
+        let duplicate = ledger
+            .migrate_finalized_storage_v14(
+                &run.allocation_id,
+                &old.manifest_sha256,
+                &finalization.checksum_sha256,
+                stop.stopped_at_ms,
+            )
+            .unwrap();
+        assert_eq!(duplicate.manifest_sha256, after.manifest_sha256);
+        assert_eq!(fs::read(store.path()).unwrap(), after_bytes);
+        let reopened = DurableExecutionLedger::open(store.clone(), 3500).unwrap();
+        assert_eq!(reopened.risk_stop(), Some(&stop));
+        assert_eq!(reopened.finalized_run(), Some(&finalization));
+        assert!(
+            reopened
+                .migrate_finalized_storage_v14(
+                    &run.allocation_id,
+                    &"c".repeat(64),
+                    &finalization.checksum_sha256,
+                    stop.stopped_at_ms,
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), after_bytes);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
