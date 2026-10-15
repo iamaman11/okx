@@ -3822,6 +3822,21 @@ mod tests {
         // The original file is kept in this test to continue verifying the
         // legacy tamper predicate after the v14 checks.
         let original_legacy = fs::read(store.path()).unwrap();
+        let preserved_legacy = store.path().with_extension("pre-v14.json");
+        fs::write(&preserved_legacy, b"forged migration snapshot").unwrap();
+        assert!(matches!(
+            store.save(
+                &reopened.entries,
+                reopened.risk_stop.as_ref(),
+                reopened.capital_reservation.as_ref(),
+                reopened.exchange_evidence.as_ref(),
+                &reopened.strategy_periods,
+                &reopened.leverage_attempts,
+            ),
+            Err(ExecutionLedgerError::Corrupt(_))
+        ));
+        assert_eq!(fs::read(store.path()).unwrap(), original_legacy);
+        fs::remove_file(&preserved_legacy).unwrap();
         store
             .save(
                 &reopened.entries,
