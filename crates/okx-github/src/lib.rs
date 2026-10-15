@@ -1224,7 +1224,7 @@ mod tests {
         assert_eq!(GITHUB_REQUEST_TIMEOUT, Duration::from_secs(60));
         assert_eq!(GITHUB_ARTIFACT_REQUEST_TIMEOUT, Duration::from_secs(180));
         assert!(GITHUB_ARTIFACT_REQUEST_TIMEOUT > GITHUB_REQUEST_TIMEOUT);
-        assert!(MAX_GITHUB_ARTIFACT_ZIP_BYTES > 11_107_095);
+        assert_eq!(MAX_GITHUB_ARTIFACT_ZIP_BYTES, 256 * 1024 * 1024);
     }
 
     #[test]
