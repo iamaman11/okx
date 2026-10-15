@@ -1245,7 +1245,9 @@ impl AgentOperation {
                 if expected_manifest_sha256.len() != 64
                     || expected_finalized_checksum_sha256.len() != 64
                     || *expected_stopped_at_ms == 0
-                    || !expected_manifest_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                    || !expected_manifest_sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit())
                     || !expected_finalized_checksum_sha256
                         .bytes()
                         .all(|b| b.is_ascii_hexdigit())
