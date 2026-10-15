@@ -1,5 +1,48 @@
 # Stage 5 implementation checklist and live-admission contract
 
+
+## Stage 5B / 5C: one-account compact trader view (PR #334, candidate)
+
+The existing primary Cloudflare MCP `account_summary` tool supports an
+optional `view: "trader"` that changes the native Rust read-only query to
+`trader_snapshot`. `view: "full"` (or omitted view) preserves the old
+diagnostic response. There is no second MCP tool, Windows agent, Demo
+analytics engine, state database, timer, execution ingress, or transport.
+
+One native account snapshot and one ledger reconciliation own **both** views:
+authenticated account UID and native position/order/OCO counts, source
+coverage/coherence, strategy STOP, terminal NAV/checksum, FINALIZED vs
+UNVERIFIED count, and funding-bill attribution are taken from exactly the
+same previously reconciled source. The compact view is bounded to 12,288
+bytes of serialized result; it includes actual source history-read duration,
+full-result serialized byte count and compact-result serialized byte count
+so bandwidth/context reduction is measured rather than guessed.
+
+**Critical safety:** the read-only view can return `NO_GO` on a source/risk
+blocker or `NOT_ATTESTED` otherwise, **never `GO`**. Positive new-risk
+permission requires the separate explicit, current executor preflight,
+instrument-specific Production-public market FRESH, account/strategy NAV,
+versioned risk policy, and immutable execution plan revalidation. An
+allowed reduce/close under STOP still uses the existing native executor.
+Fundamental strategy signals never come from Demo. Production Live OFF
+until separately admitted.
+
+Funding bills (OKX subTypes `173`/`174`) provide account-side PnL but
+not a universal exact strategy/position-side order identity. The compact
+packet reports ambiguous funding as **unallocated**, never silently
+included in strategy NAV; positive assignment needs source-exact native
+ownership and independent financial tests. One-symbol or time-window
+coincidence is insufficient. Official source:
+https://www.okx.com/docs-v5/en/ (Get bills details).
+
+**Separate unaccepted physical test:** v14 cold on-disk migration after
+first legitimate persisted ledger write, intact pre-v14 snapshot and
+detached archived evidence, fail-closed recovery and performance. The
+day-boundary STOP does not prevent continuing code or read-only tests.
+Avoid artificial trading POST or bypass of account-safety STOP to create
+a migration proof.
+
+
 ## Stage 5B financial ledger v14: sealed archive / recovery invariant (PR #333, DRAFT)
 
 This change is **NOT ACCEPTED until full CI, Windows CONTROL source-tree

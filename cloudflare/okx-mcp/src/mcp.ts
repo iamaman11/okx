@@ -372,8 +372,14 @@ export const mcpApi = {
           },
           {
             name: "account_summary",
-            description: "Get a bounded read-only OKX account and ledger truth summary, including history coverage and durable execution-ledger reconciliation.",
-            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            description: "Read-only account/ledger reconciliation. Optional view=trader returns a small fail-closed GO/NO_GO observer packet with NAV, STOP, source and byte metrics; full (default) keeps the detailed diagnostic response. No Demo market signals or trading permission.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                view: { type: "string", enum: ["full", "trader"] },
+              },
+              additionalProperties: false,
+            },
           },
           {
             name: "execution_status",
@@ -1340,10 +1346,14 @@ export const mcpApi = {
         })));
       }
       if (name === "account_summary") {
+        if (!hasOnlyKeys(args, ["view"]) ||
+            (args.view !== undefined && args.view !== "full" && args.view !== "trader")) {
+          return jsonRpcError(id, -32602, "view must be full or trader");
+        }
         const agentRequest = {
           schema: "okx.agent.request/v1",
           request_id: requestId(),
-          operation: { type: "account_summary" },
+          operation: { type: args.view === "trader" ? "trader_snapshot" : "account_summary" },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }

@@ -29,6 +29,142 @@ struct AccountSummaryResult {
     coherence: AccountSummaryCoherence,
 }
 
+const TRADER_SNAPSHOT_SCHEMA_V1: &str = "okx.trader-snapshot/v1";
+const MAX_TRADER_PACKET_BYTES: usize = 12_288;
+
+/// Deliberately *not* a mutation authority. This is one bounded projection of
+/// account_summary, after the same source/coherence/ledger reconciliation.
+/// It can prove NO_GO, but can NEVER mint a GO from read-only observations.
+fn compact_trader_packet(
+    full: &serde_json::Value,
+    quality: &DataQuality,
+    warnings_count: usize,
+    source_read_duration_ms: u64,
+) -> serde_json::Value {
+    use serde_json::{Value, json};
+
+    let get = |p: &str| full.pointer(p).cloned().unwrap_or(Value::Null);
+    let has_stop = !get("/reconciliation/strategy_risk_stop").is_null();
+    let finalized = !get("/reconciliation/finalized_run").is_null();
+    let coherent = get("/coherence/coherent") == json!(true);
+    let reconciled = get("/reconciliation/consistent") == json!(true);
+    let complete_protection = get("/pending_protective_algos/complete_within_bound") == json!(true);
+    let history_complete = full
+        .pointer("/account_ledger/history_coverage")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            !rows.is_empty()
+                && rows
+                    .iter()
+                    .all(|row| row.get("complete_within_bound") == Some(&json!(true)))
+        });
+    let mut reasons = Vec::new();
+    if has_stop {
+        reasons.push("DURABLE_STRATEGY_STOP");
+    }
+    if finalized {
+        reasons.push("RUN_FINALIZED");
+    }
+    if get("/reconciliation/financial_period/state") == json!("INCOMPLETE") {
+        reasons.push("STRATEGY_FINANCE_INCOMPLETE");
+    }
+    if get("/reconciliation/exchange_evidence/source_gap_over_two_hours") == json!(true) {
+        reasons.push("FINANCIAL_SOURCE_GAP");
+    }
+    if get("/reconciliation/strategy_attribution/unallocated_funding_bills")
+        .as_u64()
+        .is_some_and(|count| count > 0)
+    {
+        reasons.push("FUNDING_NOT_ATTRIBUTED");
+    }
+    if !coherent {
+        reasons.push("PRIVATE_SOURCE_NOT_COHERENT");
+    }
+    if !reconciled {
+        reasons.push("LEDGER_RECONCILIATION_NOT_PROVEN");
+    }
+    if !complete_protection || !history_complete {
+        reasons.push("BOUNDED_PRIVATE_SOURCE");
+    }
+    if !matches!(quality, DataQuality::Fresh) {
+        reasons.push("SUMMARY_QUALITY_NOT_FRESH");
+    }
+    let blocked = !reasons.is_empty();
+    // Even when no blocker was observed, this read-only packet cannot attest
+    // an execution policy, risk budget, exact current venue or new order plan.
+    reasons.push("EXECUTOR_RISK_ADMISSION_NOT_PERFORMED");
+    let mut compact = json!({
+        "schema": TRADER_SNAPSHOT_SCHEMA_V1,
+        "decision": {
+            "new_risk": if blocked { "NO_GO" } else { "NOT_ATTESTED" },
+            "scope": "READ_ONLY_OBSERVER_NOT_TRADE_PERMISSION",
+            "reasons": reasons,
+            "risk_reducing_exit": "REQUIRES_NATIVE_EXECUTOR_REVALIDATION"
+        },
+        "account": {
+            "uid_fingerprint": get("/account_ledger/authority/account_uid_fingerprint"),
+            "scope": "AUTHENTICATED_ACCOUNT_ONLY",
+            "account_equity_usd": get("/account_ledger/total_equity_usd"),
+            "account_unrealized_pnl": get("/account_ledger/current_unrealized_pnl"),
+            "equity_is_strategy_nav": false,
+            "positions": get("/account_ledger/open_positions"),
+            "pending_orders": get("/account_ledger/pending_orders"),
+            "pending_protective_algos": get("/pending_protective_algos/rows"),
+            "native_protection_complete": complete_protection,
+            "private_history_complete_within_bound": history_complete
+        },
+        "strategy": {
+            "active_run_id": get("/reconciliation/financial_period/run_id"),
+            "period_state": get("/reconciliation/financial_period/state"),
+            "current_nav_usdt": get("/reconciliation/financial_period/nav_usdt"),
+            "finalized_run_id": get("/reconciliation/finalized_run/run_id"),
+            "finalized_nav_usdt": get("/reconciliation/finalized_run/nav_usdt"),
+            "finalized_realized_usdt": get("/reconciliation/finalized_run/realized_usdt"),
+            "finalized_fees_usdt": get("/reconciliation/finalized_run/fees_usdt"),
+            "finalized_checksum_sha256": get("/reconciliation/finalized_run/checksum_sha256"),
+            "durable_stop": get("/reconciliation/strategy_risk_stop"),
+            "archived_finalized": get("/reconciliation/archived_runs_count"),
+            "archived_unverified": get("/reconciliation/unverified_runs_count"),
+            "archive_free_slots": get("/reconciliation/archived_run_slots_remaining")
+        },
+        "funding": {
+            "allocated_to_strategy_usdt": get("/reconciliation/financial_period/funding_usdt"),
+            "unallocated_exchange_bills": get("/reconciliation/strategy_attribution/unallocated_funding_bills"),
+            "classification": "UNOWNED_UNLESS_EXACT_POSITION_PROOF"
+        },
+        "evidence": {
+            "quality": quality,
+            "private_source_coherent": coherent,
+            "current_account_asof_ms": get("/coherence/current_account_as_of_ms"),
+            "account_source_received_at": get("/coherence/account_snapshot_source_received_at"),
+            "history_source_received_at": get("/coherence/history_source_received_at"),
+            "source_history_complete": history_complete,
+            "source_gap_over_two_hours": get("/reconciliation/exchange_evidence/source_gap_over_two_hours"),
+            "source_cursor_complete": get("/reconciliation/exchange_evidence/latest_source_complete"),
+            "source_asof_ms": get("/reconciliation/exchange_evidence/latest_source_asof_ms"),
+            "production_public_market_gate": "NOT_TESTED_BY_ACCOUNT_READ",
+            "managed_intents_total": get("/managed_execution_intents/total"),
+            "managed_intents_sampled": get("/managed_execution_intents/shown")
+        },
+        "transport": {
+            "full_account_result_bytes": serde_json::to_vec(full).map_or(0, |v| v.len()),
+            "native_source_read_ms": source_read_duration_ms,
+            "warnings_count": warnings_count,
+            "packet_bytes": 0
+        }
+    });
+    // The packet byte count includes its own integer field, not just
+    // the pre-metadata JSON. Stabilizes after at most a few digit changes.
+    for _ in 0..4 {
+        let bytes = serde_json::to_vec(&compact).map_or(usize::MAX, |v| v.len());
+        if compact["transport"]["packet_bytes"] == json!(bytes) {
+            break;
+        }
+        compact["transport"]["packet_bytes"] = json!(bytes);
+    }
+    compact
+}
+
 const PORTFOLIO_RISK_MAX_OBSERVATION_SKEW_MS: u64 = 30_000;
 
 #[derive(serde::Serialize)]
@@ -150,7 +286,7 @@ pub(super) async fn dispatch(
                 warnings: assembled.warnings,
             })
         }
-        AgentOperation::AccountSummary => {
+        AgentOperation::AccountSummary | AgentOperation::TraderSnapshot => {
             let assembled = match assemble_account_snapshot(context).await {
                 Ok(value) => value,
                 Err(error) => return Ok(account_query_failure(request, generated_at, error)),
@@ -449,24 +585,54 @@ pub(super) async fn dispatch(
                 blockers: opening_blockers,
             };
 
+            let compact = matches!(request.operation, AgentOperation::TraderSnapshot);
+            let full = serde_json::to_value(AccountSummaryResult {
+                schema: ACCOUNT_SUMMARY_SCHEMA_V1,
+                account_ledger: facts.summary,
+                pending_protective_algos,
+                strategy_run_opening_source,
+                reconciliation,
+                managed_execution_intents,
+                coherence,
+            })?;
+            let result = if compact {
+                let packet = compact_trader_packet(
+                    &full,
+                    &quality,
+                    warnings.len(),
+                    history_read_duration_ms,
+                );
+                if serde_json::to_vec(&packet)?.len() > MAX_TRADER_PACKET_BYTES {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        ACCOUNT_LEDGER_INCONSISTENT_CODE,
+                        "compact trader snapshot exceeds bounded transport payload".to_owned(),
+                        false,
+                    ));
+                }
+                packet
+            } else {
+                full
+            };
             Ok(AgentResponse {
                 schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
                 request_id: request.request_id.clone(),
                 status: AgentResponseStatus::Completed,
                 generated_at: generated_at.to_owned(),
                 quality,
-                result_schema: Some(ACCOUNT_SUMMARY_SCHEMA_V1.to_owned()),
-                result: Some(serde_json::to_value(AccountSummaryResult {
-                    schema: ACCOUNT_SUMMARY_SCHEMA_V1,
-                    account_ledger: facts.summary,
-                    pending_protective_algos,
-                    strategy_run_opening_source,
-                    reconciliation,
-                    managed_execution_intents,
-                    coherence,
-                })?),
+                result_schema: Some(
+                    if compact {
+                        TRADER_SNAPSHOT_SCHEMA_V1
+                    } else {
+                        ACCOUNT_SUMMARY_SCHEMA_V1
+                    }
+                    .to_owned(),
+                ),
+                result: Some(result),
                 failure: None,
-                warnings,
+                warnings: if compact { Vec::new() } else { warnings },
             })
         }
         AgentOperation::TradingCapabilities {
@@ -2092,6 +2258,112 @@ fn account_ledger_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trader_packet_is_bounded_never_mints_go_and_keeps_exact_finance_proof() {
+        use serde_json::json;
+        let mut full = json!({
+            "account_ledger": {
+                "authority": {"account_uid_fingerprint": "account-sha"},
+                "open_positions": 0,
+                "pending_orders": 0,
+                "total_equity_usd": "5000",
+                "current_unrealized_pnl": "0",
+                "history_coverage": [{"complete_within_bound": true}]
+            },
+            "pending_protective_algos": {
+                "rows": 0,
+                "complete_within_bound": true
+            },
+            "coherence": {
+                "coherent": true,
+                "current_account_as_of_ms": "1792024604593",
+                "account_snapshot_source_received_at": "2026-10-15T01:00:00Z",
+                "history_source_received_at": "2026-10-15T01:00:01Z"
+            },
+            "reconciliation": {
+                "consistent": true,
+                "strategy_risk_stop": {"reason": "STRATEGY_UTC_DAILY_GROSS_LOSS"},
+                "financial_period": {
+                    "run_id": "stage5b_physical_test_run",
+                    "state": "FLAT_RECONCILED",
+                    "nav_usdt": "99.996587799",
+                    "funding_usdt": null
+                },
+                "finalized_run": {
+                    "run_id": "stage5b_physical_test_run",
+                    "nav_usdt": "99.996587799",
+                    "realized_usdt": "0.004762",
+                    "fees_usdt": "-0.008174201",
+                    "checksum_sha256": "542337bbb39787dba9f128c7828716e12f95cc3954358400e644fb28f0fe75ce"
+                },
+                "archived_runs_count": 4,
+                "unverified_runs_count": 1,
+                "archived_run_slots_remaining": 251,
+                "strategy_attribution": {"unallocated_funding_bills": 2},
+                "exchange_evidence": {
+                    "source_gap_over_two_hours": false,
+                    "latest_source_complete": true,
+                    "latest_source_asof_ms": 1792023166014u64
+                }
+            },
+            "managed_execution_intents": {
+                "total": 45,
+                "shown": 16,
+                "rows": vec!["big diagnostic content".repeat(500); 16]
+            }
+        });
+        let p = compact_trader_packet(&full, &DataQuality::Degraded, 2, 125);
+        assert_eq!(p["schema"], TRADER_SNAPSHOT_SCHEMA_V1);
+        assert_eq!(p["decision"]["new_risk"], "NO_GO");
+        assert_eq!(
+            p["decision"]["scope"],
+            "READ_ONLY_OBSERVER_NOT_TRADE_PERMISSION"
+        );
+        assert_eq!(p["strategy"]["finalized_nav_usdt"], "99.996587799");
+        assert_eq!(p["account"]["account_equity_usd"], "5000");
+        assert_eq!(p["account"]["equity_is_strategy_nav"], false);
+        assert_eq!(
+            p["strategy"]["finalized_checksum_sha256"],
+            full["reconciliation"]["finalized_run"]["checksum_sha256"]
+        );
+        assert_eq!(p["funding"]["unallocated_exchange_bills"], 2);
+        assert_eq!(p["evidence"]["current_account_asof_ms"], "1792024604593");
+        assert_eq!(
+            p["evidence"]["account_source_received_at"],
+            "2026-10-15T01:00:00Z"
+        );
+        assert!(p["funding"]["allocated_to_strategy_usdt"].is_null());
+        assert!(serde_json::to_vec(&p).unwrap().len() <= MAX_TRADER_PACKET_BYTES);
+        assert_eq!(
+            p["transport"]["packet_bytes"].as_u64().unwrap() as usize,
+            serde_json::to_vec(&p).unwrap().len()
+        );
+        assert!(
+            p["transport"]["full_account_result_bytes"]
+                .as_u64()
+                .unwrap()
+                > 5 * p["transport"]["packet_bytes"].as_u64().unwrap()
+        );
+        // A healthy observer still cannot authorize new risk without a typed
+        // native executor + explicit risk/mandate; not a false green GO.
+        full["reconciliation"]["strategy_risk_stop"] = json!(null);
+        full["reconciliation"]["finalized_run"] = json!(null);
+        full["reconciliation"]["strategy_attribution"]["unallocated_funding_bills"] = json!(0);
+        let seemingly_ready = compact_trader_packet(&full, &DataQuality::Fresh, 0, 1);
+        assert_eq!(seemingly_ready["decision"]["new_risk"], "NOT_ATTESTED");
+        full["reconciliation"]["financial_period"]["state"] = json!("INCOMPLETE");
+        let incomplete = compact_trader_packet(&full, &DataQuality::Fresh, 0, 1);
+        assert_eq!(incomplete["decision"]["new_risk"], "NO_GO");
+        full["reconciliation"]["financial_period"]["state"] = json!("FLAT_RECONCILED");
+        full["reconciliation"]["strategy_attribution"]["unallocated_funding_bills"] = json!(1);
+        let unfunded = compact_trader_packet(&full, &DataQuality::Fresh, 0, 1);
+        assert_eq!(unfunded["decision"]["new_risk"], "NO_GO");
+        assert_ne!(seemingly_ready["decision"]["new_risk"], "GO");
+        let absent = compact_trader_packet(&json!({}), &DataQuality::Fresh, 0, 1);
+        assert_eq!(absent["decision"]["new_risk"], "NO_GO");
+        assert!(absent["account"]["positions"].is_null());
+    }
 
     #[test]
     fn portfolio_observation_skew_is_explicit_and_bounded_in_milliseconds() {
