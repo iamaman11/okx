@@ -456,7 +456,9 @@ pub struct GitHubClient {
 
 impl GitHubClient {
     pub fn new(token: Zeroizing<String>, user_agent: &str) -> Result<Self, GitHubError> {
+        // The native GitHub control/release channel never inherits a shell or system proxy.
         let http = Client::builder()
+            .no_proxy()
             .user_agent(user_agent)
             .connect_timeout(GITHUB_CONNECT_TIMEOUT)
             .timeout(GITHUB_REQUEST_TIMEOUT)
