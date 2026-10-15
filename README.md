@@ -1,5 +1,7 @@
 # okx
 
+> **Current operator/architecture cursor (2026-10-15):** [Single-agent account profiles and Stage 5C-2 acceptance](docs/ACCOUNT_PROFILES_AND_RELEASE_ACCEPTANCE.md). One native agent, one executor, account venue Demo/Production selected independently from permission ReadOnly/Trading. Production Trading is DISABLED until a separately accepted explicit Live gate. PR #339 was merged, CI 6/6, **but NOT installed**: the verified Windows release download by installed CONTROL fails with a GitHub JSON body decode error. Older "current" paragraphs below are historical and must not override this cursor.
+
 Rust/Tokio OKX observation, analysis and execution-safety platform for the current Windows + GitHub environment.
 
 The production architecture is deliberately small: one Windows supervisor chain, one observation runtime, one mutation owner, typed encrypted access, and hosted-CI artifacts as the only normal deployment authority.
