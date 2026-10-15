@@ -3748,6 +3748,57 @@ mod tests {
                 .evidence
                 .checksum_sha256
         );
+        // Migrate the exact v9 inline evidence through the single owner.
+        // The original file is kept in this test to continue verifying the
+        // legacy tamper predicate after the v14 checks.
+        let original_legacy = fs::read(store.path()).unwrap();
+        store
+            .save(
+                &reopened.entries,
+                reopened.risk_stop.as_ref(),
+                reopened.capital_reservation.as_ref(),
+                reopened.exchange_evidence.as_ref(),
+                &reopened.strategy_periods,
+                &reopened.leverage_attempts,
+            )
+            .unwrap();
+        let compact: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(compact["schema"], EXECUTION_LEDGER_SCHEMA_V14);
+        assert_eq!(compact["archive_refs"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            compact["strategy_periods"]["archived_runs"].as_array().unwrap().len(),
+            0
+        );
+        let detached = store
+            .archive_path(ArchivedRunKind::Finalized, "run_archived_source_0123456789")
+            .unwrap();
+        let correct_archive = fs::read(&detached).unwrap();
+        assert_eq!(
+            DurableExecutionLedger::open(store.clone(), 3250)
+                .unwrap()
+                .archived_runs_count(),
+            1
+        );
+        // Tampering with a *separate* sealed payload must not be ignored.
+        fs::write(&detached, b"tampered").unwrap();
+        assert!(DurableExecutionLedger::open(store.clone(), 3260).is_err());
+        assert!(
+            store
+                .save(
+                    &reopened.entries,
+                    reopened.risk_stop.as_ref(),
+                    reopened.capital_reservation.as_ref(),
+                    reopened.exchange_evidence.as_ref(),
+                    &reopened.strategy_periods,
+                    &reopened.leverage_attempts,
+                )
+                .is_err(),
+            "tampering must also forbid a subsequent writer commit"
+        );
+        fs::write(&detached, correct_archive).unwrap();
+        assert!(DurableExecutionLedger::open(store.clone(), 3270).is_ok());
+        fs::write(store.path(), original_legacy).unwrap();
         drop(reopened);
         let mut altered = serde_json::to_value(&file).unwrap();
         altered["strategy_periods"]["archived_runs"][0]["finalization"]["nav_usdt"] =
