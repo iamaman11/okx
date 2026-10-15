@@ -1134,8 +1134,8 @@ impl DurableExecutionLedger {
                 .iter()
                 .filter(|change| !change.state.is_terminal())
                 .count();
-            if let Some(protective) = entry.record.protection.as_ref() {
-                if !matches!(
+            if let Some(protective) = entry.record.protection.as_ref()
+                && (!matches!(
                     protective.status,
                     ProtectiveOrderStatus::CleanedUp | ProtectiveOrderStatus::NotActivated
                 ) || protective
@@ -1148,10 +1148,9 @@ impl DurableExecutionLedger {
                             ProtectiveSizeAmendState::Confirmed
                                 | ProtectiveSizeAmendState::RetiredAbsent
                         )
-                    })
-                {
-                    unresolved_protective_lifecycle += 1;
-                }
+                    }))
+            {
+                unresolved_protective_lifecycle += 1;
             }
         }
         Ok(ProfileHandoffLedgerAssessment {
