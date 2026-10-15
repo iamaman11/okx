@@ -1095,6 +1095,109 @@ struct CommentUser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    /// One local HTTP response, no credentials/network dependencies or daemon.
+    /// The spawned server owns a single connection and always exits.
+    fn one_response(
+        reply: &'static [u8],
+        hold_open: Duration,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("ephemeral TCP listener");
+        let address = listener.local_addr().expect("listener address");
+        let join = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("single client connection");
+            let mut request = [0_u8; 2048];
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("read timeout");
+            let _ = socket.read(&mut request);
+            socket.write_all(reply).expect("send fixture");
+            socket.flush().expect("flush response");
+            if !hold_open.is_zero() {
+                thread::sleep(hold_open);
+            }
+        });
+        (format!("http://{address}"), join)
+    }
+
+    #[tokio::test]
+    async fn truncated_http_body_fails_in_exact_release_stage() {
+        let (url, server) = one_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+            Duration::ZERO,
+        );
+        let response = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("valid headers");
+        let error = read_response_body(response, "workflow_artifact", 1024)
+            .await
+            .expect_err("early EOF must fail");
+        assert!(matches!(
+            error,
+            GitHubError::BodyRead(ref details)
+                if details.phase == "workflow_artifact" && details.status == 200
+        ));
+        assert_eq!(error.failure_class(), GitHubFailureClass::Network);
+        server.join().expect("server exit");
+    }
+
+    #[tokio::test]
+    async fn stalled_http_body_reports_timeout_and_received_bytes() {
+        let (url, server) = one_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\nContent-Type: application/zip\r\nConnection: close\r\n\r\nZIP",
+            Duration::from_millis(600),
+        );
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .expect("client");
+        let response = client.get(url).send().await.expect("valid headers");
+        let error = read_response_body(response, "download_artifact_zip", 1024)
+            .await
+            .expect_err("stall must fail within bounded deadline");
+        assert!(matches!(
+            error,
+            GitHubError::BodyRead(ref details)
+                if details.phase == "download_artifact_zip"
+                    && details.timeout
+                    && details.content_length == Some(128)
+        ));
+        assert_eq!(error.failure_class(), GitHubFailureClass::Timeout);
+        server.join().expect("server exit");
+    }
+
+    #[tokio::test]
+    async fn declared_body_over_limit_rejected_before_read() {
+        let (url, server) = one_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n",
+            Duration::ZERO,
+        );
+        let response = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("valid headers");
+        let error = read_response_body(response, "download_artifact_zip", 128)
+            .await
+            .expect_err("declared oversized ZIP must fail");
+        assert!(matches!(
+            error,
+            GitHubError::BodyTooLarge {
+                phase: "download_artifact_zip",
+                max_bytes: 128,
+                received_bytes: 0,
+                ..
+            }
+        ));
+        server.join().expect("server exit");
+    }
 
     fn response_error(
         status: u16,
