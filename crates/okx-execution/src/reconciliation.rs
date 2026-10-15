@@ -139,6 +139,8 @@ pub struct AccountLedgerReconciliation {
     /// Immutable operator-authorized STOP epoch archive from this same ledger.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub strategy_stop_rearm_proofs: Vec<crate::StrategyStopRearm>,
+    pub strategy_stop_rearm_proofs_total: usize,
+    pub strategy_stop_rearm_proofs_truncated: bool,
     /// Immutable past result; independent of current source-window age.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalized_run: Option<crate::StrategyFinalization>,
@@ -257,7 +259,15 @@ pub fn reconcile_account_ledger(
     result.strategy_nav_watermark = ledger.strategy_nav_watermark().cloned();
     result.strategy_nav_checkpoint_count = ledger.strategy_nav_point_count();
     result.strategy_risk_stop = ledger.risk_stop().cloned();
-    result.strategy_stop_rearm_proofs = ledger.stop_rearm_proofs();
+    let rearm_proofs = ledger.stop_rearm_proofs();
+    result.strategy_stop_rearm_proofs_total = rearm_proofs.len();
+    result.strategy_stop_rearm_proofs_truncated = rearm_proofs.len() > MAX_ARCHIVE_PROOF_ROWS;
+    result.strategy_stop_rearm_proofs = rearm_proofs
+        .into_iter()
+        .rev()
+        .take(MAX_ARCHIVE_PROOF_ROWS)
+        .collect::<Vec<_>>();
+    result.strategy_stop_rearm_proofs.reverse();
     result.financial_period = ledger.financial_period(facts, false);
     result.finalized_run = ledger.finalized_run().cloned();
     result.archived_runs_count = ledger.archived_runs_count();
@@ -450,6 +460,8 @@ fn reconcile_exchange_evidence(
         strategy_nav_checkpoint_count: 0,
         strategy_risk_stop: None,
         strategy_stop_rearm_proofs: Vec::new(),
+        strategy_stop_rearm_proofs_total: 0,
+        strategy_stop_rearm_proofs_truncated: false,
         finalized_run: None,
         archived_runs_count: 0,
         archived_run_proofs: Vec::new(),
