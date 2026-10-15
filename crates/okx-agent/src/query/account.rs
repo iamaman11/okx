@@ -132,6 +132,9 @@ fn compact_trader_packet(
         "evidence": {
             "quality": quality,
             "private_source_coherent": coherent,
+            "current_account_asof_ms": get("/coherence/current_account_as_of_ms"),
+            "account_source_received_at": get("/coherence/account_snapshot_source_received_at"),
+            "history_source_received_at": get("/coherence/history_source_received_at"),
             "source_history_complete": history_complete,
             "source_gap_over_two_hours": get("/reconciliation/exchange_evidence/source_gap_over_two_hours"),
             "source_cursor_complete": get("/reconciliation/exchange_evidence/latest_source_complete"),
@@ -2267,7 +2270,12 @@ mod tests {
                 "rows": 0,
                 "complete_within_bound": true
             },
-            "coherence": {"coherent": true},
+            "coherence": {
+                "coherent": true,
+                "current_account_as_of_ms": "1792024604593",
+                "account_snapshot_source_received_at": "2026-10-15T01:00:00Z",
+                "history_source_received_at": "2026-10-15T01:00:01Z"
+            },
             "reconciliation": {
                 "consistent": true,
                 "strategy_risk_stop": {"reason": "STRATEGY_UTC_DAILY_GROSS_LOSS"},
@@ -2313,6 +2321,11 @@ mod tests {
             full["reconciliation"]["finalized_run"]["checksum_sha256"]
         );
         assert_eq!(p["funding"]["unallocated_exchange_bills"], 2);
+        assert_eq!(p["evidence"]["current_account_asof_ms"], "1792024604593");
+        assert_eq!(
+            p["evidence"]["account_source_received_at"],
+            "2026-10-15T01:00:00Z"
+        );
         assert!(p["funding"]["allocated_to_strategy_usdt"].is_null());
         assert!(serde_json::to_vec(&p).unwrap().len() <= MAX_TRADER_PACKET_BYTES);
         assert_eq!(
