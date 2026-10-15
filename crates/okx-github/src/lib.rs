@@ -118,6 +118,28 @@ impl GitHubBackoff {
 }
 
 #[derive(Debug, Error)]
+#[error(
+    "GitHub response body read failed: phase={phase} status={status} host={host} \
+content_type={content_type:?} content_encoding={content_encoding:?} \
+content_length={content_length:?} request_id={request_id:?} \
+received_bytes={received_bytes} timeout={timeout} body={body} decode={decode}"
+)]
+pub struct GitHubBodyReadDiagnostic {
+        phase: &'static str,
+        status: u16,
+        host: String,
+        content_type: Option<String>,
+        content_encoding: Option<String>,
+        content_length: Option<u64>,
+        request_id: Option<String>,
+        received_bytes: usize,
+        timeout: bool,
+        body: bool,
+        decode: bool,
+
+}
+
+#[derive(Debug, Error)]
 pub enum GitHubError {
     #[error("GitHub HTTP transport error: {0}")]
     Http(#[from] reqwest::Error),
@@ -135,25 +157,8 @@ pub enum GitHubError {
         source: serde_json::Error,
     },
 
-    #[error(
-        "GitHub response body read failed: phase={phase} status={status} host={host} \
-content_type={content_type:?} content_encoding={content_encoding:?} \
-content_length={content_length:?} request_id={request_id:?} \
-received_bytes={received_bytes} timeout={timeout} body={body} decode={decode}"
-    )]
-    BodyRead {
-        phase: &'static str,
-        status: u16,
-        host: String,
-        content_type: Option<String>,
-        content_encoding: Option<String>,
-        content_length: Option<u64>,
-        request_id: Option<String>,
-        received_bytes: usize,
-        timeout: bool,
-        body: bool,
-        decode: bool,
-    },
+    #[error(transparent)]
+    BodyRead(Box<GitHubBodyReadDiagnostic>),
 
     #[error(
         "GitHub response body exceeded limit: phase={phase} max_bytes={max_bytes} \
@@ -210,7 +215,7 @@ impl GitHubError {
     pub fn failure_class(&self) -> GitHubFailureClass {
         match self {
             Self::Http(error) => classify_http_failure(error.is_timeout()),
-            Self::BodyRead { timeout, .. } => classify_http_failure(*timeout),
+            Self::BodyRead(details) => classify_http_failure(details.timeout),
             Self::Response(error) => error.class,
             Self::Decode(_) | Self::JsonAtPhase { .. } => GitHubFailureClass::Decode,
             Self::BodyTooLarge { .. } => GitHubFailureClass::UnexpectedResponse,
@@ -868,7 +873,7 @@ async fn read_response_body(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| GitHubError::BodyRead {
+        .map_err(|error| GitHubError::BodyRead(Box::new(GitHubBodyReadDiagnostic {
             phase,
             status,
             host: host.clone(),
@@ -880,7 +885,7 @@ async fn read_response_body(
             timeout: error.is_timeout(),
             body: error.is_body(),
             decode: error.is_decode(),
-        })?
+        })))?
     {
         if chunk.len() > max_bytes.saturating_sub(body.len()) {
             return Err(GitHubError::BodyTooLarge {
@@ -1154,7 +1159,7 @@ mod tests {
 
     #[test]
     fn body_read_phase_and_timeout_are_typed_without_claiming_json_failure() {
-        let timeout = GitHubError::BodyRead {
+        let timeout = GitHubError::BodyRead(Box::new(GitHubBodyReadDiagnostic {
             phase: "download_artifact_zip",
             status: 200,
             host: "storage.example.net".to_owned(),
@@ -1166,11 +1171,11 @@ mod tests {
             timeout: true,
             body: true,
             decode: true,
-        };
+        }));
         assert_eq!(timeout.failure_class(), GitHubFailureClass::Timeout);
         assert!(timeout.to_string().contains("phase=download_artifact_zip"));
         assert!(timeout.to_string().contains("received_bytes=4096"));
-        let network = GitHubError::BodyRead {
+        let network = GitHubError::BodyRead(Box::new(GitHubBodyReadDiagnostic {
             phase: "workflow_artifact",
             status: 200,
             host: "api.github.com".to_owned(),
@@ -1182,7 +1187,7 @@ mod tests {
             timeout: false,
             body: true,
             decode: true,
-        };
+        }));
         assert_eq!(network.failure_class(), GitHubFailureClass::Network);
         assert!(network.to_string().contains("phase=workflow_artifact"));
         assert!(!network.to_string().contains("download_artifact_zip"));
