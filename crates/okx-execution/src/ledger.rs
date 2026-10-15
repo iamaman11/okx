@@ -3587,6 +3587,7 @@ mod tests {
                 finalized_run: Some(finalization.clone()),
                 ..StrategyPeriodHistory::default()
             },
+            archive_refs: Vec::new(),
             leverage_attempts: vec![attempt.clone()],
         };
         fs::write(store.path(), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
@@ -5152,6 +5153,7 @@ mod tests {
                     capital_reservation: None,
                     exchange_evidence: None,
                     strategy_periods: StrategyPeriodHistory::default(),
+                    archive_refs: Vec::new(),
                     leverage_attempts: Vec::new(),
                 })
                 .expect("legacy json"),
@@ -5161,11 +5163,11 @@ mod tests {
             let store = ExecutionLedgerStore::at(&path);
             let mut ledger = DurableExecutionLedger::open(store, 101).expect("load legacy");
             assert_eq!(ledger.len(), 1);
-            ledger.begin_submission(&intent_id, 102).expect("write v6");
+            ledger.begin_submission(&intent_id, 102).expect("write v14");
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V13);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V14);
 
             let _ = fs::remove_dir_all(root);
         }
