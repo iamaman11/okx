@@ -31,6 +31,12 @@ pub const MAX_COMMENT_BODY_BYTES: usize = 64 * 1024;
 pub const ISSUE_CURSOR_SCHEMA_V1: &str = "okx.github.issue-cursor/v1";
 pub const GITHUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// The accepted 11 MB Windows ReleaseSet exceeded the generic 60s request
+/// deadline on three installations. Give only this immutable GET a bounded
+/// longer total deadline, preserving every existing provenance/hash check.
+pub const GITHUB_ARTIFACT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const MAX_GITHUB_WORKFLOW_JSON_BYTES: usize = 2 * 1024 * 1024;
+const MAX_GITHUB_ARTIFACT_ZIP_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -112,6 +118,27 @@ impl GitHubBackoff {
 }
 
 #[derive(Debug, Error)]
+#[error(
+    "GitHub response body read failed: phase={phase} status={status} host={host} \
+content_type={content_type:?} content_encoding={content_encoding:?} \
+content_length={content_length:?} request_id={request_id:?} \
+received_bytes={received_bytes} timeout={timeout} body={body} decode={decode}"
+)]
+pub struct GitHubBodyReadDiagnostic {
+    phase: &'static str,
+    status: u16,
+    host: String,
+    content_type: Option<String>,
+    content_encoding: Option<String>,
+    content_length: Option<u64>,
+    request_id: Option<String>,
+    received_bytes: usize,
+    timeout: bool,
+    body: bool,
+    decode: bool,
+}
+
+#[derive(Debug, Error)]
 pub enum GitHubError {
     #[error("GitHub HTTP transport error: {0}")]
     Http(#[from] reqwest::Error),
@@ -121,6 +148,27 @@ pub enum GitHubError {
 
     #[error("GitHub response JSON decode error: {0}")]
     Decode(serde_json::Error),
+
+    #[error("GitHub response JSON decode failed at {phase}: {source}")]
+    JsonAtPhase {
+        phase: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error(transparent)]
+    BodyRead(Box<GitHubBodyReadDiagnostic>),
+
+    #[error(
+        "GitHub response body exceeded limit: phase={phase} max_bytes={max_bytes} \
+received_bytes={received_bytes} content_length={content_length:?}"
+    )]
+    BodyTooLarge {
+        phase: &'static str,
+        max_bytes: usize,
+        received_bytes: usize,
+        content_length: Option<u64>,
+    },
 
     #[error("GitHub repository identity mismatch")]
     RepositoryIdentityMismatch,
@@ -166,8 +214,10 @@ impl GitHubError {
     pub fn failure_class(&self) -> GitHubFailureClass {
         match self {
             Self::Http(error) => classify_http_failure(error.is_timeout()),
+            Self::BodyRead(details) => classify_http_failure(details.timeout),
             Self::Response(error) => error.class,
-            Self::Decode(_) => GitHubFailureClass::Decode,
+            Self::Decode(_) | Self::JsonAtPhase { .. } => GitHubFailureClass::Decode,
+            Self::BodyTooLarge { .. } => GitHubFailureClass::UnexpectedResponse,
             Self::RepositoryIdentityMismatch => GitHubFailureClass::UnexpectedResponse,
             Self::InvalidIssueNumber
             | Self::HistoryLimitExceeded
@@ -673,7 +723,7 @@ impl GitHubClient {
                     .header("Accept", "application/vnd.github+json"),
             )
             .await?;
-        let run: RawWorkflowRun = decode_json_response(response).await?;
+        let run: RawWorkflowRun = decode_workflow_json(response, "workflow_run").await?;
 
         if run.id != run_id {
             return Err(GitHubError::UntrustedWorkflowRun);
@@ -705,7 +755,8 @@ impl GitHubClient {
                     .header("Accept", "application/vnd.github+json"),
             )
             .await?;
-        let response: RawArtifactsResponse = decode_json_response(response).await?;
+        let response: RawArtifactsResponse =
+            decode_workflow_json(response, "workflow_artifact").await?;
 
         let artifact = response
             .artifacts
@@ -723,19 +774,22 @@ impl GitHubClient {
     pub async fn download_artifact_zip(&self, artifact_id: u64) -> Result<Vec<u8>, GitHubError> {
         let url =
             format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip");
-        let bytes = self
+        let response = self
             .send_checked(
                 self.http
                     .get(url)
                     .bearer_auth(self.token.as_str())
-                    .header("Accept", "application/vnd.github+json"),
+                    .header("Accept", "application/vnd.github+json")
+                    .timeout(GITHUB_ARTIFACT_REQUEST_TIMEOUT),
             )
-            .await?
-            .bytes()
-            .await
-            .map_err(GitHubError::Http)?;
+            .await?;
 
-        Ok(bytes.to_vec())
+        read_response_body(
+            response,
+            "download_artifact_zip",
+            MAX_GITHUB_ARTIFACT_ZIP_BYTES,
+        )
+        .await
     }
 
     pub async fn post_issue_comment(
@@ -761,6 +815,86 @@ impl GitHubClient {
 
         Ok(())
     }
+}
+
+/// Only the three trusted release HTTP stages use the structured evidence.
+/// It never logs a response body, bearer token, redirected URL or signed query.
+async fn decode_workflow_json<T: DeserializeOwned>(
+    response: Response,
+    phase: &'static str,
+) -> Result<T, GitHubError> {
+    let bytes = read_response_body(response, phase, MAX_GITHUB_WORKFLOW_JSON_BYTES).await?;
+    serde_json::from_slice(&bytes).map_err(|source| GitHubError::JsonAtPhase { phase, source })
+}
+
+fn safe_response_host(url: &reqwest::Url) -> String {
+    url.host_str()
+        .filter(|host| host.len() <= 128)
+        .unwrap_or("unavailable")
+        .to_owned()
+}
+
+fn safe_metadata_header(headers: &HeaderMap, name: &'static str) -> Option<String> {
+    let value = headers.get(name)?.to_str().ok()?.trim();
+    (!value.is_empty()
+        && value.len() <= 96
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'/' | b'.' | b'-' | b'_' | b'+' | b';' | b'=' | b' ' | b':'
+                )
+        }))
+    .then(|| value.to_owned())
+}
+
+async fn read_response_body(
+    mut response: Response,
+    phase: &'static str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, GitHubError> {
+    let status = response.status().as_u16();
+    let host = safe_response_host(response.url());
+    let content_type = safe_metadata_header(response.headers(), "content-type");
+    let content_encoding = safe_metadata_header(response.headers(), "content-encoding");
+    let request_id = safe_metadata_header(response.headers(), "x-github-request-id");
+    let content_length = response.content_length();
+    if content_length.is_some_and(|length| length > max_bytes as u64) {
+        return Err(GitHubError::BodyTooLarge {
+            phase,
+            max_bytes,
+            received_bytes: 0,
+            content_length,
+        });
+    }
+
+    let mut body = Vec::with_capacity(content_length.unwrap_or(0).min(max_bytes as u64) as usize);
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        GitHubError::BodyRead(Box::new(GitHubBodyReadDiagnostic {
+            phase,
+            status,
+            host: host.clone(),
+            content_type: content_type.clone(),
+            content_encoding: content_encoding.clone(),
+            content_length,
+            request_id: request_id.clone(),
+            received_bytes: body.len(),
+            timeout: error.is_timeout(),
+            body: error.is_body(),
+            decode: error.is_decode(),
+        }))
+    })? {
+        if chunk.len() > max_bytes.saturating_sub(body.len()) {
+            return Err(GitHubError::BodyTooLarge {
+                phase,
+                max_bytes,
+                received_bytes: body.len(),
+                content_length,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 async fn decode_json_response<T: DeserializeOwned>(response: Response) -> Result<T, GitHubError> {
@@ -959,6 +1093,106 @@ struct CommentUser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    /// One local HTTP response, no credentials/network dependencies or daemon.
+    /// The spawned server owns a single connection and always exits.
+    fn one_response(reply: &'static [u8], hold_open: Duration) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("ephemeral TCP listener");
+        let address = listener.local_addr().expect("listener address");
+        let join = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("single client connection");
+            let mut request = [0_u8; 2048];
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("read timeout");
+            let _ = socket.read(&mut request);
+            socket.write_all(reply).expect("send fixture");
+            socket.flush().expect("flush response");
+            if !hold_open.is_zero() {
+                thread::sleep(hold_open);
+            }
+        });
+        (format!("http://{address}"), join)
+    }
+
+    #[tokio::test]
+    async fn truncated_http_body_fails_in_exact_release_stage() {
+        let (url, server) = one_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+            Duration::ZERO,
+        );
+        let response = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("valid headers");
+        let error = read_response_body(response, "workflow_artifact", 1024)
+            .await
+            .expect_err("early EOF must fail");
+        assert!(matches!(
+            error,
+            GitHubError::BodyRead(ref details)
+                if details.phase == "workflow_artifact" && details.status == 200
+        ));
+        assert_eq!(error.failure_class(), GitHubFailureClass::Network);
+        server.join().expect("server exit");
+    }
+
+    #[tokio::test]
+    async fn stalled_http_body_reports_timeout_and_received_bytes() {
+        let (url, server) = one_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\nContent-Type: application/zip\r\nConnection: close\r\n\r\nZIP",
+            Duration::from_millis(600),
+        );
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .expect("client");
+        let response = client.get(url).send().await.expect("valid headers");
+        let error = read_response_body(response, "download_artifact_zip", 1024)
+            .await
+            .expect_err("stall must fail within bounded deadline");
+        assert!(matches!(
+            error,
+            GitHubError::BodyRead(ref details)
+                if details.phase == "download_artifact_zip"
+                    && details.timeout
+                    && details.content_length == Some(128)
+        ));
+        assert_eq!(error.failure_class(), GitHubFailureClass::Timeout);
+        server.join().expect("server exit");
+    }
+
+    #[tokio::test]
+    async fn declared_body_over_limit_rejected_before_read() {
+        let (url, server) = one_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n",
+            Duration::ZERO,
+        );
+        let response = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("valid headers");
+        let error = read_response_body(response, "download_artifact_zip", 128)
+            .await
+            .expect_err("declared oversized ZIP must fail");
+        assert!(matches!(
+            error,
+            GitHubError::BodyTooLarge {
+                phase: "download_artifact_zip",
+                max_bytes: 128,
+                received_bytes: 0,
+                ..
+            }
+        ));
+        server.join().expect("server exit");
+    }
 
     fn response_error(
         status: u16,
@@ -983,6 +1217,89 @@ mod tests {
         assert_eq!(GITHUB_REQUEST_TIMEOUT, Duration::from_secs(60));
         assert_eq!(classify_http_failure(true), GitHubFailureClass::Timeout);
         assert_eq!(classify_http_failure(false), GitHubFailureClass::Network);
+    }
+
+    #[test]
+    fn artifact_get_has_independent_bounded_total_deadline() {
+        assert_eq!(GITHUB_REQUEST_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(GITHUB_ARTIFACT_REQUEST_TIMEOUT, Duration::from_secs(180));
+        assert!(GITHUB_ARTIFACT_REQUEST_TIMEOUT > GITHUB_REQUEST_TIMEOUT);
+        assert_eq!(MAX_GITHUB_ARTIFACT_ZIP_BYTES, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn release_failure_evidence_never_contains_signed_redirect_query() {
+        let signed = reqwest::Url::parse(
+            "https://artifact-cache.example.net/private/file?sig=VERY_SECRET&token=HIDDEN",
+        )
+        .expect("URL");
+        assert_eq!(safe_response_host(&signed), "artifact-cache.example.net");
+        assert!(!safe_response_host(&signed).contains("VERY_SECRET"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/zip".parse().unwrap());
+        headers.insert("x-github-request-id", "123:ABC".parse().unwrap());
+        headers.insert(
+            "content-encoding",
+            "gzip?token=VERY_SECRET".parse().unwrap(),
+        );
+        assert_eq!(
+            safe_metadata_header(&headers, "content-type").as_deref(),
+            Some("application/zip")
+        );
+        assert_eq!(
+            safe_metadata_header(&headers, "x-github-request-id").as_deref(),
+            Some("123:ABC")
+        );
+        assert_eq!(safe_metadata_header(&headers, "content-encoding"), None);
+    }
+
+    #[test]
+    fn body_read_phase_and_timeout_are_typed_without_claiming_json_failure() {
+        let timeout = GitHubError::BodyRead(Box::new(GitHubBodyReadDiagnostic {
+            phase: "download_artifact_zip",
+            status: 200,
+            host: "storage.example.net".to_owned(),
+            content_type: Some("application/zip".to_owned()),
+            content_encoding: None,
+            content_length: Some(11_107_095),
+            request_id: None,
+            received_bytes: 4_096,
+            timeout: true,
+            body: true,
+            decode: true,
+        }));
+        assert_eq!(timeout.failure_class(), GitHubFailureClass::Timeout);
+        assert!(timeout.to_string().contains("phase=download_artifact_zip"));
+        assert!(timeout.to_string().contains("received_bytes=4096"));
+        let network = GitHubError::BodyRead(Box::new(GitHubBodyReadDiagnostic {
+            phase: "workflow_artifact",
+            status: 200,
+            host: "api.github.com".to_owned(),
+            content_type: Some("application/json".to_owned()),
+            content_encoding: None,
+            content_length: Some(780),
+            request_id: None,
+            received_bytes: 42,
+            timeout: false,
+            body: true,
+            decode: true,
+        }));
+        assert_eq!(network.failure_class(), GitHubFailureClass::Network);
+        assert!(network.to_string().contains("phase=workflow_artifact"));
+        assert!(!network.to_string().contains("download_artifact_zip"));
+    }
+
+    #[test]
+    fn malformed_workflow_json_is_not_a_transport_failure() {
+        let source =
+            serde_json::from_slice::<RawWorkflowRun>(br#"{"id":"incomplete"}"#).unwrap_err();
+        let failure = GitHubError::JsonAtPhase {
+            phase: "workflow_run",
+            source,
+        };
+        assert_eq!(failure.failure_class(), GitHubFailureClass::Decode);
+        assert!(failure.to_string().contains("workflow_run"));
     }
 
     #[test]
