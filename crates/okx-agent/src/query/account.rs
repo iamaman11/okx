@@ -5,7 +5,9 @@ struct AccountSummaryCoherence {
     account_snapshot_source_received_at: String,
     current_account_as_of_ms: Option<String>,
     history_source_received_at: String,
+    account_snapshot_read_duration_ms: u64,
     history_read_duration_ms: u64,
+    ledger_reconciliation_duration_ms: u64,
     ledger_history_read_duration_ms: u64,
     protective_algo_read_duration_ms: u64,
     private_ws_generation: Option<u64>,
@@ -151,6 +153,8 @@ fn compact_trader_packet(
         "transport": {
             "full_account_result_bytes": serde_json::to_vec(full).map_or(0, |v| v.len()),
             "native_source_read_ms": source_read_duration_ms,
+            "account_snapshot_read_ms": get("/coherence/account_snapshot_read_duration_ms"),
+            "reconciliation_read_ms": get("/coherence/ledger_reconciliation_duration_ms"),
             "ledger_history_read_ms": get("/coherence/ledger_history_read_duration_ms"),
             "protective_algo_read_ms": get("/coherence/protective_algo_read_duration_ms"),
             "warnings_count": warnings_count,
@@ -330,10 +334,14 @@ pub(super) async fn dispatch(
             })
         }
         AgentOperation::AccountSummary | AgentOperation::TraderSnapshot => {
+            let account_snapshot_started = std::time::Instant::now();
             let assembled = match assemble_account_snapshot(context).await {
                 Ok(value) => value,
                 Err(error) => return Ok(account_query_failure(request, generated_at, error)),
             };
+            let account_snapshot_read_duration_ms =
+                u64::try_from(account_snapshot_started.elapsed().as_millis())
+                    .unwrap_or(u64::MAX);
             let Some(account) = context.account_fallback else {
                 return Ok(failure_response(
                     request,
@@ -480,7 +488,9 @@ pub(super) async fn dispatch(
                 account_snapshot_source_received_at: assembled.snapshot.source_received_at.clone(),
                 current_account_as_of_ms: facts.summary.current_account_as_of_ms.clone(),
                 history_source_received_at: facts.summary.source_received_at.clone(),
+                account_snapshot_read_duration_ms,
                 history_read_duration_ms,
+                ledger_reconciliation_duration_ms: 0,
                 ledger_history_read_duration_ms,
                 protective_algo_read_duration_ms,
                 private_ws_generation: assembled.snapshot.private_ws_generation,
@@ -511,6 +521,7 @@ pub(super) async fn dispatch(
                 }
             }
 
+            let reconciliation_started = std::time::Instant::now();
             let (reconciliation, managed_execution_intents) = match context.execution {
                 Some(execution) => match execution
                     .reconcile_account_ledger_with_intents(
@@ -621,6 +632,10 @@ pub(super) async fn dispatch(
                     (None, None)
                 }
             };
+
+            coherence.ledger_reconciliation_duration_ms =
+                u64::try_from(reconciliation_started.elapsed().as_millis())
+                    .unwrap_or(u64::MAX);
 
             // Same native source predicates as the Demo BEGIN operation,
             // but this is only read-only observer proof, never trading authority.
@@ -2338,7 +2353,9 @@ mod tests {
                 "current_account_as_of_ms": "1792024604593",
                 "account_snapshot_source_received_at": "2026-10-15T01:00:00Z",
                 "history_source_received_at": "2026-10-15T01:00:01Z",
+                "account_snapshot_read_duration_ms": 48,
                 "history_read_duration_ms": 125,
+                "ledger_reconciliation_duration_ms": 12,
                 "ledger_history_read_duration_ms": 120,
                 "protective_algo_read_duration_ms": 95
             },
@@ -2393,6 +2410,8 @@ mod tests {
         // windows without altering the financial/account proof or inventing
         // FRESH from parallel REST completion.
         assert_eq!(p["transport"]["native_source_read_ms"], 125);
+        assert_eq!(p["transport"]["account_snapshot_read_ms"], 48);
+        assert_eq!(p["transport"]["reconciliation_read_ms"], 12);
         assert_eq!(p["transport"]["ledger_history_read_ms"], 120);
         assert_eq!(p["transport"]["protective_algo_read_ms"], 95);
         assert_eq!(p["evidence"]["current_account_asof_ms"], "1792024604593");
