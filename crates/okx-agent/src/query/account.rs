@@ -2458,6 +2458,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn profile_handoff_is_read_only_and_refuses_bounded_or_unknown_history() {
+        use serde_json::json;
+        let ledger = okx_execution::ProfileHandoffLedgerAssessment {
+            schema: okx_execution::PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1,
+            managed_intents_total: 45,
+            nonterminal_intents: 0,
+            unresolved_order_mutations: 0,
+            unresolved_protective_lifecycle: 0,
+            account_uid_mismatches: 0,
+            source_ledger_manifest_sha256: "a".repeat(64),
+            source_ledger_format: okx_execution::EXECUTION_LEDGER_SCHEMA_V14.to_owned(),
+            immutable_stop_reason: Some("STRATEGY_UTC_DAILY_GROSS_LOSS".to_owned()),
+            finalized_run_checksum_sha256: Some("b".repeat(64)),
+        };
+        let mut full = json!({
+            "account_ledger": {
+                "authority": {"account_uid_fingerprint": "uid"},
+                "open_positions": 0,
+                "pending_orders": 0,
+                "current_account_as_of_ms": "1792068161383",
+                "history_coverage": [{"complete_within_bound":true}]
+            },
+            "coherence": {"coherent":true},
+            "pending_protective_algos": {"rows":0,"complete_within_bound":true},
+            "reconciliation": {
+                "consistent":true,
+                "managed_intents":45,
+                "managed_intents_unresolved_in_bounded_exchange_evidence":0,
+                "position_attribution_residual_count":0,
+                "position_attribution_unavailable_events":0,
+                "identity_mismatches":0
+            },
+            "managed_execution_intents":{"shown":16,"total":45,"complete_within_bound":false}
+        });
+        let ready = profile_handoff_readiness_packet(
+            &full, &DataQuality::Fresh, Some(&ledger)
+        );
+        // Even entirely quiescent sources cannot authorize a CTRL swap:
+        // no trusted one-time frozen owner ticket exists yet.
+        assert_eq!(ready["status"], "SOURCE_QUIESCENT_NOT_AUTHORIZED");
+        assert_eq!(ready["source_predicates_pass"], true);
+        assert_eq!(ready["handoff_admission"], "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE");
+        assert_eq!(ready["control_action"], "DO_NOT_SWITCH_PROFILE");
+        assert_eq!(ready["native_ledger"]["managed_intents_total"], 45);
+        assert_eq!(ready["source"]["managed_intents_sampled"], 16);
+
+        full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] = json!(3);
+        let unresolved = profile_handoff_readiness_packet(
+            &full, &DataQuality::Degraded, Some(&ledger)
+        );
+        assert_eq!(unresolved["status"], "BLOCKED");
+        assert!(unresolved["blockers"].as_array().unwrap().iter().any(
+            |b| b == "MANAGED_INTENTS_OUTSIDE_EXCHANGE_EVIDENCE"
+        ));
+        full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] = json!(0);
+        full["pending_protective_algos"]["rows"] = json!(1);
+        let oco = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, Some(&ledger));
+        assert_eq!(oco["status"], "BLOCKED");
+        full["pending_protective_algos"]["rows"] = json!(0);
+        let unavailable = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, None);
+        assert_eq!(unavailable["status"], "BLOCKED");
+        assert!(unavailable["blockers"].as_array().unwrap().iter().any(
+            |b| b == "NATIVE_EXECUTOR_LEDGER_UNAVAILABLE"
+        ));
+        let empty = profile_handoff_readiness_packet(&json!({}), &DataQuality::Fresh, None);
+        assert_eq!(empty["status"], "BLOCKED");
+        assert_eq!(empty["control_action"], "DO_NOT_SWITCH_PROFILE");
+    }
+
+    #[test]
     fn trader_packet_is_bounded_never_mints_go_and_keeps_exact_finance_proof() {
         use serde_json::json;
         let mut full = json!({
