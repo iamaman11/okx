@@ -1082,6 +1082,12 @@ pub struct DurableExecutionLedger {
 }
 
 impl DurableExecutionLedger {
+    /// Read-only on-disk bundle verification; never changes in-memory executor
+    /// state or triggers its first-open UNKNOWN/POST recovery transitions.
+    pub fn attest_storage(&self) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
+        self.store.attest_storage()
+    }
+
     pub fn canonical(observed_at_ms: u64) -> Result<Self, ExecutionLedgerError> {
         Self::open(ExecutionLedgerStore::canonical(), observed_at_ms)
     }
