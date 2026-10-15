@@ -719,8 +719,7 @@ impl GitHubClient {
                     .header("Accept", "application/vnd.github+json"),
             )
             .await?;
-        let run: RawWorkflowRun =
-            decode_workflow_json(response, "workflow_run").await?;
+        let run: RawWorkflowRun = decode_workflow_json(response, "workflow_run").await?;
 
         if run.id != run_id {
             return Err(GitHubError::UntrustedWorkflowRun);
@@ -781,7 +780,12 @@ impl GitHubClient {
             )
             .await?;
 
-        read_response_body(response, "download_artifact_zip", MAX_GITHUB_ARTIFACT_ZIP_BYTES).await
+        read_response_body(
+            response,
+            "download_artifact_zip",
+            MAX_GITHUB_ARTIFACT_ZIP_BYTES,
+        )
+        .await
     }
 
     pub async fn post_issue_comment(
@@ -832,7 +836,10 @@ fn safe_metadata_header(headers: &HeaderMap, name: &'static str) -> Option<Strin
         && value.len() <= 96
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
-                || matches!(byte, b'/' | b'.' | b'-' | b'_' | b'+' | b';' | b'=' | b' ' | b':')
+                || matches!(
+                    byte,
+                    b'/' | b'.' | b'-' | b'_' | b'+' | b';' | b'=' | b' ' | b':'
+                )
         }))
     .then(|| value.to_owned())
 }
@@ -858,19 +865,23 @@ async fn read_response_body(
     }
 
     let mut body = Vec::with_capacity(content_length.unwrap_or(0).min(max_bytes as u64) as usize);
-    while let Some(chunk) = response.chunk().await.map_err(|error| GitHubError::BodyRead {
-        phase,
-        status,
-        host: host.clone(),
-        content_type: content_type.clone(),
-        content_encoding: content_encoding.clone(),
-        content_length,
-        request_id: request_id.clone(),
-        received_bytes: body.len(),
-        timeout: error.is_timeout(),
-        body: error.is_body(),
-        decode: error.is_decode(),
-    })? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| GitHubError::BodyRead {
+            phase,
+            status,
+            host: host.clone(),
+            content_type: content_type.clone(),
+            content_encoding: content_encoding.clone(),
+            content_length,
+            request_id: request_id.clone(),
+            received_bytes: body.len(),
+            timeout: error.is_timeout(),
+            body: error.is_body(),
+            decode: error.is_decode(),
+        })?
+    {
         if chunk.len() > max_bytes.saturating_sub(body.len()) {
             return Err(GitHubError::BodyTooLarge {
                 phase,
