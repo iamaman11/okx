@@ -3984,6 +3984,54 @@ mod tests {
             .archive_path(ArchivedRunKind::Finalized, "run_archived_source_0123456789")
             .unwrap();
         let correct_archive = fs::read(&detached).unwrap();
+        let attested = store.attest_storage().unwrap();
+        assert_eq!(attested.integrity, "VALIDATED_COLD_READ");
+        assert_eq!(attested.migration, "V14_SEALED_OR_EMPTY_ARCHIVE");
+        assert_eq!(attested.verified_archive_bodies, 1);
+        assert_eq!(attested.sealed_finalized_runs, 1);
+        assert_eq!(attested.original_snapshot, "PRE_V14_SNAPSHOT_PRESENT");
+
+        // Offline recovery, even on a Windows runner: copy the *entire*
+        // financial bundle to an isolated path, not a second agent. Cold-load
+        // immutable archive and original snapshot without any exchange POST,
+        // rearm, or mutation to the running ledger.
+        let restore_root = temp_root("v14-restore-cold-bundle");
+        let _ = fs::remove_dir_all(&restore_root);
+        fs::create_dir_all(&restore_root).unwrap();
+        let restored = ExecutionLedgerStore::at(restore_root.join("ledger.json"));
+        fs::copy(store.path(), restored.path()).unwrap();
+        fs::copy(
+            store.path().with_extension("pre-v14.json"),
+            restored.path().with_extension("pre-v14.json"),
+        )
+        .unwrap();
+        let restored_segment = restored
+            .archive_path(ArchivedRunKind::Finalized, "run_archived_source_0123456789")
+            .unwrap();
+        fs::create_dir_all(restored_segment.parent().unwrap()).unwrap();
+        fs::copy(&detached, &restored_segment).unwrap();
+        let restored_manifest_before = fs::read(restored.path()).unwrap();
+        let restored_proof = restored.attest_storage().unwrap();
+        assert_eq!(restored_proof.manifest_sha256, attested.manifest_sha256);
+        assert_eq!(restored_proof.original_snapshot_sha256, attested.original_snapshot_sha256);
+        assert_eq!(restored_proof.verified_archive_bodies, 1);
+        let restored_ledger = DurableExecutionLedger::open(restored.clone(), 3250).unwrap();
+        assert_eq!(restored_ledger.archived_runs_count(), 1);
+        assert_eq!(
+            restored_ledger.archived_strategy_proofs()[0].finalization_sha256,
+            file.strategy_periods.archived_runs[0].finalization.checksum_sha256
+        );
+        assert_eq!(
+            fs::read(restored.path()).unwrap(),
+            restored_manifest_before,
+            "read-only cold restore cannot rewrite recovered financial history"
+        );
+        fs::remove_file(&restored_segment).unwrap();
+        assert!(restored.attest_storage().is_err(), "incomplete restore must fail closed");
+        assert!(DurableExecutionLedger::open(restored.clone(), 3251).is_err());
+        assert_eq!(fs::read(restored.path()).unwrap(), restored_manifest_before);
+        let _ = fs::remove_dir_all(restore_root);
+
         assert_eq!(
             DurableExecutionLedger::open(store.clone(), 3250)
                 .unwrap()
