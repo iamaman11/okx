@@ -229,6 +229,18 @@ impl HostExecutor {
         let agent_binary = self.agent_binary();
         let installed_agent =
             InstalledAgentProvenanceStore::canonical().status_value(&agent_binary);
+        // Read-only release identity: the controller must not mistake an
+        // independently updated agent for the same tested release set.
+        // Same-profile recovery is deliberately not gated by this diagnostic.
+        let launcher = okx_host_launcher::status_value();
+        let current_controller_sha256 = std::env::current_exe()
+            .ok()
+            .and_then(|path| okx_host_launcher::sha256_file(&path).ok());
+        let release_parity = controller_agent_release_parity(
+            &installed_agent,
+            &launcher,
+            current_controller_sha256.as_deref(),
+        );
         let owned_launch = if running {
             self.agent_launch.as_ref()
         } else {
@@ -247,6 +259,7 @@ impl HostExecutor {
                 "cargo_available": command_available("cargo")
             },
             "installed_agent": installed_agent,
+            "release_parity": release_parity,
             "agent_binary_present": agent_binary.is_file(),
             "agent_owned_running": running,
             "agent_pid": if running { self.agent_child.as_ref().map(Child::id) } else { None },
@@ -1247,6 +1260,54 @@ fn ensure_profile_unchanged(
     Ok(())
 }
 
+/// One read-only provenance check, not a profile-switch authority.
+/// Versions can legitimately differ while serving the same profile, but a
+/// cross-profile transition must never infer a tested release pair from
+/// separately installed binaries. No runtime, ledger or network mutation.
+fn controller_agent_release_parity(
+    agent: &Value,
+    launcher: &Value,
+    running_controller_sha256: Option<&str>,
+) -> Value {
+    let mut blockers = Vec::<&str>::new();
+    let agent_tree = agent.pointer("/provenance/source_tree").and_then(Value::as_str);
+    let controller_tree = launcher
+        .pointer("/active/value/active/source_tree")
+        .and_then(Value::as_str);
+    let expected_controller_sha256 = launcher
+        .pointer("/active/value/active/controller_sha256")
+        .and_then(Value::as_str);
+
+    if agent.pointer("/state").and_then(Value::as_str) != Some("VERIFIED") {
+        blockers.push("AGENT_BINARY_OR_PROVENANCE_UNVERIFIED");
+    }
+    if launcher.pointer("/active/state").and_then(Value::as_str) != Some("READY")
+        || launcher.pointer("/entrypoint_is_launcher").and_then(Value::as_bool) != Some(true)
+    {
+        blockers.push("ACTIVE_CONTROLLER_UNVERIFIED");
+    }
+    if launcher.pointer("/pending/state").and_then(Value::as_str) != Some("NONE") {
+        blockers.push("CONTROLLER_ACTIVATION_INCOMPLETE");
+    }
+    if controller_tree.is_none() || agent_tree.is_none() || controller_tree != agent_tree {
+        blockers.push("CONTROLLER_AGENT_SOURCE_TREE_MISMATCH");
+    }
+    if expected_controller_sha256.is_none()
+        || expected_controller_sha256 != running_controller_sha256
+    {
+        blockers.push("RUNNING_CONTROLLER_BINARY_MISMATCH");
+    }
+
+    json!({
+        "schema": "okx.host-control.release-parity/v1",
+        "state": if blockers.is_empty() { "MATCHED" } else { "BLOCKED" },
+        "source_tree": if blockers.is_empty() { agent_tree } else { None },
+        "blockers": blockers,
+        "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE",
+        "same_profile_recovery_permitted": true
+    })
+}
+
 pub fn install_current_executable(destination: &Path) -> HostControlResult<Value> {
     let source = std::env::current_exe()?;
     if !source.is_file() {
@@ -1270,6 +1331,60 @@ pub fn install_current_executable(destination: &Path) -> HostControlResult<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controller_agent_release_parity_detects_drift_without_authorizing_handoff() {
+        let hash = "c".repeat(64);
+        let tree = "a".repeat(40);
+        let agent = json!({
+            "state": "VERIFIED",
+            "provenance": {"source_tree": tree}
+        });
+        let launcher = json!({
+            "active": {"state": "READY", "value": {"active": {
+                "source_tree": tree, "controller_sha256": hash
+            }}},
+            "pending": {"state": "NONE"},
+            "entrypoint_is_launcher": true
+        });
+        let matched = controller_agent_release_parity(&agent, &launcher, Some(&hash));
+        assert_eq!(matched["state"], "MATCHED");
+        assert_eq!(
+            matched["handoff_admission"],
+            "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE"
+        );
+        assert_eq!(matched["same_profile_recovery_permitted"], true);
+
+        let mut old_controller = launcher.clone();
+        old_controller["active"]["value"]["active"]["source_tree"] =
+            json!("b".repeat(40));
+        let drift = controller_agent_release_parity(&agent, &old_controller, Some(&hash));
+        assert_eq!(drift["state"], "BLOCKED");
+        assert!(drift["blockers"].as_array().unwrap().contains(
+            &json!("CONTROLLER_AGENT_SOURCE_TREE_MISMATCH")
+        ));
+
+        let wrong_binary =
+            controller_agent_release_parity(&agent, &launcher, Some(&"d".repeat(64)));
+        assert_eq!(wrong_binary["state"], "BLOCKED");
+        assert!(wrong_binary["blockers"].as_array().unwrap().contains(
+            &json!("RUNNING_CONTROLLER_BINARY_MISMATCH")
+        ));
+
+        let mut pending = launcher.clone();
+        pending["pending"]["state"] = json!("PENDING");
+        assert_eq!(
+            controller_agent_release_parity(&agent, &pending, Some(&hash))["state"],
+            "BLOCKED"
+        );
+
+        let missing = controller_agent_release_parity(
+            &json!({"state": "UNKNOWN"}),
+            &json!({"active": {"state": "NONE"}}),
+            None,
+        );
+        assert_eq!(missing["state"], "BLOCKED");
+    }
 
     #[test]
     fn profile_handoff_requires_real_quiescence_not_a_control_request() {
