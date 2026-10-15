@@ -1142,13 +1142,14 @@ impl DurableExecutionLedger {
                     .cleanup
                     .as_ref()
                     .is_some_and(|c| c.state != ProtectiveCleanupState::ConfirmedAbsent)
-                || protective.size_amend.as_ref().is_some_and(|amend| {
-                    !matches!(
-                        amend.state,
-                        ProtectiveSizeAmendState::Confirmed
-                            | ProtectiveSizeAmendState::RetiredAbsent
-                    )
-                }) {
+                    || protective.size_amend.as_ref().is_some_and(|amend| {
+                        !matches!(
+                            amend.state,
+                            ProtectiveSizeAmendState::Confirmed
+                                | ProtectiveSizeAmendState::RetiredAbsent
+                        )
+                    })
+                {
                     unresolved_protective_lifecycle += 1;
                 }
             }
@@ -1170,8 +1171,6 @@ impl DurableExecutionLedger {
                 .map(|f| f.checksum_sha256.clone()),
         })
     }
-
-
 
     /// One explicitly authorized *storage-only* migration. Keep all financial
     /// states and STOP byte-for-byte equivalent. No clock, exchange or policy
