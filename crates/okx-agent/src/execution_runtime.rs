@@ -652,9 +652,9 @@ impl ExecutionRuntime {
         if !self.environment.demo || self.mode != ExecutionRuntimeMode::DemoAcceptance {
             return Ok(None);
         }
-        let mut owner = self.executor.lock().await;
+        let owner = self.executor.lock().await;
         owner
-            .ledger_mut()
+            .ledger()
             .migrate_finalized_storage_v14(
                 run_id,
                 expected_manifest_sha256,
