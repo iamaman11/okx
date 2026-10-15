@@ -46,6 +46,7 @@ pub const EXECUTION_LEDGER_SCHEMA_V13: &str = "okx.execution-ledger/v13";
 pub const EXECUTION_LEDGER_SCHEMA_V14: &str = "okx.execution-ledger/v14";
 pub const LEVERAGE_ATTEMPT_SCHEMA_V1: &str = "okx.leverage-change-attempt/v1";
 const MAX_LEVERAGE_ATTEMPTS: usize = 256;
+const MAX_SEALED_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1: &str = "okx.strategy-capital-reservation/v1";
 pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
@@ -407,6 +408,9 @@ impl ExecutionLedgerStore {
         payload: Vec<u8>,
     ) -> Result<ArchivedRunReference, ExecutionLedgerError> {
         let path = self.archive_path(kind, run_id)?;
+        if u64::try_from(payload.len()).unwrap_or(u64::MAX) > MAX_SEALED_ARCHIVE_BYTES {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
         fs::create_dir_all(
             path.parent()
                 .ok_or(ExecutionLedgerError::Corrupt("archive parent absent"))?,
@@ -453,6 +457,9 @@ impl ExecutionLedgerStore {
                 "v14 mixes inline and sealed archives",
             ));
         }
+        if file.archive_refs.len() > MAX_ARCHIVED_STRATEGY_RUNS {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
         let mut seen = BTreeSet::new();
         for reference in &file.archive_refs {
             if !seen.insert((reference.kind.as_str(), reference.run_id.as_str()))
@@ -464,7 +471,11 @@ impl ExecutionLedgerStore {
             {
                 return Err(ExecutionLedgerError::Corrupt("invalid archive reference"));
             }
-            let bytes = fs::read(self.archive_path(reference.kind, &reference.run_id)?)?;
+            let path = self.archive_path(reference.kind, &reference.run_id)?;
+            if fs::metadata(&path)?.len() > MAX_SEALED_ARCHIVE_BYTES {
+                return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+            }
+            let bytes = fs::read(path)?;
             if format!("{:x}", Sha256::digest(&bytes)) != reference.content_sha256 {
                 return Err(ExecutionLedgerError::Corrupt(
                     "sealed archive hash mismatch",
