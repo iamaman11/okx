@@ -65,9 +65,12 @@ fn profile_handoff_readiness_packet(
     if !full
         .pointer("/account_ledger/history_coverage")
         .and_then(Value::as_array)
-        .is_some_and(|rows| !rows.is_empty() && rows.iter().all(|r| {
-            r.get("complete_within_bound") == Some(&json!(true))
-        }))
+        .is_some_and(|rows| {
+            !rows.is_empty()
+                && rows
+                    .iter()
+                    .all(|r| r.get("complete_within_bound") == Some(&json!(true)))
+        })
     {
         blockers.push("HISTORY_BOUNDED_OR_ABSENT");
     }
@@ -2492,36 +2495,46 @@ mod tests {
             },
             "managed_execution_intents":{"shown":16,"total":45,"complete_within_bound":false}
         });
-        let ready = profile_handoff_readiness_packet(
-            &full, &DataQuality::Fresh, Some(&ledger)
-        );
+        let ready = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, Some(&ledger));
         // Even entirely quiescent sources cannot authorize a CTRL swap:
         // no trusted one-time frozen owner ticket exists yet.
         assert_eq!(ready["status"], "SOURCE_QUIESCENT_NOT_AUTHORIZED");
         assert_eq!(ready["source_predicates_pass"], true);
-        assert_eq!(ready["handoff_admission"], "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE");
+        assert_eq!(
+            ready["handoff_admission"],
+            "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE"
+        );
         assert_eq!(ready["control_action"], "DO_NOT_SWITCH_PROFILE");
         assert_eq!(ready["native_ledger"]["managed_intents_total"], 45);
         assert_eq!(ready["source"]["managed_intents_sampled"], 16);
 
-        full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] = json!(3);
-        let unresolved = profile_handoff_readiness_packet(
-            &full, &DataQuality::Degraded, Some(&ledger)
-        );
+        full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] =
+            json!(3);
+        let unresolved =
+            profile_handoff_readiness_packet(&full, &DataQuality::Degraded, Some(&ledger));
         assert_eq!(unresolved["status"], "BLOCKED");
-        assert!(unresolved["blockers"].as_array().unwrap().iter().any(
-            |b| b == "MANAGED_INTENTS_OUTSIDE_EXCHANGE_EVIDENCE"
-        ));
-        full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] = json!(0);
+        assert!(
+            unresolved["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "MANAGED_INTENTS_OUTSIDE_EXCHANGE_EVIDENCE")
+        );
+        full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] =
+            json!(0);
         full["pending_protective_algos"]["rows"] = json!(1);
         let oco = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, Some(&ledger));
         assert_eq!(oco["status"], "BLOCKED");
         full["pending_protective_algos"]["rows"] = json!(0);
         let unavailable = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, None);
         assert_eq!(unavailable["status"], "BLOCKED");
-        assert!(unavailable["blockers"].as_array().unwrap().iter().any(
-            |b| b == "NATIVE_EXECUTOR_LEDGER_UNAVAILABLE"
-        ));
+        assert!(
+            unavailable["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "NATIVE_EXECUTOR_LEDGER_UNAVAILABLE")
+        );
         let empty = profile_handoff_readiness_packet(&json!({}), &DataQuality::Fresh, None);
         assert_eq!(empty["status"], "BLOCKED");
         assert_eq!(empty["control_action"], "DO_NOT_SWITCH_PROFILE");
