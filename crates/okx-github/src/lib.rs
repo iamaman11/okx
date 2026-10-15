@@ -125,18 +125,17 @@ content_length={content_length:?} request_id={request_id:?} \
 received_bytes={received_bytes} timeout={timeout} body={body} decode={decode}"
 )]
 pub struct GitHubBodyReadDiagnostic {
-        phase: &'static str,
-        status: u16,
-        host: String,
-        content_type: Option<String>,
-        content_encoding: Option<String>,
-        content_length: Option<u64>,
-        request_id: Option<String>,
-        received_bytes: usize,
-        timeout: bool,
-        body: bool,
-        decode: bool,
-
+    phase: &'static str,
+    status: u16,
+    host: String,
+    content_type: Option<String>,
+    content_encoding: Option<String>,
+    content_length: Option<u64>,
+    request_id: Option<String>,
+    received_bytes: usize,
+    timeout: bool,
+    body: bool,
+    decode: bool,
 }
 
 #[derive(Debug, Error)]
