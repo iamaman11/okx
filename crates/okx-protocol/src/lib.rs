@@ -1019,6 +1019,9 @@ pub enum AgentOperation {
     MailboxTelemetry,
     AccountSnapshot,
     AccountSummary,
+    /// Read-only compact projection of the SAME account source and ledger owner.
+    /// No market signal, no live trade permission, no independent risk authority.
+    TraderSnapshot,
     PortfolioRisk {
         mandate: Box<PortfolioMandateRequest>,
         policy: Box<HardRiskPolicyRequest>,
@@ -1143,7 +1146,8 @@ impl AgentOperation {
             Self::ExecutorPreflight
             | Self::MailboxTelemetry
             | Self::AccountSnapshot
-            | Self::AccountSummary => Ok(()),
+            | Self::AccountSummary
+            | Self::TraderSnapshot => Ok(()),
             Self::PortfolioRisk {
                 mandate,
                 policy,
@@ -2484,6 +2488,14 @@ mod tests {
             instrument: "DOGE-USDT-SWAP".to_owned(),
         };
         assert!(read.direct_transport_read_only());
+        let trader = AgentOperation::TraderSnapshot;
+        assert!(trader.direct_transport_read_only());
+        assert!(!trader.direct_transport_demo_execution());
+        assert_eq!(
+            serde_json::to_value(&trader).unwrap(),
+            serde_json::json!({"type": "trader_snapshot"})
+        );
+        assert!(trader.validate().is_ok());
 
         let generic = AgentOperation::PrepareExecution {
             intent_id: "intent_generic_01234567".to_owned(),
