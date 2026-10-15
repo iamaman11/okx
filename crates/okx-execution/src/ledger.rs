@@ -407,12 +407,15 @@ impl ExecutionLedgerStore {
         payload: Vec<u8>,
     ) -> Result<ArchivedRunReference, ExecutionLedgerError> {
         let path = self.archive_path(kind, run_id)?;
-        fs::create_dir_all(path.parent().ok_or(ExecutionLedgerError::Corrupt(
-            "archive parent absent",
-        ))?)?;
+        fs::create_dir_all(
+            path.parent()
+                .ok_or(ExecutionLedgerError::Corrupt("archive parent absent"))?,
+        )?;
         if path.exists() {
             if fs::read(&path)? != payload {
-                return Err(ExecutionLedgerError::Corrupt("sealed archive payload mismatch"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "sealed archive payload mismatch",
+                ));
             }
         } else {
             let temp = temp_path(&path);
@@ -454,20 +457,27 @@ impl ExecutionLedgerStore {
         for reference in &file.archive_refs {
             if !seen.insert((reference.kind.as_str(), reference.run_id.as_str()))
                 || reference.content_sha256.len() != 64
-                || !reference.content_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                || !reference
+                    .content_sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit())
             {
                 return Err(ExecutionLedgerError::Corrupt("invalid archive reference"));
             }
             let bytes = fs::read(self.archive_path(reference.kind, &reference.run_id)?)?;
             if format!("{:x}", Sha256::digest(&bytes)) != reference.content_sha256 {
-                return Err(ExecutionLedgerError::Corrupt("sealed archive hash mismatch"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "sealed archive hash mismatch",
+                ));
             }
             match reference.kind {
                 ArchivedRunKind::Finalized => {
                     let archived: ArchivedStrategyRun = serde_json::from_slice(&bytes)?;
                     archived.validate()?;
                     if archived.reservation.allocation_id != reference.run_id {
-                        return Err(ExecutionLedgerError::Corrupt("sealed finalized run mismatch"));
+                        return Err(ExecutionLedgerError::Corrupt(
+                            "sealed finalized run mismatch",
+                        ));
                     }
                     file.strategy_periods.archived_runs.push(archived);
                 }
@@ -475,7 +485,9 @@ impl ExecutionLedgerStore {
                     let archived: UnverifiedStrategyRun = serde_json::from_slice(&bytes)?;
                     archived.validate()?;
                     if archived.reservation.allocation_id != reference.run_id {
-                        return Err(ExecutionLedgerError::Corrupt("sealed unverified run mismatch"));
+                        return Err(ExecutionLedgerError::Corrupt(
+                            "sealed unverified run mismatch",
+                        ));
                     }
                     file.strategy_periods.unverified_runs.push(archived);
                 }
@@ -3767,7 +3779,10 @@ mod tests {
         assert_eq!(compact["schema"], EXECUTION_LEDGER_SCHEMA_V14);
         assert_eq!(compact["archive_refs"].as_array().unwrap().len(), 1);
         assert_eq!(
-            compact["strategy_periods"]["archived_runs"].as_array().unwrap().len(),
+            compact["strategy_periods"]["archived_runs"]
+                .as_array()
+                .unwrap()
+                .len(),
             0
         );
         let detached = store
@@ -3868,21 +3883,17 @@ mod tests {
             ..StrategyPeriodHistory::default()
         };
         store
-            .save(
-                &BTreeMap::new(),
-                None,
-                Some(&active),
-                None,
-                &history,
-                &[],
-            )
+            .save(&BTreeMap::new(), None, Some(&active), None, &history, &[])
             .unwrap();
         let primary: serde_json::Value =
             serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(primary["schema"], EXECUTION_LEDGER_SCHEMA_V14);
         assert_eq!(primary["archive_refs"].as_array().unwrap().len(), 17);
         assert_eq!(
-            primary["strategy_periods"]["archived_runs"].as_array().unwrap().len(),
+            primary["strategy_periods"]["archived_runs"]
+                .as_array()
+                .unwrap()
+                .len(),
             0
         );
         let ledger = DurableExecutionLedger::open(store.clone(), 172_001).unwrap();
