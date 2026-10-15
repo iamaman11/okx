@@ -3447,7 +3447,7 @@ mod tests {
         );
         let raw: serde_json::Value =
             serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-        assert_eq!(raw["schema"], EXECUTION_LEDGER_SCHEMA_V13);
+        assert_eq!(raw["schema"], EXECUTION_LEDGER_SCHEMA_V14);
         let _ = fs::remove_dir_all(&root);
     }
 
