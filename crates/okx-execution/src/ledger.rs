@@ -3786,6 +3786,16 @@ mod tests {
             prior_finalization_sha256: finalization.checksum_sha256.clone(),
         };
         let before = fs::read(store.path()).unwrap();
+        let audit = store.attest_storage().unwrap();
+        assert_eq!(audit.on_disk_schema, EXECUTION_LEDGER_SCHEMA_V12);
+        assert_eq!(audit.migration, "LEGACY_PENDING_FIRST_AUTHORIZED_WRITE");
+        assert_eq!(audit.original_snapshot, "ABSENT");
+        assert_eq!(audit.active_risk_stop_reason.as_deref(), Some("STRATEGY_MAX_DRAWDOWN"));
+        assert_eq!(
+            audit.finalized_run_checksum_sha256.as_deref(),
+            Some(finalization.checksum_sha256.as_str())
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), before);
         assert!(
             ledger
                 .reserve_strategy_capital(next.clone(), &opening, next_at + 1)
@@ -3940,6 +3950,7 @@ mod tests {
         let original_legacy = fs::read(store.path()).unwrap();
         let preserved_legacy = store.path().with_extension("pre-v14.json");
         fs::write(&preserved_legacy, b"forged migration snapshot").unwrap();
+        assert!(store.attest_storage().is_err(), "fake snapshot must not audit as safe");
         assert!(matches!(
             store.save(
                 &reopened.entries,
