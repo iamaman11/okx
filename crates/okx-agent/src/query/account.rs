@@ -2337,7 +2337,10 @@ mod tests {
                 "coherent": true,
                 "current_account_as_of_ms": "1792024604593",
                 "account_snapshot_source_received_at": "2026-10-15T01:00:00Z",
-                "history_source_received_at": "2026-10-15T01:00:01Z"
+                "history_source_received_at": "2026-10-15T01:00:01Z",
+                "history_read_duration_ms": 125,
+                "ledger_history_read_duration_ms": 120,
+                "protective_algo_read_duration_ms": 95
             },
             "reconciliation": {
                 "consistent": true,
@@ -2386,6 +2389,12 @@ mod tests {
             full["reconciliation"]["finalized_run"]["checksum_sha256"]
         );
         assert_eq!(p["funding"]["unallocated_exchange_bills"], 2);
+        // Performance telemetry must reflect independently measured source
+        // windows without altering the financial/account proof or inventing
+        // FRESH from parallel REST completion.
+        assert_eq!(p["transport"]["native_source_read_ms"], 125);
+        assert_eq!(p["transport"]["ledger_history_read_ms"], 120);
+        assert_eq!(p["transport"]["protective_algo_read_ms"], 95);
         assert_eq!(p["evidence"]["current_account_asof_ms"], "1792024604593");
         assert_eq!(
             p["evidence"]["account_source_received_at"],
