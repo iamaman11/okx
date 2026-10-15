@@ -384,6 +384,40 @@ impl ExecutionLedgerStore {
         &self.path
     }
 
+    /// The pre-migration ledger remains a one-time, immutable recovery artifact.
+    /// It is never loaded as a fallback and never used to authorize execution.
+    fn preserve_legacy_before_migration(&self) -> Result<(), ExecutionLedgerError> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+        let original = fs::read(&self.path)?;
+        let legacy: ExecutionLedgerFile = serde_json::from_slice(&original)?;
+        if legacy.schema == EXECUTION_LEDGER_SCHEMA_V14 {
+            return Ok(());
+        }
+        let snapshot = self.path.with_extension("pre-v14.json");
+        if snapshot.exists() {
+            if fs::read(&snapshot)? != original {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "pre-v14 recovery snapshot differs from legacy ledger",
+                ));
+            }
+            return Ok(());
+        }
+        let staging = temp_path(&snapshot);
+        let mut file = File::create(&staging)?;
+        file.write_all(&original)?;
+        file.sync_all()?;
+        drop(file);
+        if snapshot.exists() {
+            return Err(ExecutionLedgerError::Corrupt(
+                "pre-v14 recovery snapshot appeared concurrently",
+            ));
+        }
+        atomic_replace(&staging, &snapshot)?;
+        Ok(())
+    }
+
     fn archive_path(
         &self,
         kind: ArchivedRunKind,
@@ -775,6 +809,12 @@ impl ExecutionLedgerStore {
             .parent()
             .ok_or(ExecutionLedgerError::Corrupt("ledger path has no parent"))?;
         fs::create_dir_all(parent)?;
+        // Preserve the exact last pre-v14 source bytes BEFORE sealing any
+        // detached archive or publishing a manifest. Older agent binaries
+        // cannot interpret v14 and may only be recovered by an operator who
+        // deliberately restores the whole pre-upgrade ledger and verifies
+        // exchange-side state; there is never automatic fallback.
+        self.preserve_legacy_before_migration()?;
 
         let mut archive_refs = Vec::new();
         for archived in &history.archived_runs {
@@ -3111,6 +3151,12 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), ExecutionLedg
 #[cfg(not(windows))]
 fn atomic_replace(source: &Path, destination: &Path) -> Result<(), ExecutionLedgerError> {
     fs::rename(source, destination)?;
+    // fsync the parent directory as well as the data file. A power loss
+    // must not publish a ledger manifest referencing an uncommitted name.
+    File::open(destination.parent().ok_or(ExecutionLedgerError::Corrupt(
+        "atomic replacement parent missing",
+    ))?)?
+    .sync_all()?;
     Ok(())
 }
 
