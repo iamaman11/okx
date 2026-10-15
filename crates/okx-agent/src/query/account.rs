@@ -269,6 +269,45 @@ pub(super) async fn dispatch(
     generated_at: &str,
 ) -> AgentResult<AgentResponse> {
     match &request.operation {
+        AgentOperation::LedgerStorageAudit => {
+            let Some(execution) = context.execution else {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    ACCOUNT_LEDGER_INCONSISTENT_CODE,
+                    "native single-owner execution ledger is not configured".to_owned(),
+                    false,
+                ));
+            };
+            match execution.attest_ledger_storage().await {
+                Ok(proof) => Ok(AgentResponse {
+                    schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                    request_id: request.request_id.clone(),
+                    status: AgentResponseStatus::Completed,
+                    generated_at: generated_at.to_owned(),
+                    quality: if proof.on_disk_schema == okx_execution::EXECUTION_LEDGER_SCHEMA_V14 {
+                        DataQuality::Fresh
+                    } else {
+                        DataQuality::Degraded
+                    },
+                    result_schema: Some(
+                        okx_execution::LEDGER_STORAGE_ATTESTATION_SCHEMA_V1.to_owned(),
+                    ),
+                    result: Some(serde_json::to_value(proof)?),
+                    failure: None,
+                    warnings: Vec::new(),
+                }),
+                Err(error) => Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Failed,
+                    ACCOUNT_LEDGER_INCONSISTENT_CODE,
+                    format!("native on-disk ledger integrity audit failed: {error}"),
+                    false,
+                )),
+            }
+        }
         AgentOperation::AccountSnapshot => {
             let assembled = match assemble_account_snapshot(context).await {
                 Ok(value) => value,

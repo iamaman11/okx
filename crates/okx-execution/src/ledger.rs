@@ -351,6 +351,29 @@ type LoadedExecutionLedger = (
     Vec<LeverageChangeAttempt>,
 );
 
+/// Read-only, bounded inventory of the actual native ledger files.
+/// Neither this proof nor an offline backup is trading/replay authority.
+pub const LEDGER_STORAGE_ATTESTATION_SCHEMA_V1: &str = "okx.ledger-storage-attestation/v1";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LedgerStorageAttestation {
+    pub schema: &'static str,
+    pub on_disk_schema: String,
+    pub integrity: &'static str,
+    pub migration: &'static str,
+    pub manifest_sha256: String,
+    pub manifest_bytes: u64,
+    pub sealed_finalized_runs: usize,
+    pub sealed_unverified_runs: usize,
+    pub verified_archive_bodies: usize,
+    pub original_snapshot: &'static str,
+    pub original_snapshot_sha256: Option<String>,
+    pub active_risk_stop_reason: Option<String>,
+    pub finalized_run_checksum_sha256: Option<String>,
+    pub backup_scope: &'static str,
+    pub trading_admission: &'static str,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecutionLedgerStore {
     path: PathBuf,
@@ -382,6 +405,98 @@ impl ExecutionLedgerStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Explicit read-only disk audit. Unlike first-open recovery, this never
+    /// repairs an UNKNOWN state, migrates formats, rewrites, or sends to OKX.
+    /// It verifies all v14 sealed records through the normal fail-closed
+    /// decoder and reports the installed on-disk format without assuming v14.
+    pub fn attest_storage(&self) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
+        if !self.path.exists() {
+            return Err(ExecutionLedgerError::Corrupt("ledger not initialized"));
+        }
+        let size = fs::metadata(&self.path)?.len();
+        if size > 128 * 1024 * 1024 {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+        let raw = fs::read(&self.path)?;
+        let (_entries, stop, _reservation, _source, history, _attempts) = self.load()?;
+        if fs::read(&self.path)? != raw {
+            return Err(ExecutionLedgerError::Corrupt(
+                "on-disk manifest changed during read-only attestation",
+            ));
+        }
+        let manifest: ExecutionLedgerFile = serde_json::from_slice(&raw)?;
+        let v14 = manifest.schema == EXECUTION_LEDGER_SCHEMA_V14;
+        let finalized = manifest
+            .archive_refs
+            .iter()
+            .filter(|reference| reference.kind == ArchivedRunKind::Finalized)
+            .count();
+        let unverified = manifest
+            .archive_refs
+            .iter()
+            .filter(|reference| reference.kind == ArchivedRunKind::Unverified)
+            .count();
+        if v14
+            && (finalized != history.archived_runs.len()
+                || unverified != history.unverified_runs.len())
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "verified archive inventory mismatch",
+            ));
+        }
+        let snapshot_path = self.path.with_extension("pre-v14.json");
+        let (snapshot_state, snapshot_sha) = if snapshot_path.exists() {
+            let legacy_bytes = fs::read(snapshot_path)?;
+            let legacy: ExecutionLedgerFile = serde_json::from_slice(&legacy_bytes)?;
+            if legacy.schema == EXECUTION_LEDGER_SCHEMA_V14 {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "pre-v14 snapshot is not legacy",
+                ));
+            }
+            // On a pre-v14 file, a snapshot must be identical to current.
+            // Once v14 was published, it is historical and must differ.
+            if !v14 && legacy_bytes != raw {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "pre-v14 snapshot mismatches current legacy source",
+                ));
+            }
+            (
+                if v14 {
+                    "PRE_V14_SNAPSHOT_PRESENT"
+                } else {
+                    "CURRENT_LEGACY_SNAPSHOT_MATCH"
+                },
+                Some(format!("{:x}", Sha256::digest(&legacy_bytes))),
+            )
+        } else {
+            ("ABSENT", None)
+        };
+        Ok(LedgerStorageAttestation {
+            schema: LEDGER_STORAGE_ATTESTATION_SCHEMA_V1,
+            on_disk_schema: manifest.schema,
+            integrity: "VALIDATED_COLD_READ",
+            migration: if v14 {
+                "V14_SEALED_OR_EMPTY_ARCHIVE"
+            } else {
+                "LEGACY_PENDING_FIRST_AUTHORIZED_WRITE"
+            },
+            manifest_sha256: format!("{:x}", Sha256::digest(&raw)),
+            manifest_bytes: size,
+            sealed_finalized_runs: finalized,
+            sealed_unverified_runs: unverified,
+            verified_archive_bodies: finalized + unverified,
+            original_snapshot: snapshot_state,
+            original_snapshot_sha256: snapshot_sha,
+            active_risk_stop_reason: stop.as_ref().map(|v| v.reason.clone()),
+            finalized_run_checksum_sha256: history
+                .finalized_run
+                .as_ref()
+                .map(|v| v.checksum_sha256.clone()),
+            backup_scope: "MANIFEST_PLUS_ARCHIVE_DIRECTORY_PLUS_PRE_V14_SNAPSHOT",
+            trading_admission: "READ_ONLY_NOT_TRADING_AUTHORITY",
+        })
     }
 
     /// The pre-migration ledger remains a one-time, immutable recovery artifact.
@@ -972,6 +1087,12 @@ pub struct DurableExecutionLedger {
 }
 
 impl DurableExecutionLedger {
+    /// Read-only on-disk bundle verification; never changes in-memory executor
+    /// state or triggers its first-open UNKNOWN/POST recovery transitions.
+    pub fn attest_storage(&self) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
+        self.store.attest_storage()
+    }
+
     pub fn canonical(observed_at_ms: u64) -> Result<Self, ExecutionLedgerError> {
         Self::open(ExecutionLedgerStore::canonical(), observed_at_ms)
     }
@@ -3670,6 +3791,19 @@ mod tests {
             prior_finalization_sha256: finalization.checksum_sha256.clone(),
         };
         let before = fs::read(store.path()).unwrap();
+        let audit = store.attest_storage().unwrap();
+        assert_eq!(audit.on_disk_schema, EXECUTION_LEDGER_SCHEMA_V12);
+        assert_eq!(audit.migration, "LEGACY_PENDING_FIRST_AUTHORIZED_WRITE");
+        assert_eq!(audit.original_snapshot, "ABSENT");
+        assert_eq!(
+            audit.active_risk_stop_reason.as_deref(),
+            Some("STRATEGY_MAX_DRAWDOWN")
+        );
+        assert_eq!(
+            audit.finalized_run_checksum_sha256.as_deref(),
+            Some(finalization.checksum_sha256.as_str())
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), before);
         assert!(
             ledger
                 .reserve_strategy_capital(next.clone(), &opening, next_at + 1)
@@ -3824,6 +3958,10 @@ mod tests {
         let original_legacy = fs::read(store.path()).unwrap();
         let preserved_legacy = store.path().with_extension("pre-v14.json");
         fs::write(&preserved_legacy, b"forged migration snapshot").unwrap();
+        assert!(
+            store.attest_storage().is_err(),
+            "fake snapshot must not audit as safe"
+        );
         assert!(matches!(
             store.save(
                 &reopened.entries,
@@ -3868,6 +4006,62 @@ mod tests {
             .archive_path(ArchivedRunKind::Finalized, "run_archived_source_0123456789")
             .unwrap();
         let correct_archive = fs::read(&detached).unwrap();
+        let attested = store.attest_storage().unwrap();
+        assert_eq!(attested.integrity, "VALIDATED_COLD_READ");
+        assert_eq!(attested.migration, "V14_SEALED_OR_EMPTY_ARCHIVE");
+        assert_eq!(attested.verified_archive_bodies, 1);
+        assert_eq!(attested.sealed_finalized_runs, 1);
+        assert_eq!(attested.original_snapshot, "PRE_V14_SNAPSHOT_PRESENT");
+
+        // Offline recovery, even on a Windows runner: copy the *entire*
+        // financial bundle to an isolated path, not a second agent. Cold-load
+        // immutable archive and original snapshot without any exchange POST,
+        // rearm, or mutation to the running ledger.
+        let restore_root = temp_root("v14-restore-cold-bundle");
+        let _ = fs::remove_dir_all(&restore_root);
+        fs::create_dir_all(&restore_root).unwrap();
+        let restored = ExecutionLedgerStore::at(restore_root.join("ledger.json"));
+        fs::copy(store.path(), restored.path()).unwrap();
+        fs::copy(
+            store.path().with_extension("pre-v14.json"),
+            restored.path().with_extension("pre-v14.json"),
+        )
+        .unwrap();
+        let restored_segment = restored
+            .archive_path(ArchivedRunKind::Finalized, "run_archived_source_0123456789")
+            .unwrap();
+        fs::create_dir_all(restored_segment.parent().unwrap()).unwrap();
+        fs::copy(&detached, &restored_segment).unwrap();
+        let restored_manifest_before = fs::read(restored.path()).unwrap();
+        let restored_proof = restored.attest_storage().unwrap();
+        assert_eq!(restored_proof.manifest_sha256, attested.manifest_sha256);
+        assert_eq!(
+            restored_proof.original_snapshot_sha256,
+            attested.original_snapshot_sha256
+        );
+        assert_eq!(restored_proof.verified_archive_bodies, 1);
+        let restored_ledger = DurableExecutionLedger::open(restored.clone(), 3250).unwrap();
+        assert_eq!(restored_ledger.archived_runs_count(), 1);
+        assert_eq!(
+            restored_ledger.archived_strategy_proofs()[0].finalization_sha256,
+            file.strategy_periods.archived_runs[0]
+                .finalization
+                .checksum_sha256
+        );
+        assert_eq!(
+            fs::read(restored.path()).unwrap(),
+            restored_manifest_before,
+            "read-only cold restore cannot rewrite recovered financial history"
+        );
+        fs::remove_file(&restored_segment).unwrap();
+        assert!(
+            restored.attest_storage().is_err(),
+            "incomplete restore must fail closed"
+        );
+        assert!(DurableExecutionLedger::open(restored.clone(), 3251).is_err());
+        assert_eq!(fs::read(restored.path()).unwrap(), restored_manifest_before);
+        let _ = fs::remove_dir_all(restore_root);
+
         assert_eq!(
             DurableExecutionLedger::open(store.clone(), 3250)
                 .unwrap()

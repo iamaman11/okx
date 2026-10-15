@@ -372,11 +372,11 @@ export const mcpApi = {
           },
           {
             name: "account_summary",
-            description: "Read-only account/ledger reconciliation. Optional view=trader returns a small fail-closed GO/NO_GO observer packet with NAV, STOP, source and byte metrics; full (default) keeps the detailed diagnostic response. No Demo market signals or trading permission.",
+            description: "Read-only account/ledger reconciliation. Optional view=trader returns a small fail-closed GO/NO_GO observer packet; view=storage verifies local ledger files without account REST with NAV, STOP, source and byte metrics; full (default) keeps the detailed diagnostic response. No Demo market signals or trading permission.",
             inputSchema: {
               type: "object",
               properties: {
-                view: { type: "string", enum: ["full", "trader"] },
+                view: { type: "string", enum: ["full", "trader", "storage"] },
               },
               additionalProperties: false,
             },
@@ -1347,13 +1347,16 @@ export const mcpApi = {
       }
       if (name === "account_summary") {
         if (!hasOnlyKeys(args, ["view"]) ||
-            (args.view !== undefined && args.view !== "full" && args.view !== "trader")) {
-          return jsonRpcError(id, -32602, "view must be full or trader");
+            (args.view !== undefined && args.view !== "full" && args.view !== "trader" && args.view !== "storage")) {
+          return jsonRpcError(id, -32602, "view must be full, trader or storage");
         }
         const agentRequest = {
           schema: "okx.agent.request/v1",
           request_id: requestId(),
-          operation: { type: args.view === "trader" ? "trader_snapshot" : "account_summary" },
+          operation: {
+            type: args.view === "storage" ? "ledger_storage_audit"
+              : args.view === "trader" ? "trader_snapshot" : "account_summary"
+          },
         };
         return jsonRpc(id, toolResult(await dispatchRuntime(env, agentRequest)));
       }

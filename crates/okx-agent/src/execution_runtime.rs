@@ -738,6 +738,15 @@ impl ExecutionRuntime {
         )))
     }
 
+    /// Same single durable executor ledger, explicit disk read only; no
+    /// exchange API/POST and no schema migration or recovery write.
+    pub async fn attest_ledger_storage(
+        &self,
+    ) -> Result<okx_execution::LedgerStorageAttestation, OrderExecutorError> {
+        let executor = self.executor.lock().await;
+        Ok(executor.ledger().attest_storage()?)
+    }
+
     pub async fn risk_stop_status(&self) -> Option<ExecutionRiskStop> {
         self.executor.lock().await.ledger().risk_stop().cloned()
     }
