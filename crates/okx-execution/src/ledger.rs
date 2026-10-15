@@ -3832,6 +3832,12 @@ mod tests {
                 &reopened.leverage_attempts,
             )
             .unwrap();
+        let preserved_legacy = store.path().with_extension("pre-v14.json");
+        assert_eq!(
+            fs::read(&preserved_legacy).unwrap(),
+            original_legacy,
+            "migration must seal exact original bytes before upgrading"
+        );
         let compact: serde_json::Value =
             serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(compact["schema"], EXECUTION_LEDGER_SCHEMA_V14);
