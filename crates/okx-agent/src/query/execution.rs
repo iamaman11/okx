@@ -308,7 +308,9 @@ async fn migrate_finalized_storage(
             generated_at,
             AgentResponseStatus::Failed,
             EXECUTION_LEDGER_CAPACITY_EXHAUSTED_CODE,
-            format!("storage migration failed or result uncertain; read-only storage audit required before any repeat: {error}"),
+            format!(
+                "storage migration failed or result uncertain; read-only storage audit required before any repeat: {error}"
+            ),
             false,
         )),
     }
