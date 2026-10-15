@@ -118,6 +118,27 @@ for (const invalid of [
   assert(buildExecutionOperation({action:"set_leverage",intent_id:"stage5a_leverage_20261014",...invalid})===null,
     "unsafe leverage wire shape rejected");
 }
+const storageMigration = uidAction("migrate_finalized_ledger_storage", {
+  expected_manifest_sha256:"a".repeat(64),
+  expected_finalized_checksum_sha256:"b".repeat(64),
+  expected_stopped_at_ms:1792022959136,
+});
+assert(buildExecutionOperation(storageMigration)?.type==="migrate_finalized_ledger_storage",
+  "migration uses exact typed local file proof and no OKX order fields");
+for (const bad of [
+  {expected_manifest_sha256:"bad"},
+  {expected_finalized_checksum_sha256:"b".repeat(63)},
+  {expected_stopped_at_ms:0},
+  {instrument:"BTC-USDT-SWAP"},
+  {rearm:{expected_stopped_at_ms:1}},
+]) {
+  assert(buildExecutionOperation({...storageMigration,...bad})===null,
+    "forged hash/STOP or injected trading fields must be rejected by MCP");
+}
+assert(isExecutionMutation("migrate_finalized_ledger_storage"),
+  "local financial storage writes require the Demo mutation profile fence");
+assert(!executionProfilePermitsOperation("production", "migrate_finalized_ledger_storage"),
+  "Production cannot admit Demo administrative ledger mutation");
 assert(isExecutionMutation("set_leverage"),"leverage POST must require Demo profile");
 assert(!executionProfilePermitsOperation("production","set_leverage"),"Production leverage always read-only");
 assert(isExecutionMutation("begin_strategy_run"),"capital mutation requires Demo-only owner");
