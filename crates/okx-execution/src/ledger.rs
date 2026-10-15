@@ -43,8 +43,10 @@ pub const EXECUTION_LEDGER_SCHEMA_V10: &str = "okx.execution-ledger/v10";
 pub const EXECUTION_LEDGER_SCHEMA_V11: &str = "okx.execution-ledger/v11";
 pub const EXECUTION_LEDGER_SCHEMA_V12: &str = "okx.execution-ledger/v12";
 pub const EXECUTION_LEDGER_SCHEMA_V13: &str = "okx.execution-ledger/v13";
+pub const EXECUTION_LEDGER_SCHEMA_V14: &str = "okx.execution-ledger/v14";
 pub const LEVERAGE_ATTEMPT_SCHEMA_V1: &str = "okx.leverage-change-attempt/v1";
 const MAX_LEVERAGE_ATTEMPTS: usize = 256;
+const MAX_SEALED_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 pub const STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1: &str = "okx.strategy-capital-reservation/v1";
 pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
@@ -310,7 +312,34 @@ struct ExecutionLedgerFile {
     #[serde(default)]
     strategy_periods: StrategyPeriodHistory,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    archive_refs: Vec<ArchivedRunReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     leverage_attempts: Vec<LeverageChangeAttempt>,
+}
+
+/// Content-addressed immutable run pointer owned by the same ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchivedRunReference {
+    run_id: String,
+    kind: ArchivedRunKind,
+    content_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ArchivedRunKind {
+    Finalized,
+    Unverified,
+}
+
+impl ArchivedRunKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Finalized => "finalized",
+            Self::Unverified => "unverified",
+        }
+    }
 }
 
 type LoadedExecutionLedger = (
@@ -355,6 +384,163 @@ impl ExecutionLedgerStore {
         &self.path
     }
 
+    /// The pre-migration ledger remains a one-time, immutable recovery artifact.
+    /// It is never loaded as a fallback and never used to authorize execution.
+    fn preserve_legacy_before_migration(&self) -> Result<(), ExecutionLedgerError> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+        let original = fs::read(&self.path)?;
+        let legacy: ExecutionLedgerFile = serde_json::from_slice(&original)?;
+        if legacy.schema == EXECUTION_LEDGER_SCHEMA_V14 {
+            return Ok(());
+        }
+        let snapshot = self.path.with_extension("pre-v14.json");
+        if snapshot.exists() {
+            if fs::read(&snapshot)? != original {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "pre-v14 recovery snapshot differs from legacy ledger",
+                ));
+            }
+            return Ok(());
+        }
+        let staging = temp_path(&snapshot);
+        let mut file = File::create(&staging)?;
+        file.write_all(&original)?;
+        file.sync_all()?;
+        drop(file);
+        if snapshot.exists() {
+            return Err(ExecutionLedgerError::Corrupt(
+                "pre-v14 recovery snapshot appeared concurrently",
+            ));
+        }
+        atomic_replace(&staging, &snapshot)?;
+        Ok(())
+    }
+
+    fn archive_path(
+        &self,
+        kind: ArchivedRunKind,
+        run_id: &str,
+    ) -> Result<PathBuf, ExecutionLedgerError> {
+        if !valid_intent_id(run_id) {
+            return Err(ExecutionLedgerError::Corrupt("invalid archive run ID"));
+        }
+        Ok(self
+            .path
+            .with_extension("archive")
+            .join(format!("{}-{run_id}.json", kind.as_str())))
+    }
+
+    /// Seal native evidence before atomically committing the primary manifest.
+    /// A crash before manifest publication leaves, at most, an unreferenced
+    /// immutable file; an acknowledged manifest can never reference missing data.
+    fn seal_archive(
+        &self,
+        kind: ArchivedRunKind,
+        run_id: &str,
+        payload: Vec<u8>,
+    ) -> Result<ArchivedRunReference, ExecutionLedgerError> {
+        let path = self.archive_path(kind, run_id)?;
+        if u64::try_from(payload.len()).unwrap_or(u64::MAX) > MAX_SEALED_ARCHIVE_BYTES {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+        fs::create_dir_all(
+            path.parent()
+                .ok_or(ExecutionLedgerError::Corrupt("archive parent absent"))?,
+        )?;
+        if path.exists() {
+            if fs::read(&path)? != payload {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "sealed archive payload mismatch",
+                ));
+            }
+        } else {
+            let temp = temp_path(&path);
+            let mut file = File::create(&temp)?;
+            file.write_all(&payload)?;
+            file.sync_all()?;
+            drop(file);
+            if path.exists() {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "sealed archive appeared concurrently",
+                ));
+            }
+            atomic_replace(&temp, &path)?;
+        }
+        Ok(ArchivedRunReference {
+            run_id: run_id.to_owned(),
+            kind,
+            content_sha256: format!("{:x}", Sha256::digest(&payload)),
+        })
+    }
+
+    fn load_archives(&self, file: &mut ExecutionLedgerFile) -> Result<(), ExecutionLedgerError> {
+        if file.schema != EXECUTION_LEDGER_SCHEMA_V14 {
+            if !file.archive_refs.is_empty() {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "legacy ledger has archive references",
+                ));
+            }
+            return Ok(());
+        }
+        if !file.strategy_periods.archived_runs.is_empty()
+            || !file.strategy_periods.unverified_runs.is_empty()
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "v14 mixes inline and sealed archives",
+            ));
+        }
+        if file.archive_refs.len() > MAX_ARCHIVED_STRATEGY_RUNS {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+        let mut seen = BTreeSet::new();
+        for reference in &file.archive_refs {
+            if !seen.insert((reference.kind.as_str(), reference.run_id.as_str()))
+                || reference.content_sha256.len() != 64
+                || !reference
+                    .content_sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(ExecutionLedgerError::Corrupt("invalid archive reference"));
+            }
+            let path = self.archive_path(reference.kind, &reference.run_id)?;
+            if fs::metadata(&path)?.len() > MAX_SEALED_ARCHIVE_BYTES {
+                return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+            }
+            let bytes = fs::read(path)?;
+            if format!("{:x}", Sha256::digest(&bytes)) != reference.content_sha256 {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "sealed archive hash mismatch",
+                ));
+            }
+            match reference.kind {
+                ArchivedRunKind::Finalized => {
+                    let archived: ArchivedStrategyRun = serde_json::from_slice(&bytes)?;
+                    archived.validate()?;
+                    if archived.reservation.allocation_id != reference.run_id {
+                        return Err(ExecutionLedgerError::Corrupt(
+                            "sealed finalized run mismatch",
+                        ));
+                    }
+                    file.strategy_periods.archived_runs.push(archived);
+                }
+                ArchivedRunKind::Unverified => {
+                    let archived: UnverifiedStrategyRun = serde_json::from_slice(&bytes)?;
+                    archived.validate()?;
+                    if archived.reservation.allocation_id != reference.run_id {
+                        return Err(ExecutionLedgerError::Corrupt(
+                            "sealed unverified run mismatch",
+                        ));
+                    }
+                    file.strategy_periods.unverified_runs.push(archived);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn load(&self) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
         if !self.path.exists() {
             return Ok((
@@ -368,7 +554,8 @@ impl ExecutionLedgerStore {
         }
 
         let bytes = fs::read(&self.path)?;
-        let file: ExecutionLedgerFile = serde_json::from_slice(&bytes)?;
+        let mut file: ExecutionLedgerFile = serde_json::from_slice(&bytes)?;
+        self.load_archives(&mut file)?;
         if !matches!(
             file.schema.as_str(),
             EXECUTION_LEDGER_SCHEMA_V1
@@ -384,6 +571,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V11
                 | EXECUTION_LEDGER_SCHEMA_V12
                 | EXECUTION_LEDGER_SCHEMA_V13
+                | EXECUTION_LEDGER_SCHEMA_V14
         ) {
             return Err(ExecutionLedgerError::Corrupt("unsupported schema"));
         }
@@ -398,6 +586,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
                     | EXECUTION_LEDGER_SCHEMA_V13
+                    | EXECUTION_LEDGER_SCHEMA_V14
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "risk stop on legacy ledger schema",
@@ -415,6 +604,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
                     | EXECUTION_LEDGER_SCHEMA_V13
+                    | EXECUTION_LEDGER_SCHEMA_V14
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -433,6 +623,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
                     | EXECUTION_LEDGER_SCHEMA_V13
+                    | EXECUTION_LEDGER_SCHEMA_V14
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
                     "exchange evidence on legacy schema",
@@ -453,6 +644,7 @@ impl ExecutionLedgerStore {
                 | EXECUTION_LEDGER_SCHEMA_V11
                 | EXECUTION_LEDGER_SCHEMA_V12
                 | EXECUTION_LEDGER_SCHEMA_V13
+                | EXECUTION_LEDGER_SCHEMA_V14
         ) && file.strategy_periods != StrategyPeriodHistory::default()
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -466,6 +658,7 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
                     | EXECUTION_LEDGER_SCHEMA_V13
+                    | EXECUTION_LEDGER_SCHEMA_V14
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -479,6 +672,7 @@ impl ExecutionLedgerStore {
                 EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
                     | EXECUTION_LEDGER_SCHEMA_V13
+                    | EXECUTION_LEDGER_SCHEMA_V14
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -486,7 +680,10 @@ impl ExecutionLedgerStore {
             ));
         }
         if !file.strategy_periods.stop_rearms.is_empty()
-            && file.schema != EXECUTION_LEDGER_SCHEMA_V13
+            && !matches!(
+                file.schema.as_str(),
+                EXECUTION_LEDGER_SCHEMA_V13 | EXECUTION_LEDGER_SCHEMA_V14
+            )
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "STOP rearm requires ledger v13",
@@ -499,7 +696,9 @@ impl ExecutionLedgerStore {
         if !file.leverage_attempts.is_empty()
             && !matches!(
                 file.schema.as_str(),
-                EXECUTION_LEDGER_SCHEMA_V12 | EXECUTION_LEDGER_SCHEMA_V13
+                EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
+                    | EXECUTION_LEDGER_SCHEMA_V14
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -610,14 +809,39 @@ impl ExecutionLedgerStore {
             .parent()
             .ok_or(ExecutionLedgerError::Corrupt("ledger path has no parent"))?;
         fs::create_dir_all(parent)?;
+        // Preserve the exact last pre-v14 source bytes BEFORE sealing any
+        // detached archive or publishing a manifest. Older agent binaries
+        // cannot interpret v14 and may only be recovered by an operator who
+        // deliberately restores the whole pre-upgrade ledger and verifies
+        // exchange-side state; there is never automatic fallback.
+        self.preserve_legacy_before_migration()?;
 
+        let mut archive_refs = Vec::new();
+        for archived in &history.archived_runs {
+            archive_refs.push(self.seal_archive(
+                ArchivedRunKind::Finalized,
+                &archived.reservation.allocation_id,
+                serde_json::to_vec(archived)?,
+            )?);
+        }
+        for archived in &history.unverified_runs {
+            archive_refs.push(self.seal_archive(
+                ArchivedRunKind::Unverified,
+                &archived.reservation.allocation_id,
+                serde_json::to_vec(archived)?,
+            )?);
+        }
+        let mut compact_history = history.clone();
+        compact_history.archived_runs.clear();
+        compact_history.unverified_runs.clear();
         let payload = serde_json::to_vec_pretty(&ExecutionLedgerFile {
-            schema: EXECUTION_LEDGER_SCHEMA_V13.to_owned(),
+            schema: EXECUTION_LEDGER_SCHEMA_V14.to_owned(),
             records: entries.values().cloned().collect(),
             risk_stop: risk_stop.cloned(),
             capital_reservation: capital_reservation.cloned(),
             exchange_evidence: exchange_evidence.cloned(),
-            strategy_periods: history.clone(),
+            strategy_periods: compact_history,
+            archive_refs,
             leverage_attempts: leverage_attempts.to_vec(),
         })?;
         if payload.len() > 128 * 1024 * 1024 {
@@ -1222,6 +1446,15 @@ impl DurableExecutionLedger {
 
     pub fn archived_runs_count(&self) -> usize {
         self.strategy_periods.archived_runs.len()
+    }
+
+    /// Both FINALIZED and UNVERIFIED run bodies consume one sealed archive.
+    pub fn archived_storage_count(&self) -> usize {
+        self.strategy_periods.archived_runs.len() + self.strategy_periods.unverified_runs.len()
+    }
+
+    pub fn archived_unverified_count(&self) -> usize {
+        self.strategy_periods.unverified_runs.len()
     }
 
     /// Exact immutable per-period NAV and checksum, without raw private
@@ -2918,6 +3151,12 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), ExecutionLedg
 #[cfg(not(windows))]
 fn atomic_replace(source: &Path, destination: &Path) -> Result<(), ExecutionLedgerError> {
     fs::rename(source, destination)?;
+    // fsync the parent directory as well as the data file. A power loss
+    // must not publish a ledger manifest referencing an uncommitted name.
+    File::open(destination.parent().ok_or(ExecutionLedgerError::Corrupt(
+        "atomic replacement parent missing",
+    ))?)?
+    .sync_all()?;
     Ok(())
 }
 
@@ -3254,7 +3493,7 @@ mod tests {
         );
         let raw: serde_json::Value =
             serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-        assert_eq!(raw["schema"], EXECUTION_LEDGER_SCHEMA_V13);
+        assert_eq!(raw["schema"], EXECUTION_LEDGER_SCHEMA_V14);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -3405,6 +3644,7 @@ mod tests {
                 finalized_run: Some(finalization.clone()),
                 ..StrategyPeriodHistory::default()
             },
+            archive_refs: Vec::new(),
             leverage_attempts: vec![attempt.clone()],
         };
         fs::write(store.path(), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
@@ -3554,6 +3794,7 @@ mod tests {
                 unverified_runs: Vec::new(),
                 stop_rearms: Vec::new(),
             },
+            archive_refs: Vec::new(),
             leverage_attempts: Vec::new(),
         };
         fs::write(store.path(), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
@@ -3577,6 +3818,81 @@ mod tests {
                 .evidence
                 .checksum_sha256
         );
+        // Migrate the exact v9 inline evidence through the single owner.
+        // The original file is kept in this test to continue verifying the
+        // legacy tamper predicate after the v14 checks.
+        let original_legacy = fs::read(store.path()).unwrap();
+        let preserved_legacy = store.path().with_extension("pre-v14.json");
+        fs::write(&preserved_legacy, b"forged migration snapshot").unwrap();
+        assert!(matches!(
+            store.save(
+                &reopened.entries,
+                reopened.risk_stop.as_ref(),
+                reopened.capital_reservation.as_ref(),
+                reopened.exchange_evidence.as_ref(),
+                &reopened.strategy_periods,
+                &reopened.leverage_attempts,
+            ),
+            Err(ExecutionLedgerError::Corrupt(_))
+        ));
+        assert_eq!(fs::read(store.path()).unwrap(), original_legacy);
+        fs::remove_file(&preserved_legacy).unwrap();
+        store
+            .save(
+                &reopened.entries,
+                reopened.risk_stop.as_ref(),
+                reopened.capital_reservation.as_ref(),
+                reopened.exchange_evidence.as_ref(),
+                &reopened.strategy_periods,
+                &reopened.leverage_attempts,
+            )
+            .unwrap();
+        let preserved_legacy = store.path().with_extension("pre-v14.json");
+        assert_eq!(
+            fs::read(&preserved_legacy).unwrap(),
+            original_legacy,
+            "migration must seal exact original bytes before upgrading"
+        );
+        let compact: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(compact["schema"], EXECUTION_LEDGER_SCHEMA_V14);
+        assert_eq!(compact["archive_refs"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            compact["strategy_periods"]["archived_runs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        let detached = store
+            .archive_path(ArchivedRunKind::Finalized, "run_archived_source_0123456789")
+            .unwrap();
+        let correct_archive = fs::read(&detached).unwrap();
+        assert_eq!(
+            DurableExecutionLedger::open(store.clone(), 3250)
+                .unwrap()
+                .archived_runs_count(),
+            1
+        );
+        // Tampering with a *separate* sealed payload must not be ignored.
+        fs::write(&detached, b"tampered").unwrap();
+        assert!(DurableExecutionLedger::open(store.clone(), 3260).is_err());
+        assert!(
+            store
+                .save(
+                    &reopened.entries,
+                    reopened.risk_stop.as_ref(),
+                    reopened.capital_reservation.as_ref(),
+                    reopened.exchange_evidence.as_ref(),
+                    &reopened.strategy_periods,
+                    &reopened.leverage_attempts,
+                )
+                .is_err(),
+            "tampering must also forbid a subsequent writer commit"
+        );
+        fs::write(&detached, correct_archive).unwrap();
+        assert!(DurableExecutionLedger::open(store.clone(), 3270).is_ok());
+        fs::write(store.path(), original_legacy).unwrap();
         drop(reopened);
         let mut altered = serde_json::to_value(&file).unwrap();
         altered["strategy_periods"]["archived_runs"][0]["finalization"]["nav_usdt"] =
@@ -3588,6 +3904,85 @@ mod tests {
             Err(ExecutionLedgerError::Corrupt(_))
         ));
         assert_eq!(fs::read(store.path()).unwrap(), tampered);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn seventeen_runs_are_sealed_without_eviction_and_missing_payload_fails_closed() {
+        let root = temp_root("seventeen-run-segments");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut archive = Vec::new();
+        for i in 0..17u64 {
+            let run = StrategyCapitalReservation {
+                schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+                allocation_id: format!("stage5b_sealed_run_{i:04}"),
+                account_uid_fingerprint: "uid-fingerprint".to_owned(),
+                origin_schema: "okx.market-intelligence/v1".to_owned(),
+                origin_version: "stage5b-archive/2026-10-15.1".to_owned(),
+                mandate_version: "stage5b-archive-policy/v1".to_owned(),
+                allocated_usdt: "100".to_owned(),
+                opening_account_usdt_equity: "1000".to_owned(),
+                account_generation: "source-generation".to_owned(),
+                operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+                started_at_ms: 1_000 + i * 10_000,
+            };
+            let evidence = DurableExchangeEvidence::new(&run).unwrap();
+            let report = StrategyFinancialPeriod {
+                schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+                run_id: run.allocation_id.clone(),
+                state: "FLAT_RECONCILED",
+                evidence_sha256: evidence.checksum_sha256.clone(),
+                allocation_usdt: "100".to_owned(),
+                linked_fills: 0,
+                linked_bills: 0,
+                realized_usdt: "0".to_owned(),
+                fees_usdt: "0".to_owned(),
+                funding_usdt: None,
+                unrealized_usdt: Some("0".to_owned()),
+                nav_usdt: Some("100".to_owned()),
+                positions: Vec::new(),
+                usable_for_new_risk: false,
+                reasons: Vec::new(),
+            };
+            let finalization =
+                StrategyFinalization::new(&run, &evidence, &report, run.started_at_ms + 1000)
+                    .unwrap();
+            archive.push(ArchivedStrategyRun {
+                reservation: run,
+                evidence,
+                finalization,
+            });
+        }
+        let mut active = archive.last().unwrap().reservation.clone();
+        active.allocation_id = "stage5b_sealed_run_next_0018".to_owned();
+        active.started_at_ms = 172_000;
+        let history = StrategyPeriodHistory {
+            archived_runs: archive,
+            ..StrategyPeriodHistory::default()
+        };
+        store
+            .save(&BTreeMap::new(), None, Some(&active), None, &history, &[])
+            .unwrap();
+        let primary: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(primary["schema"], EXECUTION_LEDGER_SCHEMA_V14);
+        assert_eq!(primary["archive_refs"].as_array().unwrap().len(), 17);
+        assert_eq!(
+            primary["strategy_periods"]["archived_runs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        let ledger = DurableExecutionLedger::open(store.clone(), 172_001).unwrap();
+        assert_eq!(ledger.archived_runs_count(), 17);
+        assert_eq!(ledger.archived_strategy_proofs().len(), 17);
+        let missing = store
+            .archive_path(ArchivedRunKind::Finalized, "stage5b_sealed_run_0000")
+            .unwrap();
+        fs::remove_file(missing).unwrap();
+        assert!(DurableExecutionLedger::open(store.clone(), 172_002).is_err());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3667,6 +4062,7 @@ mod tests {
             capital_reservation: None,
             exchange_evidence: None,
             strategy_periods: StrategyPeriodHistory::default(),
+            archive_refs: Vec::new(),
             leverage_attempts: Vec::new(),
         };
         let payload = serde_json::to_vec_pretty(&file).unwrap();
@@ -4835,6 +5231,7 @@ mod tests {
                     capital_reservation: None,
                     exchange_evidence: None,
                     strategy_periods: StrategyPeriodHistory::default(),
+                    archive_refs: Vec::new(),
                     leverage_attempts: Vec::new(),
                 })
                 .expect("legacy json"),
@@ -4844,11 +5241,11 @@ mod tests {
             let store = ExecutionLedgerStore::at(&path);
             let mut ledger = DurableExecutionLedger::open(store, 101).expect("load legacy");
             assert_eq!(ledger.len(), 1);
-            ledger.begin_submission(&intent_id, 102).expect("write v6");
+            ledger.begin_submission(&intent_id, 102).expect("write v14");
 
             let file: ExecutionLedgerFile =
                 serde_json::from_slice(&fs::read(&path).expect("read upgraded")).expect("decode");
-            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V13);
+            assert_eq!(file.schema, EXECUTION_LEDGER_SCHEMA_V14);
 
             let _ = fs::remove_dir_all(root);
         }

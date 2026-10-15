@@ -19,6 +19,7 @@ use crate::{
 pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str = "okx.account-ledger-reconciliation/v1";
 const MAX_POSITION_ATTRIBUTION_ROWS: usize = 20;
 const MAX_ORIGIN_COHORT_ROWS: usize = 8;
+const MAX_ARCHIVE_PROOF_ROWS: usize = 16;
 pub const STRATEGY_ATTRIBUTION_SCHEMA_V1: &str = "okx.strategy-exchange-attribution/v1";
 pub const STRATEGY_NAV_ASSESSMENT_SCHEMA_V1: &str = "okx.strategy-nav-assessment/v1";
 
@@ -138,12 +139,17 @@ pub struct AccountLedgerReconciliation {
     /// Immutable operator-authorized STOP epoch archive from this same ledger.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub strategy_stop_rearm_proofs: Vec<crate::StrategyStopRearm>,
+    pub strategy_stop_rearm_proofs_total: usize,
+    pub strategy_stop_rearm_proofs_truncated: bool,
     /// Immutable past result; independent of current source-window age.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalized_run: Option<crate::StrategyFinalization>,
     pub archived_runs_count: usize,
     /// Immutable archived period hashes and financial totals (maximum 16).
     pub archived_run_proofs: Vec<crate::ArchivedStrategyProof>,
+    pub archived_run_proofs_truncated: bool,
+    pub unverified_runs_count: usize,
+    pub unverified_run_proofs_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unverified_run: Option<crate::StrategyUnverifiedClosure>,
     pub unverified_run_proofs: Vec<crate::UnverifiedStrategyProof>,
@@ -253,15 +259,38 @@ pub fn reconcile_account_ledger(
     result.strategy_nav_watermark = ledger.strategy_nav_watermark().cloned();
     result.strategy_nav_checkpoint_count = ledger.strategy_nav_point_count();
     result.strategy_risk_stop = ledger.risk_stop().cloned();
-    result.strategy_stop_rearm_proofs = ledger.stop_rearm_proofs();
+    let rearm_proofs = ledger.stop_rearm_proofs();
+    result.strategy_stop_rearm_proofs_total = rearm_proofs.len();
+    result.strategy_stop_rearm_proofs_truncated = rearm_proofs.len() > MAX_ARCHIVE_PROOF_ROWS;
+    result.strategy_stop_rearm_proofs = rearm_proofs
+        .into_iter()
+        .rev()
+        .take(MAX_ARCHIVE_PROOF_ROWS)
+        .collect::<Vec<_>>();
+    result.strategy_stop_rearm_proofs.reverse();
     result.financial_period = ledger.financial_period(facts, false);
     result.finalized_run = ledger.finalized_run().cloned();
     result.archived_runs_count = ledger.archived_runs_count();
-    result.archived_run_proofs = ledger.archived_strategy_proofs();
+    result.unverified_runs_count = ledger.archived_unverified_count();
+    let archived = ledger.archived_strategy_proofs();
+    result.archived_run_proofs_truncated = archived.len() > MAX_ARCHIVE_PROOF_ROWS;
+    result.archived_run_proofs = archived
+        .into_iter()
+        .rev()
+        .take(MAX_ARCHIVE_PROOF_ROWS)
+        .collect::<Vec<_>>();
+    result.archived_run_proofs.reverse();
     result.unverified_run = ledger.unverified_run().cloned();
-    result.unverified_run_proofs = ledger.archived_unverified_proofs();
+    let unverified = ledger.archived_unverified_proofs();
+    result.unverified_run_proofs_truncated = unverified.len() > MAX_ARCHIVE_PROOF_ROWS;
+    result.unverified_run_proofs = unverified
+        .into_iter()
+        .rev()
+        .take(MAX_ARCHIVE_PROOF_ROWS)
+        .collect::<Vec<_>>();
+    result.unverified_run_proofs.reverse();
     result.archived_run_slots_remaining =
-        crate::MAX_ARCHIVED_STRATEGY_RUNS.saturating_sub(result.archived_runs_count);
+        crate::MAX_ARCHIVED_STRATEGY_RUNS.saturating_sub(ledger.archived_storage_count());
     result.strategy_attribution = Some(attribute_strategy_exchange_evidence(
         ledger,
         &facts.exchange_orders,
@@ -431,9 +460,14 @@ fn reconcile_exchange_evidence(
         strategy_nav_checkpoint_count: 0,
         strategy_risk_stop: None,
         strategy_stop_rearm_proofs: Vec::new(),
+        strategy_stop_rearm_proofs_total: 0,
+        strategy_stop_rearm_proofs_truncated: false,
         finalized_run: None,
         archived_runs_count: 0,
         archived_run_proofs: Vec::new(),
+        archived_run_proofs_truncated: false,
+        unverified_runs_count: 0,
+        unverified_run_proofs_truncated: false,
         unverified_run: None,
         unverified_run_proofs: Vec::new(),
         archived_run_slots_remaining: crate::MAX_ARCHIVED_STRATEGY_RUNS,
