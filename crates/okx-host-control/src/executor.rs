@@ -1270,7 +1270,9 @@ fn controller_agent_release_parity(
     running_controller_sha256: Option<&str>,
 ) -> Value {
     let mut blockers = Vec::<&str>::new();
-    let agent_tree = agent.pointer("/provenance/source_tree").and_then(Value::as_str);
+    let agent_tree = agent
+        .pointer("/provenance/source_tree")
+        .and_then(Value::as_str);
     let controller_tree = launcher
         .pointer("/active/value/active/source_tree")
         .and_then(Value::as_str);
@@ -1282,7 +1284,10 @@ fn controller_agent_release_parity(
         blockers.push("AGENT_BINARY_OR_PROVENANCE_UNVERIFIED");
     }
     if launcher.pointer("/active/state").and_then(Value::as_str) != Some("READY")
-        || launcher.pointer("/entrypoint_is_launcher").and_then(Value::as_bool) != Some(true)
+        || launcher
+            .pointer("/entrypoint_is_launcher")
+            .and_then(Value::as_bool)
+            != Some(true)
     {
         blockers.push("ACTIVE_CONTROLLER_UNVERIFIED");
     }
@@ -1356,20 +1361,25 @@ mod tests {
         assert_eq!(matched["same_profile_recovery_permitted"], true);
 
         let mut old_controller = launcher.clone();
-        old_controller["active"]["value"]["active"]["source_tree"] =
-            json!("b".repeat(40));
+        old_controller["active"]["value"]["active"]["source_tree"] = json!("b".repeat(40));
         let drift = controller_agent_release_parity(&agent, &old_controller, Some(&hash));
         assert_eq!(drift["state"], "BLOCKED");
-        assert!(drift["blockers"].as_array().unwrap().contains(
-            &json!("CONTROLLER_AGENT_SOURCE_TREE_MISMATCH")
-        ));
+        assert!(
+            drift["blockers"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("CONTROLLER_AGENT_SOURCE_TREE_MISMATCH"))
+        );
 
         let wrong_binary =
             controller_agent_release_parity(&agent, &launcher, Some(&"d".repeat(64)));
         assert_eq!(wrong_binary["state"], "BLOCKED");
-        assert!(wrong_binary["blockers"].as_array().unwrap().contains(
-            &json!("RUNNING_CONTROLLER_BINARY_MISMATCH")
-        ));
+        assert!(
+            wrong_binary["blockers"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("RUNNING_CONTROLLER_BINARY_MISMATCH"))
+        );
 
         let mut pending = launcher.clone();
         pending["pending"]["state"] = json!("PENDING");
