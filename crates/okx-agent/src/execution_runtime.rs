@@ -772,7 +772,9 @@ impl ExecutionRuntime {
         account_uid: &str,
     ) -> Result<okx_execution::ProfileHandoffLedgerAssessment, OrderExecutorError> {
         let owner = self.executor.lock().await;
-        Ok(owner.ledger().profile_handoff_ledger_assessment(account_uid)?)
+        Ok(owner
+            .ledger()
+            .profile_handoff_ledger_assessment(account_uid)?)
     }
 
     pub async fn attest_ledger_storage(
