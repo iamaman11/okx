@@ -1,5 +1,7 @@
 # Stage 5 implementation checklist and live-admission contract
 
+> **Current 5C-2 release/profile contract (2026-10-15):** [Single-agent account profiles and Stage 5C-2 acceptance](ACCOUNT_PROFILES_AND_RELEASE_ACCEPTANCE.md). Existing #339 diagnostic code is merged with six CI checks but not deployed; installed CONTROL reports GitHub JSON decode errors on exact ZIP acquisition. Account mode is selected independently from trade authority. No second Demo binary or execution architecture; no Production Trading admission yet. Historical candidate-state paragraphs below remain evidence, not the current cursor.
+
 
 ## Stage 5B / 5C: one-account compact trader view (PR #334, candidate)
 
