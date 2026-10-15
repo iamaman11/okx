@@ -29,6 +29,125 @@ struct AccountSummaryResult {
     coherence: AccountSummaryCoherence,
 }
 
+const TRADER_SNAPSHOT_SCHEMA_V1: &str = "okx.trader-snapshot/v1";
+const MAX_TRADER_PACKET_BYTES: usize = 12_288;
+
+/// Deliberately *not* a mutation authority. This is one bounded projection of
+/// account_summary, after the same source/coherence/ledger reconciliation.
+/// It can prove NO_GO, but can NEVER mint a GO from read-only observations.
+fn compact_trader_packet(
+    full: &serde_json::Value,
+    quality: &DataQuality,
+    warnings_count: usize,
+    source_read_duration_ms: u64,
+) -> serde_json::Value {
+    use serde_json::{Value, json};
+
+    let get = |p: &str| full.pointer(p).cloned().unwrap_or(Value::Null);
+    let has_stop = !get("/reconciliation/strategy_risk_stop").is_null();
+    let finalized = !get("/reconciliation/finalized_run").is_null();
+    let coherent = get("/coherence/coherent") == json!(true);
+    let reconciled = get("/reconciliation/consistent") == json!(true);
+    let complete_protection =
+        get("/pending_protective_algos/complete_within_bound") == json!(true);
+    let history_complete = full
+        .pointer("/account_ledger/history_coverage")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            !rows.is_empty()
+                && rows
+                    .iter()
+                    .all(|row| row.get("complete_within_bound") == Some(&json!(true)))
+        });
+    let mut reasons = Vec::new();
+    if has_stop {
+        reasons.push("DURABLE_STRATEGY_STOP");
+    }
+    if finalized {
+        reasons.push("RUN_FINALIZED");
+    }
+    if !coherent {
+        reasons.push("PRIVATE_SOURCE_NOT_COHERENT");
+    }
+    if !reconciled {
+        reasons.push("LEDGER_RECONCILIATION_NOT_PROVEN");
+    }
+    if !complete_protection || !history_complete {
+        reasons.push("BOUNDED_PRIVATE_SOURCE");
+    }
+    if !matches!(quality, DataQuality::Fresh) {
+        reasons.push("SUMMARY_QUALITY_NOT_FRESH");
+    }
+    let blocked = !reasons.is_empty();
+    // Even when no blocker was observed, this read-only packet cannot attest
+    // an execution policy, risk budget, exact current venue or new order plan.
+    reasons.push("EXECUTOR_RISK_ADMISSION_NOT_PERFORMED");
+    let mut compact = json!({
+        "schema": TRADER_SNAPSHOT_SCHEMA_V1,
+        "decision": {
+            "new_risk": if blocked { "NO_GO" } else { "NOT_ATTESTED" },
+            "scope": "READ_ONLY_OBSERVER_NOT_TRADE_PERMISSION",
+            "reasons": reasons,
+            "risk_reducing_exit": "REQUIRES_NATIVE_EXECUTOR_REVALIDATION"
+        },
+        "account": {
+            "uid_fingerprint": get("/account_ledger/authority/account_uid_fingerprint"),
+            "scope": "AUTHENTICATED_ACCOUNT_ONLY",
+            "positions": get("/account_ledger/open_positions"),
+            "pending_orders": get("/account_ledger/pending_orders"),
+            "pending_protective_algos": get("/pending_protective_algos/rows"),
+            "native_protection_complete": complete_protection,
+            "private_history_complete_within_bound": history_complete
+        },
+        "strategy": {
+            "active_run_id": get("/reconciliation/financial_period/run_id"),
+            "period_state": get("/reconciliation/financial_period/state"),
+            "current_nav_usdt": get("/reconciliation/financial_period/nav_usdt"),
+            "finalized_run_id": get("/reconciliation/finalized_run/run_id"),
+            "finalized_nav_usdt": get("/reconciliation/finalized_run/nav_usdt"),
+            "finalized_realized_usdt": get("/reconciliation/finalized_run/realized_usdt"),
+            "finalized_fees_usdt": get("/reconciliation/finalized_run/fees_usdt"),
+            "finalized_checksum_sha256": get("/reconciliation/finalized_run/checksum_sha256"),
+            "durable_stop": get("/reconciliation/strategy_risk_stop"),
+            "archived_finalized": get("/reconciliation/archived_runs_count"),
+            "archived_unverified": get("/reconciliation/unverified_runs_count"),
+            "archive_free_slots": get("/reconciliation/archived_run_slots_remaining")
+        },
+        "funding": {
+            "allocated_to_strategy_usdt": get("/reconciliation/financial_period/funding_usdt"),
+            "unallocated_exchange_bills": get("/reconciliation/strategy_attribution/unallocated_funding_bills"),
+            "classification": "UNOWNED_UNLESS_EXACT_POSITION_PROOF"
+        },
+        "evidence": {
+            "quality": quality,
+            "private_source_coherent": coherent,
+            "source_history_complete": history_complete,
+            "source_gap_over_two_hours": get("/reconciliation/exchange_evidence/source_gap_over_two_hours"),
+            "source_cursor_complete": get("/reconciliation/exchange_evidence/latest_source_complete"),
+            "source_asof_ms": get("/reconciliation/exchange_evidence/latest_source_asof_ms"),
+            "production_public_market_gate": "NOT_TESTED_BY_ACCOUNT_READ",
+            "managed_intents_total": get("/managed_execution_intents/total"),
+            "managed_intents_sampled": get("/managed_execution_intents/shown")
+        },
+        "transport": {
+            "full_account_result_bytes": serde_json::to_vec(full).map_or(0, |v| v.len()),
+            "native_source_read_ms": source_read_duration_ms,
+            "warnings_count": warnings_count,
+            "packet_bytes": 0
+        }
+    });
+    // The packet byte count includes its own integer field, not just
+    // the pre-metadata JSON. Stabilizes after at most a few digit changes.
+    for _ in 0..4 {
+        let bytes = serde_json::to_vec(&compact).map_or(usize::MAX, |v| v.len());
+        if compact["transport"]["packet_bytes"] == json!(bytes) {
+            break;
+        }
+        compact["transport"]["packet_bytes"] = json!(bytes);
+    }
+    compact
+}
+
 const PORTFOLIO_RISK_MAX_OBSERVATION_SKEW_MS: u64 = 30_000;
 
 #[derive(serde::Serialize)]
@@ -150,7 +269,7 @@ pub(super) async fn dispatch(
                 warnings: assembled.warnings,
             })
         }
-        AgentOperation::AccountSummary => {
+        AgentOperation::AccountSummary | AgentOperation::TraderSnapshot => {
             let assembled = match assemble_account_snapshot(context).await {
                 Ok(value) => value,
                 Err(error) => return Ok(account_query_failure(request, generated_at, error)),
@@ -449,14 +568,8 @@ pub(super) async fn dispatch(
                 blockers: opening_blockers,
             };
 
-            Ok(AgentResponse {
-                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-                request_id: request.request_id.clone(),
-                status: AgentResponseStatus::Completed,
-                generated_at: generated_at.to_owned(),
-                quality,
-                result_schema: Some(ACCOUNT_SUMMARY_SCHEMA_V1.to_owned()),
-                result: Some(serde_json::to_value(AccountSummaryResult {
+            let compact = matches!(request.operation, AgentOperation::TraderSnapshot);
+            let full = serde_json::to_value(AccountSummaryResult {
                     schema: ACCOUNT_SUMMARY_SCHEMA_V1,
                     account_ledger: facts.summary,
                     pending_protective_algos,
@@ -464,9 +577,42 @@ pub(super) async fn dispatch(
                     reconciliation,
                     managed_execution_intents,
                     coherence,
-                })?),
+                })?;
+            let result = if compact {
+                let packet = compact_trader_packet(
+                    &full,
+                    &quality,
+                    warnings.len(),
+                    history_read_duration_ms,
+                );
+                if serde_json::to_vec(&packet)?.len() > MAX_TRADER_PACKET_BYTES {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Failed,
+                        ACCOUNT_LEDGER_INCONSISTENT_CODE,
+                        "compact trader snapshot exceeds bounded transport payload".to_owned(),
+                        false,
+                    ));
+                }
+                packet
+            } else {
+                full
+            };
+            Ok(AgentResponse {
+                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+                request_id: request.request_id.clone(),
+                status: AgentResponseStatus::Completed,
+                generated_at: generated_at.to_owned(),
+                quality,
+                result_schema: Some(if compact {
+                    TRADER_SNAPSHOT_SCHEMA_V1
+                } else {
+                    ACCOUNT_SUMMARY_SCHEMA_V1
+                }.to_owned()),
+                result: Some(result),
                 failure: None,
-                warnings,
+                warnings: if compact { Vec::new() } else { warnings },
             })
         }
         AgentOperation::TradingCapabilities {
