@@ -1103,7 +1103,7 @@ impl DurableExecutionLedger {
     /// already committed v14 and immutable legacy snapshot: never repeats a
     /// trading operation or fabricates another run.
     pub fn migrate_finalized_storage_v14(
-        &mut self,
+        &self,
         run_id: &str,
         expected_manifest_sha256: &str,
         expected_finalized_checksum_sha256: &str,
