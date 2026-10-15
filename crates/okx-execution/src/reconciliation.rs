@@ -439,8 +439,7 @@ fn reconcile_exchange_evidence(
     }
     unmatched_historical.sort_by(|a, b| a.intent_id.cmp(&b.intent_id));
     let unmatched_historical_total = unmatched_historical.len();
-    let unmatched_historical_truncated =
-        unmatched_historical_total > MAX_UNMATCHED_HISTORICAL_ROWS;
+    let unmatched_historical_truncated = unmatched_historical_total > MAX_UNMATCHED_HISTORICAL_ROWS;
     unmatched_historical.truncate(MAX_UNMATCHED_HISTORICAL_ROWS);
 
     let (position_attribution, position_attribution_unavailable_events) =
@@ -1901,11 +1900,18 @@ mod tests {
             DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("ledger");
         let intent_id = "intent_historical_unknown_0123456789";
         ledger.prepare(plan(intent_id), 101).expect("prepare");
-        ledger.begin_submission(intent_id, 102).expect("begin submission");
-        ledger.mark_unknown_submission(intent_id, 103).expect("unknown");
+        ledger
+            .begin_submission(intent_id, 102)
+            .expect("begin submission");
+        ledger
+            .mark_unknown_submission(intent_id, 103)
+            .expect("unknown");
 
         let result = reconcile_exchange_evidence(&ledger, &[], &[], &[]).expect("reconcile");
-        assert_eq!(result.managed_intents_unresolved_in_bounded_exchange_evidence, 1);
+        assert_eq!(
+            result.managed_intents_unresolved_in_bounded_exchange_evidence,
+            1
+        );
         assert_eq!(result.unmatched_historical_total, 1);
         assert!(!result.unmatched_historical_truncated);
         assert_eq!(result.unmatched_historical[0].intent_id, intent_id);
