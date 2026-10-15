@@ -33,6 +33,7 @@ pub use ledger::{
     EXECUTION_RISK_STOP_SCHEMA_V1, ExecutionLedgerEntry, ExecutionLedgerError,
     ExecutionLedgerStore, ExecutionRiskStop, LEDGER_STORAGE_ATTESTATION_SCHEMA_V1,
     LEVERAGE_ATTEMPT_SCHEMA_V1, LedgerStorageAttestation, LeverageAttemptState,
+    PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1, ProfileHandoffLedgerAssessment,
     LeverageChangeAttempt, MAX_EXECUTION_LEDGER_RECORDS, MutationPrepareDisposition,
     PrepareDisposition, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1, StrategyAllocationOpening,
     StrategyCapitalReservation, StrategyStopRearmRequest,
