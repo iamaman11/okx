@@ -21,3 +21,12 @@ members = [
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
+
+# Optimize the same native Windows ReleaseSet for a bounded download by
+# the previously accepted 60-second controller. No new installer/transport.
+# Keep panic semantics and runtime feature set unchanged.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
