@@ -104,6 +104,9 @@ fn compact_trader_packet(
         "account": {
             "uid_fingerprint": get("/account_ledger/authority/account_uid_fingerprint"),
             "scope": "AUTHENTICATED_ACCOUNT_ONLY",
+            "account_equity_usd": get("/account_ledger/total_equity_usd"),
+            "account_unrealized_pnl": get("/account_ledger/current_unrealized_pnl"),
+            "equity_is_strategy_nav": false,
             "positions": get("/account_ledger/open_positions"),
             "pending_orders": get("/account_ledger/pending_orders"),
             "pending_protective_algos": get("/pending_protective_algos/rows"),
@@ -2264,6 +2267,8 @@ mod tests {
                 "authority": {"account_uid_fingerprint": "account-sha"},
                 "open_positions": 0,
                 "pending_orders": 0,
+                "total_equity_usd": "5000",
+                "current_unrealized_pnl": "0",
                 "history_coverage": [{"complete_within_bound": true}]
             },
             "pending_protective_algos": {
@@ -2316,6 +2321,8 @@ mod tests {
             "READ_ONLY_OBSERVER_NOT_TRADE_PERMISSION"
         );
         assert_eq!(p["strategy"]["finalized_nav_usdt"], "99.996587799");
+        assert_eq!(p["account"]["account_equity_usd"], "5000");
+        assert_eq!(p["account"]["equity_is_strategy_nav"], false);
         assert_eq!(
             p["strategy"]["finalized_checksum_sha256"],
             full["reconciliation"]["finalized_run"]["checksum_sha256"]
