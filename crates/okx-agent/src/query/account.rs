@@ -2240,6 +2240,85 @@ mod tests {
     use super::*;
 
     #[test]
+    fn trader_packet_is_bounded_never_mints_go_and_keeps_exact_finance_proof() {
+        use serde_json::json;
+        let mut full = json!({
+            "account_ledger": {
+                "authority": {"account_uid_fingerprint": "account-sha"},
+                "open_positions": 0,
+                "pending_orders": 0,
+                "history_coverage": [{"complete_within_bound": true}]
+            },
+            "pending_protective_algos": {
+                "rows": 0,
+                "complete_within_bound": true
+            },
+            "coherence": {"coherent": true},
+            "reconciliation": {
+                "consistent": true,
+                "strategy_risk_stop": {"reason": "STRATEGY_UTC_DAILY_GROSS_LOSS"},
+                "financial_period": {
+                    "run_id": "stage5b_physical_test_run",
+                    "state": "FLAT_RECONCILED",
+                    "nav_usdt": "99.996587799",
+                    "funding_usdt": null
+                },
+                "finalized_run": {
+                    "run_id": "stage5b_physical_test_run",
+                    "nav_usdt": "99.996587799",
+                    "realized_usdt": "0.004762",
+                    "fees_usdt": "-0.008174201",
+                    "checksum_sha256": "542337bbb39787dba9f128c7828716e12f95cc3954358400e644fb28f0fe75ce"
+                },
+                "archived_runs_count": 4,
+                "unverified_runs_count": 1,
+                "archived_run_slots_remaining": 251,
+                "strategy_attribution": {"unallocated_funding_bills": 2},
+                "exchange_evidence": {
+                    "source_gap_over_two_hours": false,
+                    "latest_source_complete": true,
+                    "latest_source_asof_ms": 1792023166014u64
+                }
+            },
+            "managed_execution_intents": {
+                "total": 45,
+                "shown": 16,
+                "rows": vec!["big diagnostic content".repeat(500); 16]
+            }
+        });
+        let p = compact_trader_packet(&full, &DataQuality::Degraded, 2, 125);
+        assert_eq!(p["schema"], TRADER_SNAPSHOT_SCHEMA_V1);
+        assert_eq!(p["decision"]["new_risk"], "NO_GO");
+        assert_eq!(p["decision"]["scope"], "READ_ONLY_OBSERVER_NOT_TRADE_PERMISSION");
+        assert_eq!(p["strategy"]["finalized_nav_usdt"], "99.996587799");
+        assert_eq!(
+            p["strategy"]["finalized_checksum_sha256"],
+            full["reconciliation"]["finalized_run"]["checksum_sha256"]
+        );
+        assert_eq!(p["funding"]["unallocated_exchange_bills"], 2);
+        assert!(p["funding"]["allocated_to_strategy_usdt"].is_null());
+        assert!(serde_json::to_vec(&p).unwrap().len() <= MAX_TRADER_PACKET_BYTES);
+        assert_eq!(
+            p["transport"]["packet_bytes"].as_u64().unwrap() as usize,
+            serde_json::to_vec(&p).unwrap().len()
+        );
+        assert!(
+            p["transport"]["full_account_result_bytes"].as_u64().unwrap()
+                > 5 * p["transport"]["packet_bytes"].as_u64().unwrap()
+        );
+        // A healthy observer still cannot authorize new risk without a typed
+        // native executor + explicit risk/mandate; not a false green GO.
+        full["reconciliation"]["strategy_risk_stop"] = json!(null);
+        full["reconciliation"]["finalized_run"] = json!(null);
+        let seemingly_ready = compact_trader_packet(&full, &DataQuality::Fresh, 0, 1);
+        assert_eq!(seemingly_ready["decision"]["new_risk"], "NOT_ATTESTED");
+        assert_ne!(seemingly_ready["decision"]["new_risk"], "GO");
+        let absent = compact_trader_packet(&json!({}), &DataQuality::Fresh, 0, 1);
+        assert_eq!(absent["decision"]["new_risk"], "NO_GO");
+        assert!(absent["account"]["positions"].is_null());
+    }
+
+    #[test]
     fn portfolio_observation_skew_is_explicit_and_bounded_in_milliseconds() {
         assert_eq!(
             observation_skew_ms("2026-10-03T00:00:05.000Z", "1790985600000").expect("skew"),
