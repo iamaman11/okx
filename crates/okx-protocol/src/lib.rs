@@ -1022,6 +1022,8 @@ pub enum AgentOperation {
     /// Read-only compact projection of the SAME account source and ledger owner.
     /// No market signal, no live trade permission, no independent risk authority.
     TraderSnapshot,
+    /// Explicit on-disk audit of the one local execution ledger. Never POST.
+    LedgerStorageAudit,
     PortfolioRisk {
         mandate: Box<PortfolioMandateRequest>,
         policy: Box<HardRiskPolicyRequest>,
@@ -1147,7 +1149,8 @@ impl AgentOperation {
             | Self::MailboxTelemetry
             | Self::AccountSnapshot
             | Self::AccountSummary
-            | Self::TraderSnapshot => Ok(()),
+            | Self::TraderSnapshot
+            | Self::LedgerStorageAudit => Ok(()),
             Self::PortfolioRisk {
                 mandate,
                 policy,
@@ -2496,6 +2499,10 @@ mod tests {
             serde_json::json!({"type": "trader_snapshot"})
         );
         assert!(trader.validate().is_ok());
+        let audit = AgentOperation::LedgerStorageAudit;
+        assert!(audit.direct_transport_read_only());
+        assert!(!audit.direct_transport_demo_execution());
+        assert!(audit.validate().is_ok());
 
         let generic = AgentOperation::PrepareExecution {
             intent_id: "intent_generic_01234567".to_owned(),
