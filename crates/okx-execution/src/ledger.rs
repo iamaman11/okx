@@ -3814,6 +3814,89 @@ mod tests {
     }
 
     #[test]
+    fn seventeen_runs_are_sealed_without_eviction_and_missing_payload_fails_closed() {
+        let root = temp_root("seventeen-run-segments");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut archive = Vec::new();
+        for i in 0..17u64 {
+            let run = StrategyCapitalReservation {
+                schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+                allocation_id: format!("stage5b_sealed_run_{i:04}"),
+                account_uid_fingerprint: "uid-fingerprint".to_owned(),
+                origin_schema: "okx.market-intelligence/v1".to_owned(),
+                origin_version: "stage5b-archive/2026-10-15.1".to_owned(),
+                mandate_version: "stage5b-archive-policy/v1".to_owned(),
+                allocated_usdt: "100".to_owned(),
+                opening_account_usdt_equity: "1000".to_owned(),
+                account_generation: "source-generation".to_owned(),
+                operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+                started_at_ms: 1_000 + i * 10_000,
+            };
+            let evidence = DurableExchangeEvidence::new(&run).unwrap();
+            let report = StrategyFinancialPeriod {
+                schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+                run_id: run.allocation_id.clone(),
+                state: "FLAT_RECONCILED",
+                evidence_sha256: evidence.checksum_sha256.clone(),
+                allocation_usdt: "100".to_owned(),
+                linked_fills: 0,
+                linked_bills: 0,
+                realized_usdt: "0".to_owned(),
+                fees_usdt: "0".to_owned(),
+                funding_usdt: None,
+                unrealized_usdt: Some("0".to_owned()),
+                nav_usdt: Some("100".to_owned()),
+                positions: Vec::new(),
+                usable_for_new_risk: false,
+                reasons: Vec::new(),
+            };
+            let finalization =
+                StrategyFinalization::new(&run, &evidence, &report, run.started_at_ms + 1000)
+                    .unwrap();
+            archive.push(ArchivedStrategyRun {
+                reservation: run,
+                evidence,
+                finalization,
+            });
+        }
+        let mut active = archive.last().unwrap().reservation.clone();
+        active.allocation_id = "stage5b_sealed_run_next_0018".to_owned();
+        active.started_at_ms = 172_000;
+        let history = StrategyPeriodHistory {
+            archived_runs: archive,
+            ..StrategyPeriodHistory::default()
+        };
+        store
+            .save(
+                &BTreeMap::new(),
+                None,
+                Some(&active),
+                None,
+                &history,
+                &[],
+            )
+            .unwrap();
+        let primary: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(primary["schema"], EXECUTION_LEDGER_SCHEMA_V14);
+        assert_eq!(primary["archive_refs"].as_array().unwrap().len(), 17);
+        assert_eq!(
+            primary["strategy_periods"]["archived_runs"].as_array().unwrap().len(),
+            0
+        );
+        let ledger = DurableExecutionLedger::open(store.clone(), 172_001).unwrap();
+        assert_eq!(ledger.archived_runs_count(), 17);
+        assert_eq!(ledger.archived_strategy_proofs().len(), 17);
+        let missing = store
+            .archive_path(ArchivedRunKind::Finalized, "stage5b_sealed_run_0000")
+            .unwrap();
+        fs::remove_file(missing).unwrap();
+        assert!(DurableExecutionLedger::open(store.clone(), 172_002).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn missing_ledger_opens_empty_and_prepare_round_trips() {
         let root = temp_root("roundtrip");
         let _ = fs::remove_dir_all(&root);
