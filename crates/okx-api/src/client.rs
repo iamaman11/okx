@@ -35,6 +35,7 @@ struct ServerTime {
 
 fn build_http_client() -> Result<Client, reqwest::Error> {
     Client::builder()
+        .no_proxy()
         .user_agent("iamaman11-okx/0.1")
         .connect_timeout(OKX_CONNECT_TIMEOUT)
         .timeout(OKX_REQUEST_TIMEOUT)
