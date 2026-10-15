@@ -20,6 +20,7 @@ pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str = "okx.account-ledger-re
 const MAX_POSITION_ATTRIBUTION_ROWS: usize = 20;
 const MAX_ORIGIN_COHORT_ROWS: usize = 8;
 const MAX_ARCHIVE_PROOF_ROWS: usize = 16;
+const MAX_UNMATCHED_HISTORICAL_ROWS: usize = 16;
 pub const STRATEGY_ATTRIBUTION_SCHEMA_V1: &str = "okx.strategy-exchange-attribution/v1";
 pub const STRATEGY_NAV_ASSESSMENT_SCHEMA_V1: &str = "okx.strategy-nav-assessment/v1";
 
@@ -104,6 +105,17 @@ pub struct PositionAttributionDiagnostic {
     pub unattributed_external_or_outside_bounded_history_residual: String,
 }
 
+/// Native ledger facts for an exchange order outside the bounded REST window.
+/// A terminal local state does NOT independently prove a venue-side absence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManagedIntentOutsideExchangeWindow {
+    pub intent_id: String,
+    pub state: ExecutionState,
+    pub ledger_terminal: bool,
+    pub recorded_order_id: Option<String>,
+    pub evidence_status: &'static str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AccountLedgerReconciliation {
     pub schema: &'static str,
@@ -114,6 +126,9 @@ pub struct AccountLedgerReconciliation {
     pub unattributed_external_or_exchange_system_fills: usize,
     pub managed_intents_with_exchange_match: usize,
     pub managed_intents_unresolved_in_bounded_exchange_evidence: usize,
+    pub unmatched_historical_total: usize,
+    pub unmatched_historical_truncated: bool,
+    pub unmatched_historical: Vec<ManagedIntentOutsideExchangeWindow>,
     pub unexpected_exchange_orders_for_non_submitted_intents: usize,
     pub unexpected_exchange_fills_for_non_submitted_intents: usize,
     pub identity_mismatches: usize,
@@ -349,6 +364,7 @@ fn reconcile_exchange_evidence(
 
     let mut matched = 0usize;
     let mut unresolved = 0usize;
+    let mut unmatched_historical = Vec::<ManagedIntentOutsideExchangeWindow>::new();
     let mut unexpected_orders = 0usize;
     let mut unexpected_fills = 0usize;
     let mut identity_mismatches = 0usize;
@@ -410,10 +426,22 @@ fn reconcile_exchange_evidence(
                     matched += 1;
                 } else {
                     unresolved += 1;
+                    unmatched_historical.push(ManagedIntentOutsideExchangeWindow {
+                        intent_id: plan.intent_id.clone(),
+                        state: entry.record.state,
+                        ledger_terminal: entry.record.state.is_terminal(),
+                        recorded_order_id: entry.record.order_id.clone(),
+                        evidence_status: "NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW",
+                    });
                 }
             }
         }
     }
+    unmatched_historical.sort_by(|a, b| a.intent_id.cmp(&b.intent_id));
+    let unmatched_historical_total = unmatched_historical.len();
+    let unmatched_historical_truncated =
+        unmatched_historical_total > MAX_UNMATCHED_HISTORICAL_ROWS;
+    unmatched_historical.truncate(MAX_UNMATCHED_HISTORICAL_ROWS);
 
     let (position_attribution, position_attribution_unavailable_events) =
         reconcile_position_attribution(
@@ -443,6 +471,9 @@ fn reconcile_exchange_evidence(
         unattributed_external_or_exchange_system_fills: unattributed_fills,
         managed_intents_with_exchange_match: matched,
         managed_intents_unresolved_in_bounded_exchange_evidence: unresolved,
+        unmatched_historical_total,
+        unmatched_historical_truncated,
+        unmatched_historical,
         unexpected_exchange_orders_for_non_submitted_intents: unexpected_orders,
         unexpected_exchange_fills_for_non_submitted_intents: unexpected_fills,
         identity_mismatches,
@@ -1859,6 +1890,35 @@ mod tests {
         assert_eq!(inventory.shown, MAX_MANAGED_EXECUTION_INVENTORY_ROWS);
         assert!(!inventory.complete_within_bound);
         assert!(inventory.rows[0].intent_id.contains("0016"));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn unmatched_historical_intent_reports_exact_unknown_without_clearing_risk() {
+        let p = path("unmatched-unknown");
+        let _ = std::fs::remove_file(&p);
+        let mut ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("ledger");
+        let intent_id = "intent_historical_unknown_0123456789";
+        ledger.prepare(plan(intent_id), 101).expect("prepare");
+        ledger.begin_submission(intent_id, 102).expect("begin submission");
+        ledger.mark_unknown_submission(intent_id, 103).expect("unknown");
+
+        let result = reconcile_exchange_evidence(&ledger, &[], &[], &[]).expect("reconcile");
+        assert_eq!(result.managed_intents_unresolved_in_bounded_exchange_evidence, 1);
+        assert_eq!(result.unmatched_historical_total, 1);
+        assert!(!result.unmatched_historical_truncated);
+        assert_eq!(result.unmatched_historical[0].intent_id, intent_id);
+        assert_eq!(
+            result.unmatched_historical[0].state,
+            ExecutionState::UnknownSubmission
+        );
+        assert!(!result.unmatched_historical[0].ledger_terminal);
+        assert_eq!(
+            result.unmatched_historical[0].evidence_status,
+            "NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW"
+        );
+        assert!(reconcile_exchange_evidence(&ledger, &[], &[], &[]).is_ok());
         let _ = std::fs::remove_file(p);
     }
 
