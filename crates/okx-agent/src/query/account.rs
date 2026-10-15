@@ -340,8 +340,7 @@ pub(super) async fn dispatch(
                 Err(error) => return Ok(account_query_failure(request, generated_at, error)),
             };
             let account_snapshot_read_duration_ms =
-                u64::try_from(account_snapshot_started.elapsed().as_millis())
-                    .unwrap_or(u64::MAX);
+                u64::try_from(account_snapshot_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let Some(account) = context.account_fallback else {
                 return Ok(failure_response(
                     request,
@@ -376,9 +375,10 @@ pub(super) async fn dispatch(
                 let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 (result, duration)
             };
-            let ((facts_result, ledger_history_read_duration_ms),
-                (protection_result, protective_algo_read_duration_ms)) =
-                tokio::join!(ledger_read, protective_read);
+            let (
+                (facts_result, ledger_history_read_duration_ms),
+                (protection_result, protective_algo_read_duration_ms),
+            ) = tokio::join!(ledger_read, protective_read);
             let history_read_duration_ms =
                 u64::try_from(history_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let facts = match facts_result {
@@ -634,8 +634,7 @@ pub(super) async fn dispatch(
             };
 
             coherence.ledger_reconciliation_duration_ms =
-                u64::try_from(reconciliation_started.elapsed().as_millis())
-                    .unwrap_or(u64::MAX);
+                u64::try_from(reconciliation_started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
             // Same native source predicates as the Demo BEGIN operation,
             // but this is only read-only observer proof, never trading authority.
