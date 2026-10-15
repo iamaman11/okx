@@ -65,6 +65,18 @@ fn compact_trader_packet(
     if finalized {
         reasons.push("RUN_FINALIZED");
     }
+    if get("/reconciliation/financial_period/state") == json!("INCOMPLETE") {
+        reasons.push("STRATEGY_FINANCE_INCOMPLETE");
+    }
+    if get("/reconciliation/exchange_evidence/source_gap_over_two_hours") == json!(true) {
+        reasons.push("FINANCIAL_SOURCE_GAP");
+    }
+    if get("/reconciliation/strategy_attribution/unallocated_funding_bills")
+        .as_u64()
+        .is_some_and(|count| count > 0)
+    {
+        reasons.push("FUNDING_NOT_ATTRIBUTED");
+    }
     if !coherent {
         reasons.push("PRIVATE_SOURCE_NOT_COHERENT");
     }
@@ -2317,8 +2329,16 @@ mod tests {
         // native executor + explicit risk/mandate; not a false green GO.
         full["reconciliation"]["strategy_risk_stop"] = json!(null);
         full["reconciliation"]["finalized_run"] = json!(null);
+        full["reconciliation"]["strategy_attribution"]["unallocated_funding_bills"] = json!(0);
         let seemingly_ready = compact_trader_packet(&full, &DataQuality::Fresh, 0, 1);
         assert_eq!(seemingly_ready["decision"]["new_risk"], "NOT_ATTESTED");
+        full["reconciliation"]["financial_period"]["state"] = json!("INCOMPLETE");
+        let incomplete = compact_trader_packet(&full, &DataQuality::Fresh, 0, 1);
+        assert_eq!(incomplete["decision"]["new_risk"], "NO_GO");
+        full["reconciliation"]["financial_period"]["state"] = json!("FLAT_RECONCILED");
+        full["reconciliation"]["strategy_attribution"]["unallocated_funding_bills"] = json!(1);
+        let unfunded = compact_trader_packet(&full, &DataQuality::Fresh, 0, 1);
+        assert_eq!(unfunded["decision"]["new_risk"], "NO_GO");
         assert_ne!(seemingly_ready["decision"]["new_risk"], "GO");
         let absent = compact_trader_packet(&json!({}), &DataQuality::Fresh, 0, 1);
         assert_eq!(absent["decision"]["new_risk"], "NO_GO");
