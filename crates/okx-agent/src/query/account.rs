@@ -130,6 +130,9 @@ fn profile_handoff_readiness_packet(
             "orders": get("/account_ledger/pending_orders"),
             "native_oco": get("/pending_protective_algos/rows"),
             "unresolved_historical_intents": get("/reconciliation/managed_intents_unresolved_in_bounded_exchange_evidence"),
+            "unmatched_historical": get("/reconciliation/unmatched_historical"),
+            "unmatched_historical_total": get("/reconciliation/unmatched_historical_total"),
+            "unmatched_historical_truncated": get("/reconciliation/unmatched_historical_truncated"),
             "managed_intents_total": get("/reconciliation/managed_intents"),
             "managed_intents_sampled": get("/managed_execution_intents/shown")
         }
