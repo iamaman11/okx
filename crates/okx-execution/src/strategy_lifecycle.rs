@@ -1,5 +1,6 @@
 //! Immutable financial closure identity for the existing execution ledger.
-//! No separate archive owner: historical source events remain embedded in that ledger.
+//! No separate archive owner: immutable run evidence is managed by the same ledger writer.
+//! In ledger v14 a durable manifest links to individually sealed run archives.
 use std::str::FromStr;
 
 use rust_decimal::Decimal;
@@ -13,7 +14,9 @@ use crate::{
 
 pub const STRATEGY_FINALIZATION_SCHEMA_V1: &str = "okx.strategy-finalization/v1";
 pub const STRATEGY_UNVERIFIED_CLOSURE_SCHEMA_V1: &str = "okx.strategy-unverified-closure/v1";
-pub const MAX_ARCHIVED_STRATEGY_RUNS: usize = 16;
+/// A bounded number of sealed runs per native ledger manifest, with no eviction.
+/// Archive payloads are stored separately by the SAME atomic ledger owner.
+pub const MAX_ARCHIVED_STRATEGY_RUNS: usize = 256;
 pub const STRATEGY_NAV_POINT_SCHEMA_V1: &str = "okx.strategy-nav-point/v1";
 pub const MAX_STRATEGY_NAV_POINTS: usize = 4096;
 
@@ -1002,8 +1005,8 @@ mod tests {
             stop_rearms: Vec::new(),
         };
         assert!(duplicate_history.validate(Some(&next), None).is_err());
-        // Sixteen distinct, internally valid immutable periods are allowed.
-        // The seventeenth must be refused without evicting earlier evidence.
+        // The bounded number of distinct, internally valid immutable periods is allowed.
+        // The first over-capacity run must be refused without eviction.
         let mut accepted_archives = Vec::new();
         for i in 0..MAX_ARCHIVED_STRATEGY_RUNS {
             let mut distinct = run.clone();
