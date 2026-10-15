@@ -38,7 +38,6 @@ const RUNTIME_DIAGNOSTIC_TAIL_BYTES: u64 = 64 * 1024;
 const ALLOWED_REMOTES: &[&str] = &[
     "https://github.com/iamaman11/okx",
     "https://github.com/iamaman11/okx.git",
-    "git@github.com:iamaman11/okx.git",
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -877,11 +876,7 @@ impl HostExecutor {
     }
 
     fn git(&self, args: &[&str]) -> HostControlResult<String> {
-        let output = hidden_command("git")
-            .arg("-C")
-            .arg(&self.repo_root)
-            .args(args)
-            .output()?;
+        let output = direct_git_command(&self.repo_root, args).output()?;
 
         if !output.status.success() {
             return Err(HostControlError::CommandFailed("git"));
@@ -1333,9 +1328,100 @@ pub fn install_current_executable(destination: &Path) -> HostControlResult<Value
     }))
 }
 
+/// Git is a verification tool, not a separate transport authority. Its origin/main
+/// HTTPS reads must stay direct even when the Windows operator shell is proxied.
+/// Keep the override process-local; never modify user or system Git configuration.
+fn direct_git_command(repo_root: &Path, args: &[&str]) -> std::process::Command {
+    let mut command = hidden_command("git");
+    command
+        .args([
+            "-c",
+            "http.proxy=",
+            "-c",
+            "http.https://github.com/iamaman11/okx.proxy=",
+            "-c",
+            "http.https://github.com/iamaman11/okx.git.proxy=",
+        ])
+        .arg("-C")
+        .arg(repo_root)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        );
+
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "GIT_PROXY_COMMAND",
+        "GIT_CONFIG_COUNT",
+    ] {
+        command.env_remove(name);
+    }
+
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_commands_ignore_shell_proxy_and_global_git_configuration() {
+        let command = direct_git_command(
+            Path::new(r"C:\okx"),
+            &["fetch", "--prune", "origin", "main"],
+        );
+        let arguments = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        for setting in [
+            "http.proxy=",
+            "http.https://github.com/iamaman11/okx.proxy=",
+            "http.https://github.com/iamaman11/okx.git.proxy=",
+        ] {
+            assert!(
+                arguments
+                    .windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1] == setting)
+            );
+        }
+
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+            "GIT_PROXY_COMMAND",
+            "GIT_CONFIG_COUNT",
+        ] {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == std::ffi::OsStr::new(name) && value.is_none()),
+                "proxy or inherited Git override not removed: {name}"
+            );
+        }
+
+        assert!(command.get_envs().any(|(key, value)| {
+            key == std::ffi::OsStr::new("GIT_CONFIG_NOSYSTEM")
+                && value == Some(std::ffi::OsStr::new("1"))
+        }));
+        assert!(ALLOWED_REMOTES.iter().all(|remote| remote.starts_with("https://")));
+    }
 
     #[test]
     fn controller_agent_release_parity_detects_drift_without_authorizing_handoff() {
