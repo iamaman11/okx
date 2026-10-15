@@ -16,10 +16,21 @@ writer: there is no second agent, service, database or independent archive owner
   before execution resumes. Old v1–v13 inline archives remain readable and
   migrate only through the existing ledger writer. A crash before manifest
   publication can leave unreferenced staging data, never a false accepted proof.
-* **Backup, transfer and restore the manifest and archive directory together**,
-  never the JSON file alone. A binary deployment must not erase either. Do not
-  repair a bad archive by deleting a record, recomputing a checksum, inventing a
-  fill, or silently falling back to a newer exchange REST window.
+* **Migration:** before its first v14 write, the same native ledger
+  writer seals the exact original v1–v13 file as
+  `execution-ledger.pre-v14.json`. A conflicting snapshot aborts admission
+  without modifying the original ledger. This snapshot is NEVER a live
+  runtime fallback or an authority to replay an uncertain trade.
+* **Backup, transfer and restore the v14 manifest and archive directory
+  together**, never the manifest alone. `execution-ledger.pre-v14.json`
+  must also be preserved for operator-controlled disaster recovery. The
+  old v13 binary CANNOT load v14; binary rollback after migration requires
+  verified account FLAT/source, stopping the sole owner, and a separate
+  consciously authorized legacy data restoration. Do NOT automatically
+  restore a stale legacy file over later v14 financial events.
+* A binary deployment must not erase financial files. Do not repair a bad
+  archive by deleting a record, recomputing a checksum, inventing a fill,
+  or silently falling back to a newer exchange REST window.
 * The archive still has an explicit bounded ceiling (256 sealed periods); the
   response includes both FINALIZED and UNVERIFIED consumption. The standard
   readback returns a bounded sample rather than hundreds of proof records; the
