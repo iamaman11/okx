@@ -419,8 +419,13 @@ impl ExecutionLedgerStore {
         if size > 128 * 1024 * 1024 {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
         }
-        let (_entries, stop, _reservation, _source, history, _attempts) = self.load()?;
         let raw = fs::read(&self.path)?;
+        let (_entries, stop, _reservation, _source, history, _attempts) = self.load()?;
+        if fs::read(&self.path)? != raw {
+            return Err(ExecutionLedgerError::Corrupt(
+                "on-disk manifest changed during read-only attestation",
+            ));
+        }
         let manifest: ExecutionLedgerFile = serde_json::from_slice(&raw)?;
         let v14 = manifest.schema == EXECUTION_LEDGER_SCHEMA_V14;
         let finalized = manifest
