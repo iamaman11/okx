@@ -383,11 +383,18 @@ impl ExecutionLedgerStore {
         &self.path
     }
 
-    fn archive_path(&self, kind: ArchivedRunKind, run_id: &str) -> Result<PathBuf, ExecutionLedgerError> {
+    fn archive_path(
+        &self,
+        kind: ArchivedRunKind,
+        run_id: &str,
+    ) -> Result<PathBuf, ExecutionLedgerError> {
         if !valid_intent_id(run_id) {
             return Err(ExecutionLedgerError::Corrupt("invalid archive run ID"));
         }
-        Ok(self.path.with_extension("archive").join(format!("{}-{run_id}.json", kind.as_str())))
+        Ok(self
+            .path
+            .with_extension("archive")
+            .join(format!("{}-{run_id}.json", kind.as_str())))
     }
 
     /// Seal native evidence before atomically committing the primary manifest.
@@ -400,7 +407,9 @@ impl ExecutionLedgerStore {
         payload: Vec<u8>,
     ) -> Result<ArchivedRunReference, ExecutionLedgerError> {
         let path = self.archive_path(kind, run_id)?;
-        fs::create_dir_all(path.parent().ok_or(ExecutionLedgerError::Corrupt("archive parent absent"))?)?;
+        fs::create_dir_all(path.parent().ok_or(ExecutionLedgerError::Corrupt(
+            "archive parent absent",
+        ))?)?;
         if path.exists() {
             if fs::read(&path)? != payload {
                 return Err(ExecutionLedgerError::Corrupt("sealed archive payload mismatch"));
@@ -412,7 +421,9 @@ impl ExecutionLedgerStore {
             file.sync_all()?;
             drop(file);
             if path.exists() {
-                return Err(ExecutionLedgerError::Corrupt("sealed archive appeared concurrently"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "sealed archive appeared concurrently",
+                ));
             }
             atomic_replace(&temp, &path)?;
         }
@@ -426,14 +437,18 @@ impl ExecutionLedgerStore {
     fn load_archives(&self, file: &mut ExecutionLedgerFile) -> Result<(), ExecutionLedgerError> {
         if file.schema != EXECUTION_LEDGER_SCHEMA_V14 {
             if !file.archive_refs.is_empty() {
-                return Err(ExecutionLedgerError::Corrupt("legacy ledger has archive references"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "legacy ledger has archive references",
+                ));
             }
             return Ok(());
         }
         if !file.strategy_periods.archived_runs.is_empty()
             || !file.strategy_periods.unverified_runs.is_empty()
         {
-            return Err(ExecutionLedgerError::Corrupt("v14 mixes inline and sealed archives"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "v14 mixes inline and sealed archives",
+            ));
         }
         let mut seen = BTreeSet::new();
         for reference in &file.archive_refs {
@@ -514,7 +529,6 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
                     | EXECUTION_LEDGER_SCHEMA_V13
-                | EXECUTION_LEDGER_SCHEMA_V14
                     | EXECUTION_LEDGER_SCHEMA_V14
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
@@ -533,7 +547,6 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
                     | EXECUTION_LEDGER_SCHEMA_V13
-                | EXECUTION_LEDGER_SCHEMA_V14
                     | EXECUTION_LEDGER_SCHEMA_V14
             )
         {
@@ -553,7 +566,6 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
                     | EXECUTION_LEDGER_SCHEMA_V13
-                | EXECUTION_LEDGER_SCHEMA_V14
                     | EXECUTION_LEDGER_SCHEMA_V14
             ) {
                 return Err(ExecutionLedgerError::Corrupt(
@@ -589,7 +601,6 @@ impl ExecutionLedgerStore {
                     | EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
                     | EXECUTION_LEDGER_SCHEMA_V13
-                | EXECUTION_LEDGER_SCHEMA_V14
                     | EXECUTION_LEDGER_SCHEMA_V14
             )
         {
@@ -604,7 +615,6 @@ impl ExecutionLedgerStore {
                 EXECUTION_LEDGER_SCHEMA_V11
                     | EXECUTION_LEDGER_SCHEMA_V12
                     | EXECUTION_LEDGER_SCHEMA_V13
-                | EXECUTION_LEDGER_SCHEMA_V14
                     | EXECUTION_LEDGER_SCHEMA_V14
             )
         {
@@ -613,7 +623,10 @@ impl ExecutionLedgerStore {
             ));
         }
         if !file.strategy_periods.stop_rearms.is_empty()
-            && !matches!(file.schema.as_str(), EXECUTION_LEDGER_SCHEMA_V13 | EXECUTION_LEDGER_SCHEMA_V14)
+            && !matches!(
+                file.schema.as_str(),
+                EXECUTION_LEDGER_SCHEMA_V13 | EXECUTION_LEDGER_SCHEMA_V14
+            )
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "STOP rearm requires ledger v13",
@@ -626,7 +639,9 @@ impl ExecutionLedgerStore {
         if !file.leverage_attempts.is_empty()
             && !matches!(
                 file.schema.as_str(),
-                EXECUTION_LEDGER_SCHEMA_V12 | EXECUTION_LEDGER_SCHEMA_V13 | EXECUTION_LEDGER_SCHEMA_V14
+                EXECUTION_LEDGER_SCHEMA_V12
+                    | EXECUTION_LEDGER_SCHEMA_V13
+                    | EXECUTION_LEDGER_SCHEMA_V14
             )
         {
             return Err(ExecutionLedgerError::Corrupt(
