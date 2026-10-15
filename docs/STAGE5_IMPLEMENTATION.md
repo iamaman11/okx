@@ -43,7 +43,39 @@ Avoid artificial trading POST or bypass of account-safety STOP to create
 a migration proof.
 
 
-## Stage 5B financial ledger v14: sealed archive / recovery invariant (PR #333, DRAFT)
+## Stage 5B recovery audit without Demo trading (integrated acceptance slice)
+
+`account_summary({view:"storage"})` calls a **distinct, explicitly requested
+read-only Rust query**, inside the **same Windows agent and ledger owner**. No
+new tool, service, scheduler, executor, trading endpoint or mutable fallback.
+The query reads exact installed on-disk `execution-ledger.json` bytes,
+verifies the legacy or v14 reader invariants (including detached archive
+hashes and identities), and reports a manifest SHA256, actual on-disk schema,
+verified sealed FINALIZED/UNVERIFIED counts, immutable pre-v14 original
+snapshot SHA256 where present, durable STOP reason and final NAV checksum.
+
+Status `LEGACY_PENDING_FIRST_AUTHORIZED_WRITE` means a v14-capable binary
+**has not** converted the actual ledger. It is NOT a failure and MUST NOT
+trigger a fake trade, reset STOP or convert the existing run. Status
+`V14_SEALED_OR_EMPTY_ARCHIVE` means the manifest/archive payloads were
+validated by a cold, non-mutating disk read; it is NOT an automated backup
+or proof of off-host disaster recovery.
+
+Native Linux + Windows tests perform the full legacy→v14 transition on a
+synthetic fixture and then **copy** primary manifest, `.archive` directory
+and `.pre-v14.json` original into a different temporary directory. The
+copy is cold-loaded and checks all financial IDs/hashes. Missing or
+tampered segments fail closed, and failed recovery never modifies the
+manifest. This tests portable offline bundle semantics before any future
+live migration, without new cloud hosts or Demo execution.
+
+The operator must back up the entire directory with a consistent
+single-owner quiescent boundary. Reading the audit result does **not** itself
+freeze a filesystem, snapshot data or authorize binary rollback. Existing
+UTC STOP remains live until a separately proven native rearm and separate
+operator authorization; Production Live remains disabled.
+
+## Stage 5B financial ledger v14: sealed archive / recovery invariant (PR #333, merged and installed)
 
 This change is **NOT ACCEPTED until full CI, Windows CONTROL source-tree
 parity, cold restart, and independent read-only MCP proof**. Production Live is
