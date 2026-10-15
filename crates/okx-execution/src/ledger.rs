@@ -3795,7 +3795,10 @@ mod tests {
         assert_eq!(audit.on_disk_schema, EXECUTION_LEDGER_SCHEMA_V12);
         assert_eq!(audit.migration, "LEGACY_PENDING_FIRST_AUTHORIZED_WRITE");
         assert_eq!(audit.original_snapshot, "ABSENT");
-        assert_eq!(audit.active_risk_stop_reason.as_deref(), Some("STRATEGY_MAX_DRAWDOWN"));
+        assert_eq!(
+            audit.active_risk_stop_reason.as_deref(),
+            Some("STRATEGY_MAX_DRAWDOWN")
+        );
         assert_eq!(
             audit.finalized_run_checksum_sha256.as_deref(),
             Some(finalization.checksum_sha256.as_str())
@@ -3955,7 +3958,10 @@ mod tests {
         let original_legacy = fs::read(store.path()).unwrap();
         let preserved_legacy = store.path().with_extension("pre-v14.json");
         fs::write(&preserved_legacy, b"forged migration snapshot").unwrap();
-        assert!(store.attest_storage().is_err(), "fake snapshot must not audit as safe");
+        assert!(
+            store.attest_storage().is_err(),
+            "fake snapshot must not audit as safe"
+        );
         assert!(matches!(
             store.save(
                 &reopened.entries,
@@ -4029,13 +4035,18 @@ mod tests {
         let restored_manifest_before = fs::read(restored.path()).unwrap();
         let restored_proof = restored.attest_storage().unwrap();
         assert_eq!(restored_proof.manifest_sha256, attested.manifest_sha256);
-        assert_eq!(restored_proof.original_snapshot_sha256, attested.original_snapshot_sha256);
+        assert_eq!(
+            restored_proof.original_snapshot_sha256,
+            attested.original_snapshot_sha256
+        );
         assert_eq!(restored_proof.verified_archive_bodies, 1);
         let restored_ledger = DurableExecutionLedger::open(restored.clone(), 3250).unwrap();
         assert_eq!(restored_ledger.archived_runs_count(), 1);
         assert_eq!(
             restored_ledger.archived_strategy_proofs()[0].finalization_sha256,
-            file.strategy_periods.archived_runs[0].finalization.checksum_sha256
+            file.strategy_periods.archived_runs[0]
+                .finalization
+                .checksum_sha256
         );
         assert_eq!(
             fs::read(restored.path()).unwrap(),
@@ -4043,7 +4054,10 @@ mod tests {
             "read-only cold restore cannot rewrite recovered financial history"
         );
         fs::remove_file(&restored_segment).unwrap();
-        assert!(restored.attest_storage().is_err(), "incomplete restore must fail closed");
+        assert!(
+            restored.attest_storage().is_err(),
+            "incomplete restore must fail closed"
+        );
         assert!(DurableExecutionLedger::open(restored.clone(), 3251).is_err());
         assert_eq!(fs::read(restored.path()).unwrap(), restored_manifest_before);
         let _ = fs::remove_dir_all(restore_root);
