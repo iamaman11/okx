@@ -34,8 +34,9 @@ pub use ledger::{
     ExecutionLedgerStore, ExecutionRiskStop, LEDGER_STORAGE_ATTESTATION_SCHEMA_V1,
     LEVERAGE_ATTEMPT_SCHEMA_V1, LedgerStorageAttestation, LeverageAttemptState,
     LeverageChangeAttempt, MAX_EXECUTION_LEDGER_RECORDS, MutationPrepareDisposition,
-    PrepareDisposition, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1, StrategyAllocationOpening,
-    StrategyCapitalReservation, StrategyStopRearmRequest,
+    PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1, PrepareDisposition,
+    ProfileHandoffLedgerAssessment, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1,
+    StrategyAllocationOpening, StrategyCapitalReservation, StrategyStopRearmRequest,
 };
 pub use model::{
     EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_PLAN_SCHEMA_V1,

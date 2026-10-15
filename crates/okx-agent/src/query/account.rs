@@ -33,6 +33,109 @@ struct AccountSummaryResult {
     coherence: AccountSummaryCoherence,
 }
 
+const PROFILE_HANDOFF_READINESS_SCHEMA_V1: &str = "okx.profile-handoff-readiness/v1";
+
+/// Conservative observer-only readiness. No profile is changed, the source
+/// executor is NOT frozen and this packet is NEVER a CONTROL authorization.
+fn profile_handoff_readiness_packet(
+    full: &serde_json::Value,
+    quality: &DataQuality,
+    local: Option<&okx_execution::ProfileHandoffLedgerAssessment>,
+) -> serde_json::Value {
+    use serde_json::{Value, json};
+    let get = |p: &str| full.pointer(p).cloned().unwrap_or(Value::Null);
+    let mut blockers = Vec::<&'static str>::new();
+    if !matches!(quality, DataQuality::Fresh) {
+        blockers.push("ACCOUNT_SUMMARY_NOT_FRESH");
+    }
+    if get("/coherence/coherent") != json!(true) {
+        blockers.push("PRIVATE_SOURCE_NOT_COHERENT");
+    }
+    if get("/account_ledger/open_positions") != json!(0) {
+        blockers.push("OPEN_OR_UNPROVEN_POSITION");
+    }
+    if get("/account_ledger/pending_orders") != json!(0) {
+        blockers.push("OPEN_OR_UNPROVEN_ORDER");
+    }
+    if get("/pending_protective_algos/rows") != json!(0)
+        || get("/pending_protective_algos/complete_within_bound") != json!(true)
+    {
+        blockers.push("OCO_NOT_PROVEN_ABSENT");
+    }
+    if !full
+        .pointer("/account_ledger/history_coverage")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            !rows.is_empty()
+                && rows
+                    .iter()
+                    .all(|r| r.get("complete_within_bound") == Some(&json!(true)))
+        })
+    {
+        blockers.push("HISTORY_BOUNDED_OR_ABSENT");
+    }
+    if get("/reconciliation/consistent") != json!(true) {
+        blockers.push("EXECUTION_RECONCILIATION_NOT_PROVEN");
+    }
+    if get("/reconciliation/managed_intents_unresolved_in_bounded_exchange_evidence") != json!(0) {
+        blockers.push("MANAGED_INTENTS_OUTSIDE_EXCHANGE_EVIDENCE");
+    }
+    if get("/reconciliation/position_attribution_residual_count") != json!(0)
+        || get("/reconciliation/position_attribution_unavailable_events") != json!(0)
+    {
+        blockers.push("POSITION_ATTRIBUTION_INCOMPLETE");
+    }
+    if get("/reconciliation/identity_mismatches") != json!(0) {
+        blockers.push("EXECUTION_IDENTITY_MISMATCH");
+    }
+    match local {
+        None => blockers.push("NATIVE_EXECUTOR_LEDGER_UNAVAILABLE"),
+        Some(value) => {
+            if value.source_ledger_format != okx_execution::EXECUTION_LEDGER_SCHEMA_V14 {
+                blockers.push("LEDGER_NOT_VERIFIED_V14");
+            }
+            if value.account_uid_mismatches > 0 {
+                blockers.push("LEDGER_ACCOUNT_IDENTITY_MISMATCH");
+            }
+            if value.nonterminal_intents > 0 {
+                blockers.push("NONTERMINAL_NATIVE_INTENT");
+            }
+            if value.unresolved_order_mutations > 0 {
+                blockers.push("UNKNOWN_OR_PENDING_ORDER_MUTATION");
+            }
+            if value.unresolved_protective_lifecycle > 0 {
+                blockers.push("UNRESOLVED_NATIVE_PROTECTION");
+            }
+            if Some(value.managed_intents_total as u64)
+                != get("/reconciliation/managed_intents").as_u64()
+            {
+                blockers.push("LEDGER_INVENTORY_COUNT_MISMATCH");
+            }
+        }
+    }
+    let source_ready = blockers.is_empty();
+    json!({
+        "schema": PROFILE_HANDOFF_READINESS_SCHEMA_V1,
+        "status": if source_ready { "SOURCE_QUIESCENT_NOT_AUTHORIZED" } else { "BLOCKED" },
+        "source_predicates_pass": source_ready,
+        "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE",
+        "control_action": "DO_NOT_SWITCH_PROFILE",
+        "blockers": blockers,
+        "source_account_uid_fingerprint": get("/account_ledger/authority/account_uid_fingerprint"),
+        "source_asof_ms": get("/account_ledger/current_account_as_of_ms"),
+        "native_ledger": local,
+        "source": {
+            "coherent": get("/coherence/coherent"),
+            "positions": get("/account_ledger/open_positions"),
+            "orders": get("/account_ledger/pending_orders"),
+            "native_oco": get("/pending_protective_algos/rows"),
+            "unresolved_historical_intents": get("/reconciliation/managed_intents_unresolved_in_bounded_exchange_evidence"),
+            "managed_intents_total": get("/reconciliation/managed_intents"),
+            "managed_intents_sampled": get("/managed_execution_intents/shown")
+        }
+    })
+}
+
 const TRADER_SNAPSHOT_SCHEMA_V1: &str = "okx.trader-snapshot/v1";
 const MAX_TRADER_PACKET_BYTES: usize = 12_288;
 
@@ -333,7 +436,9 @@ pub(super) async fn dispatch(
                 warnings: assembled.warnings,
             })
         }
-        AgentOperation::AccountSummary | AgentOperation::TraderSnapshot => {
+        AgentOperation::AccountSummary
+        | AgentOperation::TraderSnapshot
+        | AgentOperation::ProfileHandoffReadiness => {
             let account_snapshot_started = std::time::Instant::now();
             let assembled = match assemble_account_snapshot(context).await {
                 Ok(value) => value,
@@ -657,6 +762,22 @@ pub(super) async fn dispatch(
                 blockers: opening_blockers,
             };
 
+            let handoff_readiness =
+                matches!(request.operation, AgentOperation::ProfileHandoffReadiness);
+            let local_handoff = if handoff_readiness {
+                match context.execution {
+                    Some(execution) => execution
+                        .profile_handoff_ledger_assessment(
+                            &facts.summary.authority.account_uid_fingerprint,
+                        )
+                        .await
+                        .ok(),
+                    None => None,
+                }
+            } else {
+                None
+            };
+
             let compact = matches!(request.operation, AgentOperation::TraderSnapshot);
             let full = serde_json::to_value(AccountSummaryResult {
                 schema: ACCOUNT_SUMMARY_SCHEMA_V1,
@@ -667,7 +788,9 @@ pub(super) async fn dispatch(
                 managed_execution_intents,
                 coherence,
             })?;
-            let result = if compact {
+            let result = if handoff_readiness {
+                profile_handoff_readiness_packet(&full, &quality, local_handoff.as_ref())
+            } else if compact {
                 let packet = compact_trader_packet(
                     &full,
                     &quality,
@@ -695,7 +818,9 @@ pub(super) async fn dispatch(
                 generated_at: generated_at.to_owned(),
                 quality,
                 result_schema: Some(
-                    if compact {
+                    if handoff_readiness {
+                        PROFILE_HANDOFF_READINESS_SCHEMA_V1
+                    } else if compact {
                         TRADER_SNAPSHOT_SCHEMA_V1
                     } else {
                         ACCOUNT_SUMMARY_SCHEMA_V1
@@ -704,7 +829,11 @@ pub(super) async fn dispatch(
                 ),
                 result: Some(result),
                 failure: None,
-                warnings: if compact { Vec::new() } else { warnings },
+                warnings: if compact || handoff_readiness {
+                    Vec::new()
+                } else {
+                    warnings
+                },
             })
         }
         AgentOperation::TradingCapabilities {
@@ -2330,6 +2459,86 @@ fn account_ledger_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_handoff_is_read_only_and_refuses_bounded_or_unknown_history() {
+        use serde_json::json;
+        let ledger = okx_execution::ProfileHandoffLedgerAssessment {
+            schema: okx_execution::PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1,
+            managed_intents_total: 45,
+            nonterminal_intents: 0,
+            unresolved_order_mutations: 0,
+            unresolved_protective_lifecycle: 0,
+            account_uid_mismatches: 0,
+            source_ledger_manifest_sha256: "a".repeat(64),
+            source_ledger_format: okx_execution::EXECUTION_LEDGER_SCHEMA_V14.to_owned(),
+            immutable_stop_reason: Some("STRATEGY_UTC_DAILY_GROSS_LOSS".to_owned()),
+            finalized_run_checksum_sha256: Some("b".repeat(64)),
+        };
+        let mut full = json!({
+            "account_ledger": {
+                "authority": {"account_uid_fingerprint": "uid"},
+                "open_positions": 0,
+                "pending_orders": 0,
+                "current_account_as_of_ms": "1792068161383",
+                "history_coverage": [{"complete_within_bound":true}]
+            },
+            "coherence": {"coherent":true},
+            "pending_protective_algos": {"rows":0,"complete_within_bound":true},
+            "reconciliation": {
+                "consistent":true,
+                "managed_intents":45,
+                "managed_intents_unresolved_in_bounded_exchange_evidence":0,
+                "position_attribution_residual_count":0,
+                "position_attribution_unavailable_events":0,
+                "identity_mismatches":0
+            },
+            "managed_execution_intents":{"shown":16,"total":45,"complete_within_bound":false}
+        });
+        let ready = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, Some(&ledger));
+        // Even entirely quiescent sources cannot authorize a CTRL swap:
+        // no trusted one-time frozen owner ticket exists yet.
+        assert_eq!(ready["status"], "SOURCE_QUIESCENT_NOT_AUTHORIZED");
+        assert_eq!(ready["source_predicates_pass"], true);
+        assert_eq!(
+            ready["handoff_admission"],
+            "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE"
+        );
+        assert_eq!(ready["control_action"], "DO_NOT_SWITCH_PROFILE");
+        assert_eq!(ready["native_ledger"]["managed_intents_total"], 45);
+        assert_eq!(ready["source"]["managed_intents_sampled"], 16);
+
+        full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] =
+            json!(3);
+        let unresolved =
+            profile_handoff_readiness_packet(&full, &DataQuality::Degraded, Some(&ledger));
+        assert_eq!(unresolved["status"], "BLOCKED");
+        assert!(
+            unresolved["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "MANAGED_INTENTS_OUTSIDE_EXCHANGE_EVIDENCE")
+        );
+        full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] =
+            json!(0);
+        full["pending_protective_algos"]["rows"] = json!(1);
+        let oco = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, Some(&ledger));
+        assert_eq!(oco["status"], "BLOCKED");
+        full["pending_protective_algos"]["rows"] = json!(0);
+        let unavailable = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, None);
+        assert_eq!(unavailable["status"], "BLOCKED");
+        assert!(
+            unavailable["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "NATIVE_EXECUTOR_LEDGER_UNAVAILABLE")
+        );
+        let empty = profile_handoff_readiness_packet(&json!({}), &DataQuality::Fresh, None);
+        assert_eq!(empty["status"], "BLOCKED");
+        assert_eq!(empty["control_action"], "DO_NOT_SWITCH_PROFILE");
+    }
 
     #[test]
     fn trader_packet_is_bounded_never_mints_go_and_keeps_exact_finance_proof() {

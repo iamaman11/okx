@@ -52,6 +52,23 @@ pub const EXECUTION_RISK_STOP_SCHEMA_V1: &str = "okx.execution-risk-stop/v1";
 pub const MAX_EXECUTION_LEDGER_RECORDS: usize = 10_000;
 const DEFAULT_EXECUTION_LEDGER_PATH: &str = r"C:\okx-runtime\execution-ledger.json";
 
+pub const PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1: &str =
+    "okx.profile-handoff-ledger-assessment/v1";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileHandoffLedgerAssessment {
+    pub schema: &'static str,
+    pub managed_intents_total: usize,
+    pub nonterminal_intents: usize,
+    pub unresolved_order_mutations: usize,
+    pub unresolved_protective_lifecycle: usize,
+    pub account_uid_mismatches: usize,
+    pub source_ledger_manifest_sha256: String,
+    pub source_ledger_format: String,
+    pub immutable_stop_reason: Option<String>,
+    pub finalized_run_checksum_sha256: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionLedgerEntry {
@@ -1091,6 +1108,67 @@ impl DurableExecutionLedger {
     /// state or triggers its first-open UNKNOWN/POST recovery transitions.
     pub fn attest_storage(&self) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
         self.store.attest_storage()
+    }
+
+    /// Exhaustive native owner inspection: never infer that all 45 intents
+    /// are terminal from a bounded 16-row human-readable sample.
+    pub fn profile_handoff_ledger_assessment(
+        &self,
+        account_uid: &str,
+    ) -> Result<ProfileHandoffLedgerAssessment, ExecutionLedgerError> {
+        let physical = self.store.attest_storage()?;
+        let mut nonterminal_intents = 0usize;
+        let mut unresolved_order_mutations = 0usize;
+        let mut unresolved_protective_lifecycle = 0usize;
+        let mut account_uid_mismatches = 0usize;
+        for entry in self.entries.values() {
+            if !entry.record.state.is_terminal() {
+                nonterminal_intents += 1;
+            }
+            if entry.record.plan.account_uid_fingerprint != account_uid {
+                account_uid_mismatches += 1;
+            }
+            unresolved_order_mutations += entry
+                .record
+                .mutations
+                .iter()
+                .filter(|change| !change.state.is_terminal())
+                .count();
+            if let Some(protective) = entry.record.protection.as_ref()
+                && (!matches!(
+                    protective.status,
+                    ProtectiveOrderStatus::CleanedUp | ProtectiveOrderStatus::NotActivated
+                ) || protective
+                    .cleanup
+                    .as_ref()
+                    .is_some_and(|c| c.state != ProtectiveCleanupState::ConfirmedAbsent)
+                    || protective.size_amend.as_ref().is_some_and(|amend| {
+                        !matches!(
+                            amend.state,
+                            ProtectiveSizeAmendState::Confirmed
+                                | ProtectiveSizeAmendState::RetiredAbsent
+                        )
+                    }))
+            {
+                unresolved_protective_lifecycle += 1;
+            }
+        }
+        Ok(ProfileHandoffLedgerAssessment {
+            schema: PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1,
+            managed_intents_total: self.entries.len(),
+            nonterminal_intents,
+            unresolved_order_mutations,
+            unresolved_protective_lifecycle,
+            account_uid_mismatches,
+            source_ledger_manifest_sha256: physical.manifest_sha256,
+            source_ledger_format: physical.on_disk_schema,
+            immutable_stop_reason: self.risk_stop.as_ref().map(|s| s.reason.clone()),
+            finalized_run_checksum_sha256: self
+                .strategy_periods
+                .finalized_run
+                .as_ref()
+                .map(|f| f.checksum_sha256.clone()),
+        })
     }
 
     /// One explicitly authorized *storage-only* migration. Keep all financial

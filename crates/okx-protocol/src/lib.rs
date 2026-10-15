@@ -1022,6 +1022,8 @@ pub enum AgentOperation {
     /// Read-only compact projection of the SAME account source and ledger owner.
     /// No market signal, no live trade permission, no independent risk authority.
     TraderSnapshot,
+    /// Conservative read-only source proof, never a profile switch ticket.
+    ProfileHandoffReadiness,
     /// Explicit on-disk audit of the one local execution ledger. Never POST.
     LedgerStorageAudit,
     /// Explicit Demo-profile storage-only migration. No exchange operation.
@@ -1159,6 +1161,7 @@ impl AgentOperation {
             | Self::AccountSnapshot
             | Self::AccountSummary
             | Self::TraderSnapshot
+            | Self::ProfileHandoffReadiness
             | Self::LedgerStorageAudit => Ok(()),
             Self::PortfolioRisk {
                 mandate,
@@ -2535,6 +2538,10 @@ mod tests {
         assert!(audit.direct_transport_read_only());
         assert!(!audit.direct_transport_demo_execution());
         assert!(audit.validate().is_ok());
+        let preview = AgentOperation::ProfileHandoffReadiness;
+        assert!(preview.direct_transport_read_only());
+        assert!(!preview.direct_transport_demo_execution());
+        assert!(preview.validate().is_ok());
         let migrate = AgentOperation::MigrateFinalizedLedgerStorage {
             allocation_id: "stage5a_daily_loss_run_20261015_g".to_owned(),
             expected_manifest_sha256: "a".repeat(64),

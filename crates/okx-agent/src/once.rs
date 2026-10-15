@@ -196,6 +196,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         | AgentOperation::TradingCapabilities { .. }
         | AgentOperation::AccountSummary
         | AgentOperation::TraderSnapshot
+        | AgentOperation::ProfileHandoffReadiness
         | AgentOperation::LedgerStorageAudit => STANDARD_RESPONSE_PLAINTEXT_BYTES,
         AgentOperation::MarketHistory { .. }
         | AgentOperation::FindInstruments { .. }

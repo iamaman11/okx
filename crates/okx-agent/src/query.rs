@@ -385,6 +385,7 @@ pub(crate) async fn dispatch(
         AgentOperation::AccountSnapshot
         | AgentOperation::AccountSummary
         | AgentOperation::TraderSnapshot
+        | AgentOperation::ProfileHandoffReadiness
         | AgentOperation::LedgerStorageAudit
         | AgentOperation::PortfolioRisk { .. }
         | AgentOperation::TradingCapabilities { .. } => {
