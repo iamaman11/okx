@@ -1385,6 +1385,15 @@ impl DurableExecutionLedger {
         self.strategy_periods.archived_runs.len()
     }
 
+    /// Both FINALIZED and UNVERIFIED run bodies consume one sealed archive.
+    pub fn archived_storage_count(&self) -> usize {
+        self.strategy_periods.archived_runs.len() + self.strategy_periods.unverified_runs.len()
+    }
+
+    pub fn archived_unverified_count(&self) -> usize {
+        self.strategy_periods.unverified_runs.len()
+    }
+
     /// Exact immutable per-period NAV and checksum, without raw private
     /// exchange events. Every record is validated at ledger open/save.
     pub fn archived_strategy_proofs(&self) -> Vec<crate::ArchivedStrategyProof> {
