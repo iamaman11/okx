@@ -1420,7 +1420,11 @@ mod tests {
             key == std::ffi::OsStr::new("GIT_CONFIG_NOSYSTEM")
                 && value == Some(std::ffi::OsStr::new("1"))
         }));
-        assert!(ALLOWED_REMOTES.iter().all(|remote| remote.starts_with("https://")));
+        assert!(
+            ALLOWED_REMOTES
+                .iter()
+                .all(|remote| remote.starts_with("https://"))
+        );
     }
 
     #[test]
