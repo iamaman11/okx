@@ -351,6 +351,29 @@ type LoadedExecutionLedger = (
     Vec<LeverageChangeAttempt>,
 );
 
+/// Read-only, bounded inventory of the actual native ledger files.
+/// Neither this proof nor an offline backup is trading/replay authority.
+pub const LEDGER_STORAGE_ATTESTATION_SCHEMA_V1: &str = "okx.ledger-storage-attestation/v1";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LedgerStorageAttestation {
+    pub schema: &'static str,
+    pub on_disk_schema: String,
+    pub integrity: &'static str,
+    pub migration: &'static str,
+    pub manifest_sha256: String,
+    pub manifest_bytes: u64,
+    pub sealed_finalized_runs: usize,
+    pub sealed_unverified_runs: usize,
+    pub verified_archive_bodies: usize,
+    pub original_snapshot: &'static str,
+    pub original_snapshot_sha256: Option<String>,
+    pub active_risk_stop_reason: Option<String>,
+    pub finalized_run_checksum_sha256: Option<String>,
+    pub backup_scope: &'static str,
+    pub trading_admission: &'static str,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecutionLedgerStore {
     path: PathBuf,
@@ -382,6 +405,93 @@ impl ExecutionLedgerStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Explicit read-only disk audit. Unlike first-open recovery, this never
+    /// repairs an UNKNOWN state, migrates formats, rewrites, or sends to OKX.
+    /// It verifies all v14 sealed records through the normal fail-closed
+    /// decoder and reports the installed on-disk format without assuming v14.
+    pub fn attest_storage(&self) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
+        if !self.path.exists() {
+            return Err(ExecutionLedgerError::Corrupt("ledger not initialized"));
+        }
+        let size = fs::metadata(&self.path)?.len();
+        if size > 128 * 1024 * 1024 {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+        let (_entries, stop, _reservation, _source, history, _attempts) = self.load()?;
+        let raw = fs::read(&self.path)?;
+        let manifest: ExecutionLedgerFile = serde_json::from_slice(&raw)?;
+        let v14 = manifest.schema == EXECUTION_LEDGER_SCHEMA_V14;
+        let finalized = manifest
+            .archive_refs
+            .iter()
+            .filter(|reference| reference.kind == ArchivedRunKind::Finalized)
+            .count();
+        let unverified = manifest
+            .archive_refs
+            .iter()
+            .filter(|reference| reference.kind == ArchivedRunKind::Unverified)
+            .count();
+        if v14
+            && (finalized != history.archived_runs.len()
+                || unverified != history.unverified_runs.len())
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "verified archive inventory mismatch",
+            ));
+        }
+        let snapshot_path = self.path.with_extension("pre-v14.json");
+        let (snapshot_state, snapshot_sha) = if snapshot_path.exists() {
+            let legacy_bytes = fs::read(snapshot_path)?;
+            let legacy: ExecutionLedgerFile = serde_json::from_slice(&legacy_bytes)?;
+            if legacy.schema == EXECUTION_LEDGER_SCHEMA_V14 {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "pre-v14 snapshot is not legacy",
+                ));
+            }
+            // On a pre-v14 file, a snapshot must be identical to current.
+            // Once v14 was published, it is historical and must differ.
+            if !v14 && legacy_bytes != raw {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "pre-v14 snapshot mismatches current legacy source",
+                ));
+            }
+            (
+                if v14 {
+                    "PRE_V14_SNAPSHOT_PRESENT"
+                } else {
+                    "CURRENT_LEGACY_SNAPSHOT_MATCH"
+                },
+                Some(format!("{:x}", Sha256::digest(&legacy_bytes))),
+            )
+        } else {
+            ("ABSENT", None)
+        };
+        Ok(LedgerStorageAttestation {
+            schema: LEDGER_STORAGE_ATTESTATION_SCHEMA_V1,
+            on_disk_schema: manifest.schema,
+            integrity: "VALIDATED_COLD_READ",
+            migration: if v14 {
+                "V14_SEALED_OR_EMPTY_ARCHIVE"
+            } else {
+                "LEGACY_PENDING_FIRST_AUTHORIZED_WRITE"
+            },
+            manifest_sha256: format!("{:x}", Sha256::digest(&raw)),
+            manifest_bytes: size,
+            sealed_finalized_runs: finalized,
+            sealed_unverified_runs: unverified,
+            verified_archive_bodies: finalized + unverified,
+            original_snapshot: snapshot_state,
+            original_snapshot_sha256: snapshot_sha,
+            active_risk_stop_reason: stop.as_ref().map(|v| v.reason.clone()),
+            finalized_run_checksum_sha256: history
+                .finalized_run
+                .as_ref()
+                .map(|v| v.checksum_sha256.clone()),
+            backup_scope: "MANIFEST_PLUS_ARCHIVE_DIRECTORY_PLUS_PRE_V14_SNAPSHOT",
+            trading_admission: "READ_ONLY_NOT_TRADING_AUTHORITY",
+        })
     }
 
     /// The pre-migration ledger remains a one-time, immutable recovery artifact.
