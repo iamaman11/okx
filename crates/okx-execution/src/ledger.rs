@@ -1093,6 +1093,106 @@ impl DurableExecutionLedger {
         self.store.attest_storage()
     }
 
+    /// One explicitly authorized *storage-only* migration. Keep all financial
+    /// states and STOP byte-for-byte equivalent. No clock, exchange or policy
+    /// mutation is permitted. The caller must supply the exact observed legacy
+    /// source hash, FINALIZED checksum, run identity, and STOP identity.
+    ///
+    /// The same executor mutex that serializes all financial writes must own
+    /// this operation. If ACK is lost, an identical request only verifies the
+    /// already committed v14 and immutable legacy snapshot: never repeats a
+    /// trading operation or fabricates another run.
+    pub fn migrate_finalized_storage_v14(
+        &mut self,
+        run_id: &str,
+        expected_manifest_sha256: &str,
+        expected_finalized_checksum_sha256: &str,
+        expected_stopped_at_ms: u64,
+    ) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
+        let before = self.store.attest_storage()?;
+        let stop = self
+            .risk_stop
+            .as_ref()
+            .ok_or(ExecutionLedgerError::NewRiskStopped)?;
+        let finalized = self
+            .strategy_periods
+            .finalized_run
+            .as_ref()
+            .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
+        if expected_stopped_at_ms == 0
+            || stop.stopped_at_ms != expected_stopped_at_ms
+            || finalized.run_id != run_id
+            || finalized.checksum_sha256 != expected_finalized_checksum_sha256
+            || self
+                .capital_reservation
+                .as_ref()
+                .is_none_or(|run| run.allocation_id != run_id)
+            || before.active_risk_stop_reason.as_deref() != Some(stop.reason.as_str())
+            || before.finalized_run_checksum_sha256.as_deref()
+                != Some(expected_finalized_checksum_sha256)
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "storage migration STOP/finalization identity mismatch",
+            ));
+        }
+        // POST-commit duplicate is a verified read, not a second writer.
+        if before.on_disk_schema == EXECUTION_LEDGER_SCHEMA_V14 {
+            if before.original_snapshot_sha256.as_deref() == Some(expected_manifest_sha256)
+                && before.original_snapshot == "PRE_V14_SNAPSHOT_PRESENT"
+            {
+                return Ok(before);
+            }
+            return Err(ExecutionLedgerError::Corrupt(
+                "migration replay has mismatched original source",
+            ));
+        }
+        if before.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V13
+            || before.manifest_sha256 != expected_manifest_sha256
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "storage migration legacy source hash/schema mismatch",
+            ));
+        }
+        // Do not silently migrate a stale disk snapshot over the active owner.
+        let (entries, disk_stop, reservation, evidence, periods, leverage) =
+            self.store.load()?;
+        if entries != self.entries
+            || disk_stop.as_ref() != self.risk_stop.as_ref()
+            || reservation.as_ref() != self.capital_reservation.as_ref()
+            || evidence.as_ref() != self.exchange_evidence.as_ref()
+            || periods != self.strategy_periods
+            || leverage != self.leverage_attempts
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "in-memory ledger differs from migration source",
+            ));
+        }
+        self.store.save(
+            &self.entries,
+            self.risk_stop.as_ref(),
+            self.capital_reservation.as_ref(),
+            self.exchange_evidence.as_ref(),
+            &self.strategy_periods,
+            &self.leverage_attempts,
+        )?;
+        let after = self.store.attest_storage()?;
+        if after.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V14
+            || after.original_snapshot_sha256.as_deref()
+                != Some(expected_manifest_sha256)
+            || after.original_snapshot != "PRE_V14_SNAPSHOT_PRESENT"
+            || after.active_risk_stop_reason != before.active_risk_stop_reason
+            || after.finalized_run_checksum_sha256 != before.finalized_run_checksum_sha256
+            || after.sealed_finalized_runs + after.sealed_unverified_runs
+                != self.strategy_periods.archived_runs.len()
+                    + self.strategy_periods.unverified_runs.len()
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "storage migration post-commit financial proof failed",
+            ));
+        }
+        Ok(after)
+    }
+
     pub fn canonical(observed_at_ms: u64) -> Result<Self, ExecutionLedgerError> {
         Self::open(ExecutionLedgerStore::canonical(), observed_at_ms)
     }
