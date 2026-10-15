@@ -1154,8 +1154,7 @@ impl DurableExecutionLedger {
             ));
         }
         // Do not silently migrate a stale disk snapshot over the active owner.
-        let (entries, disk_stop, reservation, evidence, periods, leverage) =
-            self.store.load()?;
+        let (entries, disk_stop, reservation, evidence, periods, leverage) = self.store.load()?;
         if entries != self.entries
             || disk_stop.as_ref() != self.risk_stop.as_ref()
             || reservation.as_ref() != self.capital_reservation.as_ref()
@@ -1177,8 +1176,7 @@ impl DurableExecutionLedger {
         )?;
         let after = self.store.attest_storage()?;
         if after.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V14
-            || after.original_snapshot_sha256.as_deref()
-                != Some(expected_manifest_sha256)
+            || after.original_snapshot_sha256.as_deref() != Some(expected_manifest_sha256)
             || after.original_snapshot != "PRE_V14_SNAPSHOT_PRESENT"
             || after.active_risk_stop_reason != before.active_risk_stop_reason
             || after.finalized_run_checksum_sha256 != before.finalized_run_checksum_sha256
@@ -3866,15 +3864,25 @@ mod tests {
         assert_eq!(old.on_disk_schema, EXECUTION_LEDGER_SCHEMA_V13);
 
         for (hash, check, ts) in [
-            ("b".repeat(64), finalization.checksum_sha256.clone(), stop.stopped_at_ms),
-            (old.manifest_sha256.clone(), "f".repeat(64), stop.stopped_at_ms),
-            (old.manifest_sha256.clone(), finalization.checksum_sha256.clone(), 1),
+            (
+                "b".repeat(64),
+                finalization.checksum_sha256.clone(),
+                stop.stopped_at_ms,
+            ),
+            (
+                old.manifest_sha256.clone(),
+                "f".repeat(64),
+                stop.stopped_at_ms,
+            ),
+            (
+                old.manifest_sha256.clone(),
+                finalization.checksum_sha256.clone(),
+                1,
+            ),
         ] {
             assert!(
                 ledger
-                    .migrate_finalized_storage_v14(
-                        &run.allocation_id, &hash, &check, ts
-                    )
+                    .migrate_finalized_storage_v14(&run.allocation_id, &hash, &check, ts)
                     .is_err(),
                 "incorrect supplied identity must not touch financial storage"
             );
@@ -3929,14 +3937,16 @@ mod tests {
         let reopened = DurableExecutionLedger::open(store.clone(), 3500).unwrap();
         assert_eq!(reopened.risk_stop(), Some(&stop));
         assert_eq!(reopened.finalized_run(), Some(&finalization));
-        assert!(reopened
-            .migrate_finalized_storage_v14(
-                &run.allocation_id,
-                &"c".repeat(64),
-                &finalization.checksum_sha256,
-                stop.stopped_at_ms,
-            )
-            .is_err());
+        assert!(
+            reopened
+                .migrate_finalized_storage_v14(
+                    &run.allocation_id,
+                    &"c".repeat(64),
+                    &finalization.checksum_sha256,
+                    stop.stopped_at_ms,
+                )
+                .is_err()
+        );
         assert_eq!(fs::read(store.path()).unwrap(), after_bytes);
         let _ = fs::remove_dir_all(root);
     }
