@@ -1409,9 +1409,14 @@ mod tests {
             "GIT_CONFIG_COUNT",
         ] {
             assert!(
-                command
-                    .get_envs()
-                    .any(|(key, value)| key == std::ffi::OsStr::new(name) && value.is_none()),
+                command.get_envs().any(|(key, value)| {
+                    let same_name = if cfg!(windows) {
+                        key.to_string_lossy().eq_ignore_ascii_case(name)
+                    } else {
+                        key == std::ffi::OsStr::new(name)
+                    };
+                    same_name && value.is_none()
+                }),
                 "proxy or inherited Git override not removed: {name}"
             );
         }
