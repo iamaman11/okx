@@ -48,8 +48,7 @@ fn compact_trader_packet(
     let finalized = !get("/reconciliation/finalized_run").is_null();
     let coherent = get("/coherence/coherent") == json!(true);
     let reconciled = get("/reconciliation/consistent") == json!(true);
-    let complete_protection =
-        get("/pending_protective_algos/complete_within_bound") == json!(true);
+    let complete_protection = get("/pending_protective_algos/complete_within_bound") == json!(true);
     let history_complete = full
         .pointer("/account_ledger/history_coverage")
         .and_then(Value::as_array)
@@ -570,14 +569,14 @@ pub(super) async fn dispatch(
 
             let compact = matches!(request.operation, AgentOperation::TraderSnapshot);
             let full = serde_json::to_value(AccountSummaryResult {
-                    schema: ACCOUNT_SUMMARY_SCHEMA_V1,
-                    account_ledger: facts.summary,
-                    pending_protective_algos,
-                    strategy_run_opening_source,
-                    reconciliation,
-                    managed_execution_intents,
-                    coherence,
-                })?;
+                schema: ACCOUNT_SUMMARY_SCHEMA_V1,
+                account_ledger: facts.summary,
+                pending_protective_algos,
+                strategy_run_opening_source,
+                reconciliation,
+                managed_execution_intents,
+                coherence,
+            })?;
             let result = if compact {
                 let packet = compact_trader_packet(
                     &full,
@@ -605,11 +604,14 @@ pub(super) async fn dispatch(
                 status: AgentResponseStatus::Completed,
                 generated_at: generated_at.to_owned(),
                 quality,
-                result_schema: Some(if compact {
-                    TRADER_SNAPSHOT_SCHEMA_V1
-                } else {
-                    ACCOUNT_SUMMARY_SCHEMA_V1
-                }.to_owned()),
+                result_schema: Some(
+                    if compact {
+                        TRADER_SNAPSHOT_SCHEMA_V1
+                    } else {
+                        ACCOUNT_SUMMARY_SCHEMA_V1
+                    }
+                    .to_owned(),
+                ),
                 result: Some(result),
                 failure: None,
                 warnings: if compact { Vec::new() } else { warnings },
@@ -2289,7 +2291,10 @@ mod tests {
         let p = compact_trader_packet(&full, &DataQuality::Degraded, 2, 125);
         assert_eq!(p["schema"], TRADER_SNAPSHOT_SCHEMA_V1);
         assert_eq!(p["decision"]["new_risk"], "NO_GO");
-        assert_eq!(p["decision"]["scope"], "READ_ONLY_OBSERVER_NOT_TRADE_PERMISSION");
+        assert_eq!(
+            p["decision"]["scope"],
+            "READ_ONLY_OBSERVER_NOT_TRADE_PERMISSION"
+        );
         assert_eq!(p["strategy"]["finalized_nav_usdt"], "99.996587799");
         assert_eq!(
             p["strategy"]["finalized_checksum_sha256"],
@@ -2303,7 +2308,9 @@ mod tests {
             serde_json::to_vec(&p).unwrap().len()
         );
         assert!(
-            p["transport"]["full_account_result_bytes"].as_u64().unwrap()
+            p["transport"]["full_account_result_bytes"]
+                .as_u64()
+                .unwrap()
                 > 5 * p["transport"]["packet_bytes"].as_u64().unwrap()
         );
         // A healthy observer still cannot authorize new risk without a typed
