@@ -869,10 +869,8 @@ async fn read_response_body(
     }
 
     let mut body = Vec::with_capacity(content_length.unwrap_or(0).min(max_bytes as u64) as usize);
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| GitHubError::BodyRead(Box::new(GitHubBodyReadDiagnostic {
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        GitHubError::BodyRead(Box::new(GitHubBodyReadDiagnostic {
             phase,
             status,
             host: host.clone(),
@@ -884,8 +882,8 @@ async fn read_response_body(
             timeout: error.is_timeout(),
             body: error.is_body(),
             decode: error.is_decode(),
-        })))?
-    {
+        }))
+    })? {
         if chunk.len() > max_bytes.saturating_sub(body.len()) {
             return Err(GitHubError::BodyTooLarge {
                 phase,
@@ -1103,10 +1101,7 @@ mod tests {
 
     /// One local HTTP response, no credentials/network dependencies or daemon.
     /// The spawned server owns a single connection and always exits.
-    fn one_response(
-        reply: &'static [u8],
-        hold_open: Duration,
-    ) -> (String, thread::JoinHandle<()>) {
+    fn one_response(reply: &'static [u8], hold_open: Duration) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("ephemeral TCP listener");
         let address = listener.local_addr().expect("listener address");
         let join = thread::spawn(move || {
