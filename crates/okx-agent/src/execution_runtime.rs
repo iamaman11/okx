@@ -765,6 +765,16 @@ impl ExecutionRuntime {
 
     /// Same single durable executor ledger, explicit disk read only; no
     /// exchange API/POST and no schema migration or recovery write.
+    /// Exhaustive same-owner ledger state; no account exchange mutation.
+    /// This does NOT freeze the executor or authorize a profile handoff.
+    pub async fn profile_handoff_ledger_assessment(
+        &self,
+        account_uid: &str,
+    ) -> Result<okx_execution::ProfileHandoffLedgerAssessment, OrderExecutorError> {
+        let owner = self.executor.lock().await;
+        Ok(owner.ledger().profile_handoff_ledger_assessment(account_uid)?)
+    }
+
     pub async fn attest_ledger_storage(
         &self,
     ) -> Result<okx_execution::LedgerStorageAttestation, OrderExecutorError> {
