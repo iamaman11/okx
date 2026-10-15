@@ -3803,6 +3803,145 @@ mod tests {
     }
 
     #[test]
+    fn explicit_finalized_storage_migration_preserves_stop_and_is_idempotent() {
+        let root = temp_root("explicit-finalized-storage-v14");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let run = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "storage_migrate_finalized_0123456789".to_owned(),
+            account_uid_fingerprint: "uid-fingerprint".to_owned(),
+            origin_schema: "okx.research.live-decision/v1".to_owned(),
+            origin_version: "v1".to_owned(),
+            mandate_version: "mandate-v1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: "generation".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1000,
+        };
+        let source = DurableExchangeEvidence::new(&run).unwrap();
+        let report = StrategyFinancialPeriod {
+            schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+            run_id: run.allocation_id.clone(),
+            state: "FLAT_RECONCILED",
+            evidence_sha256: source.checksum_sha256.clone(),
+            allocation_usdt: "100".to_owned(),
+            linked_fills: 0,
+            linked_bills: 0,
+            realized_usdt: "0".to_owned(),
+            fees_usdt: "0".to_owned(),
+            funding_usdt: None,
+            unrealized_usdt: Some("0".to_owned()),
+            nav_usdt: Some("100".to_owned()),
+            positions: Vec::new(),
+            usable_for_new_risk: false,
+            reasons: Vec::new(),
+        };
+        let finalization = StrategyFinalization::new(&run, &source, &report, 2000).unwrap();
+        let stop = ExecutionRiskStop {
+            schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
+            stopped_at_ms: 1500,
+            reason: "STRATEGY_UTC_DAILY_GROSS_LOSS".to_owned(),
+        };
+        let history = StrategyPeriodHistory {
+            finalized_run: Some(finalization.clone()),
+            ..StrategyPeriodHistory::default()
+        };
+        let legacy = ExecutionLedgerFile {
+            schema: EXECUTION_LEDGER_SCHEMA_V13.to_owned(),
+            records: Vec::new(),
+            risk_stop: Some(stop.clone()),
+            capital_reservation: Some(run.clone()),
+            exchange_evidence: Some(source),
+            strategy_periods: history,
+            archive_refs: Vec::new(),
+            leverage_attempts: Vec::new(),
+        };
+        fs::write(store.path(), serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        let ledger = DurableExecutionLedger::open(store.clone(), 3000).unwrap();
+        let old = store.attest_storage().unwrap();
+        let original = fs::read(store.path()).unwrap();
+        assert_eq!(old.on_disk_schema, EXECUTION_LEDGER_SCHEMA_V13);
+
+        for (hash, check, ts) in [
+            ("b".repeat(64), finalization.checksum_sha256.clone(), stop.stopped_at_ms),
+            (old.manifest_sha256.clone(), "f".repeat(64), stop.stopped_at_ms),
+            (old.manifest_sha256.clone(), finalization.checksum_sha256.clone(), 1),
+        ] {
+            assert!(
+                ledger
+                    .migrate_finalized_storage_v14(
+                        &run.allocation_id, &hash, &check, ts
+                    )
+                    .is_err(),
+                "incorrect supplied identity must not touch financial storage"
+            );
+            assert_eq!(fs::read(store.path()).unwrap(), original);
+            assert!(!store.path().with_extension("pre-v14.json").exists());
+        }
+        assert!(
+            ledger
+                .migrate_finalized_storage_v14(
+                    "foreign_strategy_run_0123456789",
+                    &old.manifest_sha256,
+                    &finalization.checksum_sha256,
+                    stop.stopped_at_ms,
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), original);
+
+        let after = ledger
+            .migrate_finalized_storage_v14(
+                &run.allocation_id,
+                &old.manifest_sha256,
+                &finalization.checksum_sha256,
+                stop.stopped_at_ms,
+            )
+            .unwrap();
+        assert_eq!(after.on_disk_schema, EXECUTION_LEDGER_SCHEMA_V14);
+        assert_eq!(
+            after.original_snapshot_sha256.as_deref(),
+            Some(old.manifest_sha256.as_str())
+        );
+        assert_eq!(
+            fs::read(store.path().with_extension("pre-v14.json")).unwrap(),
+            original
+        );
+        assert_eq!(after.active_risk_stop_reason, old.active_risk_stop_reason);
+        assert_eq!(
+            after.finalized_run_checksum_sha256,
+            old.finalized_run_checksum_sha256
+        );
+        let after_bytes = fs::read(store.path()).unwrap();
+        let duplicate = ledger
+            .migrate_finalized_storage_v14(
+                &run.allocation_id,
+                &old.manifest_sha256,
+                &finalization.checksum_sha256,
+                stop.stopped_at_ms,
+            )
+            .unwrap();
+        assert_eq!(duplicate.manifest_sha256, after.manifest_sha256);
+        assert_eq!(fs::read(store.path()).unwrap(), after_bytes);
+        let reopened = DurableExecutionLedger::open(store.clone(), 3500).unwrap();
+        assert_eq!(reopened.risk_stop(), Some(&stop));
+        assert_eq!(reopened.finalized_run(), Some(&finalization));
+        assert!(reopened
+            .migrate_finalized_storage_v14(
+                &run.allocation_id,
+                &"c".repeat(64),
+                &finalization.checksum_sha256,
+                stop.stopped_at_ms,
+            )
+            .is_err());
+        assert_eq!(fs::read(store.path()).unwrap(), after_bytes);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn operator_rearm_rejects_same_day_and_forged_stop_then_preserves_history_on_restart() {
         let root = temp_root("operator-stop-rearm");
         let _ = fs::remove_dir_all(&root);
