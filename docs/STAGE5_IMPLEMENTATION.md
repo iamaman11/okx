@@ -1,5 +1,34 @@
 # Stage 5 implementation checklist and live-admission contract
 
+## Stage 5B financial ledger v14: sealed archive / recovery invariant (PR #333, DRAFT)
+
+This change is **NOT ACCEPTED until full CI, Windows CONTROL source-tree
+parity, cold restart, and independent read-only MCP proof**. Production Live is
+OFF. The one Rust `okx-execution` ledger remains the only financial/mutation
+writer: there is no second agent, service, database or independent archive owner.
+
+* Atomic ledger commit now means a **bundle** under the same runtime root:
+  `execution-ledger.json` is the authoritative v14 manifest; adjacent
+  `execution-ledger.archive/` contains immutable `finalized-<run-id>.json`
+  and `unverified-<run-id>.json` source-evidence bodies. The manifest publishes
+  SHA-256 content references only *after* each sealed body is durable.
+* On startup, missing/mismatched/duplicated detached run bodies fail closed
+  before execution resumes. Old v1–v13 inline archives remain readable and
+  migrate only through the existing ledger writer. A crash before manifest
+  publication can leave unreferenced staging data, never a false accepted proof.
+* **Backup, transfer and restore the manifest and archive directory together**,
+  never the JSON file alone. A binary deployment must not erase either. Do not
+  repair a bad archive by deleting a record, recomputing a checksum, inventing a
+  fill, or silently falling back to a newer exchange REST window.
+* The archive still has an explicit bounded ceiling (256 sealed periods); the
+  response includes both FINALIZED and UNVERIFIED consumption. The standard
+  readback returns a bounded sample rather than hundreds of proof records; the
+  underlying history is not evicted. This is not a claim of infinite retention.
+* Funding bills (OKX subtype 173/174) remain **UNALLOCATED** where a native
+  instrument/side/time/position-owner proof is unavailable; no matching-by-symbol
+  shortcut. Funding allocation is not accepted by this archive-only change.
+
+
 **Stage 5A current recovery decision (2026-10-14, [PR #329](https://github.com/iamaman11/okx/pull/329), DRAFT):** The selected Demo run `stage5b_financial_demo_run_20261014_d` is irrecoverably `INCOMPLETE` after a 9h+ private source gap, despite current FLAT/0 orders/0 OCO. Never force `FINALIZED` or write fictitious NAV/fee/PnL. The single execution ledger v11 adds an explicit immutable `UNVERIFIED` *non-financial closure* containing run/account ID, exact source checksum, reason and cryptographic closure checksum, and archives the exact native evidence separately from financially finalized runs. This is an explicit Demo-only administrative action with current fresh independent REST/private-WS/OCO/FLAT proof; refuse if any run-owned execution, recent native fill/bill/order, active STOP or unknown account status is present. Only a separate independently attested new FLAT opening may start the next run with fresh cursors; prior run ID/history are never reused or silently purged. Read-only `account_summary` must surface both financially finalized and unverified proofs distinctly, the latter without NAV. Do not execute the action or claim Stage 5A acceptance until CI and Windows CONTROL/MCP acceptance prove these conditions. Production Live OFF, no new services/fallback.
 
 
