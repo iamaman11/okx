@@ -13,7 +13,7 @@ use okx_execution::{
     ExecutionPlan, ExecutionRiskStop, ExecutionState, ExecutionStatusEnvelope,
     FencedProtectiveShrinkRequest, LeverageAttemptState, ManagedExecutionInventory,
     MutationAuthority, MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor,
-    OrderExecutorError, PositionSide, PrepareOutcome, ProductionMarkEvidence,
+    OrderExecutorError, PositionSide, PrepareOutcome, ProductionLivePermit, ProductionMarkEvidence,
     StrategyAllocationOpening, StrategyCapitalReservation, StrategyFinalization,
     StrategyUnverifiedClosure, SubmitDisposition, execution_status_with_ledger,
     managed_execution_inventory, reconcile_account_ledger,
@@ -878,6 +878,44 @@ impl ExecutionRuntime {
         let result = executor
             .submit_prepared(intent_id, timing, observed_at_ms)
             .await;
+        executor.disable_mutations();
+        Ok(Some(result))
+    }
+
+    /// The future native CONTROL arm handler is the ONLY permitted issuer of
+    /// ProductionLivePermit. No public MCP or mailbox operation accepts this
+    /// proof. Keep the same Rust ledger/executor mutex as Demo, with authority
+    /// enabled for exactly one submission and disabled before releasing it.
+    /// Do not retry an uncertain result or mistake a valid pilot permit for
+    /// independent risk/venue/WS admission (which callers must revalidate).
+    pub async fn submit_prepared_production_authorized(
+        &self,
+        preflight: &ExecutorPreflightSnapshot,
+        permit: &ProductionLivePermit,
+        intent_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+    ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
+        let mut executor = self.executor.lock().await;
+        executor.disable_mutations();
+        if self.environment.demo
+            || self.mode != ExecutionRuntimeMode::ReadOnly
+            || !preflight.accepted
+            || !preflight.credential.accepted
+            || !preflight.credential.production_environment
+            || !preflight.credential.executor_ip_bound
+            || preflight.credential.account_uid_fingerprint.is_empty()
+            || preflight.credential.account_uid_fingerprint != permit.account_uid_fingerprint
+        {
+            return Ok(None);
+        }
+        if executor
+            .enable_production_live(self.environment, permit, observed_at_ms)
+            .is_err()
+        {
+            return Ok(None);
+        }
+        let result = executor.submit_prepared(intent_id, timing, observed_at_ms).await;
         executor.disable_mutations();
         Ok(Some(result))
     }
