@@ -1769,10 +1769,69 @@ impl HostControlRequest {
     }
 }
 
+pub const ACCOUNT_CATALOG_ENTRY_SCHEMA_V1: &str = "okx.account-catalog-entry/v1";
+
+/// Metadata only. Registration never provisions an API key, probes a UID,
+/// changes the selected account or grants execution privileges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountCatalogEnvironment {
+    Production,
+    Demo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountCatalogEntry {
+    pub schema: String,
+    pub account_id: String,
+    pub label: String,
+    pub environment: AccountCatalogEnvironment,
+    pub expected_uid_fingerprint: String,
+}
+
+impl AccountCatalogEntry {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let id = self.account_id.as_bytes();
+        if self.schema != ACCOUNT_CATALOG_ENTRY_SCHEMA_V1
+            || id.is_empty()
+            || id.len() > 32
+            || !id[0].is_ascii_lowercase()
+            || !id
+                .iter()
+                .all(|&byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || id.last() == Some(&b'-')
+            || self.account_id == "production"
+            || self.account_id == "demo_acceptance"
+            || self.label.is_empty()
+            || self.label.len() > 48
+            || self.label.trim() != self.label
+            || self.label.chars().any(char::is_control)
+        {
+            return Err(ProtocolError::InvalidRequestId);
+        }
+        validate_sha256(&self.expected_uid_fingerprint)?;
+        if self
+            .expected_uid_fingerprint
+            .bytes()
+            .any(|b| !(b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        {
+            return Err(ProtocolError::InvalidRequestId);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostControlOperation {
     Status,
+    /// Read-only metadata registry in the existing CONTROL owner.
+    AccountCatalog,
+    /// Metadata registration ONLY, never new credentials or account selection.
+    RegisterReadOnlyAccount {
+        entry: AccountCatalogEntry,
+    },
     Sync,
     BuildAgent,
     DeployAgent {
@@ -1829,6 +1888,7 @@ pub enum HostControlOperation {
 impl HostControlOperation {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
+            Self::RegisterReadOnlyAccount { entry } => entry.validate(),
             Self::DeployAgent {
                 run_id,
                 artifact_id,
@@ -3161,6 +3221,57 @@ mod tests {
 
         let arbitrary = r#"{"schema":"okx.windows.control/v1","request_id":"ctl_0123456789abcdef","operation":{"type":"run_shell","command":"whoami"}}"#;
         assert!(serde_json::from_str::<HostControlRequest>(arbitrary).is_err());
+    }
+
+    #[test]
+    fn account_catalog_accepts_only_nonsecret_named_metadata() {
+        let entry = AccountCatalogEntry {
+            schema: ACCOUNT_CATALOG_ENTRY_SCHEMA_V1.to_owned(),
+            account_id: "sub-1".to_owned(),
+            label: "Read only account".to_owned(),
+            environment: AccountCatalogEnvironment::Production,
+            expected_uid_fingerprint: "a".repeat(64),
+        };
+        let register = HostControlOperation::RegisterReadOnlyAccount {
+            entry: entry.clone(),
+        };
+        register.validate().expect("valid metadata only");
+        let json = serde_json::to_string(&register).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<HostControlOperation>(&json).unwrap(),
+            register
+        );
+        for wrong_id in [
+            "",
+            "sub_1",
+            "../account",
+            "Demo",
+            "production",
+            "demo_acceptance",
+        ] {
+            let mut wrong = entry.clone();
+            wrong.account_id = wrong_id.to_owned();
+            assert!(wrong.validate().is_err(), "{wrong_id}");
+        }
+        let mut wrong = entry.clone();
+        wrong.expected_uid_fingerprint = "A".repeat(64);
+        assert!(wrong.validate().is_err());
+        let mut wrong = entry.clone();
+        wrong.label = " \nunsafe".to_owned();
+        assert!(wrong.validate().is_err());
+        let mut multibyte = entry.clone();
+        multibyte.label = "🔒".repeat(13);
+        assert!(
+            multibyte.validate().is_err(),
+            "48-byte bound includes UTF-8 expansion"
+        );
+        let smuggled = format!(
+            "{{\"schema\":\"{}\",\"account_id\":\"sub-1\",\"label\":\"ok\",\"environment\":\"production\",\"expected_uid_fingerprint\":\"{}\",\"api_key\":\"secret\"}}",
+            ACCOUNT_CATALOG_ENTRY_SCHEMA_V1,
+            "a".repeat(64)
+        );
+        assert!(serde_json::from_str::<AccountCatalogEntry>(&smuggled).is_err());
+        assert!(HostControlOperation::AccountCatalog.validate().is_ok());
     }
 
     #[test]

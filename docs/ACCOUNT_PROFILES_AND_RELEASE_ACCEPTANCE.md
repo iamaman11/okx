@@ -107,6 +107,32 @@ repeatable connected samples. Financial source was DEGRADED due
 bounded old history even though current private exposure is flat;
 the compact packet never re-labels it FRESH.
 
+## Stage 5C: metadata-only catalog without additional control authority
+
+Named-account onboarding begins with one explicit nonsecret, bounded native
+CONTROL catalog `okx.account-catalog/v1` (maximum 32 entries), stored
+atomically under the existing `C:\\okx-control` configuration root.
+The one accepted GitHub CONTROL endpoint supports
+`account_catalog` (read-only) and `register_read_only_account`
+(metadata-only, exact `okx.account-catalog-entry/v1` account ID, display
+label (at most 48 UTF-8 bytes), Demo/Production environment and expected 64-hex UID fingerprint).
+All new entries are explicitly `UNVERIFIED`, `selectable=false` and
+`trading_authorized=false`: a supplied UID hash is merely an expectation,
+not a proven authenticated account. No API key, secret, passphrase, OCO or
+market data may appear in the catalog. Names cannot be paths, replace
+`production`/`demo_acceptance`, or collide with another UID. Exact
+duplicate registration is idempotent; conflicting identity fails closed.
+A corrupt catalog fails closed for registration, while status reports a
+safe typed diagnosis; it never stops or changes the running agent.
+
+This is actual remote **metadata management** for arbitrary future accounts,
+NOT functional named-account selection. Both legacy profiles, the sole
+`desired.json` lifecycle and PID/Job/ledger/STOP remain unchanged.
+The next independent gate is credential-keyring binding and authenticated
+read-only UID verification in the same Rust/CONTROL chain, then one
+bounded physical named-account switch. Do not suggest that a metadata
+entry is connected, or let registration grant Live.
+
 ## Operator contract: one application, no Demo fork
 
 - Exactly **one installed `okx-agent.exe` binary** and **one Windows Job/CONTROL-owned running process** at any instant; `okx-host-control` and its launcher are existing lifecycle owners, not an alternate trading engine.
