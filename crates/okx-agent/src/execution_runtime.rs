@@ -161,6 +161,16 @@ impl MutationIngress {
     }
 }
 
+/// Cancelling or unwinding a Production send drops its ephemeral authority
+/// before releasing the existing one-owner executor mutex.
+struct ProductionAuthorityReset<'a>(&'a mut OrderExecutor<TradeApi>);
+
+impl Drop for ProductionAuthorityReset<'_> {
+    fn drop(&mut self) {
+        self.0.disable_mutations();
+    }
+}
+
 pub struct ExecutionRuntime {
     mutation_ingress: MutationIngress,
     environment: OkxEnvironment,
@@ -915,10 +925,12 @@ impl ExecutionRuntime {
         {
             return Ok(None);
         }
-        let result = executor
+        let guarded = ProductionAuthorityReset(&mut *executor);
+        let result = guarded
+            .0
             .submit_prepared(intent_id, timing, observed_at_ms)
             .await;
-        executor.disable_mutations();
+        drop(guarded);
         Ok(Some(result))
     }
 
