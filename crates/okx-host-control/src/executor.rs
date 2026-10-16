@@ -1553,6 +1553,54 @@ mod tests {
     }
 
     #[test]
+    fn crash_pending_profile_transition_prevents_reconcile_and_manual_restart() {
+        use crate::profile_transition::FrozenSourceWitness;
+        let path = std::env::temp_dir().join(format!(
+            "okx-control-pending-handoff-{}.json",
+            std::process::id(),
+        ));
+        let _ = fs::remove_file(&path);
+
+        let mut host = HostExecutor::canonical().expect("controller");
+        host.profile_transition_store = ProfileTransitionStore::at(path.clone());
+        host.desired_profile = AgentProfile::DemoAcceptance;
+        host.desired_agent = AgentDesired::Running;
+
+        let ticket = FrozenSourceWitness {
+            sequence: 1,
+            source: AgentProfile::DemoAcceptance,
+            destination: AgentProfile::Production,
+            source_pid: 321,
+            launch_lease_sha256: "a".repeat(64),
+            account_uid_fingerprint: "b".repeat(64),
+            private_ws_generation: 7,
+            ledger_manifest_sha256: "c".repeat(64),
+            source_tree: "d".repeat(40),
+            agent_sha256: "e".repeat(64),
+            controller_sha256: "f".repeat(64),
+            source_observed_at_ms: 10_000,
+            issued_at_ms: 10_500,
+            expires_at_ms: 40_500,
+        };
+        host.profile_transition_store
+            .stage_frozen(ticket, 11_000)
+            .expect("atomic source fence");
+        let disposition = host.reconcile_desired().expect("bounded blocked readback");
+        assert_eq!(disposition["disposition"], "BLOCKED_UNFINALIZED_PROFILE_TRANSITION");
+        assert_eq!(host.desired_profile, AgentProfile::DemoAcceptance);
+        assert_eq!(host.desired_agent, AgentDesired::Running);
+        assert!(matches!(
+            host.execute(HostControlOperation::RestoreProductionAgent),
+            Err(HostControlError::ProfileTransitionPending)
+        ));
+        assert!(matches!(
+            host.execute(HostControlOperation::RestartAgent),
+            Err(HostControlError::ProfileTransitionPending)
+        ));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn canonical_root_is_fixed() {
         let executor = HostExecutor::canonical().expect("executor");
         assert_eq!(executor.repo_root, PathBuf::from(r"C:\okx"));
