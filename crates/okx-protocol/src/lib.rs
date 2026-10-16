@@ -6,6 +6,58 @@ use thiserror::Error;
 pub const MAILBOX_ENVELOPE_SCHEMA_V1: &str = "okx.mailbox.envelope/v1";
 pub const AGENT_REQUEST_SCHEMA_V1: &str = "okx.agent.request/v1";
 pub const AGENT_RESPONSE_SCHEMA_V1: &str = "okx.agent.response/v1";
+/// Authenticated by inherited parent/child pipe handles, NOT a remote API.
+pub const NATIVE_CHILD_CONTROL_SCHEMA_V1: &str = "okx.native-child-control/v1";
+pub const NATIVE_CHILD_CONTROL_PREFIX: &str = "@okx-child-control:";
+pub const NATIVE_CHILD_CONTROL_MAX_BYTES: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum NativeChildOperation {
+    Drain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeChildRequest {
+    pub schema: String,
+    pub request_id: String,
+    pub operation: NativeChildOperation,
+    pub expected_uid_fingerprint: String,
+}
+
+impl NativeChildRequest {
+    pub fn valid(&self) -> bool {
+        self.schema == NATIVE_CHILD_CONTROL_SCHEMA_V1
+            && self.request_id.len() == 64
+            && self.request_id.bytes().all(|b| b.is_ascii_hexdigit())
+            && self.expected_uid_fingerprint.len() == 64
+            && self.expected_uid_fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeChildReply {
+    pub schema: String,
+    pub request_id: String,
+    pub disposition: String,
+    pub ledger_only: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+impl NativeChildReply {
+    pub fn valid_for(&self, request_id: &str) -> bool {
+        self.schema == NATIVE_CHILD_CONTROL_SCHEMA_V1
+            && self.request_id == request_id
+            && matches!(self.disposition.as_str(), "DRAINED_LEDGER_ONLY" | "BLOCKED")
+            && match self.disposition.as_str() {
+                "DRAINED_LEDGER_ONLY" => self.ledger_only.is_some() && self.error.is_none(),
+                _ => self.ledger_only.is_none() && self.error.is_some(),
+            }
+    }
+}
+
 pub const HOST_CONTROL_REQUEST_SCHEMA_V1: &str = "okx.windows.control/v1";
 pub const HOST_CONTROL_RESULT_SCHEMA_V1: &str = "okx.windows.control.result/v1";
 pub const MAILBOX_REPOSITORY: &str = "iamaman11/okx";

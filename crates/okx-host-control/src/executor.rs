@@ -2,11 +2,15 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{Child, Stdio},
+    process::{Child, ChildStdin, Stdio},
+    sync::mpsc::{self, Receiver},
     time::{Duration, Instant},
 };
 
-use okx_protocol::HostControlOperation;
+use okx_protocol::{
+    HostControlOperation, NativeChildOperation, NativeChildReply, NativeChildRequest,
+    NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -48,7 +52,14 @@ struct AgentLaunchEvidence {
     stderr_offset: u64,
 }
 
+struct NativeChildPipe {
+    input: ChildStdin,
+    replies: Receiver<NativeChildReply>,
+    stderr_reader: std::thread::JoinHandle<()>,
+}
+
 pub struct HostExecutor {
+    native_child_pipe: Option<NativeChildPipe>,
     repo_root: PathBuf,
     agent_child: Option<Child>,
     agent_started_at: Option<Instant>,
@@ -73,6 +84,7 @@ impl HostExecutor {
         };
 
         Ok(Self {
+            native_child_pipe: None,
             repo_root: PathBuf::from(CANONICAL_ROOT),
             agent_child: None,
             agent_started_at: None,
@@ -303,6 +315,7 @@ impl HostExecutor {
             "desired_state_error": self.desired_error.clone(),
             "profile_transition": self.desired_store.status_value(),
             "job_object_owned": true,
+            "native_child_control_pipe_attached": running && self.native_child_pipe.is_some(),
             "restart_attempt": self.restart_attempt,
             "retry_in_ms": self.retry_in_ms(),
             "last_reconcile": self.last_reconcile.clone(),
@@ -795,13 +808,56 @@ impl HostExecutor {
         let stderr_offset = stderr.metadata()?.len();
         let mut child = hidden_command(self.agent_binary())
             .args(agent_args(profile))
+            .arg("--native-child-control-stdio")
             .current_dir(&self.repo_root)
+            .stdin(Stdio::piped())
             .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
+            .stderr(Stdio::piped())
             .spawn()?;
 
         self.agent_job.assign(&mut child)?;
         let pid = child.id();
+        let child_input = child.stdin.take().ok_or(HostControlError::InvalidExecutionPath)?;
+        let mut child_stderr = child.stderr.take().ok_or(HostControlError::InvalidExecutionPath)?;
+        let (reply_tx, reply_rx) = mpsc::channel();
+        // Preserve the old append-only stderr diagnostic log. Only this
+        // parent receives the anonymous stderr pipe and routes typed replies.
+        let stderr_reader = std::thread::spawn(move || {
+            let mut stderr_log = stderr;
+            let mut pending = Vec::<u8>::new();
+            let mut overflow = false;
+            let mut block = [0u8; 4096];
+            loop {
+                let count = match child_stderr.read(&mut block) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                if stderr_log.write_all(&block[..count]).is_err() {
+                    break;
+                }
+                for byte in &block[..count] {
+                    if *byte == b'\n' {
+                        if !overflow && pending.starts_with(NATIVE_CHILD_CONTROL_PREFIX.as_bytes()) {
+                            let payload = &pending[NATIVE_CHILD_CONTROL_PREFIX.len()..];
+                            if let Ok(reply) = serde_json::from_slice::<NativeChildReply>(payload) {
+                                let _ = reply_tx.send(reply);
+                            }
+                        }
+                        pending.clear();
+                        overflow = false;
+                    } else if pending.len() < NATIVE_CHILD_CONTROL_MAX_BYTES {
+                        pending.push(*byte);
+                    } else {
+                        overflow = true;
+                    }
+                }
+            }
+        });
+        self.native_child_pipe = Some(NativeChildPipe {
+            input: child_input,
+            replies: reply_rx,
+            stderr_reader,
+        });
         self.agent_child = Some(child);
         self.agent_started_at = Some(Instant::now());
         self.agent_launch = Some(AgentLaunchEvidence {
@@ -816,6 +872,10 @@ impl HostExecutor {
     }
 
     fn terminate_agent_owned(&mut self) -> HostControlResult<()> {
+        // Close the parent command pipe; never leave an orphaned ingress.
+        // Join the one-off diagnostic relay only after the Job-owned child
+        // has exited so the reader has reached pipe EOF.
+        let owned_pipe = self.native_child_pipe.take();
         let Some(mut child) = self.agent_child.take() else {
             self.agent_started_at = None;
             self.agent_launch = None;
@@ -826,10 +886,50 @@ impl HostExecutor {
             child.kill()?;
             child.wait()?;
         }
+        if let Some(pipe) = owned_pipe {
+            drop(pipe.input);
+            let _ = pipe.stderr_reader.join();
+        }
         self.agent_started_at = None;
         self.agent_launch = None;
         self.running_profile = None;
         Ok(())
+    }
+
+    /// Transport-only receipt. The response is explicitly LEDGER_ONLY:
+    /// it does not contain the independently frozen REST/WS position and OCO
+    /// evidence and therefore can NEVER authorize select-account by itself.
+    #[allow(dead_code)]
+    fn request_native_drain(&mut self, expected_uid: &str) -> HostControlResult<Value> {
+        if !expected_uid.bytes().all(|b| b.is_ascii_hexdigit()) || expected_uid.len() != 64 {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        if self.desired_store.is_pending()? {
+            return Err(HostControlError::ProfileTransitionPending);
+        }
+        let pipe = self.native_child_pipe.as_mut().ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let mut random = [0u8; 32];
+        getrandom::fill(&mut random).map_err(|e| HostControlError::Random(e.to_string()))?;
+        let request_id = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let request = NativeChildRequest {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+            request_id: request_id.clone(),
+            operation: NativeChildOperation::Drain,
+            expected_uid_fingerprint: expected_uid.to_owned(),
+        };
+        let bytes = serde_json::to_vec(&request)?;
+        if bytes.len() + 1 > NATIVE_CHILD_CONTROL_MAX_BYTES {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        pipe.input.write_all(&bytes)?;
+        pipe.input.write_all(b"\n")?;
+        pipe.input.flush()?;
+        let reply = pipe.replies.recv_timeout(Duration::from_secs(20))
+            .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
+        if !reply.valid_for(&request_id) || reply.disposition != "DRAINED_LEDGER_ONLY" {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        Ok(reply.ledger_only.unwrap_or(Value::Null))
     }
 
     fn persist_desired(&mut self, state: AgentDesiredState) -> HostControlResult<()> {

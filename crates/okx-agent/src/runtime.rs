@@ -1,12 +1,16 @@
-use std::time::Duration;
+use std::{io::{BufRead, Read}, sync::Arc, time::Duration};
 
 use chrono::Utc;
 
 use okx_github::GitHubBackoff;
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator, PublicWsHandle};
 use serde::Serialize;
+use okx_protocol::{
+    NativeChildReply, NativeChildRequest, NativeChildOperation,
+    NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
+};
 use tokio::{
-    sync::watch,
+    sync::{mpsc, watch},
     time::{MissedTickBehavior, interval},
 };
 
@@ -68,8 +72,9 @@ pub struct MailboxRuntimeContext<'a> {
     pub market: &'a MarketBootstrapper,
     pub account: Option<&'a AccountBootstrapper>,
     pub private_ws: Option<&'a PrivateWsHandle>,
-    pub execution: Option<&'a ExecutionRuntime>,
+    pub execution: Option<&'a Arc<ExecutionRuntime>>,
     pub cloudflare: Option<&'a CloudflareTransportConfig>,
+    pub native_child_control_stdio: bool,
 }
 
 pub async fn run_mailbox_until_shutdown(
@@ -88,9 +93,11 @@ pub async fn run_mailbox_until_shutdown(
         market,
         account,
         private_ws,
-        execution,
+        execution: execution_arc,
         cloudflare,
+        native_child_control_stdio,
     } = context;
+    let execution = execution_arc.map(Arc::as_ref);
     if !(1..=60).contains(&poll_seconds) {
         return Err(AgentError::InvalidPollInterval);
     }
@@ -162,11 +169,76 @@ pub async fn run_mailbox_until_shutdown(
         Some(mailbox_issue),
     )?;
 
+    // Exactly one inbound local line per process; no socket, no daemon and
+    // no general shell RPC. A reader thread is blocked in inherited stdin,
+    // then forwards one bounded typed command to the existing Tokio owner.
+    let (native_tx, mut native_rx) = mpsc::unbounded_channel::<NativeChildRequest>();
+    if native_child_control_stdio {
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let mut bounded = stdin.lock().take((NATIVE_CHILD_CONTROL_MAX_BYTES + 1) as u64);
+            let mut frame = Vec::new();
+            if bounded.read_until(b'\n', &mut frame).is_ok()
+                && frame.len() <= NATIVE_CHILD_CONTROL_MAX_BYTES
+                && frame.last() == Some(&b'\n')
+                && let Ok(request) = serde_json::from_slice::<NativeChildRequest>(&frame)
+                && request.valid()
+            {
+                let _ = native_tx.send(request);
+            }
+        });
+    }
+    let mut native_request_consumed = false;
+
     let mut ticker = interval(Duration::from_secs(poll_seconds));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
+            Some(request) = native_rx.recv(), if native_child_control_stdio && !native_request_consumed => {
+                native_request_consumed = true;
+                // Spawn only a one-off internal task. A Cloudflare POST future
+                // may be in flight in the main select loop; awaiting the drain
+                // here would stop polling that future and deadlock its RW guard.
+                // No second mutation engine, watcher or persistent scheduler.
+                if let Some(owner) = execution_arc {
+                    let owner = Arc::clone(owner);
+                    tokio::spawn(async move {
+                        let response = match request.operation {
+                            NativeChildOperation::Drain => {
+                                match owner.drain_mutation_ingress(&request.expected_uid_fingerprint).await {
+                                    Ok(ledger) => NativeChildReply {
+                                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                                        request_id: request.request_id,
+                                        disposition: "DRAINED_LEDGER_ONLY".to_owned(),
+                                        ledger_only: serde_json::to_value(ledger).ok(),
+                                        error: None,
+                                    },
+                                    Err(error) => NativeChildReply {
+                                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                                        request_id: request.request_id,
+                                        disposition: "BLOCKED".to_owned(),
+                                        ledger_only: None,
+                                        error: Some(error.to_string()),
+                                    },
+                                }
+                            }
+                        };
+                        if let Ok(serialized) = serde_json::to_string(&response) {
+                            eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{serialized}");
+                        }
+                    });
+                } else {
+                    let reply = NativeChildReply {
+                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id,
+                        disposition: "BLOCKED".to_owned(),
+                        ledger_only: None,
+                        error: Some("native executor unavailable".to_owned()),
+                    };
+                    eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
+                }
+            }
             result = tokio::signal::ctrl_c() => {
                 result?;
                 break;
