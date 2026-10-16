@@ -134,7 +134,7 @@ impl ProfileTransitionStore {
     }
 
     #[cfg(test)]
-    fn at(path: PathBuf) -> Self {
+    pub(crate) fn at(path: PathBuf) -> Self {
         Self { path }
     }
 
