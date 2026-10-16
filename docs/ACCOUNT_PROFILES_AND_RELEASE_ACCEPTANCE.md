@@ -107,6 +107,12 @@ repeatable connected samples. Financial source was DEGRADED due
 bounded old history even though current private exposure is flat;
 the compact packet never re-labels it FRESH.
 
+## Stage 5C: GitHub Environment as sole credential source
+
+Named read-only account `account_id` deterministically maps to GitHub Environment `okx-<account_id>-global-observer`. The existing CONTROL catalog derives `observer_github_environment` for display; no second configurable source mapping or secret is stored. GitHub Environment holds `OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`, plus variables `OKX_ACCOUNT_ID`, `OKX_REGION=global`, `OKX_DEMO=true|false`, `OKX_ACCESS_ROLE=observer`. The new `okx-named-account-readonly-attestation.yml` workflow (manual workflow_dispatch) validates strict account_id/UID syntax, binds the exact protected Environment and authenticates with OKX using its secrets, requires the expected UID fingerprint, ReadOnly and neither Trade nor Withdraw. Prints only a fixed PASS marker. Existing Succession acceptance and local Windows keyring remain unchanged.
+
+**This is independent GitHub-side credential identity proof, NOT Windows provisioning.** A PASS on GitHub cannot attest the locally installed key, cannot grant account selection or trading, and does not modify `identity=UNVERIFIED`, CONTROL lifecycle, v14 ledger or STOP. The following gate must use an accepted end-to-end encrypted delivery from the GitHub Environment into the existing Windows keyring and an independent native UID proof. Never send secrets through issue comments, MCP, logs or unencrypted artifacts.
+
 ## Stage 5C: metadata-only catalog without additional control authority
 
 Named-account onboarding begins with one explicit nonsecret, bounded native

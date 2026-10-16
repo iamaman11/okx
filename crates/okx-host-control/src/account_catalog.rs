@@ -65,6 +65,8 @@ impl AccountCatalogFile {
                 "label": e.label,
                 "environment": e.environment,
                 "expected_uid_fingerprint": e.expected_uid_fingerprint,
+                // A deterministic GitHub Environment name, not a second secret owner.
+                "observer_github_environment": format!("okx-{}-global-observer", e.account_id),
                 "identity": "UNVERIFIED",
                 "credentials": "NOT_ATTESTED",
                 "selectable": false,
@@ -222,6 +224,10 @@ mod tests {
         let status = store.status().unwrap();
         assert_eq!(status["entries_total"], 1);
         assert_eq!(status["entries"][0]["identity"], "UNVERIFIED");
+        assert_eq!(
+            status["entries"][0]["observer_github_environment"],
+            "okx-sub-a-global-observer"
+        );
         assert_eq!(status["entries"][0]["selectable"], false);
         assert_eq!(status["entries"][0]["trading_authorized"], false);
         assert!(matches!(
