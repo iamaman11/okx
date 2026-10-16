@@ -44,7 +44,35 @@ pub struct FrozenSourceWitness {
     pub expires_at_ms: u64,
 }
 
+/// Runtime facts that the existing CONTROL must obtain independently from
+/// its JOB-owned child and authenticated agent readback. Never copy these
+/// fields from a caller-provided witness without checking the native owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundSourceIdentity {
+    pub source: AgentProfile,
+    pub source_pid: u32,
+    pub launch_lease_sha256: String,
+    pub account_uid_fingerprint: String,
+    pub private_ws_generation: u64,
+    pub ledger_manifest_sha256: String,
+    pub source_tree: String,
+    pub agent_sha256: String,
+    pub controller_sha256: String,
+}
+
 impl FrozenSourceWitness {
+    fn matches_bound_source(&self, bound: &BoundSourceIdentity) -> bool {
+        self.source == bound.source
+            && self.source_pid == bound.source_pid
+            && self.launch_lease_sha256 == bound.launch_lease_sha256
+            && self.account_uid_fingerprint == bound.account_uid_fingerprint
+            && self.private_ws_generation == bound.private_ws_generation
+            && self.ledger_manifest_sha256 == bound.ledger_manifest_sha256
+            && self.source_tree == bound.source_tree
+            && self.agent_sha256 == bound.agent_sha256
+            && self.controller_sha256 == bound.controller_sha256
+    }
+
     fn validate(&self) -> HostControlResult<()> {
         if self.sequence == 0
             || self.source == self.destination
@@ -194,12 +222,12 @@ impl ProfileTransitionStore {
 
     /// Durable single-use consumption. A second use, including after process
     /// restart or an uncertain response, is ALWAYS denied.
-    pub fn consume_once(&self, expected_lease_sha256: &str, now_ms: u64) -> HostControlResult<()> {
+    pub fn consume_once(&self, bound: &BoundSourceIdentity, now_ms: u64) -> HostControlResult<()> {
         let Some(mut record) = self.load()? else {
             return Err(HostControlError::ProfileTransitionInvalid);
         };
         if record.phase != TransitionPhase::SourceFrozen
-            || record.witness.launch_lease_sha256 != expected_lease_sha256
+            || !record.witness.matches_bound_source(bound)
             || now_ms < record.witness.issued_at_ms
             || now_ms > record.witness.expires_at_ms
         {
@@ -268,6 +296,20 @@ mod tests {
         }
     }
 
+    fn bound(ticket: &FrozenSourceWitness) -> BoundSourceIdentity {
+        BoundSourceIdentity {
+            source: ticket.source,
+            source_pid: ticket.source_pid,
+            launch_lease_sha256: ticket.launch_lease_sha256.clone(),
+            account_uid_fingerprint: ticket.account_uid_fingerprint.clone(),
+            private_ws_generation: ticket.private_ws_generation,
+            ledger_manifest_sha256: ticket.ledger_manifest_sha256.clone(),
+            source_tree: ticket.source_tree.clone(),
+            agent_sha256: ticket.agent_sha256.clone(),
+            controller_sha256: ticket.controller_sha256.clone(),
+        }
+    }
+
     #[test]
     fn frozen_ticket_persists_one_use_and_replay_denial_across_restart() {
         let path = temp("single");
@@ -281,20 +323,68 @@ mod tests {
             store.stage_frozen(ticket.clone(), 11_001),
             Err(HostControlError::ProfileTransitionPending)
         ));
+        let owner = bound(&ticket);
+        let mut wrong = owner.clone();
+        wrong.launch_lease_sha256 = "0".repeat(64);
         assert!(matches!(
-            store.consume_once(&"0".repeat(64), 11_002),
+            store.consume_once(&wrong, 11_002),
             Err(HostControlError::ProfileTransitionReplay)
         ));
-        store
-            .consume_once(&ticket.launch_lease_sha256, 12_000)
-            .unwrap();
+        for mismatch in [
+            {
+                let mut changed = owner.clone();
+                changed.source = AgentProfile::Production;
+                changed
+            },
+            {
+                let mut changed = owner.clone();
+                changed.source_pid += 1;
+                changed
+            },
+            {
+                let mut changed = owner.clone();
+                changed.account_uid_fingerprint = "0".repeat(64);
+                changed
+            },
+            {
+                let mut changed = owner.clone();
+                changed.private_ws_generation += 1;
+                changed
+            },
+            {
+                let mut changed = owner.clone();
+                changed.ledger_manifest_sha256 = "0".repeat(64);
+                changed
+            },
+            {
+                let mut changed = owner.clone();
+                changed.source_tree = "0".repeat(40);
+                changed
+            },
+            {
+                let mut changed = owner.clone();
+                changed.agent_sha256 = "0".repeat(64);
+                changed
+            },
+            {
+                let mut changed = owner.clone();
+                changed.controller_sha256 = "0".repeat(64);
+                changed
+            },
+        ] {
+            assert!(matches!(
+                store.consume_once(&mismatch, 11_002),
+                Err(HostControlError::ProfileTransitionReplay)
+            ));
+        }
+        store.consume_once(&owner, 12_000).unwrap();
 
         // The next controller process sees the consumed proof, not a fresh
         // opportunity to re-use or implicitly swap profiles.
         let reopened = ProfileTransitionStore::at(path.clone());
         assert!(reopened.is_pending().unwrap());
         assert!(matches!(
-            reopened.consume_once(&ticket.launch_lease_sha256, 12_001),
+            reopened.consume_once(&owner, 12_001),
             Err(HostControlError::ProfileTransitionReplay)
         ));
         assert_eq!(
