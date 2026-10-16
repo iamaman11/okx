@@ -262,9 +262,10 @@ impl DesiredStateStore {
         Ok(state.read_only)
     }
 
-    /// A ledgerless drain is possible only for a previously verified ReadOnly
-    /// source and the exact Job-owned child under the durable pre-drain hold.
-    pub fn permits_ledgerless_read_only_source(
+    /// Nontrading source exit is permitted only for a previously verified
+    /// ReadOnly profile and the exact Job-owned child under the durable hold.
+    /// Unverified legacy history remains immutable and never permits trading.
+    pub fn permits_verified_read_only_source(
         &self,
         profile: AgentProfile,
         pid: u32,
@@ -1081,12 +1082,12 @@ mod single_owner_transition_tests {
         cold.begin_source_drain_hold(AgentProfile::DemoAcceptance, AgentProfile::Production, 555)
             .unwrap();
         assert!(
-            cold.permits_ledgerless_read_only_source(AgentProfile::DemoAcceptance, 555)
+            cold.permits_verified_read_only_source(AgentProfile::DemoAcceptance, 555)
                 .unwrap()
         );
         assert!(
             !cold
-                .permits_ledgerless_read_only_source(AgentProfile::DemoAcceptance, 556)
+                .permits_verified_read_only_source(AgentProfile::DemoAcceptance, 556)
                 .unwrap()
         );
         let mut ledgerless = witness();

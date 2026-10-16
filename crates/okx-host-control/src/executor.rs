@@ -1206,6 +1206,26 @@ impl HostExecutor {
             .and_then(|value| value.get("source_ledger_manifest_sha256"))
             .and_then(Value::as_str)
             .unwrap_or("");
+        let ledger_format = reply
+            .ledger_only
+            .as_ref()
+            .and_then(|value| value.get("source_ledger_format"))
+            .and_then(Value::as_str);
+        // A historical v1 journal is never declared complete. Only a native
+        // source already persisted as strictly ReadOnly may leave it untouched.
+        if let Some(format) = ledger_format {
+            if format != okx_execution::EXECUTION_LEDGER_SCHEMA_V14 {
+                let pid = self.agent_child.as_ref().map(Child::id)
+                    .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+                if format != okx_execution::EXECUTION_LEDGER_SCHEMA_V1
+                    || !self.desired_store.permits_verified_read_only_source(
+                        self.desired_profile, pid,
+                    )?
+                {
+                    return Err(HostControlError::ProfileHandoffProofRequired);
+                }
+            }
+        }
         if ledger_sha.is_empty() {
             let pid = self
                 .agent_child
@@ -1215,7 +1235,7 @@ impl HostExecutor {
             if !source.ledger_manifest_sha256.is_empty()
                 || !self
                     .desired_store
-                    .permits_ledgerless_read_only_source(self.desired_profile, pid)?
+                    .permits_verified_read_only_source(self.desired_profile, pid)?
             {
                 return Err(HostControlError::ProfileHandoffProofRequired);
             }
