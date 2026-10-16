@@ -1586,7 +1586,10 @@ mod tests {
             .stage_frozen(ticket, 11_000)
             .expect("atomic source fence");
         let disposition = host.reconcile_desired().expect("bounded blocked readback");
-        assert_eq!(disposition["disposition"], "BLOCKED_UNFINALIZED_PROFILE_TRANSITION");
+        assert_eq!(
+            disposition["disposition"],
+            "BLOCKED_UNFINALIZED_PROFILE_TRANSITION"
+        );
         assert_eq!(host.desired_profile, AgentProfile::DemoAcceptance);
         assert_eq!(host.desired_agent, AgentDesired::Running);
         assert!(matches!(
