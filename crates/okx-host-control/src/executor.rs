@@ -17,9 +17,9 @@ use zeroize::Zeroize;
 
 use crate::{
     HostControlError, HostControlResult,
+    account_catalog::AccountCatalogStore,
     auth::load_native_github_token,
     autostart,
-    account_catalog::AccountCatalogStore,
     background_process::hidden_command,
     controller_update,
     desired::{
