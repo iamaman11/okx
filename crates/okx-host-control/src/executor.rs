@@ -2220,7 +2220,7 @@ mod tests {
 
     #[test]
     fn production_agent_launch_uses_agent_owned_data_poll_default() {
-        let args = agent_args(AgentProfile::Production);
+        let args = agent_args_with_mode(AgentProfile::Production, false);
         assert!(!args.contains(&"--poll-seconds"));
         assert!(args.contains(&"--cloudflare-ws-url"));
         assert!(args.contains(&"--mailbox-issue"));
