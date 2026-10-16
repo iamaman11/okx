@@ -92,7 +92,7 @@ fn profile_handoff_readiness_packet(
         blockers.push("EXECUTION_IDENTITY_MISMATCH");
     }
     // A future single-use freeze must never be inferred from a missing UID,
-    // an old REST as-of or an unobserved private WS fence window.
+    // stale REST receipt or an unobserved private WS fence window.
     if get("/account_ledger/authority/account_uid_fingerprint")
         .as_str()
         .is_none_or(|uid| uid.is_empty())
@@ -108,12 +108,15 @@ fn profile_handoff_readiness_packet(
     if get("/coherence/events_during_history_read") != json!(0) {
         blockers.push("PRIVATE_WS_FENCE_NOT_QUIET");
     }
-    let source_asof_ms = get("/account_ledger/current_account_as_of_ms")
+    // Venue balance/position uTime is LAST CHANGE, not transport freshness:
+    // a quiet account can be unchanged for days. Measure actual REST receipt.
+    let receipt_ms = get("/coherence/account_snapshot_source_received_at")
         .as_str()
-        .and_then(|ms| ms.parse::<u64>().ok());
-    let source_age_ms = source_asof_ms.and_then(|ms| super::utc_now_ms().checked_sub(ms));
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .and_then(|at| u64::try_from(at.timestamp_millis()).ok());
+    let source_age_ms = receipt_ms.and_then(|ms| super::utc_now_ms().checked_sub(ms));
     if !source_age_ms.is_some_and(|age| age <= 10_000) {
-        blockers.push("CURRENT_ACCOUNT_ASOF_TOO_OLD_OR_UNKNOWN");
+        blockers.push("CURRENT_SNAPSHOT_RECEIPT_TOO_OLD_OR_UNKNOWN");
     }
     match local {
         None => blockers.push("NATIVE_EXECUTOR_LEDGER_UNAVAILABLE"),
@@ -2523,6 +2526,7 @@ mod tests {
             },
             "coherence": {
                 "coherent":true,
+                "account_snapshot_source_received_at": chrono::Utc::now().to_rfc3339(),
                 "private_ws_generation":7,
                 "events_during_history_read":0
             },
@@ -2610,8 +2614,17 @@ mod tests {
                 .any(|b| b == "PRIVATE_WS_GENERATION_NOT_PROVEN")
         );
         full["coherence"]["private_ws_generation"] = json!(7);
-        full["account_ledger"]["current_account_as_of_ms"] =
-            json!((utc_now_ms() - 60_000).to_string());
+        // The venue uTime may be ancient on an idle but freshly read account.
+        full["account_ledger"]["current_account_as_of_ms"] = json!("1700000000000");
+        let quiet = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(quiet["status"], "SOURCE_QUIESCENT_NOT_AUTHORIZED");
+        full["coherence"]["account_snapshot_source_received_at"] =
+            json!((chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339());
         let old = profile_handoff_readiness_packet(
             &full,
             &DataQuality::Fresh,
@@ -2623,9 +2636,10 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|b| b == "CURRENT_ACCOUNT_ASOF_TOO_OLD_OR_UNKNOWN")
+                .any(|b| b == "CURRENT_SNAPSHOT_RECEIPT_TOO_OLD_OR_UNKNOWN")
         );
-        full["account_ledger"]["current_account_as_of_ms"] = json!(utc_now_ms().to_string());
+        full["coherence"]["account_snapshot_source_received_at"] =
+            json!(chrono::Utc::now().to_rfc3339());
         full["coherence"]["events_during_history_read"] = json!(null);
         let no_window = profile_handoff_readiness_packet(
             &full,
