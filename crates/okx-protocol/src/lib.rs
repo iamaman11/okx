@@ -46,6 +46,7 @@ pub struct NativeChildReply {
     pub request_id: String,
     pub disposition: String,
     pub ledger_only: Option<serde_json::Value>,
+    pub source_candidate: Option<serde_json::Value>,
     pub error: Option<String>,
 }
 
@@ -53,10 +54,21 @@ impl NativeChildReply {
     pub fn valid_for(&self, request_id: &str) -> bool {
         self.schema == NATIVE_CHILD_CONTROL_SCHEMA_V1
             && self.request_id == request_id
-            && matches!(self.disposition.as_str(), "DRAINED_LEDGER_ONLY" | "BLOCKED")
+            && matches!(
+                self.disposition.as_str(),
+                "DRAINED_SOURCE_CANDIDATE" | "BLOCKED"
+            )
             && match self.disposition.as_str() {
-                "DRAINED_LEDGER_ONLY" => self.ledger_only.is_some() && self.error.is_none(),
-                _ => self.ledger_only.is_none() && self.error.is_some(),
+                "DRAINED_SOURCE_CANDIDATE" => {
+                    self.ledger_only.is_some()
+                        && self.source_candidate.is_some()
+                        && self.error.is_none()
+                }
+                _ => {
+                    self.ledger_only.is_none()
+                        && self.source_candidate.is_none()
+                        && self.error.is_some()
+                }
             }
     }
 }
