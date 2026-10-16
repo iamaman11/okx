@@ -915,7 +915,9 @@ impl ExecutionRuntime {
         {
             return Ok(None);
         }
-        let result = executor.submit_prepared(intent_id, timing, observed_at_ms).await;
+        let result = executor
+            .submit_prepared(intent_id, timing, observed_at_ms)
+            .await;
         executor.disable_mutations();
         Ok(Some(result))
     }
@@ -1529,7 +1531,10 @@ mod tests {
             .await
             .expect("native gate is local");
         assert!(result.is_none());
-        assert_eq!(runtime.mutation_authority().await, MutationAuthority::Disabled);
+        assert_eq!(
+            runtime.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
         assert!(!runtime.live_trading_enabled().await);
 
         // Demo may never reuse a production pilot permit or its UID.
@@ -1542,8 +1547,8 @@ mod tests {
             RateBudget::new(),
         )
         .expect("same engine, disjoint Demo journal");
-        assert!(demo
-            .submit_prepared_production_authorized(
+        assert!(
+            demo.submit_prepared_production_authorized(
                 &evidence,
                 &permit,
                 "missing_production_intent_0123456789",
@@ -1552,7 +1557,8 @@ mod tests {
             )
             .await
             .expect("Demo rejected without POST")
-            .is_none());
+            .is_none()
+        );
         assert_eq!(demo.mutation_authority().await, MutationAuthority::Disabled);
         let _ = fs::remove_dir_all(root);
     }
