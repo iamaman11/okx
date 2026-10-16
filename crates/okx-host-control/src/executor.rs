@@ -23,7 +23,7 @@ use crate::{
     controller_update,
     desired::{
         AgentDesired, AgentDesiredState, AgentProfile, BoundSourceIdentity, DesiredStateStore,
-        FrozenSourceWitness,
+        FrozenSourceWitness, VerifiedReadOnlyDestination,
     },
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
@@ -591,6 +591,135 @@ impl HostExecutor {
             "mailbox_issue": mailbox_issue(profile),
             "runtime_root": runtime_dir(profile),
             "cloudflare_attached": true
+        }))
+    }
+
+    /// Single owner sequence, never a production trading grant.
+    /// Every uncertain condition blocks new risk. The target is started
+    /// ONLY after native drain, consumed exact witness and an empty Job.
+    fn select_read_only_account(
+        &mut self,
+        target_profile: &str,
+        expected_source_uid: &str,
+        expected_target_uid: &str,
+    ) -> HostControlResult<Value> {
+        let target = match target_profile {
+            "production" => AgentProfile::Production,
+            "demo_acceptance" => AgentProfile::DemoAcceptance,
+            _ => return Err(HostControlError::ProfileHandoffProofRequired),
+        };
+        if self.desired_store.is_pending()? || !self.agent_is_running()? || target == self.desired_profile {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        if expected_source_uid == expected_target_uid
+            || expected_source_uid.len() != 64
+            || expected_target_uid.len() != 64
+        {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        let (ticket, bound) = self.bound_native_source_candidate(expected_source_uid, target)?;
+        let source_pid = bound.source_pid;
+        let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
+        self.desired_store.stage_frozen(ticket, now)?;
+        self.desired_store.consume_once(&bound, now)?;
+        // This native termination is safe ONLY after the single executor's
+        // bounded drain has finished and all current REST/WS/OCO gates passed.
+        self.terminate_agent_owned()?;
+        if !self.agent_job.is_empty()? {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        self.desired_store.mark_source_exited(
+            &bound, source_pid,
+            u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default(),
+        )?;
+
+        let transition_result = (|| -> HostControlResult<Value> {
+            let target_pid = self.start_transition_read_only_process(target)?;
+            // Independent target inquiry: target UID must differ from the
+            // frozen source, with strictly ReadOnly OKX observer permissions.
+            let evidence = self.verify_native_read_only_target(expected_target_uid)?;
+            if !self.agent_is_running()?
+                || self.agent_child.as_ref().map(Child::id) != Some(target_pid)
+                || self.running_profile != Some(target)
+                || self.agent_job.is_empty()?
+            {
+                return Err(HostControlError::ProfileHandoffProofRequired);
+            }
+            let state = self.status()?;
+            if state["release_parity"]["state"] != "MATCHED"
+                || state["installed_agent"]["state"] != "VERIFIED"
+                || state["agent_pid"] != target_pid
+            {
+                return Err(HostControlError::ProfileHandoffProofRequired);
+            }
+            let verified = VerifiedReadOnlyDestination {
+                profile: target,
+                pid: target_pid,
+                account_uid_fingerprint: evidence.account_uid_fingerprint,
+                private_ws_generation: evidence.private_ws_generation,
+                account_snapshot_received_ms: evidence.snapshot_received_ms,
+                agent_sha256: bound.agent_sha256.clone(),
+                controller_sha256: bound.controller_sha256.clone(),
+                has_trade_authority: !evidence.executor_mutations_disabled
+                    || !evidence.read_only_credentials,
+            };
+            self.desired_store.complete_verified_read_only(
+                &bound, &verified,
+                u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default(),
+            )?;
+            self.desired_agent = AgentDesired::Running;
+            self.desired_profile = target;
+            self.desired_error = None;
+            self.restart_attempt = 0;
+            self.next_restart_at = None;
+            Ok(json!({
+                "disposition": "SWITCHED_READ_ONLY",
+                "profile": target,
+                "pid": target_pid,
+                "account_uid_fingerprint": expected_target_uid,
+                "private_ws_generation": verified.private_ws_generation,
+                "live_trading": "DISABLED",
+                "ledger_migrated": false,
+                "source_pid_exited": source_pid,
+                "durable_owner": "desired.json"
+            }))
+        })();
+
+        if transition_result.is_err() {
+            // Best-effort fail-closed recovery AFTER the source is proved gone.
+            // If any OS/durable observation is uncertain the journal remains
+            // BLOCKED and an explicit recovery is required; never auto trade.
+            if self.terminate_agent_owned().is_ok()
+                && self.agent_job.is_empty().unwrap_or(false)
+                && self.desired_store
+                    .recover_stopped_after_empty_job(&bound, source_pid)
+                    .is_ok()
+            {
+                self.desired_profile = bound.source;
+                self.desired_agent = AgentDesired::Stopped;
+                self.next_restart_at = None;
+            }
+        }
+        transition_result
+    }
+
+    /// Explicit recovery of a controller crash while transitioning. The
+    /// original Job's KILL_ON_JOB_CLOSE guarantee applies; new native CONTROL
+    /// must additionally see no child/active process in its exclusive Job.
+    fn recover_read_only_selection(&mut self) -> HostControlResult<Value> {
+        if self.agent_is_running()? || !self.agent_job.is_empty()? {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        let restored = self.desired_store.recover_stopped_explicit()?;
+        self.desired_agent = restored.agent;
+        self.desired_profile = restored.profile;
+        self.next_restart_at = None;
+        self.restart_attempt = 0;
+        Ok(json!({
+            "disposition": "RECOVERED_STOPPED",
+            "profile": restored.profile,
+            "live_trading": "DISABLED",
+            "requires_fresh_source_revalidation": true
         }))
     }
 
