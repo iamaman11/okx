@@ -1797,8 +1797,9 @@ impl AccountCatalogEntry {
             || id.is_empty()
             || id.len() > 32
             || !id[0].is_ascii_lowercase()
-            || !id.iter().all(|&byte| byte.is_ascii_lowercase()
-                || byte.is_ascii_digit() || byte == b'-')
+            || !id
+                .iter()
+                .all(|&byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
             || id.last() == Some(&b'-')
             || self.account_id == "production"
             || self.account_id == "demo_acceptance"
@@ -1810,7 +1811,8 @@ impl AccountCatalogEntry {
             return Err(ProtocolError::InvalidRequestId);
         }
         validate_sha256(&self.expected_uid_fingerprint)?;
-        if self.expected_uid_fingerprint
+        if self
+            .expected_uid_fingerprint
             .bytes()
             .any(|b| !(b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
         {
@@ -1827,7 +1829,9 @@ pub enum HostControlOperation {
     /// Read-only metadata registry in the existing CONTROL owner.
     AccountCatalog,
     /// Metadata registration ONLY, never new credentials or account selection.
-    RegisterReadOnlyAccount { entry: AccountCatalogEntry },
+    RegisterReadOnlyAccount {
+        entry: AccountCatalogEntry,
+    },
     Sync,
     BuildAgent,
     DeployAgent {
@@ -3237,7 +3241,14 @@ mod tests {
             serde_json::from_str::<HostControlOperation>(&json).unwrap(),
             register
         );
-        for wrong_id in ["", "sub_1", "../account", "Demo", "production", "demo_acceptance"] {
+        for wrong_id in [
+            "",
+            "sub_1",
+            "../account",
+            "Demo",
+            "production",
+            "demo_acceptance",
+        ] {
             let mut wrong = entry.clone();
             wrong.account_id = wrong_id.to_owned();
             assert!(wrong.validate().is_err(), "{wrong_id}");
@@ -3250,7 +3261,8 @@ mod tests {
         assert!(wrong.validate().is_err());
         let smuggled = format!(
             "{{\"schema\":\"{}\",\"account_id\":\"sub-1\",\"label\":\"ok\",\"environment\":\"production\",\"expected_uid_fingerprint\":\"{}\",\"api_key\":\"secret\"}}",
-            ACCOUNT_CATALOG_ENTRY_SCHEMA_V1, "a".repeat(64)
+            ACCOUNT_CATALOG_ENTRY_SCHEMA_V1,
+            "a".repeat(64)
         );
         assert!(serde_json::from_str::<AccountCatalogEntry>(&smuggled).is_err());
         assert!(HostControlOperation::AccountCatalog.validate().is_ok());
