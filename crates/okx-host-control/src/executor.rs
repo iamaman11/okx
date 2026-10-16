@@ -951,9 +951,12 @@ impl HostExecutor {
         pipe.input.write_all(&bytes)?;
         pipe.input.write_all(b"\n")?;
         pipe.input.flush()?;
+        // The source owner has a 15s drain deadline and an additional 8s
+        // authenticated REST/WS/OCO observation budget. The parent timeout
+        // must cover BOTH stages; expiry is NEVER treated as a safe drain.
         let reply = pipe
             .replies
-            .recv_timeout(Duration::from_secs(20))
+            .recv_timeout(Duration::from_secs(27))
             .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
         if !reply.valid_for(&request_id) || reply.disposition != "DRAINED_SOURCE_CANDIDATE" {
             return Err(HostControlError::ProfileHandoffProofRequired);
