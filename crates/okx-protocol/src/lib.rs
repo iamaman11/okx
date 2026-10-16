@@ -4015,6 +4015,41 @@ mod native_drain_source_tests {
     }
 
     #[test]
+    fn readonly_target_requires_fresh_exact_uid_disabled_trade_and_zero_oco() {
+        let uid = "c".repeat(64);
+        let original = NativeReadOnlyTargetProof {
+            schema: "okx.native-readonly-target/v1".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            snapshot_received_ms: 20_000,
+            private_ws_generation: 3,
+            positions: 0,
+            orders: 0,
+            native_oco: 0,
+            native_oco_complete: true,
+            read_only_credentials: true,
+            executor_mutations_disabled: true,
+        };
+        assert!(original.valid_for(&uid, 20_100));
+        assert!(!original.valid_for(&"a".repeat(64), 20_100));
+        assert!(!original.valid_for(&uid, 30_001));
+        let mut changed = original.clone();
+        changed.native_oco = 1;
+        assert!(!changed.valid_for(&uid, 20_100));
+        changed = original.clone();
+        changed.native_oco_complete = false;
+        assert!(!changed.valid_for(&uid, 20_100));
+        changed = original.clone();
+        changed.read_only_credentials = false;
+        assert!(!changed.valid_for(&uid, 20_100));
+        changed = original.clone();
+        changed.executor_mutations_disabled = false;
+        assert!(!changed.valid_for(&uid, 20_100));
+        changed = original.clone();
+        changed.private_ws_generation = 0;
+        assert!(!changed.valid_for(&uid, 20_100));
+    }
+
+    #[test]
     fn protocol_rejects_malformed_or_unsolicited_drain_receipts() {
         let id = "f".repeat(64);
         let reply = NativeChildReply {
@@ -4023,6 +4058,7 @@ mod native_drain_source_tests {
             disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
             ledger_only: Some(serde_json::json!({"source_ledger_manifest_sha256": "b".repeat(64)})),
             source_candidate: Some(source()),
+            target_read_only: None,
             error: None,
         };
         assert!(reply.valid_for(&id));
