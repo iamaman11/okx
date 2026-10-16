@@ -662,6 +662,11 @@ pub(super) async fn dispatch(
                 }
             }
 
+            // Freeze the observation quality BEFORE native ledger comparison.
+            // It includes private WS coherence, pending OCO completeness and
+            // bounded account histories; archive-only unmatched intents may
+            // subsequently degrade the overall financial summary.
+            let current_source_quality = quality;
             let reconciliation_started = std::time::Instant::now();
             let (reconciliation, managed_execution_intents) = match context.execution {
                 Some(execution) => match execution
@@ -828,7 +833,7 @@ pub(super) async fn dispatch(
                 profile_handoff_readiness_packet(
                     &full,
                     &quality,
-                    &assembled.quality,
+                    &current_source_quality,
                     local_handoff.as_ref(),
                 )
             } else if compact {
