@@ -426,7 +426,23 @@ fn is_lower_hex(text: &str, expected_length: usize) -> bool {
 enum TransitionPhase {
     SourceFrozen,
     Consumed,
+    SourceExited,
 }
+
+/// Physical destination facts MUST be independently observed by the existing
+/// Job-owning CONTROL after source exit, never obtained from the switch caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedReadOnlyDestination {
+    pub profile: AgentProfile,
+    pub pid: u32,
+    pub account_uid_fingerprint: String,
+    pub private_ws_generation: u64,
+    pub account_snapshot_received_ms: u64,
+    pub agent_sha256: String,
+    pub controller_sha256: String,
+    pub has_trade_authority: bool,
+}
+
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -435,6 +451,7 @@ struct TransitionRecord {
     phase: TransitionPhase,
     witness: FrozenSourceWitness,
     consumed_at_ms: Option<u64>,
+    source_exited_at_ms: Option<u64>,
     checksum_sha256: String,
 }
 
@@ -445,6 +462,7 @@ impl TransitionRecord {
             &self.phase,
             &self.witness,
             &self.consumed_at_ms,
+            &self.source_exited_at_ms,
         ))?;
         Ok(format!("{:x}", Sha256::digest(payload)))
     }
@@ -457,10 +475,24 @@ impl TransitionRecord {
     fn validate(&self) -> HostControlResult<()> {
         self.witness.validate()?;
         let phase_coherent = match self.phase {
-            TransitionPhase::SourceFrozen => self.consumed_at_ms.is_none(),
-            TransitionPhase::Consumed => self.consumed_at_ms.is_some_and(|now| {
-                now >= self.witness.issued_at_ms && now <= self.witness.expires_at_ms
-            }),
+            TransitionPhase::SourceFrozen => {
+                self.consumed_at_ms.is_none() && self.source_exited_at_ms.is_none()
+            }
+            TransitionPhase::Consumed => {
+                self.source_exited_at_ms.is_none()
+                    && self.consumed_at_ms.is_some_and(|now| {
+                        now >= self.witness.issued_at_ms && now <= self.witness.expires_at_ms
+                    })
+            }
+            TransitionPhase::SourceExited => {
+                self.consumed_at_ms.is_some_and(|consumed| {
+                    consumed >= self.witness.issued_at_ms
+                        && consumed <= self.witness.expires_at_ms
+                        && self.source_exited_at_ms.is_some_and(|exited| {
+                            exited >= consumed && exited <= self.witness.expires_at_ms
+                        })
+                })
+            },
         };
         if self.schema != SCHEMA || !phase_coherent || self.checksum_sha256 != self.checksum()? {
             return Err(HostControlError::ProfileTransitionInvalid);
@@ -490,6 +522,7 @@ impl DesiredStateStore {
             phase: TransitionPhase::SourceFrozen,
             witness,
             consumed_at_ms: None,
+            source_exited_at_ms: None,
             checksum_sha256: String::new(),
         };
         record.seal()?;
@@ -518,6 +551,98 @@ impl DesiredStateStore {
         self.persist_full(&complete)
     }
 
+    /// Call ONLY after the exclusive Windows Job owner has observed exact
+    /// source PID termination and waited for its process handle. No direct
+    /// remote operation is connected to this transition.
+    pub fn mark_source_exited(
+        &self,
+        bound: &BoundSourceIdentity,
+        source_pid: u32,
+        now_ms: u64,
+    ) -> HostControlResult<()> {
+        let mut state = self.load_full()?;
+        let record = state
+            .transition
+            .as_mut()
+            .ok_or(HostControlError::ProfileTransitionInvalid)?;
+        if record.phase != TransitionPhase::Consumed
+            || record.witness.source_pid != source_pid
+            || !record.witness.matches_bound_source(bound)
+            || now_ms < record.consumed_at_ms.unwrap_or(u64::MAX)
+            || now_ms > record.witness.expires_at_ms
+        {
+            return Err(HostControlError::ProfileTransitionReplay);
+        }
+        record.phase = TransitionPhase::SourceExited;
+        record.source_exited_at_ms = Some(now_ms);
+        record.seal()?;
+        self.persist_full(&state)
+    }
+
+    /// Atomic finalization after an independently verified ReadOnly target.
+    /// CONTROL must observe the new target PID/UID/WS/rights natively and
+    /// ensure source Job exit before invoking. Not a remotely callable path.
+    pub fn complete_verified_read_only(
+        &self,
+        source: &BoundSourceIdentity,
+        target: &VerifiedReadOnlyDestination,
+        now_ms: u64,
+    ) -> HostControlResult<()> {
+        let mut state = self.load_full()?;
+        let record = state
+            .transition
+            .as_ref()
+            .ok_or(HostControlError::ProfileTransitionInvalid)?;
+        if record.phase != TransitionPhase::SourceExited
+            || !record.witness.matches_bound_source(source)
+            || record.witness.destination != target.profile
+            || target.pid == 0
+            || target.pid == source.source_pid
+            || !is_lower_hex(&target.account_uid_fingerprint, 64)
+            || target.account_uid_fingerprint == source.account_uid_fingerprint
+            || target.private_ws_generation == 0
+            || target.has_trade_authority
+            || target.agent_sha256 != source.agent_sha256
+            || target.controller_sha256 != source.controller_sha256
+            || target.account_snapshot_received_ms == 0
+            || now_ms < target.account_snapshot_received_ms
+            || now_ms - target.account_snapshot_received_ms > MAX_SOURCE_OBSERVATION_AGE_MS
+            || now_ms < record.source_exited_at_ms.unwrap_or(u64::MAX)
+            || now_ms > record.witness.expires_at_ms
+        {
+            return Err(HostControlError::ProfileTransitionInvalid);
+        }
+        state.profile = target.profile;
+        state.agent = AgentDesired::Running;
+        state.transition = None;
+        self.persist_full(&state)
+    }
+
+    /// Recovery after confirmed source exit AND verified empty Windows Job.
+    /// Roll back only to STOPPED on the source profile: never auto-rearm
+    /// trading, reset STOP, migrate ledger, or resurrect a different account.
+    pub fn recover_stopped_after_empty_job(
+        &self,
+        source: &BoundSourceIdentity,
+        source_pid: u32,
+    ) -> HostControlResult<()> {
+        let mut state = self.load_full()?;
+        let record = state
+            .transition
+            .as_ref()
+            .ok_or(HostControlError::ProfileTransitionInvalid)?;
+        if record.phase != TransitionPhase::SourceExited
+            || record.witness.source_pid != source_pid
+            || !record.witness.matches_bound_source(source)
+        {
+            return Err(HostControlError::ProfileTransitionInvalid);
+        }
+        state.agent = AgentDesired::Stopped;
+        state.profile = source.source;
+        state.transition = None;
+        self.persist_full(&state)
+    }
+
     pub fn is_pending(&self) -> HostControlResult<bool> {
         Ok(self.load_full()?.transition.is_some())
     }
@@ -538,6 +663,11 @@ impl DesiredStateStore {
                     "source": record.witness.source,
                     "destination": record.witness.destination,
                     "handoff_admission": "DENIED_TRANSITION_NOT_FINALIZED",
+                    "recovery": if record.phase == TransitionPhase::SourceExited {
+                        "VERIFY_EMPTY_OWNED_JOB_THEN_RECOVER_STOPPED_OR_VERIFY_READONLY_TARGET"
+                    } else {
+                        "DO_NOT_RESPAWN_SOURCE_OR_TARGET"
+                    },
                     "durable_owner": "desired.json"
                 }),
             },
@@ -659,6 +789,85 @@ mod single_owner_transition_tests {
             reopened.save(AgentDesiredState::production_running()),
             Err(HostControlError::ProfileTransitionPending)
         ));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn verified_readonly_finish_is_atomic_and_preserves_target_identity() {
+        let path = path("target-verified");
+        let _ = fs::remove_file(&path);
+        let store = DesiredStateStore::at(path.clone());
+        store
+            .save(AgentDesiredState::demo_acceptance_running())
+            .unwrap();
+        let ticket = witness();
+        let source = bound(&ticket);
+        store.stage_frozen(ticket, 11_000).unwrap();
+        assert!(store.mark_source_exited(&source, 321, 11_100).is_err());
+        store.consume_once(&source, 11_150).unwrap();
+        assert!(store.mark_source_exited(&source, 999, 11_200).is_err());
+        store.mark_source_exited(&source, 321, 11_200).unwrap();
+        assert_eq!(store.status_value()["state"], "BLOCKED");
+        assert!(store.mark_source_exited(&source, 321, 11_300).is_err());
+
+        let target = VerifiedReadOnlyDestination {
+            profile: AgentProfile::Production,
+            pid: 555,
+            account_uid_fingerprint: "9".repeat(64),
+            private_ws_generation: 9,
+            account_snapshot_received_ms: 11_500,
+            agent_sha256: source.agent_sha256.clone(),
+            controller_sha256: source.controller_sha256.clone(),
+            has_trade_authority: false,
+        };
+        let mut wrong = target.clone();
+        wrong.has_trade_authority = true;
+        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+        wrong = target.clone();
+        wrong.account_uid_fingerprint = source.account_uid_fingerprint.clone();
+        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+        wrong = target.clone();
+        wrong.agent_sha256 = "0".repeat(64);
+        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+        wrong = target.clone();
+        wrong.private_ws_generation = 0;
+        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+        wrong = target.clone();
+        wrong.pid = 321;
+        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+        wrong = target.clone();
+        wrong.account_snapshot_received_ms = 1;
+        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+
+        store.complete_verified_read_only(&source, &target, 11_600).unwrap();
+        let recovered = DesiredStateStore::at(path.clone());
+        assert_eq!(recovered.load().unwrap(), AgentDesiredState::production_running());
+        assert!(!recovered.is_pending().unwrap());
+        assert!(recovered.complete_verified_read_only(&source, &target, 11_601).is_err());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn post_exit_recovery_stops_same_source_and_does_not_auto_start_live() {
+        let path = path("recovery");
+        let _ = fs::remove_file(&path);
+        let store = DesiredStateStore::at(path.clone());
+        store.save(AgentDesiredState::demo_acceptance_running()).unwrap();
+        let ticket = witness();
+        let source = bound(&ticket);
+        store.stage_frozen(ticket, 11_000).unwrap();
+        assert!(store.recover_stopped_after_empty_job(&source, 321).is_err());
+        store.consume_once(&source, 11_100).unwrap();
+        assert!(store.recover_stopped_after_empty_job(&source, 321).is_err());
+        store.mark_source_exited(&source, 321, 11_200).unwrap();
+        assert!(store.recover_stopped_after_empty_job(&source, 999).is_err());
+        store.recover_stopped_after_empty_job(&source, 321).unwrap();
+        let restarted_control = DesiredStateStore::at(path.clone());
+        assert_eq!(
+            restarted_control.load().unwrap(),
+            AgentDesiredState::stopped_on(AgentProfile::DemoAcceptance)
+        );
+        assert!(!restarted_control.is_pending().unwrap());
         let _ = fs::remove_file(path);
     }
 
