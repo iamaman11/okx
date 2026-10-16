@@ -56,7 +56,7 @@ pub struct StrategyPeriodFinancialAudit {
     pub unverified_total: usize,
     pub account_unallocated_funding_bills: usize,
     pub account_unlinked_other_bills: usize,
-    pub canceled_intents_outside_exchange_history: usize,
+    pub intents_outside_exchange_history: usize,
     pub strategy_nav_risk_usable: bool,
     pub incomplete_reasons: Vec<&'static str>,
 }
@@ -413,6 +413,9 @@ fn assemble_period_financial_audit(
             incomplete_reason: None,
         });
     }
+    // Keep the newest current period in view, even when an older archive
+    // exceeds the response cap. Never let truncation silently hide current STOP.
+    periods.reverse();
     // Only independently validated ledger archives are enumerated, and each
     // category has its own accurate total even when the list is truncated.
     let periods_total = report.archived_runs_count
@@ -473,7 +476,7 @@ fn assemble_period_financial_audit(
             + usize::from(report.unverified_run.is_some()),
         account_unallocated_funding_bills: unallocated_funding,
         account_unlinked_other_bills: unlinked_bills,
-        canceled_intents_outside_exchange_history: report.unmatched_historical_total,
+        intents_outside_exchange_history: report.unmatched_historical_total,
         strategy_nav_risk_usable: nav_usable,
         incomplete_reasons: reasons,
     }
@@ -1378,9 +1381,9 @@ mod tests {
         assert!(!audit.periods_truncated);
         assert_eq!(
             audit.periods[0].historical_nav_usdt.as_deref(),
-            Some("99.95")
+            Some("99.99")
         );
-        assert_eq!(audit.periods[0].closure_sha256, "b".repeat(64));
+        assert_eq!(audit.periods[0].closure_sha256, "1".repeat(64));
         assert_eq!(audit.periods[1].record_state, "UNVERIFIED_SOURCE");
         assert!(audit.periods[1].historical_nav_usdt.is_none());
         assert!(audit.periods[1].historical_realized_usdt.is_none());
@@ -1389,8 +1392,8 @@ mod tests {
             audit.periods[1].incomplete_reason.as_deref(),
             Some("SOURCE_CONTINUITY_NOT_PROVEN")
         );
-        assert_eq!(audit.periods[2].closure_sha256, "1".repeat(64));
-        assert_eq!(audit.canceled_intents_outside_exchange_history, 3);
+        assert_eq!(audit.periods[2].closure_sha256, "b".repeat(64));
+        assert_eq!(audit.intents_outside_exchange_history, 3);
         let original = serde_json::to_value(&report.archived_run_proofs).unwrap();
         let _ = serde_json::to_value(&audit).unwrap();
         assert_eq!(
