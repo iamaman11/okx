@@ -1006,6 +1006,35 @@ mod single_owner_transition_tests {
     }
 
     #[test]
+    fn durable_pre_drain_hold_prevents_auto_rearm_on_crash_or_uncertain_ack() {
+        let path = path("pre-drain-hold");
+        let _ = fs::remove_file(&path);
+        let store = DesiredStateStore::at(path.clone());
+        store.save(AgentDesiredState::demo_acceptance_running()).unwrap();
+        store.begin_source_drain_hold(
+            AgentProfile::DemoAcceptance, AgentProfile::Production, 321
+        ).unwrap();
+        assert!(store.is_pending().unwrap());
+        assert_eq!(store.status_value()["phase"], "DRAIN_REQUESTED");
+        assert!(store.permits_owned_source_drain(AgentProfile::DemoAcceptance, 321).unwrap());
+        assert!(!store.permits_owned_source_drain(AgentProfile::DemoAcceptance, 999).unwrap());
+        assert!(!store.permits_owned_source_drain(AgentProfile::Production, 321).unwrap());
+        assert!(store.save(AgentDesiredState::demo_acceptance_running()).is_err());
+        assert!(store.save(AgentDesiredState::production_running()).is_err());
+        let reopened = DesiredStateStore::at(path.clone());
+        assert!(reopened.is_pending().unwrap());
+        assert_eq!(reopened.status_value()["state"], "SWITCHING");
+        let mut incorrect = witness();
+        incorrect.source_pid = 999;
+        assert!(reopened.stage_frozen(incorrect, 11_000).is_err());
+        reopened.stage_frozen(witness(), 11_000).unwrap();
+        assert!(reopened.is_pending().unwrap());
+        assert_eq!(reopened.status_value()["phase"], "SOURCE_FROZEN");
+        assert!(!reopened.permits_owned_source_drain(AgentProfile::DemoAcceptance, 321).unwrap());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn explicit_empty_job_recovery_never_resurrects_venue_or_target() {
         let path = path("explicit-stop");
         let _ = fs::remove_file(&path);
