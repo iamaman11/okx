@@ -347,10 +347,20 @@ impl ProductionLivePermit {
             && self.issued_at_ms > 0
             && self.issued_at_ms <= now_ms
             && self.expires_at_ms >= now_ms
-            && self.expires_at_ms.checked_sub(self.issued_at_ms).is_some_and(|age| age <= 10_000)
-            && now_ms.checked_sub(self.issued_at_ms).is_some_and(|age| age <= 10_000)
-            && max_allocation.is_some_and(|cap| cap > Decimal::ZERO && cap <= max_cap
-                && run.allocated_usdt.parse::<Decimal>().is_ok_and(|allocated| allocated > Decimal::ZERO && allocated <= cap))
+            && self
+                .expires_at_ms
+                .checked_sub(self.issued_at_ms)
+                .is_some_and(|age| age <= 10_000)
+            && now_ms
+                .checked_sub(self.issued_at_ms)
+                .is_some_and(|age| age <= 10_000)
+            && max_allocation.is_some_and(|cap| {
+                cap > Decimal::ZERO
+                    && cap <= max_cap
+                    && run.allocated_usdt.parse::<Decimal>().is_ok_and(|allocated| {
+                        allocated > Decimal::ZERO && allocated <= cap
+                    })
+            })
             && run.allocation_id == self.allocation_id
             && run.account_uid_fingerprint == self.account_uid_fingerprint
             && run.operator_authority_id == self.operator_authority_id
@@ -358,11 +368,15 @@ impl ProductionLivePermit {
             && source.checksum_sha256 == self.source_checksum_sha256
             && source.latest_source_complete
             && !source.source_gap_over_two_hours
-            && source.latest_source_asof_ms.is_some_and(|asof| asof <= now_ms && now_ms - asof <= 30_000)
+            && source
+                .latest_source_asof_ms
+                .is_some_and(|asof| asof <= now_ms && now_ms - asof <= 30_000)
             && ledger.risk_stop().is_none()
             && ledger.finalized_run().is_none()
             && ledger.unverified_run().is_none()
-            && ledger.entries().all(|entry| entry.record.plan.account_uid_fingerprint == self.account_uid_fingerprint)
+            && ledger.entries().all(|entry| {
+                entry.record.plan.account_uid_fingerprint == self.account_uid_fingerprint
+            })
     }
 }
 
@@ -412,7 +426,9 @@ pub enum OrderExecutorError {
     #[error("demo mutation authority requires an OKX Demo environment")]
     DemoAuthorityRequiresDemoEnvironment,
 
-    #[error("production live requires a current native CONTROL-bound pilot permit, same UID, fresh source and open unstopped strategy run")]
+    #[error(
+        "production live requires a current native CONTROL-bound pilot permit, same UID, fresh source and open unstopped strategy run"
+    )]
     ProductionLivePermitRejected,
 }
 
@@ -4524,8 +4540,12 @@ mod tests {
         assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
         assert!(!executor.live_trading_enabled());
         assert!(matches!(
-            executor.submit_prepared(&plan.intent_id, timing(), 102).await,
-            Err(OrderExecutorError::Transition(ExecutionTransitionError::LiveTradingDisabled))
+            executor
+                .submit_prepared(&plan.intent_id, timing(), 102)
+                .await,
+            Err(OrderExecutorError::Transition(
+                ExecutionTransitionError::LiveTradingDisabled
+            ))
         ));
         assert_eq!(executor.gateway().place_calls(), 0);
         assert_eq!(
