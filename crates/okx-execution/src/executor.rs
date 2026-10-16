@@ -357,9 +357,10 @@ impl ProductionLivePermit {
             && max_allocation.is_some_and(|cap| {
                 cap > Decimal::ZERO
                     && cap <= max_cap
-                    && run.allocated_usdt.parse::<Decimal>().is_ok_and(|allocated| {
-                        allocated > Decimal::ZERO && allocated <= cap
-                    })
+                    && run
+                        .allocated_usdt
+                        .parse::<Decimal>()
+                        .is_ok_and(|allocated| allocated > Decimal::ZERO && allocated <= cap)
             })
             && run.allocation_id == self.allocation_id
             && run.account_uid_fingerprint == self.account_uid_fingerprint
