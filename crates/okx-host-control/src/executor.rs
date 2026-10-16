@@ -1161,16 +1161,25 @@ impl HostExecutor {
         if !reply.valid_for(&request_id) || reply.disposition != "DRAINED_SOURCE_CANDIDATE" {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
+        let source = reply
+            .source_candidate
+            .as_ref()
+            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
         let ledger_sha = reply
             .ledger_only
             .as_ref()
             .and_then(|value| value.get("source_ledger_manifest_sha256"))
             .and_then(Value::as_str)
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        let source = reply
-            .source_candidate
-            .as_ref()
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+            .unwrap_or("");
+        if ledger_sha.is_empty() {
+            let pid = self.agent_child.as_ref().map(Child::id)
+                .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+            if !source.ledger_manifest_sha256.is_empty()
+                || !self.desired_store.permits_ledgerless_read_only_source(self.desired_profile, pid)?
+            {
+                return Err(HostControlError::ProfileHandoffProofRequired);
+            }
+        }
         let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
         if !source.valid_for(expected_uid, ledger_sha, now_ms) {
             return Err(HostControlError::ProfileHandoffProofRequired);
@@ -1238,9 +1247,11 @@ impl HostExecutor {
         let candidate: okx_protocol::NativeDrainedSourceCandidate =
             serde_json::from_value(reply["source_candidate"].clone())
                 .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
+        // A missing native ledger is independently proven by the child and
+        // permitted only by the source's durable verified ReadOnly right.
         let ledger_sha256 = reply["ledger"]["source_ledger_manifest_sha256"]
             .as_str()
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+            .unwrap_or("");
         let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
         if !candidate.valid_for(expected_uid, ledger_sha256, now_ms) {
             return Err(HostControlError::ProfileHandoffProofRequired);

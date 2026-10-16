@@ -262,6 +262,23 @@ impl DesiredStateStore {
         Ok(state.read_only)
     }
 
+    /// A ledgerless drain is possible only for a previously verified ReadOnly
+    /// source and the exact Job-owned child under the durable pre-drain hold.
+    pub fn permits_ledgerless_read_only_source(
+        &self,
+        profile: AgentProfile,
+        pid: u32,
+    ) -> HostControlResult<bool> {
+        let state = self.load_full()?;
+        Ok(state.read_only
+            && state.profile == profile
+            && state.agent == AgentDesired::Running
+            && state.transition.is_none()
+            && state.switch_hold.as_ref().is_some_and(|hold| {
+                hold.source == profile && hold.source_pid == pid
+            }))
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -444,7 +461,8 @@ impl FrozenSourceWitness {
             || self.private_ws_generation == 0
             || !is_lower_hex(&self.launch_lease_sha256, 64)
             || !is_lower_hex(&self.account_uid_fingerprint, 64)
-            || !is_lower_hex(&self.ledger_manifest_sha256, 64)
+            || !(self.ledger_manifest_sha256.is_empty()
+                || is_lower_hex(&self.ledger_manifest_sha256, 64))
             || !is_lower_hex(&self.source_tree, 40)
             || !is_lower_hex(&self.agent_sha256, 64)
             || !is_lower_hex(&self.controller_sha256, 64)
@@ -607,7 +625,10 @@ impl DesiredStateStore {
         }) {
             return Err(HostControlError::ProfileTransitionInvalid);
         }
-        if complete.agent != AgentDesired::Running || complete.profile != witness.source {
+        if complete.agent != AgentDesired::Running
+            || complete.profile != witness.source
+            || (witness.ledger_manifest_sha256.is_empty() && !complete.read_only)
+        {
             return Err(HostControlError::ProfileTransitionInvalid);
         }
         let mut record = TransitionRecord {
@@ -1063,6 +1084,14 @@ mod single_owner_transition_tests {
                 .unwrap()
         );
         assert!(cold.read_only_for(AgentProfile::Production).is_err());
+        cold.begin_source_drain_hold(AgentProfile::DemoAcceptance, AgentProfile::Production, 555)
+            .unwrap();
+        assert!(cold.permits_ledgerless_read_only_source(AgentProfile::DemoAcceptance, 555).unwrap());
+        assert!(!cold.permits_ledgerless_read_only_source(AgentProfile::DemoAcceptance, 556).unwrap());
+        let mut ledgerless = witness();
+        ledgerless.source_pid = 555;
+        ledgerless.ledger_manifest_sha256.clear();
+        cold.stage_frozen(ledgerless, 11_000).unwrap();
         let _ = fs::remove_file(path);
     }
 

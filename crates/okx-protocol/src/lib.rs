@@ -69,7 +69,8 @@ impl NativeDrainedSourceCandidate {
         self.schema == NATIVE_SOURCE_CANDIDATE_SCHEMA_V1
             && lower_hex(&self.account_uid_fingerprint)
             && self.account_uid_fingerprint == expected_uid
-            && lower_hex(&self.ledger_manifest_sha256)
+            && (lower_hex(&self.ledger_manifest_sha256)
+                || (self.ledger_manifest_sha256.is_empty() && expected_manifest.is_empty()))
             && self.ledger_manifest_sha256 == expected_manifest
             && self.snapshot_received_ms != 0
             && now_ms >= self.snapshot_received_ms
@@ -140,10 +141,17 @@ impl NativeChildReply {
             )
             && match self.disposition.as_str() {
                 "DRAINED_SOURCE_CANDIDATE" => {
-                    self.ledger_only.is_some()
-                        && self.source_candidate.is_some()
-                        && self.target_read_only.is_none()
-                        && self.error.is_none()
+                    self.source_candidate.as_ref().is_some_and(|source| {
+                        match self.ledger_only.as_ref() {
+                            Some(ledger) => ledger
+                                .get("source_ledger_manifest_sha256")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|sha| {
+                                    !sha.is_empty() && sha == source.ledger_manifest_sha256
+                                }),
+                            None => source.ledger_manifest_sha256.is_empty(),
+                        }
+                    }) && self.target_read_only.is_none() && self.error.is_none()
                 }
                 "VERIFIED_READ_ONLY" => {
                     self.ledger_only.is_none()
@@ -4014,6 +4022,32 @@ mod native_drain_source_tests {
         let mut encoded = serde_json::to_value(&original).unwrap();
         encoded["unexpected"] = serde_json::json!("bypass");
         assert!(serde_json::from_value::<NativeDrainedSourceCandidate>(encoded).is_err());
+    }
+
+    #[test]
+    fn ledgerless_readonly_source_never_claims_a_fabricated_manifest() {
+        let mut source = source();
+        source.ledger_manifest_sha256.clear();
+        assert!(source.valid_for(&"a".repeat(64), "", 20_100));
+        assert!(!source.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        let id = "f".repeat(64);
+        let mut reply = NativeChildReply {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+            request_id: id.clone(),
+            disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
+            ledger_only: None,
+            source_candidate: Some(source),
+            target_read_only: None,
+            error: None,
+        };
+        assert!(reply.valid_for(&id));
+        reply.ledger_only = Some(serde_json::json!({
+            "source_ledger_manifest_sha256": "b".repeat(64)
+        }));
+        assert!(!reply.valid_for(&id));
+        reply.ledger_only = None;
+        reply.source_candidate.as_mut().unwrap().ledger_manifest_sha256 = "b".repeat(64);
+        assert!(!reply.valid_for(&id));
     }
 
     #[test]

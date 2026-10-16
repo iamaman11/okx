@@ -297,14 +297,37 @@ pub async fn run_mailbox_until_shutdown(
                         let _ = tx.send((request, result));
                     });
                 } else {
-                    let reply = NativeChildReply {
-                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
-                        request_id: request.request_id,
-                        disposition: "BLOCKED".to_owned(),
-                        ledger_only: None,
-                        source_candidate: None,
-                        target_read_only: None,
-                        error: Some("native executor unavailable".to_owned()),
+                    // Strict observer-only native source: there is no mutation
+                    // executor to drain. This proof cannot invent a ledger hash
+                    // or authorize itself without CONTROL's durable ReadOnly bit.
+                    let evidence = tokio::time::timeout(
+                        Duration::from_secs(8),
+                        verify_ledgerless_read_only_source(
+                            &config.root,
+                            account,
+                            private_ws,
+                            &request.expected_uid_fingerprint,
+                        ),
+                    ).await;
+                    let reply = match evidence {
+                        Ok(Ok(source)) => NativeChildReply {
+                            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                            request_id: request.request_id,
+                            disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
+                            ledger_only: None,
+                            source_candidate: Some(source),
+                            target_read_only: None,
+                            error: None,
+                        },
+                        _ => NativeChildReply {
+                            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                            request_id: request.request_id,
+                            disposition: "BLOCKED".to_owned(),
+                            ledger_only: None,
+                            source_candidate: None,
+                            target_read_only: None,
+                            error: Some("observer-only source/ledger absence not proven".to_owned()),
+                        },
                     };
                     eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
                 }
@@ -612,6 +635,77 @@ pub async fn run_mailbox_until_shutdown(
 }
 
 /// A real nonempty private financial event, not a timer or ChatGPT query, wakes this
+/// The absence of an execution ledger is itself a fail-closed disk proof.
+/// Any matching file or archive forbids observer-only account handoff.
+fn no_native_ledger_at(root: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else { return false };
+    for entry in entries {
+        let Ok(entry) = entry else { return false };
+        if entry.file_name().to_string_lossy().starts_with("execution-ledger") {
+            return false;
+        }
+    }
+    true
+}
+
+async fn verify_ledgerless_read_only_source(
+    root: &std::path::Path,
+    account: Option<&AccountBootstrapper>,
+    private_ws: Option<&PrivateWsHandle>,
+    expected_uid: &str,
+) -> Result<NativeDrainedSourceCandidate, &'static str> {
+    let observer = account.ok_or("observer unavailable")?;
+    let private = private_ws.ok_or("private WS unavailable")?;
+    if !no_native_ledger_at(root) { return Err("native ledger exists or unreadable"); }
+    let before = private.convergence_cursor().await.map_err(|_| "private WS unavailable")?;
+    let snapshot = observer.snapshot().await.map_err(|_| "observer REST unavailable")?;
+    let (algos, facts) = tokio::try_join!(
+        async { observer.pending_protective_algos().await.map_err(|_| "OCO unavailable") },
+        async { observer.ledger_facts(&snapshot).await.map_err(|_| "history unavailable") },
+    )?;
+    let after = private.convergence_cursor().await.map_err(|_| "private WS unavailable")?;
+    let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+    let received_ms = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+        .ok().and_then(|at| u64::try_from(at.timestamp_millis()).ok())
+        .ok_or("invalid REST receipt")?;
+    if before != after
+        || after.generation == 0
+        || snapshot.account_uid_fingerprint != expected_uid
+        || !snapshot.positions.is_empty()
+        || !snapshot.pending_orders.is_empty()
+        || facts.summary.open_positions != 0
+        || facts.summary.pending_orders != 0
+        || algos.rows != 0
+        || !algos.complete_within_bound
+        || facts.summary.history_coverage.is_empty()
+        || facts.summary.history_coverage.iter().any(|row| !row.complete_within_bound)
+        || !facts.exchange_orders_history_complete
+        || !facts.exchange_fills_history_complete
+        || !facts.bills_history_complete
+        || now_ms < received_ms
+        || now_ms - received_ms > 10_000
+        || !no_native_ledger_at(root)
+    {
+        return Err("observer-only source not FLAT, FRESH or complete");
+    }
+    let candidate = NativeDrainedSourceCandidate {
+        schema: NATIVE_SOURCE_CANDIDATE_SCHEMA_V1.to_owned(),
+        account_uid_fingerprint: snapshot.account_uid_fingerprint,
+        snapshot_received_ms: received_ms,
+        source_age_ms: now_ms - received_ms,
+        private_ws_generation: after.generation,
+        ledger_manifest_sha256: String::new(),
+        historical_canceled_identity_exception: false,
+        positions: 0,
+        orders: 0,
+        native_oco: 0,
+    };
+    if !candidate.valid_for(expected_uid, "", now_ms) {
+        return Err("invalid observer-only receipt");
+    }
+    Ok(candidate)
+}
+
 /// observer. It obtains a fresh REST baseline and complete exact native
 /// orders/fills/bills, then checks both private WS convergence fences before
 /// persisting under the already existing one execution-ledger mutex.
