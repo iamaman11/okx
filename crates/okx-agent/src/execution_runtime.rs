@@ -1500,6 +1500,63 @@ mod tests {
         MutationTiming::from_exchange_time_ms(1_790_000_000_000, 5_000).expect("timing")
     }
 
+    #[tokio::test]
+    async fn production_submit_is_unreachable_without_native_bound_pilot_evidence() {
+        let root = temp_root("unarmed-production-pilot");
+        let prod = OkxEnvironment::new(Region::Global, false);
+        let runtime = ExecutionRuntime::new(&root, prod, credentials(), 101, RateBudget::new())
+            .expect("one existing production ledger and executor");
+        let mut evidence = preflight(true);
+        evidence.credential.production_environment = true;
+        evidence.credential.account_uid_fingerprint = "a".repeat(64);
+        let permit = ProductionLivePermit {
+            account_uid_fingerprint: "a".repeat(64),
+            allocation_id: "missing_new_production_run".to_owned(),
+            operator_authority_id: "unissued_operator_approval".to_owned(),
+            max_allocation_usdt: "100".to_owned(),
+            source_checksum_sha256: "b".repeat(64),
+            issued_at_ms: 101,
+            expires_at_ms: 10_101,
+        };
+        let result = runtime
+            .submit_prepared_production_authorized(
+                &evidence,
+                &permit,
+                "missing_production_intent_0123456789",
+                timing(),
+                102,
+            )
+            .await
+            .expect("native gate is local");
+        assert!(result.is_none());
+        assert_eq!(runtime.mutation_authority().await, MutationAuthority::Disabled);
+        assert!(!runtime.live_trading_enabled().await);
+
+        // Demo may never reuse a production pilot permit or its UID.
+        let demo_root = root.join("demo");
+        let demo = ExecutionRuntime::new_demo_acceptance(
+            &demo_root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            101,
+            RateBudget::new(),
+        )
+        .expect("same engine, disjoint Demo journal");
+        assert!(demo
+            .submit_prepared_production_authorized(
+                &evidence,
+                &permit,
+                "missing_production_intent_0123456789",
+                timing(),
+                102,
+            )
+            .await
+            .expect("Demo rejected without POST")
+            .is_none());
+        assert_eq!(demo.mutation_authority().await, MutationAuthority::Disabled);
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn quiet_source_capture_admission_never_relaxes_two_hour_coverage() {
         let start = 100_000;
