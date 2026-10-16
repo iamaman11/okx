@@ -799,13 +799,20 @@ impl GitHubClient {
             )
             .await?;
 
-        if response.content_length().is_some_and(|n| n > GITHUB_ARTIFACT_RANGE_BYTES as u64)
+        if response
+            .content_length()
+            .is_some_and(|n| n > GITHUB_ARTIFACT_RANGE_BYTES as u64)
             && response.url().host_str() != Some("api.github.com")
         {
             return read_artifact_zip_ranges(&self.http, response, GITHUB_ARTIFACT_RANGE_BYTES)
                 .await;
         }
-        read_response_body(response, "download_artifact_zip", MAX_GITHUB_ARTIFACT_ZIP_BYTES).await
+        read_response_body(
+            response,
+            "download_artifact_zip",
+            MAX_GITHUB_ARTIFACT_ZIP_BYTES,
+        )
+        .await
     }
 
     pub async fn post_issue_comment(
@@ -1391,7 +1398,9 @@ mod tests {
             let server = thread::spawn(move || {
                 for i in 0..3 {
                     let (mut socket, _) = listener.accept().unwrap();
-                    socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
                     let mut request = [0_u8; 2048];
                     let size = socket.read(&mut request).unwrap();
                     let text = String::from_utf8_lossy(&request[..size]);
@@ -1399,11 +1408,21 @@ mod tests {
                         socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nabcdefghij").unwrap();
                     } else {
                         let start = (i - 1) * 5;
-                        assert!(text.contains(&format!("Range: bytes={start}-{}", start + 4)) || text.to_lowercase().contains(&format!("range: bytes={start}-{}", start + 4)));
+                        assert!(
+                            text.contains(&format!("Range: bytes={start}-{}", start + 4))
+                                || text
+                                    .to_lowercase()
+                                    .contains(&format!("range: bytes={start}-{}", start + 4))
+                        );
                         let observed_start = if wrong_range && i == 1 { 1 } else { start };
-                        let head = format!("HTTP/1.1 206 Partial Content\r\nContent-Length: 5\r\nContent-Range: bytes {observed_start}-{}/10\r\nConnection: close\r\n\r\n", start + 4);
+                        let head = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: 5\r\nContent-Range: bytes {observed_start}-{}/10\r\nConnection: close\r\n\r\n",
+                            start + 4
+                        );
                         socket.write_all(head.as_bytes()).unwrap();
-                        socket.write_all(if i == 1 { b"abcde" } else { b"fghij" }).unwrap();
+                        socket
+                            .write_all(if i == 1 { b"abcde" } else { b"fghij" })
+                            .unwrap();
                     }
                     socket.flush().unwrap();
                 }
@@ -1422,7 +1441,9 @@ mod tests {
         }
 
         assert_eq!(fixture(false).await.unwrap(), b"abcdefghij");
-        let wrong = fixture(true).await.expect_err("incorrect start is never accepted");
+        let wrong = fixture(true)
+            .await
+            .expect_err("incorrect start is never accepted");
         assert!(matches!(
             wrong,
             GitHubError::ArtifactRangeInvalid { offset: 0, .. }
