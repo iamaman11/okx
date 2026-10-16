@@ -290,11 +290,79 @@ pub enum ReconcileDisposition {
 pub enum MutationAuthority {
     Disabled,
     DemoAcceptance,
+    /// Only a short-lived, native CONTROL-bound, exact-account proof can
+    /// enable this mode. Ordinary construction and restart remain Disabled.
+    ProductionLive,
 }
 
 impl MutationAuthority {
     pub const fn allows_exchange_mutation(self) -> bool {
-        matches!(self, Self::DemoAcceptance)
+        matches!(self, Self::DemoAcceptance | Self::ProductionLive)
+    }
+}
+
+/// An ephemeral single-account pilot approval delivered only by the existing
+/// trusted native CONTROL -> child pipe, never by MCP, mailbox, or an order
+/// request. This validates the *existing* immutable strategy allocation and
+/// exchange-source checkpoint; it cannot create or rearm either one.
+#[derive(Debug, Clone)]
+pub struct ProductionLivePermit {
+    pub account_uid_fingerprint: String,
+    pub allocation_id: String,
+    pub operator_authority_id: String,
+    pub max_allocation_usdt: String,
+    pub source_checksum_sha256: String,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+impl ProductionLivePermit {
+    fn valid_for(
+        &self,
+        environment: OkxEnvironment,
+        ledger: &DurableExecutionLedger,
+        now_ms: u64,
+    ) -> bool {
+        let lower_hex = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        // The 100 USDT cap belongs to the explicitly limited initial live
+        // pilot, not to the user's full exchange balance or later policy.
+        let max_cap = Decimal::from(100);
+        let max_allocation = self.max_allocation_usdt.parse::<Decimal>().ok();
+        let Some(run) = ledger.capital_reservation() else {
+            return false;
+        };
+        let Some(source) = ledger.exchange_evidence_summary() else {
+            return false;
+        };
+        !environment.demo
+            && lower_hex(&self.account_uid_fingerprint)
+            && lower_hex(&self.source_checksum_sha256)
+            && !self.allocation_id.is_empty()
+            && !self.operator_authority_id.is_empty()
+            && self.issued_at_ms > 0
+            && self.issued_at_ms <= now_ms
+            && self.expires_at_ms >= now_ms
+            && self.expires_at_ms.checked_sub(self.issued_at_ms).is_some_and(|age| age <= 10_000)
+            && now_ms.checked_sub(self.issued_at_ms).is_some_and(|age| age <= 10_000)
+            && max_allocation.is_some_and(|cap| cap > Decimal::ZERO && cap <= max_cap
+                && run.allocated_usdt.parse::<Decimal>().is_ok_and(|allocated| allocated > Decimal::ZERO && allocated <= cap))
+            && run.allocation_id == self.allocation_id
+            && run.account_uid_fingerprint == self.account_uid_fingerprint
+            && run.operator_authority_id == self.operator_authority_id
+            && source.run_id == self.allocation_id
+            && source.checksum_sha256 == self.source_checksum_sha256
+            && source.latest_source_complete
+            && !source.source_gap_over_two_hours
+            && source.latest_source_asof_ms.is_some_and(|asof| asof <= now_ms && now_ms - asof <= 30_000)
+            && ledger.risk_stop().is_none()
+            && ledger.finalized_run().is_none()
+            && ledger.unverified_run().is_none()
+            && ledger.entries().all(|entry| entry.record.plan.account_uid_fingerprint == self.account_uid_fingerprint)
     }
 }
 
@@ -343,6 +411,9 @@ pub enum OrderExecutorError {
 
     #[error("demo mutation authority requires an OKX Demo environment")]
     DemoAuthorityRequiresDemoEnvironment,
+
+    #[error("production live requires a current native CONTROL-bound pilot permit, same UID, fresh source and open unstopped strategy run")]
+    ProductionLivePermitRejected,
 }
 
 pub struct OrderExecutor<G> {
@@ -486,10 +557,10 @@ where
         self.mutation_authority
     }
 
-    // Demo acceptance is exchange mutation, but it is not production live trading.
-    // Keep this legacy safety signal false until the final production-live gate exists.
+    /// Production live can only be active inside a single validated native
+    /// mutation boundary. Every constructor, failed check and restart is OFF.
     pub const fn live_trading_enabled(&self) -> bool {
-        false
+        matches!(self.mutation_authority, MutationAuthority::ProductionLive)
     }
 
     pub fn enable_demo_acceptance(
@@ -500,6 +571,23 @@ where
             return Err(OrderExecutorError::DemoAuthorityRequiresDemoEnvironment);
         }
         self.mutation_authority = MutationAuthority::DemoAcceptance;
+        Ok(())
+    }
+
+    /// A trusted native child-pipe handler will supply this one-use proof.
+    /// The public exchange command path never accepts a caller-supplied
+    /// permit; an invalid proof leaves the executor Disabled.
+    pub fn enable_production_live(
+        &mut self,
+        environment: OkxEnvironment,
+        permit: &ProductionLivePermit,
+        now_ms: u64,
+    ) -> Result<(), OrderExecutorError> {
+        self.disable_mutations();
+        if !permit.valid_for(environment, &self.ledger, now_ms) {
+            return Err(OrderExecutorError::ProductionLivePermitRejected);
+        }
+        self.mutation_authority = MutationAuthority::ProductionLive;
         Ok(())
     }
 
