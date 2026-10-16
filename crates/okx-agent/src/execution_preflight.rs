@@ -87,7 +87,6 @@ impl ExecutorPreflightReadout {
     }
 }
 
-
 /// One observational classification of actual native mode and preflight.
 /// Production remains ReadOnly regardless of credential trade permission:
 /// neither this readout nor an accepted REST credential grants exchange POSTs.
@@ -114,10 +113,7 @@ fn observed_execution_right(
     if !preflight.clock.accepted {
         blockers.push("EXECUTOR_CLOCK_NOT_ACCEPTED");
     }
-    if !preflight.accepted
-        && preflight.credential.accepted
-        && preflight.clock.accepted
-    {
+    if !preflight.accepted && preflight.credential.accepted && preflight.clock.accepted {
         blockers.push("ACCOUNT_RATE_LIMIT_NOT_ACCEPTED");
     }
     (execution_right, blockers)
