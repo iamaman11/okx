@@ -10,6 +10,8 @@ pub const AGENT_RESPONSE_SCHEMA_V1: &str = "okx.agent.response/v1";
 pub const NATIVE_CHILD_CONTROL_SCHEMA_V1: &str = "okx.native-child-control/v1";
 pub const NATIVE_CHILD_CONTROL_PREFIX: &str = "@okx-child-control:";
 pub const NATIVE_CHILD_CONTROL_MAX_BYTES: usize = 4096;
+pub const NATIVE_SOURCE_CANDIDATE_SCHEMA_V1: &str = "okx.native-drained-source/v1";
+const MAX_NATIVE_SOURCE_RECEIPT_AGE_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -39,6 +41,42 @@ impl NativeChildRequest {
     }
 }
 
+/// Read-only source proof. Still cannot authorize a CONTROL profile switch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeDrainedSourceCandidate {
+    pub schema: String,
+    pub account_uid_fingerprint: String,
+    pub snapshot_received_ms: u64,
+    pub source_age_ms: u64,
+    pub private_ws_generation: u64,
+    pub ledger_manifest_sha256: String,
+    pub historical_canceled_identity_exception: bool,
+    pub positions: u64,
+    pub orders: u64,
+    pub native_oco: u64,
+}
+
+impl NativeDrainedSourceCandidate {
+    pub fn valid_for(&self, expected_uid: &str, expected_manifest: &str, now_ms: u64) -> bool {
+        let lower_hex = |value: &str| value.len() == 64
+            && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        self.schema == NATIVE_SOURCE_CANDIDATE_SCHEMA_V1
+            && lower_hex(&self.account_uid_fingerprint)
+            && self.account_uid_fingerprint == expected_uid
+            && lower_hex(&self.ledger_manifest_sha256)
+            && self.ledger_manifest_sha256 == expected_manifest
+            && self.snapshot_received_ms != 0
+            && now_ms >= self.snapshot_received_ms
+            && now_ms - self.snapshot_received_ms <= MAX_NATIVE_SOURCE_RECEIPT_AGE_MS
+            && self.source_age_ms <= MAX_NATIVE_SOURCE_RECEIPT_AGE_MS
+            && self.private_ws_generation != 0
+            && self.positions == 0
+            && self.orders == 0
+            && self.native_oco == 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeChildReply {
@@ -46,7 +84,7 @@ pub struct NativeChildReply {
     pub request_id: String,
     pub disposition: String,
     pub ledger_only: Option<serde_json::Value>,
-    pub source_candidate: Option<serde_json::Value>,
+    pub source_candidate: Option<NativeDrainedSourceCandidate>,
     pub error: Option<String>,
 }
 

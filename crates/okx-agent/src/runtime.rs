@@ -10,7 +10,8 @@ use okx_github::GitHubBackoff;
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponseStatus,
     NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
-    NativeChildOperation, NativeChildReply, NativeChildRequest,
+    NativeChildOperation, NativeChildReply, NativeChildRequest, NativeDrainedSourceCandidate,
+    NATIVE_SOURCE_CANDIDATE_SCHEMA_V1,
 };
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator, PublicWsHandle};
 use serde::Serialize;
@@ -277,22 +278,38 @@ pub async fn run_mailbox_until_shutdown(
                 // This is a source observation candidate, not a switch permit.
                 // CONTROL still must bind the owner PID, binary hashes, launch
                 // lease, exact WS generation, one-use state and target UID.
-                let reply = if source_valid {
+                let candidate = source.as_ref().and_then(|value| {
+                    serde_json::from_value::<NativeDrainedSourceCandidate>(serde_json::json!({
+                        "schema": NATIVE_SOURCE_CANDIDATE_SCHEMA_V1,
+                        "account_uid_fingerprint": value["source_account_uid_fingerprint"],
+                        "snapshot_received_ms": value["source_snapshot_received_ms"],
+                        "source_age_ms": value["source_age_ms"],
+                        "private_ws_generation": value["source_private_ws_generation"],
+                        "ledger_manifest_sha256": value["native_ledger"]["source_ledger_manifest_sha256"],
+                        "historical_canceled_identity_exception": value["read_only_source_assessment"]["historical_canceled_identity_exception"],
+                        "positions": value["source"]["positions"],
+                        "orders": value["source"]["orders"],
+                        "native_oco": value["source"]["native_oco"],
+                    })).ok()
+                });
+                let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+                let admitted = source_valid && candidate.as_ref().is_some_and(|proof| {
+                    ledger.as_ref().is_some_and(|record| {
+                        proof.valid_for(
+                            &request.expected_uid_fingerprint,
+                            &record.source_ledger_manifest_sha256,
+                            now_ms,
+                        )
+                    })
+                });
+                // Native source proof is NOT PID/lease/release handoff authority.
+                let reply = if admitted {
                     NativeChildReply {
                         schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
                         request_id: request.request_id,
                         disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
                         ledger_only: ledger.and_then(|value| serde_json::to_value(value).ok()),
-                        source_candidate: source.map(|value| serde_json::json!({
-                            "schema": "okx.native-drained-source/v1",
-                            "source_account_uid_fingerprint": value["source_account_uid_fingerprint"],
-                            "source_asof_ms": value["source_asof_ms"],
-                            "source": value["source"],
-                            "read_only_source_assessment": value["read_only_source_assessment"],
-                            "current_source_quality": value["current_source_quality"],
-                            "source_age_ms": value["source_age_ms"],
-                            "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE"
-                        })),
+                        source_candidate: candidate,
                         error: None,
                     }
                 } else {

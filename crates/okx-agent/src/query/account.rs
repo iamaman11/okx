@@ -211,6 +211,8 @@ fn profile_handoff_readiness_packet(
         "summary_quality": summary_quality,
         "current_source_quality": current_source_quality,
         "source_age_ms": source_age_ms,
+        "source_snapshot_received_ms": receipt_ms,
+        "source_private_ws_generation": get("/coherence/private_ws_generation"),
         "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE",
         "control_action": "DO_NOT_SWITCH_PROFILE",
         "blockers": blockers,

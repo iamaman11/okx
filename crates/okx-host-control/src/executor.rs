@@ -943,6 +943,20 @@ impl HostExecutor {
         if !reply.valid_for(&request_id) || reply.disposition != "DRAINED_SOURCE_CANDIDATE" {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
+        let ledger_sha = reply
+            .ledger_only
+            .as_ref()
+            .and_then(|value| value.get("source_ledger_manifest_sha256"))
+            .and_then(Value::as_str)
+            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let source = reply
+            .source_candidate
+            .as_ref()
+            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
+        if !source.valid_for(expected_uid, ledger_sha, now_ms) {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
         Ok(json!({
             "ledger": reply.ledger_only,
             "source_candidate": reply.source_candidate,
