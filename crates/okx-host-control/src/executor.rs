@@ -141,16 +141,17 @@ impl HostExecutor {
         &self,
         operation: &HostControlOperation,
     ) -> HostControlResult<()> {
-        if self.profile_transition_store.is_pending()?
-            && !matches!(
-                operation,
-                HostControlOperation::Status
-                    | HostControlOperation::TransportStatus
-                    | HostControlOperation::ControllerUpdateStatus
-                    | HostControlOperation::AgentIdentity
-                    | HostControlOperation::AutostartStatus
-            )
-        {
+        if matches!(
+            operation,
+            HostControlOperation::Status
+                | HostControlOperation::TransportStatus
+                | HostControlOperation::ControllerUpdateStatus
+                | HostControlOperation::AgentIdentity
+                | HostControlOperation::AutostartStatus
+        ) {
+            return Ok(());
+        }
+        if self.profile_transition_store.is_pending()? {
             return Err(HostControlError::ProfileTransitionPending);
         }
         Ok(())
@@ -727,11 +728,9 @@ impl HostExecutor {
     }
 
     pub fn install_verified_agent(&mut self, bytes: &[u8]) -> HostControlResult<()> {
-        self.profile_transition_gate(&HostControlOperation::DeployAgent {
-            run_id: 1,
-            artifact_id: 1,
-            expected_source_tree: String::new(),
-        })?;
+        if self.profile_transition_store.is_pending()? {
+            return Err(HostControlError::ProfileTransitionPending);
+        }
         let should_restore = self.desired_agent == AgentDesired::Running;
         let running = self.agent_is_running()?;
         ensure_profile_unchanged(
