@@ -71,10 +71,13 @@ fn native_legacy_read_only_source_is_quiet(
         return false;
     };
     blockers.len() == 2
-        && blockers.iter().any(|value| value == "LEDGER_NOT_VERIFIED_V14")
-        && blockers.iter().any(|value| value == "NONTERMINAL_NATIVE_INTENT")
-        && source.pointer("/current_source_quality")
-            == Some(&serde_json::json!("FRESH"))
+        && blockers
+            .iter()
+            .any(|value| value == "LEDGER_NOT_VERIFIED_V14")
+        && blockers
+            .iter()
+            .any(|value| value == "NONTERMINAL_NATIVE_INTENT")
+        && source.pointer("/current_source_quality") == Some(&serde_json::json!("FRESH"))
         && source.pointer("/source/coherent") == Some(&serde_json::json!(true))
         && source.pointer("/source/positions") == Some(&serde_json::json!(0))
         && source.pointer("/source/orders") == Some(&serde_json::json!(0))
@@ -937,25 +940,45 @@ mod tests {
                 "blockers":["LEDGER_NOT_VERIFIED_V14","NONTERMINAL_NATIVE_INTENT"]
             }
         });
-        assert!(native_legacy_read_only_source_is_quiet(&observed, &ledger, true));
-        assert!(!native_legacy_read_only_source_is_quiet(&observed, &ledger, false));
+        assert!(native_legacy_read_only_source_is_quiet(
+            &observed, &ledger, true
+        ));
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed, &ledger, false
+        ));
         observed["source"]["orders"] = serde_json::json!(1);
-        assert!(!native_legacy_read_only_source_is_quiet(&observed, &ledger, true));
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed, &ledger, true
+        ));
         observed["source"]["orders"] = serde_json::json!(0);
         observed["read_only_source_assessment"]["blockers"][0] =
             serde_json::json!("UNKNOWN_OR_PENDING_ORDER_MUTATION");
-        assert!(!native_legacy_read_only_source_is_quiet(&observed, &ledger, true));
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed, &ledger, true
+        ));
         observed["read_only_source_assessment"]["blockers"][0] =
             serde_json::json!("LEDGER_NOT_VERIFIED_V14");
         let mut unsafe_ledger = ledger.clone();
         unsafe_ledger.unresolved_order_mutations = 1;
-        assert!(!native_legacy_read_only_source_is_quiet(&observed, &unsafe_ledger, true));
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed,
+            &unsafe_ledger,
+            true
+        ));
         unsafe_ledger = ledger.clone();
         unsafe_ledger.account_uid_mismatches = 1;
-        assert!(!native_legacy_read_only_source_is_quiet(&observed, &unsafe_ledger, true));
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed,
+            &unsafe_ledger,
+            true
+        ));
         unsafe_ledger = ledger;
         unsafe_ledger.source_ledger_format = okx_execution::EXECUTION_LEDGER_SCHEMA_V14.to_owned();
-        assert!(!native_legacy_read_only_source_is_quiet(&observed, &unsafe_ledger, true));
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed,
+            &unsafe_ledger,
+            true
+        ));
     }
 
     #[test]
