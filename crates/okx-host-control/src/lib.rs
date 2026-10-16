@@ -1,7 +1,7 @@
+pub mod account_catalog;
 pub mod artifact;
 pub mod auth;
 pub mod autostart;
-pub mod account_catalog;
 pub mod background_process;
 pub mod controller_update;
 pub mod desired;
