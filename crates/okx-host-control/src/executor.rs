@@ -55,7 +55,6 @@ struct AgentLaunchEvidence {
 struct NativeChildPipe {
     input: ChildStdin,
     replies: Receiver<NativeChildReply>,
-    stderr_reader: std::thread::JoinHandle<()>,
 }
 
 pub struct HostExecutor {
@@ -828,7 +827,7 @@ impl HostExecutor {
         let (reply_tx, reply_rx) = mpsc::channel();
         // Preserve the old append-only stderr diagnostic log. Only this
         // parent receives the anonymous stderr pipe and routes typed replies.
-        let stderr_reader = std::thread::spawn(move || {
+        let _stderr_reader = std::thread::spawn(move || {
             let mut stderr_log = stderr;
             let mut pending = Vec::<u8>::new();
             let mut overflow = false;
@@ -863,7 +862,6 @@ impl HostExecutor {
         self.native_child_pipe = Some(NativeChildPipe {
             input: child_input,
             replies: reply_rx,
-            stderr_reader,
         });
         self.agent_child = Some(child);
         self.agent_started_at = Some(Instant::now());
