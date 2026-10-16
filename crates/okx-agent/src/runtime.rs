@@ -638,10 +638,16 @@ pub async fn run_mailbox_until_shutdown(
 /// The absence of an execution ledger is itself a fail-closed disk proof.
 /// Any matching file or archive forbids observer-only account handoff.
 fn no_native_ledger_at(root: &std::path::Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(root) else { return false };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
     for entry in entries {
         let Ok(entry) = entry else { return false };
-        if entry.file_name().to_string_lossy().starts_with("execution-ledger") {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("execution-ledger")
+        {
             return false;
         }
     }
@@ -656,17 +662,39 @@ async fn verify_ledgerless_read_only_source(
 ) -> Result<NativeDrainedSourceCandidate, &'static str> {
     let observer = account.ok_or("observer unavailable")?;
     let private = private_ws.ok_or("private WS unavailable")?;
-    if !no_native_ledger_at(root) { return Err("native ledger exists or unreadable"); }
-    let before = private.convergence_cursor().await.map_err(|_| "private WS unavailable")?;
-    let snapshot = observer.snapshot().await.map_err(|_| "observer REST unavailable")?;
+    if !no_native_ledger_at(root) {
+        return Err("native ledger exists or unreadable");
+    }
+    let before = private
+        .convergence_cursor()
+        .await
+        .map_err(|_| "private WS unavailable")?;
+    let snapshot = observer
+        .snapshot()
+        .await
+        .map_err(|_| "observer REST unavailable")?;
     let (algos, facts) = tokio::try_join!(
-        async { observer.pending_protective_algos().await.map_err(|_| "OCO unavailable") },
-        async { observer.ledger_facts(&snapshot).await.map_err(|_| "history unavailable") },
+        async {
+            observer
+                .pending_protective_algos()
+                .await
+                .map_err(|_| "OCO unavailable")
+        },
+        async {
+            observer
+                .ledger_facts(&snapshot)
+                .await
+                .map_err(|_| "history unavailable")
+        },
     )?;
-    let after = private.convergence_cursor().await.map_err(|_| "private WS unavailable")?;
+    let after = private
+        .convergence_cursor()
+        .await
+        .map_err(|_| "private WS unavailable")?;
     let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
     let received_ms = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
-        .ok().and_then(|at| u64::try_from(at.timestamp_millis()).ok())
+        .ok()
+        .and_then(|at| u64::try_from(at.timestamp_millis()).ok())
         .ok_or("invalid REST receipt")?;
     if before != after
         || after.generation == 0
@@ -678,7 +706,11 @@ async fn verify_ledgerless_read_only_source(
         || algos.rows != 0
         || !algos.complete_within_bound
         || facts.summary.history_coverage.is_empty()
-        || facts.summary.history_coverage.iter().any(|row| !row.complete_within_bound)
+        || facts
+            .summary
+            .history_coverage
+            .iter()
+            .any(|row| !row.complete_within_bound)
         || !facts.exchange_orders_history_complete
         || !facts.exchange_fills_history_complete
         || !facts.bills_history_complete

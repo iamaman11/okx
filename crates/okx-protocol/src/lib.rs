@@ -151,7 +151,8 @@ impl NativeChildReply {
                                 }),
                             None => source.ledger_manifest_sha256.is_empty(),
                         }
-                    }) && self.target_read_only.is_none() && self.error.is_none()
+                    }) && self.target_read_only.is_none()
+                        && self.error.is_none()
                 }
                 "VERIFIED_READ_ONLY" => {
                     self.ledger_only.is_none()
@@ -4046,7 +4047,11 @@ mod native_drain_source_tests {
         }));
         assert!(!reply.valid_for(&id));
         reply.ledger_only = None;
-        reply.source_candidate.as_mut().unwrap().ledger_manifest_sha256 = "b".repeat(64);
+        reply
+            .source_candidate
+            .as_mut()
+            .unwrap()
+            .ledger_manifest_sha256 = "b".repeat(64);
         assert!(!reply.valid_for(&id));
     }
 

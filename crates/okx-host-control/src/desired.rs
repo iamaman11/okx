@@ -274,9 +274,10 @@ impl DesiredStateStore {
             && state.profile == profile
             && state.agent == AgentDesired::Running
             && state.transition.is_none()
-            && state.switch_hold.as_ref().is_some_and(|hold| {
-                hold.source == profile && hold.source_pid == pid
-            }))
+            && state
+                .switch_hold
+                .as_ref()
+                .is_some_and(|hold| hold.source == profile && hold.source_pid == pid))
     }
 
     pub fn path(&self) -> &Path {
@@ -1086,8 +1087,15 @@ mod single_owner_transition_tests {
         assert!(cold.read_only_for(AgentProfile::Production).is_err());
         cold.begin_source_drain_hold(AgentProfile::DemoAcceptance, AgentProfile::Production, 555)
             .unwrap();
-        assert!(cold.permits_ledgerless_read_only_source(AgentProfile::DemoAcceptance, 555).unwrap());
-        assert!(!cold.permits_ledgerless_read_only_source(AgentProfile::DemoAcceptance, 556).unwrap());
+        assert!(
+            cold.permits_ledgerless_read_only_source(AgentProfile::DemoAcceptance, 555)
+                .unwrap()
+        );
+        assert!(
+            !cold
+                .permits_ledgerless_read_only_source(AgentProfile::DemoAcceptance, 556)
+                .unwrap()
+        );
         let mut ledgerless = witness();
         ledgerless.source_pid = 555;
         ledgerless.ledger_manifest_sha256.clear();

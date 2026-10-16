@@ -1172,10 +1172,15 @@ impl HostExecutor {
             .and_then(Value::as_str)
             .unwrap_or("");
         if ledger_sha.is_empty() {
-            let pid = self.agent_child.as_ref().map(Child::id)
+            let pid = self
+                .agent_child
+                .as_ref()
+                .map(Child::id)
                 .ok_or(HostControlError::ProfileHandoffProofRequired)?;
             if !source.ledger_manifest_sha256.is_empty()
-                || !self.desired_store.permits_ledgerless_read_only_source(self.desired_profile, pid)?
+                || !self
+                    .desired_store
+                    .permits_ledgerless_read_only_source(self.desired_profile, pid)?
             {
                 return Err(HostControlError::ProfileHandoffProofRequired);
             }
