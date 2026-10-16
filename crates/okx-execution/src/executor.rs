@@ -4477,6 +4477,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_pilot_cannot_send_without_native_funded_period_and_source() {
+        let (root, mut journal) = ledger("production-native-pilot-fail-closed");
+        let plan = plan();
+        journal.prepare(plan.clone(), 101).expect("unsent prepared");
+        let gateway = MockGateway::new(vec![Ok(accepted_response(&plan))], vec![]);
+        let mut executor = OrderExecutor::new(journal, gateway);
+        let prod = OkxEnvironment::new(okx_api::Region::Global, false);
+        let demo = OkxEnvironment::new(okx_api::Region::Global, true);
+        let permit = ProductionLivePermit {
+            account_uid_fingerprint: "a".repeat(64),
+            allocation_id: "prod_pilot_20261017".to_owned(),
+            operator_authority_id: "native_control_approved_pilot".to_owned(),
+            max_allocation_usdt: "100".to_owned(),
+            source_checksum_sha256: "b".repeat(64),
+            issued_at_ms: 101,
+            expires_at_ms: 10_101,
+        };
+        assert!(!executor.live_trading_enabled());
+        assert!(matches!(
+            executor.enable_production_live(prod, &permit, 102),
+            Err(OrderExecutorError::ProductionLivePermitRejected)
+        ));
+        assert!(matches!(
+            executor.enable_production_live(demo, &permit, 102),
+            Err(OrderExecutorError::ProductionLivePermitRejected)
+        ));
+        let mut stale = permit.clone();
+        stale.expires_at_ms = 101;
+        assert!(matches!(
+            executor.enable_production_live(prod, &stale, 102),
+            Err(OrderExecutorError::ProductionLivePermitRejected)
+        ));
+        let mut oversized = permit.clone();
+        oversized.max_allocation_usdt = "100.01".to_owned();
+        assert!(matches!(
+            executor.enable_production_live(prod, &oversized, 102),
+            Err(OrderExecutorError::ProductionLivePermitRejected)
+        ));
+        let mut foreign = permit.clone();
+        foreign.account_uid_fingerprint = "not-an-uid".to_owned();
+        assert!(matches!(
+            executor.enable_production_live(prod, &foreign, 102),
+            Err(OrderExecutorError::ProductionLivePermitRejected)
+        ));
+        assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
+        assert!(!executor.live_trading_enabled());
+        assert!(matches!(
+            executor.submit_prepared(&plan.intent_id, timing(), 102).await,
+            Err(OrderExecutorError::Transition(ExecutionTransitionError::LiveTradingDisabled))
+        ));
+        assert_eq!(executor.gateway().place_calls(), 0);
+        assert_eq!(
+            executor.ledger().get(&plan.intent_id).unwrap().record.state,
+            ExecutionState::Prepared
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn legacy_prepared_protected_nonfok_cannot_send_or_persist_submitting() {
         for order_type in [OrderType::Limit, OrderType::PostOnly, OrderType::Ioc] {
             let name = format!("legacy-protected-{order_type:?}");
