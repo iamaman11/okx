@@ -37,6 +37,11 @@ pub const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub const GITHUB_ARTIFACT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_GITHUB_WORKFLOW_JSON_BYTES: usize = 2 * 1024 * 1024;
 const MAX_GITHUB_ARTIFACT_ZIP_BYTES: usize = 256 * 1024 * 1024;
+/// Azure signed ZIP download supports immutable byte ranges. A 12MB monolithic
+/// body can exceed 180s even after HTTP 200, so use verified 2MiB segments.
+const GITHUB_ARTIFACT_RANGE_BYTES: usize = 2 * 1024 * 1024;
+const GITHUB_ARTIFACT_RANGE_TIMEOUT: Duration = Duration::from_secs(90);
+const GITHUB_ARTIFACT_TOTAL_RANGE_DEADLINE: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -170,6 +175,12 @@ received_bytes={received_bytes} content_length={content_length:?}"
         content_length: Option<u64>,
     },
 
+    #[error("immutable GitHub artifact range invalid: offset={offset} reason={reason}")]
+    ArtifactRangeInvalid { offset: usize, reason: &'static str },
+
+    #[error("immutable GitHub artifact range transport failure: offset={offset} timeout={timeout}")]
+    ArtifactRangeTransport { offset: usize, timeout: bool },
+
     #[error("GitHub repository identity mismatch")]
     RepositoryIdentityMismatch,
 
@@ -215,6 +226,8 @@ impl GitHubError {
         match self {
             Self::Http(error) => classify_http_failure(error.is_timeout()),
             Self::BodyRead(details) => classify_http_failure(details.timeout),
+            Self::ArtifactRangeTransport { timeout, .. } => classify_http_failure(*timeout),
+            Self::ArtifactRangeInvalid { .. } => GitHubFailureClass::UnexpectedResponse,
             Self::Response(error) => error.class,
             Self::Decode(_) | Self::JsonAtPhase { .. } => GitHubFailureClass::Decode,
             Self::BodyTooLarge { .. } => GitHubFailureClass::UnexpectedResponse,
@@ -786,6 +799,14 @@ impl GitHubClient {
             )
             .await?;
 
+        if response
+            .content_length()
+            .is_some_and(|n| n > GITHUB_ARTIFACT_RANGE_BYTES as u64)
+            && response.url().host_str() != Some("api.github.com")
+        {
+            return read_artifact_zip_ranges(&self.http, response, GITHUB_ARTIFACT_RANGE_BYTES)
+                .await;
+        }
         read_response_body(
             response,
             "download_artifact_zip",
@@ -897,6 +918,150 @@ async fn read_response_body(
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+/// A bounded immutable GET split into byte-accurate requests to the GitHub
+/// authenticated redirect target (Azure signed URL). Do not expose or log that
+/// URL, which includes a transient query signature. No bearer auth is ever
+/// copied from GitHub API to the redirected CDN request.
+///
+/// The manifest/source/binary hashes remain independently verified by CONTROL.
+async fn read_artifact_zip_ranges(
+    client: &Client,
+    initial: Response,
+    chunk_bytes: usize,
+) -> Result<Vec<u8>, GitHubError> {
+    let total = initial
+        .content_length()
+        .ok_or(GitHubError::ArtifactRangeInvalid {
+            offset: 0,
+            reason: "total length unavailable",
+        })?;
+    if total == 0 || total > MAX_GITHUB_ARTIFACT_ZIP_BYTES as u64 || chunk_bytes == 0 {
+        return Err(GitHubError::ArtifactRangeInvalid {
+            offset: 0,
+            reason: "total/chunk length outside hard limits",
+        });
+    }
+    // Signed redirect is returned by the verified GitHub API request. The
+    // existing client always uses no_proxy(); this function adds no transport.
+    let signed_url = initial.url().clone();
+    if initial
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .is_some_and(|v| v != "identity")
+    {
+        return Err(GitHubError::ArtifactRangeInvalid {
+            offset: 0,
+            reason: "compressed HTTP response cannot be byte-ranged",
+        });
+    }
+    let etag = initial
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| v.starts_with('"') && v.ends_with('"'))
+        .map(str::to_owned);
+    drop(initial);
+
+    let mut bytes = Vec::with_capacity(total as usize);
+    let started = Instant::now();
+    while bytes.len() < total as usize {
+        let offset = bytes.len();
+        let end = (offset + chunk_bytes).min(total as usize) - 1;
+        let expected = end - offset + 1;
+        let mut succeeded = false;
+        for attempt in 0..2 {
+            let remaining = GITHUB_ARTIFACT_TOTAL_RANGE_DEADLINE
+                .checked_sub(started.elapsed())
+                .ok_or(GitHubError::ArtifactRangeTransport {
+                    offset,
+                    timeout: true,
+                })?;
+            if remaining.is_zero() {
+                return Err(GitHubError::ArtifactRangeTransport {
+                    offset,
+                    timeout: true,
+                });
+            }
+            let mut request = client
+                .get(signed_url.clone())
+                .header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
+                .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                .timeout(remaining.min(GITHUB_ARTIFACT_RANGE_TIMEOUT));
+            if let Some(value) = &etag {
+                request = request.header(reqwest::header::IF_RANGE, value.as_str());
+            }
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) if attempt == 0 => {
+                    // At most one retry of this immutable GET, never a POST or
+                    // re-execution of a CONTROL operation.
+                    let _ = error;
+                    continue;
+                }
+                Err(error) => {
+                    return Err(GitHubError::ArtifactRangeTransport {
+                        offset,
+                        timeout: error.is_timeout(),
+                    });
+                }
+            };
+            let expected_range = format!("bytes {offset}-{end}/{total}");
+            if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+                || response
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    != Some(expected_range.as_str())
+                || response.content_length() != Some(expected as u64)
+                || response
+                    .headers()
+                    .get(reqwest::header::CONTENT_ENCODING)
+                    .is_some_and(|v| v != "identity")
+                || etag.as_ref().is_some_and(|value| {
+                    response
+                        .headers()
+                        .get(reqwest::header::ETAG)
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|actual| actual != value)
+                })
+            {
+                return Err(GitHubError::ArtifactRangeInvalid {
+                    offset,
+                    reason: "206/content-range/etag mismatch",
+                });
+            }
+            match read_response_body(response, "download_artifact_range", expected).await {
+                Ok(part) if part.len() == expected => {
+                    bytes.extend_from_slice(&part);
+                    succeeded = true;
+                    break;
+                }
+                Ok(_) => {
+                    return Err(GitHubError::ArtifactRangeInvalid {
+                        offset,
+                        reason: "short segment",
+                    });
+                }
+                Err(GitHubError::BodyRead(_)) if attempt == 0 => continue,
+                Err(GitHubError::BodyRead(details)) => {
+                    return Err(GitHubError::ArtifactRangeTransport {
+                        offset,
+                        timeout: details.timeout,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if !succeeded {
+            return Err(GitHubError::ArtifactRangeInvalid {
+                offset,
+                reason: "segment not received",
+            });
+        }
+    }
+    Ok(bytes)
 }
 
 async fn decode_json_response<T: DeserializeOwned>(response: Response) -> Result<T, GitHubError> {
@@ -1219,6 +1384,80 @@ mod tests {
         assert_eq!(GITHUB_REQUEST_TIMEOUT, Duration::from_secs(60));
         assert_eq!(classify_http_failure(true), GitHubFailureClass::Timeout);
         assert_eq!(classify_http_failure(false), GitHubFailureClass::Network);
+    }
+
+    #[tokio::test]
+    async fn immutable_artifact_ranges_join_exactly_and_reject_wrong_ranges() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        async fn fixture(wrong_range: bool) -> Result<Vec<u8>, GitHubError> {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                for i in 0..3 {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut request = [0_u8; 2048];
+                    let size = socket.read(&mut request).unwrap();
+                    let text = String::from_utf8_lossy(&request[..size]);
+                    if i == 0 {
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nabcdefghij").unwrap();
+                    } else {
+                        let start = (i - 1) * 5;
+                        assert!(
+                            text.contains(&format!("Range: bytes={start}-{}", start + 4))
+                                || text
+                                    .to_lowercase()
+                                    .contains(&format!("range: bytes={start}-{}", start + 4))
+                        );
+                        let observed_start = if wrong_range && i == 1 { 1 } else { start };
+                        let head = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: 5\r\nContent-Range: bytes {observed_start}-{}/10\r\nConnection: close\r\n\r\n",
+                            start + 4
+                        );
+                        socket.write_all(head.as_bytes()).unwrap();
+                        socket
+                            .write_all(if i == 1 { b"abcde" } else { b"fghij" })
+                            .unwrap();
+                    }
+                    socket.flush().unwrap();
+                }
+            });
+            let client = Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap();
+            let first = client.get(url).send().await.unwrap();
+            let value = read_artifact_zip_ranges(&client, first, 5).await;
+            if !wrong_range {
+                server.join().unwrap();
+            }
+            value
+        }
+
+        assert_eq!(fixture(false).await.unwrap(), b"abcdefghij");
+        let wrong = fixture(true)
+            .await
+            .expect_err("incorrect start is never accepted");
+        assert!(matches!(
+            wrong,
+            GitHubError::ArtifactRangeInvalid { offset: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn immutable_artifact_range_deadlines_and_budgets_are_bounded() {
+        assert_eq!(GITHUB_ARTIFACT_RANGE_BYTES, 2 * 1024 * 1024);
+        assert_eq!(GITHUB_ARTIFACT_RANGE_TIMEOUT, Duration::from_secs(90));
+        assert_eq!(
+            GITHUB_ARTIFACT_TOTAL_RANGE_DEADLINE,
+            Duration::from_secs(600)
+        );
     }
 
     #[test]
