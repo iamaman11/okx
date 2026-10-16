@@ -136,8 +136,10 @@ impl DesiredFileV3 {
             return Err(HostControlError::DesiredStateCorrupt);
         }
         if let Some(hold) = &self.switch_hold {
-            if !hold.valid() || self.transition.is_some()
-                || self.agent != AgentDesired::Running || self.profile != hold.source
+            if !hold.valid()
+                || self.transition.is_some()
+                || self.agent != AgentDesired::Running
+                || self.profile != hold.source
             {
                 return Err(HostControlError::ProfileTransitionInvalid);
             }
@@ -526,15 +528,24 @@ impl DesiredStateStore {
     /// in-flight POST ambiguity. No new service, file or mutable engine.
     /// Automatic reconcile/restart and release install are fenced while held.
     pub fn begin_source_drain_hold(
-        &self, source: AgentProfile, target: AgentProfile, source_pid: u32
+        &self,
+        source: AgentProfile,
+        target: AgentProfile,
+        source_pid: u32,
     ) -> HostControlResult<()> {
         let mut state = self.load_full()?;
-        if state.transition.is_some() || state.switch_hold.is_some()
-            || state.profile != source || state.agent != AgentDesired::Running
+        if state.transition.is_some()
+            || state.switch_hold.is_some()
+            || state.profile != source
+            || state.agent != AgentDesired::Running
         {
             return Err(HostControlError::ProfileTransitionPending);
         }
-        let hold = SourceDrainHold { source, target, source_pid };
+        let hold = SourceDrainHold {
+            source,
+            target,
+            source_pid,
+        };
         if !hold.valid() {
             return Err(HostControlError::ProfileTransitionInvalid);
         }
@@ -543,13 +554,16 @@ impl DesiredStateStore {
     }
 
     pub fn permits_owned_source_drain(
-        &self, source: AgentProfile, source_pid: u32
+        &self,
+        source: AgentProfile,
+        source_pid: u32,
     ) -> HostControlResult<bool> {
         let state = self.load_full()?;
         Ok(state.transition.is_none()
-            && state.switch_hold.as_ref().is_some_and(|hold| {
-                hold.source == source && hold.source_pid == source_pid
-            }))
+            && state
+                .switch_hold
+                .as_ref()
+                .is_some_and(|hold| hold.source == source && hold.source_pid == source_pid))
     }
 
     /// The native CONTROL may eventually stage only an authenticated and
@@ -565,7 +579,8 @@ impl DesiredStateStore {
             return Err(HostControlError::ProfileTransitionPending);
         }
         if complete.switch_hold.as_ref().is_some_and(|hold| {
-            hold.source != witness.source || hold.target != witness.destination
+            hold.source != witness.source
+                || hold.target != witness.destination
                 || hold.source_pid != witness.source_pid
         }) {
             return Err(HostControlError::ProfileTransitionInvalid);
@@ -1010,16 +1025,34 @@ mod single_owner_transition_tests {
         let path = path("pre-drain-hold");
         let _ = fs::remove_file(&path);
         let store = DesiredStateStore::at(path.clone());
-        store.save(AgentDesiredState::demo_acceptance_running()).unwrap();
-        store.begin_source_drain_hold(
-            AgentProfile::DemoAcceptance, AgentProfile::Production, 321
-        ).unwrap();
+        store
+            .save(AgentDesiredState::demo_acceptance_running())
+            .unwrap();
+        store
+            .begin_source_drain_hold(AgentProfile::DemoAcceptance, AgentProfile::Production, 321)
+            .unwrap();
         assert!(store.is_pending().unwrap());
         assert_eq!(store.status_value()["phase"], "DRAIN_REQUESTED");
-        assert!(store.permits_owned_source_drain(AgentProfile::DemoAcceptance, 321).unwrap());
-        assert!(!store.permits_owned_source_drain(AgentProfile::DemoAcceptance, 999).unwrap());
-        assert!(!store.permits_owned_source_drain(AgentProfile::Production, 321).unwrap());
-        assert!(store.save(AgentDesiredState::demo_acceptance_running()).is_err());
+        assert!(
+            store
+                .permits_owned_source_drain(AgentProfile::DemoAcceptance, 321)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .permits_owned_source_drain(AgentProfile::DemoAcceptance, 999)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .permits_owned_source_drain(AgentProfile::Production, 321)
+                .unwrap()
+        );
+        assert!(
+            store
+                .save(AgentDesiredState::demo_acceptance_running())
+                .is_err()
+        );
         assert!(store.save(AgentDesiredState::production_running()).is_err());
         let reopened = DesiredStateStore::at(path.clone());
         assert!(reopened.is_pending().unwrap());
@@ -1030,7 +1063,11 @@ mod single_owner_transition_tests {
         reopened.stage_frozen(witness(), 11_000).unwrap();
         assert!(reopened.is_pending().unwrap());
         assert_eq!(reopened.status_value()["phase"], "SOURCE_FROZEN");
-        assert!(!reopened.permits_owned_source_drain(AgentProfile::DemoAcceptance, 321).unwrap());
+        assert!(
+            !reopened
+                .permits_owned_source_drain(AgentProfile::DemoAcceptance, 321)
+                .unwrap()
+        );
         let _ = fs::remove_file(path);
     }
 

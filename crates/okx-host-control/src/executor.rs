@@ -627,11 +627,13 @@ impl HostExecutor {
         // Commit a crash-surviving hold BEFORE the child's first drain
         // response can become uncertain. A CONTROL crash here must never
         // respawn the Demo mutation-authorized agent automatically.
-        let source_pid = self.agent_child.as_ref().map(Child::id)
+        let source_pid = self
+            .agent_child
+            .as_ref()
+            .map(Child::id)
             .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        self.desired_store.begin_source_drain_hold(
-            self.desired_profile, target, source_pid,
-        )?;
+        self.desired_store
+            .begin_source_drain_hold(self.desired_profile, target, source_pid)?;
         let (ticket, bound) = self.bound_native_source_candidate(expected_source_uid, target)?;
         let source_pid = bound.source_pid;
         let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
@@ -1105,9 +1107,15 @@ impl HostExecutor {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
         if self.desired_store.is_pending()? {
-            let owned_pid = self.agent_child.as_ref().map(Child::id)
+            let owned_pid = self
+                .agent_child
+                .as_ref()
+                .map(Child::id)
                 .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-            if !self.desired_store.permits_owned_source_drain(self.desired_profile, owned_pid)? {
+            if !self
+                .desired_store
+                .permits_owned_source_drain(self.desired_profile, owned_pid)?
+            {
                 return Err(HostControlError::ProfileTransitionPending);
             }
         }
