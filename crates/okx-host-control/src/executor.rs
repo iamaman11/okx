@@ -22,8 +22,8 @@ use crate::{
     background_process::hidden_command,
     controller_update,
     desired::{
-        AgentDesired, AgentDesiredState, AgentProfile, BoundSourceIdentity,
-        DesiredStateStore, FrozenSourceWitness,
+        AgentDesired, AgentDesiredState, AgentProfile, BoundSourceIdentity, DesiredStateStore,
+        FrozenSourceWitness,
     },
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
@@ -1008,8 +1008,7 @@ impl HostExecutor {
         if !self.agent_is_running()?
             || self.agent_child.as_ref().map(Child::id) != Some(launch.pid)
             || self.agent_launch.is_none_or(|latest| {
-                latest.pid != launch.pid
-                    || latest.launch_lease_sha256 != launch.launch_lease_sha256
+                latest.pid != launch.pid || latest.launch_lease_sha256 != launch.launch_lease_sha256
             })
         {
             return Err(HostControlError::ProfileHandoffProofRequired);

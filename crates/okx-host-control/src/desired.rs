@@ -118,9 +118,7 @@ impl DesiredFileV3 {
         }
         if let Some(transition) = &self.transition {
             transition.validate()?;
-            if self.profile != transition.witness.source
-                || self.agent != AgentDesired::Running
-            {
+            if self.profile != transition.witness.source || self.agent != AgentDesired::Running {
                 return Err(HostControlError::ProfileTransitionInvalid);
             }
         }
