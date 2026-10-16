@@ -926,7 +926,10 @@ impl ExecutionRuntime {
             return Ok(None);
         }
         let guarded = ProductionAuthorityReset(&mut *executor);
-        let result = guarded.0.submit_prepared(intent_id, timing, observed_at_ms).await;
+        let result = guarded
+            .0
+            .submit_prepared(intent_id, timing, observed_at_ms)
+            .await;
         drop(guarded);
         Ok(Some(result))
     }
@@ -1527,7 +1530,10 @@ mod tests {
         owner.enable_demo_acceptance(demo).expect("test authority");
         {
             let guard = ProductionAuthorityReset(&mut *owner);
-            assert_eq!(guard.0.mutation_authority(), MutationAuthority::DemoAcceptance);
+            assert_eq!(
+                guard.0.mutation_authority(),
+                MutationAuthority::DemoAcceptance
+            );
         }
         assert_eq!(owner.mutation_authority(), MutationAuthority::Disabled);
         drop(owner);
