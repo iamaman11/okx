@@ -1586,7 +1586,11 @@ async fn executor_preflight(
         Some(handle) => Some(handle.status().await),
         None => None,
     };
-    let readout = crate::execution_preflight::ExecutorPreflightReadout::new(evidence, private_ws);
+    let readout = crate::execution_preflight::ExecutorPreflightReadout::new(
+        evidence,
+        private_ws,
+        execution.demo_mutation_acceptance_requested(),
+    );
     Ok(completed(
         request,
         generated_at,

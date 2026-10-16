@@ -46,6 +46,11 @@ pub struct ExecutorPreflightSnapshot {
 pub struct ExecutorPreflightReadout {
     #[serde(flatten)]
     pub preflight: ExecutorPreflightSnapshot,
+    /// Observed native runtime authorization; NOT an account-level trade grant.
+    pub execution_right: &'static str,
+    /// Bounded reasons before attempting a venue POST. The durable ledger
+    /// STOP and exact risk policies remain separate mandatory gates.
+    pub admission_blockers: Vec<&'static str>,
     pub protected_oco: ProtectedOcoReadiness,
 }
 
@@ -61,10 +66,15 @@ impl ExecutorPreflightReadout {
     pub fn new(
         mut preflight: ExecutorPreflightSnapshot,
         private_ws: Option<okx_runtime::PrivateWsStatus>,
+        demo_mutations_configured: bool,
     ) -> Self {
+        let (execution_right, admission_blockers) =
+            observed_execution_right(&preflight, demo_mutations_configured);
         preflight.schema = EXECUTOR_PREFLIGHT_SCHEMA_V4;
         Self {
             preflight,
+            execution_right,
+            admission_blockers,
             protected_oco: ProtectedOcoReadiness {
                 event_monitor_ready: private_ws
                     .as_ref()
@@ -75,6 +85,38 @@ impl ExecutorPreflightReadout {
             },
         }
     }
+}
+
+/// One observational classification of actual native mode and preflight.
+/// Production remains ReadOnly regardless of credential trade permission:
+/// neither this readout nor an accepted REST credential grants exchange POSTs.
+fn observed_execution_right(
+    preflight: &ExecutorPreflightSnapshot,
+    demo_mutations_configured: bool,
+) -> (&'static str, Vec<&'static str>) {
+    let mut blockers = Vec::new();
+    let execution_right = if preflight.credential.production_environment {
+        blockers.push("PRODUCTION_LIVE_NOT_AUTHORIZED");
+        if !preflight.credential.executor_ip_bound {
+            blockers.push("PRODUCTION_EXECUTOR_IP_NOT_BOUND");
+        }
+        "PRODUCTION_READ_ONLY"
+    } else if demo_mutations_configured {
+        "DEMO_MUTATIONS_CONFIGURED"
+    } else {
+        blockers.push("DEMO_EXECUTION_RIGHT_READ_ONLY");
+        "DEMO_READ_ONLY"
+    };
+    if !preflight.credential.accepted && execution_right != "DEMO_READ_ONLY" {
+        blockers.push("CREDENTIAL_PREFLIGHT_NOT_ACCEPTED");
+    }
+    if !preflight.clock.accepted {
+        blockers.push("EXECUTOR_CLOCK_NOT_ACCEPTED");
+    }
+    if !preflight.accepted && preflight.credential.accepted && preflight.clock.accepted {
+        blockers.push("ACCOUNT_RATE_LIMIT_NOT_ACCEPTED");
+    }
+    (execution_right, blockers)
 }
 
 impl ExecutorPreflightSnapshot {
@@ -312,6 +354,58 @@ mod tests {
 
     fn environment() -> OkxEnvironment {
         OkxEnvironment::new(Region::Global, false)
+    }
+
+    #[test]
+    fn effective_execution_right_never_promotes_read_only_credentials_to_trading() {
+        let observer = config("sub-uid", "main-uid", "read_only", "");
+        let executor = config("sub-uid", "main-uid", "read_only,trade", "");
+        let mut credential = evaluate_executor_preflight(environment(), &observer, &executor);
+        let snapshot = ExecutorPreflightSnapshot {
+            schema: EXECUTOR_PREFLIGHT_SCHEMA_V3,
+            accepted: false,
+            credential: credential.clone(),
+            clock: ClockEvidenceSnapshot {
+                server_time_ms: 1,
+                local_midpoint_ms: 1,
+                offset_ms: 0,
+                round_trip_ms: 0,
+                age_ms: 0,
+                max_abs_offset_ms: 5000,
+                max_round_trip_ms: 2000,
+                max_age_ms: 2000,
+                accepted: true,
+            },
+            account_rate_limit: AccountRateLimitEvidence {
+                schema: okx_api::ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V3,
+                source: AccountRateLimitSource::Exchange,
+                current_orders_per_2s: 0,
+                next_orders_per_2s: None,
+                fill_ratio: None,
+                main_fill_ratio: None,
+                updated_at_ms: None,
+            },
+            rate_budget: okx_api::RateBudget::new().snapshot(),
+        };
+        let (right, blockers) = observed_execution_right(&snapshot, false);
+        assert_eq!(right, "PRODUCTION_READ_ONLY");
+        assert!(blockers.contains(&"PRODUCTION_LIVE_NOT_AUTHORIZED"));
+        assert!(blockers.contains(&"PRODUCTION_EXECUTOR_IP_NOT_BOUND"));
+
+        credential.production_environment = false;
+        credential.accepted = false;
+        let demo_read_only = ExecutorPreflightSnapshot {
+            credential,
+            ..snapshot
+        };
+        let (right, blockers) = observed_execution_right(&demo_read_only, false);
+        assert_eq!(right, "DEMO_READ_ONLY");
+        assert!(blockers.contains(&"DEMO_EXECUTION_RIGHT_READ_ONLY"));
+        assert!(!blockers.contains(&"CREDENTIAL_PREFLIGHT_NOT_ACCEPTED"));
+
+        let (right, blockers) = observed_execution_right(&demo_read_only, true);
+        assert_eq!(right, "DEMO_MUTATIONS_CONFIGURED");
+        assert!(blockers.contains(&"CREDENTIAL_PREFLIGHT_NOT_ACCEPTED"));
     }
 
     #[test]
