@@ -325,17 +325,37 @@ fn put_lot(
     Ok(())
 }
 
-/// An observed quiet interval is only supported when source-complete
-/// checkpoints cover it. Neither REST pagination nor a later WS reconnect
-/// can retroactively prove a missing >2-hour canceled-order window.
-fn source_continuity_attested(sorted_cursor_times: &[u64], run_started_at_ms: u64) -> bool {
-    sorted_cursor_times.first().is_some_and(|first| {
-        *first >= run_started_at_ms
-            && first - run_started_at_ms <= crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
-    }) && sorted_cursor_times.windows(2).all(|pair| {
-        pair[1] >= pair[0]
-            && pair[1] - pair[0] <= crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
-    })
+/// Every interval from the run opening THROUGH the current authenticated
+/// account snapshot needs durable source-complete checkpoints. Merely having
+/// adjacent persisted cursors is not enough: if the latest is too old, a
+/// later short REST window cannot recover vanished canceled orders.
+///
+/// current_as_of is read from the same coherent private account snapshot
+/// used for this assessment, never inferred from the workstation clock.
+/// A fresh complete REST observation is evidence only if it closes the last
+/// <=2h interval; it cannot bridge a longer outage after restart.
+fn source_continuity_attested(
+    sorted_cursor_times: &[u64],
+    run_started_at_ms: u64,
+    current_as_of_ms: Option<u64>,
+) -> bool {
+    let Some(current) = current_as_of_ms else {
+        return false;
+    };
+    let Some(first) = sorted_cursor_times.first().copied() else {
+        return false;
+    };
+    let Some(last) = sorted_cursor_times.last().copied() else {
+        return false;
+    };
+    let window = crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS;
+    first >= run_started_at_ms
+        && first - run_started_at_ms <= window
+        && sorted_cursor_times
+            .windows(2)
+            .all(|pair| pair[1] >= pair[0] && pair[1] - pair[0] <= window)
+        && current >= last
+        && current - last <= window
 }
 
 /// Conservative default used by settlement/finalization paths. It never
@@ -467,7 +487,7 @@ pub fn assess_persisted_financial_period_with_verified_source(
     cursor_times.dedup();
     // Canceled unfilled exchange orders may vanish after 2 hours. Gaps cannot
     // be silently bridged by a later historical query or an empty response.
-    if !source_continuity_attested(&cursor_times, run.started_at_ms) {
+    if !source_continuity_attested(&cursor_times, run.started_at_ms, current_as_of) {
         reasons.insert("source_continuity_not_proven");
     }
     if e.cursors
@@ -874,25 +894,76 @@ mod tests {
     fn missing_two_hour_venue_window_stays_incomplete_after_restart() {
         let hour = 3_600_000_u64;
         let start = 1_000_000_u64;
-        assert!(!source_continuity_attested(&[], start));
+        let max_gap = crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS;
+
+        // Neither an empty source ledger nor a missing current exchange
+        // timestamp can prove continuity.
+        assert!(!source_continuity_attested(&[], start, Some(start)));
+        assert!(!source_continuity_attested(&[start], start, None));
+
+        let saved = [start, start + hour, start + 2 * hour];
         assert!(source_continuity_attested(
-            &[start, start + hour, start + 2 * hour],
-            start
+            &saved,
+            start,
+            Some(start + 2 * hour + max_gap),
         ));
-        // An exact boundary is still independently covered.
+        // The final checkpoint-to-account interval is part of the proof.
+        // Formerly this returned true regardless of current snapshot age.
+        assert!(!source_continuity_attested(
+            &saved,
+            start,
+            Some(start + 2 * hour + max_gap + 1),
+        ));
+        assert!(!source_continuity_attested(
+            &saved,
+            start,
+            Some(start + 2 * hour - 1),
+        ));
+        // Checkpoints survive restart. Replaying a fresh later REST snapshot
+        // without intermediate immutable cursors must not fill the hole.
+        let reopened: Vec<u64> = serde_json::from_slice(
+            &serde_json::to_vec(&saved).expect("persisted cursor timestamps")
+        )
+        .expect("read-only reopen");
+        assert!(!source_continuity_attested(
+            &reopened,
+            start,
+            Some(start + 5 * hour),
+        ));
+        // A later independent complete checkpoint within the window restores
+        // *future* continuity only when all earlier intervals were covered.
+        let continuous = [start, start + hour, start + 2 * hour, start + 3 * hour];
         assert!(source_continuity_attested(
-            &[start, start + 2 * hour],
-            start
+            &continuous,
+            start,
+            Some(start + 4 * hour),
         ));
-        // A subsequent complete REST snapshot cannot invent missing orders.
         assert!(!source_continuity_attested(
             &[start, start + 2 * hour + 1],
-            start
+            start,
+            Some(start + 2 * hour + 1),
         ));
-        assert!(!source_continuity_attested(&[start + 2 * hour + 1], start));
-        assert!(!source_continuity_attested(&[start + hour, start], start));
-        // Source readback after reconnect is not an accounting rewind.
-        assert!(!source_continuity_attested(&[start - 1], start));
+        assert!(!source_continuity_attested(
+            &[start + 2 * hour + 1],
+            start,
+            Some(start + 2 * hour + 1),
+        ));
+        assert!(!source_continuity_attested(
+            &[start + hour, start],
+            start,
+            Some(start + 2 * hour),
+        ));
+        // Neither old pre-run evidence nor a future-dated cursor is trusted.
+        assert!(!source_continuity_attested(
+            &[start - 1],
+            start,
+            Some(start),
+        ));
+        assert!(!source_continuity_attested(
+            &[start + 1],
+            start,
+            Some(start),
+        ));
     }
 
     #[test]
