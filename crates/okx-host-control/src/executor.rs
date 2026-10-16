@@ -1214,13 +1214,13 @@ impl HostExecutor {
         // A historical v1 journal is never declared complete. Only a native
         // source already persisted as strictly ReadOnly may leave it untouched.
         if let Some(format) = ledger_format {
-            if format != okx_execution::EXECUTION_LEDGER_SCHEMA_V14 {
+            if format != "okx.execution-ledger/v14" {
                 let pid = self
                     .agent_child
                     .as_ref()
                     .map(Child::id)
                     .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-                if format != okx_execution::EXECUTION_LEDGER_SCHEMA_V1
+                if format != "okx.execution-ledger/v1"
                     || !self
                         .desired_store
                         .permits_verified_read_only_source(self.desired_profile, pid)?
