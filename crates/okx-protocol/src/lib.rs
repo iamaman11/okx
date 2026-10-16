@@ -109,9 +109,9 @@ impl NativeReadOnlyTargetProof {
             && now_ms >= self.snapshot_received_ms
             && now_ms - self.snapshot_received_ms <= 10_000
             && self.private_ws_generation > 0
-            && self.positions == 0
-            && self.orders == 0
-            && self.native_oco == 0
+            // Target READONLY may already have venue positions/orders/OCO.
+            // Full observation must be complete, but not necessarily FLAT;
+            // only the outgoing mutation-owning source requires FLAT.
             && self.native_oco_complete
             && self.read_only_credentials
             && self.executor_mutations_disabled
@@ -4036,7 +4036,10 @@ mod native_drain_source_tests {
         assert!(!original.valid_for(&uid, 30_001));
         let mut changed = original.clone();
         changed.native_oco = 1;
-        assert!(!changed.valid_for(&uid, 20_100));
+        changed.orders = 2;
+        changed.positions = 3;
+        assert!(changed.valid_for(&uid, 20_100),
+            "existing independent real-account exposure is observable in ReadOnly");
         changed = original.clone();
         changed.native_oco_complete = false;
         assert!(!changed.valid_for(&uid, 20_100));
