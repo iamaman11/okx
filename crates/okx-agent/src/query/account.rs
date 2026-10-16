@@ -39,14 +39,17 @@ const PROFILE_HANDOFF_READINESS_SCHEMA_V1: &str = "okx.profile-handoff-readiness
 /// executor is NOT frozen and this packet is NEVER a CONTROL authorization.
 fn profile_handoff_readiness_packet(
     full: &serde_json::Value,
-    quality: &DataQuality,
+    summary_quality: &DataQuality,
+    current_source_quality: &DataQuality,
     local: Option<&okx_execution::ProfileHandoffLedgerAssessment>,
 ) -> serde_json::Value {
     use serde_json::{Value, json};
     let get = |p: &str| full.pointer(p).cloned().unwrap_or(Value::Null);
     let mut blockers = Vec::<&'static str>::new();
-    if !matches!(quality, DataQuality::Fresh) {
-        blockers.push("ACCOUNT_SUMMARY_NOT_FRESH");
+    // Archive incompleteness degrades the summary, not necessarily the
+    // current account/WS source. Neither observation is CONTROL authority.
+    if !matches!(current_source_quality, DataQuality::Fresh) {
+        blockers.push("CURRENT_ACCOUNT_SOURCE_NOT_FRESH");
     }
     if get("/coherence/coherent") != json!(true) {
         blockers.push("PRIVATE_SOURCE_NOT_COHERENT");
@@ -88,6 +91,30 @@ fn profile_handoff_readiness_packet(
     if get("/reconciliation/identity_mismatches") != json!(0) {
         blockers.push("EXECUTION_IDENTITY_MISMATCH");
     }
+    // A future single-use freeze must never be inferred from a missing UID,
+    // an old REST as-of or an unobserved private WS fence window.
+    if get("/account_ledger/authority/account_uid_fingerprint")
+        .as_str()
+        .is_none_or(|uid| uid.is_empty())
+    {
+        blockers.push("SOURCE_ACCOUNT_UID_NOT_PROVEN");
+    }
+    if get("/coherence/private_ws_generation")
+        .as_u64()
+        .is_none_or(|generation| generation == 0)
+    {
+        blockers.push("PRIVATE_WS_GENERATION_NOT_PROVEN");
+    }
+    if get("/coherence/events_during_history_read") != json!(0) {
+        blockers.push("PRIVATE_WS_FENCE_NOT_QUIET");
+    }
+    let source_asof_ms = get("/account_ledger/current_account_as_of_ms")
+        .as_str()
+        .and_then(|ms| ms.parse::<u64>().ok());
+    let source_age_ms = source_asof_ms.and_then(|ms| super::utc_now_ms().checked_sub(ms));
+    if !source_age_ms.is_some_and(|age| age <= 10_000) {
+        blockers.push("CURRENT_ACCOUNT_ASOF_TOO_OLD_OR_UNKNOWN");
+    }
     match local {
         None => blockers.push("NATIVE_EXECUTOR_LEDGER_UNAVAILABLE"),
         Some(value) => {
@@ -118,6 +145,9 @@ fn profile_handoff_readiness_packet(
         "schema": PROFILE_HANDOFF_READINESS_SCHEMA_V1,
         "status": if source_ready { "SOURCE_QUIESCENT_NOT_AUTHORIZED" } else { "BLOCKED" },
         "source_predicates_pass": source_ready,
+        "summary_quality": summary_quality,
+        "current_source_quality": current_source_quality,
+        "source_age_ms": source_age_ms,
         "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE",
         "control_action": "DO_NOT_SWITCH_PROFILE",
         "blockers": blockers,
@@ -792,7 +822,12 @@ pub(super) async fn dispatch(
                 coherence,
             })?;
             let result = if handoff_readiness {
-                profile_handoff_readiness_packet(&full, &quality, local_handoff.as_ref())
+                profile_handoff_readiness_packet(
+                    &full,
+                    &quality,
+                    &assembled.quality,
+                    local_handoff.as_ref(),
+                )
             } else if compact {
                 let packet = compact_trader_packet(
                     &full,
@@ -2483,10 +2518,14 @@ mod tests {
                 "authority": {"account_uid_fingerprint": "uid"},
                 "open_positions": 0,
                 "pending_orders": 0,
-                "current_account_as_of_ms": "1792068161383",
+                "current_account_as_of_ms": utc_now_ms().to_string(),
                 "history_coverage": [{"complete_within_bound":true}]
             },
-            "coherence": {"coherent":true},
+            "coherence": {
+                "coherent":true,
+                "private_ws_generation":7,
+                "events_during_history_read":0
+            },
             "pending_protective_algos": {"rows":0,"complete_within_bound":true},
             "reconciliation": {
                 "consistent":true,
@@ -2498,7 +2537,7 @@ mod tests {
             },
             "managed_execution_intents":{"shown":16,"total":45,"complete_within_bound":false}
         });
-        let ready = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, Some(&ledger));
+        let ready = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, &DataQuality::Fresh, Some(&ledger));
         // Even entirely quiescent sources cannot authorize a CTRL swap:
         // no trusted one-time frozen owner ticket exists yet.
         assert_eq!(ready["status"], "SOURCE_QUIESCENT_NOT_AUTHORIZED");
@@ -2514,7 +2553,7 @@ mod tests {
         full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] =
             json!(3);
         let unresolved =
-            profile_handoff_readiness_packet(&full, &DataQuality::Degraded, Some(&ledger));
+            profile_handoff_readiness_packet(&full, &DataQuality::Degraded, &DataQuality::Fresh, Some(&ledger));
         assert_eq!(unresolved["status"], "BLOCKED");
         assert!(
             unresolved["blockers"]
@@ -2523,13 +2562,61 @@ mod tests {
                 .iter()
                 .any(|b| b == "MANAGED_INTENTS_OUTSIDE_EXCHANGE_EVIDENCE")
         );
+        assert_eq!(unresolved["summary_quality"], "DEGRADED");
+        assert_eq!(unresolved["current_source_quality"], "FRESH");
+        assert!(!unresolved["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b == "CURRENT_ACCOUNT_SOURCE_NOT_FRESH"));
+        let stale = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Stale,
+            Some(&ledger),
+        );
+        assert!(stale["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b == "CURRENT_ACCOUNT_SOURCE_NOT_FRESH"));
         full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] =
             json!(0);
+        full["coherence"]["private_ws_generation"] = json!(null);
+        let no_generation = profile_handoff_readiness_packet(
+            &full, &DataQuality::Fresh, &DataQuality::Fresh, Some(&ledger),
+        );
+        assert!(no_generation["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b == "PRIVATE_WS_GENERATION_NOT_PROVEN"));
+        full["coherence"]["private_ws_generation"] = json!(7);
+        full["account_ledger"]["current_account_as_of_ms"] = json!((utc_now_ms() - 60_000).to_string());
+        let old = profile_handoff_readiness_packet(
+            &full, &DataQuality::Fresh, &DataQuality::Fresh, Some(&ledger),
+        );
+        assert!(old["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b == "CURRENT_ACCOUNT_ASOF_TOO_OLD_OR_UNKNOWN"));
+        full["account_ledger"]["current_account_as_of_ms"] = json!(utc_now_ms().to_string());
+        full["coherence"]["events_during_history_read"] = json!(null);
+        let no_window = profile_handoff_readiness_packet(
+            &full, &DataQuality::Fresh, &DataQuality::Fresh, Some(&ledger),
+        );
+        assert!(no_window["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b == "PRIVATE_WS_FENCE_NOT_QUIET"));
+        full["coherence"]["events_during_history_read"] = json!(0);
         full["pending_protective_algos"]["rows"] = json!(1);
-        let oco = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, Some(&ledger));
+        let oco = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, &DataQuality::Fresh, Some(&ledger));
         assert_eq!(oco["status"], "BLOCKED");
         full["pending_protective_algos"]["rows"] = json!(0);
-        let unavailable = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, None);
+        let unavailable = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, &DataQuality::Fresh, None);
         assert_eq!(unavailable["status"], "BLOCKED");
         assert!(
             unavailable["blockers"]
@@ -2538,7 +2625,7 @@ mod tests {
                 .iter()
                 .any(|b| b == "NATIVE_EXECUTOR_LEDGER_UNAVAILABLE")
         );
-        let empty = profile_handoff_readiness_packet(&json!({}), &DataQuality::Fresh, None);
+        let empty = profile_handoff_readiness_packet(&json!({}), &DataQuality::Fresh, &DataQuality::Fresh, None);
         assert_eq!(empty["status"], "BLOCKED");
         assert_eq!(empty["control_action"], "DO_NOT_SWITCH_PROFILE");
     }
