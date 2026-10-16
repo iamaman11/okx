@@ -151,8 +151,8 @@ fn profile_handoff_readiness_packet(
     //
     // This is observer-only classification, not a freeze token. Never reuse it
     // as a trading or CONTROL admission decision.
-    let unmatched_count = get("/reconciliation/managed_intents_unresolved_in_bounded_exchange_evidence")
-        .as_u64();
+    let unmatched_count =
+        get("/reconciliation/managed_intents_unresolved_in_bounded_exchange_evidence").as_u64();
     let historical_exception = unmatched_count == Some(0)
         || unmatched_count.is_some_and(|count| {
             count > 0
@@ -171,7 +171,9 @@ fn profile_handoff_readiness_packet(
                                     && row
                                         .get("recorded_order_id")
                                         .and_then(Value::as_str)
-                                        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+                                        .is_some_and(|id| {
+                                            !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+                                        })
                             })
                     })
         });
@@ -2641,7 +2643,8 @@ mod tests {
         assert_eq!(unresolved["summary_quality"], "DEGRADED");
         assert_eq!(unresolved["current_source_quality"], "FRESH");
         assert_eq!(
-            unresolved["read_only_source_assessment"]["status"], "BLOCKED"
+            unresolved["read_only_source_assessment"]["status"],
+            "BLOCKED"
         );
         // Archive-only canceled IDs are potentially acceptable for
         // independent READONLY source quiescence, never for finance or trade
@@ -2678,8 +2681,14 @@ mod tests {
             Some(&ledger),
         );
         assert_eq!(readonly["source_predicates_pass"], false);
-        assert_eq!(readonly["read_only_source_assessment"]["preconditions_pass"], true);
-        assert_eq!(readonly["read_only_source_assessment"]["historical_canceled_identity_exception"], true);
+        assert_eq!(
+            readonly["read_only_source_assessment"]["preconditions_pass"],
+            true
+        );
+        assert_eq!(
+            readonly["read_only_source_assessment"]["historical_canceled_identity_exception"],
+            true
+        );
         assert_eq!(
             readonly["read_only_source_assessment"]["status"],
             "SOURCE_CANDIDATE_NOT_FROZEN"
@@ -2695,7 +2704,10 @@ mod tests {
             &DataQuality::Fresh,
             Some(&ledger),
         );
-        assert_eq!(filled_missing["read_only_source_assessment"]["preconditions_pass"], false);
+        assert_eq!(
+            filled_missing["read_only_source_assessment"]["preconditions_pass"],
+            false
+        );
         full["reconciliation"]["unmatched_historical"][2]["state"] = json!("CANCELED");
         full["reconciliation"]["unmatched_historical"][2]["recorded_order_id"] = json!(null);
         let missing_id = profile_handoff_readiness_packet(
@@ -2704,7 +2716,10 @@ mod tests {
             &DataQuality::Fresh,
             Some(&ledger),
         );
-        assert_eq!(missing_id["read_only_source_assessment"]["preconditions_pass"], false);
+        assert_eq!(
+            missing_id["read_only_source_assessment"]["preconditions_pass"],
+            false
+        );
         full["reconciliation"]["unmatched_historical"][2]["recorded_order_id"] =
             json!("3995561309710336000");
         full["reconciliation"]["unmatched_historical_truncated"] = json!(true);
@@ -2714,7 +2729,10 @@ mod tests {
             &DataQuality::Fresh,
             Some(&ledger),
         );
-        assert_eq!(truncated["read_only_source_assessment"]["preconditions_pass"], false);
+        assert_eq!(
+            truncated["read_only_source_assessment"]["preconditions_pass"],
+            false
+        );
         full["reconciliation"]["unmatched_historical_truncated"] = json!(false);
         full["account_ledger"]["open_positions"] = json!(1);
         let active_position = profile_handoff_readiness_packet(
@@ -2723,7 +2741,10 @@ mod tests {
             &DataQuality::Fresh,
             Some(&ledger),
         );
-        assert_eq!(active_position["read_only_source_assessment"]["preconditions_pass"], false);
+        assert_eq!(
+            active_position["read_only_source_assessment"]["preconditions_pass"],
+            false
+        );
         full["account_ledger"]["open_positions"] = json!(0);
         full["coherence"]["private_ws_generation"] = json!(null);
         let no_source = profile_handoff_readiness_packet(
@@ -2732,7 +2753,10 @@ mod tests {
             &DataQuality::Fresh,
             Some(&ledger),
         );
-        assert_eq!(no_source["read_only_source_assessment"]["preconditions_pass"], false);
+        assert_eq!(
+            no_source["read_only_source_assessment"]["preconditions_pass"],
+            false
+        );
         full["coherence"]["private_ws_generation"] = json!(7);
         assert!(
             !unresolved["blockers"]
