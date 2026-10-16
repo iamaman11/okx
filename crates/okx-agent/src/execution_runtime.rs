@@ -1604,7 +1604,10 @@ mod tests {
         );
         assert_eq!(drained.nonterminal_intents, 0);
         assert_eq!(drained.unresolved_order_mutations, 0);
-        assert_eq!(drained.immutable_stop_reason.as_deref(), Some("TEST_DURABLE_STOP"));
+        assert_eq!(
+            drained.immutable_stop_reason.as_deref(),
+            Some("TEST_DURABLE_STOP")
+        );
         assert!(runtime.admit_mutating_request().await.is_none());
         assert_eq!(
             runtime.mutation_authority().await,
