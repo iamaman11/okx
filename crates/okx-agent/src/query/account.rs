@@ -115,7 +115,7 @@ fn profile_handoff_readiness_packet(
         .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
         .and_then(|at| u64::try_from(at.timestamp_millis()).ok());
     let source_age_ms = receipt_ms.and_then(|ms| super::utc_now_ms().checked_sub(ms));
-    if !source_age_ms.is_some_and(|age| age <= 10_000) {
+    if source_age_ms.is_none_or(|age| age > 10_000) {
         blockers.push("CURRENT_SNAPSHOT_RECEIPT_TOO_OLD_OR_UNKNOWN");
     }
     match local {
