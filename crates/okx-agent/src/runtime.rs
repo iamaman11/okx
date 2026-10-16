@@ -48,6 +48,42 @@ pub enum RuntimeState {
 // A failed venue proof can be retried only at a bounded cadence.
 const MIN_QUIET_SOURCE_RETRY_MS: u64 = 300_000;
 
+fn native_legacy_read_only_source_is_quiet(
+    source: &serde_json::Value,
+    ledger: &okx_execution::ProfileHandoffLedgerAssessment,
+    native_read_only_mode: bool,
+) -> bool {
+    if !native_read_only_mode
+        || ledger.source_ledger_format != okx_execution::EXECUTION_LEDGER_SCHEMA_V1
+        || ledger.nonterminal_intents == 0
+        || ledger.account_uid_mismatches != 0
+        || ledger.unresolved_order_mutations != 0
+        || ledger.unresolved_protective_lifecycle != 0
+    {
+        return false;
+    }
+    // Exactly these two historical gaps are permitted for observer departure.
+    // All current REST/WS/OCO/UID/reconciliation blockers remain fatal.
+    let Some(blockers) = source
+        .pointer("/read_only_source_assessment/blockers")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    blockers.len() == 2
+        && blockers
+            .iter()
+            .any(|value| value == "LEDGER_NOT_VERIFIED_V14")
+        && blockers
+            .iter()
+            .any(|value| value == "NONTERMINAL_NATIVE_INTENT")
+        && source.pointer("/current_source_quality") == Some(&serde_json::json!("FRESH"))
+        && source.pointer("/source/coherent") == Some(&serde_json::json!(true))
+        && source.pointer("/source/positions") == Some(&serde_json::json!(0))
+        && source.pointer("/source/orders") == Some(&serde_json::json!(0))
+        && source.pointer("/source/native_oco") == Some(&serde_json::json!(0))
+}
+
 fn quiet_source_retry_allowed(last_attempt_ms: Option<u64>, now_ms: u64) -> bool {
     last_attempt_ms.is_none_or(|last| now_ms >= last && now_ms - last >= MIN_QUIET_SOURCE_RETRY_MS)
 }
@@ -378,9 +414,17 @@ pub async fn run_mailbox_until_shutdown(
                     None
                 };
                 let ledger = drained.ok();
+                let native_read_only_mode = execution.is_some_and(|owner| {
+                    owner.mode() == crate::execution_runtime::ExecutionRuntimeMode::ReadOnly
+                });
                 let source_valid = source.as_ref().is_some_and(|value| {
-                    value.pointer("/read_only_source_assessment/preconditions_pass")
+                    (value.pointer("/read_only_source_assessment/preconditions_pass")
                         == Some(&serde_json::json!(true))
+                        || ledger.as_ref().is_some_and(|record| {
+                            native_legacy_read_only_source_is_quiet(
+                                value, record, native_read_only_mode,
+                            )
+                        }))
                         && value.pointer("/current_source_quality")
                             == Some(&serde_json::json!("FRESH"))
                         && value.pointer("/source_account_uid_fingerprint")
@@ -874,6 +918,68 @@ fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_ledger_return_cannot_bypass_readonly_or_current_risk_checks() {
+        let ledger = okx_execution::ProfileHandoffLedgerAssessment {
+            schema: okx_execution::PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1,
+            managed_intents_total: 9,
+            nonterminal_intents: 9,
+            unresolved_order_mutations: 0,
+            unresolved_protective_lifecycle: 0,
+            account_uid_mismatches: 0,
+            source_ledger_manifest_sha256: "a".repeat(64),
+            source_ledger_format: okx_execution::EXECUTION_LEDGER_SCHEMA_V1.to_owned(),
+            immutable_stop_reason: None,
+            finalized_run_checksum_sha256: None,
+        };
+        let mut observed = serde_json::json!({
+            "current_source_quality":"FRESH",
+            "source":{"coherent":true,"positions":0,"orders":0,"native_oco":0},
+            "read_only_source_assessment":{
+                "blockers":["LEDGER_NOT_VERIFIED_V14","NONTERMINAL_NATIVE_INTENT"]
+            }
+        });
+        assert!(native_legacy_read_only_source_is_quiet(
+            &observed, &ledger, true
+        ));
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed, &ledger, false
+        ));
+        observed["source"]["orders"] = serde_json::json!(1);
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed, &ledger, true
+        ));
+        observed["source"]["orders"] = serde_json::json!(0);
+        observed["read_only_source_assessment"]["blockers"][0] =
+            serde_json::json!("UNKNOWN_OR_PENDING_ORDER_MUTATION");
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed, &ledger, true
+        ));
+        observed["read_only_source_assessment"]["blockers"][0] =
+            serde_json::json!("LEDGER_NOT_VERIFIED_V14");
+        let mut unsafe_ledger = ledger.clone();
+        unsafe_ledger.unresolved_order_mutations = 1;
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed,
+            &unsafe_ledger,
+            true
+        ));
+        unsafe_ledger = ledger.clone();
+        unsafe_ledger.account_uid_mismatches = 1;
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed,
+            &unsafe_ledger,
+            true
+        ));
+        unsafe_ledger = ledger;
+        unsafe_ledger.source_ledger_format = okx_execution::EXECUTION_LEDGER_SCHEMA_V14.to_owned();
+        assert!(!native_legacy_read_only_source_is_quiet(
+            &observed,
+            &unsafe_ledger,
+            true
+        ));
+    }
 
     #[test]
     fn quiet_financial_source_retry_is_bounded_in_existing_heartbeat() {

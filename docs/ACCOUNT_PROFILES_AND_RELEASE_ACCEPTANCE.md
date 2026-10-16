@@ -33,6 +33,28 @@ without treating old retained logs as current process proof. Source and
 Production Live safety gates remain unchanged. CI alone does not close
 Stage 5C-2; physical two-way transition and recovery are required.
 
+## Stage 5C-2 safe return with retained Production legacy ledger
+
+Physical PR #347 acceptance confirmed Demo -> Production ReadOnly, exact UID,
+one Job-owned process and no Live trading. Production's separate v1 ledger has
+nine nonterminal historical intents; their economic status remains INCOMPLETE.
+Zero CURRENT exchange positions, orders and OCO were independently observed.
+
+For Production ReadOnly -> Demo ReadOnly, a historical-v1 exception is possible
+ONLY for a previously CONTROL-committed ReadOnly source (verified by desired.json
+under the exact source PID's pre-drain hold) and the same native agent running
+strictly ReadOnly with mutation authority disabled after drain. A full fresh,
+coherent and quiet REST/WS/OCO source and exact account UID/ledger digest remain
+mandatory. Only LEDGER_NOT_VERIFIED_V14 and NONTERMINAL_NATIVE_INTENT may be
+excluded from the outgoing nontrading safety proof. Other source blockers and
+wrong/corrupt/unknown native mutations are denied. The existing immutable v1
+ledger remains in place: no migration, zeroing, history relabel, trade permit,
+second process, alternate installer or new transport. Demo remains strictly
+ReadOnly after the return; original Demo v14 ledger/STOP unchanged.
+
+Physical bidirectional gate is pending exact CI 6/6, immutable Windows
+release and native CONTROL/read-only MCP evidence of the reverse transition.
+
 ## Operator contract: one application, no Demo fork
 
 - Exactly **one installed `okx-agent.exe` binary** and **one Windows Job/CONTROL-owned running process** at any instant; `okx-host-control` and its launcher are existing lifecycle owners, not an alternate trading engine.
