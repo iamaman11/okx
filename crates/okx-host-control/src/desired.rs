@@ -99,6 +99,11 @@ struct DesiredFileV3 {
     schema: String,
     agent: AgentDesired,
     profile: AgentProfile,
+    /// ReadOnly is a durable execution right, NOT implied by the account profile.
+    /// Legacy v3 files default to the previous mode, but a verified transition
+    /// persists ReadOnly until an independently authorized explicit rearm.
+    #[serde(default)]
+    read_only: bool,
     transition: Option<TransitionRecord>,
     /// Written BEFORE requesting the child drain. A crash cannot silently
     /// restart source mutations while its exchange POST outcome is unknown.
@@ -126,6 +131,7 @@ impl DesiredFileV3 {
             schema: DESIRED_STATE_SCHEMA_V3.to_owned(),
             agent: state.agent,
             profile: state.profile,
+            read_only: false,
             transition: None,
             switch_hold: None,
         }
@@ -135,14 +141,13 @@ impl DesiredFileV3 {
         if self.schema != DESIRED_STATE_SCHEMA_V3 {
             return Err(HostControlError::DesiredStateCorrupt);
         }
-        if let Some(hold) = &self.switch_hold {
-            if !hold.valid()
+        if let Some(hold) = &self.switch_hold
+            && (!hold.valid()
                 || self.transition.is_some()
                 || self.agent != AgentDesired::Running
-                || self.profile != hold.source
-            {
-                return Err(HostControlError::ProfileTransitionInvalid);
-            }
+                || self.profile != hold.source)
+        {
+            return Err(HostControlError::ProfileTransitionInvalid);
         }
         if let Some(transition) = &self.transition {
             transition.validate()?;
@@ -234,10 +239,27 @@ impl DesiredStateStore {
     /// A normal desired-state write cannot drop a pending transition.
     /// Every change of profile while drained belongs to the same atomic owner.
     pub fn save(&self, state: AgentDesiredState) -> HostControlResult<()> {
-        if self.is_pending()? {
+        let prior = self.load_full()?;
+        if prior.transition.is_some() || prior.switch_hold.is_some() {
             return Err(HostControlError::ProfileTransitionPending);
         }
-        self.persist_full(&DesiredFileV3::initial(state))
+        let mut next = DesiredFileV3::initial(state);
+        // Same-profile stop/restart MUST NOT silently restore Demo mutation
+        // acceptance after a verified ReadOnly selection.
+        if prior.profile == state.profile {
+            next.read_only = prior.read_only;
+        }
+        self.persist_full(&next)
+    }
+
+    /// Read the persisted execution right before EVERY ordinary child launch.
+    /// Pending transition target launch is authorized separately by CONTROL.
+    pub fn read_only_for(&self, profile: AgentProfile) -> HostControlResult<bool> {
+        let state = self.load_full()?;
+        if state.profile != profile || state.transition.is_some() || state.switch_hold.is_some() {
+            return Err(HostControlError::ProfileTransitionPending);
+        }
+        Ok(state.read_only)
     }
 
     pub fn path(&self) -> &Path {
@@ -686,6 +708,7 @@ impl DesiredStateStore {
         }
         state.profile = target.profile;
         state.agent = AgentDesired::Running;
+        state.read_only = true;
         state.transition = None;
         self.persist_full(&state)
     }
@@ -986,11 +1009,51 @@ mod single_owner_transition_tests {
             AgentDesiredState::production_running()
         );
         assert!(!recovered.is_pending().unwrap());
+        assert!(recovered.read_only_for(AgentProfile::Production).unwrap());
+        recovered.save(AgentDesiredState::production_running()).unwrap();
+        assert!(recovered.read_only_for(AgentProfile::Production).unwrap());
         assert!(
             recovered
                 .complete_verified_read_only(&source, &target, 11_601)
                 .is_err()
         );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reverse_selection_persists_demo_read_only_across_cold_restart_and_normal_start() {
+        let path = path("demo-readonly-restart");
+        let _ = fs::remove_file(&path);
+        let store = DesiredStateStore::at(path.clone());
+        store.save(AgentDesiredState::production_running()).unwrap();
+        let mut ticket = witness();
+        ticket.source = AgentProfile::Production;
+        ticket.destination = AgentProfile::DemoAcceptance;
+        let bound = bound(&ticket);
+        store.stage_frozen(ticket, 11_000).unwrap();
+        store.consume_once(&bound, 11_100).unwrap();
+        store.mark_source_exited(&bound, 321, 11_200).unwrap();
+        store.complete_verified_read_only(
+            &bound,
+            &VerifiedReadOnlyDestination {
+                profile: AgentProfile::DemoAcceptance,
+                pid: 555,
+                account_uid_fingerprint: "9".repeat(64),
+                private_ws_generation: 9,
+                account_snapshot_received_ms: 11_500,
+                agent_sha256: bound.agent_sha256.clone(),
+                controller_sha256: bound.controller_sha256.clone(),
+                has_trade_authority: false,
+            },
+            11_600,
+        ).unwrap();
+        let cold = DesiredStateStore::at(path.clone());
+        assert!(cold.read_only_for(AgentProfile::DemoAcceptance).unwrap());
+        cold.save(AgentDesiredState::stopped_on(AgentProfile::DemoAcceptance)).unwrap();
+        cold.save(AgentDesiredState::demo_acceptance_running()).unwrap();
+        assert!(DesiredStateStore::at(path.clone())
+            .read_only_for(AgentProfile::DemoAcceptance).unwrap());
+        assert!(cold.read_only_for(AgentProfile::Production).is_err());
         let _ = fs::remove_file(path);
     }
 

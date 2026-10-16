@@ -993,11 +993,10 @@ impl HostExecutor {
         let mut lease_nonce = [0u8; 32];
         getrandom::fill(&mut lease_nonce)
             .map_err(|error| HostControlError::Random(error.to_string()))?;
-        let args = if transition_read_only && profile == AgentProfile::DemoAcceptance {
-            DEMO_READ_ONLY_AGENT_ARGS
-        } else {
-            agent_args(profile)
-        };
+        // A verified ReadOnly target stays ReadOnly after CONTROL/agent
+        // restart. The transient transition flag alone is never sufficient.
+        let read_only = transition_read_only || self.desired_store.read_only_for(profile)?;
+        let args = agent_args_with_mode(profile, read_only);
         let mut child = hidden_command(self.agent_binary())
             .args(args)
             .arg("--native-child-control-stdio")
@@ -1499,11 +1498,16 @@ const DEMO_ACCEPTANCE_AGENT_ARGS: &[&str] = &[
     AGENT_CLOUDFLARE_RUNTIME_ID,
 ];
 
-fn agent_args(profile: AgentProfile) -> &'static [&'static str] {
-    match profile {
-        AgentProfile::Production => PRODUCTION_AGENT_ARGS,
-        AgentProfile::DemoAcceptance => DEMO_ACCEPTANCE_AGENT_ARGS,
+fn agent_args_with_mode(profile: AgentProfile, read_only: bool) -> &'static [&'static str] {
+    match (profile, read_only) {
+        (AgentProfile::Production, _) => PRODUCTION_AGENT_ARGS,
+        (AgentProfile::DemoAcceptance, true) => DEMO_READ_ONLY_AGENT_ARGS,
+        (AgentProfile::DemoAcceptance, false) => DEMO_ACCEPTANCE_AGENT_ARGS,
     }
+}
+
+fn agent_args(profile: AgentProfile) -> &'static [&'static str] {
+    agent_args_with_mode(profile, false)
 }
 
 fn read_log_tail(path: &Path) -> std::io::Result<(u64, String)> {
@@ -2438,6 +2442,9 @@ mod tests {
         let args = agent_args(AgentProfile::DemoAcceptance);
         assert!(args.contains(&"--demo"));
         assert!(args.contains(&"--demo-mutation-acceptance"));
+        let observer = agent_args_with_mode(AgentProfile::DemoAcceptance, true);
+        assert!(observer.contains(&"--demo"));
+        assert!(!observer.contains(&"--demo-mutation-acceptance"));
         assert!(args.contains(&"--root"));
         assert!(args.contains(&DEMO_RUNTIME_ROOT));
         assert!(args.contains(&DEMO_MAILBOX_ISSUE));

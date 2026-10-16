@@ -4038,8 +4038,10 @@ mod native_drain_source_tests {
         changed.native_oco = 1;
         changed.orders = 2;
         changed.positions = 3;
-        assert!(changed.valid_for(&uid, 20_100),
-            "existing independent real-account exposure is observable in ReadOnly");
+        assert!(
+            changed.valid_for(&uid, 20_100),
+            "existing independent real-account exposure is observable in ReadOnly"
+        );
         changed = original.clone();
         changed.native_oco_complete = false;
         assert!(!changed.valid_for(&uid, 20_100));
