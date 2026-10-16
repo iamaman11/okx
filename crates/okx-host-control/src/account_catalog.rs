@@ -94,10 +94,15 @@ impl AccountCatalogStore {
     }
 
     fn load(&self) -> HostControlResult<AccountCatalogFile> {
-        if !self.path.exists() {
-            return Ok(AccountCatalogFile::empty());
-        }
-        let length = fs::metadata(&self.path)?.len();
+        // Only ENOENT means an empty catalog. Access denied, reparse or
+        // metadata I/O failure must never masquerade as no registered accounts.
+        let length = match fs::metadata(&self.path) {
+            Ok(meta) => meta.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AccountCatalogFile::empty());
+            }
+            Err(error) => return Err(error.into()),
+        };
         if length > MAX_CATALOG_BYTES {
             return Err(HostControlError::AccountCatalogInvalid);
         }
