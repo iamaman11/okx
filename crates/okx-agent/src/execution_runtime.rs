@@ -1575,6 +1575,15 @@ mod tests {
             RateBudget::new(),
         )
         .expect("native single executor");
+        // A new empty ledger has no attestable durable manifest by design.
+        // Seed a real atomic on-disk STOP without an exchange POST; drain
+        // must preserve exactly those original bytes and that stop reason.
+        {
+            let mut executor = runtime.executor.lock().await;
+            executor
+                .stop_new_risk("TEST_DURABLE_STOP", 2)
+                .expect("sealed native ledger");
+        }
         let baseline = runtime
             .profile_handoff_ledger_assessment("uid-fingerprint")
             .await
@@ -1590,6 +1599,7 @@ mod tests {
         );
         assert_eq!(drained.nonterminal_intents, 0);
         assert_eq!(drained.unresolved_order_mutations, 0);
+        assert_eq!(drained.immutable_stop_reason.as_deref(), Some("TEST_DURABLE_STOP"));
         assert!(runtime.admit_mutating_request().await.is_none());
         assert_eq!(
             runtime.mutation_authority().await,
