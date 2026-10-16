@@ -1376,9 +1376,11 @@ impl HostExecutor {
                 native_read_only_denial_code(reply.error.as_deref()),
             ));
         }
-        let proof = reply.target_read_only.ok_or(
-            HostControlError::ReadOnlyTargetProofDenied("MISSING_TARGET_PROOF"),
-        )?;
+        let proof = reply
+            .target_read_only
+            .ok_or(HostControlError::ReadOnlyTargetProofDenied(
+                "MISSING_TARGET_PROOF",
+            ))?;
         let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
         if !proof.valid_for(expected_uid, now) {
             return Err(HostControlError::ReadOnlyTargetProofDenied(
@@ -1832,9 +1834,7 @@ fn native_read_only_denial_code(value: Option<&str>) -> &'static str {
         Some("MUTATION_AUTHORITY_ENABLED") => "MUTATION_AUTHORITY_ENABLED",
         Some("ACCOUNT_REST_UNAVAILABLE") => "ACCOUNT_REST_UNAVAILABLE",
         Some("INVALID_ACCOUNT_RECEIPT") => "INVALID_ACCOUNT_RECEIPT",
-        Some("TARGET_UID_ACCESS_OR_RECEIPT_INVALID") => {
-            "TARGET_UID_ACCESS_OR_RECEIPT_INVALID"
-        }
+        Some("TARGET_UID_ACCESS_OR_RECEIPT_INVALID") => "TARGET_UID_ACCESS_OR_RECEIPT_INVALID",
         Some("TARGET_VERIFY_TIMEOUT") => "TARGET_VERIFY_TIMEOUT",
         _ => "UNRECOGNIZED_TARGET_DENIAL",
     }
