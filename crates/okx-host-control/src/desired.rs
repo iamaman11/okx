@@ -1010,7 +1010,9 @@ mod single_owner_transition_tests {
         );
         assert!(!recovered.is_pending().unwrap());
         assert!(recovered.read_only_for(AgentProfile::Production).unwrap());
-        recovered.save(AgentDesiredState::production_running()).unwrap();
+        recovered
+            .save(AgentDesiredState::production_running())
+            .unwrap();
         assert!(recovered.read_only_for(AgentProfile::Production).unwrap());
         assert!(
             recovered
@@ -1033,26 +1035,33 @@ mod single_owner_transition_tests {
         store.stage_frozen(ticket, 11_000).unwrap();
         store.consume_once(&bound, 11_100).unwrap();
         store.mark_source_exited(&bound, 321, 11_200).unwrap();
-        store.complete_verified_read_only(
-            &bound,
-            &VerifiedReadOnlyDestination {
-                profile: AgentProfile::DemoAcceptance,
-                pid: 555,
-                account_uid_fingerprint: "9".repeat(64),
-                private_ws_generation: 9,
-                account_snapshot_received_ms: 11_500,
-                agent_sha256: bound.agent_sha256.clone(),
-                controller_sha256: bound.controller_sha256.clone(),
-                has_trade_authority: false,
-            },
-            11_600,
-        ).unwrap();
+        store
+            .complete_verified_read_only(
+                &bound,
+                &VerifiedReadOnlyDestination {
+                    profile: AgentProfile::DemoAcceptance,
+                    pid: 555,
+                    account_uid_fingerprint: "9".repeat(64),
+                    private_ws_generation: 9,
+                    account_snapshot_received_ms: 11_500,
+                    agent_sha256: bound.agent_sha256.clone(),
+                    controller_sha256: bound.controller_sha256.clone(),
+                    has_trade_authority: false,
+                },
+                11_600,
+            )
+            .unwrap();
         let cold = DesiredStateStore::at(path.clone());
         assert!(cold.read_only_for(AgentProfile::DemoAcceptance).unwrap());
-        cold.save(AgentDesiredState::stopped_on(AgentProfile::DemoAcceptance)).unwrap();
-        cold.save(AgentDesiredState::demo_acceptance_running()).unwrap();
-        assert!(DesiredStateStore::at(path.clone())
-            .read_only_for(AgentProfile::DemoAcceptance).unwrap());
+        cold.save(AgentDesiredState::stopped_on(AgentProfile::DemoAcceptance))
+            .unwrap();
+        cold.save(AgentDesiredState::demo_acceptance_running())
+            .unwrap();
+        assert!(
+            DesiredStateStore::at(path.clone())
+                .read_only_for(AgentProfile::DemoAcceptance)
+                .unwrap()
+        );
         assert!(cold.read_only_for(AgentProfile::Production).is_err());
         let _ = fs::remove_file(path);
     }

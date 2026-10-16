@@ -995,7 +995,14 @@ impl HostExecutor {
             .map_err(|error| HostControlError::Random(error.to_string()))?;
         // A verified ReadOnly target stays ReadOnly after CONTROL/agent
         // restart. The transient transition flag alone is never sufficient.
-        let read_only = transition_read_only || self.desired_store.read_only_for(profile)?;
+        let read_only = if transition_read_only {
+            // The pending journal still names the source profile. Its
+            // one-use destination permission was checked above; never
+            // consult ordinary desired state for a transition target.
+            true
+        } else {
+            self.desired_store.read_only_for(profile)?
+        };
         let args = agent_args_with_mode(profile, read_only);
         let mut child = hidden_command(self.agent_binary())
             .args(args)
@@ -1504,10 +1511,6 @@ fn agent_args_with_mode(profile: AgentProfile, read_only: bool) -> &'static [&'s
         (AgentProfile::DemoAcceptance, true) => DEMO_READ_ONLY_AGENT_ARGS,
         (AgentProfile::DemoAcceptance, false) => DEMO_ACCEPTANCE_AGENT_ARGS,
     }
-}
-
-fn agent_args(profile: AgentProfile) -> &'static [&'static str] {
-    agent_args_with_mode(profile, false)
 }
 
 fn read_log_tail(path: &Path) -> std::io::Result<(u64, String)> {
@@ -2439,7 +2442,7 @@ mod tests {
 
     #[test]
     fn demo_acceptance_launch_isolated_from_production_transport_and_state() {
-        let args = agent_args(AgentProfile::DemoAcceptance);
+        let args = agent_args_with_mode(AgentProfile::DemoAcceptance, false);
         assert!(args.contains(&"--demo"));
         assert!(args.contains(&"--demo-mutation-acceptance"));
         let observer = agent_args_with_mode(AgentProfile::DemoAcceptance, true);
