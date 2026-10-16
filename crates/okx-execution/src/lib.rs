@@ -51,7 +51,9 @@ pub use reconciliation::{
     AccountLedgerReconciliationError, LinkedCurrencyAmount, MANAGED_EXECUTION_INVENTORY_SCHEMA_V1,
     MAX_MANAGED_EXECUTION_INVENTORY_ROWS, ManagedExecutionIdentity, ManagedExecutionInventory,
     PositionAttributionDiagnostic, STRATEGY_ATTRIBUTION_SCHEMA_V1,
-    STRATEGY_NAV_ASSESSMENT_SCHEMA_V1, StrategyExchangeAttribution, StrategyNavAssessment,
+    STRATEGY_NAV_ASSESSMENT_SCHEMA_V1, STRATEGY_PERIOD_FINANCIAL_AUDIT_SCHEMA_V1,
+    StrategyExchangeAttribution, StrategyNavAssessment, StrategyPeriodFinancialAudit,
+    StrategyPeriodFinancialRecord,
     managed_execution_inventory, reconcile_account_ledger,
 };
 pub use state::{

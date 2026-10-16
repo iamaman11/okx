@@ -23,6 +23,42 @@ const MAX_ARCHIVE_PROOF_ROWS: usize = 16;
 const MAX_UNMATCHED_HISTORICAL_ROWS: usize = 16;
 pub const STRATEGY_ATTRIBUTION_SCHEMA_V1: &str = "okx.strategy-exchange-attribution/v1";
 pub const STRATEGY_NAV_ASSESSMENT_SCHEMA_V1: &str = "okx.strategy-nav-assessment/v1";
+pub const STRATEGY_PERIOD_FINANCIAL_AUDIT_SCHEMA_V1: &str = "okx.strategy-period-financial-audit/v1";
+const MAX_FINANCIAL_PERIOD_AUDIT_ROWS: usize = 32;
+
+/// A historical period record, not independent current exchange reconciliation.
+/// UNVERIFIED records never expose even a provisional historical NAV.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StrategyPeriodFinancialRecord {
+    pub run_id: String,
+    pub record_state: &'static str,
+    pub evidence_sha256: String,
+    pub closure_sha256: String,
+    pub historical_nav_usdt: Option<String>,
+    pub historical_realized_usdt: Option<String>,
+    pub historical_fees_usdt: Option<String>,
+    pub incomplete_reason: Option<String>,
+}
+
+/// Bounded, read-only operator projection over sealed ledger proofs.
+/// Current exchange data cannot silently validate an old proof or funding owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StrategyPeriodFinancialAudit {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub new_risk_authorized: bool,
+    pub scope: &'static str,
+    pub periods_total: usize,
+    pub periods_truncated: bool,
+    pub periods: Vec<StrategyPeriodFinancialRecord>,
+    pub archived_finalized_total: usize,
+    pub unverified_total: usize,
+    pub account_unallocated_funding_bills: usize,
+    pub account_unlinked_other_bills: usize,
+    pub canceled_intents_outside_exchange_history: usize,
+    pub strategy_nav_risk_usable: bool,
+    pub incomplete_reasons: Vec<&'static str>,
+}
 
 /// Observed *linked* exchange components; not a strategy NAV or account-equity proxy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -168,6 +204,9 @@ pub struct AccountLedgerReconciliation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unverified_run: Option<crate::StrategyUnverifiedClosure>,
     pub unverified_run_proofs: Vec<crate::UnverifiedStrategyProof>,
+    /// Read-only, account-scoped financial closure; no orders or ledger writes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy_period_financial_audit: Option<StrategyPeriodFinancialAudit>,
     pub archived_run_slots_remaining: usize,
     pub source_checkpoint_deferred: bool,
 }
@@ -315,7 +354,125 @@ pub fn reconcile_account_ledger(
         facts.exchange_orders_history_complete,
         facts.exchange_fills_history_complete,
     )?);
+    result.strategy_period_financial_audit = Some(assemble_period_financial_audit(&result));
     Ok(result)
+}
+
+/// A local finalization remains immutable and historically meaningful, but
+/// does not by itself attest missing bills or fresh trading-risk NAV.
+fn assemble_period_financial_audit(
+    report: &AccountLedgerReconciliation,
+) -> StrategyPeriodFinancialAudit {
+    let mut periods = Vec::new();
+    for proof in &report.archived_run_proofs {
+        periods.push(StrategyPeriodFinancialRecord {
+            run_id: proof.run_id.clone(),
+            record_state: "ARCHIVED_FINALIZATION",
+            evidence_sha256: proof.evidence_sha256.clone(),
+            closure_sha256: proof.finalization_sha256.clone(),
+            historical_nav_usdt: Some(proof.nav_usdt.clone()),
+            historical_realized_usdt: Some(proof.realized_usdt.clone()),
+            historical_fees_usdt: Some(proof.fees_usdt.clone()),
+            incomplete_reason: None,
+        });
+    }
+    for proof in &report.unverified_run_proofs {
+        periods.push(StrategyPeriodFinancialRecord {
+            run_id: proof.run_id.clone(),
+            record_state: "UNVERIFIED_SOURCE",
+            evidence_sha256: proof.evidence_sha256.clone(),
+            closure_sha256: proof.closure_sha256.clone(),
+            historical_nav_usdt: None,
+            historical_realized_usdt: None,
+            historical_fees_usdt: None,
+            incomplete_reason: Some(proof.reason.clone()),
+        });
+    }
+    if let Some(closure) = &report.unverified_run {
+        periods.push(StrategyPeriodFinancialRecord {
+            run_id: closure.run_id.clone(),
+            record_state: "UNVERIFIED_SOURCE",
+            evidence_sha256: closure.evidence_sha256.clone(),
+            closure_sha256: closure.checksum_sha256.clone(),
+            historical_nav_usdt: None,
+            historical_realized_usdt: None,
+            historical_fees_usdt: None,
+            incomplete_reason: Some(closure.reason.clone()),
+        });
+    }
+    if let Some(proof) = &report.finalized_run {
+        periods.push(StrategyPeriodFinancialRecord {
+            run_id: proof.run_id.clone(),
+            record_state: "CURRENT_FINALIZATION",
+            evidence_sha256: proof.evidence_sha256.clone(),
+            closure_sha256: proof.checksum_sha256.clone(),
+            historical_nav_usdt: Some(proof.nav_usdt.clone()),
+            historical_realized_usdt: Some(proof.realized_usdt.clone()),
+            historical_fees_usdt: Some(proof.fees_usdt.clone()),
+            incomplete_reason: None,
+        });
+    }
+    // Only independently validated ledger archives are enumerated, and each
+    // category has its own accurate total even when the list is truncated.
+    let periods_total = report.archived_runs_count
+        + report.unverified_runs_count
+        + usize::from(report.finalized_run.is_some())
+        + usize::from(report.unverified_run.is_some());
+    let periods_truncated = report.archived_run_proofs_truncated
+        || report.unverified_run_proofs_truncated
+        || periods.len() > MAX_FINANCIAL_PERIOD_AUDIT_ROWS
+        || periods.len() != periods_total;
+    periods.truncate(MAX_FINANCIAL_PERIOD_AUDIT_ROWS);
+
+    let attribution = report.strategy_attribution.as_ref();
+    let unallocated_funding = attribution.map_or(0, |value| value.unallocated_funding_bills);
+    let unlinked_bills = attribution.map_or(0, |value| value.unlinked_nonfunding_bills);
+    let nav_usable = report.strategy_nav.as_ref().is_some_and(|n| n.usable_for_risk);
+    let mut reasons = Vec::new();
+    if attribution.is_none_or(|value| value.status != "COMPLETE") {
+        reasons.push("ACCOUNT_STRATEGY_ATTRIBUTION_NOT_COMPLETE");
+    }
+    if unallocated_funding > 0 {
+        reasons.push("ACCOUNT_FUNDING_NOT_OWNED_BY_PERIOD");
+    }
+    if unlinked_bills > 0 {
+        reasons.push("ACCOUNT_BILLS_NOT_BOUND_TO_MANAGED_FILLS");
+    }
+    if report.unverified_runs_count > 0 || report.unverified_run.is_some() {
+        reasons.push("UNVERIFIED_HISTORICAL_RUNS");
+    }
+    if report.unmatched_historical_total > 0 {
+        reasons.push("EXCHANGE_ORDER_HISTORY_WINDOW_GAP");
+    }
+    if !nav_usable {
+        reasons.push("STRATEGY_NAV_NOT_ATTESTED_FOR_NEW_RISK");
+    }
+    if periods_truncated {
+        reasons.push("PERIOD_PROOFS_TRUNCATED");
+    }
+    // These are proof records, never a risk authorization even if historical
+    // completeness eventually becomes demonstrable.
+    StrategyPeriodFinancialAudit {
+        schema: STRATEGY_PERIOD_FINANCIAL_AUDIT_SCHEMA_V1,
+        status: if reasons.is_empty() {
+            "LEDGER_HISTORY_ONLY"
+        } else {
+            "INCOMPLETE"
+        },
+        new_risk_authorized: false,
+        scope: "AUTHENTICATED_ACCOUNT_IMMUTABLE_LEDGER_ONLY",
+        periods_total,
+        periods_truncated,
+        periods,
+        archived_finalized_total: report.archived_runs_count,
+        unverified_total: report.unverified_runs_count
+            + usize::from(report.unverified_run.is_some()),
+        account_unallocated_funding_bills: unallocated_funding,
+        account_unlinked_other_bills: unlinked_bills,
+        canceled_intents_outside_exchange_history: report.unmatched_historical_total,
+        strategy_nav_risk_usable: nav_usable,
+        incomplete_reasons: reasons,
+    }
 }
 
 fn reconcile_exchange_evidence(
@@ -500,6 +657,7 @@ fn reconcile_exchange_evidence(
         unverified_run_proofs_truncated: false,
         unverified_run: None,
         unverified_run_proofs: Vec::new(),
+        strategy_period_financial_audit: None,
         archived_run_slots_remaining: crate::MAX_ARCHIVED_STRATEGY_RUNS,
         source_checkpoint_deferred: false,
     })
@@ -1163,6 +1321,89 @@ mod tests {
         ExecutionAction, ExecutionLedgerStore, ExecutionPlan, OrderSide, OrderType, PositionSide,
         PrepareDisposition, TradeMode, derive_client_order_id,
     };
+
+    #[test]
+    fn period_financial_audit_keeps_unverified_amounts_null_and_sealed_hashes_exact() {
+        let p = path("period-financial-audit");
+        let _ = std::fs::remove_file(&p);
+        let ledger = DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100)
+            .expect("empty ledger");
+        let mut report = reconcile_exchange_evidence(&ledger, &[], &[], &[])
+            .expect("base reconciliation");
+        report.archived_runs_count = 1;
+        report.archived_run_proofs = vec![crate::ArchivedStrategyProof {
+            schema: crate::ARCHIVED_STRATEGY_PROOF_SCHEMA_V1,
+            run_id: "final_old".to_owned(),
+            started_at_ms: 100,
+            finalized_at_ms: 120,
+            nav_usdt: "99.95".to_owned(),
+            realized_usdt: "0.01".to_owned(),
+            fees_usdt: "-0.06".to_owned(),
+            finalization_sha256: "b".repeat(64),
+            evidence_sha256: "a".repeat(64),
+            source_events: 2,
+            source_cursors: 2,
+        }];
+        report.unverified_runs_count = 1;
+        report.unverified_run_proofs = vec![crate::UnverifiedStrategyProof {
+            schema: "okx.unverified-strategy-proof/v1",
+            run_id: "unverified_old".to_owned(),
+            started_at_ms: 200,
+            closed_at_ms: 220,
+            status: "UNVERIFIED",
+            reason: "SOURCE_CONTINUITY_NOT_PROVEN".to_owned(),
+            evidence_sha256: "c".repeat(64),
+            closure_sha256: "d".repeat(64),
+        }];
+        report.finalized_run = Some(crate::StrategyFinalization {
+            schema: crate::STRATEGY_FINALIZATION_SCHEMA_V1.to_owned(),
+            run_id: "final_current".to_owned(),
+            account_uid: "e".repeat(64),
+            finalized_at_ms: 320,
+            evidence_sha256: "f".repeat(64),
+            nav_usdt: "99.99".to_owned(),
+            realized_usdt: "0.02".to_owned(),
+            fees_usdt: "-0.03".to_owned(),
+            checksum_sha256: "1".repeat(64),
+        });
+        report.unmatched_historical_total = 3;
+        let audit = assemble_period_financial_audit(&report);
+        assert_eq!(audit.status, "INCOMPLETE");
+        assert!(!audit.new_risk_authorized);
+        assert_eq!(audit.periods_total, 3);
+        assert!(!audit.periods_truncated);
+        assert_eq!(audit.periods[0].historical_nav_usdt.as_deref(), Some("99.95"));
+        assert_eq!(audit.periods[0].closure_sha256, "b".repeat(64));
+        assert_eq!(audit.periods[1].record_state, "UNVERIFIED_SOURCE");
+        assert!(audit.periods[1].historical_nav_usdt.is_none());
+        assert!(audit.periods[1].historical_realized_usdt.is_none());
+        assert!(audit.periods[1].historical_fees_usdt.is_none());
+        assert_eq!(audit.periods[1].incomplete_reason.as_deref(), Some("SOURCE_CONTINUITY_NOT_PROVEN"));
+        assert_eq!(audit.periods[2].closure_sha256, "1".repeat(64));
+        assert_eq!(audit.canceled_intents_outside_exchange_history, 3);
+        let original = serde_json::to_value(&report.archived_run_proofs).unwrap();
+        let _ = serde_json::to_value(&audit).unwrap();
+        assert_eq!(original, serde_json::to_value(&report.archived_run_proofs).unwrap());
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn financial_audit_never_promotes_truncated_history_into_complete_status() {
+        let p = path("period-audit-truncated");
+        let _ = std::fs::remove_file(&p);
+        let ledger = DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100)
+            .expect("empty ledger");
+        let mut report = reconcile_exchange_evidence(&ledger, &[], &[], &[])
+            .expect("base reconciliation");
+        report.archived_runs_count = 17;
+        report.archived_run_proofs_truncated = true;
+        let audit = assemble_period_financial_audit(&report);
+        assert!(audit.periods_truncated);
+        assert_eq!(audit.periods_total, 17);
+        assert_eq!(audit.status, "INCOMPLETE");
+        assert!(!audit.new_risk_authorized);
+        let _ = std::fs::remove_file(p);
+    }
 
     fn test_lineage() -> crate::ExecutionLineageBinding {
         crate::ExecutionLineageBinding {
