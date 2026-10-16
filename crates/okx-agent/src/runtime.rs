@@ -9,6 +9,7 @@ use chrono::Utc;
 use okx_github::GitHubBackoff;
 use okx_protocol::{
     NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
+    AgentOperation, AgentRequest, AgentResponseStatus, AGENT_REQUEST_SCHEMA_V1,
     NativeChildOperation, NativeChildReply, NativeChildRequest,
 };
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator, PublicWsHandle};
@@ -29,6 +30,7 @@ use crate::{
     github_mailbox::{GitHubMailboxClient, MailboxQueryRuntimeContext},
     identity::AgentIdentity,
     market_bootstrap::MarketBootstrapper,
+    query::ObservationQueryContext,
     research_session::ResearchSessionRuntime,
 };
 
@@ -195,6 +197,7 @@ pub async fn run_mailbox_until_shutdown(
         });
     }
     let mut native_request_consumed = false;
+    let (drain_tx, mut drain_rx) = mpsc::unbounded_channel();
 
     let mut ticker = interval(Duration::from_secs(poll_seconds));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -203,36 +206,20 @@ pub async fn run_mailbox_until_shutdown(
         tokio::select! {
             Some(request) = native_rx.recv(), if native_child_control_stdio && !native_request_consumed => {
                 native_request_consumed = true;
-                // Spawn only a one-off internal task. A Cloudflare POST future
-                // may be in flight in the main select loop; awaiting the drain
-                // here would stop polling that future and deadlock its RW guard.
-                // No second mutation engine, watcher or persistent scheduler.
+                // Do not await drain inside this select loop: an in-flight
+                // Cloudflare request must continue polling until it releases
+                // the very same mutation ingress lock.
                 if let Some(owner) = execution_arc {
                     let owner = Arc::clone(owner);
+                    let tx = drain_tx.clone();
                     tokio::spawn(async move {
-                        let response = match request.operation {
-                            NativeChildOperation::Drain => {
-                                match owner.drain_mutation_ingress(&request.expected_uid_fingerprint).await {
-                                    Ok(ledger) => NativeChildReply {
-                                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
-                                        request_id: request.request_id,
-                                        disposition: "DRAINED_LEDGER_ONLY".to_owned(),
-                                        ledger_only: serde_json::to_value(ledger).ok(),
-                                        error: None,
-                                    },
-                                    Err(error) => NativeChildReply {
-                                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
-                                        request_id: request.request_id,
-                                        disposition: "BLOCKED".to_owned(),
-                                        ledger_only: None,
-                                        error: Some(error.to_string()),
-                                    },
-                                }
-                            }
+                        let result = match request.operation {
+                            NativeChildOperation::Drain => owner
+                                .drain_mutation_ingress(&request.expected_uid_fingerprint)
+                                .await
+                                .map_err(|error| error.to_string()),
                         };
-                        if let Ok(serialized) = serde_json::to_string(&response) {
-                            eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{serialized}");
-                        }
+                        let _ = tx.send((request, result));
                     });
                 } else {
                     let reply = NativeChildReply {
@@ -240,10 +227,85 @@ pub async fn run_mailbox_until_shutdown(
                         request_id: request.request_id,
                         disposition: "BLOCKED".to_owned(),
                         ledger_only: None,
+                        source_candidate: None,
                         error: Some("native executor unavailable".to_owned()),
                     };
                     eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
                 }
+            }
+            Some((request, drained)) = drain_rx.recv() => {
+                // Reuse the same native source query used by primary MCP.
+                // It cannot change the ledger manifest after drain; it must
+                // prove fresh REST receipt, coherent WS, current flat source,
+                // all OCO/conditional scopes, UID and immutable source hash.
+                let source = if drained.is_ok() {
+                    let probe = AgentRequest {
+                        schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id.clone(),
+                        operation: AgentOperation::ProfileHandoffReadiness,
+                    };
+                    let context = ObservationQueryContext::live_with_execution(
+                        public_ws, market, None, account, private_ws, execution,
+                    );
+                    match tokio::time::timeout(
+                        Duration::from_secs(8),
+                        crate::query::dispatch(
+                            &probe,
+                            context,
+                            &Utc::now().to_rfc3339(),
+                        ),
+                    ).await {
+                        Ok(Ok(reply)) if reply.status == AgentResponseStatus::Completed => reply.result,
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let ledger = drained.ok();
+                let source_valid = source.as_ref().is_some_and(|value| {
+                    value.pointer("/read_only_source_assessment/preconditions_pass")
+                        == Some(&serde_json::json!(true))
+                        && value.pointer("/current_source_quality")
+                            == Some(&serde_json::json!("FRESH"))
+                        && value.pointer("/source_account_uid_fingerprint")
+                            == Some(&serde_json::json!(&request.expected_uid_fingerprint))
+                        && value.pointer("/native_ledger/source_ledger_manifest_sha256")
+                            == ledger.as_ref().map(|record| {
+                                serde_json::json!(&record.source_ledger_manifest_sha256)
+                            }).as_ref()
+                });
+                // This is a source observation candidate, not a switch permit.
+                // CONTROL still must bind the owner PID, binary hashes, launch
+                // lease, exact WS generation, one-use state and target UID.
+                let reply = if source_valid {
+                    NativeChildReply {
+                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id,
+                        disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
+                        ledger_only: ledger.and_then(|value| serde_json::to_value(value).ok()),
+                        source_candidate: source.map(|value| serde_json::json!({
+                            "schema": "okx.native-drained-source/v1",
+                            "source_account_uid_fingerprint": value["source_account_uid_fingerprint"],
+                            "source_asof_ms": value["source_asof_ms"],
+                            "source": value["source"],
+                            "read_only_source_assessment": value["read_only_source_assessment"],
+                            "current_source_quality": value["current_source_quality"],
+                            "source_age_ms": value["source_age_ms"],
+                            "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE"
+                        })),
+                        error: None,
+                    }
+                } else {
+                    NativeChildReply {
+                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id,
+                        disposition: "BLOCKED".to_owned(),
+                        ledger_only: None,
+                        source_candidate: None,
+                        error: Some("drain or current REST/WS/OCO/UID/ledger proof not admitted".to_owned()),
+                    }
+                };
+                eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
             }
             result = tokio::signal::ctrl_c() => {
                 result?;
