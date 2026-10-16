@@ -18,6 +18,21 @@
 
 After physically accepting PR #345 (CI #1876, exact merged tree `4856c64386517f8c72aae791ee14a0e0650ff97d`), the one outstanding account-switch prerequisite is a freshly verified target UID. A native single-agent handoff readiness query now probes the existing Demo and Production ReadOnly observer credential slots via bounded authenticated REST. It returns only the distinct, fresh target UID fingerprint and source profile, never credentials and never a trading permit. The existing CONTROL `SelectReadOnlyAccount` still requires source and target UID and independently validates the destination PID/UID/WS/ReadOnly permission after one-use source drain. Missing/mismatched credentials fail closed *before* attempting any CONTROL mutation. Preserve production trading OFF, original ledger/STOP, and no second process, service, proxy, or MCP tool. Physical bidirectional account selection remains NOT_ACCEPTED until witnessed.
 
+## Stage 5C-2 next candidate — ReadOnly identity is not data readiness
+
+Keep source drain, fresh source REST/WS/OCO fence, PID/lease/release and
+ledger/STOP unchanged. A destination's strictly ReadOnly process may be
+committed after authenticated UID and disabled mutation authority are proven
+even if target WS or protective inventory is not ready. In that case data
+quality is DEGRADED; unknown OCO is null, never zero, and risk/admission stays
+denied. A later independent account observation must prove full data freshness.
+
+Native agent replies carry allowlisted fixed failure codes. CONTROL reports
+target process PID, phase, exact code and safe STOPPED/BLOCKED recovery
+without treating old retained logs as current process proof. Source and
+Production Live safety gates remain unchanged. CI alone does not close
+Stage 5C-2; physical two-way transition and recovery are required.
+
 ## Operator contract: one application, no Demo fork
 
 - Exactly **one installed `okx-agent.exe` binary** and **one Windows Job/CONTROL-owned running process** at any instant; `okx-host-control` and its launcher are existing lifecycle owners, not an alternate trading engine.

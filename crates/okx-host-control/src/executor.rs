@@ -78,6 +78,7 @@ pub struct HostExecutor {
     restart_attempt: usize,
     next_restart_at: Option<Instant>,
     last_reconcile: String,
+    last_profile_selection_failure: Option<Value>,
 }
 
 impl HostExecutor {
@@ -103,6 +104,7 @@ impl HostExecutor {
             restart_attempt: 0,
             next_restart_at: None,
             last_reconcile: "NOT_RUN".to_owned(),
+            last_profile_selection_failure: None,
         })
     }
 
@@ -335,6 +337,7 @@ impl HostExecutor {
             "restart_attempt": self.restart_attempt,
             "retry_in_ms": self.retry_in_ms(),
             "last_reconcile": self.last_reconcile.clone(),
+            "last_profile_selection_failure": self.last_profile_selection_failure.clone(),
             "runtime_diagnostics": {
                 "production": runtime_log_summary(AgentProfile::Production, owned_launch),
                 "demo_acceptance": runtime_log_summary(AgentProfile::DemoAcceptance, owned_launch)
@@ -651,8 +654,10 @@ impl HostExecutor {
             u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default(),
         )?;
 
+        let mut target_pid_observed = None;
         let transition_result = (|| -> HostControlResult<Value> {
             let target_pid = self.start_transition_read_only_process(target)?;
+            target_pid_observed = Some(target_pid);
             // Independent target inquiry: target UID must differ from the
             // frozen source, with strictly ReadOnly OKX observer permissions.
             let evidence = self.verify_native_read_only_target(expected_target_uid)?;
@@ -699,7 +704,18 @@ impl HostExecutor {
                 "private_ws_generation": verified.private_ws_generation,
                 "positions_observed": evidence.positions,
                 "orders_observed": evidence.orders,
-                "native_oco_observed": evidence.native_oco,
+                "native_oco_observed": if evidence.native_oco_complete {
+                    Some(evidence.native_oco)
+                } else {
+                    None
+                },
+                "native_oco_complete": evidence.native_oco_complete,
+                "read_only_data_quality": if evidence.private_ws_generation == 0
+                    || !evidence.native_oco_complete {
+                    "DEGRADED"
+                } else {
+                    "NOT_RECONCILED"
+                },
                 "live_trading": "DISABLED",
                 "ledger_migrated": false,
                 "source_pid_exited": source_pid,
@@ -707,21 +723,40 @@ impl HostExecutor {
             }))
         })();
 
-        if transition_result.is_err() {
-            // Best-effort fail-closed recovery AFTER the source is proved gone.
-            // If any OS/durable observation is uncertain the journal remains
-            // BLOCKED and an explicit recovery is required; never auto trade.
-            if self.terminate_agent_owned().is_ok()
+        if let Err(error) = &transition_result {
+            let recovered_stopped = self.terminate_agent_owned().is_ok()
                 && self.agent_job.is_empty().unwrap_or(false)
                 && self
                     .desired_store
                     .recover_stopped_after_empty_job(&bound, source_pid)
-                    .is_ok()
-            {
+                    .is_ok();
+            if recovered_stopped {
                 self.desired_profile = bound.source;
                 self.desired_agent = AgentDesired::Stopped;
                 self.next_restart_at = None;
             }
+            self.last_profile_selection_failure = Some(json!({
+                "phase": if target_pid_observed.is_some() {
+                    "TARGET_VERIFY_OR_FINALIZE"
+                } else {
+                    "TARGET_LAUNCH"
+                },
+                "source_pid": source_pid,
+                "target_pid": target_pid_observed,
+                "target_profile": target,
+                "reason": error.code(),
+                "detail": match error {
+                    HostControlError::ReadOnlyTargetProofDenied(code) => Some(*code),
+                    _ => None,
+                },
+                "recovery": if recovered_stopped {
+                    "STOPPED_SAFE"
+                } else {
+                    "BLOCKED_UNCERTAIN"
+                }
+            }));
+        } else {
+            self.last_profile_selection_failure = None;
         }
         transition_result
     }
@@ -1330,16 +1365,25 @@ impl HostExecutor {
         let reply = pipe
             .replies
             .recv_timeout(Duration::from_secs(11))
-            .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
-        if !reply.valid_for(&request_id) || reply.disposition != "VERIFIED_READ_ONLY" {
-            return Err(HostControlError::ProfileHandoffProofRequired);
+            .map_err(|_| HostControlError::ReadOnlyTargetProofDenied("NATIVE_REPLY_TIMEOUT"))?;
+        if !reply.valid_for(&request_id) {
+            return Err(HostControlError::ReadOnlyTargetProofDenied(
+                "INVALID_OR_UNBOUND_NATIVE_REPLY",
+            ));
         }
-        let proof = reply
-            .target_read_only
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        if reply.disposition != "VERIFIED_READ_ONLY" {
+            return Err(HostControlError::ReadOnlyTargetProofDenied(
+                native_read_only_denial_code(reply.error.as_deref()),
+            ));
+        }
+        let proof = reply.target_read_only.ok_or(
+            HostControlError::ReadOnlyTargetProofDenied("MISSING_TARGET_PROOF"),
+        )?;
         let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
         if !proof.valid_for(expected_uid, now) {
-            return Err(HostControlError::ProfileHandoffProofRequired);
+            return Err(HostControlError::ReadOnlyTargetProofDenied(
+                "INVALID_TARGET_UID_OR_RECEIPT",
+            ));
         }
         Ok(proof)
     }
@@ -1779,6 +1823,21 @@ fn runtime_log_summary_from_root(root: PathBuf) -> Value {
         },
         "fatal_error": fatal_error_summary(stderr_text)
     })
+}
+
+fn native_read_only_denial_code(value: Option<&str>) -> &'static str {
+    match value {
+        Some("OBSERVER_UNAVAILABLE") => "OBSERVER_UNAVAILABLE",
+        Some("EXECUTOR_NOT_READ_ONLY") => "EXECUTOR_NOT_READ_ONLY",
+        Some("MUTATION_AUTHORITY_ENABLED") => "MUTATION_AUTHORITY_ENABLED",
+        Some("ACCOUNT_REST_UNAVAILABLE") => "ACCOUNT_REST_UNAVAILABLE",
+        Some("INVALID_ACCOUNT_RECEIPT") => "INVALID_ACCOUNT_RECEIPT",
+        Some("TARGET_UID_ACCESS_OR_RECEIPT_INVALID") => {
+            "TARGET_UID_ACCESS_OR_RECEIPT_INVALID"
+        }
+        Some("TARGET_VERIFY_TIMEOUT") => "TARGET_VERIFY_TIMEOUT",
+        _ => "UNRECOGNIZED_TARGET_DENIAL",
+    }
 }
 
 fn mailbox_issue(profile: AgentProfile) -> u64 {
@@ -2478,6 +2537,22 @@ mod tests {
         assert_ne!(
             runtime_dir(AgentProfile::DemoAcceptance),
             runtime_dir(AgentProfile::Production)
+        );
+    }
+
+    #[test]
+    fn readonly_target_denial_is_typed_and_never_echoes_secrets() {
+        assert_eq!(
+            native_read_only_denial_code(Some("ACCOUNT_REST_UNAVAILABLE")),
+            "ACCOUNT_REST_UNAVAILABLE"
+        );
+        assert_eq!(
+            native_read_only_denial_code(Some("api-token=private")),
+            "UNRECOGNIZED_TARGET_DENIAL"
+        );
+        assert_eq!(
+            HostControlError::ReadOnlyTargetProofDenied("TARGET_VERIFY_TIMEOUT").code(),
+            "READ_ONLY_TARGET_PROOF_DENIED"
         );
     }
 

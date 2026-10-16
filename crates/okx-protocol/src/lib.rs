@@ -109,11 +109,8 @@ impl NativeReadOnlyTargetProof {
             && self.snapshot_received_ms != 0
             && now_ms >= self.snapshot_received_ms
             && now_ms - self.snapshot_received_ms <= 10_000
-            && self.private_ws_generation > 0
-            // Target READONLY may already have venue positions/orders/OCO.
-            // Full observation must be complete, but not necessarily FLAT;
-            // only the outgoing mutation-owning source requires FLAT.
-            && self.native_oco_complete
+            // An unready target WS/incomplete OCO only degrades observer data.
+            // The mutation-owning SOURCE still requires full WS/OCO evidence.
             && self.read_only_credentials
             && self.executor_mutations_disabled
     }
@@ -4056,7 +4053,7 @@ mod native_drain_source_tests {
     }
 
     #[test]
-    fn readonly_target_requires_fresh_exact_uid_disabled_trade_and_zero_oco() {
+    fn readonly_target_requires_fresh_exact_uid_and_disabled_trade() {
         let uid = "c".repeat(64);
         let original = NativeReadOnlyTargetProof {
             schema: "okx.native-readonly-target/v1".to_owned(),
@@ -4083,7 +4080,7 @@ mod native_drain_source_tests {
         );
         changed = original.clone();
         changed.native_oco_complete = false;
-        assert!(!changed.valid_for(&uid, 20_100));
+        assert!(changed.valid_for(&uid, 20_100));
         changed = original.clone();
         changed.read_only_credentials = false;
         assert!(!changed.valid_for(&uid, 20_100));
@@ -4092,7 +4089,7 @@ mod native_drain_source_tests {
         assert!(!changed.valid_for(&uid, 20_100));
         changed = original.clone();
         changed.private_ws_generation = 0;
-        assert!(!changed.valid_for(&uid, 20_100));
+        assert!(changed.valid_for(&uid, 20_100));
     }
 
     #[test]
