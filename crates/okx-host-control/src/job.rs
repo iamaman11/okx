@@ -44,6 +44,28 @@ impl AgentJob {
         Ok(Self { handle })
     }
 
+    /// Kernel accounting for the EXACT existing Job. Waiting the source
+    /// PID alone does not establish that no owned descendant survives.
+    pub fn is_empty(&self) -> HostControlResult<bool> {
+        use std::{ffi::c_void, mem::size_of};
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectBasicAccountingInformation, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            QueryInformationJobObject,
+        };
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            QueryInformationJobObject(
+                self.handle,
+                JobObjectBasicAccountingInformation,
+                &mut info as *mut _ as *mut c_void,
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 { Err(std::io::Error::last_os_error().into()) }
+        else { Ok(info.ActiveProcesses == 0) }
+    }
+
     pub fn assign(&self, child: &mut Child) -> HostControlResult<()> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
@@ -79,6 +101,10 @@ pub struct AgentJob;
 impl AgentJob {
     pub fn new() -> HostControlResult<Self> {
         Ok(Self)
+    }
+
+    pub fn is_empty(&self) -> HostControlResult<bool> {
+        Err(HostControlError::UnsupportedPlatform)
     }
 
     pub fn assign(&self, _child: &mut Child) -> HostControlResult<()> {
