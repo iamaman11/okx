@@ -178,8 +178,9 @@ impl DesiredStateStore {
                     profile: old.profile,
                 })
             }
-            DESIRED_STATE_SCHEMA_V3 => serde_json::from_slice(&bytes)
-                .map_err(|_| HostControlError::DesiredStateCorrupt)?,
+            DESIRED_STATE_SCHEMA_V3 => {
+                serde_json::from_slice(&bytes).map_err(|_| HostControlError::DesiredStateCorrupt)?
+            }
             _ => return Err(HostControlError::DesiredStateCorrupt),
         };
         complete.validate()?;
@@ -341,7 +342,6 @@ mod tests {
     }
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenSourceWitness {
@@ -469,7 +469,6 @@ impl TransitionRecord {
     }
 }
 
-
 impl DesiredStateStore {
     /// The native CONTROL may eventually stage only an authenticated and
     /// independently checked drained-owner witness. No remote request can
@@ -527,7 +526,7 @@ impl DesiredStateStore {
         match self.load_full() {
             Ok(complete) => match complete.transition {
                 None => json!({
-                    "state": "RUNNING_OR_STOPPED",
+                    "state": if complete.agent == AgentDesired::Running { "RUNNING" } else { "STOPPED" },
                     "phase": "NONE",
                     "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE",
                     "durable_owner": "desired.json"
@@ -557,7 +556,10 @@ mod single_owner_transition_tests {
 
     fn path(label: &str) -> PathBuf {
         std::env::temp_dir()
-            .join(format!("okx-single-lifecycle-{label}-{}", std::process::id()))
+            .join(format!(
+                "okx-single-lifecycle-{label}-{}",
+                std::process::id()
+            ))
             .join("desired.json")
     }
 
@@ -599,11 +601,16 @@ mod single_owner_transition_tests {
         let path = path("consume");
         let _ = fs::remove_file(&path);
         let store = DesiredStateStore::at(path.clone());
-        store.save(AgentDesiredState::demo_acceptance_running()).unwrap();
+        store
+            .save(AgentDesiredState::demo_acceptance_running())
+            .unwrap();
         let ticket = witness();
         store.stage_frozen(ticket.clone(), 11_000).unwrap();
         assert!(store.is_pending().unwrap());
-        assert_eq!(store.load().unwrap(), AgentDesiredState::demo_acceptance_running());
+        assert_eq!(
+            store.load().unwrap(),
+            AgentDesiredState::demo_acceptance_running()
+        );
         assert!(matches!(
             store.save(AgentDesiredState::production_running()),
             Err(HostControlError::ProfileTransitionPending)
@@ -660,16 +667,25 @@ mod single_owner_transition_tests {
         let path = path("corrupt");
         let _ = fs::remove_file(&path);
         let store = DesiredStateStore::at(path.clone());
-        store.save(AgentDesiredState::demo_acceptance_running()).unwrap();
+        store
+            .save(AgentDesiredState::demo_acceptance_running())
+            .unwrap();
         let mut wrong = witness();
         wrong.source_pid = 0;
         assert!(store.stage_frozen(wrong, 11_000).is_err());
         store.stage_frozen(witness(), 11_000).unwrap();
         let mut bytes = fs::read(&path).unwrap();
-        let idx = bytes.iter().position(|b| *b == b'd').unwrap();
+        let needle = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let idx = bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
         bytes[idx] = b'0';
         fs::write(&path, bytes).unwrap();
-        assert!(matches!(store.is_pending(), Err(HostControlError::ProfileTransitionInvalid)));
+        assert!(matches!(
+            store.is_pending(),
+            Err(HostControlError::ProfileTransitionInvalid)
+        ));
         assert_eq!(store.status_value()["state"], "CORRUPT");
         assert!(store.save(AgentDesiredState::production_running()).is_err());
         let _ = fs::remove_file(path);
@@ -680,9 +696,16 @@ mod single_owner_transition_tests {
         let path = path("migrate");
         let _ = fs::remove_file(&path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, br#"{"schema":"okx.host.desired/v2","agent":"RUNNING","profile":"demo_acceptance"}"#).unwrap();
+        fs::write(
+            &path,
+            br#"{"schema":"okx.host.desired/v2","agent":"RUNNING","profile":"demo_acceptance"}"#,
+        )
+        .unwrap();
         let store = DesiredStateStore::at(path.clone());
-        assert_eq!(store.load().unwrap(), AgentDesiredState::demo_acceptance_running());
+        assert_eq!(
+            store.load().unwrap(),
+            AgentDesiredState::demo_acceptance_running()
+        );
         store.save(store.load().unwrap()).unwrap();
         let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(value["schema"], DESIRED_STATE_SCHEMA_V3);
