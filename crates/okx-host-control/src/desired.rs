@@ -159,14 +159,14 @@ impl DesiredStateStore {
     }
 }
 
-fn temp_path(path: &Path) -> PathBuf {
+pub(crate) fn temp_path(path: &Path) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(".tmp");
     PathBuf::from(value)
 }
 
 #[cfg(windows)]
-fn atomic_replace(source: &Path, destination: &Path) -> HostControlResult<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> HostControlResult<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -194,7 +194,7 @@ fn atomic_replace(source: &Path, destination: &Path) -> HostControlResult<()> {
 }
 
 #[cfg(not(windows))]
-fn atomic_replace(source: &Path, destination: &Path) -> HostControlResult<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> HostControlResult<()> {
     if destination.exists() {
         fs::remove_file(destination)?;
     }
