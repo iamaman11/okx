@@ -1075,6 +1075,46 @@ impl HostExecutor {
         Ok((frozen, bound))
     }
 
+    /// Only the same Job-owned target child can return this read-only
+    /// receipt; caller-provided JSON never certifies destination identity.
+    fn verify_native_read_only_target(
+        &mut self, expected_uid: &str,
+    ) -> HostControlResult<okx_protocol::NativeReadOnlyTargetProof> {
+        if !self.agent_is_running()? {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        let pipe = self.native_child_pipe.as_mut().ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let mut entropy = [0u8; 32];
+        getrandom::fill(&mut entropy).map_err(|e| HostControlError::Random(e.to_string()))?;
+        let request_id = entropy.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        entropy.zeroize();
+        let req = NativeChildRequest {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+            request_id: request_id.clone(),
+            operation: NativeChildOperation::VerifyReadOnly,
+            expected_uid_fingerprint: expected_uid.to_owned(),
+        };
+        if !req.valid() {return Err(HostControlError::ProfileHandoffProofRequired);}
+        let bytes = serde_json::to_vec(&req)?;
+        if bytes.len()+1 > NATIVE_CHILD_CONTROL_MAX_BYTES {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        pipe.input.write_all(&bytes)?;
+        pipe.input.write_all(b"\n")?;
+        pipe.input.flush()?;
+        let reply = pipe.replies.recv_timeout(Duration::from_secs(11))
+            .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
+        if !reply.valid_for(&request_id) || reply.disposition != "VERIFIED_READ_ONLY" {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        let proof = reply.target_read_only.ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
+        if !proof.valid_for(expected_uid, now) {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        Ok(proof)
+    }
+
     fn persist_desired(&mut self, state: AgentDesiredState) -> HostControlResult<()> {
         self.desired_store.save(state)?;
         self.desired_agent = state.agent;
