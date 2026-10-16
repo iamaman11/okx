@@ -55,6 +55,26 @@ ReadOnly after the return; original Demo v14 ledger/STOP unchanged.
 Physical bidirectional gate is pending exact CI 6/6, immutable Windows
 release and native CONTROL/read-only MCP evidence of the reverse transition.
 
+## Stage 5B-1 follow-on: bounded financial audit, NOT a new ledger
+
+Current immutable v14 run finalizations, archived proofs and unverified
+closures remain the only canonical historical financial source. The
+`okx.strategy-period-financial-audit/v1` projection in existing native
+`okx-execution` lists bounded, deduplicated ledger-local period proofs:
+`ARCHIVED_FINALIZATION`, `CURRENT_FINALIZATION` or
+`UNVERIFIED_SOURCE` (with no fabricated NAV, fees or realized PnL).
+It always explicitly marks `new_risk_authorized=false`. Exact archive
+proof checksums and source hashes are retained, but a validated historical
+finalization is not a new exchange read or current trading admission.
+Account-wide funding bills, unrelated bills and canceled intents outside
+the documented exchange lookback remain countable but UNALLOCATED; no
+unsupported time-based strategy or cross-cohort allocation is attempted.
+When records exceed the bounded view, total and `periods_truncated` make
+missing proof entries explicit. `account_summary(view=full)` includes
+this detailed native audit; the normal trader packet carries only its
+summary status/counts for context economy. Historical ledger/STOP remain
+immutable; no order, write, new transport/agent/daemon or proxy is needed.
+
 ## Operator contract: one application, no Demo fork
 
 - Exactly **one installed `okx-agent.exe` binary** and **one Windows Job/CONTROL-owned running process** at any instant; `okx-host-control` and its launcher are existing lifecycle owners, not an alternate trading engine.

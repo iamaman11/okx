@@ -365,6 +365,9 @@ fn compact_trader_packet(
     if get("/reconciliation/exchange_evidence/source_gap_over_two_hours") == json!(true) {
         reasons.push("FINANCIAL_SOURCE_GAP");
     }
+    if get("/reconciliation/strategy_period_financial_audit/status") == json!("INCOMPLETE") {
+        reasons.push("PERIOD_FINANCIAL_AUDIT_INCOMPLETE");
+    }
     if get("/reconciliation/strategy_attribution/unallocated_funding_bills")
         .as_u64()
         .is_some_and(|count| count > 0)
@@ -419,7 +422,10 @@ fn compact_trader_packet(
             "durable_stop": get("/reconciliation/strategy_risk_stop"),
             "archived_finalized": get("/reconciliation/archived_runs_count"),
             "archived_unverified": get("/reconciliation/unverified_runs_count"),
-            "archive_free_slots": get("/reconciliation/archived_run_slots_remaining")
+            "archive_free_slots": get("/reconciliation/archived_run_slots_remaining"),
+            "period_audit_status": get("/reconciliation/strategy_period_financial_audit/status"),
+            "periods_total": get("/reconciliation/strategy_period_financial_audit/periods_total"),
+            "period_proofs_truncated": get("/reconciliation/strategy_period_financial_audit/periods_truncated")
         },
         "funding": {
             "allocated_to_strategy_usdt": get("/reconciliation/financial_period/funding_usdt"),
@@ -3063,6 +3069,10 @@ mod tests {
                 "unverified_runs_count": 1,
                 "archived_run_slots_remaining": 251,
                 "strategy_attribution": {"unallocated_funding_bills": 2},
+                "strategy_period_financial_audit": {
+                    "status": "INCOMPLETE", "periods_total": 6,
+                    "periods_truncated": false
+                },
                 "exchange_evidence": {
                     "source_gap_over_two_hours": false,
                     "latest_source_complete": true,
@@ -3090,6 +3100,15 @@ mod tests {
             full["reconciliation"]["finalized_run"]["checksum_sha256"]
         );
         assert_eq!(p["funding"]["unallocated_exchange_bills"], 2);
+        assert_eq!(p["strategy"]["period_audit_status"], "INCOMPLETE");
+        assert_eq!(p["strategy"]["periods_total"], 6);
+        assert_eq!(p["strategy"]["period_proofs_truncated"], false);
+        assert!(
+            p["decision"]["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("PERIOD_FINANCIAL_AUDIT_INCOMPLETE"))
+        );
         // Performance telemetry must reflect independently measured source
         // windows without altering the financial/account proof or inventing
         // FRESH from parallel REST completion.
@@ -3120,6 +3139,14 @@ mod tests {
         full["reconciliation"]["strategy_risk_stop"] = json!(null);
         full["reconciliation"]["finalized_run"] = json!(null);
         full["reconciliation"]["strategy_attribution"]["unallocated_funding_bills"] = json!(0);
+        // The synthetic "ready" control must clear the new independent
+        // financial-audit blocker. With INCOMPLETE it must return NO_GO.
+        assert_eq!(
+            compact_trader_packet(&full, &DataQuality::Fresh, 0, 1)["decision"]["new_risk"],
+            "NO_GO"
+        );
+        full["reconciliation"]["strategy_period_financial_audit"]["status"] =
+            json!("LEDGER_HISTORY_ONLY");
         let seemingly_ready = compact_trader_packet(&full, &DataQuality::Fresh, 0, 1);
         assert_eq!(seemingly_ready["decision"]["new_risk"], "NOT_ATTESTED");
         full["reconciliation"]["financial_period"]["state"] = json!("INCOMPLETE");
