@@ -2537,7 +2537,12 @@ mod tests {
             },
             "managed_execution_intents":{"shown":16,"total":45,"complete_within_bound":false}
         });
-        let ready = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, &DataQuality::Fresh, Some(&ledger));
+        let ready = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
         // Even entirely quiescent sources cannot authorize a CTRL swap:
         // no trusted one-time frozen owner ticket exists yet.
         assert_eq!(ready["status"], "SOURCE_QUIESCENT_NOT_AUTHORIZED");
@@ -2552,8 +2557,12 @@ mod tests {
 
         full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] =
             json!(3);
-        let unresolved =
-            profile_handoff_readiness_packet(&full, &DataQuality::Degraded, &DataQuality::Fresh, Some(&ledger));
+        let unresolved = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
         assert_eq!(unresolved["status"], "BLOCKED");
         assert!(
             unresolved["blockers"]
@@ -2564,59 +2573,85 @@ mod tests {
         );
         assert_eq!(unresolved["summary_quality"], "DEGRADED");
         assert_eq!(unresolved["current_source_quality"], "FRESH");
-        assert!(!unresolved["blockers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|b| b == "CURRENT_ACCOUNT_SOURCE_NOT_FRESH"));
+        assert!(
+            !unresolved["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "CURRENT_ACCOUNT_SOURCE_NOT_FRESH")
+        );
         let stale = profile_handoff_readiness_packet(
             &full,
             &DataQuality::Degraded,
             &DataQuality::Stale,
             Some(&ledger),
         );
-        assert!(stale["blockers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|b| b == "CURRENT_ACCOUNT_SOURCE_NOT_FRESH"));
+        assert!(
+            stale["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "CURRENT_ACCOUNT_SOURCE_NOT_FRESH")
+        );
         full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] =
             json!(0);
         full["coherence"]["private_ws_generation"] = json!(null);
         let no_generation = profile_handoff_readiness_packet(
-            &full, &DataQuality::Fresh, &DataQuality::Fresh, Some(&ledger),
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
         );
-        assert!(no_generation["blockers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|b| b == "PRIVATE_WS_GENERATION_NOT_PROVEN"));
+        assert!(
+            no_generation["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "PRIVATE_WS_GENERATION_NOT_PROVEN")
+        );
         full["coherence"]["private_ws_generation"] = json!(7);
-        full["account_ledger"]["current_account_as_of_ms"] = json!((utc_now_ms() - 60_000).to_string());
+        full["account_ledger"]["current_account_as_of_ms"] =
+            json!((utc_now_ms() - 60_000).to_string());
         let old = profile_handoff_readiness_packet(
-            &full, &DataQuality::Fresh, &DataQuality::Fresh, Some(&ledger),
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
         );
-        assert!(old["blockers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|b| b == "CURRENT_ACCOUNT_ASOF_TOO_OLD_OR_UNKNOWN"));
+        assert!(
+            old["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "CURRENT_ACCOUNT_ASOF_TOO_OLD_OR_UNKNOWN")
+        );
         full["account_ledger"]["current_account_as_of_ms"] = json!(utc_now_ms().to_string());
         full["coherence"]["events_during_history_read"] = json!(null);
         let no_window = profile_handoff_readiness_packet(
-            &full, &DataQuality::Fresh, &DataQuality::Fresh, Some(&ledger),
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
         );
-        assert!(no_window["blockers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|b| b == "PRIVATE_WS_FENCE_NOT_QUIET"));
+        assert!(
+            no_window["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "PRIVATE_WS_FENCE_NOT_QUIET")
+        );
         full["coherence"]["events_during_history_read"] = json!(0);
         full["pending_protective_algos"]["rows"] = json!(1);
-        let oco = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, &DataQuality::Fresh, Some(&ledger));
+        let oco = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
         assert_eq!(oco["status"], "BLOCKED");
         full["pending_protective_algos"]["rows"] = json!(0);
-        let unavailable = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, &DataQuality::Fresh, None);
+        let unavailable =
+            profile_handoff_readiness_packet(&full, &DataQuality::Fresh, &DataQuality::Fresh, None);
         assert_eq!(unavailable["status"], "BLOCKED");
         assert!(
             unavailable["blockers"]
@@ -2625,7 +2660,12 @@ mod tests {
                 .iter()
                 .any(|b| b == "NATIVE_EXECUTOR_LEDGER_UNAVAILABLE")
         );
-        let empty = profile_handoff_readiness_packet(&json!({}), &DataQuality::Fresh, &DataQuality::Fresh, None);
+        let empty = profile_handoff_readiness_packet(
+            &json!({}),
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            None,
+        );
         assert_eq!(empty["status"], "BLOCKED");
         assert_eq!(empty["control_action"], "DO_NOT_SWITCH_PROFILE");
     }
