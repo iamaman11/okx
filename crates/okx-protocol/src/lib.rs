@@ -59,8 +59,12 @@ pub struct NativeDrainedSourceCandidate {
 
 impl NativeDrainedSourceCandidate {
     pub fn valid_for(&self, expected_uid: &str, expected_manifest: &str, now_ms: u64) -> bool {
-        let lower_hex = |value: &str| value.len() == 64
-            && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        let lower_hex = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
         self.schema == NATIVE_SOURCE_CANDIDATE_SCHEMA_V1
             && lower_hex(&self.account_uid_fingerprint)
             && self.account_uid_fingerprint == expected_uid

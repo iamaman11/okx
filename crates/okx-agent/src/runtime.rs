@@ -10,8 +10,8 @@ use okx_github::GitHubBackoff;
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponseStatus,
     NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
-    NativeChildOperation, NativeChildReply, NativeChildRequest, NativeDrainedSourceCandidate,
-    NATIVE_SOURCE_CANDIDATE_SCHEMA_V1,
+    NATIVE_SOURCE_CANDIDATE_SCHEMA_V1, NativeChildOperation, NativeChildReply, NativeChildRequest,
+    NativeDrainedSourceCandidate,
 };
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator, PublicWsHandle};
 use serde::Serialize;
