@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod auth;
 pub mod autostart;
+pub mod account_catalog;
 pub mod background_process;
 pub mod controller_update;
 pub mod desired;
@@ -91,6 +92,15 @@ pub enum HostControlError {
     #[error("desired lifecycle state is corrupt or unsupported")]
     DesiredStateCorrupt,
 
+    #[error("account metadata catalog is corrupt or invalid")]
+    AccountCatalogInvalid,
+
+    #[error("account metadata identifier or UID is already registered differently")]
+    AccountCatalogConflict,
+
+    #[error("native account metadata catalog has reached its bounded capacity")]
+    AccountCatalogFull,
+
     #[error("switching the active trading environment requires an authenticated quiescence proof")]
     ProfileHandoffProofRequired,
 
@@ -157,6 +167,9 @@ impl HostControlError {
             Self::Json(_) => "JSON_ERROR",
             Self::Launcher(error) => controller_update::launcher_error_code(error),
             Self::Io(_) => "IO_ERROR",
+            Self::AccountCatalogInvalid => "ACCOUNT_CATALOG_INVALID",
+            Self::AccountCatalogConflict => "ACCOUNT_CATALOG_CONFLICT",
+            Self::AccountCatalogFull => "ACCOUNT_CATALOG_FULL",
             Self::SecretStore(_) => "SECRET_STORE_ERROR",
             Self::GithubTokenNotFound => "GITHUB_TOKEN_NOT_FOUND",
             Self::InvalidGithubToken => "INVALID_GITHUB_TOKEN",

@@ -19,6 +19,7 @@ use crate::{
     HostControlError, HostControlResult,
     auth::load_native_github_token,
     autostart,
+    account_catalog::AccountCatalogStore,
     background_process::hidden_command,
     controller_update,
     desired::{
@@ -112,6 +113,10 @@ impl HostExecutor {
         self.profile_transition_gate(&operation)?;
         match operation {
             HostControlOperation::Status => self.status(),
+            HostControlOperation::AccountCatalog => AccountCatalogStore::canonical().status(),
+            HostControlOperation::RegisterReadOnlyAccount { entry } => {
+                AccountCatalogStore::canonical().register(entry)
+            }
             HostControlOperation::Sync => self.sync(),
             HostControlOperation::BuildAgent => Err(HostControlError::InvalidExecutionPath),
             HostControlOperation::DeployAgent { .. }
@@ -170,6 +175,7 @@ impl HostExecutor {
         if matches!(
             operation,
             HostControlOperation::Status
+                | HostControlOperation::AccountCatalog
                 | HostControlOperation::TransportStatus
                 | HostControlOperation::ControllerUpdateStatus
                 | HostControlOperation::AgentIdentity
@@ -323,6 +329,11 @@ impl HostExecutor {
             },
             "installed_agent": installed_agent,
             "release_parity": release_parity,
+            // Catalog errors must be visible but cannot alter the lifecycle owner.
+            "account_catalog": match AccountCatalogStore::canonical().status() {
+                Ok(value) => value,
+                Err(_) => json!({"schema":"okx.account-catalog/v1","status":"CORRUPT_OR_UNAVAILABLE","selectable":false})
+            },
             "agent_binary_present": agent_binary.is_file(),
             "agent_owned_running": running,
             "agent_pid": if running { self.agent_child.as_ref().map(Child::id) } else { None },
