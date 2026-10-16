@@ -3902,3 +3902,75 @@ mod direct_transport_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod native_drain_source_tests {
+    use super::*;
+
+    fn source() -> NativeDrainedSourceCandidate {
+        NativeDrainedSourceCandidate {
+            schema: NATIVE_SOURCE_CANDIDATE_SCHEMA_V1.to_owned(),
+            account_uid_fingerprint: "a".repeat(64),
+            snapshot_received_ms: 20_000,
+            source_age_ms: 100,
+            private_ws_generation: 7,
+            ledger_manifest_sha256: "b".repeat(64),
+            historical_canceled_identity_exception: true,
+            positions: 0,
+            orders: 0,
+            native_oco: 0,
+        }
+    }
+
+    #[test]
+    fn native_source_must_be_fresh_flat_same_uid_and_same_exact_ledger() {
+        let original = source();
+        assert!(original.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        assert!(!original.valid_for(&"a".repeat(64), &"c".repeat(64), 20_100));
+        assert!(!original.valid_for(&"c".repeat(64), &"b".repeat(64), 20_100));
+        assert!(!original.valid_for(&"a".repeat(64), &"b".repeat(64), 19_999));
+        assert!(!original.valid_for(&"a".repeat(64), &"b".repeat(64), 30_001));
+        let mut altered = original.clone();
+        altered.private_ws_generation = 0;
+        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        altered = original.clone();
+        altered.orders = 1;
+        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        altered = original.clone();
+        altered.native_oco = 1;
+        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        altered = original.clone();
+        altered.positions = 1;
+        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        altered = original.clone();
+        altered.source_age_ms = 10_001;
+        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        let mut encoded = serde_json::to_value(&original).unwrap();
+        encoded["unexpected"] = serde_json::json!("bypass");
+        assert!(serde_json::from_value::<NativeDrainedSourceCandidate>(encoded).is_err());
+    }
+
+    #[test]
+    fn protocol_rejects_malformed_or_unsolicited_drain_receipts() {
+        let id = "f".repeat(64);
+        let reply = NativeChildReply {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+            request_id: id.clone(),
+            disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
+            ledger_only: Some(serde_json::json!({"source_ledger_manifest_sha256": "b".repeat(64)})),
+            source_candidate: Some(source()),
+            error: None,
+        };
+        assert!(reply.valid_for(&id));
+        assert!(!reply.valid_for(&"0".repeat(64)));
+        let mut missing = reply.clone();
+        missing.source_candidate = None;
+        assert!(!missing.valid_for(&id));
+        missing = reply.clone();
+        missing.disposition = "DRAINED_LEDGER_ONLY".to_owned();
+        assert!(!missing.valid_for(&id));
+        missing = reply.clone();
+        missing.error = Some("uncertain".to_owned());
+        assert!(!missing.valid_for(&id));
+    }
+}
