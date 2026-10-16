@@ -143,11 +143,69 @@ fn profile_handoff_readiness_packet(
             }
         }
     }
+    // ReadOnly venue selection has a narrower *financial-history* policy
+    // than authorizing trading. Historical canceled intents that aged out
+    // cannot be relabeled VERIFIED, yet an exact terminal-ID inventory may
+    // support a future strictly nontrading switch IF the live owner is frozen
+    // and CONTROL independently attests the destination.
+    //
+    // This is observer-only classification, not a freeze token. Never reuse it
+    // as a trading or CONTROL admission decision.
+    let unmatched_count = get("/reconciliation/managed_intents_unresolved_in_bounded_exchange_evidence")
+        .as_u64();
+    let historical_exception = unmatched_count == Some(0)
+        || unmatched_count.is_some_and(|count| {
+            count > 0
+                && get("/reconciliation/unmatched_historical_total").as_u64() == Some(count)
+                && get("/reconciliation/unmatched_historical_truncated") == json!(false)
+                && full
+                    .pointer("/reconciliation/unmatched_historical")
+                    .and_then(Value::as_array)
+                    .is_some_and(|rows| {
+                        rows.len() as u64 == count
+                            && rows.iter().all(|row| {
+                                row.get("state") == Some(&json!("CANCELED"))
+                                    && row.get("ledger_terminal") == Some(&json!(true))
+                                    && row.get("evidence_status")
+                                        == Some(&json!("NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW"))
+                                    && row
+                                        .get("recorded_order_id")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+                            })
+                    })
+        });
+    let mut read_only_blockers = blockers
+        .iter()
+        .copied()
+        .filter(|reason| {
+            *reason != "MANAGED_INTENTS_OUTSIDE_EXCHANGE_EVIDENCE" || !historical_exception
+        })
+        .collect::<Vec<_>>();
+    // Reconciliation inconsistency, active exposure, missing data, UNKNOWN,
+    // wrong UID or broken source quality still fail closed in both policies.
+    if !historical_exception
+        && unmatched_count != Some(0)
+        && !read_only_blockers.contains(&"HISTORICAL_TERMINAL_IDENTITY_UNPROVEN")
+    {
+        read_only_blockers.push("HISTORICAL_TERMINAL_IDENTITY_UNPROVEN");
+    }
+    let read_only_source_ready = read_only_blockers.is_empty();
     let source_ready = blockers.is_empty();
     json!({
         "schema": PROFILE_HANDOFF_READINESS_SCHEMA_V1,
         "status": if source_ready { "SOURCE_QUIESCENT_NOT_AUTHORIZED" } else { "BLOCKED" },
         "source_predicates_pass": source_ready,
+        "read_only_source_assessment": {
+            "schema": "okx.read-only-source-assessment/v1",
+            "status": if read_only_source_ready { "SOURCE_CANDIDATE_NOT_FROZEN" } else { "BLOCKED" },
+            "preconditions_pass": read_only_source_ready,
+            "historical_canceled_identity_exception": unmatched_count.is_some_and(|n| n > 0) && historical_exception,
+            "historical_financial_proof_complete": unmatched_count == Some(0),
+            "blockers": read_only_blockers,
+            "control_action": "DO_NOT_SWITCH_PROFILE",
+            "trade_admission": "DENIED_NO_EXECUTOR_RISK_REVALIDATION"
+        },
         "summary_quality": summary_quality,
         "current_source_quality": current_source_quality,
         "source_age_ms": source_age_ms,
@@ -2582,6 +2640,100 @@ mod tests {
         );
         assert_eq!(unresolved["summary_quality"], "DEGRADED");
         assert_eq!(unresolved["current_source_quality"], "FRESH");
+        assert_eq!(
+            unresolved["read_only_source_assessment"]["status"], "BLOCKED"
+        );
+        // Archive-only canceled IDs are potentially acceptable for
+        // independent READONLY source quiescence, never for finance or trade
+        // authorization. An incomplete or different-state history still blocks.
+        full["reconciliation"]["unmatched_historical_total"] = json!(3);
+        full["reconciliation"]["unmatched_historical_truncated"] = json!(false);
+        full["reconciliation"]["unmatched_historical"] = json!([
+            {
+                "intent_id":"first",
+                "state":"CANCELED",
+                "ledger_terminal":true,
+                "recorded_order_id":"3998883183680835584",
+                "evidence_status":"NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW"
+            },
+            {
+                "intent_id":"second",
+                "state":"CANCELED",
+                "ledger_terminal":true,
+                "recorded_order_id":"3998610524996915200",
+                "evidence_status":"NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW"
+            },
+            {
+                "intent_id":"third",
+                "state":"CANCELED",
+                "ledger_terminal":true,
+                "recorded_order_id":"3995561309710336000",
+                "evidence_status":"NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW"
+            }
+        ]);
+        let readonly = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(readonly["source_predicates_pass"], false);
+        assert_eq!(readonly["read_only_source_assessment"]["preconditions_pass"], true);
+        assert_eq!(readonly["read_only_source_assessment"]["historical_canceled_identity_exception"], true);
+        assert_eq!(
+            readonly["read_only_source_assessment"]["status"],
+            "SOURCE_CANDIDATE_NOT_FROZEN"
+        );
+        assert_eq!(
+            readonly["handoff_admission"],
+            "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE"
+        );
+        full["reconciliation"]["unmatched_historical"][2]["state"] = json!("FILLED");
+        let filled_missing = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(filled_missing["read_only_source_assessment"]["preconditions_pass"], false);
+        full["reconciliation"]["unmatched_historical"][2]["state"] = json!("CANCELED");
+        full["reconciliation"]["unmatched_historical"][2]["recorded_order_id"] = json!(null);
+        let missing_id = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(missing_id["read_only_source_assessment"]["preconditions_pass"], false);
+        full["reconciliation"]["unmatched_historical"][2]["recorded_order_id"] =
+            json!("3995561309710336000");
+        full["reconciliation"]["unmatched_historical_truncated"] = json!(true);
+        let truncated = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(truncated["read_only_source_assessment"]["preconditions_pass"], false);
+        full["reconciliation"]["unmatched_historical_truncated"] = json!(false);
+        full["account_ledger"]["open_positions"] = json!(1);
+        let active_position = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(active_position["read_only_source_assessment"]["preconditions_pass"], false);
+        full["account_ledger"]["open_positions"] = json!(0);
+        full["coherence"]["private_ws_generation"] = json!(null);
+        let no_source = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(no_source["read_only_source_assessment"]["preconditions_pass"], false);
+        full["coherence"]["private_ws_generation"] = json!(7);
         assert!(
             !unresolved["blockers"]
                 .as_array()
