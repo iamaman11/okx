@@ -3139,6 +3139,14 @@ mod tests {
         full["reconciliation"]["strategy_risk_stop"] = json!(null);
         full["reconciliation"]["finalized_run"] = json!(null);
         full["reconciliation"]["strategy_attribution"]["unallocated_funding_bills"] = json!(0);
+        // The synthetic "ready" control must clear the new independent
+        // financial-audit blocker. With INCOMPLETE it must return NO_GO.
+        assert_eq!(
+            compact_trader_packet(&full, &DataQuality::Fresh, 0, 1)["decision"]["new_risk"],
+            "NO_GO"
+        );
+        full["reconciliation"]["strategy_period_financial_audit"]["status"] =
+            json!("LEDGER_HISTORY_ONLY");
         let seemingly_ready = compact_trader_packet(&full, &DataQuality::Fresh, 0, 1);
         assert_eq!(seemingly_ready["decision"]["new_risk"], "NOT_ATTESTED");
         full["reconciliation"]["financial_period"]["state"] = json!("INCOMPLETE");
