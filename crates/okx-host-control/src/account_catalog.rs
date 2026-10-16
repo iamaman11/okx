@@ -105,6 +105,18 @@ impl AccountCatalogStore {
         Ok(self.load()?.public_value())
     }
 
+    /// Ordinary CONTROL status stays small even at full catalog capacity.
+    /// The explicit account_catalog command owns the bounded full list.
+    pub fn status_summary(&self) -> HostControlResult<Value> {
+        let catalog = self.load()?;
+        Ok(json!({
+            "schema": ACCOUNT_CATALOG_SCHEMA_V1,
+            "status": "METADATA_ONLY",
+            "entries_total": catalog.entries.len(),
+            "selectable": false
+        }))
+    }
+
     pub fn register(&self, entry: AccountCatalogEntry) -> HostControlResult<Value> {
         entry.validate().map_err(|_| HostControlError::AccountCatalogInvalid)?;
         let mut file = self.load()?;
