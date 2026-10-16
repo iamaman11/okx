@@ -196,15 +196,6 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: pwsh
         run: |
-          # Same release binaries and bundle schema, built with size-oriented
-          # stable Rust release settings. This reduces the cold-bootstrap
-          # GitHub Artifact ZIP downloaded by older native CONTROL, without
-          # introducing another installer, transport, execution path or service.
-          # Trading admission remains controlled by the unchanged runtime.
-          $env:CARGO_PROFILE_RELEASE_OPT_LEVEL = "z"
-          $env:CARGO_PROFILE_RELEASE_LTO = "fat"
-          $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "1"
-          $env:CARGO_PROFILE_RELEASE_STRIP = "symbols"
           cargo build --locked --release -p okx-agent -p okx-host-control -p okx-host-launcher
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -239,19 +230,6 @@ jobs:
           $manifest |
             ConvertTo-Json -Depth 8 |
             Set-Content -LiteralPath (Join-Path $dist "manifest.json") -Encoding utf8NoBOM
-
-          # Measure locally using native ZIP deflate; published Actions ZIP
-          # size is still checked separately from immutable artifact metadata.
-          $zipEstimate = Join-Path $env:RUNNER_TEMP "okx-bundle-size-estimate.zip"
-          Compress-Archive -Path (Join-Path $dist "*") -DestinationPath $zipEstimate -CompressionLevel Optimal -Force
-          $estimateBytes = (Get-Item -LiteralPath $zipEstimate).Length
-          $agentBytes = (Get-Item -LiteralPath (Join-Path $dist "okx-agent.exe")).Length
-          $controllerBytes = (Get-Item -LiteralPath (Join-Path $dist "okx-host-control.exe")).Length
-          $launcherBytes = (Get-Item -LiteralPath (Join-Path $dist "okx-host-launcher.exe")).Length
-          Write-Output "IMMUTABLE_RELEASE_AGENT_BYTES=$agentBytes"
-          Write-Output "IMMUTABLE_RELEASE_CONTROL_BYTES=$controllerBytes"
-          Write-Output "IMMUTABLE_RELEASE_LAUNCHER_BYTES=$launcherBytes"
-          Write-Output "IMMUTABLE_RELEASE_ZIP_ESTIMATE_BYTES=$estimateBytes"
 
       - name: Upload deployable Windows bundle
         if: github.event_name == 'pull_request'
