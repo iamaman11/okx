@@ -20,6 +20,7 @@ use crate::{
     desired::{AgentDesired, AgentDesiredState, AgentProfile, DesiredStateStore},
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
+    profile_transition::ProfileTransitionStore,
 };
 
 const CANONICAL_ROOT: &str = r"C:\okx";
@@ -55,6 +56,7 @@ pub struct HostExecutor {
     agent_launch: Option<AgentLaunchEvidence>,
     agent_job: AgentJob,
     desired_store: DesiredStateStore,
+    profile_transition_store: ProfileTransitionStore,
     desired_agent: AgentDesired,
     desired_profile: AgentProfile,
     running_profile: Option<AgentProfile>,
@@ -79,6 +81,7 @@ impl HostExecutor {
             agent_launch: None,
             agent_job: AgentJob::new()?,
             desired_store,
+            profile_transition_store: ProfileTransitionStore::canonical(),
             desired_agent: desired_state.agent,
             desired_profile: desired_state.profile,
             running_profile: None,
@@ -135,6 +138,16 @@ impl HostExecutor {
     }
 
     pub fn reconcile_desired(&mut self) -> HostControlResult<Value> {
+        // A pending profile journal outlives controller crashes. Never
+        // implicitly stop or respawn either owner across an unknown handoff.
+        if self.profile_transition_store.is_pending()? {
+            self.last_reconcile = "BLOCKED_UNFINALIZED_PROFILE_TRANSITION".to_owned();
+            return Ok(json!({
+                "disposition": self.last_reconcile,
+                "reason": HostControlError::ProfileTransitionPending.code(),
+                "desired_profile": self.desired_profile,
+            }));
+        }
         let running = self.agent_is_running()?;
 
         if let Some(error) = self.desired_error.clone() {
@@ -267,6 +280,7 @@ impl HostExecutor {
             "running_profile": self.running_profile,
             "desired_state_path": self.desired_store.path(),
             "desired_state_error": self.desired_error.clone(),
+            "profile_transition": self.profile_transition_store.status_value(),
             "job_object_owned": true,
             "restart_attempt": self.restart_attempt,
             "retry_in_ms": self.retry_in_ms(),
@@ -479,6 +493,9 @@ impl HostExecutor {
     }
 
     fn switch_agent_profile(&mut self, profile: AgentProfile) -> HostControlResult<Value> {
+        if self.profile_transition_store.is_pending()? {
+            return Err(HostControlError::ProfileTransitionPending);
+        }
         // The CONTROL command is not a flat-account witness. Do not persist a
         // different desired profile before proof, even if the child is down:
         // old exchange exposure or an UNKNOWN durable intent may survive.
@@ -556,6 +573,9 @@ impl HostExecutor {
     }
 
     fn restart_agent(&mut self) -> HostControlResult<Value> {
+        if self.profile_transition_store.is_pending()? {
+            return Err(HostControlError::ProfileTransitionPending);
+        }
         let profile = self.desired_profile;
         let running = self.agent_is_running()?;
         ensure_profile_unchanged(self.desired_profile, self.running_profile, running, profile)?;
