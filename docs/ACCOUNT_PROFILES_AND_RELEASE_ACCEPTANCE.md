@@ -115,7 +115,7 @@ atomically under the existing `C:\\okx-control` configuration root.
 The one accepted GitHub CONTROL endpoint supports
 `account_catalog` (read-only) and `register_read_only_account`
 (metadata-only, exact `okx.account-catalog-entry/v1` account ID, display
-label, Demo/Production environment and expected 64-hex UID fingerprint).
+label (at most 48 UTF-8 bytes), Demo/Production environment and expected 64-hex UID fingerprint).
 All new entries are explicitly `UNVERIFIED`, `selectable=false` and
 `trading_authorized=false`: a supplied UID hash is merely an expectation,
 not a proven authenticated account. No API key, secret, passphrase, OCO or
