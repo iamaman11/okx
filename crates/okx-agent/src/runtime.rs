@@ -212,12 +212,18 @@ pub async fn run_mailbox_until_shutdown(
                     let verify = async {
                         let observer = account.ok_or("no observer")?;
                         let private = private_ws.ok_or("no private WS")?;
-                        let executor = execution.ok_or("no native executor")?;
-                        if executor.mode() != crate::execution_runtime::ExecutionRuntimeMode::ReadOnly {
-                            return Err("execution mode is not ReadOnly");
-                        }
-                        if executor.mutation_authority().await != okx_execution::MutationAuthority::Disabled {
-                            return Err("native mutation authority enabled");
+                        // A genuine Production observer may have ONLY a
+                        // read-only OKX credential, with NO executor credential.
+                        // Absence of an executor means mutations cannot be
+                        // submitted. If it exists, it MUST be native ReadOnly
+                        // with exchange mutation authority disabled.
+                        if let Some(executor) = execution {
+                            if executor.mode() != crate::execution_runtime::ExecutionRuntimeMode::ReadOnly {
+                                return Err("execution mode is not ReadOnly");
+                            }
+                            if executor.mutation_authority().await != okx_execution::MutationAuthority::Disabled {
+                                return Err("native mutation authority enabled");
+                            }
                         }
                         let before = private.convergence_cursor().await.map_err(|_| "WS unavailable")?;
                         let (snapshot, algos) = tokio::try_join!(
