@@ -352,7 +352,15 @@ async fn process_control_batch(
         }
 
         let operation = request.operation;
-        let (execution, transition) = match &operation {
+        // The privileged release/controller/launcher commands bypass
+        // HostExecutor::execute, so fence them here under the SAME journal.
+        // A refused command still yields one durable typed terminal result.
+        let (execution, transition) = if let Err(error) =
+            executor.profile_transition_gate(&operation)
+        {
+            (Err(error), ProcessTransition::None)
+        } else {
+            match &operation {
             HostControlOperation::DeployAgent {
                 run_id,
                 artifact_id,
@@ -433,6 +441,7 @@ async fn process_control_batch(
                 ProcessTransition::Crash,
             ),
             _ => (executor.execute(operation.clone()), ProcessTransition::None),
+            }
         };
         let (status, details, failure) = match execution {
             Ok(details) => (HostControlStatus::Pass, Some(details), None),
