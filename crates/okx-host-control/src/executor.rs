@@ -940,9 +940,7 @@ impl HostExecutor {
             .replies
             .recv_timeout(Duration::from_secs(20))
             .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
-        if !reply.valid_for(&request_id)
-            || reply.disposition != "DRAINED_SOURCE_CANDIDATE"
-        {
+        if !reply.valid_for(&request_id) || reply.disposition != "DRAINED_SOURCE_CANDIDATE" {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
         Ok(json!({
