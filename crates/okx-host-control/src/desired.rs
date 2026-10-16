@@ -813,6 +813,12 @@ impl DesiredStateStore {
                     "state": if complete.agent == AgentDesired::Running { "RUNNING" } else { "STOPPED" },
                     "phase": "NONE",
                     "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE",
+                    "execution_right": if complete.profile == AgentProfile::Production || complete.read_only {
+                        "READ_ONLY"
+                    } else {
+                        "DEMO_MUTATIONS_CONFIGURED"
+                    },
+                    "read_only_persisted": complete.read_only,
                     "durable_owner": "desired.json"
                 }),
                 Some(record) => json!({
