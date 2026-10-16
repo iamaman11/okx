@@ -93,6 +93,7 @@ impl HostExecutor {
     }
 
     pub fn execute(&mut self, operation: HostControlOperation) -> HostControlResult<Value> {
+        self.profile_transition_gate(&operation)?;
         match operation {
             HostControlOperation::Status => self.status(),
             HostControlOperation::Sync => self.sync(),
@@ -131,6 +132,28 @@ impl HostExecutor {
             }
             HostControlOperation::TransportStatus => self.transport_status(),
         }
+    }
+
+    /// Single common gate for both ordinary CONTROL dispatch and privileged
+    /// runtime operations (release install, launcher and controller handoff).
+    /// A corrupt file is not an absent file: its read returns an error.
+    pub fn profile_transition_gate(
+        &self,
+        operation: &HostControlOperation,
+    ) -> HostControlResult<()> {
+        if self.profile_transition_store.is_pending()?
+            && !matches!(
+                operation,
+                HostControlOperation::Status
+                    | HostControlOperation::TransportStatus
+                    | HostControlOperation::ControllerUpdateStatus
+                    | HostControlOperation::AgentIdentity
+                    | HostControlOperation::AutostartStatus
+            )
+        {
+            return Err(HostControlError::ProfileTransitionPending);
+        }
+        Ok(())
     }
 
     pub fn shutdown(&mut self) {
@@ -549,6 +572,7 @@ impl HostExecutor {
     }
 
     fn stop_agent(&mut self) -> HostControlResult<Value> {
+        self.profile_transition_gate(&HostControlOperation::StopAgent)?;
         let was_running = self.agent_is_running()?;
         ensure_profile_unchanged(
             self.desired_profile,
@@ -608,6 +632,7 @@ impl HostExecutor {
     }
 
     fn acceptance_kill_agent(&mut self) -> HostControlResult<Value> {
+        self.profile_transition_gate(&HostControlOperation::AcceptanceKillAgent)?;
         if !self.agent_is_running()? {
             return Ok(json!({
                 "disposition": "NO_OWNED_AGENT",
@@ -702,6 +727,11 @@ impl HostExecutor {
     }
 
     pub fn install_verified_agent(&mut self, bytes: &[u8]) -> HostControlResult<()> {
+        self.profile_transition_gate(&HostControlOperation::DeployAgent {
+            run_id: 1,
+            artifact_id: 1,
+            expected_source_tree: String::new(),
+        })?;
         let should_restore = self.desired_agent == AgentDesired::Running;
         let running = self.agent_is_running()?;
         ensure_profile_unchanged(
@@ -745,6 +775,11 @@ impl HostExecutor {
     }
 
     fn start_agent_process(&mut self, profile: AgentProfile) -> HostControlResult<u32> {
+        // No normal lifecycle may spawn a second account owner while an
+        // earlier profile transition is frozen or consumed.
+        if self.profile_transition_store.is_pending()? {
+            return Err(HostControlError::ProfileTransitionPending);
+        }
         self.require_agent_binary()?;
         let runtime_dir = runtime_dir(profile);
         fs::create_dir_all(&runtime_dir)?;
@@ -1600,6 +1635,40 @@ mod tests {
             host.execute(HostControlOperation::RestartAgent),
             Err(HostControlError::ProfileTransitionPending)
         ));
+        // All lateral entrypoints must remain fenced, not just RestartAgent.
+        for operation in [
+            HostControlOperation::StopAgent,
+            HostControlOperation::AcceptanceKillAgent,
+            HostControlOperation::HandoffControllerUpdate,
+            HostControlOperation::StageControllerUpdate {
+                run_id: 1,
+                artifact_id: 1,
+                expected_source_tree: "d".repeat(40),
+            },
+            HostControlOperation::HandoffToAutostart,
+            HostControlOperation::Sync,
+            HostControlOperation::InstallAutostart,
+            HostControlOperation::ProvisionCloudflareRuntimeToken,
+        ] {
+            assert!(matches!(
+                host.profile_transition_gate(&operation),
+                Err(HostControlError::ProfileTransitionPending)
+            ));
+        }
+        assert!(matches!(
+            host.install_verified_agent(b"should-not-be-written"),
+            Err(HostControlError::ProfileTransitionPending)
+        ));
+        // Read-only status remains available for diagnosis and repair.
+        for operation in [
+            HostControlOperation::Status,
+            HostControlOperation::TransportStatus,
+            HostControlOperation::ControllerUpdateStatus,
+            HostControlOperation::AgentIdentity,
+            HostControlOperation::AutostartStatus,
+        ] {
+            assert!(host.profile_transition_gate(&operation).is_ok());
+        }
         let _ = fs::remove_file(&path);
     }
 
