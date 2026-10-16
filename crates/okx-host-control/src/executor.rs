@@ -132,6 +132,12 @@ impl HostExecutor {
             HostControlOperation::StartAgent => self.start_agent(),
             HostControlOperation::StartDemoAcceptance => self.start_demo_acceptance(),
             HostControlOperation::RestoreProductionAgent => self.restore_production_agent(),
+            HostControlOperation::SelectReadOnlyAccount {
+                target_profile, expected_source_uid_fingerprint, expected_target_uid_fingerprint,
+            } => self.select_read_only_account(
+                &target_profile, &expected_source_uid_fingerprint, &expected_target_uid_fingerprint
+            ),
+            HostControlOperation::RecoverReadOnlySelection => self.recover_read_only_selection(),
             HostControlOperation::StopAgent => self.stop_agent(),
             HostControlOperation::RestartAgent => self.restart_agent(),
             HostControlOperation::InstallAutostart => autostart::install(),
@@ -162,6 +168,7 @@ impl HostExecutor {
                 | HostControlOperation::ControllerUpdateStatus
                 | HostControlOperation::AgentIdentity
                 | HostControlOperation::AutostartStatus
+                | HostControlOperation::RecoverReadOnlySelection
         ) {
             return Ok(());
         }
@@ -789,9 +796,24 @@ impl HostExecutor {
     }
 
     fn start_agent_process(&mut self, profile: AgentProfile) -> HostControlResult<u32> {
-        // No normal lifecycle may spawn a second account owner while an
-        // earlier profile transition is frozen or consumed.
-        if self.desired_store.is_pending()? {
+        self.start_agent_process_inner(profile, false)
+    }
+
+    fn start_transition_read_only_process(&mut self, profile: AgentProfile) -> HostControlResult<u32> {
+        self.start_agent_process_inner(profile, true)
+    }
+
+    fn start_agent_process_inner(
+        &mut self, profile: AgentProfile, transition_read_only: bool,
+    ) -> HostControlResult<u32> {
+        if transition_read_only {
+            if !self.desired_store.permits_read_only_target_spawn(profile)?
+                || self.agent_child.is_some()
+                || !self.agent_job.is_empty()?
+            {
+                return Err(HostControlError::ProfileHandoffProofRequired);
+            }
+        } else if self.desired_store.is_pending()? {
             return Err(HostControlError::ProfileTransitionPending);
         }
         self.require_agent_binary()?;
@@ -814,8 +836,13 @@ impl HostExecutor {
         let mut lease_nonce = [0u8; 32];
         getrandom::fill(&mut lease_nonce)
             .map_err(|error| HostControlError::Random(error.to_string()))?;
+        let args = if transition_read_only && profile == AgentProfile::DemoAcceptance {
+            DEMO_READ_ONLY_AGENT_ARGS
+        } else {
+            agent_args(profile)
+        };
         let mut child = hidden_command(self.agent_binary())
-            .args(agent_args(profile))
+            .args(args)
             .arg("--native-child-control-stdio")
             .current_dir(&self.repo_root)
             .stdin(Stdio::piped())
@@ -1261,6 +1288,14 @@ const PRODUCTION_AGENT_ARGS: &[&str] = &[
     AGENT_CLOUDFLARE_WS_URL,
     "--cloudflare-runtime-id",
     AGENT_CLOUDFLARE_RUNTIME_ID,
+];
+
+/// Same Demo engine and data root, but exchange mutation acceptance OFF.
+/// Never introduce a parallel Demo executor or a second strategy ledger.
+const DEMO_READ_ONLY_AGENT_ARGS: &[&str] = &[
+    "--root", DEMO_RUNTIME_ROOT, "--demo", "run", "--mailbox-issue",
+    DEMO_MAILBOX_ISSUE, "--cloudflare-ws-url", AGENT_CLOUDFLARE_WS_URL,
+    "--cloudflare-runtime-id", AGENT_CLOUDFLARE_RUNTIME_ID,
 ];
 
 const DEMO_ACCEPTANCE_AGENT_ARGS: &[&str] = &[
