@@ -405,22 +405,20 @@ fn compact_trader_packet(
         "OBSERVED_FLAT"
     };
     let financial_status = get("/reconciliation/strategy_period_financial_audit/status");
-    let next_safe_action = if exposure_status == "UNKNOWN_OR_SOURCE_INCOMPLETE"
-        || !reconciled
-        || !history_complete
-    {
-        "DIAGNOSE_PRIVATE_ACCOUNT_AND_LEDGER"
-    } else if exposure_status == "EXPOSURE_OR_ORDERS_PRESENT" {
-        "REVIEW_EXPOSURE_AND_NATIVE_PROTECTION"
-    } else if has_stop {
-        "REVIEW_DURABLE_STOP_AND_FINANCIAL_PERIODS"
-    } else if financial_status == json!("INCOMPLETE") || finalized {
-        "REVIEW_PERIOD_FINANCIAL_EVIDENCE"
-    } else if !matches!(quality, DataQuality::Fresh) {
-        "CHECK_SOURCE_QUALITY"
-    } else {
-        "NO_AUTOMATIC_ACTION_READ_ONLY"
-    };
+    let next_safe_action =
+        if exposure_status == "UNKNOWN_OR_SOURCE_INCOMPLETE" || !reconciled || !history_complete {
+            "DIAGNOSE_PRIVATE_ACCOUNT_AND_LEDGER"
+        } else if exposure_status == "EXPOSURE_OR_ORDERS_PRESENT" {
+            "REVIEW_EXPOSURE_AND_NATIVE_PROTECTION"
+        } else if has_stop {
+            "REVIEW_DURABLE_STOP_AND_FINANCIAL_PERIODS"
+        } else if financial_status == json!("INCOMPLETE") || finalized {
+            "REVIEW_PERIOD_FINANCIAL_EVIDENCE"
+        } else if !matches!(quality, DataQuality::Fresh) {
+            "CHECK_SOURCE_QUALITY"
+        } else {
+            "NO_AUTOMATIC_ACTION_READ_ONLY"
+        };
     // Even when no blocker was observed, this read-only packet cannot attest
     // an execution policy, risk budget, exact current venue or new order plan.
     reasons.push("EXECUTOR_RISK_ADMISSION_NOT_PERFORMED");
@@ -3251,7 +3249,10 @@ mod tests {
         );
         observation["account_ledger"]["pending_orders"] = json!(1);
         let order = compact_trader_packet(&observation, &DataQuality::Fresh, 0, 1);
-        assert_eq!(order["operator"]["exposure_status"], "EXPOSURE_OR_ORDERS_PRESENT");
+        assert_eq!(
+            order["operator"]["exposure_status"],
+            "EXPOSURE_OR_ORDERS_PRESENT"
+        );
         assert_eq!(
             order["operator"]["next_safe_action"],
             "REVIEW_EXPOSURE_AND_NATIVE_PROTECTION"
