@@ -44,19 +44,23 @@ async fn authenticated_counterpart_identity(source_uid: &str) -> serde_json::Val
 
     let observer = |demo: bool| async move {
         let environment = OkxEnvironment::new(Region::Global, demo);
-        let credentials = crate::okx_credentials::load_native_okx_credentials_for_environment(
-            environment,
-        ).map_err(|_| ())?;
+        let credentials =
+            crate::okx_credentials::load_native_okx_credentials_for_environment(environment)
+                .map_err(|_| ())?;
         let client = OkxRestClient::with_rate_budget(environment, credentials, RateBudget::new())
             .map_err(|_| ())?;
-        AccountBootstrapper::new(client).snapshot().await.map_err(|_| ())
+        AccountBootstrapper::new(client)
+            .snapshot()
+            .await
+            .map_err(|_| ())
     };
     // Two independent authenticated REST receipts bind the chosen credential
     // slots to the actual current UID. No historical UID or local config text
     // can stand in for this fresh exchange proof.
     let receipt = tokio::time::timeout(std::time::Duration::from_secs(8), async {
         tokio::try_join!(observer(true), observer(false))
-    }).await;
+    })
+    .await;
     let Ok(Ok((demo, production))) = receipt else {
         return json!({
             "schema":"okx.counterpart-readonly-identity/v1",
@@ -65,11 +69,13 @@ async fn authenticated_counterpart_identity(source_uid: &str) -> serde_json::Val
         });
     };
     verified_counterpart_identity(source_uid, &demo, &production, super::utc_now_ms())
-        .unwrap_or_else(|| json!({
-            "schema":"okx.counterpart-readonly-identity/v1",
-            "status":"BLOCKED",
-            "reason":"ACCOUNT_UID_OR_PERMISSION_BOUNDARY_NOT_PROVEN"
-        }))
+        .unwrap_or_else(|| {
+            json!({
+                "schema":"okx.counterpart-readonly-identity/v1",
+                "status":"BLOCKED",
+                "reason":"ACCOUNT_UID_OR_PERMISSION_BOUNDARY_NOT_PROVEN"
+            })
+        })
 }
 
 /// Pure boundary: fail closed on same UID, source/account mismatch, stale
@@ -97,14 +103,13 @@ fn verified_counterpart_identity(
     {
         return None;
     }
-    let (source_profile, target_profile, target) =
-        if source_uid == demo.account_uid_fingerprint {
-            ("demo_acceptance", "production", production)
-        } else if source_uid == production.account_uid_fingerprint {
-            ("production", "demo_acceptance", demo)
-        } else {
-            return None;
-        };
+    let (source_profile, target_profile, target) = if source_uid == demo.account_uid_fingerprint {
+        ("demo_acceptance", "production", production)
+    } else if source_uid == production.account_uid_fingerprint {
+        ("production", "demo_acceptance", demo)
+    } else {
+        return None;
+    };
     Some(json!({
         "schema":"okx.counterpart-readonly-identity/v1",
         "status":"VERIFIED",
@@ -985,9 +990,8 @@ pub(super) async fn dispatch(
                 // This is an observation only. CONTROL still requires the
                 // independently checked one-use drain/PID/lease/UID witness.
                 packet["counterpart_read_only_identity"] =
-                    authenticated_counterpart_identity(
-                        &assembled.snapshot.account_uid_fingerprint,
-                    ).await;
+                    authenticated_counterpart_identity(&assembled.snapshot.account_uid_fingerprint)
+                        .await;
                 packet
             } else if compact {
                 let packet = compact_trader_packet(
@@ -2686,23 +2690,31 @@ mod tests {
             },
             "positions": [],
             "pending_orders": []
-        })).unwrap();
+        }))
+        .unwrap();
         let mut production = demo.clone();
         production.account_uid_fingerprint = "b".repeat(64);
         let now_ms = chrono::DateTime::parse_from_rfc3339("2026-10-16T14:00:04.000Z")
-            .unwrap().timestamp_millis() as u64;
+            .unwrap()
+            .timestamp_millis() as u64;
         let ready = verified_counterpart_identity(&"a".repeat(64), &demo, &production, now_ms)
             .expect("different real account RO UID");
         assert_eq!(ready["target_profile"], "production");
         assert_eq!(ready["target_account_uid_fingerprint"], "b".repeat(64));
         assert_eq!(ready["switch_authorized"], false);
-        assert!(verified_counterpart_identity(&"c".repeat(64), &demo, &production, now_ms).is_none());
+        assert!(
+            verified_counterpart_identity(&"c".repeat(64), &demo, &production, now_ms).is_none()
+        );
         assert!(verified_counterpart_identity(&"a".repeat(64), &demo, &demo, now_ms).is_none());
         production.api_key_permissions.push("trade".to_owned());
-        assert!(verified_counterpart_identity(&"a".repeat(64), &demo, &production, now_ms).is_none());
+        assert!(
+            verified_counterpart_identity(&"a".repeat(64), &demo, &production, now_ms).is_none()
+        );
         production.api_key_permissions.pop();
         demo.source_received_at = "2026-10-16T13:59:00.000Z".to_owned();
-        assert!(verified_counterpart_identity(&"a".repeat(64), &demo, &production, now_ms).is_none());
+        assert!(
+            verified_counterpart_identity(&"a".repeat(64), &demo, &production, now_ms).is_none()
+        );
     }
 
     #[test]
