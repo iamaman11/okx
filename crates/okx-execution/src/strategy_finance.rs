@@ -922,7 +922,7 @@ mod tests {
         // Checkpoints survive restart. Replaying a fresh later REST snapshot
         // without intermediate immutable cursors must not fill the hole.
         let reopened: Vec<u64> = serde_json::from_slice(
-            &serde_json::to_vec(&saved).expect("persisted cursor timestamps")
+            &serde_json::to_vec(&saved).expect("persisted cursor timestamps"),
         )
         .expect("read-only reopen");
         assert!(!source_continuity_attested(
