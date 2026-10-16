@@ -35,6 +35,9 @@ pub const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// deadline on three installations. Give only this immutable GET a bounded
 /// longer total deadline, preserving every existing provenance/hash check.
 pub const GITHUB_ARTIFACT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+/// Same direct GitHub transport; each exact byte range has its own deadline.
+const GITHUB_ARTIFACT_RANGE_BYTES: usize = 2 * 1024 * 1024;
+const GITHUB_ARTIFACT_TOTAL_DEADLINE: Duration = Duration::from_secs(15 * 60);
 const MAX_GITHUB_WORKFLOW_JSON_BYTES: usize = 2 * 1024 * 1024;
 const MAX_GITHUB_ARTIFACT_ZIP_BYTES: usize = 256 * 1024 * 1024;
 
@@ -170,6 +173,12 @@ received_bytes={received_bytes} content_length={content_length:?}"
         content_length: Option<u64>,
     },
 
+    #[error("GitHub artifact ranged download rejected inconsistent HTTP evidence")]
+    ArtifactRangeInvalid,
+
+    #[error("GitHub artifact ranged download exceeded total deadline")]
+    ArtifactDownloadDeadlineExceeded,
+
     #[error("GitHub repository identity mismatch")]
     RepositoryIdentityMismatch,
 
@@ -217,7 +226,10 @@ impl GitHubError {
             Self::BodyRead(details) => classify_http_failure(details.timeout),
             Self::Response(error) => error.class,
             Self::Decode(_) | Self::JsonAtPhase { .. } => GitHubFailureClass::Decode,
-            Self::BodyTooLarge { .. } => GitHubFailureClass::UnexpectedResponse,
+            Self::BodyTooLarge { .. } | Self::ArtifactRangeInvalid => {
+                GitHubFailureClass::UnexpectedResponse
+            }
+            Self::ArtifactDownloadDeadlineExceeded => GitHubFailureClass::Timeout,
             Self::RepositoryIdentityMismatch => GitHubFailureClass::UnexpectedResponse,
             Self::InvalidIssueNumber
             | Self::HistoryLimitExceeded
@@ -776,19 +788,11 @@ impl GitHubClient {
     pub async fn download_artifact_zip(&self, artifact_id: u64) -> Result<Vec<u8>, GitHubError> {
         let url =
             format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip");
-        let response = self
-            .send_checked(
-                self.http
-                    .get(url)
-                    .bearer_auth(self.token.as_str())
-                    .header("Accept", "application/vnd.github+json")
-                    .timeout(GITHUB_ARTIFACT_REQUEST_TIMEOUT),
-            )
-            .await?;
-
-        read_response_body(
-            response,
-            "download_artifact_zip",
+        download_artifact_zip_in_parts(
+            &self.http,
+            &url,
+            self.token.as_str(),
+            GITHUB_ARTIFACT_RANGE_BYTES,
             MAX_GITHUB_ARTIFACT_ZIP_BYTES,
         )
         .await
@@ -897,6 +901,113 @@ async fn read_response_body(
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+fn parse_artifact_content_range(value: &str) -> Option<(usize, usize, usize)> {
+    let (span, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = span.split_once('-')?;
+    if ![start, end, total]
+        .iter()
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    let start = start.parse::<usize>().ok()?;
+    let end = end.parse::<usize>().ok()?;
+    let total = total.parse::<usize>().ok()?;
+    (total > 0 && start <= end && end < total).then_some((start, end, total))
+}
+
+/// One bounded immutable artifact download; never a retry of an exchange or
+/// CONTROL mutation. Existing reqwest direct-only redirects preserve Range,
+/// but strip credentials on the cross-origin signed artifact redirect.
+/// All original bundle/provenance SHA checks still run in the caller.
+async fn download_artifact_zip_in_parts(
+    http: &Client,
+    url: &str,
+    token: &str,
+    part_bytes: usize,
+    max_bytes: usize,
+) -> Result<Vec<u8>, GitHubError> {
+    if part_bytes == 0 || part_bytes > max_bytes {
+        return Err(GitHubError::ArtifactRangeInvalid);
+    }
+
+    let started = Instant::now();
+    let mut zip = Vec::new();
+    let mut total_bytes = None;
+    let mut expected_etag = None;
+    loop {
+        let remaining = GITHUB_ARTIFACT_TOTAL_DEADLINE
+            .checked_sub(started.elapsed())
+            .filter(|duration| !duration.is_zero())
+            .ok_or(GitHubError::ArtifactDownloadDeadlineExceeded)?;
+        let offset = zip.len();
+        let end = offset
+            .checked_add(part_bytes - 1)
+            .ok_or(GitHubError::ArtifactRangeInvalid)?;
+        let response = http
+            .get(url)
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github+json")
+            .header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
+            .timeout(GITHUB_ARTIFACT_REQUEST_TIMEOUT.min(remaining))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(GitHubError::Response(classify_response_error(&response)));
+        }
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+            || response
+                .headers()
+                .contains_key(reqwest::header::CONTENT_ENCODING)
+        {
+            return Err(GitHubError::ArtifactRangeInvalid);
+        }
+        let (start, last, total) = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_artifact_content_range)
+            .ok_or(GitHubError::ArtifactRangeInvalid)?;
+        if total > max_bytes {
+            return Err(GitHubError::BodyTooLarge {
+                phase: "download_artifact_zip",
+                max_bytes,
+                received_bytes: offset,
+                content_length: Some(total as u64),
+            });
+        }
+        if offset >= total {
+            return Err(GitHubError::ArtifactRangeInvalid);
+        }
+        let expected_last = offset + (total - offset).min(part_bytes) - 1;
+        if start != offset
+            || last != expected_last
+            || total_bytes.is_some_and(|previous| previous != total)
+            || response.content_length() != Some((last - start + 1) as u64)
+        {
+            return Err(GitHubError::ArtifactRangeInvalid);
+        }
+        let etag = response.headers().get(reqwest::header::ETAG).cloned();
+        if offset > 0 && etag != expected_etag {
+            return Err(GitHubError::ArtifactRangeInvalid);
+        }
+        if offset == 0 {
+            total_bytes = Some(total);
+            expected_etag = etag;
+            zip.reserve(total);
+        }
+        let part = read_response_body(response, "download_artifact_zip", part_bytes).await?;
+        if part.len() != last - start + 1 {
+            return Err(GitHubError::ArtifactRangeInvalid);
+        }
+        zip.extend_from_slice(&part);
+        if zip.len() == total {
+            return Ok(zip);
+        }
+    }
 }
 
 async fn decode_json_response<T: DeserializeOwned>(response: Response) -> Result<T, GitHubError> {
@@ -1196,6 +1307,84 @@ mod tests {
         server.join().expect("server exit");
     }
 
+    /// Exact finite test-only server; no added daemon/scheduler.
+    fn range_responses(replies: &'static [&'static [u8]]) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("ephemeral range server");
+        let address = listener.local_addr().expect("range address");
+        let join = thread::spawn(move || {
+            for (index, reply) in replies.iter().enumerate() {
+                let (mut socket, _) = listener.accept().expect("range connection");
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("range read timeout");
+                let mut request = [0_u8; 2048];
+                let received = socket.read(&mut request).expect("range request");
+                let request = String::from_utf8_lossy(&request[..received]).to_ascii_lowercase();
+                let expected = format!("range: bytes={}-{}", index * 3, index * 3 + 2);
+                assert!(request.contains(&expected), "incorrect contiguous range");
+                socket.write_all(reply).expect("range response");
+                socket.flush().expect("range flush");
+            }
+        });
+        (format!("http://{address}"), join)
+    }
+
+    #[tokio::test]
+    async fn artifact_range_reads_exact_contiguous_immutable_zip() {
+        static REPLIES: &[&[u8]] = &[
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-2/6\r\nContent-Length: 3\r\nETag: \"same\"\r\nConnection: close\r\n\r\nABC",
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 3-5/6\r\nContent-Length: 3\r\nETag: \"same\"\r\nConnection: close\r\n\r\nDEF",
+        ];
+        let (url, server) = range_responses(REPLIES);
+        let http = Client::builder().no_proxy().build().expect("client");
+        let zip = download_artifact_zip_in_parts(&http, &url, "test-only", 3, 12)
+            .await
+            .expect("complete ranged ZIP");
+        assert_eq!(zip, b"ABCDEF");
+        server.join().expect("server exit");
+    }
+
+    #[tokio::test]
+    async fn artifact_range_refuses_server_ignoring_range() {
+        let (url, server) = one_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nZIP",
+            Duration::ZERO,
+        );
+        let http = Client::builder().no_proxy().build().expect("client");
+        let result = download_artifact_zip_in_parts(&http, &url, "test-only", 3, 12).await;
+        assert!(matches!(result, Err(GitHubError::ArtifactRangeInvalid)));
+        server.join().expect("server exit");
+    }
+
+    #[tokio::test]
+    async fn artifact_range_rejects_oversized_claim_before_body_read() {
+        let (url, server) = one_response(
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-2/1024\r\nContent-Length: 3\r\nConnection: close\r\n\r\nABC",
+            Duration::ZERO,
+        );
+        let http = Client::builder().no_proxy().build().expect("client");
+        let result = download_artifact_zip_in_parts(&http, &url, "test-only", 3, 12).await;
+        assert!(matches!(result, Err(GitHubError::BodyTooLarge { .. })));
+        server.join().expect("server exit");
+    }
+
+    #[test]
+    fn malformed_artifact_range_proof_is_never_accepted() {
+        assert_eq!(parse_artifact_content_range("bytes 0-2/6"), Some((0, 2, 6)));
+        for value in [
+            "bytes */6",
+            "bytes 2-1/6",
+            "bytes 0-6/6",
+            "bytes 0-1/*",
+            "bytes 0-1/0",
+            "bytes +0-1/6",
+            "bytes 0-1/ 6",
+            "bytes 0-1/6?sig=x",
+        ] {
+            assert_eq!(parse_artifact_content_range(value), None, "{value}");
+        }
+    }
+
     fn response_error(
         status: u16,
         remaining: Option<u64>,
@@ -1227,6 +1416,8 @@ mod tests {
         assert_eq!(GITHUB_ARTIFACT_REQUEST_TIMEOUT, Duration::from_secs(180));
         assert!(GITHUB_ARTIFACT_REQUEST_TIMEOUT > GITHUB_REQUEST_TIMEOUT);
         assert_eq!(MAX_GITHUB_ARTIFACT_ZIP_BYTES, 256 * 1024 * 1024);
+        assert_eq!(GITHUB_ARTIFACT_RANGE_BYTES, 2 * 1024 * 1024);
+        assert_eq!(GITHUB_ARTIFACT_TOTAL_DEADLINE, Duration::from_secs(900));
     }
 
     #[test]
