@@ -275,6 +275,10 @@ mod tests {
             store.status().unwrap()["entries_total"],
             MAX_CATALOG_ENTRIES
         );
+        // The wire budget is 16 KiB including the CONTROL result envelope.
+        // Leave at least 1 KiB headroom in the maximum metadata payload.
+        let result_bytes = serde_json::to_vec(&store.status().unwrap()).unwrap();
+        assert!(result_bytes.len() <= 15 * 1024);
         let content = String::from_utf8(fs::read(&store.path).unwrap()).unwrap();
         assert!(!content.contains("api_key"));
         assert!(!content.contains("secret_key"));
