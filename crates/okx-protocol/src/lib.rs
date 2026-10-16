@@ -17,6 +17,7 @@ const MAX_NATIVE_SOURCE_RECEIPT_AGE_MS: u64 = 10_000;
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum NativeChildOperation {
     Drain,
+    VerifyReadOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,12 +84,47 @@ impl NativeDrainedSourceCandidate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct NativeReadOnlyTargetProof {
+    pub schema: String,
+    pub account_uid_fingerprint: String,
+    pub snapshot_received_ms: u64,
+    pub private_ws_generation: u64,
+    pub positions: u64,
+    pub orders: u64,
+    pub native_oco: u64,
+    pub native_oco_complete: bool,
+    pub read_only_credentials: bool,
+    pub executor_mutations_disabled: bool,
+}
+
+impl NativeReadOnlyTargetProof {
+    pub fn valid_for(&self, expected_uid: &str, now_ms: u64) -> bool {
+        self.schema == "okx.native-readonly-target/v1"
+            && self.account_uid_fingerprint == expected_uid
+            && expected_uid.len() == 64
+            && expected_uid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && self.snapshot_received_ms != 0
+            && now_ms >= self.snapshot_received_ms
+            && now_ms - self.snapshot_received_ms <= 10_000
+            && self.private_ws_generation > 0
+            && self.positions == 0
+            && self.orders == 0
+            && self.native_oco == 0
+            && self.native_oco_complete
+            && self.read_only_credentials
+            && self.executor_mutations_disabled
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeChildReply {
     pub schema: String,
     pub request_id: String,
     pub disposition: String,
     pub ledger_only: Option<serde_json::Value>,
     pub source_candidate: Option<NativeDrainedSourceCandidate>,
+    pub target_read_only: Option<NativeReadOnlyTargetProof>,
     pub error: Option<String>,
 }
 
@@ -98,17 +134,25 @@ impl NativeChildReply {
             && self.request_id == request_id
             && matches!(
                 self.disposition.as_str(),
-                "DRAINED_SOURCE_CANDIDATE" | "BLOCKED"
+                "DRAINED_SOURCE_CANDIDATE" | "VERIFIED_READ_ONLY" | "BLOCKED"
             )
             && match self.disposition.as_str() {
                 "DRAINED_SOURCE_CANDIDATE" => {
                     self.ledger_only.is_some()
                         && self.source_candidate.is_some()
+                        && self.target_read_only.is_none()
+                        && self.error.is_none()
+                }
+                "VERIFIED_READ_ONLY" => {
+                    self.ledger_only.is_none()
+                        && self.source_candidate.is_none()
+                        && self.target_read_only.is_some()
                         && self.error.is_none()
                 }
                 _ => {
                     self.ledger_only.is_none()
                         && self.source_candidate.is_none()
+                        && self.target_read_only.is_none()
                         && self.error.is_some()
                 }
             }
