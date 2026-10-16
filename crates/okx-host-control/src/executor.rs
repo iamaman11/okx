@@ -330,7 +330,7 @@ impl HostExecutor {
             "installed_agent": installed_agent,
             "release_parity": release_parity,
             // Catalog errors must be visible but cannot alter the lifecycle owner.
-            "account_catalog": match AccountCatalogStore::canonical().status() {
+            "account_catalog": match AccountCatalogStore::canonical().status_summary() {
                 Ok(value) => value,
                 Err(_) => json!({"schema":"okx.account-catalog/v1","status":"CORRUPT_OR_UNAVAILABLE","selectable":false})
             },
