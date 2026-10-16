@@ -903,7 +903,6 @@ async fn read_response_body(
     Ok(body)
 }
 
-
 fn parse_artifact_content_range(value: &str) -> Option<(usize, usize, usize)> {
     let (span, total) = value.strip_prefix("bytes ")?.split_once('/')?;
     let (start, end) = span.split_once('-')?;
@@ -960,7 +959,9 @@ async fn download_artifact_zip_in_parts(
             return Err(GitHubError::Response(classify_response_error(&response)));
         }
         if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-            || response.headers().contains_key(reqwest::header::CONTENT_ENCODING)
+            || response
+                .headers()
+                .contains_key(reqwest::header::CONTENT_ENCODING)
         {
             return Err(GitHubError::ArtifactRangeInvalid);
         }
@@ -1305,7 +1306,6 @@ mod tests {
         ));
         server.join().expect("server exit");
     }
-
 
     /// Exact finite test-only server; no added daemon/scheduler.
     fn range_responses(replies: &'static [&'static [u8]]) -> (String, thread::JoinHandle<()>) {
