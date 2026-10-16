@@ -903,9 +903,8 @@ impl HostExecutor {
         Ok(())
     }
 
-    /// Transport-only receipt. The response is explicitly LEDGER_ONLY:
-    /// it does not contain the independently frozen REST/WS position and OCO
-    /// evidence and therefore can NEVER authorize select-account by itself.
+    /// Native drained read-only source is still a candidate, NOT a
+    /// CONTROL-authenticated one-use witness bound to exact PID/ReleaseSet.
     #[allow(dead_code)]
     fn request_native_drain(&mut self, expected_uid: &str) -> HostControlResult<Value> {
         if !expected_uid.bytes().all(|b| b.is_ascii_hexdigit()) || expected_uid.len() != 64 {
@@ -941,10 +940,16 @@ impl HostExecutor {
             .replies
             .recv_timeout(Duration::from_secs(20))
             .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
-        if !reply.valid_for(&request_id) || reply.disposition != "DRAINED_LEDGER_ONLY" {
+        if !reply.valid_for(&request_id)
+            || reply.disposition != "DRAINED_SOURCE_CANDIDATE"
+        {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
-        Ok(reply.ledger_only.unwrap_or(Value::Null))
+        Ok(json!({
+            "ledger": reply.ledger_only,
+            "source_candidate": reply.source_candidate,
+            "authorizes_profile_switch": false
+        }))
     }
 
     fn persist_desired(&mut self, state: AgentDesiredState) -> HostControlResult<()> {
