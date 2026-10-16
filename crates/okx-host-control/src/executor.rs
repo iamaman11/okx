@@ -19,7 +19,6 @@ use crate::{
     controller_update,
     desired::{AgentDesired, AgentDesiredState, AgentProfile, DesiredStateStore},
     job::AgentJob,
-    profile_transition::ProfileTransitionStore,
     provenance::InstalledAgentProvenanceStore,
 };
 
@@ -56,7 +55,6 @@ pub struct HostExecutor {
     agent_launch: Option<AgentLaunchEvidence>,
     agent_job: AgentJob,
     desired_store: DesiredStateStore,
-    profile_transition_store: ProfileTransitionStore,
     desired_agent: AgentDesired,
     desired_profile: AgentProfile,
     running_profile: Option<AgentProfile>,
@@ -81,7 +79,6 @@ impl HostExecutor {
             agent_launch: None,
             agent_job: AgentJob::new()?,
             desired_store,
-            profile_transition_store: ProfileTransitionStore::canonical(),
             desired_agent: desired_state.agent,
             desired_profile: desired_state.profile,
             running_profile: None,
@@ -151,7 +148,7 @@ impl HostExecutor {
         ) {
             return Ok(());
         }
-        if self.profile_transition_store.is_pending()? {
+        if self.desired_store.is_pending()? {
             return Err(HostControlError::ProfileTransitionPending);
         }
         Ok(())
@@ -164,7 +161,7 @@ impl HostExecutor {
     pub fn reconcile_desired(&mut self) -> HostControlResult<Value> {
         // A pending profile journal outlives controller crashes. Never
         // implicitly stop or respawn either owner across an unknown handoff.
-        if self.profile_transition_store.is_pending()? {
+        if self.desired_store.is_pending()? {
             self.last_reconcile = "BLOCKED_UNFINALIZED_PROFILE_TRANSITION".to_owned();
             return Ok(json!({
                 "disposition": self.last_reconcile,
@@ -304,7 +301,7 @@ impl HostExecutor {
             "running_profile": self.running_profile,
             "desired_state_path": self.desired_store.path(),
             "desired_state_error": self.desired_error.clone(),
-            "profile_transition": self.profile_transition_store.status_value(),
+            "profile_transition": self.desired_store.status_value(),
             "job_object_owned": true,
             "restart_attempt": self.restart_attempt,
             "retry_in_ms": self.retry_in_ms(),
@@ -517,7 +514,7 @@ impl HostExecutor {
     }
 
     fn switch_agent_profile(&mut self, profile: AgentProfile) -> HostControlResult<Value> {
-        if self.profile_transition_store.is_pending()? {
+        if self.desired_store.is_pending()? {
             return Err(HostControlError::ProfileTransitionPending);
         }
         // The CONTROL command is not a flat-account witness. Do not persist a
@@ -598,7 +595,7 @@ impl HostExecutor {
     }
 
     fn restart_agent(&mut self) -> HostControlResult<Value> {
-        if self.profile_transition_store.is_pending()? {
+        if self.desired_store.is_pending()? {
             return Err(HostControlError::ProfileTransitionPending);
         }
         let profile = self.desired_profile;
@@ -728,7 +725,7 @@ impl HostExecutor {
     }
 
     pub fn install_verified_agent(&mut self, bytes: &[u8]) -> HostControlResult<()> {
-        if self.profile_transition_store.is_pending()? {
+        if self.desired_store.is_pending()? {
             return Err(HostControlError::ProfileTransitionPending);
         }
         let should_restore = self.desired_agent == AgentDesired::Running;
@@ -776,7 +773,7 @@ impl HostExecutor {
     fn start_agent_process(&mut self, profile: AgentProfile) -> HostControlResult<u32> {
         // No normal lifecycle may spawn a second account owner while an
         // earlier profile transition is frozen or consumed.
-        if self.profile_transition_store.is_pending()? {
+        if self.desired_store.is_pending()? {
             return Err(HostControlError::ProfileTransitionPending);
         }
         self.require_agent_binary()?;
@@ -1588,7 +1585,7 @@ mod tests {
 
     #[test]
     fn crash_pending_profile_transition_prevents_reconcile_and_manual_restart() {
-        use crate::profile_transition::FrozenSourceWitness;
+        use crate::desired::FrozenSourceWitness;
         let path = std::env::temp_dir().join(format!(
             "okx-control-pending-handoff-{}.json",
             std::process::id(),
@@ -1596,7 +1593,10 @@ mod tests {
         let _ = fs::remove_file(&path);
 
         let mut host = HostExecutor::canonical().expect("controller");
-        host.profile_transition_store = ProfileTransitionStore::at(path.clone());
+        host.desired_store = DesiredStateStore::at(path.clone());
+        host.desired_store
+            .save(AgentDesiredState::demo_acceptance_running())
+            .expect("initial single owner");
         host.desired_profile = AgentProfile::DemoAcceptance;
         host.desired_agent = AgentDesired::Running;
 
@@ -1616,7 +1616,7 @@ mod tests {
             issued_at_ms: 10_500,
             expires_at_ms: 40_500,
         };
-        host.profile_transition_store
+        host.desired_store
             .stage_frozen(ticket, 11_000)
             .expect("atomic source fence");
         let disposition = host.reconcile_desired().expect("bounded blocked readback");
