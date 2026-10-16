@@ -75,6 +75,38 @@ this detailed native audit; the normal trader packet carries only its
 summary status/counts for context economy. Historical ledger/STOP remain
 immutable; no order, write, new transport/agent/daemon or proxy is needed.
 
+## Stage 5C: one compact read-only operator decision and measured transport
+
+The pre-existing `account_summary(view=trader)` (no new MCP tool or
+process) additionally returns `operator` with exact native
+`okx.operator-status/v1`: current exchange exposure/protection
+`OBSERVED_FLAT`, `EXPOSURE_OR_ORDERS_PRESENT`, or
+`UNKNOWN_OR_SOURCE_INCOMPLETE`; explicit financial audit status,
+a deterministic `next_safe_action`, and
+`trade_admission=NOT_AUTHORIZED_BY_OBSERVATION`. Partial WS/OCO,
+missing positions/orders or incoherent private snapshots never yield a
+false FLAT. Account identity UID is already in `account`. This agent
+cannot prove the installed release parity or Job/PID: it says
+`VERIFY_USING_NATIVE_CONTROL`, whose existing `status` owns that
+separate physical fact. Operators do not compute strategy numbers or
+risk permissions in ChatGPT; native Rust remains the only calculator.
+
+Eight sequential external MCP `view=trader` requests were measured
+on 2026-10-16 against live Demo ReadOnly: wall-clock p50 3641 ms,
+nearest-rank sample p95 3800 ms, min 3456/max 3800; JSON response
+envelopes 2495-2497 UTF-8 bytes, Rust native packet 2237-2239 bytes.
+Two full responses were 28208 bytes each; their two observed wall
+times were 3421/3972 ms (insufficient n for robust full-view p95).
+These measured figures are a **small sample**, not guaranteed SLA.
+The embedded source-read window is not end-to-end response latency.
+No measured exact ChatGPT token count or multi-hour reconnect p95 exists
+yet; do not equate bytes with tokens or claim a reconnect SLA.
+Acceptance performance targets, not guaranteed measurements: ordinary
+trader result under 4096 bytes and healthy p95 under five seconds on
+repeatable connected samples. Financial source was DEGRADED due
+bounded old history even though current private exposure is flat;
+the compact packet never re-labels it FRESH.
+
 ## Operator contract: one application, no Demo fork
 
 - Exactly **one installed `okx-agent.exe` binary** and **one Windows Job/CONTROL-owned running process** at any instant; `okx-host-control` and its launcher are existing lifecycle owners, not an alternate trading engine.

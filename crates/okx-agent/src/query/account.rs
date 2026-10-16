@@ -387,11 +387,54 @@ fn compact_trader_packet(
         reasons.push("SUMMARY_QUALITY_NOT_FRESH");
     }
     let blocked = !reasons.is_empty();
+    // A read-only observer can suggest a safe NEXT STEP; it cannot authorize
+    // execution, and it cannot infer FLAT from missing OCO/WS evidence.
+    let positions = get("/account_ledger/open_positions").as_u64();
+    let orders = get("/account_ledger/pending_orders").as_u64();
+    let protective = get("/pending_protective_algos/rows").as_u64();
+    let exposure_status = if !coherent
+        || !complete_protection
+        || positions.is_none()
+        || orders.is_none()
+        || protective.is_none()
+    {
+        "UNKNOWN_OR_SOURCE_INCOMPLETE"
+    } else if positions != Some(0) || orders != Some(0) || protective != Some(0) {
+        "EXPOSURE_OR_ORDERS_PRESENT"
+    } else {
+        "OBSERVED_FLAT"
+    };
+    let financial_status = get("/reconciliation/strategy_period_financial_audit/status");
+    let next_safe_action =
+        if exposure_status == "UNKNOWN_OR_SOURCE_INCOMPLETE" || !reconciled || !history_complete {
+            "DIAGNOSE_PRIVATE_ACCOUNT_AND_LEDGER"
+        } else if exposure_status == "EXPOSURE_OR_ORDERS_PRESENT" {
+            "REVIEW_EXPOSURE_AND_NATIVE_PROTECTION"
+        } else if has_stop {
+            "REVIEW_DURABLE_STOP_AND_FINANCIAL_PERIODS"
+        } else if financial_status == json!("INCOMPLETE") || finalized {
+            "REVIEW_PERIOD_FINANCIAL_EVIDENCE"
+        } else if !matches!(quality, DataQuality::Fresh) {
+            "CHECK_SOURCE_QUALITY"
+        } else {
+            "NO_AUTOMATIC_ACTION_READ_ONLY"
+        };
     // Even when no blocker was observed, this read-only packet cannot attest
     // an execution policy, risk budget, exact current venue or new order plan.
     reasons.push("EXECUTOR_RISK_ADMISSION_NOT_PERFORMED");
     let mut compact = json!({
         "schema": TRADER_SNAPSHOT_SCHEMA_V1,
+        "operator": {
+            "schema": "okx.operator-status/v1",
+            "venue": "OKX",
+            "exposure_status": exposure_status,
+            "financial_status": financial_status,
+            // Installing or selecting a profile is a different CONTROL owner.
+            // This data-only query must not invent its current release status.
+            "release_parity": "VERIFY_USING_NATIVE_CONTROL",
+            "next_safe_action": next_safe_action,
+            "trade_admission": "NOT_AUTHORIZED_BY_OBSERVATION"
+        },
         "decision": {
             "new_risk": if blocked { "NO_GO" } else { "NOT_ATTESTED" },
             "scope": "READ_ONLY_OBSERVER_NOT_TRADE_PERMISSION",
@@ -3101,6 +3144,16 @@ mod tests {
         );
         assert_eq!(p["funding"]["unallocated_exchange_bills"], 2);
         assert_eq!(p["strategy"]["period_audit_status"], "INCOMPLETE");
+        assert_eq!(p["operator"]["exposure_status"], "OBSERVED_FLAT");
+        assert_eq!(p["operator"]["financial_status"], "INCOMPLETE");
+        assert_eq!(
+            p["operator"]["next_safe_action"],
+            "REVIEW_DURABLE_STOP_AND_FINANCIAL_PERIODS"
+        );
+        assert_eq!(
+            p["operator"]["release_parity"],
+            "VERIFY_USING_NATIVE_CONTROL"
+        );
         assert_eq!(p["strategy"]["periods_total"], 6);
         assert_eq!(p["strategy"]["period_proofs_truncated"], false);
         assert!(
@@ -3160,6 +3213,71 @@ mod tests {
         let absent = compact_trader_packet(&json!({}), &DataQuality::Fresh, 0, 1);
         assert_eq!(absent["decision"]["new_risk"], "NO_GO");
         assert!(absent["account"]["positions"].is_null());
+        assert_eq!(
+            absent["operator"]["exposure_status"],
+            "UNKNOWN_OR_SOURCE_INCOMPLETE"
+        );
+        assert_eq!(
+            absent["operator"]["next_safe_action"],
+            "DIAGNOSE_PRIVATE_ACCOUNT_AND_LEDGER"
+        );
+    }
+
+    #[test]
+    fn operator_status_never_declares_flat_from_partial_or_exposed_source() {
+        use serde_json::json;
+        let mut observation = json!({
+            "account_ledger": {
+                "open_positions": 0,
+                "pending_orders": 0,
+                "history_coverage": [{"complete_within_bound": true}]
+            },
+            "pending_protective_algos": {"rows": 0, "complete_within_bound": true},
+            "coherence": {"coherent": true},
+            "reconciliation": {
+                "consistent": true,
+                "strategy_period_financial_audit": {"status": "LEDGER_HISTORY_ONLY"},
+                "strategy_attribution": {"unallocated_funding_bills": 0}
+            }
+        });
+        let ready = compact_trader_packet(&observation, &DataQuality::Fresh, 0, 1);
+        assert_eq!(ready["operator"]["exposure_status"], "OBSERVED_FLAT");
+        assert_eq!(ready["decision"]["new_risk"], "NOT_ATTESTED");
+        assert_eq!(
+            ready["operator"]["next_safe_action"],
+            "NO_AUTOMATIC_ACTION_READ_ONLY"
+        );
+        observation["account_ledger"]["pending_orders"] = json!(1);
+        let order = compact_trader_packet(&observation, &DataQuality::Fresh, 0, 1);
+        assert_eq!(
+            order["operator"]["exposure_status"],
+            "EXPOSURE_OR_ORDERS_PRESENT"
+        );
+        assert_eq!(
+            order["operator"]["next_safe_action"],
+            "REVIEW_EXPOSURE_AND_NATIVE_PROTECTION"
+        );
+        observation["account_ledger"]["pending_orders"] = json!(0);
+        observation["pending_protective_algos"]["complete_within_bound"] = json!(false);
+        let partial = compact_trader_packet(&observation, &DataQuality::Fresh, 0, 1);
+        assert_eq!(
+            partial["operator"]["exposure_status"],
+            "UNKNOWN_OR_SOURCE_INCOMPLETE"
+        );
+        assert_eq!(partial["decision"]["new_risk"], "NO_GO");
+        observation["pending_protective_algos"]["complete_within_bound"] = json!(true);
+        observation["coherence"]["coherent"] = json!(false);
+        let incoherent = compact_trader_packet(&observation, &DataQuality::Fresh, 0, 1);
+        assert_eq!(
+            incoherent["operator"]["next_safe_action"],
+            "DIAGNOSE_PRIVATE_ACCOUNT_AND_LEDGER"
+        );
+        // A Rust account packet cannot attest its own installed CONTROL release.
+        assert_eq!(
+            incoherent["operator"]["release_parity"],
+            "VERIFY_USING_NATIVE_CONTROL"
+        );
+        assert!(serde_json::to_vec(&incoherent).unwrap().len() <= MAX_TRADER_PACKET_BYTES);
     }
 
     #[test]
