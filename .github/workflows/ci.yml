@@ -260,4 +260,5 @@ jobs:
           name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}\okx-windows-bundle
           if-no-files-found: error
+          compression-level: 9
           retention-days: 14
