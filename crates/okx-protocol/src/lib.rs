@@ -1804,7 +1804,7 @@ impl AccountCatalogEntry {
             || self.account_id == "production"
             || self.account_id == "demo_acceptance"
             || self.label.is_empty()
-            || self.label.chars().count() > 48
+            || self.label.len() > 48
             || self.label.trim() != self.label
             || self.label.chars().any(char::is_control)
         {
@@ -3259,6 +3259,9 @@ mod tests {
         let mut wrong = entry.clone();
         wrong.label = " \nunsafe".to_owned();
         assert!(wrong.validate().is_err());
+        let mut multibyte = entry.clone();
+        multibyte.label = "🔒".repeat(13);
+        assert!(multibyte.validate().is_err(), "48-byte bound includes UTF-8 expansion");
         let smuggled = format!(
             "{{\"schema\":\"{}\",\"account_id\":\"sub-1\",\"label\":\"ok\",\"environment\":\"production\",\"expected_uid_fingerprint\":\"{}\",\"api_key\":\"secret\"}}",
             ACCOUNT_CATALOG_ENTRY_SCHEMA_V1,
