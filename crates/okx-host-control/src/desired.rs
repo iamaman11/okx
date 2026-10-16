@@ -118,9 +118,8 @@ impl DesiredFileV3 {
         }
         if let Some(transition) = &self.transition {
             transition.validate()?;
-            if transition.phase == TransitionPhase::SourceFrozen
-                && (self.profile != transition.witness.source
-                    || self.agent != AgentDesired::Running)
+            if self.profile != transition.witness.source
+                || self.agent != AgentDesired::Running
             {
                 return Err(HostControlError::ProfileTransitionInvalid);
             }
@@ -443,7 +442,6 @@ pub struct VerifiedReadOnlyDestination {
     pub has_trade_authority: bool,
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TransitionRecord {
@@ -484,15 +482,13 @@ impl TransitionRecord {
                         now >= self.witness.issued_at_ms && now <= self.witness.expires_at_ms
                     })
             }
-            TransitionPhase::SourceExited => {
-                self.consumed_at_ms.is_some_and(|consumed| {
-                    consumed >= self.witness.issued_at_ms
-                        && consumed <= self.witness.expires_at_ms
-                        && self.source_exited_at_ms.is_some_and(|exited| {
-                            exited >= consumed && exited <= self.witness.expires_at_ms
-                        })
-                })
-            },
+            TransitionPhase::SourceExited => self.consumed_at_ms.is_some_and(|consumed| {
+                consumed >= self.witness.issued_at_ms
+                    && consumed <= self.witness.expires_at_ms
+                    && self.source_exited_at_ms.is_some_and(|exited| {
+                        exited >= consumed && exited <= self.witness.expires_at_ms
+                    })
+            }),
         };
         if self.schema != SCHEMA || !phase_coherent || self.checksum_sha256 != self.checksum()? {
             return Err(HostControlError::ProfileTransitionInvalid);
@@ -822,28 +818,61 @@ mod single_owner_transition_tests {
         };
         let mut wrong = target.clone();
         wrong.has_trade_authority = true;
-        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+        assert!(
+            store
+                .complete_verified_read_only(&source, &wrong, 11_600)
+                .is_err()
+        );
         wrong = target.clone();
         wrong.account_uid_fingerprint = source.account_uid_fingerprint.clone();
-        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+        assert!(
+            store
+                .complete_verified_read_only(&source, &wrong, 11_600)
+                .is_err()
+        );
         wrong = target.clone();
         wrong.agent_sha256 = "0".repeat(64);
-        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+        assert!(
+            store
+                .complete_verified_read_only(&source, &wrong, 11_600)
+                .is_err()
+        );
         wrong = target.clone();
         wrong.private_ws_generation = 0;
-        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+        assert!(
+            store
+                .complete_verified_read_only(&source, &wrong, 11_600)
+                .is_err()
+        );
         wrong = target.clone();
         wrong.pid = 321;
-        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+        assert!(
+            store
+                .complete_verified_read_only(&source, &wrong, 11_600)
+                .is_err()
+        );
         wrong = target.clone();
         wrong.account_snapshot_received_ms = 1;
-        assert!(store.complete_verified_read_only(&source, &wrong, 11_600).is_err());
+        assert!(
+            store
+                .complete_verified_read_only(&source, &wrong, 11_600)
+                .is_err()
+        );
 
-        store.complete_verified_read_only(&source, &target, 11_600).unwrap();
+        store
+            .complete_verified_read_only(&source, &target, 11_600)
+            .unwrap();
         let recovered = DesiredStateStore::at(path.clone());
-        assert_eq!(recovered.load().unwrap(), AgentDesiredState::production_running());
+        assert_eq!(
+            recovered.load().unwrap(),
+            AgentDesiredState::production_running()
+        );
         assert!(!recovered.is_pending().unwrap());
-        assert!(recovered.complete_verified_read_only(&source, &target, 11_601).is_err());
+        assert!(
+            recovered
+                .complete_verified_read_only(&source, &target, 11_601)
+                .is_err()
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -852,7 +881,9 @@ mod single_owner_transition_tests {
         let path = path("recovery");
         let _ = fs::remove_file(&path);
         let store = DesiredStateStore::at(path.clone());
-        store.save(AgentDesiredState::demo_acceptance_running()).unwrap();
+        store
+            .save(AgentDesiredState::demo_acceptance_running())
+            .unwrap();
         let ticket = witness();
         let source = bound(&ticket);
         store.stage_frozen(ticket, 11_000).unwrap();
