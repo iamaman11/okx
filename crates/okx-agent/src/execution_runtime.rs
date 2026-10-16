@@ -272,7 +272,9 @@ impl ExecutionRuntime {
         // The source must never interpret missing archive evidence as clean.
         let mut executor = self.executor.lock().await;
         executor.disable_mutations();
-        Ok(executor.ledger().profile_handoff_ledger_assessment(account_uid)?)
+        Ok(executor
+            .ledger()
+            .profile_handoff_ledger_assessment(account_uid)?)
     }
 
     /// Single admission authority reused by every exchange POST wrapper.
@@ -1351,7 +1353,10 @@ mod mutation_ingress_tests {
         assert!(!draining.is_finished(), "cannot terminate active POST");
         drop(existing_post);
         draining.await.expect("task").expect("drain");
-        assert!(ingress.admit().await.is_none(), "future mutating ingress denied");
+        assert!(
+            ingress.admit().await.is_none(),
+            "future mutating ingress denied"
+        );
         // A repeated drain is idempotently denied to new mutation requests;
         // only an independently approved fresh agent can trade again.
         ingress.drain().await.expect("repeat safe");
