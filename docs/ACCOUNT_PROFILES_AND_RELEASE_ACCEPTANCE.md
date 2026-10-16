@@ -14,6 +14,10 @@
 
 **Closure requirement:** via approved existing remote owner chain alone, prove clean bootstrap, exact release install/reinstall/upgrade, matching A/B controller and launcher, single Job-owned agent, independent startup/status after reboot, reversible bounded recovery from interrupted download/partial install/controller crash, durable ledger/STOP preservation, coherent Demo/Production account isolation with single-use handoff, and primary MCP readback. Verify CI 6/6, exact tested=merged tree and installed binary hashes. If a physically unavailable controller cannot be recovered through the existing accepted launcher/CONTROL, record the precise `BLOCKED_REMOTE_CONTROL` gap and fix that owner natively; never invent a secondary installer or delegate remediation to the diagnostic witness. Production Live is separately disabled.
 
+## Stage 5C-2 next acceptance cursor — counterpart identity
+
+After physically accepting PR #345 (CI #1876, exact merged tree `4856c64386517f8c72aae791ee14a0e0650ff97d`), the one outstanding account-switch prerequisite is a freshly verified target UID. A native single-agent handoff readiness query now probes the existing Demo and Production ReadOnly observer credential slots via bounded authenticated REST. It returns only the distinct, fresh target UID fingerprint and source profile, never credentials and never a trading permit. The existing CONTROL `SelectReadOnlyAccount` still requires source and target UID and independently validates the destination PID/UID/WS/ReadOnly permission after one-use source drain. Missing/mismatched credentials fail closed *before* attempting any CONTROL mutation. Preserve production trading OFF, original ledger/STOP, and no second process, service, proxy, or MCP tool. Physical bidirectional account selection remains NOT_ACCEPTED until witnessed.
+
 ## Operator contract: one application, no Demo fork
 
 - Exactly **one installed `okx-agent.exe` binary** and **one Windows Job/CONTROL-owned running process** at any instant; `okx-host-control` and its launcher are existing lifecycle owners, not an alternate trading engine.

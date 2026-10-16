@@ -35,6 +35,90 @@ struct AccountSummaryResult {
 
 const PROFILE_HANDOFF_READINESS_SCHEMA_V1: &str = "okx.profile-handoff-readiness/v1";
 
+/// Read the configured counterparty's native observer credentials directly
+/// from the SAME Windows agent. This does not create an executor, process,
+/// second transport, credential export or CONTROL switching permission.
+async fn authenticated_counterpart_identity(source_uid: &str) -> serde_json::Value {
+    use okx_api::{OkxEnvironment, OkxRestClient, RateBudget, Region};
+    use serde_json::json;
+
+    let observer = |demo: bool| async move {
+        let environment = OkxEnvironment::new(Region::Global, demo);
+        let credentials = crate::okx_credentials::load_native_okx_credentials_for_environment(
+            environment,
+        ).map_err(|_| ())?;
+        let client = OkxRestClient::with_rate_budget(environment, credentials, RateBudget::new())
+            .map_err(|_| ())?;
+        AccountBootstrapper::new(client).snapshot().await.map_err(|_| ())
+    };
+    // Two independent authenticated REST receipts bind the chosen credential
+    // slots to the actual current UID. No historical UID or local config text
+    // can stand in for this fresh exchange proof.
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        tokio::try_join!(observer(true), observer(false))
+    }).await;
+    let Ok(Ok((demo, production))) = receipt else {
+        return json!({
+            "schema":"okx.counterpart-readonly-identity/v1",
+            "status":"BLOCKED",
+            "reason":"BOTH_NATIVE_OBSERVER_CREDENTIALS_NOT_FRESHLY_VERIFIED"
+        });
+    };
+    verified_counterpart_identity(source_uid, &demo, &production, super::utc_now_ms())
+        .unwrap_or_else(|| json!({
+            "schema":"okx.counterpart-readonly-identity/v1",
+            "status":"BLOCKED",
+            "reason":"ACCOUNT_UID_OR_PERMISSION_BOUNDARY_NOT_PROVEN"
+        }))
+}
+
+/// Pure boundary: fail closed on same UID, source/account mismatch, stale
+/// receipts or anything beyond strict observer-only permissions.
+fn verified_counterpart_identity(
+    source_uid: &str,
+    demo: &AccountSnapshot,
+    production: &AccountSnapshot,
+    now_ms: u64,
+) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let valid = |snapshot: &AccountSnapshot| {
+        let at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+            .ok()
+            .and_then(|value| u64::try_from(value.timestamp_millis()).ok());
+        let uid = &snapshot.account_uid_fingerprint;
+        uid.len() == 64
+            && uid.bytes().all(|b| b.is_ascii_hexdigit())
+            && snapshot.api_key_permissions.as_slice() == ["read_only"]
+            && at.is_some_and(|t| t > 0 && t <= now_ms && now_ms - t <= 10_000)
+    };
+    if !valid(demo)
+        || !valid(production)
+        || demo.account_uid_fingerprint == production.account_uid_fingerprint
+    {
+        return None;
+    }
+    let (source_profile, target_profile, target) =
+        if source_uid == demo.account_uid_fingerprint {
+            ("demo_acceptance", "production", production)
+        } else if source_uid == production.account_uid_fingerprint {
+            ("production", "demo_acceptance", demo)
+        } else {
+            return None;
+        };
+    Some(json!({
+        "schema":"okx.counterpart-readonly-identity/v1",
+        "status":"VERIFIED",
+        "source_profile":source_profile,
+        "target_profile":target_profile,
+        "target_account_uid_fingerprint":target.account_uid_fingerprint,
+        "target_snapshot_received_at":target.source_received_at,
+        "target_read_only_credentials":true,
+        "target_positions_observed":target.positions.len(),
+        "target_orders_observed":target.pending_orders.len(),
+        "switch_authorized":false
+    }))
+}
+
 /// Conservative observer-only readiness. No profile is changed, the source
 /// executor is NOT frozen and this packet is NEVER a CONTROL authorization.
 fn profile_handoff_readiness_packet(
@@ -892,12 +976,19 @@ pub(super) async fn dispatch(
                 coherence,
             })?;
             let result = if handoff_readiness {
-                profile_handoff_readiness_packet(
+                let mut packet = profile_handoff_readiness_packet(
                     &full,
                     &quality,
                     &current_source_quality,
                     local_handoff.as_ref(),
-                )
+                );
+                // This is an observation only. CONTROL still requires the
+                // independently checked one-use drain/PID/lease/UID witness.
+                packet["counterpart_read_only_identity"] =
+                    authenticated_counterpart_identity(
+                        &assembled.snapshot.account_uid_fingerprint,
+                    ).await;
+                packet
             } else if compact {
                 let packet = compact_trader_packet(
                     &full,
@@ -2567,6 +2658,52 @@ fn account_ledger_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counterpart_uid_requires_distinct_fresh_authenticated_readonly_slots() {
+        let mut demo = serde_json::from_value::<AccountSnapshot>(serde_json::json!({
+            "schema": "okx.account-snapshot/v2",
+            "source": "okx_private_rest_bootstrap",
+            "source_received_at": "2026-10-16T14:00:00.000Z",
+            "account_generation": "demo-gen",
+            "quality_reason": "M4_PRIVATE_REST_BOOTSTRAP_ONLY",
+            "private_ws_connected": false,
+            "account_level": "2",
+            "position_mode": "long_short_mode",
+            "account_type": "0",
+            "account_uid_fingerprint": "a".repeat(64),
+            "api_key_permissions": ["read_only"],
+            "balance": {
+                "total_equity_usd": "0",
+                "adjusted_equity_usd": null,
+                "isolated_equity_usd": null,
+                "initial_margin_requirement_usd": null,
+                "maintenance_margin_requirement_usd": null,
+                "margin_ratio": null,
+                "notional_usd": null,
+                "update_time_ms": null,
+                "details": []
+            },
+            "positions": [],
+            "pending_orders": []
+        })).unwrap();
+        let mut production = demo.clone();
+        production.account_uid_fingerprint = "b".repeat(64);
+        let now_ms = chrono::DateTime::parse_from_rfc3339("2026-10-16T14:00:04.000Z")
+            .unwrap().timestamp_millis() as u64;
+        let ready = verified_counterpart_identity(&"a".repeat(64), &demo, &production, now_ms)
+            .expect("different real account RO UID");
+        assert_eq!(ready["target_profile"], "production");
+        assert_eq!(ready["target_account_uid_fingerprint"], "b".repeat(64));
+        assert_eq!(ready["switch_authorized"], false);
+        assert!(verified_counterpart_identity(&"c".repeat(64), &demo, &production, now_ms).is_none());
+        assert!(verified_counterpart_identity(&"a".repeat(64), &demo, &demo, now_ms).is_none());
+        production.api_key_permissions.push("trade".to_owned());
+        assert!(verified_counterpart_identity(&"a".repeat(64), &demo, &production, now_ms).is_none());
+        production.api_key_permissions.pop();
+        demo.source_received_at = "2026-10-16T13:59:00.000Z".to_owned();
+        assert!(verified_counterpart_identity(&"a".repeat(64), &demo, &production, now_ms).is_none());
+    }
 
     #[test]
     fn profile_handoff_is_read_only_and_refuses_bounded_or_unknown_history() {
