@@ -264,13 +264,18 @@ impl ExecutionRuntime {
         &self,
         account_uid: &str,
     ) -> AgentResult<okx_execution::ProfileHandoffLedgerAssessment> {
+        // One overall deadline for both the active request fence and native
+        // ledger owner: an unbounded checkpoint must never hang CONTROL.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         self.mutation_ingress
             .drain()
             .await
             .map_err(|_| AgentError::SourceDrainTimeout)?;
         // Covers any native financial checkpoint outside request ingress.
         // The source must never interpret missing archive evidence as clean.
-        let mut executor = self.executor.lock().await;
+        let mut executor = tokio::time::timeout_at(deadline, self.executor.lock())
+            .await
+            .map_err(|_| AgentError::SourceDrainTimeout)?;
         executor.disable_mutations();
         Ok(executor
             .ledger()
