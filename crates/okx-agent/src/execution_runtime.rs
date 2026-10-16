@@ -926,10 +926,7 @@ impl ExecutionRuntime {
             return Ok(None);
         }
         let guarded = ProductionAuthorityReset(&mut *executor);
-        let result = guarded
-            .0
-            .submit_prepared(intent_id, timing, observed_at_ms)
-            .await;
+        let result = guarded.0.submit_prepared(intent_id, timing, observed_at_ms).await;
         drop(guarded);
         Ok(Some(result))
     }
@@ -1512,6 +1509,29 @@ mod tests {
 
     fn timing() -> MutationTiming {
         MutationTiming::from_exchange_time_ms(1_790_000_000_000, 5_000).expect("timing")
+    }
+
+    #[tokio::test]
+    async fn ephemeral_exchange_right_is_revoked_when_production_guard_drops() {
+        let root = temp_root("one-owner-production-right-reset");
+        let demo = OkxEnvironment::new(Region::Global, true);
+        let runtime = ExecutionRuntime::new_demo_acceptance(
+            &root,
+            demo,
+            credentials(),
+            101,
+            RateBudget::new(),
+        )
+        .expect("existing Rust trade engine");
+        let mut owner = runtime.executor.lock().await;
+        owner.enable_demo_acceptance(demo).expect("test authority");
+        {
+            let guard = ProductionAuthorityReset(&mut *owner);
+            assert_eq!(guard.0.mutation_authority(), MutationAuthority::DemoAcceptance);
+        }
+        assert_eq!(owner.mutation_authority(), MutationAuthority::Disabled);
+        drop(owner);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
