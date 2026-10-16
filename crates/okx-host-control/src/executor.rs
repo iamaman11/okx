@@ -19,8 +19,8 @@ use crate::{
     controller_update,
     desired::{AgentDesired, AgentDesiredState, AgentProfile, DesiredStateStore},
     job::AgentJob,
-    provenance::InstalledAgentProvenanceStore,
     profile_transition::ProfileTransitionStore,
+    provenance::InstalledAgentProvenanceStore,
 };
 
 const CANONICAL_ROOT: &str = r"C:\okx";
