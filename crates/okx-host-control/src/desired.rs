@@ -696,7 +696,7 @@ impl DesiredStateStore {
     }
 
     /// Atomic finalization after an independently verified ReadOnly target.
-    /// CONTROL must observe the new target PID/UID/WS/rights natively and
+    /// CONTROL must observe the new target PID/UID/rights natively and
     /// ensure source Job exit before invoking. Not a remotely callable path.
     pub fn complete_verified_read_only(
         &self,
@@ -716,7 +716,6 @@ impl DesiredStateStore {
             || target.pid == source.source_pid
             || !is_lower_hex(&target.account_uid_fingerprint, 64)
             || target.account_uid_fingerprint == source.account_uid_fingerprint
-            || target.private_ws_generation == 0
             || target.has_trade_authority
             || target.agent_sha256 != source.agent_sha256
             || target.controller_sha256 != source.controller_sha256
@@ -973,7 +972,7 @@ mod single_owner_transition_tests {
             profile: AgentProfile::Production,
             pid: 555,
             account_uid_fingerprint: "9".repeat(64),
-            private_ws_generation: 9,
+            private_ws_generation: 0,
             account_snapshot_received_ms: 11_500,
             agent_sha256: source.agent_sha256.clone(),
             controller_sha256: source.controller_sha256.clone(),
@@ -1000,13 +999,7 @@ mod single_owner_transition_tests {
                 .complete_verified_read_only(&source, &wrong, 11_600)
                 .is_err()
         );
-        wrong = target.clone();
-        wrong.private_ws_generation = 0;
-        assert!(
-            store
-                .complete_verified_read_only(&source, &wrong, 11_600)
-                .is_err()
-        );
+        // Target WS readiness is separate from ReadOnly process identity.
         wrong = target.clone();
         wrong.pid = 321;
         assert!(

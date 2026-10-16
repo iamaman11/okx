@@ -97,6 +97,9 @@ pub enum HostControlError {
     #[error("profile transition witness or durable journal has invalid provenance")]
     ProfileTransitionInvalid,
 
+    #[error("ReadOnly target proof denied: {0}")]
+    ReadOnlyTargetProofDenied(&'static str),
+
     #[error("an unfinalized profile transition prevents an implicit lifecycle operation")]
     ProfileTransitionPending,
 
@@ -176,6 +179,7 @@ impl HostControlError {
             Self::DesiredStateCorrupt => "DESIRED_STATE_CORRUPT",
             Self::ProfileHandoffProofRequired => "PROFILE_HANDOFF_PROOF_REQUIRED",
             Self::ProfileTransitionInvalid => "PROFILE_TRANSITION_INVALID",
+            Self::ReadOnlyTargetProofDenied(_) => "READ_ONLY_TARGET_PROOF_DENIED",
             Self::ProfileTransitionPending => "PROFILE_TRANSITION_PENDING",
             Self::ProfileTransitionReplay => "PROFILE_TRANSITION_REPLAY",
             Self::JobAssignment(_) => "JOB_ASSIGNMENT_FAILED",

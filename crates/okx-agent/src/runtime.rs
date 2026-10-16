@@ -208,74 +208,91 @@ pub async fn run_mailbox_until_shutdown(
             Some(request) = native_rx.recv(), if native_child_control_stdio && !native_request_consumed => {
                 native_request_consumed = true;
                 if matches!(request.operation, NativeChildOperation::VerifyReadOnly) {
-                    // One strictly read-only native observation from target.
+                    // ReadOnly access is proved by authenticated REST UID and
+                    // disabled mutation authority, independently of WS/OCO freshness.
                     let verify = async {
-                        let observer = account.ok_or("no observer")?;
-                        let private = private_ws.ok_or("no private WS")?;
-                        // A genuine Production observer may have ONLY a
-                        // read-only OKX credential, with NO executor credential.
-                        // Absence of an executor means mutations cannot be
-                        // submitted. If it exists, it MUST be native ReadOnly
-                        // with exchange mutation authority disabled.
+                        let observer = account.ok_or("OBSERVER_UNAVAILABLE")?;
                         if let Some(executor) = execution {
-                            if executor.mode() != crate::execution_runtime::ExecutionRuntimeMode::ReadOnly {
-                                return Err("execution mode is not ReadOnly");
+                            if executor.mode()
+                                != crate::execution_runtime::ExecutionRuntimeMode::ReadOnly
+                            {
+                                return Err("EXECUTOR_NOT_READ_ONLY");
                             }
-                            if executor.mutation_authority().await != okx_execution::MutationAuthority::Disabled {
-                                return Err("native mutation authority enabled");
+                            if executor.mutation_authority().await
+                                != okx_execution::MutationAuthority::Disabled
+                            {
+                                return Err("MUTATION_AUTHORITY_ENABLED");
                             }
                         }
-                        let before = private.convergence_cursor().await.map_err(|_| "WS unavailable")?;
-                        let (snapshot, algos) = tokio::try_join!(
-                            async { observer.snapshot().await.map_err(|_| "account REST unavailable") },
-                            async { observer.pending_protective_algos().await.map_err(|_| "protective inventory unavailable") },
-                        )?;
-                        let after = private.convergence_cursor().await.map_err(|_| "WS convergence lost")?;
-                        if before != after || after.generation == 0 {
-                            return Err("WS changed during REST receipt");
-                        }
-                        let parsed = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
-                            .map_err(|_| "invalid source receipt")?;
-                        let at = u64::try_from(parsed.timestamp_millis())
-                            .map_err(|_| "source receipt out of range")?;
+                        // AccountBootstrapper::snapshot enforces read_only permission.
+                        let snapshot = observer
+                            .snapshot()
+                            .await
+                            .map_err(|_| "ACCOUNT_REST_UNAVAILABLE")?;
+                        let received_ms = chrono::DateTime::parse_from_rfc3339(
+                            &snapshot.source_received_at,
+                        )
+                        .ok()
+                        .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
+                        .ok_or("INVALID_ACCOUNT_RECEIPT")?;
+                        let ws_generation = match private_ws {
+                            Some(private) => private
+                                .convergence_cursor()
+                                .await
+                                .ok()
+                                .map_or(0, |cursor| cursor.generation),
+                            None => 0,
+                        };
+                        // An unknown OCO inventory is not falsely reported as zero:
+                        // native_oco_complete=false and CONTROL returns null.
+                        let algos = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            observer.pending_protective_algos(),
+                        )
+                        .await
+                        .ok()
+                        .and_then(Result::ok);
                         let proof = NativeReadOnlyTargetProof {
                             schema: "okx.native-readonly-target/v1".to_owned(),
                             account_uid_fingerprint: snapshot.account_uid_fingerprint,
-                            snapshot_received_ms: at,
-                            private_ws_generation: after.generation,
+                            snapshot_received_ms: received_ms,
+                            private_ws_generation: ws_generation,
                             positions: snapshot.positions.len() as u64,
                             orders: snapshot.pending_orders.len() as u64,
-                            native_oco: algos.rows as u64,
-                            native_oco_complete: algos.complete_within_bound,
-                            read_only_credentials: true, // strict_read_only_permissions enforced by AccountBootstrapper
-                            executor_mutations_disabled: true, // confirmed in single executor above
+                            native_oco: algos.as_ref().map_or(0, |rows| rows.rows as u64),
+                            native_oco_complete: algos
+                                .as_ref()
+                                .is_some_and(|rows| rows.complete_within_bound),
+                            read_only_credentials: true,
+                            executor_mutations_disabled: true,
                         };
-                        let now = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+                        let now = u64::try_from(Utc::now().timestamp_millis())
+                            .unwrap_or_default();
                         if !proof.valid_for(&request.expected_uid_fingerprint, now) {
-                            return Err("target ReadOnly/UID/source not proven");
+                            return Err("TARGET_UID_ACCESS_OR_RECEIPT_INVALID");
                         }
                         Ok(proof)
                     };
-                    let response = tokio::time::timeout(Duration::from_secs(8), verify).await;
-                    let reply = match response {
-                        Ok(Ok(proof)) => NativeChildReply {
-                            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
-                            request_id: request.request_id,
-                            disposition: "VERIFIED_READ_ONLY".to_owned(),
-                            ledger_only: None,
-                            source_candidate: None,
-                            target_read_only: Some(proof),
-                            error: None,
-                        },
-                        _ => NativeChildReply {
-                            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
-                            request_id: request.request_id,
-                            disposition: "BLOCKED".to_owned(),
-                            ledger_only: None,
-                            source_candidate: None,
-                            target_read_only: None,
-                            error: Some("destination ReadOnly verification denied".to_owned()),
-                        },
+                    let response =
+                        tokio::time::timeout(Duration::from_secs(8), verify).await;
+                    let (proof, error) = match response {
+                        Ok(Ok(proof)) => (Some(proof), None),
+                        Ok(Err(reason)) => (None, Some(reason)),
+                        Err(_) => (None, Some("TARGET_VERIFY_TIMEOUT")),
+                    };
+                    let reply = NativeChildReply {
+                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id,
+                        disposition: if proof.is_some() {
+                            "VERIFIED_READ_ONLY"
+                        } else {
+                            "BLOCKED"
+                        }
+                        .to_owned(),
+                        ledger_only: None,
+                        source_candidate: None,
+                        target_read_only: proof,
+                        error: error.map(str::to_owned),
                     };
                     eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
                     continue;
