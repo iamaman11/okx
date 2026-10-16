@@ -5,7 +5,11 @@
 //! witness. There is intentionally NO remote command to create/consume it yet.
 //! A pending or corrupt journal prevents automatic lifecycle transitions.
 
-use std::{fs::{self, File}, io::Write, path::PathBuf};
+use std::{
+    fs::{self, File},
+    io::Write,
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -67,7 +71,9 @@ impl FrozenSourceWitness {
 
 fn is_lower_hex(text: &str, expected_length: usize) -> bool {
     text.len() == expected_length
-        && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,10 +117,7 @@ impl TransitionRecord {
                 now >= self.witness.issued_at_ms && now <= self.witness.expires_at_ms
             }),
         };
-        if self.schema != SCHEMA
-            || !phase_coherent
-            || self.checksum_sha256 != self.checksum()?
-        {
+        if self.schema != SCHEMA || !phase_coherent || self.checksum_sha256 != self.checksum()? {
             return Err(HostControlError::ProfileTransitionInvalid);
         }
         Ok(())
@@ -130,7 +133,9 @@ pub struct ProfileTransitionStore {
 
 impl ProfileTransitionStore {
     pub fn canonical() -> Self {
-        Self { path: PathBuf::from(CANONICAL_PATH) }
+        Self {
+            path: PathBuf::from(CANONICAL_PATH),
+        }
     }
 
     #[cfg(test)]
@@ -151,7 +156,10 @@ impl ProfileTransitionStore {
 
     fn persist(&self, record: &TransitionRecord) -> HostControlResult<()> {
         record.validate()?;
-        let parent = self.path.parent().ok_or(HostControlError::ProfileTransitionInvalid)?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or(HostControlError::ProfileTransitionInvalid)?;
         fs::create_dir_all(parent)?;
         let temp = temp_path(&self.path);
         let mut file = File::create(&temp)?;
@@ -163,9 +171,7 @@ impl ProfileTransitionStore {
 
     /// A frozen native source witness is a prerequisite, not an authorization.
     /// No existing CONTROL request can invoke this method.
-    pub fn stage_frozen(&self, witness: FrozenSourceWitness, now_ms: u64)
-        -> HostControlResult<()>
-    {
+    pub fn stage_frozen(&self, witness: FrozenSourceWitness, now_ms: u64) -> HostControlResult<()> {
         witness.validate()?;
         if now_ms < witness.issued_at_ms || now_ms > witness.expires_at_ms {
             return Err(HostControlError::ProfileTransitionInvalid);
@@ -188,9 +194,7 @@ impl ProfileTransitionStore {
 
     /// Durable single-use consumption. A second use, including after process
     /// restart or an uncertain response, is ALWAYS denied.
-    pub fn consume_once(&self, expected_lease_sha256: &str, now_ms: u64)
-        -> HostControlResult<()>
-    {
+    pub fn consume_once(&self, expected_lease_sha256: &str, now_ms: u64) -> HostControlResult<()> {
         let Some(mut record) = self.load()? else {
             return Err(HostControlError::ProfileTransitionInvalid);
         };
@@ -240,9 +244,9 @@ mod tests {
     use super::*;
 
     fn temp(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "okx-profile-fence-{label}-{}", std::process::id()
-        )).join("profile-transition.json")
+        std::env::temp_dir()
+            .join(format!("okx-profile-fence-{label}-{}", std::process::id()))
+            .join("profile-transition.json")
     }
 
     fn witness() -> FrozenSourceWitness {
@@ -273,20 +277,30 @@ mod tests {
         assert!(!store.is_pending().unwrap());
         store.stage_frozen(ticket.clone(), 11_000).unwrap();
         assert!(store.is_pending().unwrap());
-        assert!(matches!(store.stage_frozen(ticket.clone(), 11_001),
-            Err(HostControlError::ProfileTransitionPending)));
-        assert!(matches!(store.consume_once(&"0".repeat(64), 11_002),
-            Err(HostControlError::ProfileTransitionReplay)));
-        store.consume_once(&ticket.launch_lease_sha256, 12_000).unwrap();
+        assert!(matches!(
+            store.stage_frozen(ticket.clone(), 11_001),
+            Err(HostControlError::ProfileTransitionPending)
+        ));
+        assert!(matches!(
+            store.consume_once(&"0".repeat(64), 11_002),
+            Err(HostControlError::ProfileTransitionReplay)
+        ));
+        store
+            .consume_once(&ticket.launch_lease_sha256, 12_000)
+            .unwrap();
 
         // The next controller process sees the consumed proof, not a fresh
         // opportunity to re-use or implicitly swap profiles.
         let reopened = ProfileTransitionStore::at(path.clone());
         assert!(reopened.is_pending().unwrap());
-        assert!(matches!(reopened.consume_once(&ticket.launch_lease_sha256, 12_001),
-            Err(HostControlError::ProfileTransitionReplay)));
-        assert_eq!(reopened.status_value()["handoff_admission"],
-            "DENIED_TRANSITION_NOT_FINALIZED");
+        assert!(matches!(
+            reopened.consume_once(&ticket.launch_lease_sha256, 12_001),
+            Err(HostControlError::ProfileTransitionReplay)
+        ));
+        assert_eq!(
+            reopened.status_value()["handoff_admission"],
+            "DENIED_TRANSITION_NOT_FINALIZED"
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -319,8 +333,10 @@ mod tests {
         let idx = bytes.iter().position(|b| *b == b'd').unwrap();
         bytes[idx] = b'0';
         fs::write(&path, bytes).unwrap();
-        assert!(matches!(store.is_pending(),
-            Err(HostControlError::ProfileTransitionInvalid)));
+        assert!(matches!(
+            store.is_pending(),
+            Err(HostControlError::ProfileTransitionInvalid)
+        ));
         assert_eq!(store.status_value()["state"], "CORRUPT");
         let _ = fs::remove_file(path);
     }
