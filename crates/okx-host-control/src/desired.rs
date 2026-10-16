@@ -100,6 +100,24 @@ struct DesiredFileV3 {
     agent: AgentDesired,
     profile: AgentProfile,
     transition: Option<TransitionRecord>,
+    /// Written BEFORE requesting the child drain. A crash cannot silently
+    /// restart source mutations while its exchange POST outcome is unknown.
+    #[serde(default)]
+    switch_hold: Option<SourceDrainHold>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceDrainHold {
+    source: AgentProfile,
+    target: AgentProfile,
+    source_pid: u32,
+}
+
+impl SourceDrainHold {
+    fn valid(&self) -> bool {
+        self.source != self.target && self.source_pid > 0
+    }
 }
 
 impl DesiredFileV3 {
@@ -109,12 +127,20 @@ impl DesiredFileV3 {
             agent: state.agent,
             profile: state.profile,
             transition: None,
+            switch_hold: None,
         }
     }
 
     fn validate(&self) -> HostControlResult<()> {
         if self.schema != DESIRED_STATE_SCHEMA_V3 {
             return Err(HostControlError::DesiredStateCorrupt);
+        }
+        if let Some(hold) = &self.switch_hold {
+            if !hold.valid() || self.transition.is_some()
+                || self.agent != AgentDesired::Running || self.profile != hold.source
+            {
+                return Err(HostControlError::ProfileTransitionInvalid);
+            }
         }
         if let Some(transition) = &self.transition {
             transition.validate()?;
@@ -206,7 +232,7 @@ impl DesiredStateStore {
     /// A normal desired-state write cannot drop a pending transition.
     /// Every change of profile while drained belongs to the same atomic owner.
     pub fn save(&self, state: AgentDesiredState) -> HostControlResult<()> {
-        if self.load_full()?.transition.is_some() {
+        if self.is_pending()? {
             return Err(HostControlError::ProfileTransitionPending);
         }
         self.persist_full(&DesiredFileV3::initial(state))
@@ -496,6 +522,36 @@ impl TransitionRecord {
 }
 
 impl DesiredStateStore {
+    /// One minimal durable hold BEFORE the first drain request or possible
+    /// in-flight POST ambiguity. No new service, file or mutable engine.
+    /// Automatic reconcile/restart and release install are fenced while held.
+    pub fn begin_source_drain_hold(
+        &self, source: AgentProfile, target: AgentProfile, source_pid: u32
+    ) -> HostControlResult<()> {
+        let mut state = self.load_full()?;
+        if state.transition.is_some() || state.switch_hold.is_some()
+            || state.profile != source || state.agent != AgentDesired::Running
+        {
+            return Err(HostControlError::ProfileTransitionPending);
+        }
+        let hold = SourceDrainHold { source, target, source_pid };
+        if !hold.valid() {
+            return Err(HostControlError::ProfileTransitionInvalid);
+        }
+        state.switch_hold = Some(hold);
+        self.persist_full(&state)
+    }
+
+    pub fn permits_owned_source_drain(
+        &self, source: AgentProfile, source_pid: u32
+    ) -> HostControlResult<bool> {
+        let state = self.load_full()?;
+        Ok(state.transition.is_none()
+            && state.switch_hold.as_ref().is_some_and(|hold| {
+                hold.source == source && hold.source_pid == source_pid
+            }))
+    }
+
     /// The native CONTROL may eventually stage only an authenticated and
     /// independently checked drained-owner witness. No remote request can
     /// currently invoke this method: there is still NO operational switch.
@@ -507,6 +563,12 @@ impl DesiredStateStore {
         let mut complete = self.load_full()?;
         if complete.transition.is_some() {
             return Err(HostControlError::ProfileTransitionPending);
+        }
+        if complete.switch_hold.as_ref().is_some_and(|hold| {
+            hold.source != witness.source || hold.target != witness.destination
+                || hold.source_pid != witness.source_pid
+        }) {
+            return Err(HostControlError::ProfileTransitionInvalid);
         }
         if complete.agent != AgentDesired::Running || complete.profile != witness.source {
             return Err(HostControlError::ProfileTransitionInvalid);
@@ -520,6 +582,7 @@ impl DesiredStateStore {
             checksum_sha256: String::new(),
         };
         record.seal()?;
+        complete.switch_hold = None;
         complete.transition = Some(record);
         self.persist_full(&complete)
     }
@@ -653,28 +716,39 @@ impl DesiredStateStore {
     /// Never use an elapsed ticket as authority to auto-start an agent.
     pub fn recover_stopped_explicit(&self) -> HostControlResult<AgentDesiredState> {
         let mut state = self.load_full()?;
-        let transition = state
-            .transition
-            .as_ref()
-            .ok_or(HostControlError::ProfileTransitionInvalid)?;
-        let source = transition.witness.source;
+        let source = if let Some(record) = &state.transition {
+            record.witness.source
+        } else if let Some(hold) = &state.switch_hold {
+            hold.source
+        } else {
+            return Err(HostControlError::ProfileTransitionInvalid);
+        };
         if state.profile != source {
             return Err(HostControlError::ProfileTransitionInvalid);
         }
         state.profile = source;
         state.agent = AgentDesired::Stopped;
         state.transition = None;
+        state.switch_hold = None;
         self.persist_full(&state)?;
         Ok(state.desired())
     }
 
     pub fn is_pending(&self) -> HostControlResult<bool> {
-        Ok(self.load_full()?.transition.is_some())
+        let state = self.load_full()?;
+        Ok(state.transition.is_some() || state.switch_hold.is_some())
     }
 
     pub fn status_value(&self) -> Value {
         match self.load_full() {
             Ok(complete) => match complete.transition {
+                None if complete.switch_hold.is_some() => json!({
+                    "state": "SWITCHING",
+                    "phase": "DRAIN_REQUESTED",
+                    "handoff_admission": "DENIED_PRE_DRAIN_OR_UNCERTAIN_POST",
+                    "recovery": "VERIFY_EMPTY_OWNED_JOB_THEN_RECOVER_STOPPED",
+                    "durable_owner": "desired.json"
+                }),
                 None => json!({
                     "state": if complete.agent == AgentDesired::Running { "RUNNING" } else { "STOPPED" },
                     "phase": "NONE",
