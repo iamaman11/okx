@@ -11,7 +11,7 @@ use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponseStatus,
     NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
     NATIVE_SOURCE_CANDIDATE_SCHEMA_V1, NativeChildOperation, NativeChildReply, NativeChildRequest,
-    NativeDrainedSourceCandidate,
+    NativeDrainedSourceCandidate, NativeReadOnlyTargetProof,
 };
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator, PublicWsHandle};
 use serde::Serialize;
@@ -207,6 +207,73 @@ pub async fn run_mailbox_until_shutdown(
         tokio::select! {
             Some(request) = native_rx.recv(), if native_child_control_stdio && !native_request_consumed => {
                 native_request_consumed = true;
+                if matches!(request.operation, NativeChildOperation::VerifyReadOnly) {
+                    // One strictly read-only native observation from target.
+                    let verify = async {
+                        let observer = account.ok_or("no observer")?;
+                        let private = private_ws.ok_or("no private WS")?;
+                        let executor = execution.ok_or("no native executor")?;
+                        if executor.mode() != crate::execution_runtime::ExecutionRuntimeMode::ReadOnly {
+                            return Err("execution mode is not ReadOnly");
+                        }
+                        if executor.mutation_authority().await != okx_execution::MutationAuthority::Disabled {
+                            return Err("native mutation authority enabled");
+                        }
+                        let before = private.convergence_cursor().await.map_err(|_| "WS unavailable")?;
+                        let (snapshot, algos) = tokio::try_join!(
+                            async { observer.snapshot().await.map_err(|_| "account REST unavailable") },
+                            async { observer.pending_protective_algos().await.map_err(|_| "protective inventory unavailable") },
+                        )?;
+                        let after = private.convergence_cursor().await.map_err(|_| "WS convergence lost")?;
+                        if before != after || after.generation == 0 {
+                            return Err("WS changed during REST receipt");
+                        }
+                        let parsed = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+                            .map_err(|_| "invalid source receipt")?;
+                        let at = u64::try_from(parsed.timestamp_millis())
+                            .map_err(|_| "source receipt out of range")?;
+                        let proof = NativeReadOnlyTargetProof {
+                            schema: "okx.native-readonly-target/v1".to_owned(),
+                            account_uid_fingerprint: snapshot.account_uid_fingerprint,
+                            snapshot_received_ms: at,
+                            private_ws_generation: after.generation,
+                            positions: snapshot.positions.len() as u64,
+                            orders: snapshot.pending_orders.len() as u64,
+                            native_oco: algos.rows as u64,
+                            native_oco_complete: algos.complete_within_bound,
+                            read_only_credentials: true, // strict_read_only_permissions enforced by AccountBootstrapper
+                            executor_mutations_disabled: true, // confirmed in single executor above
+                        };
+                        let now = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+                        if !proof.valid_for(&request.expected_uid_fingerprint, now) {
+                            return Err("target ReadOnly/UID/source not proven");
+                        }
+                        Ok(proof)
+                    };
+                    let response = tokio::time::timeout(Duration::from_secs(8), verify).await;
+                    let reply = match response {
+                        Ok(Ok(proof)) => NativeChildReply {
+                            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                            request_id: request.request_id,
+                            disposition: "VERIFIED_READ_ONLY".to_owned(),
+                            ledger_only: None,
+                            source_candidate: None,
+                            target_read_only: Some(proof),
+                            error: None,
+                        },
+                        _ => NativeChildReply {
+                            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                            request_id: request.request_id,
+                            disposition: "BLOCKED".to_owned(),
+                            ledger_only: None,
+                            source_candidate: None,
+                            target_read_only: None,
+                            error: Some("destination ReadOnly verification denied".to_owned()),
+                        },
+                    };
+                    eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
+                    continue;
+                }
                 // Do not await drain inside this select loop: an in-flight
                 // Cloudflare request must continue polling until it releases
                 // the very same mutation ingress lock.
@@ -219,6 +286,7 @@ pub async fn run_mailbox_until_shutdown(
                                 .drain_mutation_ingress(&request.expected_uid_fingerprint)
                                 .await
                                 .map_err(|error| error.to_string()),
+                            NativeChildOperation::VerifyReadOnly => Err("handled directly".to_owned()),
                         };
                         let _ = tx.send((request, result));
                     });
@@ -229,6 +297,7 @@ pub async fn run_mailbox_until_shutdown(
                         disposition: "BLOCKED".to_owned(),
                         ledger_only: None,
                         source_candidate: None,
+                        target_read_only: None,
                         error: Some("native executor unavailable".to_owned()),
                     };
                     eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
@@ -310,6 +379,7 @@ pub async fn run_mailbox_until_shutdown(
                         disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
                         ledger_only: ledger.and_then(|value| serde_json::to_value(value).ok()),
                         source_candidate: candidate,
+                        target_read_only: None,
                         error: None,
                     }
                 } else {
@@ -319,6 +389,7 @@ pub async fn run_mailbox_until_shutdown(
                         disposition: "BLOCKED".to_owned(),
                         ledger_only: None,
                         source_candidate: None,
+                        target_read_only: None,
                         error: Some("drain or current REST/WS/OCO/UID/ledger proof not admitted".to_owned()),
                     }
                 };
