@@ -345,6 +345,11 @@ impl ExecutionRuntime {
         coherent: bool,
         production_marks: &BTreeMap<String, ProductionMarkEvidence>,
     ) -> AgentResult<(AccountLedgerReconciliation, ManagedExecutionInventory)> {
+        // Account observation remains READONLY during drain. Existing
+        // event-driven evidence/NAV checkpoints may mutate the native ledger,
+        // so they share the same ingress fence as mutating command dispatch.
+        // A drained source returns the last durable ledger without appending.
+        let capture_guard = self.mutation_ingress.admit().await;
         let mut executor = self.executor.lock().await;
         let mut reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
         let inventory = managed_execution_inventory(executor.ledger());
@@ -353,7 +358,8 @@ impl ExecutionRuntime {
         if executor.ledger().capital_reservation().is_some()
             && executor.ledger().unverified_run().is_none()
         {
-            if coherent
+            if capture_guard.is_some()
+                && coherent
                 && reconciliation.consistent
                 && okx_execution::DurableExchangeEvidence::complete_source_checkpoint(facts)
             {
@@ -1084,6 +1090,12 @@ impl ExecutionRuntime {
         intent_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionReconciliation, OrderExecutorError> {
+        // ExecutionStatus can still show exact durable state after draining,
+        // but must not record new venue reconciliation after the source
+        // manifest was frozen. This side effect is serialized with drain.
+        let Some(_reconcile_guard) = self.mutation_ingress.admit().await else {
+            return Ok(ExecutionReconciliation::Unavailable);
+        };
         let mut executor = self.executor.lock().await;
         if executor.ledger().get(intent_id).is_none() {
             return Err(ExecutionLedgerError::IntentNotFound(intent_id.to_owned()).into());
