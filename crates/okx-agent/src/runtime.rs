@@ -1,12 +1,22 @@
-use std::time::Duration;
+use std::{
+    io::{BufRead, Read},
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::Utc;
 
 use okx_github::GitHubBackoff;
+use okx_protocol::{
+    AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponseStatus,
+    NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
+    NATIVE_SOURCE_CANDIDATE_SCHEMA_V1, NativeChildOperation, NativeChildReply, NativeChildRequest,
+    NativeDrainedSourceCandidate, NativeReadOnlyTargetProof,
+};
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator, PublicWsHandle};
 use serde::Serialize;
 use tokio::{
-    sync::watch,
+    sync::{mpsc, watch},
     time::{MissedTickBehavior, interval},
 };
 
@@ -21,6 +31,7 @@ use crate::{
     github_mailbox::{GitHubMailboxClient, MailboxQueryRuntimeContext},
     identity::AgentIdentity,
     market_bootstrap::MarketBootstrapper,
+    query::ObservationQueryContext,
     research_session::ResearchSessionRuntime,
 };
 
@@ -68,8 +79,9 @@ pub struct MailboxRuntimeContext<'a> {
     pub market: &'a MarketBootstrapper,
     pub account: Option<&'a AccountBootstrapper>,
     pub private_ws: Option<&'a PrivateWsHandle>,
-    pub execution: Option<&'a ExecutionRuntime>,
+    pub execution: Option<&'a Arc<ExecutionRuntime>>,
     pub cloudflare: Option<&'a CloudflareTransportConfig>,
+    pub native_child_control_stdio: bool,
 }
 
 pub async fn run_mailbox_until_shutdown(
@@ -88,9 +100,11 @@ pub async fn run_mailbox_until_shutdown(
         market,
         account,
         private_ws,
-        execution,
+        execution: execution_arc,
         cloudflare,
+        native_child_control_stdio,
     } = context;
+    let execution = execution_arc.map(Arc::as_ref);
     if !(1..=60).contains(&poll_seconds) {
         return Err(AgentError::InvalidPollInterval);
     }
@@ -162,11 +176,254 @@ pub async fn run_mailbox_until_shutdown(
         Some(mailbox_issue),
     )?;
 
+    // Exactly one inbound local line per process; no socket, no daemon and
+    // no general shell RPC. A reader thread is blocked in inherited stdin,
+    // then forwards one bounded typed command to the existing Tokio owner.
+    let (native_tx, mut native_rx) = mpsc::unbounded_channel::<NativeChildRequest>();
+    if native_child_control_stdio {
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let mut bounded = stdin
+                .lock()
+                .take((NATIVE_CHILD_CONTROL_MAX_BYTES + 1) as u64);
+            let mut frame = Vec::new();
+            if bounded.read_until(b'\n', &mut frame).is_ok()
+                && frame.len() <= NATIVE_CHILD_CONTROL_MAX_BYTES
+                && frame.last() == Some(&b'\n')
+                && let Ok(request) = serde_json::from_slice::<NativeChildRequest>(&frame)
+                && request.valid()
+            {
+                let _ = native_tx.send(request);
+            }
+        });
+    }
+    let mut native_request_consumed = false;
+    let (drain_tx, mut drain_rx) = mpsc::unbounded_channel();
+
     let mut ticker = interval(Duration::from_secs(poll_seconds));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
+            Some(request) = native_rx.recv(), if native_child_control_stdio && !native_request_consumed => {
+                native_request_consumed = true;
+                if matches!(request.operation, NativeChildOperation::VerifyReadOnly) {
+                    // One strictly read-only native observation from target.
+                    let verify = async {
+                        let observer = account.ok_or("no observer")?;
+                        let private = private_ws.ok_or("no private WS")?;
+                        // A genuine Production observer may have ONLY a
+                        // read-only OKX credential, with NO executor credential.
+                        // Absence of an executor means mutations cannot be
+                        // submitted. If it exists, it MUST be native ReadOnly
+                        // with exchange mutation authority disabled.
+                        if let Some(executor) = execution {
+                            if executor.mode() != crate::execution_runtime::ExecutionRuntimeMode::ReadOnly {
+                                return Err("execution mode is not ReadOnly");
+                            }
+                            if executor.mutation_authority().await != okx_execution::MutationAuthority::Disabled {
+                                return Err("native mutation authority enabled");
+                            }
+                        }
+                        let before = private.convergence_cursor().await.map_err(|_| "WS unavailable")?;
+                        let (snapshot, algos) = tokio::try_join!(
+                            async { observer.snapshot().await.map_err(|_| "account REST unavailable") },
+                            async { observer.pending_protective_algos().await.map_err(|_| "protective inventory unavailable") },
+                        )?;
+                        let after = private.convergence_cursor().await.map_err(|_| "WS convergence lost")?;
+                        if before != after || after.generation == 0 {
+                            return Err("WS changed during REST receipt");
+                        }
+                        let parsed = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+                            .map_err(|_| "invalid source receipt")?;
+                        let at = u64::try_from(parsed.timestamp_millis())
+                            .map_err(|_| "source receipt out of range")?;
+                        let proof = NativeReadOnlyTargetProof {
+                            schema: "okx.native-readonly-target/v1".to_owned(),
+                            account_uid_fingerprint: snapshot.account_uid_fingerprint,
+                            snapshot_received_ms: at,
+                            private_ws_generation: after.generation,
+                            positions: snapshot.positions.len() as u64,
+                            orders: snapshot.pending_orders.len() as u64,
+                            native_oco: algos.rows as u64,
+                            native_oco_complete: algos.complete_within_bound,
+                            read_only_credentials: true, // strict_read_only_permissions enforced by AccountBootstrapper
+                            executor_mutations_disabled: true, // confirmed in single executor above
+                        };
+                        let now = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+                        if !proof.valid_for(&request.expected_uid_fingerprint, now) {
+                            return Err("target ReadOnly/UID/source not proven");
+                        }
+                        Ok(proof)
+                    };
+                    let response = tokio::time::timeout(Duration::from_secs(8), verify).await;
+                    let reply = match response {
+                        Ok(Ok(proof)) => NativeChildReply {
+                            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                            request_id: request.request_id,
+                            disposition: "VERIFIED_READ_ONLY".to_owned(),
+                            ledger_only: None,
+                            source_candidate: None,
+                            target_read_only: Some(proof),
+                            error: None,
+                        },
+                        _ => NativeChildReply {
+                            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                            request_id: request.request_id,
+                            disposition: "BLOCKED".to_owned(),
+                            ledger_only: None,
+                            source_candidate: None,
+                            target_read_only: None,
+                            error: Some("destination ReadOnly verification denied".to_owned()),
+                        },
+                    };
+                    eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
+                    continue;
+                }
+                // Do not await drain inside this select loop: an in-flight
+                // Cloudflare request must continue polling until it releases
+                // the very same mutation ingress lock.
+                if let Some(owner) = execution_arc {
+                    let owner = Arc::clone(owner);
+                    let tx = drain_tx.clone();
+                    tokio::spawn(async move {
+                        let result = match request.operation {
+                            NativeChildOperation::Drain => owner
+                                .drain_mutation_ingress(&request.expected_uid_fingerprint)
+                                .await
+                                .map_err(|error| error.to_string()),
+                            NativeChildOperation::VerifyReadOnly => Err("handled directly".to_owned()),
+                        };
+                        let _ = tx.send((request, result));
+                    });
+                } else {
+                    // Strict observer-only native source: there is no mutation
+                    // executor to drain. This proof cannot invent a ledger hash
+                    // or authorize itself without CONTROL's durable ReadOnly bit.
+                    let evidence = tokio::time::timeout(
+                        Duration::from_secs(8),
+                        verify_ledgerless_read_only_source(
+                            &config.root,
+                            account,
+                            private_ws,
+                            &request.expected_uid_fingerprint,
+                        ),
+                    ).await;
+                    let reply = match evidence {
+                        Ok(Ok(source)) => NativeChildReply {
+                            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                            request_id: request.request_id,
+                            disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
+                            ledger_only: None,
+                            source_candidate: Some(source),
+                            target_read_only: None,
+                            error: None,
+                        },
+                        _ => NativeChildReply {
+                            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                            request_id: request.request_id,
+                            disposition: "BLOCKED".to_owned(),
+                            ledger_only: None,
+                            source_candidate: None,
+                            target_read_only: None,
+                            error: Some("observer-only source/ledger absence not proven".to_owned()),
+                        },
+                    };
+                    eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
+                }
+            }
+            Some((request, drained)) = drain_rx.recv() => {
+                // Reuse the same native source query used by primary MCP.
+                // It cannot change the ledger manifest after drain; it must
+                // prove fresh REST receipt, coherent WS, current flat source,
+                // all OCO/conditional scopes, UID and immutable source hash.
+                let source = if drained.is_ok() {
+                    let probe = AgentRequest {
+                        schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id.clone(),
+                        operation: AgentOperation::ProfileHandoffReadiness,
+                    };
+                    let context = ObservationQueryContext::live_with_execution(
+                        public_ws, market, None, account, private_ws, execution,
+                    );
+                    match tokio::time::timeout(
+                        Duration::from_secs(8),
+                        crate::query::dispatch(
+                            &probe,
+                            context,
+                            &Utc::now().to_rfc3339(),
+                        ),
+                    ).await {
+                        Ok(Ok(reply)) if reply.status == AgentResponseStatus::Completed => reply.result,
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let ledger = drained.ok();
+                let source_valid = source.as_ref().is_some_and(|value| {
+                    value.pointer("/read_only_source_assessment/preconditions_pass")
+                        == Some(&serde_json::json!(true))
+                        && value.pointer("/current_source_quality")
+                            == Some(&serde_json::json!("FRESH"))
+                        && value.pointer("/source_account_uid_fingerprint")
+                            == Some(&serde_json::json!(&request.expected_uid_fingerprint))
+                        && value.pointer("/native_ledger/source_ledger_manifest_sha256")
+                            == ledger.as_ref().map(|record| {
+                                serde_json::json!(&record.source_ledger_manifest_sha256)
+                            }).as_ref()
+                });
+                // This is a source observation candidate, not a switch permit.
+                // CONTROL still must bind the owner PID, binary hashes, launch
+                // lease, exact WS generation, one-use state and target UID.
+                let candidate = source.as_ref().and_then(|value| {
+                    serde_json::from_value::<NativeDrainedSourceCandidate>(serde_json::json!({
+                        "schema": NATIVE_SOURCE_CANDIDATE_SCHEMA_V1,
+                        "account_uid_fingerprint": value["source_account_uid_fingerprint"],
+                        "snapshot_received_ms": value["source_snapshot_received_ms"],
+                        "source_age_ms": value["source_age_ms"],
+                        "private_ws_generation": value["source_private_ws_generation"],
+                        "ledger_manifest_sha256": value["native_ledger"]["source_ledger_manifest_sha256"],
+                        "historical_canceled_identity_exception": value["read_only_source_assessment"]["historical_canceled_identity_exception"],
+                        "positions": value["source"]["positions"],
+                        "orders": value["source"]["orders"],
+                        "native_oco": value["source"]["native_oco"],
+                    })).ok()
+                });
+                let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+                let admitted = source_valid && candidate.as_ref().is_some_and(|proof| {
+                    ledger.as_ref().is_some_and(|record| {
+                        proof.valid_for(
+                            &request.expected_uid_fingerprint,
+                            &record.source_ledger_manifest_sha256,
+                            now_ms,
+                        )
+                    })
+                });
+                // Native source proof is NOT PID/lease/release handoff authority.
+                let reply = if admitted {
+                    NativeChildReply {
+                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id,
+                        disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
+                        ledger_only: ledger.and_then(|value| serde_json::to_value(value).ok()),
+                        source_candidate: candidate,
+                        target_read_only: None,
+                        error: None,
+                    }
+                } else {
+                    NativeChildReply {
+                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id,
+                        disposition: "BLOCKED".to_owned(),
+                        ledger_only: None,
+                        source_candidate: None,
+                        target_read_only: None,
+                        error: Some("drain or current REST/WS/OCO/UID/ledger proof not admitted".to_owned()),
+                    }
+                };
+                eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
+            }
             result = tokio::signal::ctrl_c() => {
                 result?;
                 break;
@@ -378,6 +635,109 @@ pub async fn run_mailbox_until_shutdown(
 }
 
 /// A real nonempty private financial event, not a timer or ChatGPT query, wakes this
+/// The absence of an execution ledger is itself a fail-closed disk proof.
+/// Any matching file or archive forbids observer-only account handoff.
+fn no_native_ledger_at(root: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { return false };
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("execution-ledger")
+        {
+            return false;
+        }
+    }
+    true
+}
+
+async fn verify_ledgerless_read_only_source(
+    root: &std::path::Path,
+    account: Option<&AccountBootstrapper>,
+    private_ws: Option<&PrivateWsHandle>,
+    expected_uid: &str,
+) -> Result<NativeDrainedSourceCandidate, &'static str> {
+    let observer = account.ok_or("observer unavailable")?;
+    let private = private_ws.ok_or("private WS unavailable")?;
+    if !no_native_ledger_at(root) {
+        return Err("native ledger exists or unreadable");
+    }
+    let before = private
+        .convergence_cursor()
+        .await
+        .map_err(|_| "private WS unavailable")?;
+    let snapshot = observer
+        .snapshot()
+        .await
+        .map_err(|_| "observer REST unavailable")?;
+    let (algos, facts) = tokio::try_join!(
+        async {
+            observer
+                .pending_protective_algos()
+                .await
+                .map_err(|_| "OCO unavailable")
+        },
+        async {
+            observer
+                .ledger_facts(&snapshot)
+                .await
+                .map_err(|_| "history unavailable")
+        },
+    )?;
+    let after = private
+        .convergence_cursor()
+        .await
+        .map_err(|_| "private WS unavailable")?;
+    let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+    let received_ms = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+        .ok()
+        .and_then(|at| u64::try_from(at.timestamp_millis()).ok())
+        .ok_or("invalid REST receipt")?;
+    if before != after
+        || after.generation == 0
+        || snapshot.account_uid_fingerprint != expected_uid
+        || !snapshot.positions.is_empty()
+        || !snapshot.pending_orders.is_empty()
+        || facts.summary.open_positions != 0
+        || facts.summary.pending_orders != 0
+        || algos.rows != 0
+        || !algos.complete_within_bound
+        || facts.summary.history_coverage.is_empty()
+        || facts
+            .summary
+            .history_coverage
+            .iter()
+            .any(|row| !row.complete_within_bound)
+        || !facts.exchange_orders_history_complete
+        || !facts.exchange_fills_history_complete
+        || !facts.bills_history_complete
+        || now_ms < received_ms
+        || now_ms - received_ms > 10_000
+        || !no_native_ledger_at(root)
+    {
+        return Err("observer-only source not FLAT, FRESH or complete");
+    }
+    let candidate = NativeDrainedSourceCandidate {
+        schema: NATIVE_SOURCE_CANDIDATE_SCHEMA_V1.to_owned(),
+        account_uid_fingerprint: snapshot.account_uid_fingerprint,
+        snapshot_received_ms: received_ms,
+        source_age_ms: now_ms - received_ms,
+        private_ws_generation: after.generation,
+        ledger_manifest_sha256: String::new(),
+        historical_canceled_identity_exception: false,
+        positions: 0,
+        orders: 0,
+        native_oco: 0,
+    };
+    if !candidate.valid_for(expected_uid, "", now_ms) {
+        return Err("invalid observer-only receipt");
+    }
+    Ok(candidate)
+}
+
 /// observer. It obtains a fresh REST baseline and complete exact native
 /// orders/fills/bills, then checks both private WS convergence fences before
 /// persisting under the already existing one execution-ledger mutex.

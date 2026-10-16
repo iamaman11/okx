@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path, str::FromStr};
+use std::{collections::BTreeMap, path::Path, str::FromStr, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use okx_analysis::{PortfolioRiskAnalysis, StrategyNavRiskEvidence, durable_account_stop_reason};
@@ -22,7 +22,8 @@ use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
 };
 use serde::Serialize;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
+use tokio::time::timeout;
 
 use crate::{
     AgentError, AgentResult,
@@ -128,7 +129,40 @@ pub struct PreparedExecutionResult {
     pub entry: ExecutionLedgerEntry,
 }
 
+/// Serializes the SINGLE mutation ingress with native profile drain.
+///
+/// Each mutating request holds a read guard across *all* its REST/WS checks,
+/// durable changes and any exchange POST. Drain takes the exclusive write
+/// guard: it cannot complete before any already admitted POST resolves.
+/// Unlike a standalone freeze service this is only a lock owned by the
+/// existing ExecutionRuntime, with no new process, socket or journal.
+struct MutationIngress {
+    accepting: RwLock<bool>,
+}
+
+impl MutationIngress {
+    fn new() -> Self {
+        Self {
+            accepting: RwLock::new(true),
+        }
+    }
+
+    async fn admit(&self) -> Option<RwLockReadGuard<'_, bool>> {
+        let guard = self.accepting.read().await;
+        (*guard).then_some(guard)
+    }
+
+    /// Bounded; timeout is NOT proof that an in-flight order was canceled.
+    /// A timed-out drain must never lead to termination or profile change.
+    async fn drain(&self) -> Result<(), tokio::time::error::Elapsed> {
+        let mut guard = timeout(Duration::from_secs(15), self.accepting.write()).await?;
+        *guard = false;
+        Ok(())
+    }
+}
+
 pub struct ExecutionRuntime {
+    mutation_ingress: MutationIngress,
     environment: OkxEnvironment,
     mode: ExecutionRuntimeMode,
     executor_clock: OkxRestClient,
@@ -201,6 +235,7 @@ impl ExecutionRuntime {
             observed_at_ms,
         )?;
         Ok(Self {
+            mutation_ingress: MutationIngress::new(),
             environment,
             mode,
             executor_clock,
@@ -212,6 +247,39 @@ impl ExecutionRuntime {
 
     pub const fn mode(&self) -> ExecutionRuntimeMode {
         self.mode
+    }
+
+    /// The request holds the returned guard THROUGH the final executor
+    /// response. A drain cannot slip between preflight and actual venue POST.
+    /// Financial/read-only observation does not need this mutation guard.
+    pub async fn admit_mutating_request(&self) -> Option<RwLockReadGuard<'_, bool>> {
+        self.mutation_ingress.admit().await
+    }
+
+    /// Internal native-only primitive. This is NOT a CONTROL authorization
+    /// or public agent command: the caller must still prove a fresh FLAT
+    /// account and bind a trusted PID/UID/WS/ledger witness independently.
+    /// No IPC caller is wired until the full single-owner handoff is accepted.
+    pub async fn drain_mutation_ingress(
+        &self,
+        account_uid: &str,
+    ) -> AgentResult<okx_execution::ProfileHandoffLedgerAssessment> {
+        // One overall deadline for both the active request fence and native
+        // ledger owner: an unbounded checkpoint must never hang CONTROL.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        self.mutation_ingress
+            .drain()
+            .await
+            .map_err(|_| AgentError::SourceDrainTimeout)?;
+        // Covers any native financial checkpoint outside request ingress.
+        // The source must never interpret missing archive evidence as clean.
+        let mut executor = tokio::time::timeout_at(deadline, self.executor.lock())
+            .await
+            .map_err(|_| AgentError::SourceDrainTimeout)?;
+        executor.disable_mutations();
+        Ok(executor
+            .ledger()
+            .profile_handoff_ledger_assessment(account_uid)?)
     }
 
     /// Single admission authority reused by every exchange POST wrapper.
@@ -282,6 +350,11 @@ impl ExecutionRuntime {
         coherent: bool,
         production_marks: &BTreeMap<String, ProductionMarkEvidence>,
     ) -> AgentResult<(AccountLedgerReconciliation, ManagedExecutionInventory)> {
+        // Account observation remains READONLY during drain. Existing
+        // event-driven evidence/NAV checkpoints may mutate the native ledger,
+        // so they share the same ingress fence as mutating command dispatch.
+        // A drained source returns the last durable ledger without appending.
+        let capture_guard = self.mutation_ingress.admit().await;
         let mut executor = self.executor.lock().await;
         let mut reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
         let inventory = managed_execution_inventory(executor.ledger());
@@ -290,7 +363,8 @@ impl ExecutionRuntime {
         if executor.ledger().capital_reservation().is_some()
             && executor.ledger().unverified_run().is_none()
         {
-            if coherent
+            if capture_guard.is_some()
+                && coherent
                 && reconciliation.consistent
                 && okx_execution::DurableExchangeEvidence::complete_source_checkpoint(facts)
             {
@@ -1021,6 +1095,12 @@ impl ExecutionRuntime {
         intent_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionReconciliation, OrderExecutorError> {
+        // ExecutionStatus can still show exact durable state after draining,
+        // but must not record new venue reconciliation after the source
+        // manifest was frozen. This side effect is serialized with drain.
+        let Some(_reconcile_guard) = self.mutation_ingress.admit().await else {
+            return Ok(ExecutionReconciliation::Unavailable);
+        };
         let mut executor = self.executor.lock().await;
         if executor.ledger().get(intent_id).is_none() {
             return Err(ExecutionLedgerError::IntentNotFound(intent_id.to_owned()).into());
@@ -1276,6 +1356,41 @@ impl ExecutionRuntime {
 }
 
 #[cfg(test)]
+mod mutation_ingress_tests {
+    use super::MutationIngress;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn admitted_request_must_exit_before_source_can_drain() {
+        let ingress = Arc::new(MutationIngress::new());
+        let existing_post = ingress.admit().await.expect("admitted");
+        let another = Arc::clone(&ingress);
+        let draining = tokio::spawn(async move { another.drain().await });
+        tokio::task::yield_now().await;
+        assert!(!draining.is_finished(), "cannot terminate active POST");
+        drop(existing_post);
+        draining.await.expect("task").expect("drain");
+        assert!(
+            ingress.admit().await.is_none(),
+            "future mutating ingress denied"
+        );
+        // A repeated drain is idempotently denied to new mutation requests;
+        // only an independently approved fresh agent can trade again.
+        ingress.drain().await.expect("repeat safe");
+        assert!(ingress.admit().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_only_observer_remains_independent_of_drained_mutation_gate() {
+        let ingress = MutationIngress::new();
+        ingress.drain().await.expect("drain");
+        assert!(ingress.admit().await.is_none());
+        // Observer requests bypass the guard in query::execution::dispatch.
+        // No mutation authority is minted by their continued availability.
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::{
         fs, process,
@@ -1450,6 +1565,63 @@ mod tests {
         accepted = preflight(false);
         assert!(!runtime.demo_mutation_admitted(&accepted, executor.ledger()));
         drop(executor);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn native_runtime_drain_preserves_manifest_and_never_grants_new_mutation_authority() {
+        let root = temp_root("drain-runtime-unchanged-ledger");
+        fs::create_dir_all(&root).unwrap();
+        let runtime = ExecutionRuntime::new_demo_acceptance(
+            &root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            1,
+            RateBudget::new(),
+        )
+        .expect("native single executor");
+        // A new empty ledger has no attestable durable manifest by design.
+        // Seed a real atomic on-disk STOP without an exchange POST; drain
+        // must preserve exactly those original bytes and that stop reason.
+        {
+            let mut executor = runtime.executor.lock().await;
+            executor
+                .stop_new_risk("TEST_DURABLE_STOP", 2)
+                .expect("sealed native ledger");
+        }
+        let baseline = runtime
+            .profile_handoff_ledger_assessment("uid-fingerprint")
+            .await
+            .expect("baseline durable ledger");
+        assert!(runtime.admit_mutating_request().await.is_some());
+        let drained = runtime
+            .drain_mutation_ingress("uid-fingerprint")
+            .await
+            .expect("bounded source drain");
+        assert_eq!(
+            drained.source_ledger_manifest_sha256,
+            baseline.source_ledger_manifest_sha256
+        );
+        assert_eq!(drained.nonterminal_intents, 0);
+        assert_eq!(drained.unresolved_order_mutations, 0);
+        assert_eq!(
+            drained.immutable_stop_reason.as_deref(),
+            Some("TEST_DURABLE_STOP")
+        );
+        assert!(runtime.admit_mutating_request().await.is_none());
+        assert_eq!(
+            runtime.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
+        let after = runtime
+            .profile_handoff_ledger_assessment("uid-fingerprint")
+            .await
+            .expect("read-only durable ledger");
+        assert_eq!(
+            after.source_ledger_manifest_sha256,
+            baseline.source_ledger_manifest_sha256
+        );
+        drop(runtime);
         let _ = fs::remove_dir_all(root);
     }
 

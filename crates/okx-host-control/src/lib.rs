@@ -94,6 +94,15 @@ pub enum HostControlError {
     #[error("switching the active trading environment requires an authenticated quiescence proof")]
     ProfileHandoffProofRequired,
 
+    #[error("profile transition witness or durable journal has invalid provenance")]
+    ProfileTransitionInvalid,
+
+    #[error("an unfinalized profile transition prevents an implicit lifecycle operation")]
+    ProfileTransitionPending,
+
+    #[error("profile transition witness was stale, mismatched or already consumed")]
+    ProfileTransitionReplay,
+
     #[error("agent process could not be assigned to the controller job object: {0}")]
     JobAssignment(String),
 
@@ -166,6 +175,9 @@ impl HostControlError {
             Self::InvalidExecutionPath => "INVALID_EXECUTION_PATH",
             Self::DesiredStateCorrupt => "DESIRED_STATE_CORRUPT",
             Self::ProfileHandoffProofRequired => "PROFILE_HANDOFF_PROOF_REQUIRED",
+            Self::ProfileTransitionInvalid => "PROFILE_TRANSITION_INVALID",
+            Self::ProfileTransitionPending => "PROFILE_TRANSITION_PENDING",
+            Self::ProfileTransitionReplay => "PROFILE_TRANSITION_REPLAY",
             Self::JobAssignment(_) => "JOB_ASSIGNMENT_FAILED",
             Self::ControllerAlreadyRunning => "CONTROLLER_ALREADY_RUNNING",
             Self::WindowsIdentityUnavailable => "WINDOWS_IDENTITY_UNAVAILABLE",

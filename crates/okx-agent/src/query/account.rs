@@ -39,14 +39,17 @@ const PROFILE_HANDOFF_READINESS_SCHEMA_V1: &str = "okx.profile-handoff-readiness
 /// executor is NOT frozen and this packet is NEVER a CONTROL authorization.
 fn profile_handoff_readiness_packet(
     full: &serde_json::Value,
-    quality: &DataQuality,
+    summary_quality: &DataQuality,
+    current_source_quality: &DataQuality,
     local: Option<&okx_execution::ProfileHandoffLedgerAssessment>,
 ) -> serde_json::Value {
     use serde_json::{Value, json};
     let get = |p: &str| full.pointer(p).cloned().unwrap_or(Value::Null);
     let mut blockers = Vec::<&'static str>::new();
-    if !matches!(quality, DataQuality::Fresh) {
-        blockers.push("ACCOUNT_SUMMARY_NOT_FRESH");
+    // Archive incompleteness degrades the summary, not necessarily the
+    // current account/WS source. Neither observation is CONTROL authority.
+    if !matches!(current_source_quality, DataQuality::Fresh) {
+        blockers.push("CURRENT_ACCOUNT_SOURCE_NOT_FRESH");
     }
     if get("/coherence/coherent") != json!(true) {
         blockers.push("PRIVATE_SOURCE_NOT_COHERENT");
@@ -88,6 +91,33 @@ fn profile_handoff_readiness_packet(
     if get("/reconciliation/identity_mismatches") != json!(0) {
         blockers.push("EXECUTION_IDENTITY_MISMATCH");
     }
+    // A future single-use freeze must never be inferred from a missing UID,
+    // stale REST receipt or an unobserved private WS fence window.
+    if get("/account_ledger/authority/account_uid_fingerprint")
+        .as_str()
+        .is_none_or(|uid| uid.is_empty())
+    {
+        blockers.push("SOURCE_ACCOUNT_UID_NOT_PROVEN");
+    }
+    if get("/coherence/private_ws_generation")
+        .as_u64()
+        .is_none_or(|generation| generation == 0)
+    {
+        blockers.push("PRIVATE_WS_GENERATION_NOT_PROVEN");
+    }
+    if get("/coherence/events_during_history_read") != json!(0) {
+        blockers.push("PRIVATE_WS_FENCE_NOT_QUIET");
+    }
+    // Venue balance/position uTime is LAST CHANGE, not transport freshness:
+    // a quiet account can be unchanged for days. Measure actual REST receipt.
+    let receipt_ms = get("/coherence/account_snapshot_source_received_at")
+        .as_str()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .and_then(|at| u64::try_from(at.timestamp_millis()).ok());
+    let source_age_ms = receipt_ms.and_then(|ms| super::utc_now_ms().checked_sub(ms));
+    if source_age_ms.is_none_or(|age| age > 10_000) {
+        blockers.push("CURRENT_SNAPSHOT_RECEIPT_TOO_OLD_OR_UNKNOWN");
+    }
     match local {
         None => blockers.push("NATIVE_EXECUTOR_LEDGER_UNAVAILABLE"),
         Some(value) => {
@@ -113,11 +143,76 @@ fn profile_handoff_readiness_packet(
             }
         }
     }
+    // ReadOnly venue selection has a narrower *financial-history* policy
+    // than authorizing trading. Historical canceled intents that aged out
+    // cannot be relabeled VERIFIED, yet an exact terminal-ID inventory may
+    // support a future strictly nontrading switch IF the live owner is frozen
+    // and CONTROL independently attests the destination.
+    //
+    // This is observer-only classification, not a freeze token. Never reuse it
+    // as a trading or CONTROL admission decision.
+    let unmatched_count =
+        get("/reconciliation/managed_intents_unresolved_in_bounded_exchange_evidence").as_u64();
+    let historical_exception = unmatched_count == Some(0)
+        || unmatched_count.is_some_and(|count| {
+            count > 0
+                && get("/reconciliation/unmatched_historical_total").as_u64() == Some(count)
+                && get("/reconciliation/unmatched_historical_truncated") == json!(false)
+                && full
+                    .pointer("/reconciliation/unmatched_historical")
+                    .and_then(Value::as_array)
+                    .is_some_and(|rows| {
+                        rows.len() as u64 == count
+                            && rows.iter().all(|row| {
+                                row.get("state") == Some(&json!("CANCELED"))
+                                    && row.get("ledger_terminal") == Some(&json!(true))
+                                    && row.get("evidence_status")
+                                        == Some(&json!("NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW"))
+                                    && row
+                                        .get("recorded_order_id")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|id| {
+                                            !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+                                        })
+                            })
+                    })
+        });
+    let mut read_only_blockers = blockers
+        .iter()
+        .copied()
+        .filter(|reason| {
+            *reason != "MANAGED_INTENTS_OUTSIDE_EXCHANGE_EVIDENCE" || !historical_exception
+        })
+        .collect::<Vec<_>>();
+    // Reconciliation inconsistency, active exposure, missing data, UNKNOWN,
+    // wrong UID or broken source quality still fail closed in both policies.
+    if !historical_exception
+        && unmatched_count != Some(0)
+        && !read_only_blockers.contains(&"HISTORICAL_TERMINAL_IDENTITY_UNPROVEN")
+    {
+        read_only_blockers.push("HISTORICAL_TERMINAL_IDENTITY_UNPROVEN");
+    }
+    let read_only_source_ready = read_only_blockers.is_empty();
     let source_ready = blockers.is_empty();
     json!({
         "schema": PROFILE_HANDOFF_READINESS_SCHEMA_V1,
         "status": if source_ready { "SOURCE_QUIESCENT_NOT_AUTHORIZED" } else { "BLOCKED" },
         "source_predicates_pass": source_ready,
+        "read_only_source_assessment": {
+            "schema": "okx.read-only-source-assessment/v1",
+            "status": if read_only_source_ready { "SOURCE_CANDIDATE_NOT_FROZEN" } else { "BLOCKED" },
+            "preconditions_pass": read_only_source_ready,
+            "historical_canceled_identity_exception": unmatched_count.is_some_and(|n| n > 0) && historical_exception,
+            "historical_financial_proof_complete": unmatched_count == Some(0),
+            "blockers": read_only_blockers,
+            "control_action": "DO_NOT_SWITCH_PROFILE",
+            "trade_admission": "DENIED_NO_EXECUTOR_RISK_REVALIDATION"
+        },
+        "summary_quality": summary_quality,
+        "current_source_quality": current_source_quality,
+        "source_age_ms": source_age_ms,
+        "source_snapshot_received_ms": receipt_ms,
+        "source_private_ws_generation": get("/coherence/private_ws_generation"),
         "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE",
         "control_action": "DO_NOT_SWITCH_PROFILE",
         "blockers": blockers,
@@ -629,6 +724,11 @@ pub(super) async fn dispatch(
                 }
             }
 
+            // Freeze the observation quality BEFORE native ledger comparison.
+            // It includes private WS coherence, pending OCO completeness and
+            // bounded account histories; archive-only unmatched intents may
+            // subsequently degrade the overall financial summary.
+            let current_source_quality = quality;
             let reconciliation_started = std::time::Instant::now();
             let (reconciliation, managed_execution_intents) = match context.execution {
                 Some(execution) => match execution
@@ -792,7 +892,12 @@ pub(super) async fn dispatch(
                 coherence,
             })?;
             let result = if handoff_readiness {
-                profile_handoff_readiness_packet(&full, &quality, local_handoff.as_ref())
+                profile_handoff_readiness_packet(
+                    &full,
+                    &quality,
+                    &current_source_quality,
+                    local_handoff.as_ref(),
+                )
             } else if compact {
                 let packet = compact_trader_packet(
                     &full,
@@ -2483,10 +2588,15 @@ mod tests {
                 "authority": {"account_uid_fingerprint": "uid"},
                 "open_positions": 0,
                 "pending_orders": 0,
-                "current_account_as_of_ms": "1792068161383",
+                "current_account_as_of_ms": utc_now_ms().to_string(),
                 "history_coverage": [{"complete_within_bound":true}]
             },
-            "coherence": {"coherent":true},
+            "coherence": {
+                "coherent":true,
+                "account_snapshot_source_received_at": chrono::Utc::now().to_rfc3339(),
+                "private_ws_generation":7,
+                "events_during_history_read":0
+            },
             "pending_protective_algos": {"rows":0,"complete_within_bound":true},
             "reconciliation": {
                 "consistent":true,
@@ -2498,7 +2608,12 @@ mod tests {
             },
             "managed_execution_intents":{"shown":16,"total":45,"complete_within_bound":false}
         });
-        let ready = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, Some(&ledger));
+        let ready = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
         // Even entirely quiescent sources cannot authorize a CTRL swap:
         // no trusted one-time frozen owner ticket exists yet.
         assert_eq!(ready["status"], "SOURCE_QUIESCENT_NOT_AUTHORIZED");
@@ -2513,8 +2628,12 @@ mod tests {
 
         full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] =
             json!(3);
-        let unresolved =
-            profile_handoff_readiness_packet(&full, &DataQuality::Degraded, Some(&ledger));
+        let unresolved = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
         assert_eq!(unresolved["status"], "BLOCKED");
         assert!(
             unresolved["blockers"]
@@ -2523,13 +2642,213 @@ mod tests {
                 .iter()
                 .any(|b| b == "MANAGED_INTENTS_OUTSIDE_EXCHANGE_EVIDENCE")
         );
+        assert_eq!(unresolved["summary_quality"], "DEGRADED");
+        assert_eq!(unresolved["current_source_quality"], "FRESH");
+        assert_eq!(
+            unresolved["read_only_source_assessment"]["status"],
+            "BLOCKED"
+        );
+        // Archive-only canceled IDs are potentially acceptable for
+        // independent READONLY source quiescence, never for finance or trade
+        // authorization. An incomplete or different-state history still blocks.
+        full["reconciliation"]["unmatched_historical_total"] = json!(3);
+        full["reconciliation"]["unmatched_historical_truncated"] = json!(false);
+        full["reconciliation"]["unmatched_historical"] = json!([
+            {
+                "intent_id":"first",
+                "state":"CANCELED",
+                "ledger_terminal":true,
+                "recorded_order_id":"3998883183680835584",
+                "evidence_status":"NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW"
+            },
+            {
+                "intent_id":"second",
+                "state":"CANCELED",
+                "ledger_terminal":true,
+                "recorded_order_id":"3998610524996915200",
+                "evidence_status":"NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW"
+            },
+            {
+                "intent_id":"third",
+                "state":"CANCELED",
+                "ledger_terminal":true,
+                "recorded_order_id":"3995561309710336000",
+                "evidence_status":"NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW"
+            }
+        ]);
+        let readonly = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(readonly["source_predicates_pass"], false);
+        assert_eq!(
+            readonly["read_only_source_assessment"]["preconditions_pass"],
+            true
+        );
+        assert_eq!(
+            readonly["read_only_source_assessment"]["historical_canceled_identity_exception"],
+            true
+        );
+        assert_eq!(
+            readonly["read_only_source_assessment"]["status"],
+            "SOURCE_CANDIDATE_NOT_FROZEN"
+        );
+        assert_eq!(
+            readonly["handoff_admission"],
+            "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE"
+        );
+        full["reconciliation"]["unmatched_historical"][2]["state"] = json!("FILLED");
+        let filled_missing = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(
+            filled_missing["read_only_source_assessment"]["preconditions_pass"],
+            false
+        );
+        full["reconciliation"]["unmatched_historical"][2]["state"] = json!("CANCELED");
+        full["reconciliation"]["unmatched_historical"][2]["recorded_order_id"] = json!(null);
+        let missing_id = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(
+            missing_id["read_only_source_assessment"]["preconditions_pass"],
+            false
+        );
+        full["reconciliation"]["unmatched_historical"][2]["recorded_order_id"] =
+            json!("3995561309710336000");
+        full["reconciliation"]["unmatched_historical_truncated"] = json!(true);
+        let truncated = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(
+            truncated["read_only_source_assessment"]["preconditions_pass"],
+            false
+        );
+        full["reconciliation"]["unmatched_historical_truncated"] = json!(false);
+        full["account_ledger"]["open_positions"] = json!(1);
+        let active_position = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(
+            active_position["read_only_source_assessment"]["preconditions_pass"],
+            false
+        );
+        full["account_ledger"]["open_positions"] = json!(0);
+        full["coherence"]["private_ws_generation"] = json!(null);
+        let no_source = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(
+            no_source["read_only_source_assessment"]["preconditions_pass"],
+            false
+        );
+        full["coherence"]["private_ws_generation"] = json!(7);
+        assert!(
+            !unresolved["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "CURRENT_ACCOUNT_SOURCE_NOT_FRESH")
+        );
+        let stale = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Degraded,
+            &DataQuality::Stale,
+            Some(&ledger),
+        );
+        assert!(
+            stale["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "CURRENT_ACCOUNT_SOURCE_NOT_FRESH")
+        );
         full["reconciliation"]["managed_intents_unresolved_in_bounded_exchange_evidence"] =
             json!(0);
+        full["coherence"]["private_ws_generation"] = json!(null);
+        let no_generation = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert!(
+            no_generation["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "PRIVATE_WS_GENERATION_NOT_PROVEN")
+        );
+        full["coherence"]["private_ws_generation"] = json!(7);
+        // The venue uTime may be ancient on an idle but freshly read account.
+        full["account_ledger"]["current_account_as_of_ms"] = json!("1700000000000");
+        let quiet = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert_eq!(quiet["status"], "SOURCE_QUIESCENT_NOT_AUTHORIZED");
+        full["coherence"]["account_snapshot_source_received_at"] =
+            json!((chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339());
+        let old = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert!(
+            old["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "CURRENT_SNAPSHOT_RECEIPT_TOO_OLD_OR_UNKNOWN")
+        );
+        full["coherence"]["account_snapshot_source_received_at"] =
+            json!(chrono::Utc::now().to_rfc3339());
+        full["coherence"]["events_during_history_read"] = json!(null);
+        let no_window = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
+        assert!(
+            no_window["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == "PRIVATE_WS_FENCE_NOT_QUIET")
+        );
+        full["coherence"]["events_during_history_read"] = json!(0);
         full["pending_protective_algos"]["rows"] = json!(1);
-        let oco = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, Some(&ledger));
+        let oco = profile_handoff_readiness_packet(
+            &full,
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            Some(&ledger),
+        );
         assert_eq!(oco["status"], "BLOCKED");
         full["pending_protective_algos"]["rows"] = json!(0);
-        let unavailable = profile_handoff_readiness_packet(&full, &DataQuality::Fresh, None);
+        let unavailable =
+            profile_handoff_readiness_packet(&full, &DataQuality::Fresh, &DataQuality::Fresh, None);
         assert_eq!(unavailable["status"], "BLOCKED");
         assert!(
             unavailable["blockers"]
@@ -2538,7 +2857,12 @@ mod tests {
                 .iter()
                 .any(|b| b == "NATIVE_EXECUTOR_LEDGER_UNAVAILABLE")
         );
-        let empty = profile_handoff_readiness_packet(&json!({}), &DataQuality::Fresh, None);
+        let empty = profile_handoff_readiness_packet(
+            &json!({}),
+            &DataQuality::Fresh,
+            &DataQuality::Fresh,
+            None,
+        );
         assert_eq!(empty["status"], "BLOCKED");
         assert_eq!(empty["control_action"], "DO_NOT_SWITCH_PROFILE");
     }

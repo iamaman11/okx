@@ -6,6 +6,170 @@ use thiserror::Error;
 pub const MAILBOX_ENVELOPE_SCHEMA_V1: &str = "okx.mailbox.envelope/v1";
 pub const AGENT_REQUEST_SCHEMA_V1: &str = "okx.agent.request/v1";
 pub const AGENT_RESPONSE_SCHEMA_V1: &str = "okx.agent.response/v1";
+/// Authenticated by inherited parent/child pipe handles, NOT a remote API.
+pub const NATIVE_CHILD_CONTROL_SCHEMA_V1: &str = "okx.native-child-control/v1";
+pub const NATIVE_CHILD_CONTROL_PREFIX: &str = "@okx-child-control:";
+pub const NATIVE_CHILD_CONTROL_MAX_BYTES: usize = 4096;
+pub const NATIVE_SOURCE_CANDIDATE_SCHEMA_V1: &str = "okx.native-drained-source/v1";
+const MAX_NATIVE_SOURCE_RECEIPT_AGE_MS: u64 = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum NativeChildOperation {
+    Drain,
+    VerifyReadOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeChildRequest {
+    pub schema: String,
+    pub request_id: String,
+    pub operation: NativeChildOperation,
+    pub expected_uid_fingerprint: String,
+}
+
+impl NativeChildRequest {
+    pub fn valid(&self) -> bool {
+        self.schema == NATIVE_CHILD_CONTROL_SCHEMA_V1
+            && self.request_id.len() == 64
+            && self.request_id.bytes().all(|b| b.is_ascii_hexdigit())
+            && self.expected_uid_fingerprint.len() == 64
+            && self
+                .expected_uid_fingerprint
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+    }
+}
+
+/// Read-only source proof. Still cannot authorize a CONTROL profile switch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeDrainedSourceCandidate {
+    pub schema: String,
+    pub account_uid_fingerprint: String,
+    pub snapshot_received_ms: u64,
+    pub source_age_ms: u64,
+    pub private_ws_generation: u64,
+    pub ledger_manifest_sha256: String,
+    pub historical_canceled_identity_exception: bool,
+    pub positions: u64,
+    pub orders: u64,
+    pub native_oco: u64,
+}
+
+impl NativeDrainedSourceCandidate {
+    pub fn valid_for(&self, expected_uid: &str, expected_manifest: &str, now_ms: u64) -> bool {
+        let lower_hex = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        self.schema == NATIVE_SOURCE_CANDIDATE_SCHEMA_V1
+            && lower_hex(&self.account_uid_fingerprint)
+            && self.account_uid_fingerprint == expected_uid
+            && (lower_hex(&self.ledger_manifest_sha256)
+                || (self.ledger_manifest_sha256.is_empty() && expected_manifest.is_empty()))
+            && self.ledger_manifest_sha256 == expected_manifest
+            && self.snapshot_received_ms != 0
+            && now_ms >= self.snapshot_received_ms
+            && now_ms - self.snapshot_received_ms <= MAX_NATIVE_SOURCE_RECEIPT_AGE_MS
+            && self.source_age_ms <= MAX_NATIVE_SOURCE_RECEIPT_AGE_MS
+            && self.private_ws_generation != 0
+            && self.positions == 0
+            && self.orders == 0
+            && self.native_oco == 0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeReadOnlyTargetProof {
+    pub schema: String,
+    pub account_uid_fingerprint: String,
+    pub snapshot_received_ms: u64,
+    pub private_ws_generation: u64,
+    pub positions: u64,
+    pub orders: u64,
+    pub native_oco: u64,
+    pub native_oco_complete: bool,
+    pub read_only_credentials: bool,
+    pub executor_mutations_disabled: bool,
+}
+
+impl NativeReadOnlyTargetProof {
+    pub fn valid_for(&self, expected_uid: &str, now_ms: u64) -> bool {
+        self.schema == "okx.native-readonly-target/v1"
+            && self.account_uid_fingerprint == expected_uid
+            && expected_uid.len() == 64
+            && expected_uid
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && self.snapshot_received_ms != 0
+            && now_ms >= self.snapshot_received_ms
+            && now_ms - self.snapshot_received_ms <= 10_000
+            && self.private_ws_generation > 0
+            // Target READONLY may already have venue positions/orders/OCO.
+            // Full observation must be complete, but not necessarily FLAT;
+            // only the outgoing mutation-owning source requires FLAT.
+            && self.native_oco_complete
+            && self.read_only_credentials
+            && self.executor_mutations_disabled
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeChildReply {
+    pub schema: String,
+    pub request_id: String,
+    pub disposition: String,
+    pub ledger_only: Option<serde_json::Value>,
+    pub source_candidate: Option<NativeDrainedSourceCandidate>,
+    pub target_read_only: Option<NativeReadOnlyTargetProof>,
+    pub error: Option<String>,
+}
+
+impl NativeChildReply {
+    pub fn valid_for(&self, request_id: &str) -> bool {
+        self.schema == NATIVE_CHILD_CONTROL_SCHEMA_V1
+            && self.request_id == request_id
+            && matches!(
+                self.disposition.as_str(),
+                "DRAINED_SOURCE_CANDIDATE" | "VERIFIED_READ_ONLY" | "BLOCKED"
+            )
+            && match self.disposition.as_str() {
+                "DRAINED_SOURCE_CANDIDATE" => {
+                    self.source_candidate.as_ref().is_some_and(|source| {
+                        match self.ledger_only.as_ref() {
+                            Some(ledger) => ledger
+                                .get("source_ledger_manifest_sha256")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|sha| {
+                                    !sha.is_empty() && sha == source.ledger_manifest_sha256
+                                }),
+                            None => source.ledger_manifest_sha256.is_empty(),
+                        }
+                    }) && self.target_read_only.is_none()
+                        && self.error.is_none()
+                }
+                "VERIFIED_READ_ONLY" => {
+                    self.ledger_only.is_none()
+                        && self.source_candidate.is_none()
+                        && self.target_read_only.is_some()
+                        && self.error.is_none()
+                }
+                _ => {
+                    self.ledger_only.is_none()
+                        && self.source_candidate.is_none()
+                        && self.target_read_only.is_none()
+                        && self.error.is_some()
+                }
+            }
+    }
+}
+
 pub const HOST_CONTROL_REQUEST_SCHEMA_V1: &str = "okx.windows.control/v1";
 pub const HOST_CONTROL_RESULT_SCHEMA_V1: &str = "okx.windows.control.result/v1";
 pub const MAILBOX_REPOSITORY: &str = "iamaman11/okx";
@@ -1647,6 +1811,13 @@ pub enum HostControlOperation {
     StartAgent,
     StartDemoAcceptance,
     RestoreProductionAgent,
+    /// Same native agent and single CONTROL only; ALWAYS target ReadOnly.
+    SelectReadOnlyAccount {
+        target_profile: String,
+        expected_source_uid_fingerprint: String,
+        expected_target_uid_fingerprint: String,
+    },
+    RecoverReadOnlySelection,
     StopAgent,
     RestartAgent,
     InstallAutostart,
@@ -1692,6 +1863,19 @@ impl HostControlOperation {
                 }
                 validate_source_tree(expected_source_tree)?;
                 validate_sha256(expected_current_launcher_sha256)
+            }
+            Self::SelectReadOnlyAccount {
+                target_profile,
+                expected_source_uid_fingerprint,
+                expected_target_uid_fingerprint,
+            } => {
+                if !matches!(target_profile.as_str(), "production" | "demo_acceptance")
+                    || expected_source_uid_fingerprint == expected_target_uid_fingerprint
+                {
+                    return Err(ProtocolError::InvalidRequestId);
+                }
+                validate_sha256(expected_source_uid_fingerprint)?;
+                validate_sha256(expected_target_uid_fingerprint)
             }
             _ => Ok(()),
         }
@@ -3791,5 +3975,148 @@ mod direct_transport_tests {
             bad_schema.validate(),
             Err(ProtocolError::UnsupportedSchema(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod native_drain_source_tests {
+    use super::*;
+
+    fn source() -> NativeDrainedSourceCandidate {
+        NativeDrainedSourceCandidate {
+            schema: NATIVE_SOURCE_CANDIDATE_SCHEMA_V1.to_owned(),
+            account_uid_fingerprint: "a".repeat(64),
+            snapshot_received_ms: 20_000,
+            source_age_ms: 100,
+            private_ws_generation: 7,
+            ledger_manifest_sha256: "b".repeat(64),
+            historical_canceled_identity_exception: true,
+            positions: 0,
+            orders: 0,
+            native_oco: 0,
+        }
+    }
+
+    #[test]
+    fn native_source_must_be_fresh_flat_same_uid_and_same_exact_ledger() {
+        let original = source();
+        assert!(original.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        assert!(!original.valid_for(&"a".repeat(64), &"c".repeat(64), 20_100));
+        assert!(!original.valid_for(&"c".repeat(64), &"b".repeat(64), 20_100));
+        assert!(!original.valid_for(&"a".repeat(64), &"b".repeat(64), 19_999));
+        assert!(!original.valid_for(&"a".repeat(64), &"b".repeat(64), 30_001));
+        let mut altered = original.clone();
+        altered.private_ws_generation = 0;
+        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        altered = original.clone();
+        altered.orders = 1;
+        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        altered = original.clone();
+        altered.native_oco = 1;
+        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        altered = original.clone();
+        altered.positions = 1;
+        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        altered = original.clone();
+        altered.source_age_ms = 10_001;
+        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        let mut encoded = serde_json::to_value(&original).unwrap();
+        encoded["unexpected"] = serde_json::json!("bypass");
+        assert!(serde_json::from_value::<NativeDrainedSourceCandidate>(encoded).is_err());
+    }
+
+    #[test]
+    fn ledgerless_readonly_source_never_claims_a_fabricated_manifest() {
+        let mut source = source();
+        source.ledger_manifest_sha256.clear();
+        assert!(source.valid_for(&"a".repeat(64), "", 20_100));
+        assert!(!source.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
+        let id = "f".repeat(64);
+        let mut reply = NativeChildReply {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+            request_id: id.clone(),
+            disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
+            ledger_only: None,
+            source_candidate: Some(source),
+            target_read_only: None,
+            error: None,
+        };
+        assert!(reply.valid_for(&id));
+        reply.ledger_only = Some(serde_json::json!({
+            "source_ledger_manifest_sha256": "b".repeat(64)
+        }));
+        assert!(!reply.valid_for(&id));
+        reply.ledger_only = None;
+        reply
+            .source_candidate
+            .as_mut()
+            .unwrap()
+            .ledger_manifest_sha256 = "b".repeat(64);
+        assert!(!reply.valid_for(&id));
+    }
+
+    #[test]
+    fn readonly_target_requires_fresh_exact_uid_disabled_trade_and_zero_oco() {
+        let uid = "c".repeat(64);
+        let original = NativeReadOnlyTargetProof {
+            schema: "okx.native-readonly-target/v1".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            snapshot_received_ms: 20_000,
+            private_ws_generation: 3,
+            positions: 0,
+            orders: 0,
+            native_oco: 0,
+            native_oco_complete: true,
+            read_only_credentials: true,
+            executor_mutations_disabled: true,
+        };
+        assert!(original.valid_for(&uid, 20_100));
+        assert!(!original.valid_for(&"a".repeat(64), 20_100));
+        assert!(!original.valid_for(&uid, 30_001));
+        let mut changed = original.clone();
+        changed.native_oco = 1;
+        changed.orders = 2;
+        changed.positions = 3;
+        assert!(
+            changed.valid_for(&uid, 20_100),
+            "existing independent real-account exposure is observable in ReadOnly"
+        );
+        changed = original.clone();
+        changed.native_oco_complete = false;
+        assert!(!changed.valid_for(&uid, 20_100));
+        changed = original.clone();
+        changed.read_only_credentials = false;
+        assert!(!changed.valid_for(&uid, 20_100));
+        changed = original.clone();
+        changed.executor_mutations_disabled = false;
+        assert!(!changed.valid_for(&uid, 20_100));
+        changed = original.clone();
+        changed.private_ws_generation = 0;
+        assert!(!changed.valid_for(&uid, 20_100));
+    }
+
+    #[test]
+    fn protocol_rejects_malformed_or_unsolicited_drain_receipts() {
+        let id = "f".repeat(64);
+        let reply = NativeChildReply {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+            request_id: id.clone(),
+            disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
+            ledger_only: Some(serde_json::json!({"source_ledger_manifest_sha256": "b".repeat(64)})),
+            source_candidate: Some(source()),
+            target_read_only: None,
+            error: None,
+        };
+        assert!(reply.valid_for(&id));
+        assert!(!reply.valid_for(&"0".repeat(64)));
+        let mut missing = reply.clone();
+        missing.source_candidate = None;
+        assert!(!missing.valid_for(&id));
+        missing = reply.clone();
+        missing.disposition = "DRAINED_LEDGER_ONLY".to_owned();
+        assert!(!missing.valid_for(&id));
+        missing = reply.clone();
+        missing.error = Some("uncertain".to_owned());
+        assert!(!missing.valid_for(&id));
     }
 }

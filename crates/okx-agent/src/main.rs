@@ -108,6 +108,10 @@ enum Command {
         /// Explicitly admit bounded OKX Demo mutation acceptance. Requires --demo.
         #[arg(long)]
         demo_mutation_acceptance: bool,
+
+        /// Parent-owned anonymous stdin/stderr pipe, never a network listener.
+        #[arg(long)]
+        native_child_control_stdio: bool,
     },
 }
 
@@ -248,6 +252,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
             cloudflare_ws_url,
             cloudflare_runtime_id,
             demo_mutation_acceptance,
+            native_child_control_stdio,
         } => {
             if demo_mutation_acceptance && !environment.demo {
                 return Err(AgentError::DemoMutationAcceptanceRequiresDemoEnvironment);
@@ -278,7 +283,8 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     environment,
                     rate_budget.clone(),
                     demo_mutation_acceptance,
-                );
+                )
+                .map(std::sync::Arc::new);
                 let cloudflare = cloudflare_ws_url.and_then(|ws_url| {
                     match load_native_cloudflare_token() {
                         Ok(token) => match CloudflareTransportConfig::new(
@@ -321,6 +327,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                         private_ws: private_ws.as_ref(),
                         execution: execution.as_ref(),
                         cloudflare: cloudflare.as_ref(),
+                        native_child_control_stdio,
                     },
                     public_ws_coordinator,
                     private_ws_coordinator,
