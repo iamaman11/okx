@@ -133,9 +133,13 @@ impl HostExecutor {
             HostControlOperation::StartDemoAcceptance => self.start_demo_acceptance(),
             HostControlOperation::RestoreProductionAgent => self.restore_production_agent(),
             HostControlOperation::SelectReadOnlyAccount {
-                target_profile, expected_source_uid_fingerprint, expected_target_uid_fingerprint,
+                target_profile,
+                expected_source_uid_fingerprint,
+                expected_target_uid_fingerprint,
             } => self.select_read_only_account(
-                &target_profile, &expected_source_uid_fingerprint, &expected_target_uid_fingerprint
+                &target_profile,
+                &expected_source_uid_fingerprint,
+                &expected_target_uid_fingerprint,
             ),
             HostControlOperation::RecoverReadOnlySelection => self.recover_read_only_selection(),
             HostControlOperation::StopAgent => self.stop_agent(),
@@ -608,7 +612,10 @@ impl HostExecutor {
             "demo_acceptance" => AgentProfile::DemoAcceptance,
             _ => return Err(HostControlError::ProfileHandoffProofRequired),
         };
-        if self.desired_store.is_pending()? || !self.agent_is_running()? || target == self.desired_profile {
+        if self.desired_store.is_pending()?
+            || !self.agent_is_running()?
+            || target == self.desired_profile
+        {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
         if expected_source_uid == expected_target_uid
@@ -629,7 +636,8 @@ impl HostExecutor {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
         self.desired_store.mark_source_exited(
-            &bound, source_pid,
+            &bound,
+            source_pid,
             u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default(),
         )?;
 
@@ -664,7 +672,8 @@ impl HostExecutor {
                     || !evidence.read_only_credentials,
             };
             self.desired_store.complete_verified_read_only(
-                &bound, &verified,
+                &bound,
+                &verified,
                 u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default(),
             )?;
             self.desired_agent = AgentDesired::Running;
@@ -691,7 +700,8 @@ impl HostExecutor {
             // BLOCKED and an explicit recovery is required; never auto trade.
             if self.terminate_agent_owned().is_ok()
                 && self.agent_job.is_empty().unwrap_or(false)
-                && self.desired_store
+                && self
+                    .desired_store
                     .recover_stopped_after_empty_job(&bound, source_pid)
                     .is_ok()
             {
@@ -928,12 +938,17 @@ impl HostExecutor {
         self.start_agent_process_inner(profile, false)
     }
 
-    fn start_transition_read_only_process(&mut self, profile: AgentProfile) -> HostControlResult<u32> {
+    fn start_transition_read_only_process(
+        &mut self,
+        profile: AgentProfile,
+    ) -> HostControlResult<u32> {
         self.start_agent_process_inner(profile, true)
     }
 
     fn start_agent_process_inner(
-        &mut self, profile: AgentProfile, transition_read_only: bool,
+        &mut self,
+        profile: AgentProfile,
+        transition_read_only: bool,
     ) -> HostControlResult<u32> {
         if transition_read_only {
             if !self.desired_store.permits_read_only_target_spawn(profile)?
@@ -1234,15 +1249,22 @@ impl HostExecutor {
     /// Only the same Job-owned target child can return this read-only
     /// receipt; caller-provided JSON never certifies destination identity.
     fn verify_native_read_only_target(
-        &mut self, expected_uid: &str,
+        &mut self,
+        expected_uid: &str,
     ) -> HostControlResult<okx_protocol::NativeReadOnlyTargetProof> {
         if !self.agent_is_running()? {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
-        let pipe = self.native_child_pipe.as_mut().ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let pipe = self
+            .native_child_pipe
+            .as_mut()
+            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
         let mut entropy = [0u8; 32];
         getrandom::fill(&mut entropy).map_err(|e| HostControlError::Random(e.to_string()))?;
-        let request_id = entropy.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let request_id = entropy
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
         entropy.zeroize();
         let req = NativeChildRequest {
             schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
@@ -1250,20 +1272,26 @@ impl HostExecutor {
             operation: NativeChildOperation::VerifyReadOnly,
             expected_uid_fingerprint: expected_uid.to_owned(),
         };
-        if !req.valid() {return Err(HostControlError::ProfileHandoffProofRequired);}
+        if !req.valid() {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
         let bytes = serde_json::to_vec(&req)?;
-        if bytes.len()+1 > NATIVE_CHILD_CONTROL_MAX_BYTES {
+        if bytes.len() + 1 > NATIVE_CHILD_CONTROL_MAX_BYTES {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
         pipe.input.write_all(&bytes)?;
         pipe.input.write_all(b"\n")?;
         pipe.input.flush()?;
-        let reply = pipe.replies.recv_timeout(Duration::from_secs(11))
+        let reply = pipe
+            .replies
+            .recv_timeout(Duration::from_secs(11))
             .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
         if !reply.valid_for(&request_id) || reply.disposition != "VERIFIED_READ_ONLY" {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
-        let proof = reply.target_read_only.ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let proof = reply
+            .target_read_only
+            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
         let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
         if !proof.valid_for(expected_uid, now) {
             return Err(HostControlError::ProfileHandoffProofRequired);
@@ -1422,9 +1450,16 @@ const PRODUCTION_AGENT_ARGS: &[&str] = &[
 /// Same Demo engine and data root, but exchange mutation acceptance OFF.
 /// Never introduce a parallel Demo executor or a second strategy ledger.
 const DEMO_READ_ONLY_AGENT_ARGS: &[&str] = &[
-    "--root", DEMO_RUNTIME_ROOT, "--demo", "run", "--mailbox-issue",
-    DEMO_MAILBOX_ISSUE, "--cloudflare-ws-url", AGENT_CLOUDFLARE_WS_URL,
-    "--cloudflare-runtime-id", AGENT_CLOUDFLARE_RUNTIME_ID,
+    "--root",
+    DEMO_RUNTIME_ROOT,
+    "--demo",
+    "run",
+    "--mailbox-issue",
+    DEMO_MAILBOX_ISSUE,
+    "--cloudflare-ws-url",
+    AGENT_CLOUDFLARE_WS_URL,
+    "--cloudflare-runtime-id",
+    AGENT_CLOUDFLARE_RUNTIME_ID,
 ];
 
 const DEMO_ACCEPTANCE_AGENT_ARGS: &[&str] = &[

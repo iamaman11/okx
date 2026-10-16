@@ -49,7 +49,7 @@ impl AgentJob {
     pub fn is_empty(&self) -> HostControlResult<bool> {
         use std::{ffi::c_void, mem::size_of};
         use windows_sys::Win32::System::JobObjects::{
-            JobObjectBasicAccountingInformation, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
             QueryInformationJobObject,
         };
         let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
@@ -62,8 +62,11 @@ impl AgentJob {
                 std::ptr::null_mut(),
             )
         };
-        if ok == 0 { Err(std::io::Error::last_os_error().into()) }
-        else { Ok(info.ActiveProcesses == 0) }
+        if ok == 0 {
+            Err(std::io::Error::last_os_error().into())
+        } else {
+            Ok(info.ActiveProcesses == 0)
+        }
     }
 
     pub fn assign(&self, child: &mut Child) -> HostControlResult<()> {

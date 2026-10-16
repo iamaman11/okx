@@ -653,7 +653,9 @@ impl DesiredStateStore {
     /// Never use an elapsed ticket as authority to auto-start an agent.
     pub fn recover_stopped_explicit(&self) -> HostControlResult<AgentDesiredState> {
         let mut state = self.load_full()?;
-        let transition = state.transition.as_ref()
+        let transition = state
+            .transition
+            .as_ref()
             .ok_or(HostControlError::ProfileTransitionInvalid)?;
         let source = transition.witness.source;
         if state.profile != source {
@@ -934,11 +936,17 @@ mod single_owner_transition_tests {
         let path = path("explicit-stop");
         let _ = fs::remove_file(&path);
         let store = DesiredStateStore::at(path.clone());
-        store.save(AgentDesiredState::demo_acceptance_running()).unwrap();
+        store
+            .save(AgentDesiredState::demo_acceptance_running())
+            .unwrap();
         let witness = witness();
         assert!(store.recover_stopped_explicit().is_err());
         store.stage_frozen(witness.clone(), 11_000).unwrap();
-        assert!(!store.permits_read_only_target_spawn(AgentProfile::Production).unwrap());
+        assert!(
+            !store
+                .permits_read_only_target_spawn(AgentProfile::Production)
+                .unwrap()
+        );
         assert_eq!(
             store.recover_stopped_explicit().unwrap(),
             AgentDesiredState::stopped_on(AgentProfile::DemoAcceptance)
@@ -949,13 +957,25 @@ mod single_owner_transition_tests {
             AgentDesiredState::stopped_on(AgentProfile::DemoAcceptance)
         );
         assert!(store.recover_stopped_explicit().is_err());
-        store.save(AgentDesiredState::demo_acceptance_running()).unwrap();
+        store
+            .save(AgentDesiredState::demo_acceptance_running())
+            .unwrap();
         let bound = bound(&witness);
         store.stage_frozen(witness, 11_000).unwrap();
         store.consume_once(&bound, 11_100).unwrap();
-        store.mark_source_exited(&bound, bound.source_pid, 11_200).unwrap();
-        assert!(store.permits_read_only_target_spawn(AgentProfile::Production).unwrap());
-        assert!(!store.permits_read_only_target_spawn(AgentProfile::DemoAcceptance).unwrap());
+        store
+            .mark_source_exited(&bound, bound.source_pid, 11_200)
+            .unwrap();
+        assert!(
+            store
+                .permits_read_only_target_spawn(AgentProfile::Production)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .permits_read_only_target_spawn(AgentProfile::DemoAcceptance)
+                .unwrap()
+        );
         let _ = fs::remove_file(path);
     }
 

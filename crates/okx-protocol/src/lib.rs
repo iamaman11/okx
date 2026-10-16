@@ -102,7 +102,9 @@ impl NativeReadOnlyTargetProof {
         self.schema == "okx.native-readonly-target/v1"
             && self.account_uid_fingerprint == expected_uid
             && expected_uid.len() == 64
-            && expected_uid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && expected_uid
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             && self.snapshot_received_ms != 0
             && now_ms >= self.snapshot_received_ms
             && now_ms - self.snapshot_received_ms <= 10_000
