@@ -1563,6 +1563,50 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn native_runtime_drain_preserves_manifest_and_never_grants_new_mutation_authority() {
+        let root = temp_root("drain-runtime-unchanged-ledger");
+        fs::create_dir_all(&root).unwrap();
+        let runtime = ExecutionRuntime::new_demo_acceptance(
+            &root,
+            OkxEnvironment::new(Region::Global, true),
+            credentials(),
+            1,
+            RateBudget::new(),
+        )
+        .expect("native single executor");
+        let baseline = runtime
+            .profile_handoff_ledger_assessment("uid-fingerprint")
+            .await
+            .expect("baseline durable ledger");
+        assert!(runtime.admit_mutating_request().await.is_some());
+        let drained = runtime
+            .drain_mutation_ingress("uid-fingerprint")
+            .await
+            .expect("bounded source drain");
+        assert_eq!(
+            drained.source_ledger_manifest_sha256,
+            baseline.source_ledger_manifest_sha256
+        );
+        assert_eq!(drained.nonterminal_intents, 0);
+        assert_eq!(drained.unresolved_order_mutations, 0);
+        assert!(runtime.admit_mutating_request().await.is_none());
+        assert_eq!(
+            runtime.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
+        let after = runtime
+            .profile_handoff_ledger_assessment("uid-fingerprint")
+            .await
+            .expect("read-only durable ledger");
+        assert_eq!(
+            after.source_ledger_manifest_sha256,
+            baseline.source_ledger_manifest_sha256
+        );
+        drop(runtime);
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn demo_acceptance_runtime_rejects_production_environment_before_construction() {
         let result = ExecutionRuntime::new_demo_acceptance(
