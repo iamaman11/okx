@@ -32,7 +32,10 @@ impl NativeChildRequest {
             && self.request_id.len() == 64
             && self.request_id.bytes().all(|b| b.is_ascii_hexdigit())
             && self.expected_uid_fingerprint.len() == 64
-            && self.expected_uid_fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
+            && self
+                .expected_uid_fingerprint
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
     }
 }
 

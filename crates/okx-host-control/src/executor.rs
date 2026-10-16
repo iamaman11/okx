@@ -8,8 +8,8 @@ use std::{
 };
 
 use okx_protocol::{
-    HostControlOperation, NativeChildOperation, NativeChildReply, NativeChildRequest,
-    NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
+    HostControlOperation, NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX,
+    NATIVE_CHILD_CONTROL_SCHEMA_V1, NativeChildOperation, NativeChildReply, NativeChildRequest,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -817,8 +817,14 @@ impl HostExecutor {
 
         self.agent_job.assign(&mut child)?;
         let pid = child.id();
-        let child_input = child.stdin.take().ok_or(HostControlError::InvalidExecutionPath)?;
-        let mut child_stderr = child.stderr.take().ok_or(HostControlError::InvalidExecutionPath)?;
+        let child_input = child
+            .stdin
+            .take()
+            .ok_or(HostControlError::InvalidExecutionPath)?;
+        let mut child_stderr = child
+            .stderr
+            .take()
+            .ok_or(HostControlError::InvalidExecutionPath)?;
         let (reply_tx, reply_rx) = mpsc::channel();
         // Preserve the old append-only stderr diagnostic log. Only this
         // parent receives the anonymous stderr pipe and routes typed replies.
@@ -837,7 +843,8 @@ impl HostExecutor {
                 }
                 for byte in &block[..count] {
                     if *byte == b'\n' {
-                        if !overflow && pending.starts_with(NATIVE_CHILD_CONTROL_PREFIX.as_bytes()) {
+                        if !overflow && pending.starts_with(NATIVE_CHILD_CONTROL_PREFIX.as_bytes())
+                        {
                             let payload = &pending[NATIVE_CHILD_CONTROL_PREFIX.len()..];
                             if let Ok(reply) = serde_json::from_slice::<NativeChildReply>(payload) {
                                 let _ = reply_tx.send(reply);
@@ -887,8 +894,10 @@ impl HostExecutor {
             child.wait()?;
         }
         if let Some(pipe) = owned_pipe {
-            drop(pipe.input);
-            let _ = pipe.stderr_reader.join();
+            // Closing this handle lets the one-off relay exit at pipe EOF.
+            // Do not join unboundedly: unknown inherited child handles must
+            // never stall controller recovery after a verified process exit.
+            drop(pipe);
         }
         self.agent_started_at = None;
         self.agent_launch = None;
@@ -907,10 +916,16 @@ impl HostExecutor {
         if self.desired_store.is_pending()? {
             return Err(HostControlError::ProfileTransitionPending);
         }
-        let pipe = self.native_child_pipe.as_mut().ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let pipe = self
+            .native_child_pipe
+            .as_mut()
+            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
         let mut random = [0u8; 32];
         getrandom::fill(&mut random).map_err(|e| HostControlError::Random(e.to_string()))?;
-        let request_id = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let request_id = random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         let request = NativeChildRequest {
             schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
             request_id: request_id.clone(),
@@ -924,7 +939,9 @@ impl HostExecutor {
         pipe.input.write_all(&bytes)?;
         pipe.input.write_all(b"\n")?;
         pipe.input.flush()?;
-        let reply = pipe.replies.recv_timeout(Duration::from_secs(20))
+        let reply = pipe
+            .replies
+            .recv_timeout(Duration::from_secs(20))
             .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
         if !reply.valid_for(&request_id) || reply.disposition != "DRAINED_LEDGER_ONLY" {
             return Err(HostControlError::ProfileHandoffProofRequired);

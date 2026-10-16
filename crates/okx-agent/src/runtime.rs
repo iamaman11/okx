@@ -1,14 +1,18 @@
-use std::{io::{BufRead, Read}, sync::Arc, time::Duration};
+use std::{
+    io::{BufRead, Read},
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::Utc;
 
 use okx_github::GitHubBackoff;
+use okx_protocol::{
+    NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
+    NativeChildOperation, NativeChildReply, NativeChildRequest,
+};
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator, PublicWsHandle};
 use serde::Serialize;
-use okx_protocol::{
-    NativeChildReply, NativeChildRequest, NativeChildOperation,
-    NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
-};
 use tokio::{
     sync::{mpsc, watch},
     time::{MissedTickBehavior, interval},
@@ -176,7 +180,9 @@ pub async fn run_mailbox_until_shutdown(
     if native_child_control_stdio {
         std::thread::spawn(move || {
             let stdin = std::io::stdin();
-            let mut bounded = stdin.lock().take((NATIVE_CHILD_CONTROL_MAX_BYTES + 1) as u64);
+            let mut bounded = stdin
+                .lock()
+                .take((NATIVE_CHILD_CONTROL_MAX_BYTES + 1) as u64);
             let mut frame = Vec::new();
             if bounded.read_until(b'\n', &mut frame).is_ok()
                 && frame.len() <= NATIVE_CHILD_CONTROL_MAX_BYTES
