@@ -243,7 +243,7 @@ jobs:
           # Measure locally using native ZIP deflate; published Actions ZIP
           # size is still checked separately from immutable artifact metadata.
           $zipEstimate = Join-Path $env:RUNNER_TEMP "okx-bundle-size-estimate.zip"
-          Compress-Archive -LiteralPath (Join-Path $dist "*") -DestinationPath $zipEstimate -CompressionLevel Optimal -Force
+          Compress-Archive -Path (Join-Path $dist "*") -DestinationPath $zipEstimate -CompressionLevel Optimal -Force
           $estimateBytes = (Get-Item -LiteralPath $zipEstimate).Length
           $agentBytes = (Get-Item -LiteralPath (Join-Path $dist "okx-agent.exe")).Length
           $controllerBytes = (Get-Item -LiteralPath (Join-Path $dist "okx-host-control.exe")).Length
