@@ -371,6 +371,35 @@ mod tests {
     }
 
     #[test]
+    fn execution_right_is_not_derived_from_the_profile_name_alone() {
+        let root = test_root("effective-execution-right");
+        let _ = fs::remove_dir_all(&root);
+        let store = DesiredStateStore::at(root.join("desired.json"));
+        store
+            .save(AgentDesiredState::production_running())
+            .expect("production remains read-only regardless of legacy flag");
+        assert_eq!(store.status_value()["execution_right"], "READ_ONLY");
+
+        store
+            .save(AgentDesiredState::demo_acceptance_running())
+            .expect("new Demo profile");
+        assert_eq!(
+            store.status_value()["execution_right"],
+            "DEMO_MUTATIONS_CONFIGURED"
+        );
+
+        let mut saved = store.load_full().expect("read existing owner");
+        saved.read_only = true;
+        store.persist_full(&saved).expect("persist verified right");
+        assert_eq!(store.status_value()["execution_right"], "READ_ONLY");
+        assert_eq!(store.status_value()["read_only_persisted"], true);
+
+        let reopened = DesiredStateStore::at(root.join("desired.json"));
+        assert_eq!(reopened.status_value()["execution_right"], "READ_ONLY");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn stopped_demo_retains_its_identity_across_durable_restart() {
         let root = test_root("stopped-demo");
         let _ = fs::remove_dir_all(&root);
