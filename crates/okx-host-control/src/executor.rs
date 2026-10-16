@@ -21,7 +21,10 @@ use crate::{
     autostart,
     background_process::hidden_command,
     controller_update,
-    desired::{AgentDesired, AgentDesiredState, AgentProfile, DesiredStateStore},
+    desired::{
+        AgentDesired, AgentDesiredState, AgentProfile, BoundSourceIdentity,
+        DesiredStateStore, FrozenSourceWitness,
+    },
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
 };
@@ -50,6 +53,9 @@ struct AgentLaunchEvidence {
     pid: u32,
     stdout_offset: u64,
     stderr_offset: u64,
+    // Locally generated at each exact child launch, unavailable after a
+    // controller crash. Neither a remote caller nor an old PID can replay it.
+    launch_lease_sha256: [u8; 32],
 }
 
 struct NativeChildPipe {
@@ -805,6 +811,9 @@ impl HostExecutor {
         // Old profile tails must never be presented as this process's errors.
         let stdout_offset = stdout.metadata()?.len();
         let stderr_offset = stderr.metadata()?.len();
+        let mut lease_nonce = [0u8; 32];
+        getrandom::fill(&mut lease_nonce)
+            .map_err(|error| HostControlError::Random(error.to_string()))?;
         let mut child = hidden_command(self.agent_binary())
             .args(agent_args(profile))
             .arg("--native-child-control-stdio")
@@ -816,6 +825,11 @@ impl HostExecutor {
 
         self.agent_job.assign(&mut child)?;
         let pid = child.id();
+        let mut lease_hasher = Sha256::new();
+        lease_hasher.update(lease_nonce);
+        lease_hasher.update(pid.to_le_bytes());
+        lease_nonce.zeroize();
+        let launch_lease_sha256: [u8; 32] = lease_hasher.finalize().into();
         let child_input = child
             .stdin
             .take()
@@ -870,6 +884,7 @@ impl HostExecutor {
             pid,
             stdout_offset,
             stderr_offset,
+            launch_lease_sha256,
         });
         self.running_profile = Some(profile);
         self.next_restart_at = None;
@@ -962,6 +977,100 @@ impl HostExecutor {
             "source_candidate": reply.source_candidate,
             "authorizes_profile_switch": false
         }))
+    }
+
+    /// Internal strict parent-bound source identity. This path does NOT mint
+    /// a remote switch authority. Only CONTROL knows the actual Job-owned PID,
+    /// per-launch random lease, tested ReleaseSet and native pipe handles.
+    #[allow(dead_code)]
+    fn bound_native_source_candidate(
+        &mut self,
+        expected_uid: &str,
+        destination: AgentProfile,
+    ) -> HostControlResult<(FrozenSourceWitness, BoundSourceIdentity)> {
+        if !self.agent_is_running()? {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        let launch = self
+            .agent_launch
+            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        if self.running_profile != Some(launch.profile)
+            || self.desired_profile != launch.profile
+            || self.desired_agent != AgentDesired::Running
+            || destination == launch.profile
+        {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+
+        // This one-shot pipe drains real executor POSTs; NEVER reuse a reply
+        // after a timeout or obtain it from GitHub/Cloudflare.
+        let reply = self.request_native_drain(expected_uid)?;
+        if !self.agent_is_running()?
+            || self.agent_child.as_ref().map(Child::id) != Some(launch.pid)
+            || self.agent_launch.is_none_or(|latest| {
+                latest.pid != launch.pid
+                    || latest.launch_lease_sha256 != launch.launch_lease_sha256
+            })
+        {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        let state = self.status()?;
+        if state["release_parity"]["state"] != "MATCHED"
+            || state["installed_agent"]["state"] != "VERIFIED"
+            || state["agent_owned_running"] != true
+            || state["agent_pid"] != launch.pid
+        {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        let prov = &state["installed_agent"]["provenance"];
+        let source_tree = prov["source_tree"]
+            .as_str()
+            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let agent_sha256 = prov["agent_sha256"]
+            .as_str()
+            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let controller_sha256 = std::env::current_exe()
+            .ok()
+            .and_then(|path| okx_host_launcher::sha256_file(&path).ok())
+            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let candidate: okx_protocol::NativeDrainedSourceCandidate =
+            serde_json::from_value(reply["source_candidate"].clone())
+                .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
+        let ledger_sha256 = reply["ledger"]["source_ledger_manifest_sha256"]
+            .as_str()
+            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
+        if !candidate.valid_for(expected_uid, ledger_sha256, now_ms) {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        let bound = BoundSourceIdentity {
+            source: launch.profile,
+            source_pid: launch.pid,
+            launch_lease_sha256: format!("{:x}", Sha256::digest(launch.launch_lease_sha256)),
+            account_uid_fingerprint: expected_uid.to_owned(),
+            private_ws_generation: candidate.private_ws_generation,
+            ledger_manifest_sha256: ledger_sha256.to_owned(),
+            source_tree: source_tree.to_owned(),
+            agent_sha256: agent_sha256.to_owned(),
+            controller_sha256,
+        };
+        let frozen = FrozenSourceWitness {
+            sequence: now_ms,
+            destination,
+            source_observed_at_ms: candidate.snapshot_received_ms,
+            issued_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(60_000),
+            source: bound.source,
+            source_pid: bound.source_pid,
+            launch_lease_sha256: bound.launch_lease_sha256.clone(),
+            account_uid_fingerprint: bound.account_uid_fingerprint.clone(),
+            private_ws_generation: bound.private_ws_generation,
+            ledger_manifest_sha256: bound.ledger_manifest_sha256.clone(),
+            source_tree: bound.source_tree.clone(),
+            agent_sha256: bound.agent_sha256.clone(),
+            controller_sha256: bound.controller_sha256.clone(),
+        };
+        Ok((frozen, bound))
     }
 
     fn persist_desired(&mut self, state: AgentDesiredState) -> HostControlResult<()> {
@@ -1946,6 +2055,7 @@ mod tests {
             pid: 321,
             stdout_offset: fs::metadata(&stdout).expect("stdout metadata").len(),
             stderr_offset: fs::metadata(&stderr).expect("stderr metadata").len(),
+            launch_lease_sha256: [0xabu8; 32],
         };
         fs::OpenOptions::new()
             .append(true)
