@@ -3103,9 +3103,12 @@ mod tests {
         assert_eq!(p["strategy"]["period_audit_status"], "INCOMPLETE");
         assert_eq!(p["strategy"]["periods_total"], 6);
         assert_eq!(p["strategy"]["period_proofs_truncated"], false);
-        assert!(p["decision"]["reasons"].as_array().unwrap().contains(
-            &json!("PERIOD_FINANCIAL_AUDIT_INCOMPLETE")
-        ));
+        assert!(
+            p["decision"]["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("PERIOD_FINANCIAL_AUDIT_INCOMPLETE"))
+        );
         // Performance telemetry must reflect independently measured source
         // windows without altering the financial/account proof or inventing
         // FRESH from parallel REST completion.

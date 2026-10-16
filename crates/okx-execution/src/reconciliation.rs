@@ -23,7 +23,8 @@ const MAX_ARCHIVE_PROOF_ROWS: usize = 16;
 const MAX_UNMATCHED_HISTORICAL_ROWS: usize = 16;
 pub const STRATEGY_ATTRIBUTION_SCHEMA_V1: &str = "okx.strategy-exchange-attribution/v1";
 pub const STRATEGY_NAV_ASSESSMENT_SCHEMA_V1: &str = "okx.strategy-nav-assessment/v1";
-pub const STRATEGY_PERIOD_FINANCIAL_AUDIT_SCHEMA_V1: &str = "okx.strategy-period-financial-audit/v1";
+pub const STRATEGY_PERIOD_FINANCIAL_AUDIT_SCHEMA_V1: &str =
+    "okx.strategy-period-financial-audit/v1";
 const MAX_FINANCIAL_PERIOD_AUDIT_ROWS: usize = 32;
 
 /// A historical period record, not independent current exchange reconciliation.
@@ -427,7 +428,10 @@ fn assemble_period_financial_audit(
     let attribution = report.strategy_attribution.as_ref();
     let unallocated_funding = attribution.map_or(0, |value| value.unallocated_funding_bills);
     let unlinked_bills = attribution.map_or(0, |value| value.unlinked_nonfunding_bills);
-    let nav_usable = report.strategy_nav.as_ref().is_some_and(|n| n.usable_for_risk);
+    let nav_usable = report
+        .strategy_nav
+        .as_ref()
+        .is_some_and(|n| n.usable_for_risk);
     let mut reasons = Vec::new();
     if attribution.is_none_or(|value| value.status != "COMPLETE") {
         reasons.push("ACCOUNT_STRATEGY_ATTRIBUTION_NOT_COMPLETE");
@@ -1326,10 +1330,10 @@ mod tests {
     fn period_financial_audit_keeps_unverified_amounts_null_and_sealed_hashes_exact() {
         let p = path("period-financial-audit");
         let _ = std::fs::remove_file(&p);
-        let ledger = DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100)
-            .expect("empty ledger");
-        let mut report = reconcile_exchange_evidence(&ledger, &[], &[], &[])
-            .expect("base reconciliation");
+        let ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("empty ledger");
+        let mut report =
+            reconcile_exchange_evidence(&ledger, &[], &[], &[]).expect("base reconciliation");
         report.archived_runs_count = 1;
         report.archived_run_proofs = vec![crate::ArchivedStrategyProof {
             schema: crate::ARCHIVED_STRATEGY_PROOF_SCHEMA_V1,
@@ -1372,18 +1376,27 @@ mod tests {
         assert!(!audit.new_risk_authorized);
         assert_eq!(audit.periods_total, 3);
         assert!(!audit.periods_truncated);
-        assert_eq!(audit.periods[0].historical_nav_usdt.as_deref(), Some("99.95"));
+        assert_eq!(
+            audit.periods[0].historical_nav_usdt.as_deref(),
+            Some("99.95")
+        );
         assert_eq!(audit.periods[0].closure_sha256, "b".repeat(64));
         assert_eq!(audit.periods[1].record_state, "UNVERIFIED_SOURCE");
         assert!(audit.periods[1].historical_nav_usdt.is_none());
         assert!(audit.periods[1].historical_realized_usdt.is_none());
         assert!(audit.periods[1].historical_fees_usdt.is_none());
-        assert_eq!(audit.periods[1].incomplete_reason.as_deref(), Some("SOURCE_CONTINUITY_NOT_PROVEN"));
+        assert_eq!(
+            audit.periods[1].incomplete_reason.as_deref(),
+            Some("SOURCE_CONTINUITY_NOT_PROVEN")
+        );
         assert_eq!(audit.periods[2].closure_sha256, "1".repeat(64));
         assert_eq!(audit.canceled_intents_outside_exchange_history, 3);
         let original = serde_json::to_value(&report.archived_run_proofs).unwrap();
         let _ = serde_json::to_value(&audit).unwrap();
-        assert_eq!(original, serde_json::to_value(&report.archived_run_proofs).unwrap());
+        assert_eq!(
+            original,
+            serde_json::to_value(&report.archived_run_proofs).unwrap()
+        );
         let _ = std::fs::remove_file(p);
     }
 
@@ -1391,10 +1404,10 @@ mod tests {
     fn financial_audit_never_promotes_truncated_history_into_complete_status() {
         let p = path("period-audit-truncated");
         let _ = std::fs::remove_file(&p);
-        let ledger = DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100)
-            .expect("empty ledger");
-        let mut report = reconcile_exchange_evidence(&ledger, &[], &[], &[])
-            .expect("base reconciliation");
+        let ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("empty ledger");
+        let mut report =
+            reconcile_exchange_evidence(&ledger, &[], &[], &[]).expect("base reconciliation");
         report.archived_runs_count = 17;
         report.archived_run_proofs_truncated = true;
         let audit = assemble_period_financial_audit(&report);
