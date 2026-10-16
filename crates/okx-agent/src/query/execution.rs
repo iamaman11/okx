@@ -59,6 +59,7 @@ pub const EXECUTION_RISK_STOP_PERSISTENCE_FAILED_CODE: &str =
 pub const EXECUTION_RECONCILIATION_FAILED_CODE: &str = "EXECUTION_RECONCILIATION_FAILED";
 pub const EXECUTION_RECONCILIATION_UNAVAILABLE_CODE: &str = "EXECUTION_RECONCILIATION_UNAVAILABLE";
 pub const EXECUTION_MUTATION_UNSAFE_CODE: &str = "EXECUTION_MUTATION_UNSAFE";
+pub const EXECUTION_PROFILE_DRAINING_CODE: &str = "EXECUTION_PROFILE_DRAINING";
 pub const EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED_CODE: &str =
     "EXECUTION_PROTECTED_ADD_HEDGE_UNSUPPORTED";
 pub const EXECUTION_PROTECTED_REDUCE_UNSUPPORTED_CODE: &str =
@@ -142,6 +143,34 @@ pub(super) async fn dispatch(
     context: ObservationQueryContext<'_>,
     generated_at: &str,
 ) -> AgentResult<AgentResponse> {
+    // Critical admission boundary for ALL public mutation requests, including
+    // ledger-only prepare, risk changes, migrations and exchange POST actions.
+    // Holding this guard across the entire request prevents drain from racing
+    // with preflight or a queued send. ExecutionStatus and ExecutorPreflight
+    // remain read-only and accessible even when the source is drained.
+    let _mutation_guard = if matches!(
+        &request.operation,
+        AgentOperation::ExecutionStatus { .. } | AgentOperation::ExecutorPreflight
+    ) {
+        None
+    } else if let Some(execution) = context.execution {
+        match execution.admit_mutating_request().await {
+            Some(guard) => Some(guard),
+            None => {
+                return Ok(failure_response(
+                    request,
+                    generated_at,
+                    AgentResponseStatus::Rejected,
+                    EXECUTION_PROFILE_DRAINING_CODE,
+                    "native source mutation ingress is drained; no ledger or exchange mutation admitted"
+                        .to_owned(),
+                    false,
+                ));
+            }
+        }
+    } else {
+        None // Existing typed missing-executor response below remains authoritative.
+    };
     match &request.operation {
         AgentOperation::ExecutorPreflight => {
             executor_preflight(request, context, generated_at).await

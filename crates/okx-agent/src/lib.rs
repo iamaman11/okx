@@ -136,6 +136,9 @@ pub enum AgentError {
     #[error("response budget invariant failed")]
     ResponseBudgetInvariant,
 
+    #[error("native source mutation drain did not quiesce before the 15-second deadline")]
+    SourceDrainTimeout,
+
     #[error("account ledger reconciliation error: {0}")]
     AccountReconciliation(#[from] okx_execution::AccountLedgerReconciliationError),
 
