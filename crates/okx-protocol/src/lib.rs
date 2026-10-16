@@ -1800,6 +1800,13 @@ pub enum HostControlOperation {
     StartAgent,
     StartDemoAcceptance,
     RestoreProductionAgent,
+    /// Same native agent and single CONTROL only; ALWAYS target ReadOnly.
+    SelectReadOnlyAccount {
+        target_profile: String,
+        expected_source_uid_fingerprint: String,
+        expected_target_uid_fingerprint: String,
+    },
+    RecoverReadOnlySelection,
     StopAgent,
     RestartAgent,
     InstallAutostart,
@@ -1845,6 +1852,19 @@ impl HostControlOperation {
                 }
                 validate_source_tree(expected_source_tree)?;
                 validate_sha256(expected_current_launcher_sha256)
+            }
+            Self::SelectReadOnlyAccount {
+                target_profile,
+                expected_source_uid_fingerprint,
+                expected_target_uid_fingerprint,
+            } => {
+                if !matches!(target_profile.as_str(), "production" | "demo_acceptance")
+                    || expected_source_uid_fingerprint == expected_target_uid_fingerprint
+                {
+                    return Err(ProtocolError::InvalidRequestId);
+                }
+                validate_sha256(expected_source_uid_fingerprint)?;
+                validate_sha256(expected_target_uid_fingerprint)
             }
             _ => Ok(()),
         }
