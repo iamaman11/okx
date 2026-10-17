@@ -1606,7 +1606,10 @@ mod tests {
                 .expect("wrong child PID rejected before POST")
                 .is_none()
         );
-        assert_eq!(runtime.mutation_authority().await, MutationAuthority::Disabled);
+        assert_eq!(
+            runtime.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
         let result = runtime
             .submit_prepared_production_authorized(
                 &evidence,

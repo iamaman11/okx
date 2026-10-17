@@ -429,10 +429,7 @@ impl ProductionLivePermit {
             && source
                 .latest_source_asof_ms
                 .is_some_and(|asof| asof <= now_ms && now_ms - asof <= 30_000)
-            && Self::stop_allows_action(
-                ledger.risk_stop().is_some(),
-                intent.record.plan.action,
-            )
+            && Self::stop_allows_action(ledger.risk_stop().is_some(), intent.record.plan.action)
             && ledger.finalized_run().is_none()
             && ledger.unverified_run().is_none()
             && ledger.entries().all(|entry| {
