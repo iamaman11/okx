@@ -328,12 +328,11 @@ pub struct ProductionTradingPolicy {
 /// API, MCP request or caller assertion may be treated as this evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionRiskWitness {
-    pub account_and_source_fresh: bool,
     pub finance_complete: bool,
     pub unknown_mutations_reconciled: bool,
     /// Existing portfolio loss INCLUDING uncertain/pending exposure but
     /// EXCLUDING this new candidate. Must be independently reconstructed.
-    pub existing_modelled_loss_usdt: String,
+    pub existing_modelled_loss_usdt: Decimal,
     /// Native exchange/ledger evidence that this CLOSE only reduces an
     /// exact owned position and cannot create reverse or foreign exposure.
     pub exact_owned_reduce_only_close: bool,
@@ -350,9 +349,10 @@ pub enum ProductionPolicyRejection {
 }
 
 impl ProductionTradingPolicy {
-    /// Read-only, deterministic candidate decision. Never changes a ledger,
-    /// STOP, permission or exchange state and never grants mutation authority.
-    pub fn evaluate(
+    /// Private, deterministic policy arithmetic: callers cannot bypass the
+    /// single executor's durable STOP, source/UID and run checks.
+    /// This routine does not grant mutation authority.
+    fn evaluate(
         &self,
         run: &crate::StrategyCapitalReservation,
         plan: &ExecutionPlan,
@@ -388,9 +388,6 @@ impl ProductionTradingPolicy {
         {
             return Err(Rejection::ScopeMismatch);
         }
-        if !witness.account_and_source_fresh {
-            return Err(Rejection::SourceUnattested);
-        }
         if plan.order_type != OrderType::Fok || !plan.instrument_id.ends_with("-USDT-SWAP") {
             return Err(Rejection::UnsupportedAction);
         }
@@ -417,8 +414,7 @@ impl ProductionTradingPolicy {
                 if !witness.finance_complete || !witness.unknown_mutations_reconciled {
                     return Err(Rejection::SourceUnattested);
                 }
-                let occupied = Decimal::from_str(&witness.existing_modelled_loss_usdt)
-                    .map_err(|_| Rejection::SourceUnattested)?;
+                let occupied = witness.existing_modelled_loss_usdt;
                 let Some(risk) = plan.open_risk.as_ref() else {
                     return Err(Rejection::RiskBudgetExceeded);
                 };
@@ -4566,19 +4562,27 @@ mod tests {
             max_total_modelled_loss_usdt: "10".to_owned(),
         };
         let mut witness = ProductionRiskWitness {
-            account_and_source_fresh: true,
             finance_complete: true,
             unknown_mutations_reconciled: true,
-            existing_modelled_loss_usdt: "8.99".to_owned(),
+            existing_modelled_loss_usdt: Decimal::from_str("8.99").unwrap(),
             exact_owned_reduce_only_close: false,
         };
         assert_eq!(policy.evaluate(&run, &plan, &witness), Ok(()));
-        witness.existing_modelled_loss_usdt = "9.01".to_owned();
+        witness.existing_modelled_loss_usdt = Decimal::from_str("9.01").unwrap();
         assert_eq!(
             policy.evaluate(&run, &plan, &witness),
             Err(ProductionPolicyRejection::RiskBudgetExceeded)
         );
-        witness.existing_modelled_loss_usdt = "0".to_owned();
+        // Exact monetary units are Decimal, not JSON strings or f64.
+        // This is the inclusive boundary: 9.00 occupied + 1.00 request = 10.00.
+        witness.existing_modelled_loss_usdt = Decimal::from_str("9.00").unwrap();
+        assert_eq!(policy.evaluate(&run, &plan, &witness), Ok(()));
+        witness.existing_modelled_loss_usdt = Decimal::from_str("9.000000001").unwrap();
+        assert_eq!(
+            policy.evaluate(&run, &plan, &witness),
+            Err(ProductionPolicyRejection::RiskBudgetExceeded)
+        );
+        witness.existing_modelled_loss_usdt = Decimal::ZERO;
         witness.unknown_mutations_reconciled = false;
         assert_eq!(
             policy.evaluate(&run, &plan, &witness),
@@ -4665,21 +4669,17 @@ mod tests {
         close.action = ExecutionAction::Close;
         close.order_type = OrderType::Fok;
         let mut witness = ProductionRiskWitness {
-            account_and_source_fresh: false,
             finance_complete: false,
             unknown_mutations_reconciled: false,
-            existing_modelled_loss_usdt: "unknown".to_owned(),
+            existing_modelled_loss_usdt: Decimal::ZERO,
             exact_owned_reduce_only_close: false,
         };
         assert_eq!(
             policy.evaluate(&run, &close, &witness),
             Err(ProductionPolicyRejection::SourceUnattested)
         );
-        witness.account_and_source_fresh = true;
-        assert_eq!(
-            policy.evaluate(&run, &close, &witness),
-            Err(ProductionPolicyRejection::SourceUnattested)
-        );
+        // No independent "fresh" boolean can be supplied by a caller.
+        // Source freshness belongs exclusively to assess_production_candidate.
         witness.exact_owned_reduce_only_close = true;
         assert_eq!(policy.evaluate(&run, &close, &witness), Ok(()));
         policy.permission = ProductionPermission::ReadOnly;
@@ -4708,10 +4708,9 @@ mod tests {
             max_total_modelled_loss_usdt: "10".to_owned(),
         };
         let witness = ProductionRiskWitness {
-            account_and_source_fresh: true,
             finance_complete: true,
             unknown_mutations_reconciled: true,
-            existing_modelled_loss_usdt: "0".to_owned(),
+            existing_modelled_loss_usdt: Decimal::ZERO,
             exact_owned_reduce_only_close: false,
         };
         let production = OkxEnvironment::new(okx_api::Region::Global, false);
