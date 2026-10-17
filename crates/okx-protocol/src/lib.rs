@@ -1822,6 +1822,73 @@ impl AccountCatalogEntry {
     }
 }
 
+/// Immutable operator limit for the existing Production executor, not a
+/// credential and never itself permission to send an exchange request.
+pub const PRODUCTION_TRADING_POLICY_SCHEMA_V1: &str = "okx.production-trading-policy/v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProductionPermission {
+    Off,
+    ReadOnly,
+    Enabled,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionTradingPolicy {
+    pub schema: String,
+    pub revision: u64,
+    pub permission: ProductionPermission,
+    pub account_uid_fingerprint: String,
+    pub strategy_run_id: String,
+    pub operator_authority_id: String,
+    pub allowed_instruments: Vec<String>,
+    pub max_total_modelled_loss_usdt: String,
+}
+
+impl ProductionTradingPolicy {
+    /// Validate durable operator scope without floating-point arithmetic.
+    /// Financial exposure is independently recomputed by okx-execution.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        const BAD: ProtocolError = ProtocolError::InvalidAnalyticalQuery("invalid Production trading policy");
+        if self.schema != PRODUCTION_TRADING_POLICY_SCHEMA_V1
+            || self.revision == 0
+            || validate_sha256(&self.account_uid_fingerprint).is_err()
+            || self.strategy_run_id.is_empty()
+            || self.strategy_run_id.len() > 128
+            || !self.operator_authority_id.starts_with("sha256:")
+            || validate_sha256(self.operator_authority_id.strip_prefix("sha256:").unwrap_or("")).is_err()
+            || self.allowed_instruments.is_empty()
+            || self.allowed_instruments.len() > 32
+            || self.allowed_instruments.iter().any(|s| !s.ends_with("-USDT-SWAP") || s.len() > 64)
+        {
+            return Err(BAD);
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        if self.allowed_instruments.iter().any(|s| !unique.insert(s.as_str())) {
+            return Err(BAD);
+        }
+        let (whole, decimal) = self.max_total_modelled_loss_usdt
+            .split_once('.')
+            .unwrap_or((self.max_total_modelled_loss_usdt.as_str(), ""));
+        if whole.is_empty() || whole.len() > 2 || !whole.bytes().all(|b| b.is_ascii_digit())
+            || decimal.len() > 18 || !decimal.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(BAD);
+        }
+        let integral = whole.parse::<u8>().map_err(|_| BAD)?;
+        if integral > 10
+            || (integral == 10 && decimal.bytes().any(|b| b != b'0'))
+            || (integral == 0 && !decimal.bytes().any(|b| b != b'0'))
+        {
+            return Err(BAD);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostControlOperation {
@@ -1832,6 +1899,10 @@ pub enum HostControlOperation {
     RegisterReadOnlyAccount {
         entry: AccountCatalogEntry,
     },
+    /// One durable CONTROL authorization, never an ephemeral pilot permit.
+    ConfigureProductionTrading { policy: ProductionTradingPolicy },
+    /// Fail-closed durable revocation, also effective after restart.
+    StopProductionTrading { expected_revision: u64 },
     Sync,
     BuildAgent,
     DeployAgent {
@@ -1889,6 +1960,10 @@ impl HostControlOperation {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
             Self::RegisterReadOnlyAccount { entry } => entry.validate(),
+            Self::ConfigureProductionTrading { policy } => policy.validate(),
+            Self::StopProductionTrading { expected_revision } => {
+                if *expected_revision == 0 { Err(ProtocolError::InvalidRequestId) } else { Ok(()) }
+            },
             Self::DeployAgent {
                 run_id,
                 artifact_id,
@@ -2499,6 +2574,33 @@ fn validate_decimal_text(value: &str, field: &'static str) -> Result<(), Protoco
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn production_policy_scope_is_typed_bounded_and_strict() {
+        let mut p = ProductionTradingPolicy {
+            schema: PRODUCTION_TRADING_POLICY_SCHEMA_V1.to_owned(),
+            revision: 1,
+            permission: ProductionPermission::Enabled,
+            account_uid_fingerprint: "a".repeat(64),
+            strategy_run_id: "run_for_current_strategy".to_owned(),
+            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
+            allowed_instruments: vec!["BTC-USDT-SWAP".to_owned()],
+            max_total_modelled_loss_usdt: "10".to_owned(),
+        };
+        assert!(p.validate().is_ok());
+        for bad in ["10.000000001", "11", "0", "-1", "1e2", "Infinity"] {
+            p.max_total_modelled_loss_usdt = bad.to_owned();
+            assert!(p.validate().is_err(), "bad budget: {bad}");
+        }
+        p.max_total_modelled_loss_usdt = "0.000000001".to_owned();
+        assert!(p.validate().is_ok());
+        p.allowed_instruments.push("BTC-USDT-SWAP".to_owned());
+        assert!(p.validate().is_err());
+        p.allowed_instruments.pop();
+        p.account_uid_fingerprint = "not-an-account".to_owned();
+        assert!(p.validate().is_err());
+    }
+
+
     use super::*;
 
     #[test]
