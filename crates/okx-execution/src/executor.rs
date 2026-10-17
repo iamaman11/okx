@@ -524,6 +524,67 @@ where
         &self.ledger
     }
 
+    /// The single executor must cross-check a policy against its OWN durable
+    /// run, STOP, exact prepared plan and account source. A caller-created
+    /// policy/witness is never exchange-mutation authority; this is read-only
+    /// admission evidence for future trusted CONTROL-to-owner integration.
+    /// No ledger transition and no network call occurs here.
+    pub fn assess_production_candidate(
+        &self,
+        environment: OkxEnvironment,
+        policy: &ProductionTradingPolicy,
+        witness: &ProductionRiskWitness,
+        intent_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<(), ProductionPolicyRejection> {
+        use ProductionPolicyRejection as Reject;
+        if environment.demo || observed_at_ms == 0 {
+            return Err(Reject::ModeDenied);
+        }
+        let run = self
+            .ledger
+            .capital_reservation()
+            .ok_or(Reject::SourceUnattested)?;
+        let entry = self.ledger.get(intent_id).ok_or(Reject::ScopeMismatch)?;
+        if entry.record.state != ExecutionState::Prepared
+            || entry.record.plan.intent_id != intent_id
+            || entry.record.plan.account_uid_fingerprint != run.account_uid_fingerprint
+            || self.ledger.entries().any(|record| {
+                record.record.plan.account_uid_fingerprint != run.account_uid_fingerprint
+            })
+        {
+            return Err(Reject::ScopeMismatch);
+        }
+        // A finalized or unverified run is never reopened by granting an
+        // authorization policy. Only the existing strict lifecycle may begin
+        // a separately attested new run.
+        if self.ledger.finalized_run().is_some() || self.ledger.unverified_run().is_some() {
+            return Err(Reject::SourceUnattested);
+        }
+        // Durable STOP is stronger than a potentially stale ENABLED policy.
+        // Risk-reducing CLOSE is independently limited by exact owned
+        // reduce-only evidence inside policy.evaluate().
+        if self.ledger.risk_stop().is_some() && entry.record.plan.action.is_risk_increasing() {
+            return Err(Reject::ModeDenied);
+        }
+        let source = self
+            .ledger
+            .exchange_evidence_summary()
+            .ok_or(Reject::SourceUnattested)?;
+        if source.run_id != run.allocation_id
+            || !source.latest_source_complete
+            || source.source_gap_over_two_hours
+            || source.latest_source_asof_ms.is_none_or(|asof| {
+                asof < entry.created_at_ms
+                    || asof > observed_at_ms
+                    || observed_at_ms - asof > 30_000
+            })
+        {
+            return Err(Reject::SourceUnattested);
+        }
+        policy.evaluate(run, &entry.record.plan, witness)
+    }
+
     /// The existing single executor owns the configuration POST fence.
     pub fn begin_leverage_change(
         &mut self,
@@ -4626,6 +4687,56 @@ mod tests {
             policy.evaluate(&run, &close, &witness),
             Err(ProductionPolicyRejection::ModeDenied)
         );
+    }
+
+    #[test]
+    fn production_owner_denies_without_persisted_financial_source_and_never_sends() {
+        let (root, mut ledger) = ledger("production-owned-policy-gate");
+        let mut plan = protected_plan();
+        plan.order_type = OrderType::Fok;
+        plan.account_uid_fingerprint = "a".repeat(64);
+        ledger.prepare(plan.clone(), 101).expect("prepare");
+        let executor = OrderExecutor::new(ledger, MockGateway::new(vec![], vec![]));
+        let policy = ProductionTradingPolicy {
+            schema: PRODUCTION_TRADING_POLICY_SCHEMA_V1.to_owned(),
+            revision: 1,
+            permission: ProductionPermission::Enabled,
+            account_uid_fingerprint: plan.account_uid_fingerprint.clone(),
+            strategy_run_id: "run_policy_20261017_fixture".to_owned(),
+            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
+            allowed_instruments: vec![plan.instrument_id.clone()],
+            max_total_modelled_loss_usdt: "10".to_owned(),
+        };
+        let witness = ProductionRiskWitness {
+            account_and_source_fresh: true,
+            finance_complete: true,
+            unknown_mutations_reconciled: true,
+            existing_modelled_loss_usdt: "0".to_owned(),
+            exact_owned_reduce_only_close: false,
+        };
+        let production = OkxEnvironment::new(okx_api::Region::Global, false);
+        let demo = OkxEnvironment::new(okx_api::Region::Global, true);
+        assert_eq!(
+            executor.assess_production_candidate(demo, &policy, &witness, &plan.intent_id, 102),
+            Err(ProductionPolicyRejection::ModeDenied)
+        );
+        assert_eq!(
+            executor.assess_production_candidate(
+                production,
+                &policy,
+                &witness,
+                &plan.intent_id,
+                102
+            ),
+            Err(ProductionPolicyRejection::SourceUnattested)
+        );
+        assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
+        assert_eq!(executor.gateway().place_calls(), 0);
+        assert_eq!(
+            executor.ledger().get(&plan.intent_id).unwrap().record.state,
+            ExecutionState::Prepared
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
