@@ -308,6 +308,8 @@ impl MutationAuthority {
 #[derive(Debug, Clone)]
 pub struct ProductionLivePermit {
     pub account_uid_fingerprint: String,
+    /// Exact prepared intent: approval cannot authorize another order.
+    pub intent_id: String,
     pub allocation_id: String,
     pub operator_authority_id: String,
     pub max_allocation_usdt: String,
@@ -322,6 +324,7 @@ impl ProductionLivePermit {
         environment: OkxEnvironment,
         ledger: &DurableExecutionLedger,
         now_ms: u64,
+        intent_id: &str,
     ) -> bool {
         let lower_hex = |value: &str| {
             value.len() == 64
@@ -341,6 +344,8 @@ impl ProductionLivePermit {
         };
         !environment.demo
             && lower_hex(&self.account_uid_fingerprint)
+            && !self.intent_id.is_empty()
+            && self.intent_id == intent_id
             && lower_hex(&self.source_checksum_sha256)
             && !self.allocation_id.is_empty()
             && !self.operator_authority_id.is_empty()
@@ -598,10 +603,11 @@ where
         &mut self,
         environment: OkxEnvironment,
         permit: &ProductionLivePermit,
+        intent_id: &str,
         now_ms: u64,
     ) -> Result<(), OrderExecutorError> {
         self.disable_mutations();
-        if !permit.valid_for(environment, &self.ledger, now_ms) {
+        if !permit.valid_for(environment, &self.ledger, now_ms, intent_id) {
             return Err(OrderExecutorError::ProductionLivePermitRejected);
         }
         self.mutation_authority = MutationAuthority::ProductionLive;
@@ -4504,6 +4510,7 @@ mod tests {
         let demo = OkxEnvironment::new(okx_api::Region::Global, true);
         let permit = ProductionLivePermit {
             account_uid_fingerprint: "a".repeat(64),
+            intent_id: plan.intent_id.clone(),
             allocation_id: "prod_pilot_20261017".to_owned(),
             operator_authority_id: "native_control_approved_pilot".to_owned(),
             max_allocation_usdt: "100".to_owned(),
@@ -4513,29 +4520,35 @@ mod tests {
         };
         assert!(!executor.live_trading_enabled());
         assert!(matches!(
-            executor.enable_production_live(prod, &permit, 102),
+            executor.enable_production_live(prod, &permit, &plan.intent_id, 102),
             Err(OrderExecutorError::ProductionLivePermitRejected)
         ));
         assert!(matches!(
-            executor.enable_production_live(demo, &permit, 102),
+            executor.enable_production_live(demo, &permit, &plan.intent_id, 102),
             Err(OrderExecutorError::ProductionLivePermitRejected)
         ));
         let mut stale = permit.clone();
         stale.expires_at_ms = 101;
         assert!(matches!(
-            executor.enable_production_live(prod, &stale, 102),
+            executor.enable_production_live(prod, &stale, &plan.intent_id, 102),
             Err(OrderExecutorError::ProductionLivePermitRejected)
         ));
         let mut oversized = permit.clone();
         oversized.max_allocation_usdt = "100.01".to_owned();
         assert!(matches!(
-            executor.enable_production_live(prod, &oversized, 102),
+            executor.enable_production_live(prod, &oversized, &plan.intent_id, 102),
             Err(OrderExecutorError::ProductionLivePermitRejected)
         ));
         let mut foreign = permit.clone();
         foreign.account_uid_fingerprint = "not-an-uid".to_owned();
         assert!(matches!(
-            executor.enable_production_live(prod, &foreign, 102),
+            executor.enable_production_live(prod, &foreign, &plan.intent_id, 102),
+            Err(OrderExecutorError::ProductionLivePermitRejected)
+        ));
+        let mut wrong_intent = permit.clone();
+        wrong_intent.intent_id = "unrelated_prepared_intent_0123456789".to_owned();
+        assert!(matches!(
+            executor.enable_production_live(prod, &wrong_intent, &plan.intent_id, 102),
             Err(OrderExecutorError::ProductionLivePermitRejected)
         ));
         assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
