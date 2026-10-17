@@ -143,6 +143,32 @@ pub(super) async fn dispatch(
     context: ObservationQueryContext<'_>,
     generated_at: &str,
 ) -> AgentResult<AgentResponse> {
+    // A live write must carry the fresh policy read by the authenticated
+    // Worker for THIS request/session, never a local host journal permission.
+    // All other transports lack this context and therefore cannot mint a live
+    // exchange mutation. Demo remains governed by its native venue preflight.
+    if context
+        .execution
+        .is_some_and(|owner| owner.production_trading_requested())
+        && !request.operation.direct_transport_read_only()
+        && !context.operator_policy.is_some_and(|policy| {
+            policy.valid()
+                && policy.trading_requested
+                && policy.session_generation == context.transport_generation
+                && policy.issued_at_ms <= utc_now_ms()
+                && utc_now_ms().saturating_sub(policy.issued_at_ms)
+                    <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
+        })
+    {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            LIVE_TRADING_DISABLED_CODE,
+            "central account policy unavailable, revoked, stale or not bound to this authenticated Worker session".to_owned(),
+            false,
+        ));
+    }
     // Critical admission boundary for ALL public mutation requests, including
     // ledger-only prepare, risk changes, migrations and exchange POST actions.
     // Holding this guard across the entire request prevents drain from racing
@@ -568,6 +594,7 @@ async fn begin_strategy_run(
                 &opening,
                 observed_at_ms,
                 rearm.as_ref(),
+                context.central_policy_binding(),
             )
             .await?
     } else {
@@ -1706,8 +1733,11 @@ async fn submit_prepared(
                 intent_id,
                 timing,
                 observed_at_ms,
-                facts,
-                &protection,
+                crate::execution_runtime::ProductionSubmitSources {
+                    facts,
+                    protection: &protection,
+                },
+                context.central_policy_binding(),
             )
             .await?
         {

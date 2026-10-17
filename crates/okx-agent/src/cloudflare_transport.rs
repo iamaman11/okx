@@ -4,8 +4,8 @@ use chrono::{SecondsFormat, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentResponse, AgentResponseStatus,
-    DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DataQuality,
-    DirectRuntimeProfile, DirectTransportFrame,
+    CentralAccountPolicy, DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES,
+    DataQuality, DirectRuntimeProfile, DirectTransportFrame,
 };
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
 use tokio::{
@@ -52,6 +52,37 @@ fn direct_operation_allowed(
         || (profile == DirectRuntimeProfile::DemoAcceptance
             && runtime_mode == Some(ExecutionRuntimeMode::DemoAcceptance)
             && operation.direct_transport_demo_execution())
+}
+
+/// Delivery admission only. Native Rust will independently check UID,
+/// Trade credential, financial continuity and shared risk before any POST.
+fn central_production_delivery_admitted(
+    profile: DirectRuntimeProfile,
+    mode: Option<ExecutionRuntimeMode>,
+    operation: &AgentOperation,
+    policy: Option<&CentralAccountPolicy>,
+    generation: u64,
+    now_ms: u64,
+) -> bool {
+    profile == DirectRuntimeProfile::Production
+        && mode == Some(ExecutionRuntimeMode::Production)
+        && matches!(
+            operation,
+            AgentOperation::BeginStrategyRun { .. }
+                | AgentOperation::PrepareExecution { .. }
+                | AgentOperation::SubmitPreparedExecution { .. }
+                | AgentOperation::FinalizeStrategyRun { .. }
+                | AgentOperation::QuarantineUnverifiedStrategyRun { .. }
+        )
+        && policy.is_some_and(|p| {
+            p.valid()
+                && p.trading_requested
+                && p.revision > 0
+                && p.session_generation == generation
+                && p.issued_at_ms <= now_ms
+                && now_ms.saturating_sub(p.issued_at_ms)
+                    <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
+        })
 }
 
 pub struct CloudflareTransportConfig {
@@ -341,6 +372,7 @@ async fn run_session(
                         session_id: frame_session,
                         connection_generation: frame_generation,
                         request,
+                        operator_policy,
                         ..
                     } => {
                         require_session(
@@ -393,12 +425,19 @@ async fn run_session(
                             config.runtime_profile,
                             context.execution.map(ExecutionRuntime::mode),
                             &request.operation,
+                        ) || central_production_delivery_admitted(
+                            config.runtime_profile,
+                            context.execution.map(ExecutionRuntime::mode),
+                            &request.operation,
+                            operator_policy.as_ref(),
+                            frame_generation,
+                            Utc::now().timestamp_millis().max(1) as u64,
                         );
                         if !allowed {
                             let response = direct_rejection(
                                 &request.request_id,
                                 DIRECT_TRANSPORT_MUTATION_REJECTED,
-                                "executor mutation requires a profile-verified Demo runtime and its existing Rust admission; production remains read-only",
+                                "mutation requires Demo admission or a current central Production policy bound to this authenticated Worker session; Rust still owns final trade permission",
                                 false,
                             );
                             send_frame(
@@ -455,6 +494,8 @@ async fn run_session(
                         }
                         in_flight.push(
                             async move {
+                                let query_context = query_context
+                                    .with_operator_policy(operator_policy.as_ref(), frame_generation);
                                 let result =
                                     dispatch(&request, query_context, &generated_at).await;
                                 (response_request_id, mutating, result)
@@ -686,6 +727,69 @@ mod tests {
             assert!(!direct_operation_allowed(profile, mode, &submit));
             assert!(direct_operation_allowed(profile, mode, &read));
         }
+    }
+
+    #[test]
+    fn central_policy_gates_production_delivery_without_granting_trade() {
+        let submit = AgentOperation::SubmitPreparedExecution {
+            intent_id: "intent_central_policy_012345".to_owned(),
+        };
+        let p = CentralAccountPolicy {
+            schema: okx_protocol::CENTRAL_ACCOUNT_POLICY_SCHEMA_V1.to_owned(),
+            revision: 3,
+            trading_requested: true,
+            allowed_account_uids: vec!["a".repeat(64)],
+            max_total_modelled_loss_usdt: "10".to_owned(),
+            issued_at_ms: 1_000,
+            session_generation: 7,
+        };
+        let admit = |policy: Option<&CentralAccountPolicy>, profile, mode, generation, now| {
+            central_production_delivery_admitted(profile, mode, &submit, policy, generation, now)
+        };
+        assert!(admit(
+            Some(&p),
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::Production),
+            7,
+            1_001
+        ));
+        assert!(!admit(
+            None,
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::Production),
+            7,
+            1_001
+        ));
+        assert!(!admit(
+            Some(&p),
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::ReadOnly),
+            7,
+            1_001
+        ));
+        assert!(!admit(
+            Some(&p),
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::Production),
+            8,
+            1_001
+        ));
+        assert!(!admit(
+            Some(&p),
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::Production),
+            7,
+            16_001
+        ));
+        let mut revoked = p;
+        revoked.trading_requested = false;
+        assert!(!admit(
+            Some(&revoked),
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::Production),
+            7,
+            1_001
+        ));
     }
 
     #[test]

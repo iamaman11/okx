@@ -1615,6 +1615,58 @@ impl AgentOperation {
     }
 }
 
+/// One fresh operator policy from the authenticated Cloudflare session.
+/// It is a request-scoped limit, NOT an exchange credential or an order permit.
+pub const CENTRAL_ACCOUNT_POLICY_SCHEMA_V1: &str = "okx.account-policy/v1";
+pub const CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS: u64 = 15_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CentralAccountPolicy {
+    pub schema: String,
+    pub revision: u64,
+    pub trading_requested: bool,
+    pub allowed_account_uids: Vec<String>,
+    pub max_total_modelled_loss_usdt: String,
+    pub issued_at_ms: u64,
+    pub session_generation: u64,
+}
+
+impl CentralAccountPolicy {
+    pub fn valid(&self) -> bool {
+        self.schema == CENTRAL_ACCOUNT_POLICY_SCHEMA_V1
+            && self.session_generation > 0
+            && (!self.trading_requested || self.revision > 0)
+            && self.issued_at_ms > 0
+            && self.max_total_modelled_loss_usdt == "10"
+            && (!self.trading_requested || !self.allowed_account_uids.is_empty())
+            && self.allowed_account_uids.len() <= 16
+            && self
+                .allowed_account_uids
+                .iter()
+                .all(|uid| validate_sha256(uid).is_ok())
+            && self
+                .allowed_account_uids
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+    }
+
+    /// Result belongs to exactly this request/session; never cache across
+    /// exchange POSTs, profile selection or a central revocation.
+    pub fn authorizes_uid(&self, uid: &str, now_ms: u64, session_generation: u64) -> bool {
+        self.valid()
+            && self.revision > 0
+            && self.trading_requested
+            && self.session_generation == session_generation
+            && self.issued_at_ms <= now_ms
+            && now_ms.saturating_sub(self.issued_at_ms) <= CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
+            && self
+                .allowed_account_uids
+                .binary_search_by(|s| s.as_str().cmp(uid))
+                .is_ok()
+    }
+}
+
 /// The authenticated one-owner Windows process profile, never an order-mutation grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1657,6 +1709,8 @@ pub enum DirectTransportFrame {
         session_id: String,
         connection_generation: u64,
         request: AgentRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_policy: Option<CentralAccountPolicy>,
     },
     DeliveryAck {
         schema: String,
@@ -1684,6 +1738,7 @@ impl DirectTransportFrame {
                 session_id,
                 connection_generation,
                 request,
+                operator_policy: _,
             } => {
                 validate_direct_schema(schema)?;
                 validate_direct_token(session_id, 16, 128)?;
@@ -1740,10 +1795,17 @@ impl DirectTransportFrame {
                 session_id,
                 connection_generation,
                 request,
+                operator_policy,
             } => {
                 validate_direct_schema(schema)?;
                 validate_direct_token(session_id, 16, 128)?;
                 validate_connection_generation(*connection_generation)?;
+                if operator_policy
+                    .as_ref()
+                    .is_some_and(|p| !p.valid() || p.session_generation != *connection_generation)
+                {
+                    return Err(ProtocolError::InvalidProductionTradingPolicy);
+                }
                 request.validate()
             }
             Self::DeliveryAck {
@@ -4038,12 +4100,37 @@ mod direct_transport_tests {
     }
 
     #[test]
+    fn central_policy_session_uid_revision_and_time_are_fenced() {
+        let uid = "a".repeat(64);
+        let policy = CentralAccountPolicy {
+            schema: CENTRAL_ACCOUNT_POLICY_SCHEMA_V1.to_owned(),
+            revision: 1,
+            trading_requested: true,
+            allowed_account_uids: vec![uid.clone()],
+            max_total_modelled_loss_usdt: "10".to_owned(),
+            issued_at_ms: 1000,
+            session_generation: 7,
+        };
+        assert!(policy.authorizes_uid(&uid, 1001, 7));
+        assert!(!policy.authorizes_uid(&uid, 1001, 8));
+        assert!(!policy.authorizes_uid(&uid, 1000 + CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS + 1, 7));
+        assert!(!policy.authorizes_uid(&"b".repeat(64), 1001, 7));
+        let mut disabled = policy.clone();
+        disabled.trading_requested = false;
+        assert!(!disabled.authorizes_uid(&uid, 1001, 7));
+        let mut overflow = policy;
+        overflow.max_total_modelled_loss_usdt = "11".to_owned();
+        assert!(!overflow.authorizes_uid(&uid, 1001, 7));
+    }
+
+    #[test]
     fn direct_transport_request_round_trips() {
         let frame = DirectTransportFrame::Request {
             schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
             session_id: "session_0123456789".to_owned(),
             connection_generation: 7,
             request: request(),
+            operator_policy: None,
         };
         frame.validate().expect("valid frame");
         let encoded = serde_json::to_string(&frame).expect("encode");
@@ -4092,6 +4179,7 @@ mod direct_transport_tests {
             session_id: "session_direct_0123456789".to_owned(),
             connection_generation: 7,
             request,
+            operator_policy: None,
         };
         assert!(frame.validate_incoming_envelope().is_ok());
         assert!(frame.validate().is_err());
@@ -4237,6 +4325,7 @@ mod direct_transport_tests {
             session_id: "session_0123456789".to_owned(),
             connection_generation: 0,
             request: request(),
+            operator_policy: None,
         };
         assert_eq!(
             bad_generation.validate(),

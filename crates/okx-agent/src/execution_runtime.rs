@@ -21,6 +21,7 @@ use okx_execution::{
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
 };
+use okx_protocol::CentralAccountPolicy;
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use tokio::time::timeout;
@@ -36,6 +37,28 @@ use crate::{
 
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
 pub const LEVERAGE_CHANGE_PROOF_SCHEMA_V1: &str = "okx.leverage-change-proof/v1";
+
+/// The final native venue witnesses are captured by one query owner before
+/// the single Rust executor evaluates and submits a Production intent.
+pub struct ProductionSubmitSources<'a> {
+    pub facts: &'a AccountLedgerFacts,
+    pub protection: &'a PendingProtectiveAlgoInventory,
+}
+
+/// One immutable, Worker-sourced policy for exactly this authenticated
+/// transport generation and one native execution request. Never persisted.
+#[derive(Clone, Copy)]
+pub struct CentralPolicyBinding<'a> {
+    pub policy: &'a CentralAccountPolicy,
+    pub session_generation: u64,
+}
+
+impl CentralPolicyBinding<'_> {
+    pub fn authorizes_uid(self, uid: &str, now_ms: u64) -> bool {
+        self.policy
+            .authorizes_uid(uid, now_ms, self.session_generation)
+    }
+}
 
 /// A Hedge Cross setting is accepted only when BOTH distinct sides are
 /// individually verified and have the same exact, positive leverage.
@@ -895,7 +918,16 @@ impl ExecutionRuntime {
         opening: &StrategyAllocationOpening,
         now_ms: u64,
         rearm: Option<&okx_execution::StrategyStopRearmRequest>,
+        central: Option<CentralPolicyBinding<'_>>,
     ) -> AgentResult<Option<Result<StrategyCapitalReservation, OrderExecutorError>>> {
+        if !central.is_some_and(|p| {
+            p.authorizes_uid(
+                &preflight.account_uid_fingerprint,
+                Utc::now().timestamp_millis().max(1) as u64,
+            )
+        }) {
+            return Ok(None);
+        }
         if !self.production_trading_requested()
             || !preflight.accepted
             || !preflight.production_environment
@@ -1063,9 +1095,18 @@ impl ExecutionRuntime {
         intent_id: &str,
         timing: MutationTiming,
         observed_at_ms: u64,
-        facts: &AccountLedgerFacts,
-        protection: &PendingProtectiveAlgoInventory,
+        sources: ProductionSubmitSources<'_>,
+        central: Option<CentralPolicyBinding<'_>>,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
+        let ProductionSubmitSources { facts, protection } = sources;
+        if !central.is_some_and(|p| {
+            p.authorizes_uid(
+                &preflight.credential.account_uid_fingerprint,
+                Utc::now().timestamp_millis().max(1) as u64,
+            )
+        }) {
+            return Ok(None);
+        }
         if !self.production_trading_requested()
             || !preflight.accepted
             || !preflight.credential.accepted
@@ -1176,6 +1217,16 @@ impl ExecutionRuntime {
             existing_modelled_loss_usdt: rust_decimal::Decimal::ZERO,
             exact_owned_reduce_only_close: close_owned_exact,
         };
+        // Final central revision/UID/expiry fence immediately before the
+        // native gateway owner enters its durable SUBMITTING and single POST.
+        if !central.is_some_and(|p| {
+            p.authorizes_uid(
+                &preflight.credential.account_uid_fingerprint,
+                Utc::now().timestamp_millis().max(1) as u64,
+            )
+        }) {
+            return Ok(None);
+        }
         Ok(Some(
             executor
                 .submit_prepared_production_authorized(

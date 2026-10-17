@@ -1,4 +1,5 @@
 import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
+import { defaultAccountPolicy, validAccountPolicy } from "./account_policy.js";
 import { accountPolicyRequest } from "./account_policy.js";
 import {
   ACK_DEADLINE_MS,
@@ -254,12 +255,37 @@ export class RuntimeSession {
         active.attachment.generation,
         RESPONSE_DEADLINE_MS,
       );
+      // Read the authoritative policy for EVERY Production write. Never
+      // cache it across calls or accept caller-supplied policy fields.
+      // Native Rust still owns credential/UID/STOP/risk and exchange POST.
+      let operator_policy: Record<string, unknown> | undefined;
+      if (isExecutionMutation(request.operation?.type) &&
+          active.attachment.runtimeProfile === "production") {
+        const stored: unknown = await this.state.storage.get("account_policy_v1");
+        if (stored !== undefined && !validAccountPolicy(stored)) {
+          return transportFailure("CENTRAL_POLICY_CORRUPT", false);
+        }
+        const policy = stored ?? defaultAccountPolicy();
+        if (!validAccountPolicy(policy)) {
+          return transportFailure("CENTRAL_POLICY_UNAVAILABLE", false);
+        }
+        operator_policy = {
+          schema: policy.schema,
+          revision: policy.revision,
+          trading_requested: policy.trading_requested,
+          allowed_account_uids: policy.allowed_account_uids,
+          max_total_modelled_loss_usdt: policy.max_total_modelled_loss_usdt,
+          issued_at_ms: Date.now(),
+          session_generation: active.attachment.generation,
+        };
+      }
       active.ws.send(JSON.stringify({
         type: "request",
         schema: FRAME_SCHEMA,
         session_id: active.attachment.sessionId,
         connection_generation: active.attachment.generation,
         request,
+        ...(operator_policy === undefined ? {} : { operator_policy }),
       }));
       await ack;
       return await response as Json;

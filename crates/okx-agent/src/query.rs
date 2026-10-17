@@ -30,9 +30,9 @@ use okx_observation::{
 };
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
-    AgentResponseStatus, DataQuality, HardRiskPolicyRequest, InstrumentTypeFilter,
-    LiquidityRole as ProtocolLiquidityRole, PortfolioMandateRequest, PortfolioStatisticsRequest,
-    PositionSide, RiskDegradedMode as ProtocolRiskDegradedMode,
+    AgentResponseStatus, CentralAccountPolicy, DataQuality, HardRiskPolicyRequest,
+    InstrumentTypeFilter, LiquidityRole as ProtocolLiquidityRole, PortfolioMandateRequest,
+    PortfolioStatisticsRequest, PositionSide, RiskDegradedMode as ProtocolRiskDegradedMode,
     RiskMinimumQuality as ProtocolRiskMinimumQuality, VirtualPortfolioRequest,
 };
 use okx_runtime::{
@@ -174,6 +174,8 @@ pub struct ObservationQueryContext<'a> {
     execution: Option<&'a ExecutionRuntime>,
     research_root: Option<&'a Path>,
     research_session: Option<&'a ResearchSessionHandle>,
+    operator_policy: Option<&'a CentralAccountPolicy>,
+    transport_generation: u64,
 }
 
 impl<'a> ObservationQueryContext<'a> {
@@ -188,6 +190,8 @@ impl<'a> ObservationQueryContext<'a> {
             execution: None,
             research_root: None,
             research_session: None,
+            operator_policy: None,
+            transport_generation: 0,
         }
     }
 
@@ -213,6 +217,8 @@ impl<'a> ObservationQueryContext<'a> {
             execution: None,
             research_root: None,
             research_session: None,
+            operator_policy: None,
+            transport_generation: 0,
         }
     }
 
@@ -309,7 +315,36 @@ impl<'a> ObservationQueryContext<'a> {
             execution,
             research_root,
             research_session,
+            operator_policy: None,
+            transport_generation: 0,
         }
+    }
+
+    /// Only direct authenticated Worker transport may bind this fresh policy.
+    /// Ordinary GitHub mailbox, local tests and saved files have no grant.
+    pub const fn with_operator_policy(
+        mut self,
+        policy: Option<&'a CentralAccountPolicy>,
+        generation: u64,
+    ) -> Self {
+        self.operator_policy = policy;
+        self.transport_generation = generation;
+        self
+    }
+
+    pub fn central_policy_binding(
+        &self,
+    ) -> Option<crate::execution_runtime::CentralPolicyBinding<'a>> {
+        self.operator_policy
+            .map(|policy| crate::execution_runtime::CentralPolicyBinding {
+                policy,
+                session_generation: self.transport_generation,
+            })
+    }
+
+    pub fn central_uid_admitted(&self, uid: &str, now_ms: u64) -> bool {
+        self.operator_policy
+            .is_some_and(|policy| policy.authorizes_uid(uid, now_ms, self.transport_generation))
     }
 }
 
@@ -1113,6 +1148,8 @@ mod tests {
                 execution: None,
                 research_root: None,
                 research_session: None,
+                operator_policy: None,
+                transport_generation: 0,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1154,6 +1191,8 @@ mod tests {
                 execution: None,
                 research_root: None,
                 research_session: None,
+                operator_policy: None,
+                transport_generation: 0,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1196,6 +1235,8 @@ mod tests {
                 execution: None,
                 research_root: None,
                 research_session: None,
+                operator_policy: None,
+                transport_generation: 0,
             },
             "2026-09-27T00:00:01.000Z",
         )
