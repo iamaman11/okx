@@ -332,7 +332,9 @@ impl ProductionLivePermit {
     }
 
     fn loss_within_pilot(plan: &ExecutionPlan, approved_loss: Decimal) -> bool {
-        if approved_loss <= Decimal::ZERO {
+        // This operator-authorized pilot has a 10 USDT planned loss ceiling.
+        // Stop-loss is a modelled risk bound, NOT a guaranteed worst-case fill.
+        if approved_loss <= Decimal::ZERO || approved_loss > Decimal::from(10) {
             return false;
         }
         match plan.action {
@@ -419,8 +421,9 @@ impl ProductionLivePermit {
                         .is_ok_and(|allocated| allocated > Decimal::ZERO && allocated <= cap)
             })
             && max_loss.is_some_and(|loss| {
-                max_allocation.is_some_and(|cap| loss > Decimal::ZERO && loss <= cap)
-                    && Self::loss_within_pilot(&intent.record.plan, loss)
+                max_allocation.is_some_and(|cap| {
+                    loss > Decimal::ZERO && loss <= cap && loss <= Decimal::from(10)
+                }) && Self::loss_within_pilot(&intent.record.plan, loss)
             })
             && run.allocation_id == self.allocation_id
             && run.account_uid_fingerprint == self.account_uid_fingerprint
@@ -4628,12 +4631,22 @@ mod tests {
             &open,
             Decimal::ZERO
         ));
+        assert!(!ProductionLivePermit::loss_within_pilot(
+            &open,
+            Decimal::new(1_001, 2)
+        ));
         assert!(!ProductionLivePermit::stop_allows_action(
             true,
             crate::ExecutionAction::Open
         ));
         open.action = crate::ExecutionAction::Close;
         assert!(ProductionLivePermit::loss_within_pilot(&open, Decimal::ONE));
+        // Risk-reducing CLOSE does not create exposure but may not be paired
+        // with an unbounded approval above this operator's 10 USDT limit.
+        assert!(!ProductionLivePermit::loss_within_pilot(
+            &open,
+            Decimal::new(1_001, 2)
+        ));
         assert!(ProductionLivePermit::stop_allows_action(
             true,
             crate::ExecutionAction::Close
@@ -4695,6 +4708,12 @@ mod tests {
         stale.expires_at_ms = 101;
         assert!(matches!(
             executor.enable_production_live(prod, &stale, &plan.intent_id, 102),
+            Err(OrderExecutorError::ProductionLivePermitRejected)
+        ));
+        let mut above_loss_budget = permit.clone();
+        above_loss_budget.max_loss_usdt = "10.01".to_owned();
+        assert!(matches!(
+            executor.enable_production_live(prod, &above_loss_budget, &plan.intent_id, 102),
             Err(OrderExecutorError::ProductionLivePermitRejected)
         ));
         let mut oversized = permit.clone();
