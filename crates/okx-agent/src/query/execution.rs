@@ -1604,7 +1604,8 @@ async fn executor_preflight(
     let readout = crate::execution_preflight::ExecutorPreflightReadout::new(
         evidence,
         private_ws,
-        execution.demo_mutation_acceptance_requested(),
+        execution.demo_mutation_acceptance_requested()
+            || execution.production_trading_requested(),
     );
     Ok(completed(
         request,
