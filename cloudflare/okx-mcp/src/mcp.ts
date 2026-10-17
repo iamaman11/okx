@@ -159,6 +159,24 @@ export const mcpApi = {
             inputSchema: { type: "object", properties: {}, additionalProperties: false },
           },
           {
+            name: "account_control",
+            description: "Read or configure the ONE central account trading request, with one aggregate $10 modelled-loss budget, immutable account UID allowlist, and CAS revision. Configuration is NOT an executable trading permit; native OKX Trade credentials, financial STOP and Rust risk still decide effective admission.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                action: { type: "string", enum: ["status", "configure"] },
+                expected_revision: { type: "integer", minimum: 0 },
+                trading_requested: { type: "boolean" },
+                allowed_account_uids: {
+                  type: "array", minItems: 0, maxItems: 16, uniqueItems: true,
+                  items: { type: "string", pattern: "^[0-9a-f]{64}$" },
+                },
+              },
+              required: ["action"],
+              additionalProperties: false,
+            },
+          },
+          {
             name: "find_instruments",
             description: "Find OKX derivatives through the Windows ReferenceRegistry. AgentResponse.quality describes reference-readiness, not live market freshness; use market_overview for market freshness.",
             inputSchema: {
@@ -556,6 +574,25 @@ export const mcpApi = {
     try {
       if (name === "runtime_status") {
         return jsonRpc(id, toolResult(contractStatus(await runtimeFetch(env, "/status?probe=1"))));
+      }
+      if (name === "account_control") {
+        if (args.action === "status" && hasOnlyKeys(args, ["action"])) {
+          return jsonRpc(id, toolResult(await runtimeFetch(env, "/account-policy")));
+        }
+        if (args.action === "configure" && hasOnlyKeys(args, [
+          "action","expected_revision","trading_requested","allowed_account_uids",
+        ]) && Object.keys(args).length === 4) {
+          return jsonRpc(id, toolResult(await runtimeFetch(env, "/account-policy", {
+            method: "POST",
+            headers: {"content-type":"application/json"},
+            body: JSON.stringify({
+              expected_revision: args.expected_revision,
+              trading_requested: args.trading_requested,
+              allowed_account_uids: args.allowed_account_uids,
+            }),
+          })));
+        }
+        return jsonRpcError(id,-32602,"invalid account_control request");
       }
       if (name === "find_instruments") {
         const asset = normalizeCode(args.asset, 2, 16);
