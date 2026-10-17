@@ -453,6 +453,12 @@ fn assemble_period_financial_audit(
                 .strategy_nav
                 .as_ref()
                 .is_some_and(|nav| nav.allocation_id == period.run_id)
+            && report.exchange_evidence.as_ref().is_some_and(|source| {
+                source.run_id == period.run_id
+                    && source.checksum_sha256 == period.evidence_sha256
+                    && source.latest_source_complete
+                    && !source.source_gap_over_two_hours
+            })
     });
     let mut reasons = Vec::new();
     if attribution.is_none_or(|value| value.status != "COMPLETE") {
@@ -1445,6 +1451,21 @@ mod tests {
             nav_usdt: None,
             reasons: vec!["nav_epoch_outside_order_history_window"],
         });
+        report.exchange_evidence = Some(crate::ExchangeEvidenceSummary {
+            schema: crate::EXCHANGE_EVIDENCE_SCHEMA_V1,
+            run_id: "new_run_20261017".to_owned(),
+            events: 2,
+            cursors: 2,
+            checksum_sha256: "a".repeat(64),
+            latest_source_complete: true,
+            oldest_source_asof_ms: Some(100),
+            latest_source_asof_ms: Some(200),
+            largest_persisted_gap_ms: Some(100),
+            source_gap_over_two_hours: false,
+            remaining_source_cursors: 100,
+            remaining_events: 100,
+            next_source_coverage_deadline_ms: Some(300),
+        });
         report.financial_period = Some(crate::StrategyFinancialPeriod {
             schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
             run_id: "new_run_20261017".to_owned(),
@@ -1480,6 +1501,9 @@ mod tests {
         assert!(!assemble_period_financial_audit(&report).current_period_proven);
         report.financial_period.as_mut().unwrap().evidence_sha256 = "a".repeat(64);
         report.financial_period.as_mut().unwrap().state = "INCOMPLETE";
+        assert!(!assemble_period_financial_audit(&report).current_period_proven);
+        report.financial_period.as_mut().unwrap().state = "FLAT_RECONCILED";
+        report.exchange_evidence.as_mut().unwrap().checksum_sha256 = "f".repeat(64);
         assert!(!assemble_period_financial_audit(&report).current_period_proven);
         let _ = std::fs::remove_file(p);
     }
