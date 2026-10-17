@@ -48,6 +48,35 @@ pub enum RuntimeState {
 // A failed venue proof can be retried only at a bounded cadence.
 const MIN_QUIET_SOURCE_RETRY_MS: u64 = 300_000;
 
+/// A prior pilot request must not prevent CONTROL from safely draining the
+/// same owned process. No further arm or target verification is accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeControlPhase {
+    Initial,
+    PilotSeen,
+    Closed,
+}
+
+impl NativeControlPhase {
+    fn admit(&mut self, operation: NativeChildOperation) -> bool {
+        match (*self, operation) {
+            (Self::Initial, NativeChildOperation::ArmProductionPilot) => {
+                *self = Self::PilotSeen;
+                true
+            }
+            (Self::Initial, NativeChildOperation::Drain | NativeChildOperation::VerifyReadOnly)
+            | (Self::PilotSeen, NativeChildOperation::Drain) => {
+                *self = Self::Closed;
+                true
+            }
+            _ => {
+                *self = Self::Closed;
+                false
+            }
+        }
+    }
+}
+
 fn native_legacy_read_only_source_is_quiet(
     source: &serde_json::Value,
     ledger: &okx_execution::ProfileHandoffLedgerAssessment,
@@ -212,28 +241,39 @@ pub async fn run_mailbox_until_shutdown(
         Some(mailbox_issue),
     )?;
 
-    // Exactly one inbound local line per process; no socket, no daemon and
-    // no general shell RPC. A reader thread is blocked in inherited stdin,
-    // then forwards one bounded typed command to the existing Tokio owner.
+    // Existing inherited pipe, bounded blocking reader. A pilot arm may
+    // receive exactly one follow-up terminal Drain; any other first command
+    // remains single-use. No new daemon, timer, socket, or retry transport.
     let (native_tx, mut native_rx) = mpsc::unbounded_channel::<NativeChildRequest>();
     if native_child_control_stdio {
         std::thread::spawn(move || {
             let stdin = std::io::stdin();
-            let mut bounded = stdin
-                .lock()
-                .take((NATIVE_CHILD_CONTROL_MAX_BYTES + 1) as u64);
-            let mut frame = Vec::new();
-            if bounded.read_until(b'\n', &mut frame).is_ok()
-                && frame.len() <= NATIVE_CHILD_CONTROL_MAX_BYTES
-                && frame.last() == Some(&b'\n')
-                && let Ok(request) = serde_json::from_slice::<NativeChildRequest>(&frame)
-                && request.valid()
-            {
-                let _ = native_tx.send(request);
+            let mut input = stdin.lock();
+            for index in 0..2 {
+                let mut bounded = (&mut input).take((NATIVE_CHILD_CONTROL_MAX_BYTES + 1) as u64);
+                let mut frame = Vec::new();
+                if bounded.read_until(b'\n', &mut frame).is_err()
+                    || frame.len() > NATIVE_CHILD_CONTROL_MAX_BYTES
+                    || frame.last() != Some(&b'\n')
+                {
+                    break;
+                }
+                let Ok(request) = serde_json::from_slice::<NativeChildRequest>(&frame) else {
+                    break;
+                };
+                if !request.valid()
+                    || (index == 1 && request.operation != NativeChildOperation::Drain)
+                {
+                    break;
+                }
+                let follow_up_permitted = request.operation == NativeChildOperation::ArmProductionPilot;
+                if native_tx.send(request).is_err() || !follow_up_permitted {
+                    break;
+                }
             }
         });
     }
-    let mut native_request_consumed = false;
+    let mut native_control_phase = NativeControlPhase::Initial;
     let (drain_tx, mut drain_rx) = mpsc::unbounded_channel();
 
     let mut ticker = interval(Duration::from_secs(poll_seconds));
@@ -241,11 +281,13 @@ pub async fn run_mailbox_until_shutdown(
 
     loop {
         tokio::select! {
-            Some(request) = native_rx.recv(), if native_child_control_stdio && !native_request_consumed => {
-                native_request_consumed = true;
+            Some(request) = native_rx.recv(), if native_child_control_stdio && native_control_phase != NativeControlPhase::Closed => {
+                if !native_control_phase.admit(request.operation) {
+                    continue;
+                }
                 if matches!(request.operation, NativeChildOperation::ArmProductionPilot) {
-                    // Exactly one inherited-stdin command per Job child process.
-                    // A staged pilot does NOT enable mutation authority or POST.
+                    // The only possible following native command is terminal
+                    // Drain. Pilot staging does NOT enable exchange POST.
                     let probe = async {
                         let owner = execution.ok_or("EXECUTOR_UNAVAILABLE")?;
                         let observer = account.ok_or("OBSERVER_UNAVAILABLE")?;
@@ -1009,6 +1051,29 @@ fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_pilot_allows_terminal_drain_but_never_a_second_arm() {
+        let mut pilot = NativeControlPhase::Initial;
+        assert!(pilot.admit(NativeChildOperation::ArmProductionPilot));
+        assert_eq!(pilot, NativeControlPhase::PilotSeen);
+        assert!(pilot.admit(NativeChildOperation::Drain));
+        assert_eq!(pilot, NativeControlPhase::Closed);
+        assert!(!pilot.admit(NativeChildOperation::ArmProductionPilot));
+
+        let mut repeated = NativeControlPhase::Initial;
+        assert!(repeated.admit(NativeChildOperation::ArmProductionPilot));
+        assert!(!repeated.admit(NativeChildOperation::ArmProductionPilot));
+        assert_eq!(repeated, NativeControlPhase::Closed);
+
+        let mut direct = NativeControlPhase::Initial;
+        assert!(direct.admit(NativeChildOperation::Drain));
+        assert!(!direct.admit(NativeChildOperation::ArmProductionPilot));
+
+        let mut target = NativeControlPhase::Initial;
+        assert!(target.admit(NativeChildOperation::VerifyReadOnly));
+        assert!(!target.admit(NativeChildOperation::Drain));
+    }
 
     #[test]
     fn old_ledger_return_cannot_bypass_readonly_or_current_risk_checks() {
