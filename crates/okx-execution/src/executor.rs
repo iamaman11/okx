@@ -356,9 +356,7 @@ impl ProductionTradingPolicy {
         witness: &ProductionRiskWitness,
     ) -> Result<(), ProductionPolicyRejection> {
         use ProductionPolicyRejection as Rejection;
-        let hex64 = |value: &str| {
-            value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
-        };
+        let hex64 = |value: &str| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit());
         let max_loss = Decimal::from_str(&self.max_total_modelled_loss_usdt)
             .map_err(|_| Rejection::InvalidPolicy)?;
         if self.schema != PRODUCTION_TRADING_POLICY_SCHEMA_V1
@@ -370,9 +368,10 @@ impl ProductionTradingPolicy {
             || !hex64(&self.operator_authority_id[7..])
             || self.allowed_instruments.is_empty()
             || self.allowed_instruments.len() > 32
-            || self.allowed_instruments.iter().any(|item| {
-                !item.ends_with("-USDT-SWAP") || item.len() > 64
-            })
+            || self
+                .allowed_instruments
+                .iter()
+                .any(|item| !item.ends_with("-USDT-SWAP") || item.len() > 64)
             || max_loss <= Decimal::ZERO
             || max_loss > Decimal::from(10)
         {
@@ -443,7 +442,6 @@ impl ProductionTradingPolicy {
         }
     }
 }
-
 
 impl MutationAuthority {
     pub const fn allows_exchange_mutation(self) -> bool {
