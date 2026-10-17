@@ -145,7 +145,10 @@ impl DesiredFileV3 {
 
     fn validate(&self) -> HostControlResult<()> {
         if self.schema != DESIRED_STATE_SCHEMA_V3
-            || self.production_policy.as_ref().is_some_and(|p| p.validate().is_err())
+            || self
+                .production_policy
+                .as_ref()
+                .is_some_and(|p| p.validate().is_err())
             || (self.profile != AgentProfile::Production && self.production_policy.is_some())
         {
             return Err(HostControlError::DesiredStateCorrupt);
@@ -302,12 +305,18 @@ impl DesiredStateStore {
         {
             return Err(HostControlError::ProfileTransitionPending);
         }
-        let mut policy = state.production_policy.take().ok_or(HostControlError::ProfileTransitionInvalid)?;
+        let mut policy = state
+            .production_policy
+            .take()
+            .ok_or(HostControlError::ProfileTransitionInvalid)?;
         if policy.revision != expected_revision {
             return Err(HostControlError::ProfileTransitionReplay);
         }
         if policy.permission != ProductionPermission::Stopped {
-            policy.revision = policy.revision.checked_add(1).ok_or(HostControlError::ProfileTransitionReplay)?;
+            policy.revision = policy
+                .revision
+                .checked_add(1)
+                .ok_or(HostControlError::ProfileTransitionReplay)?;
             policy.permission = ProductionPermission::Stopped;
         }
         state.production_policy = Some(policy);
@@ -471,21 +480,44 @@ mod tests {
         store.configure_production_policy(policy.clone()).unwrap();
         assert_eq!(store.production_policy_status().unwrap()["revision"], 1);
         store.stop_production_policy(1).unwrap();
-        assert_eq!(store.production_policy_status().unwrap()["permission"], "STOPPED");
-        assert_eq!(store.production_policy_status().unwrap()["effective_trading"], false);
+        assert_eq!(
+            store.production_policy_status().unwrap()["permission"],
+            "STOPPED"
+        );
+        assert_eq!(
+            store.production_policy_status().unwrap()["effective_trading"],
+            false
+        );
         assert!(store.stop_production_policy(1).is_err());
         policy.revision = 2;
-        assert!(store.configure_production_policy(policy.clone()).is_err(), "revocation revision is not reusable");
+        assert!(
+            store.configure_production_policy(policy.clone()).is_err(),
+            "revocation revision is not reusable"
+        );
         let reopened = DesiredStateStore::at(root.join("desired.json"));
-        assert_eq!(reopened.production_policy_status().unwrap()["permission"], "STOPPED");
+        assert_eq!(
+            reopened.production_policy_status().unwrap()["permission"],
+            "STOPPED"
+        );
         // A NEW explicit CONTROL authorization, not a restart, may rearm.
         policy.revision = 3;
         reopened.configure_production_policy(policy).unwrap();
-        assert_eq!(reopened.production_policy_status().unwrap()["permission"], "ENABLED");
+        assert_eq!(
+            reopened.production_policy_status().unwrap()["permission"],
+            "ENABLED"
+        );
         reopened.save(AgentDesiredState::stopped()).unwrap();
-        assert_eq!(reopened.production_policy_status().unwrap()["permission"], "ENABLED");
-        reopened.save(AgentDesiredState::demo_acceptance_running()).unwrap();
-        assert_eq!(reopened.production_policy_status().unwrap()["permission"], "OFF");
+        assert_eq!(
+            reopened.production_policy_status().unwrap()["permission"],
+            "ENABLED"
+        );
+        reopened
+            .save(AgentDesiredState::demo_acceptance_running())
+            .unwrap();
+        assert_eq!(
+            reopened.production_policy_status().unwrap()["permission"],
+            "OFF"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
