@@ -314,6 +314,8 @@ pub struct ProductionLivePermit {
     pub intent_id: String,
     pub allocation_id: String,
     pub operator_authority_id: String,
+    /// PID of the one Job-owned child; verified again by the agent.
+    pub bound_child_pid: u32,
     pub max_allocation_usdt: String,
     /// Independent worst-case loss cap approved for this exact intent.
     pub max_loss_usdt: String,
@@ -394,6 +396,7 @@ impl ProductionLivePermit {
             && lower_hex(&self.source_checksum_sha256)
             && !self.allocation_id.is_empty()
             && !self.operator_authority_id.is_empty()
+            && self.bound_child_pid != 0
             && self.issued_at_ms > 0
             && self.issued_at_ms <= now_ms
             && self.expires_at_ms >= now_ms
@@ -4661,6 +4664,7 @@ mod tests {
             intent_id: plan.intent_id.clone(),
             allocation_id: "prod_pilot_20261017".to_owned(),
             operator_authority_id: "native_control_approved_pilot".to_owned(),
+            bound_child_pid: std::process::id(),
             max_allocation_usdt: "100".to_owned(),
             max_loss_usdt: "5".to_owned(),
             source_checksum_sha256: "b".repeat(64),
@@ -4686,6 +4690,12 @@ mod tests {
         oversized.max_allocation_usdt = "100.01".to_owned();
         assert!(matches!(
             executor.enable_production_live(prod, &oversized, &plan.intent_id, 102),
+            Err(OrderExecutorError::ProductionLivePermitRejected)
+        ));
+        let mut wrong_pid = permit.clone();
+        wrong_pid.bound_child_pid = 0;
+        assert!(matches!(
+            executor.enable_production_live(prod, &wrong_pid, &plan.intent_id, 102),
             Err(OrderExecutorError::ProductionLivePermitRejected)
         ));
         let mut foreign = permit.clone();
