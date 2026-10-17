@@ -816,7 +816,11 @@ pub fn assess_persisted_financial_period_with_verified_source(
         linked_bills: linked_bills.len(),
         realized_usdt: realized.normalize().to_string(),
         fees_usdt: fees.normalize().to_string(),
-        funding_usdt: None,
+        // Zero funding is knowable only when the entire run source is
+        // complete and no funding bill was seen. Any funding bill remains
+        // unallocated and makes the period INCOMPLETE instead of inventing
+        // a position-side attribution.
+        funding_usdt: complete.then(|| "0".to_owned()),
         unrealized_usdt: complete.then(|| unrealized.normalize().to_string()),
         nav_usdt: complete.then(|| nav.normalize().to_string()),
         positions: open_positions,
