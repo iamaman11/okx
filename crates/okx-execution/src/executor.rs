@@ -296,8 +296,10 @@ pub enum MutationAuthority {
 }
 
 impl MutationAuthority {
+    /// Unscoped mutation rights are Demo-only. A Production grant permits
+    /// exactly one prepared intent through the dedicated guarded submit path.
     pub const fn allows_exchange_mutation(self) -> bool {
-        matches!(self, Self::DemoAcceptance | Self::ProductionLive)
+        matches!(self, Self::DemoAcceptance)
     }
 }
 
@@ -461,6 +463,9 @@ pub struct OrderExecutor<G> {
     ledger: DurableExecutionLedger,
     gateway: G,
     mutation_authority: MutationAuthority,
+    // In-memory one-shot Production scope. Never persisted, never restored.
+    // Only submit_prepared_inner for this exact intent may use ProductionLive.
+    production_intent_id: Option<String>,
 }
 
 impl<G> OrderExecutor<G>
@@ -472,6 +477,7 @@ where
             ledger,
             gateway,
             mutation_authority: MutationAuthority::Disabled,
+            production_intent_id: None,
         }
     }
 
@@ -611,6 +617,7 @@ where
         if !environment.demo {
             return Err(OrderExecutorError::DemoAuthorityRequiresDemoEnvironment);
         }
+        self.production_intent_id = None;
         self.mutation_authority = MutationAuthority::DemoAcceptance;
         Ok(())
     }
@@ -629,12 +636,24 @@ where
         if !permit.valid_for(environment, &self.ledger, now_ms, intent_id) {
             return Err(OrderExecutorError::ProductionLivePermitRejected);
         }
+        self.production_intent_id = Some(intent_id.to_owned());
         self.mutation_authority = MutationAuthority::ProductionLive;
         Ok(())
     }
 
     pub fn disable_mutations(&mut self) {
         self.mutation_authority = MutationAuthority::Disabled;
+        self.production_intent_id = None;
+    }
+
+    fn can_submit_prepared_intent(&self, intent_id: &str) -> bool {
+        match self.mutation_authority {
+            MutationAuthority::DemoAcceptance => true,
+            MutationAuthority::ProductionLive => {
+                self.production_intent_id.as_deref() == Some(intent_id)
+            }
+            MutationAuthority::Disabled => false,
+        }
     }
 
     pub fn prepare(
@@ -1417,7 +1436,8 @@ where
         // The production constructor is intentionally fail-closed. The hard
         // gate is the first operation: disabled execution must not validate,
         // persist SUBMITTING, or call the exchange gateway.
-        require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
+        // A Production one-use grant never authorizes any OTHER intent.
+        require_live_trading_enabled(self.can_submit_prepared_intent(intent_id))?;
 
         let entry = self
             .ledger
@@ -4515,6 +4535,35 @@ mod tests {
             ExecutionState::Prepared
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn production_authority_cannot_submit_foreign_intent_or_unscoped_mutation() {
+        let (root, mut journal) = ledger("production-exact-intent-final-post-gate");
+        let plan = plan();
+        journal.prepare(plan.clone(), 101).expect("unsent prepared");
+        let gateway = MockGateway::new(vec![Ok(accepted_response(&plan))], vec![]);
+        let mut executor = OrderExecutor::new(journal, gateway);
+        executor.mutation_authority = MutationAuthority::ProductionLive;
+        executor.production_intent_id = Some("different_prepared_intent_0123456789".to_owned());
+        assert!(!MutationAuthority::ProductionLive.allows_exchange_mutation());
+        assert!(!executor.can_submit_prepared_intent(&plan.intent_id));
+        assert!(matches!(
+            executor.submit_prepared(&plan.intent_id, timing(), 102).await,
+            Err(OrderExecutorError::Transition(
+                ExecutionTransitionError::LiveTradingDisabled
+            ))
+        ));
+        assert_eq!(executor.gateway().place_calls(), 0);
+        assert_eq!(
+            executor.ledger().get(&plan.intent_id).unwrap().record.state,
+            ExecutionState::Prepared
+        );
+        executor.disable_mutations();
+        assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
+        assert!(executor.production_intent_id.is_none());
+        assert!(!executor.can_submit_prepared_intent(&plan.intent_id));
         let _ = fs::remove_dir_all(root);
     }
 
