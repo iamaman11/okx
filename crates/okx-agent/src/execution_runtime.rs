@@ -320,6 +320,10 @@ impl ExecutionRuntime {
             .drain()
             .await
             .map_err(|_| AgentError::SourceDrainTimeout)?;
+        // Native terminal Drain burns the staged in-memory pilot immediately.
+        // Even a subsequent ledger-assessment failure must never carry an
+        // approved intent into the next CONTROL handoff or restart.
+        self.production_pilot_staged.lock().await.take();
         // Covers any native financial checkpoint outside request ingress.
         // The source must never interpret missing archive evidence as clean.
         let mut executor = tokio::time::timeout_at(deadline, self.executor.lock())
@@ -1605,6 +1609,41 @@ mod tests {
             MutationAuthority::Disabled
         );
         assert!(!runtime.live_trading_enabled().await);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn native_terminal_drain_burns_staged_pilot_without_live_authority() {
+        let root = temp_root("terminal-native-drain-burns-pilot");
+        let runtime = ExecutionRuntime::new(
+            &root,
+            OkxEnvironment::new(Region::Global, false),
+            credentials(),
+            100,
+            RateBudget::new(),
+        )
+        .expect("production owner with no live authority");
+        *runtime.production_pilot_staged.lock().await = Some(ProductionLivePermit {
+            account_uid_fingerprint: "a".repeat(64),
+            intent_id: "intent_test_0123456789abcdef".to_owned(),
+            allocation_id: "pilot_run_20261017".to_owned(),
+            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
+            bound_child_pid: std::process::id(),
+            max_allocation_usdt: "100".to_owned(),
+            max_loss_usdt: "10".to_owned(),
+            source_checksum_sha256: "c".repeat(64),
+            issued_at_ms: 101,
+            expires_at_ms: 10_101,
+        });
+        // A ledger-only handoff may refuse an unfunded source, but the
+        // in-memory permit and mutation ingress must still be dead.
+        let _ = runtime.drain_mutation_ingress(&"a".repeat(64)).await;
+        assert!(runtime.production_pilot_staged.lock().await.is_none());
+        assert!(runtime.admit_mutating_request().await.is_none());
+        assert_eq!(
+            runtime.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
         let _ = fs::remove_dir_all(root);
     }
 
