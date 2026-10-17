@@ -952,6 +952,111 @@ impl ExecutionRuntime {
         self.executor.lock().await.ledger().risk_stop().cloned()
     }
 
+    /// Ordinary Production OPEN/CLOSE, not a pilot or separate executor.
+    /// CONTROL is re-read on every submission; an absent/revoked policy
+    /// rejects before any ledger SUBMITTING transition or exchange POST.
+    /// The account and protection evidence are gathered from native
+    /// authenticated REST/WS by the existing query admission owner.
+    pub async fn submit_prepared_production_authorized(
+        &self,
+        preflight: &ExecutorPreflightSnapshot,
+        intent_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+        facts: &AccountLedgerFacts,
+        protection: &PendingProtectiveAlgoInventory,
+    ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
+        if !self.production_trading_requested()
+            || !preflight.accepted
+            || !preflight.credential.accepted
+            || !preflight.credential.production_environment
+            || !preflight.credential.executor_ip_bound
+            || !preflight.credential.executor_trade_permission
+            || preflight.credential.executor_withdraw_permission
+            || facts.summary.authority.account_uid_fingerprint
+                != preflight.credential.account_uid_fingerprint
+            || !protection.complete_within_bound
+        {
+            return Ok(None);
+        }
+        let policy = read_native_production_policy()?;
+        if policy.account_uid_fingerprint != preflight.credential.account_uid_fingerprint {
+            return Ok(None);
+        }
+        // ONE executor mutex spans the final policy read, source risk
+        // admission, durable SUBMITTING and exactly one exchange request.
+        let mut executor = self.executor.lock().await;
+        let Some(entry) = executor.ledger().get(intent_id) else {
+            return Ok(None);
+        };
+        let plan = &entry.record.plan;
+        let new_risk = plan.action.is_risk_increasing();
+        let flat = facts.summary.open_positions == 0
+            && facts.summary.pending_orders == 0
+            && facts.authoritative_positions.iter().all(|position| {
+                rust_decimal::Decimal::from_str(&position.position)
+                    .is_ok_and(|v| v == rust_decimal::Decimal::ZERO)
+            });
+        // Existing exposure on ANY instrument or unowned conditional order
+        // may occupy risk: require the entire venue FLAT for new OPEN.
+        if new_risk && (!flat || protection.rows != 0) {
+            return Ok(None);
+        }
+        let close_owned_exact = if plan.action == ExecutionAction::Close {
+            let observed = facts.authoritative_positions.iter().filter(|position| {
+                position.instrument_id == plan.instrument_id
+                    && position.position_side == plan.position_side.as_str()
+                    && rust_decimal::Decimal::from_str(&position.position)
+                        .is_ok_and(|v| v > rust_decimal::Decimal::ZERO)
+            }).collect::<Vec<_>>();
+            observed.len() == 1
+                && rust_decimal::Decimal::from_str(&observed[0].position)
+                    .ok() == rust_decimal::Decimal::from_str(&plan.size).ok()
+                && executor.ledger().capital_reservation().is_some_and(|run| {
+                    executor.ledger().entries().any(|owned| {
+                        owned.record.plan.action == ExecutionAction::Open
+                            && owned.record.strategy_run_id.as_deref()
+                                == Some(run.allocation_id.as_str())
+                            && owned.record.plan.instrument_id == plan.instrument_id
+                            && owned.record.plan.position_side == plan.position_side
+                            && owned.record.order_id.is_some()
+                    })
+                })
+        } else {
+            false
+        };
+        let finance_complete = if new_risk {
+            executor.ledger().financial_period(facts, true).is_some_and(|period| {
+                period.state == "FLAT_RECONCILED"
+                    && period.nav_usdt.is_some()
+                    && period.funding_usdt.is_some()
+                    && period.reasons.is_empty()
+            })
+        } else {
+            false
+        };
+        let witness = okx_execution::ProductionRiskWitness {
+            finance_complete,
+            // The executor independently scans durable parent/mutation/OCO
+            // UNKNOWN states; this cannot override native state.
+            unknown_mutations_reconciled: true,
+            existing_modelled_loss_usdt: rust_decimal::Decimal::ZERO,
+            exact_owned_reduce_only_close: close_owned_exact,
+        };
+        Ok(Some(
+            executor
+                .submit_prepared_production_authorized(
+                    self.environment,
+                    &policy,
+                    &witness,
+                    intent_id,
+                    timing,
+                    observed_at_ms,
+                )
+                .await,
+        ))
+    }
+
     pub async fn submit_prepared_demo_authorized(
         &self,
         preflight: &ExecutorPreflightSnapshot,
