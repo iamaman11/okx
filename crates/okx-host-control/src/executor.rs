@@ -43,6 +43,10 @@ const RESTART_BACKOFF_SECS: [u64; 5] = [1, 5, 15, 30, 60];
 const WORKSPACE_STATUS_MAX_CHANGES: usize = 16;
 const WORKSPACE_STATUS_MAX_CHANGE_BYTES: usize = 512;
 const RUNTIME_DIAGNOSTIC_TAIL_BYTES: u64 = 64 * 1024;
+// Max source handshake: 10s native account identity + 15s ingress/ledger
+// drain + 8s authenticated REST/WS/OCO source proof + bounded delivery slack.
+// A 27s parent timeout was shorter than its own child's 33s worst-case path.
+const NATIVE_SELECT_REPLY_TIMEOUT_SECS: u64 = 45;
 const ALLOWED_REMOTES: &[&str] = &[
     "https://github.com/iamaman11/okx",
     "https://github.com/iamaman11/okx.git",
@@ -846,7 +850,23 @@ impl HostExecutor {
     /// original Job's KILL_ON_JOB_CLOSE guarantee applies; new native CONTROL
     /// must additionally see no child/active process in its exclusive Job.
     fn recover_read_only_selection(&mut self) -> HostControlResult<Value> {
-        if self.agent_is_running()? || !self.agent_job.is_empty()? {
+        // A failed first drain may leave the SAME verified ReadOnly source
+        // still running under the durable hold, with its one-shot pipe already
+        // consumed. Explicit recovery is safe only for that exact Job-owned
+        // child and an immutable persisted ReadOnly right (zero trade posts).
+        // No mutation-authorized source, unknown descendant or target process
+        // can be force-resumed or switched by this operation.
+        if self.agent_is_running()? {
+            let source_pid = self.agent_child.as_ref().map(Child::id)
+                .ok_or(HostControlError::ProfileHandoffProofRequired)?;
+            if !self.desired_store.permits_verified_read_only_source(
+                self.desired_profile, source_pid
+            )? {
+                return Err(HostControlError::ProfileHandoffProofRequired);
+            }
+            self.terminate_agent_owned()?;
+        }
+        if !self.agent_job.is_empty()? {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
         let restored = self.desired_store.recover_stopped_explicit()?;
@@ -1277,12 +1297,12 @@ impl HostExecutor {
         pipe.input.write_all(&bytes)?;
         pipe.input.write_all(b"\n")?;
         pipe.input.flush()?;
-        // The source owner has a 15s drain deadline and an additional 8s
-        // authenticated REST/WS/OCO observation budget. The parent timeout
-        // must cover BOTH stages; expiry is NEVER treated as a safe drain.
+        // Parent must cover the 10s native account-identity receipt BEFORE
+        // the 15s mutation drain and 8s REST/WS/OCO source observation.
+        // Timeout still fails closed, never an implicit cancellation or POST retry.
         let reply = pipe
             .replies
-            .recv_timeout(Duration::from_secs(27))
+            .recv_timeout(Duration::from_secs(NATIVE_SELECT_REPLY_TIMEOUT_SECS))
             .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
         if !reply.valid_for(&request_id) || reply.disposition != "DRAINED_SOURCE_CANDIDATE" {
             return Err(HostControlError::ProfileHandoffProofRequired);
@@ -2157,6 +2177,14 @@ fn direct_git_command(repo_root: &Path, args: &[&str]) -> std::process::Command 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parent_native_select_budget_covers_sequential_child_deadlines() {
+        // Shared-account source may spend up to 10s authenticating BOTH UIDs,
+        // 15s draining ingress and 8s reading a coherent source packet.
+        // Deliberately no busy retry/poll loop and no fabricated proof.
+        assert!(NATIVE_SELECT_REPLY_TIMEOUT_SECS > 10 + 15 + 8);
+    }
 
     #[test]
     fn git_commands_ignore_shell_proxy_and_global_git_configuration() {
