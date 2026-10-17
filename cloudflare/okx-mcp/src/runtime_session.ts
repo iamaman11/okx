@@ -211,13 +211,14 @@ export class RuntimeSession {
     }
     const active = this.activeSocket();
     if (!active) return transportFailure("RUNTIME_OFFLINE");
-    // OAuth alone never authorizes a trading command; profile identity
-    // comes from the single authenticated Windows Hello/generation.
+    // OAuth/profile only authorizes delivery of a narrowly typed action.
+    // Rust CONTROL/executor alone evaluates the durable live policy and
+    // owns the actual exchange POST admission under the same ledger.
     if (!executionProfilePermitsOperation(
       active.attachment.runtimeProfile,
       request.operation?.type,
     )) {
-      return transportFailure("DEMO_EXECUTION_PROFILE_REQUIRED", false);
+      return transportFailure("EXECUTION_PROFILE_OPERATION_UNSUPPORTED", false);
     }
 
     this.inflight += 1;
