@@ -758,10 +758,11 @@ async fn finalize_strategy_run(
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
-    if !execution.demo_mutation_acceptance_requested()
-        && !execution.production_trading_requested()
+    if !execution.demo_mutation_acceptance_requested() && !execution.production_trading_requested()
     {
-        return Ok(deny("only an authenticated native execution owner can finalize a strategy run"));
+        return Ok(deny(
+            "only an authenticated native execution owner can finalize a strategy run",
+        ));
     }
     let snapshot = match fresh_account(request, context, generated_at).await? {
         FreshAccount::Ready(account) => account,
@@ -858,8 +859,7 @@ async fn quarantine_unverified_strategy_run(
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
-    if !execution.demo_mutation_acceptance_requested()
-        && !execution.production_trading_requested()
+    if !execution.demo_mutation_acceptance_requested() && !execution.production_trading_requested()
     {
         return Ok(deny(
             "unverified closure requires exact native execution owner".to_owned(),
