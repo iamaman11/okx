@@ -1,6 +1,6 @@
 # Single native OKX agent: account profiles, CONTROL releases and Stage 5C-2 acceptance
 
-**Binding product/architecture decision — updated 2026-10-16.** Subordinate to [canonical issue #160](https://github.com/iamaman11/okx/issues/160), not a new project stage, scheduler, source of execution authority or alternate roadmap. This document is the current actionable Stage 5C-2 cursor and supersedes older "now/current" notes in README, ARCHITECTURE, ROADMAP and STAGE5_IMPLEMENTATION.
+**ACTIVE ORDER (2026-10-17; canonical #160):** This document is the **subordinate Stage 5C design/acceptance contract**, not the active work item. [Canonical #160](https://github.com/iamaman11/okx/issues/160) controls execution order: **5B financial run → 5A final strategy risk acceptance → 5C read-only account handoff, operations and measured compact MCP → separately authorized Live gate**. The dated 'next/current 5C-2' sections below are preserved technical requirements/history; they may not interrupt unfinished 5B/5A or imply extra product stages. Only two existing Demo/Production profiles currently exist; extra named-account provisioning is deferred until a real additional account exists. Never confuse an exact ReleaseSet install with account-switch or trading acceptance.
 
 ## Control ownership — ChatGPT remote operator, local read-only witness (2026-10-15)
 
