@@ -43,8 +43,13 @@ impl NativeChildRequest {
                     self.operation == NativeChildOperation::Drain
                         && self.expected_uid_fingerprint.is_empty()
                 }
-                None => self.expected_uid_fingerprint.len() == 64
-                    && self.expected_uid_fingerprint.bytes().all(|b| b.is_ascii_hexdigit()),
+                None => {
+                    self.expected_uid_fingerprint.len() == 64
+                        && self
+                            .expected_uid_fingerprint
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit())
+                }
                 Some(_) => false,
             }
     }
@@ -162,13 +167,16 @@ impl NativeChildReply {
                         }
                     }) && self.target_read_only.is_none()
                         && self.error.is_none()
-                        && self.selected_target_uid_fingerprint.as_ref().is_none_or(|uid| {
-                            uid.len() == 64
-                                && uid.bytes().all(|b| b.is_ascii_hexdigit())
-                                && self.source_candidate.as_ref().is_some_and(|source| {
-                                    uid != &source.account_uid_fingerprint
-                                })
-                        })
+                        && self
+                            .selected_target_uid_fingerprint
+                            .as_ref()
+                            .is_none_or(|uid| {
+                                uid.len() == 64
+                                    && uid.bytes().all(|b| b.is_ascii_hexdigit())
+                                    && self.source_candidate.as_ref().is_some_and(|source| {
+                                        uid != &source.account_uid_fingerprint
+                                    })
+                            })
                 }
                 "VERIFIED_READ_ONLY" => {
                     self.ledger_only.is_none()
@@ -1984,7 +1992,9 @@ pub enum HostControlOperation {
     RestoreProductionAgent,
     /// One account name, no operator UID/profile; native child derives both UIDs.
     /// Selection never enables trading.
-    SelectAccount { account_id: String },
+    SelectAccount {
+        account_id: String,
+    },
     /// Legacy technical operation: same native agent, ALWAYS target ReadOnly.
     SelectReadOnlyAccount {
         target_profile: String,
@@ -4292,7 +4302,6 @@ mod native_drain_source_tests {
         assert!(serde_json::from_value::<NativeDrainedSourceCandidate>(encoded).is_err());
     }
 
-
     #[test]
     fn native_simple_account_selection_is_typed_and_never_a_trade_grant() {
         let mut req = NativeChildRequest {
@@ -4313,9 +4322,27 @@ mod native_drain_source_tests {
         req.operation = NativeChildOperation::Drain;
         req.expected_uid_fingerprint = "b".repeat(64);
         assert!(!req.valid());
-        assert!(HostControlOperation::SelectAccount { account_id: "real".to_owned() }.validate().is_ok());
-        assert!(HostControlOperation::SelectAccount { account_id: "demo".to_owned() }.validate().is_ok());
-        assert!(HostControlOperation::SelectAccount { account_id: "demo_acceptance".to_owned() }.validate().is_err());
+        assert!(
+            HostControlOperation::SelectAccount {
+                account_id: "real".to_owned()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            HostControlOperation::SelectAccount {
+                account_id: "demo".to_owned()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            HostControlOperation::SelectAccount {
+                account_id: "demo_acceptance".to_owned()
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
