@@ -1036,13 +1036,13 @@ impl ExecutionRuntime {
         {
             return Ok(None);
         }
+        // Serialize policy reading with all other execution submissions:
+        // revocation cannot be hidden behind a prior wait on the ledger lock.
+        let mut executor = self.executor.lock().await;
         let policy = read_native_production_policy()?;
         if policy.account_uid_fingerprint != preflight.credential.account_uid_fingerprint {
             return Ok(None);
         }
-        // ONE executor mutex spans the final policy read, source risk
-        // admission, durable SUBMITTING and exactly one exchange request.
-        let mut executor = self.executor.lock().await;
         let Some(entry) = executor.ledger().get(intent_id) else {
             return Ok(None);
         };
