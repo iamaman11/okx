@@ -47,6 +47,8 @@ const RUNTIME_DIAGNOSTIC_TAIL_BYTES: u64 = 64 * 1024;
 // drain + 8s authenticated REST/WS/OCO source proof + bounded delivery slack.
 // A 27s parent timeout was shorter than its own child's 33s worst-case path.
 const NATIVE_SELECT_REPLY_TIMEOUT_SECS: u64 = 45;
+// Compile-time admission: parent always outlives the serial native child deadlines.
+const _: () = assert!(NATIVE_SELECT_REPLY_TIMEOUT_SECS > 10 + 15 + 8);
 const ALLOWED_REMOTES: &[&str] = &[
     "https://github.com/iamaman11/okx",
     "https://github.com/iamaman11/okx.git",
@@ -2181,14 +2183,6 @@ fn direct_git_command(repo_root: &Path, args: &[&str]) -> std::process::Command 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parent_native_select_budget_covers_sequential_child_deadlines() {
-        // Shared-account source may spend up to 10s authenticating BOTH UIDs,
-        // 15s draining ingress and 8s reading a coherent source packet.
-        // Deliberately no busy retry/poll loop and no fabricated proof.
-        assert!(NATIVE_SELECT_REPLY_TIMEOUT_SECS > 10 + 15 + 8);
-    }
 
     #[test]
     fn git_commands_ignore_shell_proxy_and_global_git_configuration() {
