@@ -292,35 +292,10 @@ pub enum MutationAuthority {
     DemoAcceptance,
 }
 
-/// Normal account-scoped policy, not a per-order/10-second Production pilot.
-/// This is a pure admission contract; constructing one does not enable trading.
-/// The one native execution owner must attest risk occupancy and source truth.
-pub const PRODUCTION_TRADING_POLICY_SCHEMA_V1: &str = "okx.production-trading-policy/v1";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ProductionPermission {
-    Off,
-    ReadOnly,
-    Enabled,
-    Stopped,
-}
-
-/// Revisions can be replaced/revoked by the existing owner, not by an order
-/// parameter or an ephemeral stdin grant. Persistence and native CONTROL
-/// loading must be completed before Production mutation authority is exposed.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProductionTradingPolicy {
-    pub schema: String,
-    pub revision: u64,
-    pub permission: ProductionPermission,
-    pub account_uid_fingerprint: String,
-    pub strategy_run_id: String,
-    pub operator_authority_id: String,
-    pub allowed_instruments: Vec<String>,
-    pub max_total_modelled_loss_usdt: String,
-}
+// The same typed durable policy is owned by CONTROL and evaluated here.
+pub use okx_protocol::{
+    PRODUCTION_TRADING_POLICY_SCHEMA_V1, ProductionPermission, ProductionTradingPolicy,
+};
 
 /// Inputs are collected by the single native owner at prepare AND just before
 /// send. Modelled risk includes all open lots, pending orders, reservations and
@@ -359,6 +334,11 @@ impl ProductionTradingPolicy {
         witness: &ProductionRiskWitness,
     ) -> Result<(), ProductionPolicyRejection> {
         use ProductionPolicyRejection as Rejection;
+        // All operator scope and budget syntax is validated at the CONTROL
+        // boundary and again by the executor immediately before admission.
+        if self.validate().is_err() {
+            return Err(Rejection::InvalidPolicy);
+        }
         let hex64 = |value: &str| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit());
         let max_loss = Decimal::from_str(&self.max_total_modelled_loss_usdt)
             .map_err(|_| Rejection::InvalidPolicy)?;
