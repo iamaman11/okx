@@ -349,6 +349,15 @@ impl DesiredStateStore {
         if state.profile != profile || state.transition.is_some() || state.switch_hold.is_some() {
             return Err(HostControlError::ProfileTransitionPending);
         }
+        if profile == AgentProfile::Production {
+            return Ok(state.read_only
+                || !state.production_policy.as_ref().is_some_and(|policy| {
+                    matches!(
+                        policy.permission,
+                        ProductionPermission::Enabled | ProductionPermission::Stopped
+                    )
+                }));
+        }
         Ok(state.read_only)
     }
 
@@ -995,8 +1004,14 @@ impl DesiredStateStore {
                     "state": if complete.agent == AgentDesired::Running { "RUNNING" } else { "STOPPED" },
                     "phase": "NONE",
                     "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE",
-                    "execution_right": if complete.profile == AgentProfile::Production || complete.read_only {
+                    "execution_right": if complete.read_only {
                         "READ_ONLY"
+                    } else if complete.profile == AgentProfile::Production {
+                        match complete.production_policy.as_ref().map(|p| p.permission) {
+                            Some(ProductionPermission::Enabled) => "PRODUCTION_POLICY_CONFIGURED",
+                            Some(ProductionPermission::Stopped) => "PRODUCTION_NEW_RISK_STOPPED",
+                            _ => "READ_ONLY",
+                        }
                     } else {
                         "DEMO_MUTATIONS_CONFIGURED"
                     },
