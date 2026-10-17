@@ -353,9 +353,9 @@ fn compact_trader_packet(
         .and_then(Value::as_array)
         .is_some_and(|rows| {
             !rows.is_empty()
-                && rows
-                    .iter()
-                    .all(|row| row.get("complete_within_bound").and_then(Value::as_bool) == Some(true))
+                && rows.iter().all(|row| {
+                    row.get("complete_within_bound").and_then(Value::as_bool) == Some(true)
+                })
         });
     let mut reasons = Vec::new();
     if has_stop {
