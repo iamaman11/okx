@@ -920,12 +920,12 @@ impl ExecutionRuntime {
             return Ok(None);
         }
         if executor
-            .enable_production_live(self.environment, permit, observed_at_ms)
+            .enable_production_live(self.environment, permit, intent_id, observed_at_ms)
             .is_err()
         {
             return Ok(None);
         }
-        let guarded = ProductionAuthorityReset(&mut *executor);
+        let guarded = ProductionAuthorityReset(&mut executor);
         let result = guarded
             .0
             .submit_prepared(intent_id, timing, observed_at_ms)
@@ -1529,7 +1529,7 @@ mod tests {
         let mut owner = runtime.executor.lock().await;
         owner.enable_demo_acceptance(demo).expect("test authority");
         {
-            let guard = ProductionAuthorityReset(&mut *owner);
+            let guard = ProductionAuthorityReset(&mut owner);
             assert_eq!(
                 guard.0.mutation_authority(),
                 MutationAuthority::DemoAcceptance
@@ -1551,6 +1551,7 @@ mod tests {
         evidence.credential.account_uid_fingerprint = "a".repeat(64);
         let permit = ProductionLivePermit {
             account_uid_fingerprint: "a".repeat(64),
+            intent_id: "missing_production_intent_0123456789".to_owned(),
             allocation_id: "missing_new_production_run".to_owned(),
             operator_authority_id: "unissued_operator_approval".to_owned(),
             max_allocation_usdt: "100".to_owned(),
