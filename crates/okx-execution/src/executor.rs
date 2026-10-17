@@ -4798,8 +4798,8 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn production_owner_denies_without_persisted_financial_source_and_never_sends() {
+    #[tokio::test]
+    async fn production_owner_denies_without_persisted_financial_source_and_never_sends() {
         let (root, mut ledger) = ledger("production-owned-policy-gate");
         let mut plan = protected_plan();
         plan.order_type = OrderType::Fok;
@@ -4838,6 +4838,32 @@ mod tests {
             ),
             Err(ProductionPolicyRejection::SourceUnattested)
         );
+        assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
+        assert_eq!(executor.gateway().place_calls(), 0);
+        assert_eq!(
+            executor.ledger().get(&plan.intent_id).unwrap().record.state,
+            ExecutionState::Prepared
+        );
+        // Production is no longer rejected for profile name alone, but
+        // impossible-to-attest source may not reach the real exchange.
+        let mut executor = executor;
+        let error = executor
+            .submit_prepared_production_authorized(
+                production,
+                &policy,
+                &witness,
+                &plan.intent_id,
+                timing(),
+                102,
+            )
+            .await
+            .expect_err("missing native source must deny before POST");
+        assert!(matches!(
+            error,
+            OrderExecutorError::ProductionPolicyDenied(
+                ProductionPolicyRejection::SourceUnattested
+            )
+        ));
         assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
         assert_eq!(executor.gateway().place_calls(), 0);
         assert_eq!(
