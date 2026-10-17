@@ -21,7 +21,7 @@ use okx_execution::{
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use tokio::time::timeout;
 
@@ -102,6 +102,66 @@ fn quiet_source_capture_due(
             >= QUIET_SOURCE_COVERAGE_REFRESH_MS
 }
 
+/// CONTROL is the only writer of this already-existing atomic desired file.
+/// The agent reads a typed, minimal view immediately before Production POST;
+/// no second credentials store, policy daemon or JSON application logic.
+const NATIVE_CONTROL_DESIRED: &str = r"C:\okx-control\desired.json";
+
+#[derive(Deserialize)]
+struct ProductionControlSnapshot {
+    schema: String,
+    agent: String,
+    profile: String,
+    read_only: bool,
+    production_policy: Option<okx_protocol::ProductionTradingPolicy>,
+    transition: Option<serde_json::Value>,
+    switch_hold: Option<serde_json::Value>,
+}
+
+fn parse_native_production_policy(
+    bytes: &[u8],
+) -> AgentResult<okx_execution::ProductionTradingPolicy> {
+    let owner: ProductionControlSnapshot = serde_json::from_slice(bytes)?;
+    if owner.schema != "okx.host.desired/v3"
+        || owner.agent != "RUNNING"
+        || owner.profile != "production"
+        || owner.read_only
+        || owner.transition.is_some()
+        || owner.switch_hold.is_some()
+    {
+        return Err(AgentError::ProductionPolicyUnavailable);
+    }
+    let policy = owner.production_policy.ok_or(AgentError::ProductionPolicyUnavailable)?;
+    policy.validate()?;
+    if !matches!(
+        policy.permission,
+        okx_protocol::ProductionPermission::Enabled
+            | okx_protocol::ProductionPermission::Stopped
+    ) {
+        return Err(AgentError::ProductionPolicyUnavailable);
+    }
+    let permission = match policy.permission {
+        okx_protocol::ProductionPermission::Enabled => okx_execution::ProductionPermission::Enabled,
+        okx_protocol::ProductionPermission::Stopped => okx_execution::ProductionPermission::Stopped,
+        _ => return Err(AgentError::ProductionPolicyUnavailable),
+    };
+    Ok(okx_execution::ProductionTradingPolicy {
+        schema: policy.schema,
+        revision: policy.revision,
+        permission,
+        account_uid_fingerprint: policy.account_uid_fingerprint,
+        strategy_run_id: policy.strategy_run_id,
+        operator_authority_id: policy.operator_authority_id,
+        allowed_instruments: policy.allowed_instruments,
+        max_total_modelled_loss_usdt: policy.max_total_modelled_loss_usdt,
+    })
+}
+
+fn read_native_production_policy() -> AgentResult<okx_execution::ProductionTradingPolicy> {
+    let bytes = std::fs::read(NATIVE_CONTROL_DESIRED)?;
+    parse_native_production_policy(&bytes)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionReconciliation {
     NotRequired,
@@ -113,6 +173,7 @@ pub enum ExecutionReconciliation {
 pub enum ExecutionRuntimeMode {
     ReadOnly,
     DemoAcceptance,
+    Production,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -186,6 +247,29 @@ impl ExecutionRuntime {
             observed_at_ms,
             rate_budget,
             ExecutionRuntimeMode::ReadOnly,
+        )
+    }
+
+    /// Same ledger and gateway as Demo, selected only by the native CONTROL
+    /// child owner and its atomic, durable policy. No ephemeral pilot.
+    pub fn new_production(
+        root: &Path,
+        environment: OkxEnvironment,
+        executor_credentials: Credentials,
+        observed_at_ms: u64,
+        rate_budget: RateBudget,
+    ) -> AgentResult<Self> {
+        if environment.demo {
+            return Err(AgentError::ProductionPolicyUnavailable);
+        }
+        read_native_production_policy()?;
+        Self::new_with_mode(
+            root,
+            environment,
+            executor_credentials,
+            observed_at_ms,
+            rate_budget,
+            ExecutionRuntimeMode::Production,
         )
     }
 
@@ -304,6 +388,10 @@ impl ExecutionRuntime {
 
     pub const fn demo_mutation_acceptance_requested(&self) -> bool {
         matches!(self.mode, ExecutionRuntimeMode::DemoAcceptance)
+    }
+
+    pub const fn production_trading_requested(&self) -> bool {
+        matches!(self.mode, ExecutionRuntimeMode::Production) && !self.environment.demo
     }
 
     /// Return the exchange reconciliation and exact identity inventory under
@@ -530,7 +618,9 @@ impl ExecutionRuntime {
         observer: &AccountSnapshot,
     ) -> AgentResult<ExecutorCredentialPreflight> {
         match self.mode {
-            ExecutionRuntimeMode::ReadOnly => self.preflight(observer).await,
+            ExecutionRuntimeMode::ReadOnly | ExecutionRuntimeMode::Production => {
+                self.preflight(observer).await
+            }
             ExecutionRuntimeMode::DemoAcceptance => self.demo_acceptance_preflight(observer).await,
         }
     }
