@@ -1788,6 +1788,7 @@ where
             ledger,
             gateway,
             mutation_authority: MutationAuthority::DemoAcceptance,
+            production_intent_id: None,
         }
     }
 
