@@ -114,7 +114,7 @@ jobs:
 
       - name: Reconcile new prost lock (one-time diagnostics)
         run: |
-          cargo metadata --format-version 1 --no-deps > /dev/null
+          cargo metadata --format-version 1 > /dev/null
           git diff -- Cargo.lock
 
       - name: Format
