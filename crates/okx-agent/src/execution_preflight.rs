@@ -87,20 +87,26 @@ impl ExecutorPreflightReadout {
     }
 }
 
-/// One observational classification of actual native mode and preflight.
-/// Production remains ReadOnly regardless of credential trade permission:
-/// neither this readout nor an accepted REST credential grants exchange POSTs.
+/// Observational classification only. Production policy may select the
+/// ordinary executor; any POST still requires the native CONTROL policy,
+/// complete risk evidence and exact executor pre-submit admission.
 fn observed_execution_right(
     preflight: &ExecutorPreflightSnapshot,
     demo_mutations_configured: bool,
 ) -> (&'static str, Vec<&'static str>) {
     let mut blockers = Vec::new();
     let execution_right = if preflight.credential.production_environment {
-        blockers.push("PRODUCTION_LIVE_NOT_AUTHORIZED");
         if !preflight.credential.executor_ip_bound {
             blockers.push("PRODUCTION_EXECUTOR_IP_NOT_BOUND");
         }
-        "PRODUCTION_READ_ONLY"
+        if demo_mutations_configured && preflight.accepted
+            && preflight.credential.executor_ip_bound
+        {
+            "PRODUCTION_POLICY_SELECTED"
+        } else {
+            blockers.push("PRODUCTION_EXECUTOR_NOT_ADMITTED");
+            "PRODUCTION_READ_ONLY"
+        }
     } else if demo_mutations_configured {
         "DEMO_MUTATIONS_CONFIGURED"
     } else {
