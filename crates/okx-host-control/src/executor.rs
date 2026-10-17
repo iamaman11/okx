@@ -148,6 +148,7 @@ impl HostExecutor {
             HostControlOperation::StartAgent => self.start_agent(),
             HostControlOperation::StartDemoAcceptance => self.start_demo_acceptance(),
             HostControlOperation::RestoreProductionAgent => self.restore_production_agent(),
+            HostControlOperation::SelectAccount { account_id } => self.select_account(&account_id),
             HostControlOperation::SelectReadOnlyAccount {
                 target_profile,
                 expected_source_uid_fingerprint,
@@ -625,12 +626,61 @@ impl HostExecutor {
     /// Single owner sequence, never a production trading grant.
     /// Every uncertain condition blocks new risk. The target is started
     /// ONLY after native drain, consumed exact witness and an empty Job.
+    fn select_account(&mut self, account_id: &str) -> HostControlResult<Value> {
+        let target = match account_id {
+            "real" => AgentProfile::Production,
+            "demo" => AgentProfile::DemoAcceptance,
+            _ => return Err(HostControlError::ProfileHandoffProofRequired),
+        };
+        // Selecting an already active account is harmless and idempotent.
+        // It never changes trading admission or revokes its existing rights.
+        if target == self.desired_profile && self.agent_is_running()? {
+            return Ok(json!({
+                "account_id": account_id,
+                "disposition": "ALREADY_SELECTED",
+                "pid": self.agent_child.as_ref().map(Child::id),
+                "selection_changed_trading_rights": false,
+            }));
+        }
+        let target_profile = if target == AgentProfile::Production {
+            "production"
+        } else {
+            "demo_acceptance"
+        };
+        let selected =
+            self.select_read_only_account_internal(target_profile, None, Some(account_id))?;
+        // Public selection view: do not leak internal profile names, PID, STOP
+        // or historical financial-audit state into the account chooser.
+        Ok(json!({
+            "account_id": account_id,
+            "selected": true,
+            "changed": true,
+            "positions": selected["positions_observed"],
+            "orders": selected["orders_observed"],
+            "selection_changed_trading_rights": false,
+        }))
+    }
+
     fn select_read_only_account(
         &mut self,
         target_profile: &str,
         expected_source_uid: &str,
         expected_target_uid: &str,
     ) -> HostControlResult<Value> {
+        self.select_read_only_account_internal(
+            target_profile,
+            Some((expected_source_uid, expected_target_uid)),
+            None,
+        )
+    }
+
+    fn select_read_only_account_internal(
+        &mut self,
+        target_profile: &str,
+        supplied_uids: Option<(&str, &str)>,
+        account_id: Option<&str>,
+    ) -> HostControlResult<Value> {
+        let (expected_source_uid, legacy_target_uid) = supplied_uids.unwrap_or(("", ""));
         let target = match target_profile {
             "production" => AgentProfile::Production,
             "demo_acceptance" => AgentProfile::DemoAcceptance,
@@ -642,9 +692,10 @@ impl HostExecutor {
         {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
-        if expected_source_uid == expected_target_uid
-            || expected_source_uid.len() != 64
-            || expected_target_uid.len() != 64
+        if account_id.is_none()
+            && (expected_source_uid == legacy_target_uid
+                || expected_source_uid.len() != 64
+                || legacy_target_uid.len() != 64)
         {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
@@ -658,7 +709,15 @@ impl HostExecutor {
             .ok_or(HostControlError::ProfileHandoffProofRequired)?;
         self.desired_store
             .begin_source_drain_hold(self.desired_profile, target, source_pid)?;
-        let (ticket, bound) = self.bound_native_source_candidate(expected_source_uid, target)?;
+        let (ticket, bound, selected_target_uid) =
+            self.bound_native_source_candidate(expected_source_uid, target, account_id)?;
+        let expected_target_uid = match account_id {
+            Some(_) => selected_target_uid.ok_or(HostControlError::ProfileHandoffProofRequired)?,
+            None => legacy_target_uid.to_owned(),
+        };
+        if bound.account_uid_fingerprint == expected_target_uid {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
         let source_pid = bound.source_pid;
         let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
         self.desired_store.stage_frozen(ticket, now)?;
@@ -681,7 +740,7 @@ impl HostExecutor {
             target_pid_observed = Some(target_pid);
             // Independent target inquiry: target UID must differ from the
             // frozen source, with strictly ReadOnly OKX observer permissions.
-            let evidence = self.verify_native_read_only_target(expected_target_uid)?;
+            let evidence = self.verify_native_read_only_target(&expected_target_uid)?;
             if !self.agent_is_running()?
                 || self.agent_child.as_ref().map(Child::id) != Some(target_pid)
                 || self.running_profile != Some(target)
@@ -719,6 +778,7 @@ impl HostExecutor {
             self.next_restart_at = None;
             Ok(json!({
                 "disposition": "SWITCHED_READ_ONLY",
+                "account_id": account_id.unwrap_or(if target == AgentProfile::Production { "real" } else { "demo" }),
                 "profile": target,
                 "pid": target_pid,
                 "account_uid_fingerprint": expected_target_uid,
@@ -1167,8 +1227,14 @@ impl HostExecutor {
     /// Native drained read-only source is still a candidate, NOT a
     /// CONTROL-authenticated one-use witness bound to exact PID/ReleaseSet.
     #[allow(dead_code)]
-    fn request_native_drain(&mut self, expected_uid: &str) -> HostControlResult<Value> {
-        if !expected_uid.bytes().all(|b| b.is_ascii_hexdigit()) || expected_uid.len() != 64 {
+    fn request_native_drain(
+        &mut self,
+        expected_uid: &str,
+        account_id: Option<&str>,
+    ) -> HostControlResult<Value> {
+        if account_id.is_none()
+            && (!expected_uid.bytes().all(|b| b.is_ascii_hexdigit()) || expected_uid.len() != 64)
+        {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
         if self.desired_store.is_pending()? {
@@ -1199,7 +1265,11 @@ impl HostExecutor {
             request_id: request_id.clone(),
             operation: NativeChildOperation::Drain,
             expected_uid_fingerprint: expected_uid.to_owned(),
+            account_id: account_id.map(str::to_owned),
         };
+        if !request.valid() {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
         let bytes = serde_json::to_vec(&request)?;
         if bytes.len() + 1 > NATIVE_CHILD_CONTROL_MAX_BYTES {
             return Err(HostControlError::ProfileHandoffProofRequired);
@@ -1265,12 +1335,20 @@ impl HostExecutor {
             }
         }
         let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
-        if !source.valid_for(expected_uid, ledger_sha, now_ms) {
+        let source_uid = if account_id.is_some() {
+            source.account_uid_fingerprint.as_str()
+        } else {
+            expected_uid
+        };
+        if !source.valid_for(source_uid, ledger_sha, now_ms)
+            || (account_id.is_some() && reply.selected_target_uid_fingerprint.is_none())
+        {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
         Ok(json!({
             "ledger": reply.ledger_only,
             "source_candidate": reply.source_candidate,
+            "selected_target_uid_fingerprint": reply.selected_target_uid_fingerprint,
             "authorizes_profile_switch": false
         }))
     }
@@ -1283,7 +1361,8 @@ impl HostExecutor {
         &mut self,
         expected_uid: &str,
         destination: AgentProfile,
-    ) -> HostControlResult<(FrozenSourceWitness, BoundSourceIdentity)> {
+        account_id: Option<&str>,
+    ) -> HostControlResult<(FrozenSourceWitness, BoundSourceIdentity, Option<String>)> {
         if !self.agent_is_running()? {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
@@ -1300,7 +1379,7 @@ impl HostExecutor {
 
         // This one-shot pipe drains real executor POSTs; NEVER reuse a reply
         // after a timeout or obtain it from GitHub/Cloudflare.
-        let reply = self.request_native_drain(expected_uid)?;
+        let reply = self.request_native_drain(expected_uid, account_id)?;
         if !self.agent_is_running()?
             || self.agent_child.as_ref().map(Child::id) != Some(launch.pid)
             || self.agent_launch.is_none_or(|latest| {
@@ -1337,14 +1416,17 @@ impl HostExecutor {
             .as_str()
             .unwrap_or("");
         let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
-        if !candidate.valid_for(expected_uid, ledger_sha256, now_ms) {
+        let source_uid = candidate.account_uid_fingerprint.as_str();
+        if (account_id.is_none() && source_uid != expected_uid)
+            || !candidate.valid_for(source_uid, ledger_sha256, now_ms)
+        {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
         let bound = BoundSourceIdentity {
             source: launch.profile,
             source_pid: launch.pid,
             launch_lease_sha256: format!("{:x}", Sha256::digest(launch.launch_lease_sha256)),
-            account_uid_fingerprint: expected_uid.to_owned(),
+            account_uid_fingerprint: source_uid.to_owned(),
             private_ws_generation: candidate.private_ws_generation,
             ledger_manifest_sha256: ledger_sha256.to_owned(),
             source_tree: source_tree.to_owned(),
@@ -1367,7 +1449,13 @@ impl HostExecutor {
             agent_sha256: bound.agent_sha256.clone(),
             controller_sha256: bound.controller_sha256.clone(),
         };
-        Ok((frozen, bound))
+        let selected_target_uid = reply["selected_target_uid_fingerprint"]
+            .as_str()
+            .map(str::to_owned);
+        if account_id.is_some() && selected_target_uid.is_none() {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        Ok((frozen, bound, selected_target_uid))
     }
 
     /// Only the same Job-owned target child can return this read-only
@@ -1395,6 +1483,7 @@ impl HostExecutor {
             request_id: request_id.clone(),
             operation: NativeChildOperation::VerifyReadOnly,
             expected_uid_fingerprint: expected_uid.to_owned(),
+            account_id: None,
         };
         if !req.valid() {
             return Err(HostControlError::ProfileHandoffProofRequired);

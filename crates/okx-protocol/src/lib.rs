@@ -27,6 +27,10 @@ pub struct NativeChildRequest {
     pub request_id: String,
     pub operation: NativeChildOperation,
     pub expected_uid_fingerprint: String,
+    /// Public selection of one of the existing connected accounts; UID is resolved
+    /// by authenticated native REST on the current child, not by the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl NativeChildRequest {
@@ -34,11 +38,20 @@ impl NativeChildRequest {
         self.schema == NATIVE_CHILD_CONTROL_SCHEMA_V1
             && self.request_id.len() == 64
             && self.request_id.bytes().all(|b| b.is_ascii_hexdigit())
-            && self.expected_uid_fingerprint.len() == 64
-            && self
-                .expected_uid_fingerprint
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit())
+            && match self.account_id.as_deref() {
+                Some("real" | "demo") => {
+                    self.operation == NativeChildOperation::Drain
+                        && self.expected_uid_fingerprint.is_empty()
+                }
+                None => {
+                    self.expected_uid_fingerprint.len() == 64
+                        && self
+                            .expected_uid_fingerprint
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit())
+                }
+                Some(_) => false,
+            }
     }
 }
 
@@ -125,6 +138,10 @@ pub struct NativeChildReply {
     pub ledger_only: Option<serde_json::Value>,
     pub source_candidate: Option<NativeDrainedSourceCandidate>,
     pub target_read_only: Option<NativeReadOnlyTargetProof>,
+    /// Source-bound, authenticated target UID for a one-parameter account choice.
+    /// Never a trading permission; CONTROL still verifies the actual target child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_target_uid_fingerprint: Option<String>,
     pub error: Option<String>,
 }
 
@@ -150,17 +167,29 @@ impl NativeChildReply {
                         }
                     }) && self.target_read_only.is_none()
                         && self.error.is_none()
+                        && self
+                            .selected_target_uid_fingerprint
+                            .as_ref()
+                            .is_none_or(|uid| {
+                                uid.len() == 64
+                                    && uid.bytes().all(|b| b.is_ascii_hexdigit())
+                                    && self.source_candidate.as_ref().is_some_and(|source| {
+                                        uid != &source.account_uid_fingerprint
+                                    })
+                            })
                 }
                 "VERIFIED_READ_ONLY" => {
                     self.ledger_only.is_none()
                         && self.source_candidate.is_none()
                         && self.target_read_only.is_some()
+                        && self.selected_target_uid_fingerprint.is_none()
                         && self.error.is_none()
                 }
                 _ => {
                     self.ledger_only.is_none()
                         && self.source_candidate.is_none()
                         && self.target_read_only.is_none()
+                        && self.selected_target_uid_fingerprint.is_none()
                         && self.error.is_some()
                 }
             }
@@ -1961,7 +1990,12 @@ pub enum HostControlOperation {
     StartAgent,
     StartDemoAcceptance,
     RestoreProductionAgent,
-    /// Same native agent and single CONTROL only; ALWAYS target ReadOnly.
+    /// One account name, no operator UID/profile; native child derives both UIDs.
+    /// Selection never enables trading.
+    SelectAccount {
+        account_id: String,
+    },
+    /// Legacy technical operation: same native agent, ALWAYS target ReadOnly.
     SelectReadOnlyAccount {
         target_profile: String,
         expected_source_uid_fingerprint: String,
@@ -1982,6 +2016,13 @@ pub enum HostControlOperation {
 impl HostControlOperation {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
+            Self::SelectAccount { account_id } => {
+                if matches!(account_id.as_str(), "real" | "demo") {
+                    Ok(())
+                } else {
+                    Err(ProtocolError::InvalidRequestId)
+                }
+            }
             Self::RegisterReadOnlyAccount { entry } => entry.validate(),
             Self::ConfigureProductionTrading { policy } => policy.validate(),
             Self::StopProductionTrading { expected_revision } => {
@@ -4262,6 +4303,49 @@ mod native_drain_source_tests {
     }
 
     #[test]
+    fn native_simple_account_selection_is_typed_and_never_a_trade_grant() {
+        let mut req = NativeChildRequest {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+            request_id: "a".repeat(64),
+            operation: NativeChildOperation::Drain,
+            expected_uid_fingerprint: String::new(),
+            account_id: Some("real".to_owned()),
+        };
+        assert!(req.valid());
+        req.account_id = Some("demo".to_owned());
+        assert!(req.valid());
+        req.account_id = Some("unknown".to_owned());
+        assert!(!req.valid());
+        req.account_id = Some("real".to_owned());
+        req.operation = NativeChildOperation::VerifyReadOnly;
+        assert!(!req.valid());
+        req.operation = NativeChildOperation::Drain;
+        req.expected_uid_fingerprint = "b".repeat(64);
+        assert!(!req.valid());
+        assert!(
+            HostControlOperation::SelectAccount {
+                account_id: "real".to_owned()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            HostControlOperation::SelectAccount {
+                account_id: "demo".to_owned()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            HostControlOperation::SelectAccount {
+                account_id: "demo_acceptance".to_owned()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
     fn ledgerless_readonly_source_never_claims_a_fabricated_manifest() {
         let mut source = source();
         source.ledger_manifest_sha256.clear();
@@ -4275,6 +4359,7 @@ mod native_drain_source_tests {
             ledger_only: None,
             source_candidate: Some(source),
             target_read_only: None,
+            selected_target_uid_fingerprint: None,
             error: None,
         };
         assert!(reply.valid_for(&id));
@@ -4341,6 +4426,7 @@ mod native_drain_source_tests {
             ledger_only: Some(serde_json::json!({"source_ledger_manifest_sha256": "b".repeat(64)})),
             source_candidate: Some(source()),
             target_read_only: None,
+            selected_target_uid_fingerprint: None,
             error: None,
         };
         assert!(reply.valid_for(&id));

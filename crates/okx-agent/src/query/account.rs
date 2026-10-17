@@ -38,7 +38,7 @@ const PROFILE_HANDOFF_READINESS_SCHEMA_V1: &str = "okx.profile-handoff-readiness
 /// Read the configured counterparty's native observer credentials directly
 /// from the SAME Windows agent. This does not create an executor, process,
 /// second transport, credential export or CONTROL switching permission.
-async fn authenticated_counterpart_identity(source_uid: &str) -> serde_json::Value {
+pub(crate) async fn authenticated_counterpart_identity(source_uid: &str) -> serde_json::Value {
     use okx_api::{OkxEnvironment, OkxRestClient, RateBudget, Region};
     use serde_json::json;
 

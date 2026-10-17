@@ -241,8 +241,53 @@ pub async fn run_mailbox_until_shutdown(
 
     loop {
         tokio::select! {
-            Some(request) = native_rx.recv(), if native_child_control_stdio && !native_request_consumed => {
+            Some(mut request) = native_rx.recv(), if native_child_control_stdio && !native_request_consumed => {
                 native_request_consumed = true;
+                // Operator selects "real" or "demo" only. Resolve BOTH UIDs
+                // from freshly authenticated observer REST in this same agent.
+                // This does not grant trading, drain an order or mutate a ledger.
+                let mut selected_target_uid_fingerprint = None;
+                if let Some(account_id) = request.account_id.as_deref() {
+                    let identity = async {
+                        let observer = account.ok_or("SOURCE_OBSERVER_UNAVAILABLE")?;
+                        let source = observer.snapshot().await.map_err(|_| "SOURCE_ACCOUNT_UNAVAILABLE")?;
+                        let source_uid = source.account_uid_fingerprint;
+                        let counterpart = crate::query::authenticated_counterpart_identity(&source_uid).await;
+                        let target_profile = if account_id == "real" { "production" } else { "demo_acceptance" };
+                        if counterpart["status"] != "VERIFIED"
+                            || counterpart["target_profile"] != target_profile
+                            || counterpart["target_read_only_credentials"] != true
+                        {
+                            return Err("ACCOUNT_IDENTITY_NOT_VERIFIED");
+                        }
+                        let target_uid = counterpart["target_account_uid_fingerprint"]
+                            .as_str().ok_or("TARGET_UID_MISSING")?.to_owned();
+                        if source_uid.len() != 64 || target_uid.len() != 64 || source_uid == target_uid {
+                            return Err("ACCOUNT_UID_INVALID");
+                        }
+                        Ok((source_uid, target_uid))
+                    };
+                    match tokio::time::timeout(Duration::from_secs(10), identity).await {
+                        Ok(Ok((source_uid, target_uid))) => {
+                            request.expected_uid_fingerprint = source_uid;
+                            selected_target_uid_fingerprint = Some(target_uid);
+                        }
+                        _ => {
+                            let reply = NativeChildReply {
+                                schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                                request_id: request.request_id,
+                                disposition: "BLOCKED".to_owned(),
+                                ledger_only: None,
+                                source_candidate: None,
+                                target_read_only: None,
+                                selected_target_uid_fingerprint: None,
+                                error: Some("authenticated source/target identity not proven".to_owned()),
+                            };
+                            eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
+                            continue;
+                        }
+                    }
+                }
                 if matches!(request.operation, NativeChildOperation::VerifyReadOnly) {
                     // ReadOnly access is proved by authenticated REST UID and
                     // disabled mutation authority, independently of WS/OCO freshness.
@@ -328,6 +373,7 @@ pub async fn run_mailbox_until_shutdown(
                         ledger_only: None,
                         source_candidate: None,
                         target_read_only: proof,
+                        selected_target_uid_fingerprint: None,
                         error: error.map(str::to_owned),
                     };
                     eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
@@ -347,7 +393,7 @@ pub async fn run_mailbox_until_shutdown(
                                 .map_err(|error| error.to_string()),
                             NativeChildOperation::VerifyReadOnly => Err("handled directly".to_owned()),
                         };
-                        let _ = tx.send((request, result));
+                        let _ = tx.send((request, result, selected_target_uid_fingerprint));
                     });
                 } else {
                     // Strict observer-only native source: there is no mutation
@@ -370,6 +416,7 @@ pub async fn run_mailbox_until_shutdown(
                             ledger_only: None,
                             source_candidate: Some(source),
                             target_read_only: None,
+                            selected_target_uid_fingerprint,
                             error: None,
                         },
                         _ => NativeChildReply {
@@ -379,13 +426,14 @@ pub async fn run_mailbox_until_shutdown(
                             ledger_only: None,
                             source_candidate: None,
                             target_read_only: None,
+                            selected_target_uid_fingerprint: None,
                             error: Some("observer-only source/ledger absence not proven".to_owned()),
                         },
                     };
                     eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
                 }
             }
-            Some((request, drained)) = drain_rx.recv() => {
+            Some((request, drained, selected_target_uid_fingerprint)) = drain_rx.recv() => {
                 // Reuse the same native source query used by primary MCP.
                 // It cannot change the ledger manifest after drain; it must
                 // prove fresh REST receipt, coherent WS, current flat source,
@@ -452,7 +500,19 @@ pub async fn run_mailbox_until_shutdown(
                     })).ok()
                 });
                 let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
-                let admitted = source_valid && candidate.as_ref().is_some_and(|proof| {
+                // Reconfirm the target account on a SECOND authenticated
+                // receipt after drain. A stale or mismatched account is denied.
+                let selection_verified = request.account_id.as_deref().is_none_or(|account_id| {
+                    let expected_profile = if account_id == "real" { "production" } else { "demo_acceptance" };
+                    let counterpart = source.as_ref().and_then(|v| v.get("counterpart_read_only_identity"));
+                    counterpart.is_some_and(|v| {
+                        v["status"] == "VERIFIED"
+                            && v["target_profile"] == expected_profile
+                            && v["target_read_only_credentials"] == true
+                            && v["target_account_uid_fingerprint"].as_str() == selected_target_uid_fingerprint.as_deref()
+                    })
+                });
+                let admitted = selection_verified && source_valid && candidate.as_ref().is_some_and(|proof| {
                     ledger.as_ref().is_some_and(|record| {
                         proof.valid_for(
                             &request.expected_uid_fingerprint,
@@ -470,6 +530,7 @@ pub async fn run_mailbox_until_shutdown(
                         ledger_only: ledger.and_then(|value| serde_json::to_value(value).ok()),
                         source_candidate: candidate,
                         target_read_only: None,
+                        selected_target_uid_fingerprint: selected_target_uid_fingerprint.clone(),
                         error: None,
                     }
                 } else {
@@ -480,6 +541,7 @@ pub async fn run_mailbox_until_shutdown(
                         ledger_only: None,
                         source_candidate: None,
                         target_read_only: None,
+                        selected_target_uid_fingerprint: None,
                         error: Some("drain or current REST/WS/OCO/UID/ledger proof not admitted".to_owned()),
                     }
                 };
