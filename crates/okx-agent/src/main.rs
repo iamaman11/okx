@@ -259,11 +259,11 @@ async fn run(cli: Cli) -> AgentResult<()> {
             production_trading,
             native_child_control_stdio,
         } => {
-            if demo_mutation_acceptance && !environment.demo
-                || production_trading && (environment.demo || !native_child_control_stdio)
-                || demo_mutation_acceptance && production_trading
-            {
+            if demo_mutation_acceptance && !environment.demo {
                 return Err(AgentError::DemoMutationAcceptanceRequiresDemoEnvironment);
+            }
+            if production_trading && (environment.demo || !native_child_control_stdio) {
+                return Err(AgentError::ProductionPolicyUnavailable);
             }
             let identity = load_native_identity(&config.key_id)?;
             if let Some(mailbox_issue) = mailbox_issue {
