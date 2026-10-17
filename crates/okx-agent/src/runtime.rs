@@ -266,7 +266,8 @@ pub async fn run_mailbox_until_shutdown(
                 {
                     break;
                 }
-                let follow_up_permitted = request.operation == NativeChildOperation::ArmProductionPilot;
+                let follow_up_permitted =
+                    request.operation == NativeChildOperation::ArmProductionPilot;
                 if native_tx.send(request).is_err() || !follow_up_permitted {
                     break;
                 }
