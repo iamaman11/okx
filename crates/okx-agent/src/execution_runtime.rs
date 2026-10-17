@@ -496,6 +496,9 @@ impl ExecutionRuntime {
         reconciliation.strategy_stop_rearm_proofs = executor.ledger().stop_rearm_proofs();
         reconciliation.unverified_run = executor.ledger().unverified_run().cloned();
         reconciliation.unverified_run_proofs = executor.ledger().archived_unverified_proofs();
+        // Initial reconciliation preceded the source capture above. Publish
+        // an audit of this exact updated run, not the pre-capture snapshot.
+        reconciliation.refresh_period_financial_audit();
         Ok((reconciliation, inventory))
     }
 

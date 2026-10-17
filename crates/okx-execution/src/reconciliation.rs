@@ -359,8 +359,17 @@ pub fn reconcile_account_ledger(
         facts.exchange_orders_history_complete,
         facts.exchange_fills_history_complete,
     )?);
-    result.strategy_period_financial_audit = Some(assemble_period_financial_audit(&result));
+    result.refresh_period_financial_audit();
     Ok(result)
+}
+
+impl AccountLedgerReconciliation {
+    /// Rebuild the existing read-only financial audit after the one native
+    /// owner captures source evidence and updates the NAV watermark.
+    /// Neither this projection nor a historical archive grants trade rights.
+    pub fn refresh_period_financial_audit(&mut self) {
+        self.strategy_period_financial_audit = Some(assemble_period_financial_audit(self));
+    }
 }
 
 /// A local finalization remains immutable and historically meaningful, but
@@ -445,8 +454,9 @@ fn assemble_period_financial_audit(
     // archived NAV, or a caller-supplied Boolean.
     let current_period_proven = report.financial_period.as_ref().is_some_and(|period| {
         matches!(period.state, "FLAT_RECONCILED" | "ACTIVE_VALUED")
+            && period.reasons.is_empty()
             && period.nav_usdt.is_some()
-            && period.funding_usdt.is_some()
+            && period.funding_usdt.as_deref() == Some("0")
             && period.evidence_sha256.len() == 64
             && period
                 .evidence_sha256
@@ -1487,6 +1497,8 @@ mod tests {
             reasons: Vec::new(),
         });
         let historical = assemble_period_financial_audit(&report);
+        report.refresh_period_financial_audit();
+        assert_eq!(report.strategy_period_financial_audit.as_ref(), Some(&historical));
         assert_eq!(historical.status, "INCOMPLETE");
         assert!(historical.current_period_proven);
         assert!(!historical.new_risk_authorized);
@@ -1496,6 +1508,21 @@ mod tests {
                 .contains(&"UNVERIFIED_HISTORICAL_RUNS")
         );
         assert_eq!(historical.intents_outside_exchange_history, 3);
+        // The audit is refreshed only AFTER the same native owner has
+        // captured the source and recomputed the current financial period.
+        report.financial_period.as_mut().unwrap().state = "INCOMPLETE";
+        report.refresh_period_financial_audit();
+        assert!(!report.strategy_period_financial_audit.as_ref().unwrap().current_period_proven);
+        report.financial_period.as_mut().unwrap().state = "FLAT_RECONCILED";
+        report.refresh_period_financial_audit();
+        assert!(report.strategy_period_financial_audit.as_ref().unwrap().current_period_proven);
+        assert!(!report.strategy_period_financial_audit.as_ref().unwrap().new_risk_authorized);
+        report.financial_period.as_mut().unwrap().funding_usdt = Some("1".to_owned());
+        assert!(!assemble_period_financial_audit(&report).current_period_proven);
+        report.financial_period.as_mut().unwrap().funding_usdt = Some("0".to_owned());
+        report.financial_period.as_mut().unwrap().reasons.push("funding_unallocated");
+        assert!(!assemble_period_financial_audit(&report).current_period_proven);
+        report.financial_period.as_mut().unwrap().reasons.clear();
         // Missing funding, cross-run identity or incomplete current source
         // cannot inherit an archive's historical NAV or a previous run.
         report.financial_period.as_mut().unwrap().funding_usdt = None;
