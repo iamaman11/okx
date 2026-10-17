@@ -758,10 +758,10 @@ async fn finalize_strategy_run(
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
-    if !execution.demo_mutation_acceptance_requested() {
-        return Ok(deny(
-            "only the authenticated Demo owner can finalize a strategy run",
-        ));
+    if !execution.demo_mutation_acceptance_requested()
+        && !execution.production_trading_requested()
+    {
+        return Ok(deny("only an authenticated native execution owner can finalize a strategy run"));
     }
     let snapshot = match fresh_account(request, context, generated_at).await? {
         FreshAccount::Ready(account) => account,
@@ -772,7 +772,9 @@ async fn finalize_strategy_run(
             ExecutorPreflightCheck::Ready(value) => value,
             ExecutorPreflightCheck::Response(reply) => return Ok(*reply),
         };
-    if !preflight.accepted || preflight.production_environment {
+    if !preflight.accepted
+        || preflight.production_environment != execution.production_trading_requested()
+    {
         return Ok(preflight_rejected(request, generated_at));
     }
     let (Some(observer), Some(ws)) = (context.account_fallback, context.private_ws) else {
@@ -817,7 +819,7 @@ async fn finalize_strategy_run(
     }
     let now = utc_now_ms();
     match execution
-        .finalize_strategy_run_demo_authorized(&preflight, allocation_id, &facts, true, true, now)
+        .finalize_strategy_run_authorized(&preflight, allocation_id, &facts, true, true, now)
         .await?
     {
         Some(Ok(done)) => Ok(completed(
@@ -830,7 +832,7 @@ async fn finalize_strategy_run(
             "durable financial period incomplete: {error}"
         ))),
         None => Ok(deny(
-            "exact active strategy run or Demo account identity not verified",
+            "exact active strategy run or account identity not verified",
         )),
     }
 }
@@ -856,9 +858,11 @@ async fn quarantine_unverified_strategy_run(
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
-    if !execution.demo_mutation_acceptance_requested() {
+    if !execution.demo_mutation_acceptance_requested()
+        && !execution.production_trading_requested()
+    {
         return Ok(deny(
-            "unverified closure requires exact Demo owner".to_owned(),
+            "unverified closure requires exact native execution owner".to_owned(),
         ));
     }
     let snapshot = match fresh_account(request, context, generated_at).await? {
@@ -870,7 +874,9 @@ async fn quarantine_unverified_strategy_run(
             ExecutorPreflightCheck::Ready(value) => value,
             ExecutorPreflightCheck::Response(reply) => return Ok(*reply),
         };
-    if !preflight.accepted || preflight.production_environment {
+    if !preflight.accepted
+        || preflight.production_environment != execution.production_trading_requested()
+    {
         return Ok(preflight_rejected(request, generated_at));
     }
     let (Some(observer), Some(ws)) = (context.account_fallback, context.private_ws) else {
@@ -905,7 +911,7 @@ async fn quarantine_unverified_strategy_run(
     }
     let now_ms = utc_now_ms();
     match execution
-        .quarantine_unverified_strategy_run_demo_authorized(
+        .quarantine_unverified_strategy_run_authorized(
             &preflight,
             allocation_id,
             &facts,
@@ -925,7 +931,7 @@ async fn quarantine_unverified_strategy_run(
             "unverified closure is not independently attested: {error}"
         ))),
         None => Ok(deny(
-            "exact Demo source identity or run mismatch".to_owned(),
+            "exact native source identity or run mismatch".to_owned(),
         )),
     }
 }
