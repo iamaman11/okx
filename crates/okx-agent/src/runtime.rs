@@ -243,6 +243,94 @@ pub async fn run_mailbox_until_shutdown(
         tokio::select! {
             Some(request) = native_rx.recv(), if native_child_control_stdio && !native_request_consumed => {
                 native_request_consumed = true;
+                if matches!(request.operation, NativeChildOperation::ArmProductionPilot) {
+                    // Exactly one inherited-stdin command per Job child process.
+                    // A staged pilot does NOT enable mutation authority or POST.
+                    let probe = async {
+                        let owner = execution.ok_or("EXECUTOR_UNAVAILABLE")?;
+                        let observer = account.ok_or("OBSERVER_UNAVAILABLE")?;
+                        let private = private_ws.ok_or("PRIVATE_WS_UNAVAILABLE")?;
+                        let pilot = request.pilot.as_ref().ok_or("PILOT_PROOF_MISSING")?;
+                        if owner.mode()
+                            != crate::execution_runtime::ExecutionRuntimeMode::ReadOnly
+                        {
+                            return Err("NOT_PRODUCTION_READ_ONLY");
+                        }
+                        let snapshot = observer
+                            .snapshot()
+                            .await
+                            .map_err(|_| "ACCOUNT_REST_UNAVAILABLE")?;
+                        if snapshot.account_uid_fingerprint != request.expected_uid_fingerprint {
+                            return Err("ACCOUNT_UID_MISMATCH");
+                        }
+                        let preflight = owner
+                            .preflight(&snapshot)
+                            .await
+                            .map_err(|_| "EXECUTOR_PREFLIGHT_UNAVAILABLE")?;
+                        if !preflight.accepted
+                            || !preflight.production_environment
+                            || !preflight.executor_ip_bound
+                        {
+                            return Err("PRODUCTION_CREDENTIAL_UNACCEPTED");
+                        }
+                        let cursor = private
+                            .convergence_cursor()
+                            .await
+                            .map_err(|_| "PRIVATE_WS_UNAVAILABLE")?;
+                        let protection = observer
+                            .pending_protective_algos()
+                            .await
+                            .map_err(|_| "NATIVE_PROTECTION_UNAVAILABLE")?;
+                        if !protection.complete_within_bound {
+                            return Err("NATIVE_PROTECTION_INCOMPLETE");
+                        }
+                        let stable = private
+                            .convergence_window(cursor)
+                            .await
+                            .map_err(|_| "PRIVATE_WS_GAP")?;
+                        if !stable.events.is_empty() {
+                            return Err("PRIVATE_WS_CHANGED");
+                        }
+                        let permit = okx_execution::ProductionLivePermit {
+                            account_uid_fingerprint: pilot.account_uid_fingerprint.clone(),
+                            intent_id: pilot.intent_id.clone(),
+                            allocation_id: pilot.allocation_id.clone(),
+                            operator_authority_id: pilot.operator_authority_id.clone(),
+                            bound_child_pid: pilot.bound_child_pid,
+                            max_allocation_usdt: pilot.max_allocation_usdt.clone(),
+                            max_loss_usdt: pilot.max_loss_usdt.clone(),
+                            source_checksum_sha256: pilot.source_checksum_sha256.clone(),
+                            issued_at_ms: pilot.issued_at_ms,
+                            expires_at_ms: pilot.expires_at_ms,
+                        };
+                        let now = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+                        if !owner.stage_production_pilot_native(permit, now).await {
+                            return Err("PRODUCTION_PILOT_NOT_ADMITTED");
+                        }
+                        Ok(())
+                    };
+                    let result = tokio::time::timeout(Duration::from_secs(8), probe).await;
+                    let error = match result {
+                        Ok(Ok(())) => None,
+                        Ok(Err(reason)) => Some(reason),
+                        Err(_) => Some("PRODUCTION_PILOT_PROOF_TIMEOUT"),
+                    };
+                    let reply = NativeChildReply {
+                        schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+                        request_id: request.request_id,
+                        disposition: if error.is_none() {
+                            "PILOT_ARMED"
+                        } else {
+                            "BLOCKED"
+                        }.to_owned(),
+                        ledger_only: None,
+                        source_candidate: None,
+                        target_read_only: None,
+                        error: error.map(str::to_owned),
+                    };
+                    eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
+                    continue;
+                }
                 if matches!(request.operation, NativeChildOperation::VerifyReadOnly) {
                     // ReadOnly access is proved by authenticated REST UID and
                     // disabled mutation authority, independently of WS/OCO freshness.
@@ -345,7 +433,10 @@ pub async fn run_mailbox_until_shutdown(
                                 .drain_mutation_ingress(&request.expected_uid_fingerprint)
                                 .await
                                 .map_err(|error| error.to_string()),
-                            NativeChildOperation::VerifyReadOnly => Err("handled directly".to_owned()),
+                            NativeChildOperation::VerifyReadOnly
+                            | NativeChildOperation::ArmProductionPilot => {
+                                Err("handled directly".to_owned())
+                            },
                         };
                         let _ = tx.send((request, result));
                     });

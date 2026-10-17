@@ -179,6 +179,9 @@ pub struct ExecutionRuntime {
     executor_account: AccountApi,
     public_data: PublicDataApi,
     executor: Mutex<OrderExecutor<TradeApi>>,
+    /// Only inherited native CONTROL can stage this one-use in-memory intent.
+    /// It does not enable executor mutations or authorize any MCP request.
+    production_pilot_staged: Mutex<Option<ProductionLivePermit>>,
 }
 
 fn strategy_nav_source_supported(demo: bool, mode: ExecutionRuntimeMode) -> bool {
@@ -259,7 +262,36 @@ impl ExecutionRuntime {
             executor_account,
             public_data,
             executor: Mutex::new(OrderExecutor::new(ledger, trade)),
+            production_pilot_staged: Mutex::new(None),
         })
+    }
+
+    /// Staging is *not* activation. The only source is the inherited native
+    /// child pipe, after independent Production REST/WS proof. No storage write
+    /// or exchange POST; expiry and UID are checked once more on any future use.
+    pub async fn stage_production_pilot_native(
+        &self,
+        permit: ProductionLivePermit,
+        now_ms: u64,
+    ) -> bool {
+        if self.environment.demo
+            || self.mode != ExecutionRuntimeMode::ReadOnly
+            || permit.bound_child_pid != std::process::id()
+        {
+            return false;
+        }
+        let mut slot = self.production_pilot_staged.lock().await;
+        if slot.is_some() {
+            return false;
+        }
+        let executor = self.executor.lock().await;
+        if executor.mutation_authority() != MutationAuthority::Disabled
+            || !executor.production_pilot_candidate_valid(self.environment, &permit, now_ms)
+        {
+            return false;
+        }
+        *slot = Some(permit);
+        true
     }
 
     pub const fn mode(&self) -> ExecutionRuntimeMode {
@@ -1542,6 +1574,35 @@ mod tests {
             false,
             ExecutionRuntimeMode::DemoAcceptance
         ));
+    }
+
+    #[tokio::test]
+    async fn native_pilot_staging_alone_never_enables_exchange_mutation() {
+        let root = temp_root("pilot-staging-is-not-live");
+        let runtime = ExecutionRuntime::new(
+            &root,
+            OkxEnvironment::new(Region::Global, false),
+            credentials(),
+            100,
+            RateBudget::new(),
+        )
+        .expect("one native executor");
+        let permit = ProductionLivePermit {
+            account_uid_fingerprint: "a".repeat(64),
+            intent_id: "intent_0123456789abcdef".to_owned(),
+            allocation_id: "pilot_20261017".to_owned(),
+            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
+            bound_child_pid: std::process::id(),
+            max_allocation_usdt: "100".to_owned(),
+            max_loss_usdt: "5".to_owned(),
+            source_checksum_sha256: "c".repeat(64),
+            issued_at_ms: 101,
+            expires_at_ms: 10_101,
+        };
+        assert!(!runtime.stage_production_pilot_native(permit, 102).await);
+        assert_eq!(runtime.mutation_authority().await, MutationAuthority::Disabled);
+        assert!(!runtime.live_trading_enabled().await);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

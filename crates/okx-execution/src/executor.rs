@@ -350,6 +350,9 @@ impl ProductionLivePermit {
     /// Full executor risk and venue gates remain additionally mandatory.
     fn pilot_plan_supported(plan: &ExecutionPlan) -> bool {
         plan.order_type == OrderType::Fok
+            // First Production pilot has one independently auditable currency.
+            // Do not compare USDC/USD settle loss with a USDT loss allowance.
+            && plan.instrument_id.ends_with("-USDT-SWAP")
             && match plan.action {
                 crate::ExecutionAction::Open => {
                     plan.open_risk.is_some() && plan.risk_binding.is_some()
@@ -670,6 +673,17 @@ where
         self.production_intent_id = Some(intent_id.to_owned());
         self.mutation_authority = MutationAuthority::ProductionLive;
         Ok(())
+    }
+
+    /// Read-only, no mutation authority: allow native CONTROL to validate an
+    /// operator-granted single prepared pilot against the SAME ledger.
+    pub fn production_pilot_candidate_valid(
+        &self,
+        environment: OkxEnvironment,
+        permit: &ProductionLivePermit,
+        now_ms: u64,
+    ) -> bool {
+        permit.valid_for(environment, &self.ledger, now_ms, &permit.intent_id)
     }
 
     pub fn disable_mutations(&mut self) {

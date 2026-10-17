@@ -18,6 +18,48 @@ const MAX_NATIVE_SOURCE_RECEIPT_AGE_MS: u64 = 10_000;
 pub enum NativeChildOperation {
     Drain,
     VerifyReadOnly,
+    /// One native approved intent, never itself an exchange POST.
+    ArmProductionPilot,
+}
+
+/// CONTROL builds this approval for the exact Job-owned child PID.
+/// Only the inherited parent/child pipe may carry it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeProductionPilotRequest {
+    pub account_uid_fingerprint: String,
+    pub intent_id: String,
+    pub allocation_id: String,
+    pub operator_authority_id: String,
+    pub max_allocation_usdt: String,
+    pub max_loss_usdt: String,
+    pub source_checksum_sha256: String,
+    pub bound_child_pid: u32,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+impl NativeProductionPilotRequest {
+    pub fn valid(&self) -> bool {
+        let hex64 = |s: &str| {
+            s.len() == 64
+                && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        hex64(&self.account_uid_fingerprint)
+            && hex64(&self.source_checksum_sha256)
+            && !self.intent_id.is_empty()
+            && self.intent_id.len() <= 128
+            && !self.allocation_id.is_empty()
+            && self.allocation_id.len() <= 128
+            && self.operator_authority_id.starts_with("sha256:")
+            && self.operator_authority_id.len() == 71
+            && hex64(&self.operator_authority_id[7..])
+            && (1..=128).contains(&self.max_allocation_usdt.len())
+            && (1..=128).contains(&self.max_loss_usdt.len())
+            && self.bound_child_pid != 0
+            && self.issued_at_ms > 0
+            && self.expires_at_ms.checked_sub(self.issued_at_ms).is_some_and(|age| age <= 10_000)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +69,8 @@ pub struct NativeChildRequest {
     pub request_id: String,
     pub operation: NativeChildOperation,
     pub expected_uid_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pilot: Option<NativeProductionPilotRequest>,
 }
 
 impl NativeChildRequest {
@@ -39,6 +83,14 @@ impl NativeChildRequest {
                 .expected_uid_fingerprint
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit())
+            && match self.operation {
+                NativeChildOperation::ArmProductionPilot => self.pilot.as_ref().is_some_and(|p| {
+                    p.valid() && p.account_uid_fingerprint == self.expected_uid_fingerprint
+                }),
+                NativeChildOperation::Drain | NativeChildOperation::VerifyReadOnly => {
+                    self.pilot.is_none()
+                }
+            }
     }
 }
 
@@ -134,7 +186,7 @@ impl NativeChildReply {
             && self.request_id == request_id
             && matches!(
                 self.disposition.as_str(),
-                "DRAINED_SOURCE_CANDIDATE" | "VERIFIED_READ_ONLY" | "BLOCKED"
+                "DRAINED_SOURCE_CANDIDATE" | "VERIFIED_READ_ONLY" | "PILOT_ARMED" | "BLOCKED"
             )
             && match self.disposition.as_str() {
                 "DRAINED_SOURCE_CANDIDATE" => {
@@ -155,6 +207,12 @@ impl NativeChildReply {
                     self.ledger_only.is_none()
                         && self.source_candidate.is_none()
                         && self.target_read_only.is_some()
+                        && self.error.is_none()
+                }
+                "PILOT_ARMED" => {
+                    self.ledger_only.is_none()
+                        && self.source_candidate.is_none()
+                        && self.target_read_only.is_none()
                         && self.error.is_none()
                 }
                 _ => {
@@ -1867,6 +1925,17 @@ pub enum HostControlOperation {
     StartAgent,
     StartDemoAcceptance,
     RestoreProductionAgent,
+    /// Explicit operator-approved, one-use staging through existing Job pipe.
+    /// Staging never sends to OKX or switches the agent to persistent Live.
+    ArmProductionPilot {
+        account_uid_fingerprint: String,
+        intent_id: String,
+        allocation_id: String,
+        operator_authority_id: String,
+        max_allocation_usdt: String,
+        max_loss_usdt: String,
+        source_checksum_sha256: String,
+    },
     /// Same native agent and single CONTROL only; ALWAYS target ReadOnly.
     SelectReadOnlyAccount {
         target_profile: String,
@@ -1888,6 +1957,33 @@ pub enum HostControlOperation {
 impl HostControlOperation {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
+            Self::ArmProductionPilot {
+                account_uid_fingerprint,
+                intent_id,
+                allocation_id,
+                operator_authority_id,
+                max_allocation_usdt,
+                max_loss_usdt,
+                source_checksum_sha256,
+            } => {
+                let candidate = NativeProductionPilotRequest {
+                    account_uid_fingerprint: account_uid_fingerprint.clone(),
+                    intent_id: intent_id.clone(),
+                    allocation_id: allocation_id.clone(),
+                    operator_authority_id: operator_authority_id.clone(),
+                    max_allocation_usdt: max_allocation_usdt.clone(),
+                    max_loss_usdt: max_loss_usdt.clone(),
+                    source_checksum_sha256: source_checksum_sha256.clone(),
+                    bound_child_pid: 1,
+                    issued_at_ms: 1,
+                    expires_at_ms: 10_001,
+                };
+                if candidate.valid() {
+                    Ok(())
+                } else {
+                    Err(ProtocolError::InvalidRequestId)
+                }
+            }
             Self::RegisterReadOnlyAccount { entry } => entry.validate(),
             Self::DeployAgent {
                 run_id,
@@ -4103,6 +4199,50 @@ mod native_drain_source_tests {
             orders: 0,
             native_oco: 0,
         }
+    }
+
+    #[test]
+    fn native_pilot_arm_is_exact_scoped_and_old_operations_reject_pilot_payload() {
+        let pilot = NativeProductionPilotRequest {
+            account_uid_fingerprint: "a".repeat(64),
+            intent_id: "intent_0123456789abcdef".to_owned(),
+            allocation_id: "pilot_20261017".to_owned(),
+            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
+            max_allocation_usdt: "100".to_owned(),
+            max_loss_usdt: "5".to_owned(),
+            source_checksum_sha256: "c".repeat(64),
+            bound_child_pid: 42,
+            issued_at_ms: 10_000,
+            expires_at_ms: 20_000,
+        };
+        let mut request = NativeChildRequest {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+            request_id: "d".repeat(64),
+            operation: NativeChildOperation::ArmProductionPilot,
+            expected_uid_fingerprint: "a".repeat(64),
+            pilot: Some(pilot),
+        };
+        assert!(request.valid());
+        request.expected_uid_fingerprint = "e".repeat(64);
+        assert!(!request.valid());
+        request.expected_uid_fingerprint = "a".repeat(64);
+        request.operation = NativeChildOperation::Drain;
+        assert!(!request.valid());
+        request.operation = NativeChildOperation::ArmProductionPilot;
+        request.pilot.as_mut().unwrap().bound_child_pid = 0;
+        assert!(!request.valid());
+        request.pilot.as_mut().unwrap().bound_child_pid = 42;
+        let reply = NativeChildReply {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+            request_id: request.request_id.clone(),
+            disposition: "PILOT_ARMED".to_owned(),
+            ledger_only: None,
+            source_candidate: None,
+            target_read_only: None,
+            error: None,
+        };
+        assert!(reply.valid_for(&request.request_id));
+        assert!(!reply.valid_for(&"e".repeat(64)));
     }
 
     #[test]
