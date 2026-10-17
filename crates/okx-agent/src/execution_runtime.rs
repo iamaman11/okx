@@ -395,13 +395,23 @@ impl ExecutionRuntime {
         matches!(self.mode, ExecutionRuntimeMode::Production) && !self.environment.demo
     }
 
+    /// Single normal financial source owner for either actual venue. This
+    /// does not grant trading rights and never invents missing exchange data.
+    fn financial_source_owner_active(&self) -> bool {
+        matches!(
+            (self.mode, self.environment.demo),
+            (ExecutionRuntimeMode::DemoAcceptance, true)
+                | (ExecutionRuntimeMode::Production, false)
+        )
+    }
+
     /// Return the exchange reconciliation and exact identity inventory under
     /// one ledger lock so the two views cannot observe different intent sets.
     /// This does not perform a gateway send or a mutation.
     /// Read-only admission for the in-process private-order event source.
     /// The executor ledger remains the sole owner of durable evidence.
     pub async fn strategy_financial_capture_active(&self) -> bool {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !self.environment.demo {
+        if !self.financial_source_owner_active() {
             return false;
         }
         let executor = self.executor.lock().await;
@@ -413,7 +423,7 @@ impl ExecutionRuntime {
     /// Read-only, bounded decision for the EXISTING mailbox heartbeat.
     /// Never accepts a request-supplied cursor or treats a >2h gap as healed.
     pub async fn strategy_quiet_source_capture_due(&self, now_ms: u64) -> bool {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !self.environment.demo {
+        if !self.financial_source_owner_active() {
             return false;
         }
         let executor = self.executor.lock().await;
