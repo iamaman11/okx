@@ -44,6 +44,32 @@ pub enum RuntimeState {
     ShuttingDown,
 }
 
+/// Accept multiple sequential native commands on the same inherited pipe.
+/// No partial, oversized or malformed frame can become a command; terminate
+/// the pipe reader rather than resynchronizing past an untrusted boundary.
+fn forward_native_child_requests<R: BufRead>(
+    mut source: R,
+    sender: mpsc::UnboundedSender<NativeChildRequest>,
+) {
+    loop {
+        let mut frame = Vec::new();
+        let result = (&mut source)
+            .take((NATIVE_CHILD_CONTROL_MAX_BYTES + 1) as u64)
+            .read_until(b'\n', &mut frame);
+        if !matches!(result, Ok(size) if size > 0 && size <= NATIVE_CHILD_CONTROL_MAX_BYTES)
+            || frame.last() != Some(&b'\n')
+        {
+            break;
+        }
+        let Ok(request) = serde_json::from_slice::<NativeChildRequest>(&frame) else {
+            break;
+        };
+        if !request.valid() || sender.send(request).is_err() {
+            break;
+        }
+    }
+}
+
 // Reuse the existing heartbeat; never spin a new timer or retry task.
 // A failed venue proof can be retried only at a bounded cadence.
 const MIN_QUIET_SOURCE_RETRY_MS: u64 = 300_000;
@@ -212,28 +238,15 @@ pub async fn run_mailbox_until_shutdown(
         Some(mailbox_issue),
     )?;
 
-    // Exactly one inbound local line per process; no socket, no daemon and
-    // no general shell RPC. A reader thread is blocked in inherited stdin,
-    // then forwards one bounded typed command to the existing Tokio owner.
+    // One inherited CONTROL pipe; many sequential bounded typed requests.
+    // No listening socket, extra agent or general shell RPC.
     let (native_tx, mut native_rx) = mpsc::unbounded_channel::<NativeChildRequest>();
     if native_child_control_stdio {
         std::thread::spawn(move || {
-            let stdin = std::io::stdin();
-            let mut bounded = stdin
-                .lock()
-                .take((NATIVE_CHILD_CONTROL_MAX_BYTES + 1) as u64);
-            let mut frame = Vec::new();
-            if bounded.read_until(b'\n', &mut frame).is_ok()
-                && frame.len() <= NATIVE_CHILD_CONTROL_MAX_BYTES
-                && frame.last() == Some(&b'\n')
-                && let Ok(request) = serde_json::from_slice::<NativeChildRequest>(&frame)
-                && request.valid()
-            {
-                let _ = native_tx.send(request);
-            }
+            forward_native_child_requests(std::io::stdin().lock(), native_tx);
         });
     }
-    let mut native_request_consumed = false;
+    let mut native_command_inflight = false;
     let (drain_tx, mut drain_rx) = mpsc::unbounded_channel();
 
     let mut ticker = interval(Duration::from_secs(poll_seconds));
@@ -241,8 +254,8 @@ pub async fn run_mailbox_until_shutdown(
 
     loop {
         tokio::select! {
-            Some(mut request) = native_rx.recv(), if native_child_control_stdio && !native_request_consumed => {
-                native_request_consumed = true;
+            Some(mut request) = native_rx.recv(), if native_child_control_stdio && !native_command_inflight => {
+                native_command_inflight = true;
                 // Operator selects "real" or "demo" only. Resolve BOTH UIDs
                 // from freshly authenticated observer REST in this same agent.
                 // This does not grant trading, drain an order or mutate a ledger.
@@ -284,6 +297,7 @@ pub async fn run_mailbox_until_shutdown(
                                 error: Some("authenticated source/target identity not proven".to_owned()),
                             };
                             eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
+                            native_command_inflight = false;
                             continue;
                         }
                     }
@@ -377,6 +391,7 @@ pub async fn run_mailbox_until_shutdown(
                         error: error.map(str::to_owned),
                     };
                     eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
+                    native_command_inflight = false;
                     continue;
                 }
                 // Do not await drain inside this select loop: an in-flight
@@ -431,6 +446,7 @@ pub async fn run_mailbox_until_shutdown(
                         },
                     };
                     eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
+                    native_command_inflight = false;
                 }
             }
             Some((request, drained, selected_target_uid_fingerprint)) = drain_rx.recv() => {
@@ -546,6 +562,7 @@ pub async fn run_mailbox_until_shutdown(
                     }
                 };
                 eprintln!("{NATIVE_CHILD_CONTROL_PREFIX}{}", serde_json::to_string(&reply)?);
+                native_command_inflight = false;
             }
             result = tokio::signal::ctrl_c() => {
                 result?;
@@ -980,6 +997,59 @@ fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_pipe_delivers_verify_then_drain_from_same_process() {
+        let first = NativeChildRequest {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+            request_id: "a".repeat(64),
+            operation: NativeChildOperation::VerifyReadOnly,
+            expected_uid_fingerprint: "b".repeat(64),
+            account_id: None,
+        };
+        let second = NativeChildRequest {
+            request_id: "c".repeat(64),
+            operation: NativeChildOperation::Drain,
+            account_id: Some("demo".to_owned()),
+            expected_uid_fingerprint: String::new(),
+            ..first.clone()
+        };
+        let source = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        forward_native_child_requests(std::io::Cursor::new(source), tx);
+        assert_eq!(rx.try_recv().unwrap().request_id, first.request_id);
+        assert_eq!(rx.try_recv().unwrap().request_id, second.request_id);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn native_pipe_rejects_incomplete_or_oversize_second_frame() {
+        let first = NativeChildRequest {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
+            request_id: "a".repeat(64),
+            operation: NativeChildOperation::VerifyReadOnly,
+            expected_uid_fingerprint: "b".repeat(64),
+            account_id: None,
+        };
+        let header = format!("{}\n", serde_json::to_string(&first).unwrap());
+        for trailer in [
+            "incomplete".to_owned(),
+            format!("{}\n", "x".repeat(NATIVE_CHILD_CONTROL_MAX_BYTES)),
+            "{not-json}\n".to_owned(),
+        ] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            forward_native_child_requests(
+                std::io::Cursor::new(format!("{header}{trailer}{header}")),
+                tx,
+            );
+            assert_eq!(rx.try_recv().unwrap().request_id, first.request_id);
+            assert!(rx.try_recv().is_err());
+        }
+    }
 
     #[test]
     fn old_ledger_return_cannot_bypass_readonly_or_current_risk_checks() {
