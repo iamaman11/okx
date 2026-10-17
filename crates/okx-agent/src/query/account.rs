@@ -340,9 +340,14 @@ fn compact_trader_packet(
     let get = |p: &str| full.pointer(p).cloned().unwrap_or(Value::Null);
     let has_stop = !get("/reconciliation/strategy_risk_stop").is_null();
     let finalized = !get("/reconciliation/finalized_run").is_null();
-    let coherent = get("/coherence/coherent") == json!(true);
-    let reconciled = get("/reconciliation/consistent") == json!(true);
-    let complete_protection = get("/pending_protective_algos/complete_within_bound") == json!(true);
+    // Convert the JSON wire projection into native facts ONCE. All trading
+    // decisions below are made from typed bool/count/text, never JSON equality.
+    let boolean = |path: &str| full.pointer(path).and_then(Value::as_bool) == Some(true);
+    let count = |path: &str| full.pointer(path).and_then(Value::as_u64);
+    let state = |path: &str| full.pointer(path).and_then(Value::as_str);
+    let coherent = boolean("/coherence/coherent");
+    let reconciled = boolean("/reconciliation/consistent");
+    let complete_protection = boolean("/pending_protective_algos/complete_within_bound");
     let history_complete = full
         .pointer("/account_ledger/history_coverage")
         .and_then(Value::as_array)
@@ -350,7 +355,7 @@ fn compact_trader_packet(
             !rows.is_empty()
                 && rows
                     .iter()
-                    .all(|row| row.get("complete_within_bound") == Some(&json!(true)))
+                    .all(|row| row.get("complete_within_bound").and_then(Value::as_bool) == Some(true))
         });
     let mut reasons = Vec::new();
     if has_stop {
@@ -359,18 +364,17 @@ fn compact_trader_packet(
     if finalized {
         reasons.push("RUN_FINALIZED");
     }
-    if get("/reconciliation/financial_period/state") == json!("INCOMPLETE") {
+    if state("/reconciliation/financial_period/state") == Some("INCOMPLETE") {
         reasons.push("STRATEGY_FINANCE_INCOMPLETE");
     }
-    if get("/reconciliation/exchange_evidence/source_gap_over_two_hours") == json!(true) {
+    if boolean("/reconciliation/exchange_evidence/source_gap_over_two_hours") {
         reasons.push("FINANCIAL_SOURCE_GAP");
     }
-    if get("/reconciliation/strategy_period_financial_audit/status") == json!("INCOMPLETE") {
+    if state("/reconciliation/strategy_period_financial_audit/status") == Some("INCOMPLETE") {
         reasons.push("PERIOD_FINANCIAL_AUDIT_INCOMPLETE");
     }
-    if get("/reconciliation/strategy_attribution/unallocated_funding_bills")
-        .as_u64()
-        .is_some_and(|count| count > 0)
+    if count("/reconciliation/strategy_attribution/unallocated_funding_bills")
+        .is_some_and(|amount| amount > 0)
     {
         reasons.push("FUNDING_NOT_ATTRIBUTED");
     }
@@ -389,9 +393,9 @@ fn compact_trader_packet(
     let blocked = !reasons.is_empty();
     // A read-only observer can suggest a safe NEXT STEP; it cannot authorize
     // execution, and it cannot infer FLAT from missing OCO/WS evidence.
-    let positions = get("/account_ledger/open_positions").as_u64();
-    let orders = get("/account_ledger/pending_orders").as_u64();
-    let protective = get("/pending_protective_algos/rows").as_u64();
+    let positions = count("/account_ledger/open_positions");
+    let orders = count("/account_ledger/pending_orders");
+    let protective = count("/pending_protective_algos/rows");
     let exposure_status = if !coherent
         || !complete_protection
         || positions.is_none()
@@ -404,7 +408,7 @@ fn compact_trader_packet(
     } else {
         "OBSERVED_FLAT"
     };
-    let financial_status = get("/reconciliation/strategy_period_financial_audit/status");
+    let financial_status = state("/reconciliation/strategy_period_financial_audit/status");
     let next_safe_action =
         if exposure_status == "UNKNOWN_OR_SOURCE_INCOMPLETE" || !reconciled || !history_complete {
             "DIAGNOSE_PRIVATE_ACCOUNT_AND_LEDGER"
@@ -412,7 +416,7 @@ fn compact_trader_packet(
             "REVIEW_EXPOSURE_AND_NATIVE_PROTECTION"
         } else if has_stop {
             "REVIEW_DURABLE_STOP_AND_FINANCIAL_PERIODS"
-        } else if financial_status == json!("INCOMPLETE") || finalized {
+        } else if financial_status == Some("INCOMPLETE") || finalized {
             "REVIEW_PERIOD_FINANCIAL_EVIDENCE"
         } else if !matches!(quality, DataQuality::Fresh) {
             "CHECK_SOURCE_QUALITY"
@@ -428,7 +432,7 @@ fn compact_trader_packet(
             "schema": "okx.operator-status/v1",
             "venue": "OKX",
             "exposure_status": exposure_status,
-            "financial_status": financial_status,
+            "financial_status": get("/reconciliation/strategy_period_financial_audit/status"),
             // Installing or selecting a profile is a different CONTROL owner.
             // This data-only query must not invent its current release status.
             "release_parity": "VERIFY_USING_NATIVE_CONTROL",
