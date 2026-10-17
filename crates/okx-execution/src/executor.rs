@@ -292,6 +292,163 @@ pub enum MutationAuthority {
     DemoAcceptance,
 }
 
+/// Normal account-scoped policy, not a per-order/10-second Production pilot.
+/// This is a pure admission contract; constructing one does not enable trading.
+/// The one native execution owner must attest risk occupancy and source truth.
+pub const PRODUCTION_TRADING_POLICY_SCHEMA_V1: &str = "okx.production-trading-policy/v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProductionPermission {
+    Off,
+    ReadOnly,
+    Enabled,
+    Stopped,
+}
+
+/// Revisions can be replaced/revoked by the existing owner, not by an order
+/// parameter or an ephemeral stdin grant. Persistence and native CONTROL
+/// loading must be completed before Production mutation authority is exposed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionTradingPolicy {
+    pub schema: String,
+    pub revision: u64,
+    pub permission: ProductionPermission,
+    pub account_uid_fingerprint: String,
+    pub strategy_run_id: String,
+    pub operator_authority_id: String,
+    pub allowed_instruments: Vec<String>,
+    pub max_total_modelled_loss_usdt: String,
+}
+
+/// Inputs are collected by the single native owner at prepare AND just before
+/// send. Modelled risk includes all open lots, pending orders, reservations and
+/// UNKNOWN outcomes, rather than only the candidate's stop-loss. No public
+/// API, MCP request or caller assertion may be treated as this evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionRiskWitness {
+    pub account_and_source_fresh: bool,
+    pub finance_complete: bool,
+    pub unknown_mutations_reconciled: bool,
+    /// Existing portfolio loss INCLUDING uncertain/pending exposure but
+    /// EXCLUDING this new candidate. Must be independently reconstructed.
+    pub existing_modelled_loss_usdt: String,
+    /// Native exchange/ledger evidence that this CLOSE only reduces an
+    /// exact owned position and cannot create reverse or foreign exposure.
+    pub exact_owned_reduce_only_close: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionPolicyRejection {
+    InvalidPolicy,
+    ScopeMismatch,
+    ModeDenied,
+    UnsupportedAction,
+    SourceUnattested,
+    RiskBudgetExceeded,
+}
+
+impl ProductionTradingPolicy {
+    /// Read-only, deterministic candidate decision. Never changes a ledger,
+    /// STOP, permission or exchange state and never grants mutation authority.
+    pub fn evaluate(
+        &self,
+        run: &crate::StrategyCapitalReservation,
+        plan: &ExecutionPlan,
+        witness: &ProductionRiskWitness,
+    ) -> Result<(), ProductionPolicyRejection> {
+        use ProductionPolicyRejection as Rejection;
+        let hex64 = |value: &str| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit());
+        let max_loss = Decimal::from_str(&self.max_total_modelled_loss_usdt)
+            .map_err(|_| Rejection::InvalidPolicy)?;
+        if self.schema != PRODUCTION_TRADING_POLICY_SCHEMA_V1
+            || self.revision == 0
+            || !hex64(&self.account_uid_fingerprint)
+            || self.strategy_run_id.is_empty()
+            || self.operator_authority_id.len() != 71
+            || !self.operator_authority_id.starts_with("sha256:")
+            || !hex64(&self.operator_authority_id[7..])
+            || self.allowed_instruments.is_empty()
+            || self.allowed_instruments.len() > 32
+            || self
+                .allowed_instruments
+                .iter()
+                .any(|item| !item.ends_with("-USDT-SWAP") || item.len() > 64)
+            || max_loss <= Decimal::ZERO
+            || max_loss > Decimal::from(10)
+        {
+            return Err(Rejection::InvalidPolicy);
+        }
+        if self.account_uid_fingerprint != run.account_uid_fingerprint
+            || self.account_uid_fingerprint != plan.account_uid_fingerprint
+            || self.strategy_run_id != run.allocation_id
+            || self.operator_authority_id != run.operator_authority_id
+            || !self.allowed_instruments.contains(&plan.instrument_id)
+        {
+            return Err(Rejection::ScopeMismatch);
+        }
+        if !witness.account_and_source_fresh {
+            return Err(Rejection::SourceUnattested);
+        }
+        if plan.order_type != OrderType::Fok || !plan.instrument_id.ends_with("-USDT-SWAP") {
+            return Err(Rejection::UnsupportedAction);
+        }
+        match plan.action {
+            crate::ExecutionAction::Close => {
+                if !witness.exact_owned_reduce_only_close {
+                    return Err(Rejection::SourceUnattested);
+                }
+                // STOPPED explicitly permits existing protected risk-reducing
+                // exits; OFF and READ_ONLY still cannot send any order.
+                if matches!(
+                    self.permission,
+                    ProductionPermission::Enabled | ProductionPermission::Stopped
+                ) {
+                    Ok(())
+                } else {
+                    Err(Rejection::ModeDenied)
+                }
+            }
+            crate::ExecutionAction::Open => {
+                if self.permission != ProductionPermission::Enabled {
+                    return Err(Rejection::ModeDenied);
+                }
+                if !witness.finance_complete || !witness.unknown_mutations_reconciled {
+                    return Err(Rejection::SourceUnattested);
+                }
+                let occupied = Decimal::from_str(&witness.existing_modelled_loss_usdt)
+                    .map_err(|_| Rejection::SourceUnattested)?;
+                let Some(risk) = plan.open_risk.as_ref() else {
+                    return Err(Rejection::RiskBudgetExceeded);
+                };
+                let measured = Decimal::from_str(&risk.stop_loss_settle)
+                    .map_err(|_| Rejection::RiskBudgetExceeded)?;
+                let requested = Decimal::from_str(&risk.requested_max_loss_settle)
+                    .map_err(|_| Rejection::RiskBudgetExceeded)?;
+                if occupied < Decimal::ZERO
+                    || measured <= Decimal::ZERO
+                    || requested <= Decimal::ZERO
+                    || measured > requested
+                    || requested > max_loss
+                    || occupied
+                        .checked_add(requested)
+                        .is_none_or(|total| total > max_loss)
+                {
+                    Err(Rejection::RiskBudgetExceeded)
+                } else {
+                    Ok(())
+                }
+            }
+            // Unaccepted partial/advanced operations are not silently enabled
+            // by granting a general account trading policy.
+            crate::ExecutionAction::Add
+            | crate::ExecutionAction::Hedge
+            | crate::ExecutionAction::Reduce => Err(Rejection::UnsupportedAction),
+        }
+    }
+}
+
 impl MutationAuthority {
     pub const fn allows_exchange_mutation(self) -> bool {
         matches!(self, Self::DemoAcceptance)
@@ -4315,6 +4472,160 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn production_policy_is_revocable_and_has_one_shared_ten_usdt_budget() {
+        let uid = "a".repeat(64);
+        let authority = format!("sha256:{}", "b".repeat(64));
+        let run = crate::StrategyCapitalReservation {
+            schema: crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "run_policy_20261017_fixture".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            origin_schema: "okx.test".to_owned(),
+            origin_version: "v1".to_owned(),
+            mandate_version: "test-mandate".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: "gen".to_owned(),
+            operator_authority_id: authority.clone(),
+            started_at_ms: 100,
+        };
+        let mut plan = protected_plan();
+        plan.account_uid_fingerprint = uid.clone();
+        plan.order_type = OrderType::Fok;
+        let mut policy = ProductionTradingPolicy {
+            schema: PRODUCTION_TRADING_POLICY_SCHEMA_V1.to_owned(),
+            revision: 1,
+            permission: ProductionPermission::Enabled,
+            account_uid_fingerprint: uid.clone(),
+            strategy_run_id: run.allocation_id.clone(),
+            operator_authority_id: authority.clone(),
+            allowed_instruments: vec![plan.instrument_id.clone()],
+            max_total_modelled_loss_usdt: "10".to_owned(),
+        };
+        let mut witness = ProductionRiskWitness {
+            account_and_source_fresh: true,
+            finance_complete: true,
+            unknown_mutations_reconciled: true,
+            existing_modelled_loss_usdt: "8.99".to_owned(),
+            exact_owned_reduce_only_close: false,
+        };
+        assert_eq!(policy.evaluate(&run, &plan, &witness), Ok(()));
+        witness.existing_modelled_loss_usdt = "9.01".to_owned();
+        assert_eq!(
+            policy.evaluate(&run, &plan, &witness),
+            Err(ProductionPolicyRejection::RiskBudgetExceeded)
+        );
+        witness.existing_modelled_loss_usdt = "0".to_owned();
+        witness.unknown_mutations_reconciled = false;
+        assert_eq!(
+            policy.evaluate(&run, &plan, &witness),
+            Err(ProductionPolicyRejection::SourceUnattested)
+        );
+        witness.unknown_mutations_reconciled = true;
+        policy.max_total_modelled_loss_usdt = "10.01".to_owned();
+        assert_eq!(
+            policy.evaluate(&run, &plan, &witness),
+            Err(ProductionPolicyRejection::InvalidPolicy)
+        );
+        policy.max_total_modelled_loss_usdt = "10".to_owned();
+        policy.permission = ProductionPermission::ReadOnly;
+        assert_eq!(
+            policy.evaluate(&run, &plan, &witness),
+            Err(ProductionPolicyRejection::ModeDenied)
+        );
+        policy.permission = ProductionPermission::Stopped;
+        assert_eq!(
+            policy.evaluate(&run, &plan, &witness),
+            Err(ProductionPolicyRejection::ModeDenied)
+        );
+        plan.action = ExecutionAction::Close;
+        plan.open_risk = None;
+        assert_eq!(
+            policy.evaluate(&run, &plan, &witness),
+            Err(ProductionPolicyRejection::SourceUnattested)
+        );
+        witness.exact_owned_reduce_only_close = true;
+        assert_eq!(policy.evaluate(&run, &plan, &witness), Ok(()));
+        policy.permission = ProductionPermission::Off;
+        assert_eq!(
+            policy.evaluate(&run, &plan, &witness),
+            Err(ProductionPolicyRejection::ModeDenied)
+        );
+        policy.permission = ProductionPermission::Enabled;
+        plan.account_uid_fingerprint = "c".repeat(64);
+        assert_eq!(
+            policy.evaluate(&run, &plan, &witness),
+            Err(ProductionPolicyRejection::ScopeMismatch)
+        );
+        plan.account_uid_fingerprint = uid;
+        plan.action = ExecutionAction::Hedge;
+        assert_eq!(
+            policy.evaluate(&run, &plan, &witness),
+            Err(ProductionPolicyRejection::UnsupportedAction)
+        );
+        let mut wrong_run = run;
+        wrong_run.operator_authority_id = format!("sha256:{}", "d".repeat(64));
+        assert_eq!(
+            policy.evaluate(&wrong_run, &plan, &witness),
+            Err(ProductionPolicyRejection::ScopeMismatch)
+        );
+    }
+
+    #[test]
+    fn production_policy_requires_native_scope_and_fresh_witness_for_exit() {
+        let mut policy = ProductionTradingPolicy {
+            schema: PRODUCTION_TRADING_POLICY_SCHEMA_V1.to_owned(),
+            revision: 1,
+            permission: ProductionPermission::Stopped,
+            account_uid_fingerprint: "a".repeat(64),
+            strategy_run_id: "run_policy_20261017_fixture".to_owned(),
+            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
+            allowed_instruments: vec!["BTC-USDT-SWAP".to_owned()],
+            max_total_modelled_loss_usdt: "10".to_owned(),
+        };
+        let run = crate::StrategyCapitalReservation {
+            schema: crate::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: policy.strategy_run_id.clone(),
+            account_uid_fingerprint: policy.account_uid_fingerprint.clone(),
+            origin_schema: "test".to_owned(),
+            origin_version: "v1".to_owned(),
+            mandate_version: "test".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: "gen".to_owned(),
+            operator_authority_id: policy.operator_authority_id.clone(),
+            started_at_ms: 100,
+        };
+        let mut close = plan();
+        close.instrument_id = "BTC-USDT-SWAP".to_owned();
+        close.account_uid_fingerprint = run.account_uid_fingerprint.clone();
+        close.action = ExecutionAction::Close;
+        close.order_type = OrderType::Fok;
+        let mut witness = ProductionRiskWitness {
+            account_and_source_fresh: false,
+            finance_complete: false,
+            unknown_mutations_reconciled: false,
+            existing_modelled_loss_usdt: "unknown".to_owned(),
+            exact_owned_reduce_only_close: false,
+        };
+        assert_eq!(
+            policy.evaluate(&run, &close, &witness),
+            Err(ProductionPolicyRejection::SourceUnattested)
+        );
+        witness.account_and_source_fresh = true;
+        assert_eq!(
+            policy.evaluate(&run, &close, &witness),
+            Err(ProductionPolicyRejection::SourceUnattested)
+        );
+        witness.exact_owned_reduce_only_close = true;
+        assert_eq!(policy.evaluate(&run, &close, &witness), Ok(()));
+        policy.permission = ProductionPermission::ReadOnly;
+        assert_eq!(
+            policy.evaluate(&run, &close, &witness),
+            Err(ProductionPolicyRejection::ModeDenied)
+        );
     }
 
     #[tokio::test]
