@@ -594,8 +594,7 @@ async fn begin_strategy_run(
                 &opening,
                 observed_at_ms,
                 rearm.as_ref(),
-                context.operator_policy,
-                context.transport_generation,
+                context.central_policy_binding(),
             )
             .await?
     } else {
@@ -1736,8 +1735,7 @@ async fn submit_prepared(
                 observed_at_ms,
                 facts,
                 &protection,
-                context.operator_policy,
-                context.transport_generation,
+                context.central_policy_binding(),
             )
             .await?
         {

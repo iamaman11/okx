@@ -38,6 +38,21 @@ use crate::{
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
 pub const LEVERAGE_CHANGE_PROOF_SCHEMA_V1: &str = "okx.leverage-change-proof/v1";
 
+/// One immutable, Worker-sourced policy for exactly this authenticated
+/// transport generation and one native execution request. Never persisted.
+#[derive(Clone, Copy)]
+pub struct CentralPolicyBinding<'a> {
+    pub policy: &'a CentralAccountPolicy,
+    pub session_generation: u64,
+}
+
+impl CentralPolicyBinding<'_> {
+    pub fn authorizes_uid(self, uid: &str, now_ms: u64) -> bool {
+        self.policy.authorizes_uid(uid, now_ms, self.session_generation)
+    }
+}
+
+
 /// A Hedge Cross setting is accepted only when BOTH distinct sides are
 /// individually verified and have the same exact, positive leverage.
 /// Account generations hash mutable snapshots and legitimately advance during a
@@ -896,14 +911,12 @@ impl ExecutionRuntime {
         opening: &StrategyAllocationOpening,
         now_ms: u64,
         rearm: Option<&okx_execution::StrategyStopRearmRequest>,
-        central: Option<&CentralAccountPolicy>,
-        session_generation: u64,
+        central: Option<CentralPolicyBinding<'_>>,
     ) -> AgentResult<Option<Result<StrategyCapitalReservation, OrderExecutorError>>> {
         if !central.is_some_and(|p| {
             p.authorizes_uid(
                 &preflight.account_uid_fingerprint,
                 Utc::now().timestamp_millis().max(1) as u64,
-                session_generation,
             )
         }) {
             return Ok(None);
@@ -1077,14 +1090,12 @@ impl ExecutionRuntime {
         observed_at_ms: u64,
         facts: &AccountLedgerFacts,
         protection: &PendingProtectiveAlgoInventory,
-        central: Option<&CentralAccountPolicy>,
-        session_generation: u64,
+        central: Option<CentralPolicyBinding<'_>>,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
         if !central.is_some_and(|p| {
             p.authorizes_uid(
                 &preflight.credential.account_uid_fingerprint,
                 Utc::now().timestamp_millis().max(1) as u64,
-                session_generation,
             )
         }) {
             return Ok(None);
@@ -1205,7 +1216,6 @@ impl ExecutionRuntime {
             p.authorizes_uid(
                 &preflight.credential.account_uid_fingerprint,
                 Utc::now().timestamp_millis().max(1) as u64,
-                session_generation,
             )
         }) {
             return Ok(None);
