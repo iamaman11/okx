@@ -319,6 +319,19 @@ pub struct ProductionLivePermit {
 }
 
 impl ProductionLivePermit {
+    /// First live pilot deliberately excludes unprotected/untested mutations.
+    /// Full executor risk and venue gates remain additionally mandatory.
+    fn pilot_plan_supported(plan: &ExecutionPlan) -> bool {
+        plan.order_type == OrderType::Fok
+            && match plan.action {
+                crate::ExecutionAction::Open => {
+                    plan.open_risk.is_some() && plan.risk_binding.is_some()
+                }
+                crate::ExecutionAction::Close => true,
+                _ => false,
+            }
+    }
+
     fn valid_for(
         &self,
         environment: OkxEnvironment,
@@ -342,7 +355,13 @@ impl ProductionLivePermit {
         let Some(source) = ledger.exchange_evidence_summary() else {
             return false;
         };
+        let Some(intent) = ledger.get(intent_id) else {
+            return false;
+        };
         !environment.demo
+            && intent.record.state == ExecutionState::Prepared
+            && intent.record.plan.account_uid_fingerprint == self.account_uid_fingerprint
+            && Self::pilot_plan_supported(&intent.record.plan)
             && lower_hex(&self.account_uid_fingerprint)
             && !self.intent_id.is_empty()
             && self.intent_id == intent_id
@@ -4497,6 +4516,23 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn production_pilot_scope_denies_unprotected_and_unsupported_actions() {
+        let mut candidate = protected_plan();
+        candidate.order_type = OrderType::Fok;
+        // An OPEN with stop/target but without portfolio risk binding is still blocked.
+        assert!(!ProductionLivePermit::pilot_plan_supported(&candidate));
+        candidate.action = crate::ExecutionAction::Close;
+        assert!(ProductionLivePermit::pilot_plan_supported(&candidate));
+        candidate.order_type = OrderType::Limit;
+        assert!(!ProductionLivePermit::pilot_plan_supported(&candidate));
+        candidate.order_type = OrderType::Fok;
+        candidate.action = crate::ExecutionAction::Reduce;
+        assert!(!ProductionLivePermit::pilot_plan_supported(&candidate));
+        candidate.action = crate::ExecutionAction::Hedge;
+        assert!(!ProductionLivePermit::pilot_plan_supported(&candidate));
     }
 
     #[tokio::test]
