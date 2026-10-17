@@ -334,6 +334,9 @@ pub struct ProductionRiskWitness {
     /// Existing portfolio loss INCLUDING uncertain/pending exposure but
     /// EXCLUDING this new candidate. Must be independently reconstructed.
     pub existing_modelled_loss_usdt: String,
+    /// Native exchange/ledger evidence that this CLOSE only reduces an
+    /// exact owned position and cannot create reverse or foreign exposure.
+    pub exact_owned_reduce_only_close: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,6 +396,9 @@ impl ProductionTradingPolicy {
         }
         match plan.action {
             crate::ExecutionAction::Close => {
+                if !witness.exact_owned_reduce_only_close {
+                    return Err(Rejection::SourceUnattested);
+                }
                 // STOPPED explicitly permits existing protected risk-reducing
                 // exits; OFF and READ_ONLY still cannot send any order.
                 if matches!(
@@ -4503,6 +4509,7 @@ mod tests {
             finance_complete: true,
             unknown_mutations_reconciled: true,
             existing_modelled_loss_usdt: "8.99".to_owned(),
+            exact_owned_reduce_only_close: false,
         };
         assert_eq!(policy.evaluate(&run, &plan, &witness), Ok(()));
         witness.existing_modelled_loss_usdt = "9.01".to_owned();
@@ -4535,6 +4542,11 @@ mod tests {
         );
         plan.action = ExecutionAction::Close;
         plan.open_risk = None;
+        assert_eq!(
+            policy.evaluate(&run, &plan, &witness),
+            Err(ProductionPolicyRejection::SourceUnattested)
+        );
+        witness.exact_owned_reduce_only_close = true;
         assert_eq!(policy.evaluate(&run, &plan, &witness), Ok(()));
         policy.permission = ProductionPermission::Off;
         assert_eq!(
@@ -4596,12 +4608,18 @@ mod tests {
             finance_complete: false,
             unknown_mutations_reconciled: false,
             existing_modelled_loss_usdt: "unknown".to_owned(),
+            exact_owned_reduce_only_close: false,
         };
         assert_eq!(
             policy.evaluate(&run, &close, &witness),
             Err(ProductionPolicyRejection::SourceUnattested)
         );
         witness.account_and_source_fresh = true;
+        assert_eq!(
+            policy.evaluate(&run, &close, &witness),
+            Err(ProductionPolicyRejection::SourceUnattested)
+        );
+        witness.exact_owned_reduce_only_close = true;
         assert_eq!(policy.evaluate(&run, &close, &witness), Ok(()));
         policy.permission = ProductionPermission::ReadOnly;
         assert_eq!(
