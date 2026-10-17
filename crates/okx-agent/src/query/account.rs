@@ -348,6 +348,9 @@ fn compact_trader_packet(
     let coherent = boolean("/coherence/coherent");
     let reconciled = boolean("/reconciliation/consistent");
     let complete_protection = boolean("/pending_protective_algos/complete_within_bound");
+    // Pure read-only finance evidence; no trader admission path consumes it.
+    let current_period_proven =
+        boolean("/reconciliation/strategy_period_financial_audit/current_period_proven");
     let history_complete = full
         .pointer("/account_ledger/history_coverage")
         .and_then(Value::as_array)
@@ -471,6 +474,7 @@ fn compact_trader_packet(
             "archived_unverified": get("/reconciliation/unverified_runs_count"),
             "archive_free_slots": get("/reconciliation/archived_run_slots_remaining"),
             "period_audit_status": get("/reconciliation/strategy_period_financial_audit/status"),
+            "current_period_proven": current_period_proven,
             "periods_total": get("/reconciliation/strategy_period_financial_audit/periods_total"),
             "period_proofs_truncated": get("/reconciliation/strategy_period_financial_audit/periods_truncated")
         },
@@ -3118,6 +3122,7 @@ mod tests {
                 "strategy_attribution": {"unallocated_funding_bills": 2},
                 "strategy_period_financial_audit": {
                     "status": "INCOMPLETE", "periods_total": 6,
+                    "current_period_proven": true,
                     "periods_truncated": false
                 },
                 "exchange_evidence": {
@@ -3148,6 +3153,10 @@ mod tests {
         );
         assert_eq!(p["funding"]["unallocated_exchange_bills"], 2);
         assert_eq!(p["strategy"]["period_audit_status"], "INCOMPLETE");
+        // A source-proven current run does NOT clear old financial gaps,
+        // durable STOP, or the separate live order admission requirement.
+        assert_eq!(p["strategy"]["current_period_proven"], true);
+        assert_eq!(p["decision"]["new_risk"], "NO_GO");
         assert_eq!(p["operator"]["exposure_status"], "OBSERVED_FLAT");
         assert_eq!(p["operator"]["financial_status"], "INCOMPLETE");
         assert_eq!(

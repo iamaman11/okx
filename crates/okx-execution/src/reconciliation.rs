@@ -58,6 +58,10 @@ pub struct StrategyPeriodFinancialAudit {
     pub account_unlinked_other_bills: usize,
     pub intents_outside_exchange_history: usize,
     pub strategy_nav_risk_usable: bool,
+    /// Independent, current-run persisted finance proof. It is never a trade
+    /// permit, and old UNVERIFIED archives remain INCOMPLETE in `status`.
+    /// An absent, cross-run or missing-funding proof is always false.
+    pub current_period_proven: bool,
     pub incomplete_reasons: Vec<&'static str>,
 }
 
@@ -435,6 +439,30 @@ fn assemble_period_financial_audit(
         .strategy_nav
         .as_ref()
         .is_some_and(|n| n.usable_for_risk);
+    // Old account history is deliberately separate from a prospective run.
+    // A complete current period is derived only from its OWN immutable,
+    // run-bound, source-checked finance record, never from account equity,
+    // archived NAV, or a caller-supplied Boolean.
+    let current_period_proven = report.financial_period.as_ref().is_some_and(|period| {
+        matches!(period.state, "FLAT_RECONCILED" | "ACTIVE_VALUED")
+            && period.nav_usdt.is_some()
+            && period.funding_usdt.is_some()
+            && period.evidence_sha256.len() == 64
+            && period
+                .evidence_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+            && report
+                .strategy_nav
+                .as_ref()
+                .is_some_and(|nav| nav.allocation_id == period.run_id)
+            && report.exchange_evidence.as_ref().is_some_and(|source| {
+                source.run_id == period.run_id
+                    && source.checksum_sha256 == period.evidence_sha256
+                    && source.latest_source_complete
+                    && !source.source_gap_over_two_hours
+            })
+    });
     let mut reasons = Vec::new();
     if attribution.is_none_or(|value| value.status != "COMPLETE") {
         reasons.push("ACCOUNT_STRATEGY_ATTRIBUTION_NOT_COMPLETE");
@@ -478,6 +506,7 @@ fn assemble_period_financial_audit(
         account_unlinked_other_bills: unlinked_bills,
         intents_outside_exchange_history: report.unmatched_historical_total,
         strategy_nav_risk_usable: nav_usable,
+        current_period_proven,
         incomplete_reasons: reasons,
     }
 }
@@ -1400,6 +1429,89 @@ mod tests {
             original,
             serde_json::to_value(&report.archived_run_proofs).unwrap()
         );
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn historical_unverified_does_not_erase_exact_current_run_finance() {
+        let p = path("period-finance-separated");
+        let _ = std::fs::remove_file(&p);
+        let ledger =
+            DurableExecutionLedger::open(ExecutionLedgerStore::at(&p), 100).expect("empty ledger");
+        let mut report =
+            reconcile_exchange_evidence(&ledger, &[], &[], &[]).expect("base reconciliation");
+        report.unverified_runs_count = 1;
+        report.unmatched_historical_total = 3;
+        report.strategy_nav = Some(StrategyNavAssessment {
+            schema: STRATEGY_NAV_ASSESSMENT_SCHEMA_V1,
+            status: "INCOMPLETE",
+            usable_for_risk: false,
+            allocation_id: "new_run_20261017".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            exact_trade_bills: 0,
+            verified_realized_usdt: "0".to_owned(),
+            verified_fees_usdt: "0".to_owned(),
+            nav_usdt: None,
+            reasons: vec!["nav_epoch_outside_order_history_window"],
+        });
+        report.exchange_evidence = Some(crate::ExchangeEvidenceSummary {
+            schema: crate::EXCHANGE_EVIDENCE_SCHEMA_V1,
+            run_id: "new_run_20261017".to_owned(),
+            events: 2,
+            cursors: 2,
+            checksum_sha256: "a".repeat(64),
+            latest_source_complete: true,
+            oldest_source_asof_ms: Some(100),
+            latest_source_asof_ms: Some(200),
+            largest_persisted_gap_ms: Some(100),
+            source_gap_over_two_hours: false,
+            remaining_source_cursors: 100,
+            remaining_events: 100,
+            next_source_coverage_deadline_ms: Some(300),
+        });
+        report.financial_period = Some(crate::StrategyFinancialPeriod {
+            schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+            run_id: "new_run_20261017".to_owned(),
+            state: "FLAT_RECONCILED",
+            evidence_sha256: "a".repeat(64),
+            allocation_usdt: "100".to_owned(),
+            linked_fills: 2,
+            linked_bills: 2,
+            realized_usdt: "0.05".to_owned(),
+            fees_usdt: "-0.01".to_owned(),
+            funding_usdt: Some("0".to_owned()),
+            unrealized_usdt: Some("0".to_owned()),
+            nav_usdt: Some("100.04".to_owned()),
+            positions: Vec::new(),
+            usable_for_new_risk: false,
+            reasons: Vec::new(),
+        });
+        let historical = assemble_period_financial_audit(&report);
+        assert_eq!(historical.status, "INCOMPLETE");
+        assert!(historical.current_period_proven);
+        assert!(!historical.new_risk_authorized);
+        assert!(
+            historical
+                .incomplete_reasons
+                .contains(&"UNVERIFIED_HISTORICAL_RUNS")
+        );
+        assert_eq!(historical.intents_outside_exchange_history, 3);
+        // Missing funding, cross-run identity or incomplete current source
+        // cannot inherit an archive's historical NAV or a previous run.
+        report.financial_period.as_mut().unwrap().funding_usdt = None;
+        assert!(!assemble_period_financial_audit(&report).current_period_proven);
+        report.financial_period.as_mut().unwrap().funding_usdt = Some("0".to_owned());
+        report.financial_period.as_mut().unwrap().run_id = "other_run".to_owned();
+        assert!(!assemble_period_financial_audit(&report).current_period_proven);
+        report.financial_period.as_mut().unwrap().run_id = "new_run_20261017".to_owned();
+        report.financial_period.as_mut().unwrap().evidence_sha256 = String::new();
+        assert!(!assemble_period_financial_audit(&report).current_period_proven);
+        report.financial_period.as_mut().unwrap().evidence_sha256 = "a".repeat(64);
+        report.financial_period.as_mut().unwrap().state = "INCOMPLETE";
+        assert!(!assemble_period_financial_audit(&report).current_period_proven);
+        report.financial_period.as_mut().unwrap().state = "FLAT_RECONCILED";
+        report.exchange_evidence.as_mut().unwrap().checksum_sha256 = "f".repeat(64);
+        assert!(!assemble_period_financial_audit(&report).current_period_proven);
         let _ = std::fs::remove_file(p);
     }
 
