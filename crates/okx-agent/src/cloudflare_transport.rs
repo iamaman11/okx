@@ -4,9 +4,8 @@ use chrono::{SecondsFormat, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentResponse, AgentResponseStatus,
-    CentralAccountPolicy,
-    DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DataQuality,
-    DirectRuntimeProfile, DirectTransportFrame,
+    CentralAccountPolicy, DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES,
+    DataQuality, DirectRuntimeProfile, DirectTransportFrame,
 };
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
 use tokio::{
@@ -67,7 +66,8 @@ fn central_production_delivery_admitted(
 ) -> bool {
     profile == DirectRuntimeProfile::Production
         && mode == Some(ExecutionRuntimeMode::Production)
-        && matches!(operation,
+        && matches!(
+            operation,
             AgentOperation::BeginStrategyRun { .. }
                 | AgentOperation::PrepareExecution { .. }
                 | AgentOperation::SubmitPreparedExecution { .. }
@@ -746,14 +746,50 @@ mod tests {
         let admit = |policy: Option<&CentralAccountPolicy>, profile, mode, generation, now| {
             central_production_delivery_admitted(profile, mode, &submit, policy, generation, now)
         };
-        assert!(admit(Some(&p), DirectRuntimeProfile::Production, Some(ExecutionRuntimeMode::Production), 7, 1_001));
-        assert!(!admit(None, DirectRuntimeProfile::Production, Some(ExecutionRuntimeMode::Production), 7, 1_001));
-        assert!(!admit(Some(&p), DirectRuntimeProfile::Production, Some(ExecutionRuntimeMode::ReadOnly), 7, 1_001));
-        assert!(!admit(Some(&p), DirectRuntimeProfile::Production, Some(ExecutionRuntimeMode::Production), 8, 1_001));
-        assert!(!admit(Some(&p), DirectRuntimeProfile::Production, Some(ExecutionRuntimeMode::Production), 7, 16_001));
+        assert!(admit(
+            Some(&p),
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::Production),
+            7,
+            1_001
+        ));
+        assert!(!admit(
+            None,
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::Production),
+            7,
+            1_001
+        ));
+        assert!(!admit(
+            Some(&p),
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::ReadOnly),
+            7,
+            1_001
+        ));
+        assert!(!admit(
+            Some(&p),
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::Production),
+            8,
+            1_001
+        ));
+        assert!(!admit(
+            Some(&p),
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::Production),
+            7,
+            16_001
+        ));
         let mut revoked = p;
         revoked.trading_requested = false;
-        assert!(!admit(Some(&revoked), DirectRuntimeProfile::Production, Some(ExecutionRuntimeMode::Production), 7, 1_001));
+        assert!(!admit(
+            Some(&revoked),
+            DirectRuntimeProfile::Production,
+            Some(ExecutionRuntimeMode::Production),
+            7,
+            1_001
+        ));
     }
 
     #[test]

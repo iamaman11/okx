@@ -30,10 +30,9 @@ use okx_observation::{
 };
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
-    CentralAccountPolicy,
-    AgentResponseStatus, DataQuality, HardRiskPolicyRequest, InstrumentTypeFilter,
-    LiquidityRole as ProtocolLiquidityRole, PortfolioMandateRequest, PortfolioStatisticsRequest,
-    PositionSide, RiskDegradedMode as ProtocolRiskDegradedMode,
+    AgentResponseStatus, CentralAccountPolicy, DataQuality, HardRiskPolicyRequest,
+    InstrumentTypeFilter, LiquidityRole as ProtocolLiquidityRole, PortfolioMandateRequest,
+    PortfolioStatisticsRequest, PositionSide, RiskDegradedMode as ProtocolRiskDegradedMode,
     RiskMinimumQuality as ProtocolRiskMinimumQuality, VirtualPortfolioRequest,
 };
 use okx_runtime::{
@@ -334,9 +333,8 @@ impl<'a> ObservationQueryContext<'a> {
     }
 
     pub fn central_uid_admitted(&self, uid: &str, now_ms: u64) -> bool {
-        self.operator_policy.is_some_and(|policy| {
-            policy.authorizes_uid(uid, now_ms, self.transport_generation)
-        })
+        self.operator_policy
+            .is_some_and(|policy| policy.authorizes_uid(uid, now_ms, self.transport_generation))
     }
 }
 
@@ -1140,8 +1138,8 @@ mod tests {
                 execution: None,
                 research_root: None,
                 research_session: None,
-            operator_policy: None,
-            transport_generation: 0,
+                operator_policy: None,
+                transport_generation: 0,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1183,8 +1181,8 @@ mod tests {
                 execution: None,
                 research_root: None,
                 research_session: None,
-            operator_policy: None,
-            transport_generation: 0,
+                operator_policy: None,
+                transport_generation: 0,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1227,8 +1225,8 @@ mod tests {
                 execution: None,
                 research_root: None,
                 research_session: None,
-            operator_policy: None,
-            transport_generation: 0,
+                operator_policy: None,
+                transport_generation: 0,
             },
             "2026-09-27T00:00:01.000Z",
         )

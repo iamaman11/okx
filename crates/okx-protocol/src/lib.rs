@@ -1641,8 +1641,14 @@ impl CentralAccountPolicy {
             && self.max_total_modelled_loss_usdt == "10"
             && (!self.trading_requested || !self.allowed_account_uids.is_empty())
             && self.allowed_account_uids.len() <= 16
-            && self.allowed_account_uids.iter().all(|uid| validate_sha256(uid).is_ok())
-            && self.allowed_account_uids.windows(2).all(|pair| pair[0] < pair[1])
+            && self
+                .allowed_account_uids
+                .iter()
+                .all(|uid| validate_sha256(uid).is_ok())
+            && self
+                .allowed_account_uids
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
     }
 
     /// Result belongs to exactly this request/session; never cache across
@@ -1654,7 +1660,10 @@ impl CentralAccountPolicy {
             && self.session_generation == session_generation
             && self.issued_at_ms <= now_ms
             && now_ms.saturating_sub(self.issued_at_ms) <= CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
-            && self.allowed_account_uids.binary_search_by(|s| s.as_str().cmp(uid)).is_ok()
+            && self
+                .allowed_account_uids
+                .binary_search_by(|s| s.as_str().cmp(uid))
+                .is_ok()
     }
 }
 
@@ -1791,7 +1800,10 @@ impl DirectTransportFrame {
                 validate_direct_schema(schema)?;
                 validate_direct_token(session_id, 16, 128)?;
                 validate_connection_generation(*connection_generation)?;
-                if operator_policy.as_ref().is_some_and(|p| !p.valid() || p.session_generation != *connection_generation) {
+                if operator_policy
+                    .as_ref()
+                    .is_some_and(|p| !p.valid() || p.session_generation != *connection_generation)
+                {
                     return Err(ProtocolError::InvalidProductionTradingPolicy);
                 }
                 request.validate()

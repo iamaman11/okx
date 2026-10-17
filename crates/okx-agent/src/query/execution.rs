@@ -147,7 +147,9 @@ pub(super) async fn dispatch(
     // Worker for THIS request/session, never a local host journal permission.
     // All other transports lack this context and therefore cannot mint a live
     // exchange mutation. Demo remains governed by its native venue preflight.
-    if context.execution.is_some_and(|owner| owner.production_trading_requested())
+    if context
+        .execution
+        .is_some_and(|owner| owner.production_trading_requested())
         && !request.operation.direct_transport_read_only()
         && !context.operator_policy.is_some_and(|policy| {
             policy.valid()

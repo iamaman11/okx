@@ -21,8 +21,8 @@ use okx_execution::{
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
 };
-use serde::Serialize;
 use okx_protocol::CentralAccountPolicy;
+use serde::Serialize;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use tokio::time::timeout;
 
@@ -899,11 +899,13 @@ impl ExecutionRuntime {
         central: Option<&CentralAccountPolicy>,
         session_generation: u64,
     ) -> AgentResult<Option<Result<StrategyCapitalReservation, OrderExecutorError>>> {
-        if !central.is_some_and(|p| p.authorizes_uid(
-            &preflight.account_uid_fingerprint,
-            Utc::now().timestamp_millis().max(1) as u64,
-            session_generation,
-        )) {
+        if !central.is_some_and(|p| {
+            p.authorizes_uid(
+                &preflight.account_uid_fingerprint,
+                Utc::now().timestamp_millis().max(1) as u64,
+                session_generation,
+            )
+        }) {
             return Ok(None);
         }
         if !self.production_trading_requested()
@@ -1078,11 +1080,13 @@ impl ExecutionRuntime {
         central: Option<&CentralAccountPolicy>,
         session_generation: u64,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
-        if !central.is_some_and(|p| p.authorizes_uid(
-            &preflight.credential.account_uid_fingerprint,
-            Utc::now().timestamp_millis().max(1) as u64,
-            session_generation,
-        )) {
+        if !central.is_some_and(|p| {
+            p.authorizes_uid(
+                &preflight.credential.account_uid_fingerprint,
+                Utc::now().timestamp_millis().max(1) as u64,
+                session_generation,
+            )
+        }) {
             return Ok(None);
         }
         if !self.production_trading_requested()
@@ -1197,11 +1201,13 @@ impl ExecutionRuntime {
         };
         // Final central revision/UID/expiry fence immediately before the
         // native gateway owner enters its durable SUBMITTING and single POST.
-        if !central.is_some_and(|p| p.authorizes_uid(
-            &preflight.credential.account_uid_fingerprint,
-            Utc::now().timestamp_millis().max(1) as u64,
-            session_generation,
-        )) {
+        if !central.is_some_and(|p| {
+            p.authorizes_uid(
+                &preflight.credential.account_uid_fingerprint,
+                Utc::now().timestamp_millis().max(1) as u64,
+                session_generation,
+            )
+        }) {
             return Ok(None);
         }
         Ok(Some(
