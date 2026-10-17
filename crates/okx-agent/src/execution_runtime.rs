@@ -927,9 +927,49 @@ impl ExecutionRuntime {
         )))
     }
 
-    /// The single Demo executor captures the coherent source before the
+    /// The same persisted run and native source must authorize financial
+    /// FINALIZED/UNVERIFIED on Demo and Production. No exchange POST is
+    /// possible here; this only closes the already-owned immutable ledger.
+    fn strategy_financial_mutation_admitted(
+        &self,
+        preflight: &ExecutorCredentialPreflight,
+        expected_run_id: &str,
+        observed_uid: &str,
+        ledger: &DurableExecutionLedger,
+    ) -> bool {
+        if !preflight.accepted
+            || preflight.account_uid_fingerprint != observed_uid
+            || !ledger.capital_reservation().is_some_and(|run| {
+                run.allocation_id == expected_run_id && run.account_uid_fingerprint == observed_uid
+            })
+        {
+            return false;
+        }
+        if self.demo_mutation_acceptance_requested() {
+            return self.environment.demo && !preflight.production_environment;
+        }
+        if !self.production_trading_requested() || !preflight.production_environment {
+            return false;
+        }
+        // CONTROL owns the authorization, the exchange preflight owns UID.
+        // A STOPPED Production policy can still finalize source-exact
+        // finances; OFF/READ_ONLY cannot mutate the financial archive.
+        read_native_production_policy().is_ok_and(|policy| {
+            matches!(
+                policy.permission,
+                okx_execution::ProductionPermission::Enabled
+                    | okx_execution::ProductionPermission::Stopped
+            ) && ledger.capital_reservation().is_some_and(|run| {
+                policy.account_uid_fingerprint == run.account_uid_fingerprint
+                    && policy.strategy_run_id == run.allocation_id
+                    && policy.operator_authority_id == run.operator_authority_id
+            })
+        })
+    }
+
+    /// The single executor captures the coherent source before the
     /// atomic FINALIZED write. Caller cannot supply the exchange witness.
-    pub async fn finalize_strategy_run_demo_authorized(
+    pub async fn finalize_strategy_run_authorized(
         &self,
         preflight: &ExecutorCredentialPreflight,
         expected_run_id: &str,
@@ -939,16 +979,12 @@ impl ExecutionRuntime {
         observed_at_ms: u64,
     ) -> AgentResult<Option<Result<StrategyFinalization, OrderExecutorError>>> {
         let mut executor = self.executor.lock().await;
-        if !self.environment.demo
-            || self.mode != ExecutionRuntimeMode::DemoAcceptance
-            || !preflight.accepted
-            || preflight.production_environment
-            || preflight.account_uid_fingerprint != facts.summary.authority.account_uid_fingerprint
-            || executor.ledger().capital_reservation().is_none_or(|run| {
-                run.allocation_id != expected_run_id
-                    || run.account_uid_fingerprint != preflight.account_uid_fingerprint
-            })
-        {
+        if !self.strategy_financial_mutation_admitted(
+            preflight,
+            expected_run_id,
+            &facts.summary.authority.account_uid_fingerprint,
+            executor.ledger(),
+        ) {
             return Ok(None);
         }
         if executor.ledger().finalized_run().is_none() {
@@ -962,9 +998,9 @@ impl ExecutionRuntime {
         )))
     }
 
-    /// Exact authorized Demo administrative quarantine; never an exchange
-    /// order, never inferred from a private account balance.
-    pub async fn quarantine_unverified_strategy_run_demo_authorized(
+    /// Exact authorized administrative quarantine for the same native owner;
+    /// never an exchange order or a fabricated historical profit.
+    pub async fn quarantine_unverified_strategy_run_authorized(
         &self,
         preflight: &ExecutorCredentialPreflight,
         expected_run_id: &str,
@@ -974,16 +1010,12 @@ impl ExecutionRuntime {
         now_ms: u64,
     ) -> AgentResult<Option<Result<StrategyUnverifiedClosure, OrderExecutorError>>> {
         let mut executor = self.executor.lock().await;
-        if !self.environment.demo
-            || self.mode != ExecutionRuntimeMode::DemoAcceptance
-            || !preflight.accepted
-            || preflight.production_environment
-            || preflight.account_uid_fingerprint != facts.summary.authority.account_uid_fingerprint
-            || executor.ledger().capital_reservation().is_none_or(|run| {
-                run.allocation_id != expected_run_id
-                    || run.account_uid_fingerprint != preflight.account_uid_fingerprint
-            })
-        {
+        if !self.strategy_financial_mutation_admitted(
+            preflight,
+            expected_run_id,
+            &facts.summary.authority.account_uid_fingerprint,
+            executor.ledger(),
+        ) {
             return Ok(None);
         }
         Ok(Some(executor.quarantine_unverified_strategy_run(
