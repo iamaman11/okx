@@ -329,7 +329,7 @@ impl ExecutionRuntime {
     /// Read-only admission for the in-process private-order event source.
     /// The executor ledger remains the sole owner of durable evidence.
     pub async fn strategy_financial_capture_active(&self) -> bool {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !self.environment.demo {
+        if !strategy_nav_source_supported(self.environment.demo, self.mode) {
             return false;
         }
         let executor = self.executor.lock().await;
@@ -341,7 +341,7 @@ impl ExecutionRuntime {
     /// Read-only, bounded decision for the EXISTING mailbox heartbeat.
     /// Never accepts a request-supplied cursor or treats a >2h gap as healed.
     pub async fn strategy_quiet_source_capture_due(&self, now_ms: u64) -> bool {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !self.environment.demo {
+        if !strategy_nav_source_supported(self.environment.demo, self.mode) {
             return false;
         }
         let executor = self.executor.lock().await;
@@ -925,6 +925,7 @@ impl ExecutionRuntime {
             || !preflight.credential.executor_ip_bound
             || preflight.credential.account_uid_fingerprint.is_empty()
             || preflight.credential.account_uid_fingerprint != permit.account_uid_fingerprint
+            || permit.bound_child_pid != std::process::id()
         {
             return Ok(None);
         }
@@ -1583,11 +1584,29 @@ mod tests {
             intent_id: "missing_production_intent_0123456789".to_owned(),
             allocation_id: "missing_new_production_run".to_owned(),
             operator_authority_id: "unissued_operator_approval".to_owned(),
+            bound_child_pid: std::process::id(),
             max_allocation_usdt: "100".to_owned(),
+            max_loss_usdt: "5".to_owned(),
             source_checksum_sha256: "b".repeat(64),
             issued_at_ms: 101,
             expires_at_ms: 10_101,
         };
+        let mut wrong_pid = permit.clone();
+        wrong_pid.bound_child_pid = std::process::id().wrapping_add(1);
+        assert!(
+            runtime
+                .submit_prepared_production_authorized(
+                    &evidence,
+                    &wrong_pid,
+                    "missing_production_intent_0123456789",
+                    timing(),
+                    102,
+                )
+                .await
+                .expect("wrong child PID rejected before POST")
+                .is_none()
+        );
+        assert_eq!(runtime.mutation_authority().await, MutationAuthority::Disabled);
         let result = runtime
             .submit_prepared_production_authorized(
                 &evidence,
