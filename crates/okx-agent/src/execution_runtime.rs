@@ -181,6 +181,14 @@ pub struct ExecutionRuntime {
     executor: Mutex<OrderExecutor<TradeApi>>,
 }
 
+fn strategy_nav_source_supported(demo: bool, mode: ExecutionRuntimeMode) -> bool {
+    matches!(
+        (demo, mode),
+        (true, ExecutionRuntimeMode::DemoAcceptance)
+            | (false, ExecutionRuntimeMode::ReadOnly)
+    )
+}
+
 impl ExecutionRuntime {
     pub fn new(
         root: &Path,
@@ -423,8 +431,10 @@ impl ExecutionRuntime {
         settle_currency: Option<&str>,
         contract_type: Option<&str>,
     ) -> Option<StrategyNavRiskEvidence> {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance
-            || !self.environment.demo
+        // Demo and Production use the SAME native NAV/risk mathematics.
+        // Production is still ReadOnly until a separate native one-use grant;
+        // producing a source-attested NAV cannot enable any exchange mutation.
+        if !strategy_nav_source_supported(self.environment.demo, self.mode)
             || !coherent
             || plan.action != ExecutionAction::Open
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
@@ -1512,6 +1522,26 @@ mod tests {
 
     fn timing() -> MutationTiming {
         MutationTiming::from_exchange_time_ms(1_790_000_000_000, 5_000).expect("timing")
+    }
+
+    #[test]
+    fn one_strategy_nav_gate_uses_correct_demo_and_production_mode() {
+        assert!(strategy_nav_source_supported(
+            true,
+            ExecutionRuntimeMode::DemoAcceptance
+        ));
+        assert!(strategy_nav_source_supported(
+            false,
+            ExecutionRuntimeMode::ReadOnly
+        ));
+        assert!(!strategy_nav_source_supported(
+            true,
+            ExecutionRuntimeMode::ReadOnly
+        ));
+        assert!(!strategy_nav_source_supported(
+            false,
+            ExecutionRuntimeMode::DemoAcceptance
+        ));
     }
 
     #[tokio::test]
