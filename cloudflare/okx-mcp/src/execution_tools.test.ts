@@ -220,7 +220,7 @@ for (const action of ["prepare", "submit", "begin_strategy_run", "finalize_strat
       mandate_version:"native-v1",allocated_usdt:"100",
       operator_authority_id:"sha256:"+"f".repeat(64)
     } : {}));
-  assert(op && executionProfilePermitsOperation("production",op.type),
+  assert(!!op && executionProfilePermitsOperation("production",op.type),
     "supported normal Production action is typed and not hard-gated by Worker: "+action);
 }
 for (const action of ["set_leverage","amend","cancel","shrink_protection_size","migrate_finalized_ledger_storage"]) {
