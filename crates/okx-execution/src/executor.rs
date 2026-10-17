@@ -315,12 +315,35 @@ pub struct ProductionLivePermit {
     pub allocation_id: String,
     pub operator_authority_id: String,
     pub max_allocation_usdt: String,
+    /// Independent worst-case loss cap approved for this exact intent.
+    pub max_loss_usdt: String,
     pub source_checksum_sha256: String,
     pub issued_at_ms: u64,
     pub expires_at_ms: u64,
 }
 
 impl ProductionLivePermit {
+    /// A durable STOP forbids new exposure but must not trap an exact owned
+    /// risk-reducing CLOSE. No ADD/HEDGE/partial REDUCE is admitted here.
+    fn stop_allows_action(stop_latched: bool, action: crate::ExecutionAction) -> bool {
+        !stop_latched || action == crate::ExecutionAction::Close
+    }
+
+    fn loss_within_pilot(plan: &ExecutionPlan, approved_loss: Decimal) -> bool {
+        if approved_loss <= Decimal::ZERO {
+            return false;
+        }
+        match plan.action {
+            crate::ExecutionAction::Open => plan
+                .open_risk
+                .as_ref()
+                .and_then(|risk| Decimal::from_str(&risk.stop_loss_settle).ok())
+                .is_some_and(|loss| loss > Decimal::ZERO && loss <= approved_loss),
+            crate::ExecutionAction::Close => true,
+            _ => false,
+        }
+    }
+
     /// First live pilot deliberately excludes unprotected/untested mutations.
     /// Full executor risk and venue gates remain additionally mandatory.
     fn pilot_plan_supported(plan: &ExecutionPlan) -> bool {
@@ -351,6 +374,7 @@ impl ProductionLivePermit {
         // pilot, not to the user's full exchange balance or later policy.
         let max_cap = Decimal::from(100);
         let max_allocation = self.max_allocation_usdt.parse::<Decimal>().ok();
+        let max_loss = self.max_loss_usdt.parse::<Decimal>().ok();
         let Some(run) = ledger.capital_reservation() else {
             return false;
         };
@@ -388,6 +412,10 @@ impl ProductionLivePermit {
                         .parse::<Decimal>()
                         .is_ok_and(|allocated| allocated > Decimal::ZERO && allocated <= cap)
             })
+            && max_loss.is_some_and(|loss| {
+                max_allocation.is_some_and(|cap| loss > Decimal::ZERO && loss <= cap)
+                    && Self::loss_within_pilot(&intent.record.plan, loss)
+            })
             && run.allocation_id == self.allocation_id
             && run.account_uid_fingerprint == self.account_uid_fingerprint
             && run.operator_authority_id == self.operator_authority_id
@@ -398,7 +426,10 @@ impl ProductionLivePermit {
             && source
                 .latest_source_asof_ms
                 .is_some_and(|asof| asof <= now_ms && now_ms - asof <= 30_000)
-            && ledger.risk_stop().is_none()
+            && Self::stop_allows_action(
+                ledger.risk_stop().is_some(),
+                intent.record.plan.action,
+            )
             && ledger.finalized_run().is_none()
             && ledger.unverified_run().is_none()
             && ledger.entries().all(|entry| {
@@ -4571,6 +4602,35 @@ mod tests {
     }
 
     #[test]
+    fn production_pilot_loss_and_stop_are_independent_of_capital() {
+        let mut open = protected_plan();
+        open.order_type = OrderType::Fok;
+        assert!(ProductionLivePermit::loss_within_pilot(&open, Decimal::ONE));
+        assert!(!ProductionLivePermit::loss_within_pilot(
+            &open,
+            Decimal::new(5, 1)
+        ));
+        assert!(!ProductionLivePermit::loss_within_pilot(
+            &open,
+            Decimal::ZERO
+        ));
+        assert!(!ProductionLivePermit::stop_allows_action(
+            true,
+            crate::ExecutionAction::Open
+        ));
+        open.action = crate::ExecutionAction::Close;
+        assert!(ProductionLivePermit::loss_within_pilot(&open, Decimal::ONE));
+        assert!(ProductionLivePermit::stop_allows_action(
+            true,
+            crate::ExecutionAction::Close
+        ));
+        assert!(!ProductionLivePermit::stop_allows_action(
+            true,
+            crate::ExecutionAction::Hedge
+        ));
+    }
+
+    #[test]
     fn production_pilot_scope_denies_unprotected_and_unsupported_actions() {
         let mut candidate = protected_plan();
         candidate.order_type = OrderType::Fok;
@@ -4602,6 +4662,7 @@ mod tests {
             allocation_id: "prod_pilot_20261017".to_owned(),
             operator_authority_id: "native_control_approved_pilot".to_owned(),
             max_allocation_usdt: "100".to_owned(),
+            max_loss_usdt: "5".to_owned(),
             source_checksum_sha256: "b".repeat(64),
             issued_at_ms: 101,
             expires_at_ms: 10_101,
