@@ -276,7 +276,6 @@ impl DesiredStateStore {
             || state.agent != AgentDesired::Stopped
             || state.transition.is_some()
             || state.switch_hold.is_some()
-            || state.read_only
         {
             return Err(HostControlError::ProfileTransitionPending);
         }
@@ -284,10 +283,7 @@ impl DesiredStateStore {
             if *prior == policy {
                 return Ok(());
             }
-            if policy.revision <= prior.revision
-                || prior.permission == ProductionPermission::Stopped
-                    && policy.permission == ProductionPermission::Enabled
-            {
+            if policy.revision <= prior.revision {
                 return Err(HostControlError::ProfileTransitionReplay);
             }
         }
@@ -479,11 +475,15 @@ mod tests {
         assert_eq!(store.production_policy_status().unwrap()["effective_trading"], false);
         assert!(store.stop_production_policy(1).is_err());
         policy.revision = 2;
-        assert!(store.configure_production_policy(policy).is_err(), "STOP cannot be implicitly rearmed");
+        assert!(store.configure_production_policy(policy.clone()).is_err(), "revocation revision is not reusable");
         let reopened = DesiredStateStore::at(root.join("desired.json"));
         assert_eq!(reopened.production_policy_status().unwrap()["permission"], "STOPPED");
+        // A NEW explicit CONTROL authorization, not a restart, may rearm.
+        policy.revision = 3;
+        reopened.configure_production_policy(policy).unwrap();
+        assert_eq!(reopened.production_policy_status().unwrap()["permission"], "ENABLED");
         reopened.save(AgentDesiredState::stopped()).unwrap();
-        assert_eq!(reopened.production_policy_status().unwrap()["permission"], "STOPPED");
+        assert_eq!(reopened.production_policy_status().unwrap()["permission"], "ENABLED");
         reopened.save(AgentDesiredState::demo_acceptance_running()).unwrap();
         assert_eq!(reopened.production_policy_status().unwrap()["permission"], "OFF");
         let _ = fs::remove_dir_all(root);
