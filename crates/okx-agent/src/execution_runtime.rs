@@ -184,8 +184,7 @@ pub struct ExecutionRuntime {
 fn strategy_nav_source_supported(demo: bool, mode: ExecutionRuntimeMode) -> bool {
     matches!(
         (demo, mode),
-        (true, ExecutionRuntimeMode::DemoAcceptance)
-            | (false, ExecutionRuntimeMode::ReadOnly)
+        (true, ExecutionRuntimeMode::DemoAcceptance) | (false, ExecutionRuntimeMode::ReadOnly)
     )
 }
 
