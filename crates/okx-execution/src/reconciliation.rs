@@ -1498,7 +1498,10 @@ mod tests {
         });
         let historical = assemble_period_financial_audit(&report);
         report.refresh_period_financial_audit();
-        assert_eq!(report.strategy_period_financial_audit.as_ref(), Some(&historical));
+        assert_eq!(
+            report.strategy_period_financial_audit.as_ref(),
+            Some(&historical)
+        );
         assert_eq!(historical.status, "INCOMPLETE");
         assert!(historical.current_period_proven);
         assert!(!historical.new_risk_authorized);
@@ -1512,15 +1515,38 @@ mod tests {
         // captured the source and recomputed the current financial period.
         report.financial_period.as_mut().unwrap().state = "INCOMPLETE";
         report.refresh_period_financial_audit();
-        assert!(!report.strategy_period_financial_audit.as_ref().unwrap().current_period_proven);
+        assert!(
+            !report
+                .strategy_period_financial_audit
+                .as_ref()
+                .unwrap()
+                .current_period_proven
+        );
         report.financial_period.as_mut().unwrap().state = "FLAT_RECONCILED";
         report.refresh_period_financial_audit();
-        assert!(report.strategy_period_financial_audit.as_ref().unwrap().current_period_proven);
-        assert!(!report.strategy_period_financial_audit.as_ref().unwrap().new_risk_authorized);
+        assert!(
+            report
+                .strategy_period_financial_audit
+                .as_ref()
+                .unwrap()
+                .current_period_proven
+        );
+        assert!(
+            !report
+                .strategy_period_financial_audit
+                .as_ref()
+                .unwrap()
+                .new_risk_authorized
+        );
         report.financial_period.as_mut().unwrap().funding_usdt = Some("1".to_owned());
         assert!(!assemble_period_financial_audit(&report).current_period_proven);
         report.financial_period.as_mut().unwrap().funding_usdt = Some("0".to_owned());
-        report.financial_period.as_mut().unwrap().reasons.push("funding_unallocated");
+        report
+            .financial_period
+            .as_mut()
+            .unwrap()
+            .reasons
+            .push("funding_unallocated");
         assert!(!assemble_period_financial_audit(&report).current_period_proven);
         report.financial_period.as_mut().unwrap().reasons.clear();
         // Missing funding, cross-run identity or incomplete current source
