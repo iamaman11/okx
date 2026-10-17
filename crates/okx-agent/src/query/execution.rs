@@ -457,9 +457,11 @@ async fn begin_strategy_run(
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
-    if !execution.demo_mutation_acceptance_requested() {
+    if !execution.demo_mutation_acceptance_requested()
+        && !execution.production_trading_requested()
+    {
         return Ok(deny(
-            "new strategy run requires the authenticated Demo owner".to_owned(),
+            "new strategy run requires the authenticated native CONTROL owner".to_owned(),
         ));
     }
     let snapshot = match fresh_account(request, context, generated_at).await? {
@@ -471,7 +473,9 @@ async fn begin_strategy_run(
             ExecutorPreflightCheck::Ready(value) => value,
             ExecutorPreflightCheck::Response(reply) => return Ok(*reply),
         };
-    if !preflight.accepted || preflight.production_environment {
+    if !preflight.accepted
+        || preflight.production_environment != execution.production_trading_requested()
+    {
         return Ok(preflight_rejected(request, generated_at));
     }
     let Some(observer) = context.account_fallback else {
@@ -553,21 +557,32 @@ async fn begin_strategy_run(
         operator_authority_id: operator_authority_id.to_owned(),
         started_at_ms: observed_at_ms,
     };
-    match execution
-        .begin_strategy_run_demo_authorized(
-            &preflight,
-            reservation,
-            &opening,
-            observed_at_ms,
-            rearm
-                .map(|p| okx_execution::StrategyStopRearmRequest {
-                    expected_stopped_at_ms: p.expected_stopped_at_ms,
-                    prior_finalization_sha256: p.prior_finalization_sha256.clone(),
-                })
-                .as_ref(),
-        )
-        .await?
-    {
+    let rearm = rearm.map(|p| okx_execution::StrategyStopRearmRequest {
+        expected_stopped_at_ms: p.expected_stopped_at_ms,
+        prior_finalization_sha256: p.prior_finalization_sha256.clone(),
+    });
+    let result = if execution.production_trading_requested() {
+        execution
+            .begin_strategy_run_production_authorized(
+                &preflight,
+                reservation,
+                &opening,
+                observed_at_ms,
+                rearm.as_ref(),
+            )
+            .await?
+    } else {
+        execution
+            .begin_strategy_run_demo_authorized(
+                &preflight,
+                reservation,
+                &opening,
+                observed_at_ms,
+                rearm.as_ref(),
+            )
+            .await?
+    };
+    match result {
         Some(Ok(value)) => Ok(completed(
             request,
             generated_at,
