@@ -338,11 +338,15 @@ impl ProductionLivePermit {
             return false;
         }
         match plan.action {
-            crate::ExecutionAction::Open => plan
-                .open_risk
-                .as_ref()
-                .and_then(|risk| Decimal::from_str(&risk.stop_loss_settle).ok())
-                .is_some_and(|loss| loss > Decimal::ZERO && loss <= approved_loss),
+            crate::ExecutionAction::Open => plan.open_risk.as_ref().is_some_and(|risk| {
+                let measured = Decimal::from_str(&risk.stop_loss_settle).ok();
+                let requested = Decimal::from_str(&risk.requested_max_loss_settle).ok();
+                measured.zip(requested).is_some_and(|(measured, requested)| {
+                    measured > Decimal::ZERO
+                        && measured <= requested
+                        && requested <= approved_loss
+                })
+            }),
             crate::ExecutionAction::Close => true,
             _ => false,
         }
@@ -4623,6 +4627,12 @@ mod tests {
         let mut open = protected_plan();
         open.order_type = OrderType::Fok;
         assert!(ProductionLivePermit::loss_within_pilot(&open, Decimal::ONE));
+        open.open_risk.as_mut().unwrap().requested_max_loss_settle = "11".to_owned();
+        assert!(
+            !ProductionLivePermit::loss_within_pilot(&open, Decimal::from(10)),
+            "an understated measured stop must not bypass the immutable requested loss budget"
+        );
+        open.open_risk.as_mut().unwrap().requested_max_loss_settle = "1".to_owned();
         assert!(!ProductionLivePermit::loss_within_pilot(
             &open,
             Decimal::new(5, 1)

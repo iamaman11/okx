@@ -40,6 +40,20 @@ pub struct NativeProductionPilotRequest {
 }
 
 impl NativeProductionPilotRequest {
+    /// Exact decimal text, no float rounding and no new dependency: reject a
+    /// malformed/over-budget native command BEFORE consuming the child pipe.
+    fn bounded_positive_usdt(value: &str, ceiling: u16) -> bool {
+        if validate_positive_decimal_text(value, "pilot_usdt").is_err() {
+            return false;
+        }
+        let mut components = value.split('.');
+        let Some(whole) = components.next().and_then(|part| part.parse::<u16>().ok()) else {
+            return false;
+        };
+        let fractional = components.next().unwrap_or("");
+        whole < ceiling || (whole == ceiling && fractional.bytes().all(|b| b == b'0'))
+    }
+
     pub fn valid(&self) -> bool {
         let hex64 = |s: &str| {
             s.len() == 64
@@ -55,8 +69,8 @@ impl NativeProductionPilotRequest {
             && self.operator_authority_id.starts_with("sha256:")
             && self.operator_authority_id.len() == 71
             && hex64(&self.operator_authority_id[7..])
-            && (1..=128).contains(&self.max_allocation_usdt.len())
-            && (1..=128).contains(&self.max_loss_usdt.len())
+            && Self::bounded_positive_usdt(&self.max_allocation_usdt, 100)
+            && Self::bounded_positive_usdt(&self.max_loss_usdt, 10)
             && self.bound_child_pid != 0
             && self.issued_at_ms > 0
             && self
@@ -4236,6 +4250,20 @@ mod native_drain_source_tests {
         request.pilot.as_mut().unwrap().bound_child_pid = 0;
         assert!(!request.valid());
         request.pilot.as_mut().unwrap().bound_child_pid = 42;
+        request.pilot.as_mut().unwrap().max_loss_usdt = "10.01".to_owned();
+        assert!(!request.valid());
+        request.pilot.as_mut().unwrap().max_loss_usdt = "10.000".to_owned();
+        assert!(request.valid());
+        request.pilot.as_mut().unwrap().max_loss_usdt = "0".to_owned();
+        assert!(!request.valid());
+        request.pilot.as_mut().unwrap().max_loss_usdt = "5".to_owned();
+        request.pilot.as_mut().unwrap().max_allocation_usdt = "100.01".to_owned();
+        assert!(!request.valid());
+        request.pilot.as_mut().unwrap().max_allocation_usdt = "100".to_owned();
+        assert!(request.valid());
+        request.pilot.as_mut().unwrap().max_loss_usdt = "-1".to_owned();
+        assert!(!request.valid());
+        request.pilot.as_mut().unwrap().max_loss_usdt = "5".to_owned();
         let reply = NativeChildReply {
             schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
             request_id: request.request_id.clone(),
