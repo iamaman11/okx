@@ -1,6 +1,6 @@
 # Stage 5 implementation checklist and live-admission contract
 
-> **Current 5C-2 release/profile contract (2026-10-15):** [Single-agent account profiles and Stage 5C-2 acceptance](ACCOUNT_PROFILES_AND_RELEASE_ACCEPTANCE.md). Existing #339 diagnostic code is merged with six CI checks but not deployed; installed CONTROL reports GitHub JSON decode errors on exact ZIP acquisition. Account mode is selected independently from trade authority. No second Demo binary or execution architecture; no Production Trading admission yet. Historical candidate-state paragraphs below remain evidence, not the current cursor.
+> **ACTIVE ORDER (2026-10-17; canonical #160):** The [canonical issue #160](https://github.com/iamaman11/okx/issues/160) is the only executable plan. **NOW: 5B financial attribution/source completeness** → 5A full native NAV/high-water/drawdown/STOP acceptance → 5C compact operator UX/transport and safe existing Demo ↔ Production ReadOnly handoff → final separately approved Live gate. This is *one unfinished numbered Stage 5*, not a sixth MVP stage. The old 5C-2/ZIP-decoding 'current' cursor below predates physically accepted native CONTROL deployment and is historical. Keep prior lineage and persistent STOP intact; no Production order, new transport, agent or unaccepted account selection.
 
 
 ## Stage 5B / 5C: one-account compact trader view (PR #334, candidate)

@@ -257,7 +257,10 @@ impl StrategyFinalization {
             || report.evidence_sha256 != evidence.checksum_sha256
             || !report.reasons.is_empty()
             || report.linked_bills != report.linked_fills
-            || report.funding_usdt.is_some()
+            // Source-complete financial assessment attests zero funding.
+            // Unknown/non-zero amounts cannot be finalized without exact
+            // native strategy attribution and a versioned finalization model.
+            || report.funding_usdt.as_deref() != Some("0")
             || finalized_at_ms <= run.started_at_ms
         {
             return Err(ExecutionLedgerError::StrategyRunNotFinalizable);
@@ -944,7 +947,7 @@ mod tests {
             linked_bills: 0,
             realized_usdt: "0".into(),
             fees_usdt: "0".into(),
-            funding_usdt: None,
+            funding_usdt: Some("0".into()),
             unrealized_usdt: Some("0".into()),
             nav_usdt: Some("100".into()),
             positions: vec![],
@@ -1099,6 +1102,43 @@ mod tests {
             forged.validate().is_err(),
             "tampered financial hash breaks rearm chain"
         );
+    }
+
+    #[test]
+    fn finalized_period_accepts_only_source_proven_zero_funding() {
+        let run = reservation();
+        let evidence = DurableExchangeEvidence::new(&run).unwrap();
+        let mut report = StrategyFinancialPeriod {
+            schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+            run_id: run.allocation_id.clone(),
+            state: "FLAT_RECONCILED",
+            evidence_sha256: evidence.checksum_sha256.clone(),
+            allocation_usdt: "100".into(),
+            linked_fills: 0,
+            linked_bills: 0,
+            realized_usdt: "0".into(),
+            fees_usdt: "0".into(),
+            funding_usdt: Some("0".into()),
+            unrealized_usdt: Some("0".into()),
+            nav_usdt: Some("100".into()),
+            positions: vec![],
+            usable_for_new_risk: false,
+            reasons: vec![],
+        };
+        assert!(StrategyFinalization::new(&run, &evidence, &report, 2000).is_ok());
+        for funding in [None, Some("1"), Some("-0.01"), Some("invalid")] {
+            report.funding_usdt = funding.map(str::to_owned);
+            assert!(matches!(
+                StrategyFinalization::new(&run, &evidence, &report, 2000),
+                Err(ExecutionLedgerError::StrategyRunNotFinalizable)
+            ));
+        }
+        report.funding_usdt = Some("0".into());
+        report.reasons.push("funding_unallocated");
+        assert!(matches!(
+            StrategyFinalization::new(&run, &evidence, &report, 2000),
+            Err(ExecutionLedgerError::StrategyRunNotFinalizable)
+        ));
     }
 
     #[test]
