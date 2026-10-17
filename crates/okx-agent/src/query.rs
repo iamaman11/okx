@@ -52,6 +52,7 @@ use crate::{
 };
 
 mod account;
+pub(crate) use account::authenticated_counterpart_identity;
 mod analysis;
 mod execution;
 mod market;
