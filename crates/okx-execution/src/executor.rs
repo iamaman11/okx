@@ -341,11 +341,13 @@ impl ProductionLivePermit {
             crate::ExecutionAction::Open => plan.open_risk.as_ref().is_some_and(|risk| {
                 let measured = Decimal::from_str(&risk.stop_loss_settle).ok();
                 let requested = Decimal::from_str(&risk.requested_max_loss_settle).ok();
-                measured.zip(requested).is_some_and(|(measured, requested)| {
-                    measured > Decimal::ZERO
-                        && measured <= requested
-                        && requested <= approved_loss
-                })
+                measured
+                    .zip(requested)
+                    .is_some_and(|(measured, requested)| {
+                        measured > Decimal::ZERO
+                            && measured <= requested
+                            && requested <= approved_loss
+                    })
             }),
             crate::ExecutionAction::Close => true,
             _ => false,
