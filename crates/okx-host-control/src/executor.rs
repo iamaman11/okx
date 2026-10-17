@@ -122,7 +122,8 @@ impl HostExecutor {
                 self.desired_store.production_policy_status()
             }
             HostControlOperation::StopProductionTrading { expected_revision } => {
-                self.desired_store.stop_production_policy(expected_revision)?;
+                self.desired_store
+                    .stop_production_policy(expected_revision)?;
                 self.desired_store.production_policy_status()
             }
             HostControlOperation::Sync => self.sync(),
