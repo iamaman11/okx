@@ -38,6 +38,13 @@ use crate::{
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
 pub const LEVERAGE_CHANGE_PROOF_SCHEMA_V1: &str = "okx.leverage-change-proof/v1";
 
+/// The final native venue witnesses are captured by one query owner before
+/// the single Rust executor evaluates and submits a Production intent.
+pub struct ProductionSubmitSources<'a> {
+    pub facts: &'a AccountLedgerFacts,
+    pub protection: &'a PendingProtectiveAlgoInventory,
+}
+
 /// One immutable, Worker-sourced policy for exactly this authenticated
 /// transport generation and one native execution request. Never persisted.
 #[derive(Clone, Copy)]
@@ -1088,10 +1095,10 @@ impl ExecutionRuntime {
         intent_id: &str,
         timing: MutationTiming,
         observed_at_ms: u64,
-        facts: &AccountLedgerFacts,
-        protection: &PendingProtectiveAlgoInventory,
+        sources: ProductionSubmitSources<'_>,
         central: Option<CentralPolicyBinding<'_>>,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
+        let ProductionSubmitSources { facts, protection } = sources;
         if !central.is_some_and(|p| {
             p.authorizes_uid(
                 &preflight.credential.account_uid_fingerprint,

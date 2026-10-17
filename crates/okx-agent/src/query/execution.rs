@@ -1733,8 +1733,10 @@ async fn submit_prepared(
                 intent_id,
                 timing,
                 observed_at_ms,
-                facts,
-                &protection,
+                crate::execution_runtime::ProductionSubmitSources {
+                    facts,
+                    protection: &protection,
+                },
                 context.central_policy_binding(),
             )
             .await?
