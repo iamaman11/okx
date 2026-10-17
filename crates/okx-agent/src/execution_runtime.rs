@@ -860,6 +860,49 @@ impl ExecutionRuntime {
         )))
     }
 
+    /// The normal Production strategy allocation uses the SAME durable
+    /// executor/ledger and independent venue-opening witness as Demo.
+    /// CONTROL's persistent UID/run/authority scope is read fresh.
+    pub async fn begin_strategy_run_production_authorized(
+        &self,
+        preflight: &ExecutorCredentialPreflight,
+        reservation: StrategyCapitalReservation,
+        opening: &StrategyAllocationOpening,
+        now_ms: u64,
+        rearm: Option<&okx_execution::StrategyStopRearmRequest>,
+    ) -> AgentResult<Option<Result<StrategyCapitalReservation, OrderExecutorError>>> {
+        if !self.production_trading_requested()
+            || !preflight.accepted
+            || !preflight.production_environment
+            || !preflight.executor_ip_bound
+            || !preflight.executor_trade_permission
+            || preflight.executor_withdraw_permission
+        {
+            return Ok(None);
+        }
+        let policy = read_native_production_policy()?;
+        if policy.permission != okx_execution::ProductionPermission::Enabled
+            || policy.account_uid_fingerprint != preflight.account_uid_fingerprint
+            || policy.account_uid_fingerprint != opening.account_uid_fingerprint
+            || policy.strategy_run_id != reservation.allocation_id
+            || policy.operator_authority_id != reservation.operator_authority_id
+        {
+            return Ok(None);
+        }
+        let mut executor = self.executor.lock().await;
+        if !executor.ledger().entries().all(|entry| {
+            entry.record.plan.account_uid_fingerprint == preflight.account_uid_fingerprint
+        }) {
+            return Ok(None);
+        }
+        Ok(Some(executor.reserve_strategy_capital_with_rearm(
+            reservation,
+            opening,
+            rearm,
+            now_ms,
+        )))
+    }
+
     /// The single Demo executor captures the coherent source before the
     /// atomic FINALIZED write. Caller cannot supply the exchange witness.
     pub async fn finalize_strategy_run_demo_authorized(
