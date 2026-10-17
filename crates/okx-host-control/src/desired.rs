@@ -290,6 +290,15 @@ impl DesiredStateStore {
                 return Err(HostControlError::ProfileTransitionReplay);
             }
         }
+        // A verified ReadOnly profile handoff intentionally latches this
+        // legacy flag. An explicit, revision-fenced Production authorization
+        // while STOPPED is the ONE native way to leave that state: save the
+        // policy and the execution right atomically under the same owner.
+        // Neither restarts nor profile switches can silently clear it.
+        state.read_only = !matches!(
+            policy.permission,
+            ProductionPermission::Enabled | ProductionPermission::Stopped
+        );
         state.production_policy = Some(policy);
         self.persist_full(&state)
     }
@@ -332,7 +341,9 @@ impl DesiredStateStore {
                 "permission": policy.permission,
                 "revision": policy.revision,
                 "effective_trading": false,
-                "authority": "NATIVE_EXECUTOR_POST_GATE_PENDING"
+                "authority": "NATIVE_EXECUTOR_PER_ORDER_GATE",
+                "configured_for_admission": !state.read_only
+                    && matches!(policy.permission, ProductionPermission::Enabled)
             }),
             None => json!({
                 "configured": false,
@@ -485,10 +496,29 @@ mod tests {
             max_total_modelled_loss_usdt: "10".to_owned(),
         };
         store.save(AgentDesiredState::stopped()).unwrap();
+        // Simulate a previously proven ReadOnly profile handoff. This must
+        // remain until explicit STOPPED CONTROL authorization, never until
+        // a profile-name switch or agent restart.
+        let mut prior = store.load_full().unwrap();
+        prior.read_only = true;
+        store.persist_full(&prior).unwrap();
+        assert!(store.read_only_for(AgentProfile::Production).unwrap());
         store.configure_production_policy(policy.clone()).unwrap();
+        assert!(!store.read_only_for(AgentProfile::Production).unwrap());
+        assert_eq!(
+            store.production_policy_status().unwrap()["configured_for_admission"],
+            true
+        );
         store.configure_production_policy(policy.clone()).unwrap();
         assert_eq!(store.production_policy_status().unwrap()["revision"], 1);
         store.stop_production_policy(1).unwrap();
+        // Native durable STOP never re-enables new risk; it leaves the
+        // existing owner alive only for strictly verified reduce-only CLOSE.
+        assert!(!store.read_only_for(AgentProfile::Production).unwrap());
+        assert_eq!(
+            store.production_policy_status().unwrap()["configured_for_admission"],
+            false
+        );
         assert_eq!(
             store.production_policy_status().unwrap()["permission"],
             "STOPPED"
