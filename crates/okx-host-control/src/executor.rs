@@ -647,7 +647,8 @@ impl HostExecutor {
         } else {
             "demo_acceptance"
         };
-        let selected = self.select_read_only_account_internal(target_profile, None, Some(account_id))?;
+        let selected =
+            self.select_read_only_account_internal(target_profile, None, Some(account_id))?;
         // Public selection view: do not leak internal profile names, PID, STOP
         // or historical financial-audit state into the account chooser.
         Ok(json!({
