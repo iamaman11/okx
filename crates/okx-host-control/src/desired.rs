@@ -4,7 +4,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use okx_protocol::{ProductionPermission, ProductionTradingPolicy};
+use okx_protocol::{
+    ProductionPermission, ProductionTradingPolicy,
+    host_state_proto::{
+        self, HostStateWire, LegacyProductionPolicyWire, SourceDrainHoldWire,
+        SourceWitnessWire, TransitionWire, HOST_STATE_VERSION,
+    },
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -14,12 +20,12 @@ use crate::{HostControlError, HostControlResult};
 pub const DESIRED_STATE_SCHEMA_V1: &str = "okx.host.desired/v1";
 pub const DESIRED_STATE_SCHEMA_V2: &str = "okx.host.desired/v2";
 pub const DESIRED_STATE_SCHEMA_V3: &str = "okx.host.desired/v3";
-// The original CONTROL desired.json is the ONLY durable lifecycle owner.
-// Transition evidence is a field here, not a second file or state machine.
+// One crash-safe, typed Protobuf machine journal. The legacy JSON is read
+// ONLY to migrate the original source/target transition and STOP state.
 const SCHEMA: &str = "okx.host.profile-transition/v1";
 const MAX_WITNESS_LIFETIME_MS: u64 = 60_000;
 const MAX_SOURCE_OBSERVATION_AGE_MS: u64 = 10_000;
-const DEFAULT_DESIRED_PATH: &str = r"C:\okx-control\desired.json";
+const DEFAULT_DESIRED_PATH: &str = r"C:\okx-control\host-state.pb";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -196,11 +202,47 @@ impl DesiredStateStore {
     }
 
     fn load_full(&self) -> HostControlResult<DesiredFileV3> {
-        if !self.path.exists() {
-            return Ok(DesiredFileV3::initial(AgentDesiredState::stopped()));
+        // Test-only explicit JSON fixtures preserve legacy migration coverage;
+        // canonical Windows CONTROL never chooses a JSON persistence path.
+        #[cfg(test)]
+        if self.path.extension().is_some_and(|v| v == "json") {
+            return if self.path.exists() {
+                Self::load_legacy_json(&self.path)
+            } else {
+                Ok(DesiredFileV3::initial(AgentDesiredState::stopped()))
+            };
         }
 
-        let bytes = fs::read(&self.path)?;
+        if self.path.exists() {
+            return Self::decode_binary(&fs::read(&self.path)?);
+        }
+
+        let legacy = self.path.with_file_name("desired.json");
+        let archived = self.path.with_file_name("desired.json.migrated");
+        if archived.exists() {
+            // Missing canonical journal after migration is not permission
+            // to resurrect a stale former JSON snapshot.
+            return Err(HostControlError::DesiredStateCorrupt);
+        }
+        if legacy.exists() {
+            let previous = Self::load_legacy_json(&legacy)?;
+            // Commit and fsync the complete typed snapshot FIRST. Never clear
+            // or reinterpret a one-use hold while importing the legacy file.
+            self.persist_full(&previous)?;
+            fs::rename(&legacy, &archived)?;
+            return Ok(previous);
+        }
+        Ok(DesiredFileV3::initial(AgentDesiredState::stopped()))
+    }
+
+    fn decode_binary(bytes: &[u8]) -> HostControlResult<DesiredFileV3> {
+        let wire = host_state_proto::decode_host_state(bytes)
+            .ok_or(HostControlError::DesiredStateCorrupt)?;
+        desired_from_wire(wire)
+    }
+
+    fn load_legacy_json(path: &Path) -> HostControlResult<DesiredFileV3> {
+        let bytes = fs::read(path)?;
         let header: DesiredHeader =
             serde_json::from_slice(&bytes).map_err(|_| HostControlError::DesiredStateCorrupt)?;
         let complete = match header.schema.as_str() {
@@ -231,14 +273,21 @@ impl DesiredStateStore {
 
     fn persist_full(&self, complete: &DesiredFileV3) -> HostControlResult<()> {
         complete.validate()?;
-        let parent = self
-            .path
-            .parent()
-            .ok_or(HostControlError::DesiredStateCorrupt)?;
+        let parent = self.path.parent().ok_or(HostControlError::DesiredStateCorrupt)?;
         fs::create_dir_all(parent)?;
         let temp = temp_path(&self.path);
         let mut file = File::create(&temp)?;
-        file.write_all(&serde_json::to_vec_pretty(complete)?)?;
+        #[cfg(test)]
+        let legacy_fixture = self.path.extension().is_some_and(|v| v == "json");
+        #[cfg(not(test))]
+        let legacy_fixture = false;
+        if legacy_fixture {
+            file.write_all(&serde_json::to_vec_pretty(complete)?)?;
+        } else {
+            let bytes = host_state_proto::encode_host_state(&desired_to_wire(complete))
+                .ok_or(HostControlError::DesiredStateCorrupt)?;
+            file.write_all(&bytes)?;
+        }
         file.sync_all()?;
         drop(file);
         atomic_replace(&temp, &self.path)
@@ -445,6 +494,99 @@ mod tests {
 
     fn test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("okx-desired-{label}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn protobuf_frozen_source_witness_round_trips_exact_checksum() {
+        let witness = FrozenSourceWitness {
+            sequence: 1,
+            source: AgentProfile::Production,
+            destination: AgentProfile::DemoAcceptance,
+            source_pid: 432,
+            launch_lease_sha256: "a".repeat(64),
+            account_uid_fingerprint: "b".repeat(64),
+            private_ws_generation: 1,
+            ledger_manifest_sha256: "c".repeat(64),
+            source_tree: "d".repeat(40),
+            agent_sha256: "e".repeat(64),
+            controller_sha256: "f".repeat(64),
+            source_observed_at_ms: 99,
+            issued_at_ms: 100,
+            expires_at_ms: 200,
+        };
+        let mut record = TransitionRecord {
+            schema: SCHEMA.to_owned(),
+            phase: TransitionPhase::SourceFrozen,
+            witness,
+            consumed_at_ms: None,
+            source_exited_at_ms: None,
+            checksum_sha256: String::new(),
+        };
+        record.seal().unwrap();
+        let before = DesiredFileV3 {
+            schema: DESIRED_STATE_SCHEMA_V3.to_owned(),
+            agent: AgentDesired::Running,
+            profile: AgentProfile::Production,
+            read_only: true,
+            production_policy: None,
+            transition: Some(record.clone()),
+            switch_hold: None,
+        };
+        before.validate().unwrap();
+        let bytes = host_state_proto::encode_host_state(&desired_to_wire(&before)).unwrap();
+        let after = desired_from_wire(host_state_proto::decode_host_state(&bytes).unwrap()).unwrap();
+        let restored = after.transition.unwrap();
+        assert_eq!(restored.witness, record.witness);
+        assert_eq!(restored.checksum_sha256, record.checksum_sha256);
+        assert_eq!(restored.phase, TransitionPhase::SourceFrozen);
+    }
+
+    #[test]
+    fn protobuf_host_journal_migrates_once_without_dropping_source_hold() {
+        let root = test_root("native-protobuf-migrate");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let old = DesiredStateStore::at(root.join("desired.json"));
+        old.save(AgentDesiredState::production_running()).unwrap();
+        old.begin_source_drain_hold(
+            AgentProfile::Production, AgentProfile::DemoAcceptance, 41,
+        ).unwrap();
+        let current = DesiredStateStore::at(root.join("host-state.pb"));
+        assert!(current.is_pending().unwrap(), "durable hold survives native migration");
+        assert_eq!(current.load().unwrap(), AgentDesiredState::production_running());
+        assert!(root.join("host-state.pb").exists());
+        assert!(!root.join("desired.json").exists());
+        assert!(root.join("desired.json.migrated").exists());
+        assert!(current.recover_stopped_explicit().is_ok(), "explicit recovery only");
+        assert!(!current.is_pending().unwrap());
+        assert_eq!(
+            current.load().unwrap(),
+            AgentDesiredState::stopped_on(AgentProfile::Production),
+        );
+        fs::remove_file(root.join("host-state.pb")).unwrap();
+        assert!(matches!(
+            current.load(),
+            Err(HostControlError::DesiredStateCorrupt),
+        ), "lost typed journal may never replay archived JSON");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protobuf_journal_rejects_unknown_enum_and_corruption() {
+        let root = test_root("native-protobuf-corruption");
+        let _ = fs::remove_dir_all(&root);
+        let store = DesiredStateStore::at(root.join("host-state.pb"));
+        store.save(AgentDesiredState::stopped()).unwrap();
+        let mut bytes = fs::read(root.join("host-state.pb")).unwrap();
+        let original = bytes.clone();
+        // Preserve the valid prefix while appending an unsupported extra
+        // field. Canonical decode must reject rather than ignore it.
+        bytes.extend([0x98, 0x06, 0x01]);
+        fs::write(root.join("host-state.pb"), bytes).unwrap();
+        assert!(store.load().is_err());
+        fs::write(root.join("host-state.pb"), original).unwrap();
+        assert_eq!(store.load().unwrap(), AgentDesiredState::stopped());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1028,7 +1170,7 @@ impl DesiredStateStore {
                     "phase": "DRAIN_REQUESTED",
                     "handoff_admission": "DENIED_PRE_DRAIN_OR_UNCERTAIN_POST",
                     "recovery": "VERIFY_EMPTY_OWNED_JOB_THEN_RECOVER_STOPPED",
-                    "durable_owner": "desired.json"
+                    "durable_owner": "host-state.pb"
                 }),
                 None => json!({
                     "state": if complete.agent == AgentDesired::Running { "RUNNING" } else { "STOPPED" },
@@ -1048,7 +1190,7 @@ impl DesiredStateStore {
                     "read_only_persisted": complete.read_only,
                     "production_policy_revision": complete.production_policy.as_ref().map(|p| p.revision),
                     "production_policy_permission": complete.production_policy.as_ref().map(|p| p.permission),
-                    "durable_owner": "desired.json"
+                    "durable_owner": "host-state.pb"
                 }),
                 Some(record) => json!({
                     "state": if record.phase == TransitionPhase::SourceFrozen { "SWITCHING" } else { "BLOCKED" },
@@ -1062,13 +1204,13 @@ impl DesiredStateStore {
                     } else {
                         "DO_NOT_RESPAWN_SOURCE_OR_TARGET"
                     },
-                    "durable_owner": "desired.json"
+                    "durable_owner": "host-state.pb"
                 }),
             },
             Err(_) => json!({
                 "state": "CORRUPT",
                 "handoff_admission": "DENIED_TRANSITION_INTEGRITY_UNPROVEN",
-                "durable_owner": "desired.json"
+                "durable_owner": "host-state.pb"
             }),
         }
     }
@@ -1508,4 +1650,180 @@ mod single_owner_transition_tests {
         assert!(value["transition"].is_null());
         let _ = fs::remove_file(path);
     }
+}
+
+fn wire_profile(profile: AgentProfile) -> u32 {
+    match profile {
+        AgentProfile::Production => 1,
+        AgentProfile::DemoAcceptance => 2,
+    }
+}
+fn from_wire_profile(value: u32) -> HostControlResult<AgentProfile> {
+    match value {
+        1 => Ok(AgentProfile::Production),
+        2 => Ok(AgentProfile::DemoAcceptance),
+        _ => Err(HostControlError::DesiredStateCorrupt),
+    }
+}
+fn wire_agent(agent: AgentDesired) -> u32 {
+    match agent {
+        AgentDesired::Running => 1,
+        AgentDesired::Stopped => 2,
+    }
+}
+fn from_wire_agent(value: u32) -> HostControlResult<AgentDesired> {
+    match value {
+        1 => Ok(AgentDesired::Running),
+        2 => Ok(AgentDesired::Stopped),
+        _ => Err(HostControlError::DesiredStateCorrupt),
+    }
+}
+fn wire_permission(permission: ProductionPermission) -> u32 {
+    match permission {
+        ProductionPermission::Off => 0,
+        ProductionPermission::ReadOnly => 1,
+        ProductionPermission::Enabled => 2,
+        ProductionPermission::Stopped => 3,
+    }
+}
+fn from_wire_permission(value: u32) -> HostControlResult<ProductionPermission> {
+    match value {
+        0 => Ok(ProductionPermission::Off),
+        1 => Ok(ProductionPermission::ReadOnly),
+        2 => Ok(ProductionPermission::Enabled),
+        3 => Ok(ProductionPermission::Stopped),
+        _ => Err(HostControlError::DesiredStateCorrupt),
+    }
+}
+fn witness_to_wire(w: &FrozenSourceWitness) -> SourceWitnessWire {
+    SourceWitnessWire {
+        sequence: w.sequence,
+        source_environment: wire_profile(w.source),
+        destination_environment: wire_profile(w.destination),
+        source_pid: w.source_pid,
+        launch_lease_sha256: w.launch_lease_sha256.clone(),
+        account_uid_fingerprint: w.account_uid_fingerprint.clone(),
+        private_ws_generation: w.private_ws_generation,
+        ledger_manifest_sha256: w.ledger_manifest_sha256.clone(),
+        source_tree: w.source_tree.clone(),
+        agent_sha256: w.agent_sha256.clone(),
+        controller_sha256: w.controller_sha256.clone(),
+        source_observed_at_ms: w.source_observed_at_ms,
+        issued_at_ms: w.issued_at_ms,
+        expires_at_ms: w.expires_at_ms,
+    }
+}
+fn witness_from_wire(w: SourceWitnessWire) -> HostControlResult<FrozenSourceWitness> {
+    Ok(FrozenSourceWitness {
+        sequence: w.sequence,
+        source: from_wire_profile(w.source_environment)?,
+        destination: from_wire_profile(w.destination_environment)?,
+        source_pid: w.source_pid,
+        launch_lease_sha256: w.launch_lease_sha256,
+        account_uid_fingerprint: w.account_uid_fingerprint,
+        private_ws_generation: w.private_ws_generation,
+        ledger_manifest_sha256: w.ledger_manifest_sha256,
+        source_tree: w.source_tree,
+        agent_sha256: w.agent_sha256,
+        controller_sha256: w.controller_sha256,
+        source_observed_at_ms: w.source_observed_at_ms,
+        issued_at_ms: w.issued_at_ms,
+        expires_at_ms: w.expires_at_ms,
+    })
+}
+fn wire_phase(phase: TransitionPhase) -> u32 {
+    match phase {
+        TransitionPhase::SourceFrozen => 1,
+        TransitionPhase::Consumed => 2,
+        TransitionPhase::SourceExited => 3,
+    }
+}
+fn phase_from_wire(phase: u32) -> HostControlResult<TransitionPhase> {
+    match phase {
+        1 => Ok(TransitionPhase::SourceFrozen),
+        2 => Ok(TransitionPhase::Consumed),
+        3 => Ok(TransitionPhase::SourceExited),
+        _ => Err(HostControlError::DesiredStateCorrupt),
+    }
+}
+fn desired_to_wire(state: &DesiredFileV3) -> HostStateWire {
+    HostStateWire {
+        version: HOST_STATE_VERSION,
+        desired_agent: wire_agent(state.agent),
+        selected_environment: wire_profile(state.profile),
+        read_only: state.read_only,
+        legacy_production_policy: state.production_policy.as_ref().map(|policy| {
+            LegacyProductionPolicyWire {
+                schema: policy.schema.clone(),
+                revision: policy.revision,
+                permission: wire_permission(policy.permission),
+                account_uid_fingerprint: policy.account_uid_fingerprint.clone(),
+                strategy_run_id: policy.strategy_run_id.clone(),
+                operator_authority_id: policy.operator_authority_id.clone(),
+                allowed_instruments: policy.allowed_instruments.clone(),
+                max_total_modelled_loss_usdt: policy.max_total_modelled_loss_usdt.clone(),
+            }
+        }),
+        transition: state.transition.as_ref().map(|t| TransitionWire {
+            schema: t.schema.clone(),
+            phase: wire_phase(t.phase),
+            witness: Some(witness_to_wire(&t.witness)),
+            consumed_at_ms: t.consumed_at_ms,
+            source_exited_at_ms: t.source_exited_at_ms,
+            checksum_sha256: t.checksum_sha256.clone(),
+        }),
+        switch_hold: state.switch_hold.as_ref().map(|hold| SourceDrainHoldWire {
+            source_environment: wire_profile(hold.source),
+            destination_environment: wire_profile(hold.target),
+            source_pid: hold.source_pid,
+        }),
+    }
+}
+fn desired_from_wire(wire: HostStateWire) -> HostControlResult<DesiredFileV3> {
+    let production_policy = if let Some(p) = wire.legacy_production_policy {
+        let policy = ProductionTradingPolicy {
+            schema: p.schema,
+            revision: p.revision,
+            permission: from_wire_permission(p.permission)?,
+            account_uid_fingerprint: p.account_uid_fingerprint,
+            strategy_run_id: p.strategy_run_id,
+            operator_authority_id: p.operator_authority_id,
+            allowed_instruments: p.allowed_instruments,
+            max_total_modelled_loss_usdt: p.max_total_modelled_loss_usdt,
+        };
+        policy.validate().map_err(|_| HostControlError::DesiredStateCorrupt)?;
+        Some(policy)
+    } else {
+        None
+    };
+    let state = DesiredFileV3 {
+        schema: DESIRED_STATE_SCHEMA_V3.to_owned(),
+        agent: from_wire_agent(wire.desired_agent)?,
+        profile: from_wire_profile(wire.selected_environment)?,
+        read_only: wire.read_only,
+        production_policy,
+        transition: if let Some(t) = wire.transition {
+            Some(TransitionRecord {
+                schema: t.schema,
+                phase: phase_from_wire(t.phase)?,
+                witness: witness_from_wire(t.witness.ok_or(HostControlError::DesiredStateCorrupt)?)?,
+                consumed_at_ms: t.consumed_at_ms,
+                source_exited_at_ms: t.source_exited_at_ms,
+                checksum_sha256: t.checksum_sha256,
+            })
+        } else {
+            None
+        },
+        switch_hold: if let Some(hold) = wire.switch_hold {
+            Some(SourceDrainHold {
+                source: from_wire_profile(hold.source_environment)?,
+                target: from_wire_profile(hold.destination_environment)?,
+                source_pid: hold.source_pid,
+            })
+        } else {
+            None
+        },
+    };
+    state.validate()?;
+    Ok(state)
 }

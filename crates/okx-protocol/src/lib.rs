@@ -1,4 +1,5 @@
 pub mod crypto;
+pub mod host_state_proto;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

@@ -806,7 +806,7 @@ impl HostExecutor {
                 "live_trading": "DISABLED",
                 "ledger_migrated": false,
                 "source_pid_exited": source_pid,
-                "durable_owner": "desired.json"
+                "durable_owner": "host-state.pb"
             }))
         })();
 
