@@ -1862,22 +1862,38 @@ impl ProductionTradingPolicy {
             || self.strategy_run_id.is_empty()
             || self.strategy_run_id.len() > 128
             || !self.operator_authority_id.starts_with("sha256:")
-            || validate_sha256(self.operator_authority_id.strip_prefix("sha256:").unwrap_or("")).is_err()
+            || validate_sha256(
+                self.operator_authority_id
+                    .strip_prefix("sha256:")
+                    .unwrap_or(""),
+            )
+            .is_err()
             || self.allowed_instruments.is_empty()
             || self.allowed_instruments.len() > 32
-            || self.allowed_instruments.iter().any(|s| !s.ends_with("-USDT-SWAP") || s.len() > 64)
+            || self
+                .allowed_instruments
+                .iter()
+                .any(|s| !s.ends_with("-USDT-SWAP") || s.len() > 64)
         {
             return Err(BAD);
         }
         let mut unique = std::collections::BTreeSet::new();
-        if self.allowed_instruments.iter().any(|s| !unique.insert(s.as_str())) {
+        if self
+            .allowed_instruments
+            .iter()
+            .any(|s| !unique.insert(s.as_str()))
+        {
             return Err(BAD);
         }
-        let (whole, decimal) = self.max_total_modelled_loss_usdt
+        let (whole, decimal) = self
+            .max_total_modelled_loss_usdt
             .split_once('.')
             .unwrap_or((self.max_total_modelled_loss_usdt.as_str(), ""));
-        if whole.is_empty() || whole.len() > 2 || !whole.bytes().all(|b| b.is_ascii_digit())
-            || decimal.len() > 18 || !decimal.bytes().all(|b| b.is_ascii_digit())
+        if whole.is_empty()
+            || whole.len() > 2
+            || !whole.bytes().all(|b| b.is_ascii_digit())
+            || decimal.len() > 18
+            || !decimal.bytes().all(|b| b.is_ascii_digit())
         {
             return Err(BAD);
         }
@@ -1903,9 +1919,13 @@ pub enum HostControlOperation {
         entry: AccountCatalogEntry,
     },
     /// One durable CONTROL authorization, never an ephemeral pilot permit.
-    ConfigureProductionTrading { policy: ProductionTradingPolicy },
+    ConfigureProductionTrading {
+        policy: ProductionTradingPolicy,
+    },
     /// Fail-closed durable revocation, also effective after restart.
-    StopProductionTrading { expected_revision: u64 },
+    StopProductionTrading {
+        expected_revision: u64,
+    },
     Sync,
     BuildAgent,
     DeployAgent {
@@ -1965,8 +1985,12 @@ impl HostControlOperation {
             Self::RegisterReadOnlyAccount { entry } => entry.validate(),
             Self::ConfigureProductionTrading { policy } => policy.validate(),
             Self::StopProductionTrading { expected_revision } => {
-                if *expected_revision == 0 { Err(ProtocolError::InvalidRequestId) } else { Ok(()) }
-            },
+                if *expected_revision == 0 {
+                    Err(ProtocolError::InvalidRequestId)
+                } else {
+                    Ok(())
+                }
+            }
             Self::DeployAgent {
                 run_id,
                 artifact_id,
@@ -2602,7 +2626,6 @@ mod tests {
         p.account_uid_fingerprint = "not-an-account".to_owned();
         assert!(p.validate().is_err());
     }
-
 
     use super::*;
 
