@@ -290,6 +290,8 @@ pub enum ReconcileDisposition {
 pub enum MutationAuthority {
     Disabled,
     DemoAcceptance,
+    /// Granted for one native assessed Production submission, never persisted.
+    Production,
 }
 
 /// Normal account-scoped policy, not a per-order/10-second Production pilot.
@@ -447,7 +449,7 @@ impl ProductionTradingPolicy {
 
 impl MutationAuthority {
     pub const fn allows_exchange_mutation(self) -> bool {
-        matches!(self, Self::DemoAcceptance)
+        matches!(self, Self::DemoAcceptance | Self::Production)
     }
 }
 
@@ -458,6 +460,9 @@ pub enum OrderExecutorError {
 
     #[error(transparent)]
     Transition(#[from] ExecutionTransitionError),
+
+    #[error("Production policy denied exchange POST: {0:?}")]
+    ProductionPolicyDenied(ProductionPolicyRejection),
 
     #[error("execution record is not PREPARED; current state is {0:?}")]
     NotPrepared(ExecutionState),
@@ -753,10 +758,10 @@ where
         self.mutation_authority
     }
 
-    // Demo acceptance is exchange mutation, but it is not production live trading.
-    // Keep this legacy safety signal false until the final production-live gate exists.
+    /// Reflect the actual native per-submit gate, never infer permission from
+    /// Production credentials or a profile name.
     pub const fn live_trading_enabled(&self) -> bool {
-        false
+        matches!(self.mutation_authority, MutationAuthority::Production)
     }
 
     pub fn enable_demo_acceptance(
@@ -1542,6 +1547,36 @@ where
     ) -> Result<SubmitDisposition, OrderExecutorError> {
         self.submit_prepared_inner(intent_id, timing, observed_at_ms, false)
             .await
+    }
+
+    /// Exactly one Production submission through the SAME durable ledger and
+    /// gateway as Demo. A policy, source/STOP/UNKNOWN and risk witness must be
+    /// checked while holding the sole executor owner before SUBMITTING.
+    /// No separate trading client, pilot mode or replay capability exists.
+    pub async fn submit_prepared_production_authorized(
+        &mut self,
+        environment: OkxEnvironment,
+        policy: &ProductionTradingPolicy,
+        witness: &ProductionRiskWitness,
+        intent_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+    ) -> Result<SubmitDisposition, OrderExecutorError> {
+        self.disable_mutations();
+        self.assess_production_candidate(
+            environment,
+            policy,
+            witness,
+            intent_id,
+            observed_at_ms,
+        )
+        .map_err(OrderExecutorError::ProductionPolicyDenied)?;
+        self.mutation_authority = MutationAuthority::Production;
+        let result = self
+            .submit_prepared_inner(intent_id, timing, observed_at_ms, false)
+            .await;
+        self.disable_mutations();
+        result
     }
 
     async fn submit_prepared_inner(
