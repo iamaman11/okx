@@ -117,6 +117,14 @@ impl HostExecutor {
             HostControlOperation::RegisterReadOnlyAccount { entry } => {
                 AccountCatalogStore::canonical().register(entry)
             }
+            HostControlOperation::ConfigureProductionTrading { policy } => {
+                self.desired_store.configure_production_policy(policy)?;
+                self.desired_store.production_policy_status()
+            }
+            HostControlOperation::StopProductionTrading { expected_revision } => {
+                self.desired_store.stop_production_policy(expected_revision)?;
+                self.desired_store.production_policy_status()
+            }
             HostControlOperation::Sync => self.sync(),
             HostControlOperation::BuildAgent => Err(HostControlError::InvalidExecutionPath),
             HostControlOperation::DeployAgent { .. }
@@ -343,6 +351,7 @@ impl HostExecutor {
             "desired_state_path": self.desired_store.path(),
             "desired_state_error": self.desired_error.clone(),
             "profile_transition": self.desired_store.status_value(),
+            "production_policy": self.desired_store.production_policy_status()?,
             "job_object_owned": true,
             "native_child_control_pipe_attached": running && self.native_child_pipe.is_some(),
             "restart_attempt": self.restart_attempt,
