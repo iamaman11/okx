@@ -701,8 +701,7 @@ impl HostExecutor {
         let (ticket, bound, selected_target_uid) =
             self.bound_native_source_candidate(expected_source_uid, target, account_id)?;
         let expected_target_uid = match account_id {
-            Some(_) => selected_target_uid
-                .ok_or(HostControlError::ProfileHandoffProofRequired)?,
+            Some(_) => selected_target_uid.ok_or(HostControlError::ProfileHandoffProofRequired)?,
             None => legacy_target_uid.to_owned(),
         };
         if bound.account_uid_fingerprint == expected_target_uid {
@@ -1217,8 +1216,14 @@ impl HostExecutor {
     /// Native drained read-only source is still a candidate, NOT a
     /// CONTROL-authenticated one-use witness bound to exact PID/ReleaseSet.
     #[allow(dead_code)]
-    fn request_native_drain(&mut self, expected_uid: &str, account_id: Option<&str>) -> HostControlResult<Value> {
-        if account_id.is_none() && (!expected_uid.bytes().all(|b| b.is_ascii_hexdigit()) || expected_uid.len() != 64) {
+    fn request_native_drain(
+        &mut self,
+        expected_uid: &str,
+        account_id: Option<&str>,
+    ) -> HostControlResult<Value> {
+        if account_id.is_none()
+            && (!expected_uid.bytes().all(|b| b.is_ascii_hexdigit()) || expected_uid.len() != 64)
+        {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
         if self.desired_store.is_pending()? {
@@ -1434,7 +1439,8 @@ impl HostExecutor {
             controller_sha256: bound.controller_sha256.clone(),
         };
         let selected_target_uid = reply["selected_target_uid_fingerprint"]
-            .as_str().map(str::to_owned);
+            .as_str()
+            .map(str::to_owned);
         if account_id.is_some() && selected_target_uid.is_none() {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
