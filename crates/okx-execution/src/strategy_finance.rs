@@ -43,6 +43,10 @@ fn attested_production_mark(
             .saturating_sub(mark.exchange_timestamp_ms)
             > MAX_STRATEGY_MARK_AGE_MS
         || account_as_of_ms.abs_diff(mark.received_at_ms) > MAX_STRATEGY_MARK_AGE_MS
+        // The 30s budget is end-to-end. Two individually fresh hops
+        // (exchange -> Windows -> account) must not compose into a
+        // nearly 60-second-old strategy mark.
+        || account_as_of_ms.abs_diff(mark.exchange_timestamp_ms) > MAX_STRATEGY_MARK_AGE_MS
     {
         return None;
     }
@@ -888,6 +892,26 @@ mod tests {
         bad.exchange_timestamp_ms = 50_000;
         assert_eq!(attested_production_mark(&bad, 100_300), None);
         assert_eq!(attested_production_mark(&mark, 130_201), None);
+        // Prior code accepted both 30s hops independently, causing a
+        // 60s-old mark to be counted as fresh strategy NAV.
+        let composed_stale = ProductionMarkEvidence {
+            price: "83636.8".to_owned(),
+            exchange_timestamp_ms: 100_000,
+            received_at_ms: 130_000,
+        };
+        assert_eq!(
+            attested_production_mark(&composed_stale, 160_000),
+            None
+        );
+        // Exact end-to-end boundary is accepted; one millisecond older fails.
+        assert_eq!(
+            attested_production_mark(&composed_stale, 130_000),
+            Some(Decimal::new(836368, 1))
+        );
+        assert_eq!(
+            attested_production_mark(&composed_stale, 130_001),
+            None
+        );
     }
 
     #[test]
