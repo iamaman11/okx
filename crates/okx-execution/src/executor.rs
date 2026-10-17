@@ -1563,14 +1563,8 @@ where
         observed_at_ms: u64,
     ) -> Result<SubmitDisposition, OrderExecutorError> {
         self.disable_mutations();
-        self.assess_production_candidate(
-            environment,
-            policy,
-            witness,
-            intent_id,
-            observed_at_ms,
-        )
-        .map_err(OrderExecutorError::ProductionPolicyDenied)?;
+        self.assess_production_candidate(environment, policy, witness, intent_id, observed_at_ms)
+            .map_err(OrderExecutorError::ProductionPolicyDenied)?;
         self.mutation_authority = MutationAuthority::Production;
         let result = self
             .submit_prepared_inner(intent_id, timing, observed_at_ms, false)
