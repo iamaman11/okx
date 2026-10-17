@@ -1582,6 +1582,19 @@ const PRODUCTION_AGENT_ARGS: &[&str] = &[
     AGENT_CLOUDFLARE_RUNTIME_ID,
 ];
 
+/// The existing Production agent uses the SAME executor for trade authority,
+/// driven entirely by CONTROL's durable policy and checked at every POST.
+const PRODUCTION_TRADING_AGENT_ARGS: &[&str] = &[
+    "run",
+    "--production-trading",
+    "--mailbox-issue",
+    AGENT_MAILBOX_ISSUE,
+    "--cloudflare-ws-url",
+    AGENT_CLOUDFLARE_WS_URL,
+    "--cloudflare-runtime-id",
+    AGENT_CLOUDFLARE_RUNTIME_ID,
+];
+
 /// Same Demo engine and data root, but exchange mutation acceptance OFF.
 /// Never introduce a parallel Demo executor or a second strategy ledger.
 const DEMO_READ_ONLY_AGENT_ARGS: &[&str] = &[
@@ -1613,7 +1626,8 @@ const DEMO_ACCEPTANCE_AGENT_ARGS: &[&str] = &[
 
 fn agent_args_with_mode(profile: AgentProfile, read_only: bool) -> &'static [&'static str] {
     match (profile, read_only) {
-        (AgentProfile::Production, _) => PRODUCTION_AGENT_ARGS,
+        (AgentProfile::Production, true) => PRODUCTION_AGENT_ARGS,
+        (AgentProfile::Production, false) => PRODUCTION_TRADING_AGENT_ARGS,
         (AgentProfile::DemoAcceptance, true) => DEMO_READ_ONLY_AGENT_ARGS,
         (AgentProfile::DemoAcceptance, false) => DEMO_ACCEPTANCE_AGENT_ARGS,
     }
