@@ -1640,14 +1640,55 @@ async fn submit_prepared(
         PreMutationAdmissionResult::Ready(value) => value,
         PreMutationAdmissionResult::Response(response) => return Ok(*response),
     };
-    let preflight = admission.preflight;
-    let timing = admission.timing;
+    let PreMutationAdmission {
+        preflight,
+        timing,
+        production_facts,
+    } = *admission;
 
     let observed_at_ms = timing.request_time_ms();
     let demo_acceptance = execution.demo_mutation_acceptance_requested();
+    let production_trading = execution.production_trading_requested();
     let submit_result = if demo_acceptance {
         match execution
             .submit_prepared_demo_authorized(&preflight, intent_id, timing, observed_at_ms)
+            .await?
+        {
+            Some(result) => result,
+            None => return Ok(preflight_rejected(request, generated_at)),
+        }
+    } else if production_trading {
+        let Some(facts) = production_facts.as_ref() else {
+            return Ok(preflight_rejected(request, generated_at));
+        };
+        let Some(observer) = context.account_fallback else {
+            return Ok(execution_unavailable(request, generated_at));
+        };
+        let Some(ws) = context.private_ws else {
+            return Ok(account_not_fresh(request, generated_at));
+        };
+        // One final native conditional-order inventory with WS read fence.
+        let cursor = match ws.convergence_cursor().await {
+            Ok(value) => value,
+            Err(_) => return Ok(account_not_fresh(request, generated_at)),
+        };
+        let protection = match observer.pending_protective_algos().await {
+            Ok(value) => value,
+            Err(_) => return Ok(account_not_fresh(request, generated_at)),
+        };
+        match ws.convergence_window(cursor).await {
+            Ok(window) if window.events.is_empty() => {}
+            _ => return Ok(account_not_fresh(request, generated_at)),
+        }
+        match execution
+            .submit_prepared_production_authorized(
+                &preflight,
+                intent_id,
+                timing,
+                observed_at_ms,
+                facts,
+                &protection,
+            )
             .await?
         {
             Some(result) => result,
@@ -1660,7 +1701,7 @@ async fn submit_prepared(
     };
 
     match submit_result {
-        Ok(_) if demo_acceptance => {
+        Ok(_) if demo_acceptance || production_trading => {
             // The native submit has already returned. The immediately following
             // exchange status read is a separate I/O operation and may fail even
             // after a real FILLED order. Never relabel a successful submit as a
@@ -1733,7 +1774,7 @@ async fn submit_prepared(
             generated_at,
             AgentResponseStatus::Failed,
             EXECUTION_GATE_INVARIANT_CODE,
-            "production execution unexpectedly passed the hard disabled gate".to_owned(),
+            "read-only execution unexpectedly passed the hard disabled gate".to_owned(),
             false,
         )),
     }
@@ -1898,6 +1939,7 @@ async fn cancel_mutation_admission(
         PreMutationAdmission {
             preflight: verified,
             timing,
+            production_facts: None,
         },
     )))
 }
@@ -2706,6 +2748,7 @@ async fn cancel_owned_protection(
 struct PreMutationAdmission {
     preflight: crate::execution_preflight::ExecutorPreflightSnapshot,
     timing: MutationTiming,
+    production_facts: Option<okx_observation::AccountLedgerFacts>,
 }
 
 enum PreMutationAdmissionResult {
@@ -3295,6 +3338,7 @@ async fn pre_mutation_admission(
         PreMutationAdmission {
             preflight: verified,
             timing,
+            production_facts: Some(risk_facts),
         },
     )))
 }
