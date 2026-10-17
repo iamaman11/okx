@@ -457,8 +457,7 @@ async fn begin_strategy_run(
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
-    if !execution.demo_mutation_acceptance_requested()
-        && !execution.production_trading_requested()
+    if !execution.demo_mutation_acceptance_requested() && !execution.production_trading_requested()
     {
         return Ok(deny(
             "new strategy run requires the authenticated native CONTROL owner".to_owned(),
@@ -1604,8 +1603,7 @@ async fn executor_preflight(
     let readout = crate::execution_preflight::ExecutorPreflightReadout::new(
         evidence,
         private_ws,
-        execution.demo_mutation_acceptance_requested()
-            || execution.production_trading_requested(),
+        execution.demo_mutation_acceptance_requested() || execution.production_trading_requested(),
     );
     Ok(completed(
         request,
