@@ -290,6 +290,8 @@ pub enum ReconcileDisposition {
 pub enum MutationAuthority {
     Disabled,
     DemoAcceptance,
+    /// Granted for one native assessed Production submission, never persisted.
+    Production,
 }
 
 /// Normal account-scoped policy, not a per-order/10-second Production pilot.
@@ -447,7 +449,7 @@ impl ProductionTradingPolicy {
 
 impl MutationAuthority {
     pub const fn allows_exchange_mutation(self) -> bool {
-        matches!(self, Self::DemoAcceptance)
+        matches!(self, Self::DemoAcceptance | Self::Production)
     }
 }
 
@@ -458,6 +460,9 @@ pub enum OrderExecutorError {
 
     #[error(transparent)]
     Transition(#[from] ExecutionTransitionError),
+
+    #[error("Production policy denied exchange POST: {0:?}")]
+    ProductionPolicyDenied(ProductionPolicyRejection),
 
     #[error("execution record is not PREPARED; current state is {0:?}")]
     NotPrepared(ExecutionState),
@@ -753,10 +758,10 @@ where
         self.mutation_authority
     }
 
-    // Demo acceptance is exchange mutation, but it is not production live trading.
-    // Keep this legacy safety signal false until the final production-live gate exists.
+    /// Reflect the actual native per-submit gate, never infer permission from
+    /// Production credentials or a profile name.
     pub const fn live_trading_enabled(&self) -> bool {
-        false
+        matches!(self.mutation_authority, MutationAuthority::Production)
     }
 
     pub fn enable_demo_acceptance(
@@ -1542,6 +1547,30 @@ where
     ) -> Result<SubmitDisposition, OrderExecutorError> {
         self.submit_prepared_inner(intent_id, timing, observed_at_ms, false)
             .await
+    }
+
+    /// Exactly one Production submission through the SAME durable ledger and
+    /// gateway as Demo. A policy, source/STOP/UNKNOWN and risk witness must be
+    /// checked while holding the sole executor owner before SUBMITTING.
+    /// No separate trading client, pilot mode or replay capability exists.
+    pub async fn submit_prepared_production_authorized(
+        &mut self,
+        environment: OkxEnvironment,
+        policy: &ProductionTradingPolicy,
+        witness: &ProductionRiskWitness,
+        intent_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+    ) -> Result<SubmitDisposition, OrderExecutorError> {
+        self.disable_mutations();
+        self.assess_production_candidate(environment, policy, witness, intent_id, observed_at_ms)
+            .map_err(OrderExecutorError::ProductionPolicyDenied)?;
+        self.mutation_authority = MutationAuthority::Production;
+        let result = self
+            .submit_prepared_inner(intent_id, timing, observed_at_ms, false)
+            .await;
+        self.disable_mutations();
+        result
     }
 
     async fn submit_prepared_inner(
@@ -4769,8 +4798,8 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn production_owner_denies_without_persisted_financial_source_and_never_sends() {
+    #[tokio::test]
+    async fn production_owner_denies_without_persisted_financial_source_and_never_sends() {
         let (root, mut ledger) = ledger("production-owned-policy-gate");
         let mut plan = protected_plan();
         plan.order_type = OrderType::Fok;
@@ -4809,6 +4838,30 @@ mod tests {
             ),
             Err(ProductionPolicyRejection::SourceUnattested)
         );
+        assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
+        assert_eq!(executor.gateway().place_calls(), 0);
+        assert_eq!(
+            executor.ledger().get(&plan.intent_id).unwrap().record.state,
+            ExecutionState::Prepared
+        );
+        // Production is no longer rejected for profile name alone, but
+        // impossible-to-attest source may not reach the real exchange.
+        let mut executor = executor;
+        let error = executor
+            .submit_prepared_production_authorized(
+                production,
+                &policy,
+                &witness,
+                &plan.intent_id,
+                timing(),
+                102,
+            )
+            .await
+            .expect_err("missing native source must deny before POST");
+        assert!(matches!(
+            error,
+            OrderExecutorError::ProductionPolicyDenied(ProductionPolicyRejection::SourceUnattested)
+        ));
         assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
         assert_eq!(executor.gateway().place_calls(), 0);
         assert_eq!(

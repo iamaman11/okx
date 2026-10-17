@@ -109,6 +109,10 @@ enum Command {
         #[arg(long)]
         demo_mutation_acceptance: bool,
 
+        /// Native CONTROL policy-selected Production executor, not a pilot mode.
+        #[arg(long)]
+        production_trading: bool,
+
         /// Parent-owned anonymous stdin/stderr pipe, never a network listener.
         #[arg(long)]
         native_child_control_stdio: bool,
@@ -252,10 +256,14 @@ async fn run(cli: Cli) -> AgentResult<()> {
             cloudflare_ws_url,
             cloudflare_runtime_id,
             demo_mutation_acceptance,
+            production_trading,
             native_child_control_stdio,
         } => {
             if demo_mutation_acceptance && !environment.demo {
                 return Err(AgentError::DemoMutationAcceptanceRequiresDemoEnvironment);
+            }
+            if production_trading && (environment.demo || !native_child_control_stdio) {
+                return Err(AgentError::ProductionPolicyUnavailable);
             }
             let identity = load_native_identity(&config.key_id)?;
             if let Some(mailbox_issue) = mailbox_issue {
@@ -283,6 +291,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     environment,
                     rate_budget.clone(),
                     demo_mutation_acceptance,
+                    production_trading,
                 )
                 .map(std::sync::Arc::new);
                 let cloudflare = cloudflare_ws_url.and_then(|ws_url| {
@@ -350,6 +359,7 @@ fn optional_execution_runtime(
     environment: OkxEnvironment,
     rate_budget: RateBudget,
     demo_mutation_acceptance: bool,
+    production_trading: bool,
 ) -> Option<ExecutionRuntime> {
     let credentials = match load_native_executor_okx_credentials_for_environment(environment) {
         Ok(value) => value,
@@ -369,7 +379,15 @@ fn optional_execution_runtime(
     };
 
     let observed_at_ms = Utc::now().timestamp_millis().max(1) as u64;
-    let runtime = if demo_mutation_acceptance {
+    let runtime = if production_trading {
+        ExecutionRuntime::new_production(
+            &config.root,
+            environment,
+            credentials,
+            observed_at_ms,
+            rate_budget,
+        )
+    } else if demo_mutation_acceptance {
         ExecutionRuntime::new_demo_acceptance(
             &config.root,
             environment,

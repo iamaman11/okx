@@ -117,6 +117,15 @@ impl HostExecutor {
             HostControlOperation::RegisterReadOnlyAccount { entry } => {
                 AccountCatalogStore::canonical().register(entry)
             }
+            HostControlOperation::ConfigureProductionTrading { policy } => {
+                self.desired_store.configure_production_policy(policy)?;
+                self.desired_store.production_policy_status()
+            }
+            HostControlOperation::StopProductionTrading { expected_revision } => {
+                self.desired_store
+                    .stop_production_policy(expected_revision)?;
+                self.desired_store.production_policy_status()
+            }
             HostControlOperation::Sync => self.sync(),
             HostControlOperation::BuildAgent => Err(HostControlError::InvalidExecutionPath),
             HostControlOperation::DeployAgent { .. }
@@ -343,6 +352,7 @@ impl HostExecutor {
             "desired_state_path": self.desired_store.path(),
             "desired_state_error": self.desired_error.clone(),
             "profile_transition": self.desired_store.status_value(),
+            "production_policy": self.desired_store.production_policy_status()?,
             "job_object_owned": true,
             "native_child_control_pipe_attached": running && self.native_child_pipe.is_some(),
             "restart_attempt": self.restart_attempt,
@@ -1572,6 +1582,19 @@ const PRODUCTION_AGENT_ARGS: &[&str] = &[
     AGENT_CLOUDFLARE_RUNTIME_ID,
 ];
 
+/// The existing Production agent uses the SAME executor for trade authority,
+/// driven entirely by CONTROL's durable policy and checked at every POST.
+const PRODUCTION_TRADING_AGENT_ARGS: &[&str] = &[
+    "run",
+    "--production-trading",
+    "--mailbox-issue",
+    AGENT_MAILBOX_ISSUE,
+    "--cloudflare-ws-url",
+    AGENT_CLOUDFLARE_WS_URL,
+    "--cloudflare-runtime-id",
+    AGENT_CLOUDFLARE_RUNTIME_ID,
+];
+
 /// Same Demo engine and data root, but exchange mutation acceptance OFF.
 /// Never introduce a parallel Demo executor or a second strategy ledger.
 const DEMO_READ_ONLY_AGENT_ARGS: &[&str] = &[
@@ -1603,7 +1626,8 @@ const DEMO_ACCEPTANCE_AGENT_ARGS: &[&str] = &[
 
 fn agent_args_with_mode(profile: AgentProfile, read_only: bool) -> &'static [&'static str] {
     match (profile, read_only) {
-        (AgentProfile::Production, _) => PRODUCTION_AGENT_ARGS,
+        (AgentProfile::Production, true) => PRODUCTION_AGENT_ARGS,
+        (AgentProfile::Production, false) => PRODUCTION_TRADING_AGENT_ARGS,
         (AgentProfile::DemoAcceptance, true) => DEMO_READ_ONLY_AGENT_ARGS,
         (AgentProfile::DemoAcceptance, false) => DEMO_ACCEPTANCE_AGENT_ARGS,
     }

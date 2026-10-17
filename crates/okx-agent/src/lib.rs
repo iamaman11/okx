@@ -127,6 +127,9 @@ pub enum AgentError {
     #[error("Demo mutation acceptance requires --demo")]
     DemoMutationAcceptanceRequiresDemoEnvironment,
 
+    #[error("native CONTROL Production authority is unavailable or invalid")]
+    ProductionPolicyUnavailable,
+
     #[error("mailbox issue number must be non-zero")]
     InvalidMailboxIssue,
 

@@ -21,7 +21,7 @@ use okx_execution::{
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use tokio::time::timeout;
 
@@ -102,6 +102,67 @@ fn quiet_source_capture_due(
             >= QUIET_SOURCE_COVERAGE_REFRESH_MS
 }
 
+/// CONTROL is the only writer of this already-existing atomic desired file.
+/// The agent reads a typed, minimal view immediately before Production POST;
+/// no second credentials store, policy daemon or JSON application logic.
+const NATIVE_CONTROL_DESIRED: &str = r"C:\okx-control\desired.json";
+
+#[derive(Deserialize)]
+struct ProductionControlSnapshot {
+    schema: String,
+    agent: String,
+    profile: String,
+    read_only: bool,
+    production_policy: Option<okx_protocol::ProductionTradingPolicy>,
+    transition: Option<serde_json::Value>,
+    switch_hold: Option<serde_json::Value>,
+}
+
+fn parse_native_production_policy(
+    bytes: &[u8],
+) -> AgentResult<okx_execution::ProductionTradingPolicy> {
+    let owner: ProductionControlSnapshot = serde_json::from_slice(bytes)?;
+    if owner.schema != "okx.host.desired/v3"
+        || owner.agent != "RUNNING"
+        || owner.profile != "production"
+        || owner.read_only
+        || owner.transition.is_some()
+        || owner.switch_hold.is_some()
+    {
+        return Err(AgentError::ProductionPolicyUnavailable);
+    }
+    let policy = owner
+        .production_policy
+        .ok_or(AgentError::ProductionPolicyUnavailable)?;
+    policy.validate()?;
+    if !matches!(
+        policy.permission,
+        okx_protocol::ProductionPermission::Enabled | okx_protocol::ProductionPermission::Stopped
+    ) {
+        return Err(AgentError::ProductionPolicyUnavailable);
+    }
+    let permission = match policy.permission {
+        okx_protocol::ProductionPermission::Enabled => okx_execution::ProductionPermission::Enabled,
+        okx_protocol::ProductionPermission::Stopped => okx_execution::ProductionPermission::Stopped,
+        _ => return Err(AgentError::ProductionPolicyUnavailable),
+    };
+    Ok(okx_execution::ProductionTradingPolicy {
+        schema: policy.schema,
+        revision: policy.revision,
+        permission,
+        account_uid_fingerprint: policy.account_uid_fingerprint,
+        strategy_run_id: policy.strategy_run_id,
+        operator_authority_id: policy.operator_authority_id,
+        allowed_instruments: policy.allowed_instruments,
+        max_total_modelled_loss_usdt: policy.max_total_modelled_loss_usdt,
+    })
+}
+
+fn read_native_production_policy() -> AgentResult<okx_execution::ProductionTradingPolicy> {
+    let bytes = std::fs::read(NATIVE_CONTROL_DESIRED)?;
+    parse_native_production_policy(&bytes)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionReconciliation {
     NotRequired,
@@ -113,6 +174,7 @@ pub enum ExecutionReconciliation {
 pub enum ExecutionRuntimeMode {
     ReadOnly,
     DemoAcceptance,
+    Production,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -186,6 +248,29 @@ impl ExecutionRuntime {
             observed_at_ms,
             rate_budget,
             ExecutionRuntimeMode::ReadOnly,
+        )
+    }
+
+    /// Same ledger and gateway as Demo, selected only by the native CONTROL
+    /// child owner and its atomic, durable policy. No ephemeral pilot.
+    pub fn new_production(
+        root: &Path,
+        environment: OkxEnvironment,
+        executor_credentials: Credentials,
+        observed_at_ms: u64,
+        rate_budget: RateBudget,
+    ) -> AgentResult<Self> {
+        if environment.demo {
+            return Err(AgentError::ProductionPolicyUnavailable);
+        }
+        read_native_production_policy()?;
+        Self::new_with_mode(
+            root,
+            environment,
+            executor_credentials,
+            observed_at_ms,
+            rate_budget,
+            ExecutionRuntimeMode::Production,
         )
     }
 
@@ -306,13 +391,27 @@ impl ExecutionRuntime {
         matches!(self.mode, ExecutionRuntimeMode::DemoAcceptance)
     }
 
+    pub const fn production_trading_requested(&self) -> bool {
+        matches!(self.mode, ExecutionRuntimeMode::Production) && !self.environment.demo
+    }
+
+    /// Single normal financial source owner for either actual venue. This
+    /// does not grant trading rights and never invents missing exchange data.
+    fn financial_source_owner_active(&self) -> bool {
+        matches!(
+            (self.mode, self.environment.demo),
+            (ExecutionRuntimeMode::DemoAcceptance, true)
+                | (ExecutionRuntimeMode::Production, false)
+        )
+    }
+
     /// Return the exchange reconciliation and exact identity inventory under
     /// one ledger lock so the two views cannot observe different intent sets.
     /// This does not perform a gateway send or a mutation.
     /// Read-only admission for the in-process private-order event source.
     /// The executor ledger remains the sole owner of durable evidence.
     pub async fn strategy_financial_capture_active(&self) -> bool {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !self.environment.demo {
+        if !self.financial_source_owner_active() {
             return false;
         }
         let executor = self.executor.lock().await;
@@ -324,7 +423,7 @@ impl ExecutionRuntime {
     /// Read-only, bounded decision for the EXISTING mailbox heartbeat.
     /// Never accepts a request-supplied cursor or treats a >2h gap as healed.
     pub async fn strategy_quiet_source_capture_due(&self, now_ms: u64) -> bool {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !self.environment.demo {
+        if !self.financial_source_owner_active() {
             return false;
         }
         let executor = self.executor.lock().await;
@@ -413,9 +512,11 @@ impl ExecutionRuntime {
         settle_currency: Option<&str>,
         contract_type: Option<&str>,
     ) -> Option<StrategyNavRiskEvidence> {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance
-            || !self.environment.demo
-            || !coherent
+        if !matches!(
+            (self.mode, self.environment.demo),
+            (ExecutionRuntimeMode::DemoAcceptance, true)
+                | (ExecutionRuntimeMode::Production, false)
+        ) || !coherent
             || plan.action != ExecutionAction::Open
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
             || facts.summary.open_positions != 0
@@ -429,6 +530,17 @@ impl ExecutionRuntime {
         let mut executor = self.executor.lock().await;
         let ledger = executor.ledger();
         let run = ledger.capital_reservation()?.clone();
+        if self.production_trading_requested() {
+            let policy = read_native_production_policy().ok()?;
+            if policy.permission != okx_execution::ProductionPermission::Enabled
+                || policy.account_uid_fingerprint != run.account_uid_fingerprint
+                || policy.strategy_run_id != run.allocation_id
+                || policy.operator_authority_id != run.operator_authority_id
+                || !policy.allowed_instruments.contains(&plan.instrument_id)
+            {
+                return None;
+            }
+        }
         let binding = plan.risk_binding.as_ref()?;
         // Trading equity must remain equal to the source-authenticated
         // opening reserve. External cash transfers are not strategy PnL.
@@ -530,7 +642,9 @@ impl ExecutionRuntime {
         observer: &AccountSnapshot,
     ) -> AgentResult<ExecutorCredentialPreflight> {
         match self.mode {
-            ExecutionRuntimeMode::ReadOnly => self.preflight(observer).await,
+            ExecutionRuntimeMode::ReadOnly | ExecutionRuntimeMode::Production => {
+                self.preflight(observer).await
+            }
             ExecutionRuntimeMode::DemoAcceptance => self.demo_acceptance_preflight(observer).await,
         }
     }
@@ -770,6 +884,49 @@ impl ExecutionRuntime {
         )))
     }
 
+    /// The normal Production strategy allocation uses the SAME durable
+    /// executor/ledger and independent venue-opening witness as Demo.
+    /// CONTROL's persistent UID/run/authority scope is read fresh.
+    pub async fn begin_strategy_run_production_authorized(
+        &self,
+        preflight: &ExecutorCredentialPreflight,
+        reservation: StrategyCapitalReservation,
+        opening: &StrategyAllocationOpening,
+        now_ms: u64,
+        rearm: Option<&okx_execution::StrategyStopRearmRequest>,
+    ) -> AgentResult<Option<Result<StrategyCapitalReservation, OrderExecutorError>>> {
+        if !self.production_trading_requested()
+            || !preflight.accepted
+            || !preflight.production_environment
+            || !preflight.executor_ip_bound
+            || !preflight.executor_trade_permission
+            || preflight.executor_withdraw_permission
+        {
+            return Ok(None);
+        }
+        let policy = read_native_production_policy()?;
+        if policy.permission != okx_execution::ProductionPermission::Enabled
+            || policy.account_uid_fingerprint != preflight.account_uid_fingerprint
+            || policy.account_uid_fingerprint != opening.account_uid_fingerprint
+            || policy.strategy_run_id != reservation.allocation_id
+            || policy.operator_authority_id != reservation.operator_authority_id
+        {
+            return Ok(None);
+        }
+        let mut executor = self.executor.lock().await;
+        if !executor.ledger().entries().all(|entry| {
+            entry.record.plan.account_uid_fingerprint == preflight.account_uid_fingerprint
+        }) {
+            return Ok(None);
+        }
+        Ok(Some(executor.reserve_strategy_capital_with_rearm(
+            reservation,
+            opening,
+            rearm,
+            now_ms,
+        )))
+    }
+
     /// The single Demo executor captures the coherent source before the
     /// atomic FINALIZED write. Caller cannot supply the exchange witness.
     pub async fn finalize_strategy_run_demo_authorized(
@@ -860,6 +1017,144 @@ impl ExecutionRuntime {
 
     pub async fn risk_stop_status(&self) -> Option<ExecutionRiskStop> {
         self.executor.lock().await.ledger().risk_stop().cloned()
+    }
+
+    /// Ordinary Production OPEN/CLOSE, not a pilot or separate executor.
+    /// CONTROL is re-read on every submission; an absent/revoked policy
+    /// rejects before any ledger SUBMITTING transition or exchange POST.
+    /// The account and protection evidence are gathered from native
+    /// authenticated REST/WS by the existing query admission owner.
+    pub async fn submit_prepared_production_authorized(
+        &self,
+        preflight: &ExecutorPreflightSnapshot,
+        intent_id: &str,
+        timing: MutationTiming,
+        observed_at_ms: u64,
+        facts: &AccountLedgerFacts,
+        protection: &PendingProtectiveAlgoInventory,
+    ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
+        if !self.production_trading_requested()
+            || !preflight.accepted
+            || !preflight.credential.accepted
+            || !preflight.credential.production_environment
+            || !preflight.credential.executor_ip_bound
+            || !preflight.credential.executor_trade_permission
+            || preflight.credential.executor_withdraw_permission
+            || facts.summary.authority.account_uid_fingerprint
+                != preflight.credential.account_uid_fingerprint
+            || !protection.complete_within_bound
+        {
+            return Ok(None);
+        }
+        // Serialize policy reading with all other execution submissions:
+        // revocation cannot be hidden behind a prior wait on the ledger lock.
+        let mut executor = self.executor.lock().await;
+        let policy = read_native_production_policy()?;
+        if policy.account_uid_fingerprint != preflight.credential.account_uid_fingerprint {
+            return Ok(None);
+        }
+        let Some(entry) = executor.ledger().get(intent_id) else {
+            return Ok(None);
+        };
+        let plan = &entry.record.plan;
+        let new_risk = plan.action.is_risk_increasing();
+        let flat = facts.summary.open_positions == 0
+            && facts.summary.pending_orders == 0
+            && facts.authoritative_positions.iter().all(|position| {
+                rust_decimal::Decimal::from_str(&position.position)
+                    .is_ok_and(|v| v == rust_decimal::Decimal::ZERO)
+            });
+        // Existing exposure on ANY instrument or unowned conditional order
+        // may occupy risk: require the entire venue FLAT for new OPEN.
+        if new_risk && (!flat || protection.rows != 0) {
+            return Ok(None);
+        }
+        let close_owned_exact = if plan.action == ExecutionAction::Close {
+            let observed = facts
+                .authoritative_positions
+                .iter()
+                .filter(|position| {
+                    position.instrument_id == plan.instrument_id
+                        && position.position_side == plan.position_side.as_str()
+                        && rust_decimal::Decimal::from_str(&position.position)
+                            .is_ok_and(|v| v > rust_decimal::Decimal::ZERO)
+                })
+                .collect::<Vec<_>>();
+            observed.len() == 1
+                && rust_decimal::Decimal::from_str(&observed[0].position)
+                    .ok()
+                    .is_some_and(|quantity| {
+                        quantity > rust_decimal::Decimal::ZERO
+                            && rust_decimal::Decimal::from_str(&plan.size).ok() == Some(quantity)
+                    })
+                && executor.ledger().capital_reservation().is_some_and(|run| {
+                    executor.ledger().entries().any(|owned| {
+                        owned.record.plan.action == ExecutionAction::Open
+                            && owned.record.strategy_run_id.as_deref()
+                                == Some(run.allocation_id.as_str())
+                            && owned.record.plan.instrument_id == plan.instrument_id
+                            && owned.record.plan.position_side == plan.position_side
+                            && owned.record.order_id.is_some()
+                    })
+                })
+        } else {
+            false
+        };
+        let finance_complete = if new_risk {
+            let ledger = executor.ledger();
+            ledger.financial_period(facts, true).is_some_and(|period| {
+                let closed_complete = period.state == "FLAT_RECONCILED"
+                    && period.nav_usdt.is_some()
+                    && period.funding_usdt.is_some()
+                    && period.reasons.is_empty();
+                // The one unsent PREPARED OPEN has no fill or financial
+                // consequence, but must not fabricate a complete period.
+                let first_prepared = ledger.capital_reservation().is_some_and(|run| {
+                    period.state == "INCOMPLETE"
+                        && period.reasons == vec!["unresolved_managed_execution"]
+                        && period.linked_fills == 0
+                        && period.linked_bills == 0
+                        && period.realized_usdt == "0"
+                        && period.fees_usdt == "0"
+                        && facts.trading_usdt_equity.as_deref()
+                            == Some(run.opening_account_usdt_equity.as_str())
+                        && ledger.exchange_evidence_summary().is_some_and(|source| {
+                            source.run_id == run.allocation_id
+                                && source.events == 0
+                                && source.latest_source_complete
+                                && !source.source_gap_over_two_hours
+                        })
+                        && ledger.entries().all(|owned| {
+                            owned.created_at_ms < run.started_at_ms
+                                || owned.record.plan.intent_id == intent_id
+                                    && owned.record.state == ExecutionState::Prepared
+                        })
+                });
+                closed_complete || first_prepared
+            })
+        } else {
+            false
+        };
+        let witness = okx_execution::ProductionRiskWitness {
+            finance_complete,
+            // The executor independently scans durable parent/mutation/OCO
+            // UNKNOWN states; this cannot override native state.
+            unknown_mutations_reconciled: true,
+            existing_modelled_loss_usdt: rust_decimal::Decimal::ZERO,
+            exact_owned_reduce_only_close: close_owned_exact,
+        };
+        Ok(Some(
+            executor
+                .submit_prepared_production_authorized(
+                    self.environment,
+                    &policy,
+                    &witness,
+                    intent_id,
+                    timing,
+                    observed_at_ms,
+                )
+                .await,
+        ))
     }
 
     pub async fn submit_prepared_demo_authorized(
