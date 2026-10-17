@@ -1011,7 +1011,12 @@ impl ExecutionRuntime {
             }).collect::<Vec<_>>();
             observed.len() == 1
                 && rust_decimal::Decimal::from_str(&observed[0].position)
-                    .ok() == rust_decimal::Decimal::from_str(&plan.size).ok()
+                    .ok()
+                    .is_some_and(|quantity| {
+                        quantity > rust_decimal::Decimal::ZERO
+                            && rust_decimal::Decimal::from_str(&plan.size).ok()
+                                == Some(quantity)
+                    })
                 && executor.ledger().capital_reservation().is_some_and(|run| {
                     executor.ledger().entries().any(|owned| {
                         owned.record.plan.action == ExecutionAction::Open
