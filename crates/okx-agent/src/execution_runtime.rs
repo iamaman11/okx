@@ -1887,6 +1887,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_readonly_uses_same_native_financial_capture_after_funded_run() {
+        let root = temp_root("production-native-financial-source");
+        let production = ExecutionRuntime::new(
+            &root,
+            OkxEnvironment::new(Region::Global, false),
+            credentials(),
+            100,
+            RateBudget::new(),
+        )
+        .expect("existing Production ledger owner");
+        assert!(!production.strategy_financial_capture_active().await);
+        assert!(!production.strategy_quiet_source_capture_due(102).await);
+        let uid = "a".repeat(64);
+        let approval = format!("sha256:{}", "b".repeat(64));
+        let opening = StrategyAllocationOpening {
+            account_uid_fingerprint: uid.clone(),
+            account_generation: "current-generation".to_owned(),
+            observed_usdt_equity: "1000".to_owned(),
+            observed_at_ms: 101,
+            source_history_complete: true,
+            zero_positions: true,
+            zero_pending_orders: true,
+            zero_native_protection: true,
+            operator_authority_id: approval.clone(),
+        };
+        let reservation = StrategyCapitalReservation {
+            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "production_finance_capture_20261017".to_owned(),
+            account_uid_fingerprint: uid,
+            origin_schema: "okx.research.live-decision/v1".to_owned(),
+            origin_version: "run-2026-10-17".to_owned(),
+            mandate_version: "production-mandate-v1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: opening.observed_usdt_equity.clone(),
+            account_generation: opening.account_generation.clone(),
+            operator_authority_id: approval,
+            started_at_ms: 101,
+        };
+        production
+            .executor
+            .lock()
+            .await
+            .reserve_strategy_capital(reservation, &opening, 102)
+            .expect("existing durable capital owner");
+        assert!(production.strategy_financial_capture_active().await);
+        assert!(
+            production
+                .strategy_quiet_source_capture_due(101 + QUIET_SOURCE_COVERAGE_REFRESH_MS)
+                .await
+        );
+        assert!(!production.live_trading_enabled().await);
+        assert_eq!(
+            production.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
+        drop(production);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn strategy_opening_cannot_write_in_read_only_or_on_rejected_demo_preflight() {
         let root = temp_root("capital-opening-owner-fence");
         fs::create_dir_all(&root).expect("root");
