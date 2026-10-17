@@ -141,8 +141,8 @@ assert(!executionProfilePermitsOperation("production", "migrate_finalized_ledger
   "Production cannot admit Demo administrative ledger mutation");
 assert(isExecutionMutation("set_leverage"),"leverage POST must require Demo profile");
 assert(!executionProfilePermitsOperation("production","set_leverage"),"Production leverage always read-only");
-assert(isExecutionMutation("begin_strategy_run"),"capital mutation requires Demo-only owner");
-assert(!executionProfilePermitsOperation("production","begin_strategy_run"),"Production cannot allocate Demo strategy capital");
+assert(isExecutionMutation("begin_strategy_run"),"capital mutation requires native owner");
+assert(executionProfilePermitsOperation("production","begin_strategy_run"),"Production opening reaches its own native policy gate");
 assert(buildExecutionOperation(uidAction("finalize_strategy_run"))?.type==="finalize_strategy_run",
   "finalization is one typed local Demo-only ledger operation");
 assert(buildExecutionOperation(uidAction("finalize_strategy_run",{new_price:"0.1"}))===null,
@@ -152,10 +152,10 @@ assert(buildExecutionOperation(uidAction("quarantine_unverified_strategy_run"))?
   "UNVERIFIED closure must use an exact typed non-financial local operation");
 assert(buildExecutionOperation(uidAction("quarantine_unverified_strategy_run",{new_price:"99"}))===null,
   "caller cannot inject synthetic NAV or any trading fields in UNVERIFIED");
-assert(!executionProfilePermitsOperation("production","quarantine_unverified_strategy_run"),
-  "Production cannot quarantine Demo strategy runs");
-assert(!executionProfilePermitsOperation("production","finalize_strategy_run"),
-  "Production cannot finalize a Demo run");
+assert(executionProfilePermitsOperation("production","quarantine_unverified_strategy_run"),
+  "Production may deliver exact-run quarantine to native UID/policy owner");
+assert(executionProfilePermitsOperation("production","finalize_strategy_run"),
+  "Production may deliver exact-run financial closure to native UID/policy owner");
 assert(buildExecutionOperation(uidAction("submit"))?.type==="submit_prepared_execution","submit must be typed");
 assert(buildExecutionOperation(uidAction("abort_reverse"))?.type==="abort_reverse_execution","reverse abort must be typed");
 assert(buildExecutionOperation(uidAction("abandon_prepared"))?.type==="abandon_prepared_execution","only local unsent abandonment admitted");
@@ -199,18 +199,41 @@ for(const x of [
   // malformed or foreign fields before sending a corresponding native request.
   if(result!==null)throw Error("malformed execution action reached runtime: "+JSON.stringify(x));
 }
-for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution","abandon_prepared_execution","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage"]) {
-  assert(isExecutionMutation(op), "all trading writes classify as uncertain on lost ACK");
-  assert(executionProfilePermitsOperation("demo_acceptance",op), "verified Demo write allowed");
-  for (const profile of ["production","unverified","",undefined]) {
-    assert(!executionProfilePermitsOperation(profile,op), "non-Demo profile must deny write");
+const acceptedProduction = new Set([
+  "prepare_execution", "submit_prepared_execution", "begin_strategy_run",
+  "finalize_strategy_run", "quarantine_unverified_strategy_run",
+]);
+for (const op of ["prepare_execution","submit_prepared_execution","mutate_execution","abort_reverse_execution","abandon_prepared_execution","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage","migrate_finalized_ledger_storage"]) {
+  assert(isExecutionMutation(op), "every typed mutation remains UNKNOWN on lost ACK");
+  assert(executionProfilePermitsOperation("demo_acceptance",op), "verified Demo owner still receives typed operations");
+  assert(executionProfilePermitsOperation("production",op) === acceptedProduction.has(op),
+    "Production dispatch is limited to already implemented native policy-bound operations: "+op);
+  for (const profile of ["unverified","",undefined]) {
+    assert(!executionProfilePermitsOperation(profile,op), "unverified owner must deny all mutations");
   }
+}
+for (const action of ["prepare", "submit", "begin_strategy_run", "finalize_strategy_run", "quarantine_unverified_strategy_run"]) {
+  const op=buildExecutionOperation(uidAction(action,
+    action==="prepare" ? {...basePrepare,spec:{action:"close",position_side:"long",size:"0.02",price:"80000"}} :
+    action==="begin_strategy_run" ? {
+      origin_schema:"okx.research.live-decision/v1",origin_version:"run-2026-10-17",
+      mandate_version:"native-v1",allocated_usdt:"100",
+      operator_authority_id:"sha256:"+"f".repeat(64)
+    } : {}));
+  assert(!!op && executionProfilePermitsOperation("production",op.type),
+    "supported normal Production action is typed and not hard-gated by Worker: "+action);
+}
+for (const action of ["set_leverage","amend","cancel","shrink_protection_size","migrate_finalized_ledger_storage"]) {
+  const type=action==="set_leverage" ? "set_leverage" :
+    action==="migrate_finalized_ledger_storage" ? "migrate_finalized_ledger_storage" : "mutate_execution";
+  assert(!executionProfilePermitsOperation("production",type),
+    "unproven Production mutation stays denied at Worker: "+action);
 }
 assert(executionProfilePermitsOperation("production","account_summary"),"read is allowed");
 assert(!isExecutionMutation("account_summary"),"read must not be misclassified as exchange mutation");
 assert(EXECUTION_TOOLS.length===2,"one read preflight + one explicit write surface");
 const advertisedActions = (EXECUTION_TOOLS[1] as any).inputSchema.properties.action.enum as string[];
-assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-15.5",
+assert(TOOL_CONTRACT_VERSION === "okx.mcp.tools/2026-10-17.1",
   "typed action schema changed; the advertised MCP contract version must advance");
 assert(advertisedActions.includes("quarantine_unverified_strategy_run"),
   "UNVERIFIED must be distinct from financial FINALIZED");
