@@ -448,7 +448,10 @@ fn assemble_period_financial_audit(
             && period.nav_usdt.is_some()
             && period.funding_usdt.is_some()
             && period.evidence_sha256.len() == 64
-            && period.evidence_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            && period
+                .evidence_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
             && report
                 .strategy_nav
                 .as_ref()
@@ -1487,7 +1490,11 @@ mod tests {
         assert_eq!(historical.status, "INCOMPLETE");
         assert!(historical.current_period_proven);
         assert!(!historical.new_risk_authorized);
-        assert!(historical.incomplete_reasons.contains(&"UNVERIFIED_HISTORICAL_RUNS"));
+        assert!(
+            historical
+                .incomplete_reasons
+                .contains(&"UNVERIFIED_HISTORICAL_RUNS")
+        );
         assert_eq!(historical.intents_outside_exchange_history, 3);
         // Missing funding, cross-run identity or incomplete current source
         // cannot inherit an archive's historical NAV or a previous run.
