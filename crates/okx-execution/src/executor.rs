@@ -4550,7 +4550,9 @@ mod tests {
         assert!(!MutationAuthority::ProductionLive.allows_exchange_mutation());
         assert!(!executor.can_submit_prepared_intent(&plan.intent_id));
         assert!(matches!(
-            executor.submit_prepared(&plan.intent_id, timing(), 102).await,
+            executor
+                .submit_prepared(&plan.intent_id, timing(), 102)
+                .await,
             Err(OrderExecutorError::Transition(
                 ExecutionTransitionError::LiveTradingDisabled
             ))
