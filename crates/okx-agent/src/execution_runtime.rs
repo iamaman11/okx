@@ -502,9 +502,11 @@ impl ExecutionRuntime {
         settle_currency: Option<&str>,
         contract_type: Option<&str>,
     ) -> Option<StrategyNavRiskEvidence> {
-        if self.mode != ExecutionRuntimeMode::DemoAcceptance
-            || !self.environment.demo
-            || !coherent
+        if !matches!(
+            (self.mode, self.environment.demo),
+            (ExecutionRuntimeMode::DemoAcceptance, true)
+                | (ExecutionRuntimeMode::Production, false)
+        ) || !coherent
             || plan.action != ExecutionAction::Open
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
             || facts.summary.open_positions != 0
@@ -518,6 +520,17 @@ impl ExecutionRuntime {
         let mut executor = self.executor.lock().await;
         let ledger = executor.ledger();
         let run = ledger.capital_reservation()?.clone();
+        if self.production_trading_requested() {
+            let policy = read_native_production_policy().ok()?;
+            if policy.permission != okx_execution::ProductionPermission::Enabled
+                || policy.account_uid_fingerprint != run.account_uid_fingerprint
+                || policy.strategy_run_id != run.allocation_id
+                || policy.operator_authority_id != run.operator_authority_id
+                || !policy.allowed_instruments.contains(&plan.instrument_id)
+            {
+                return None;
+            }
+        }
         let binding = plan.risk_binding.as_ref()?;
         // Trading equity must remain equal to the source-authenticated
         // opening reserve. External cash transfers are not strategy PnL.
@@ -1078,15 +1091,37 @@ impl ExecutionRuntime {
             false
         };
         let finance_complete = if new_risk {
-            executor
-                .ledger()
-                .financial_period(facts, true)
-                .is_some_and(|period| {
-                    period.state == "FLAT_RECONCILED"
-                        && period.nav_usdt.is_some()
-                        && period.funding_usdt.is_some()
-                        && period.reasons.is_empty()
-                })
+            let ledger = executor.ledger();
+            ledger.financial_period(facts, true).is_some_and(|period| {
+                let closed_complete = period.state == "FLAT_RECONCILED"
+                    && period.nav_usdt.is_some()
+                    && period.funding_usdt.is_some()
+                    && period.reasons.is_empty();
+                // The one unsent PREPARED OPEN has no fill or financial
+                // consequence, but must not fabricate a complete period.
+                let first_prepared = ledger.capital_reservation().is_some_and(|run| {
+                    period.state == "INCOMPLETE"
+                        && period.reasons == vec!["unresolved_managed_execution"]
+                        && period.linked_fills == 0
+                        && period.linked_bills == 0
+                        && period.realized_usdt == "0"
+                        && period.fees_usdt == "0"
+                        && facts.trading_usdt_equity.as_deref()
+                            == Some(run.opening_account_usdt_equity.as_str())
+                        && ledger.exchange_evidence_summary().is_some_and(|source| {
+                            source.run_id == run.allocation_id
+                                && source.events == 0
+                                && source.latest_source_complete
+                                && !source.source_gap_over_two_hours
+                        })
+                        && ledger.entries().all(|owned| {
+                            owned.created_at_ms < run.started_at_ms
+                                || owned.record.plan.intent_id == intent_id
+                                    && owned.record.state == ExecutionState::Prepared
+                        })
+                });
+                closed_complete || first_prepared
+            })
         } else {
             false
         };
