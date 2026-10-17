@@ -290,163 +290,11 @@ pub enum ReconcileDisposition {
 pub enum MutationAuthority {
     Disabled,
     DemoAcceptance,
-    /// Only a short-lived, native CONTROL-bound, exact-account proof can
-    /// enable this mode. Ordinary construction and restart remain Disabled.
-    ProductionLive,
 }
 
 impl MutationAuthority {
-    /// Unscoped mutation rights are Demo-only. A Production grant permits
-    /// exactly one prepared intent through the dedicated guarded submit path.
     pub const fn allows_exchange_mutation(self) -> bool {
         matches!(self, Self::DemoAcceptance)
-    }
-}
-
-/// An ephemeral single-account pilot approval delivered only by the existing
-/// trusted native CONTROL -> child pipe, never by MCP, mailbox, or an order
-/// request. This validates the *existing* immutable strategy allocation and
-/// exchange-source checkpoint; it cannot create or rearm either one.
-#[derive(Debug, Clone)]
-pub struct ProductionLivePermit {
-    pub account_uid_fingerprint: String,
-    /// Exact prepared intent: approval cannot authorize another order.
-    pub intent_id: String,
-    pub allocation_id: String,
-    pub operator_authority_id: String,
-    /// PID of the one Job-owned child; verified again by the agent.
-    pub bound_child_pid: u32,
-    pub max_allocation_usdt: String,
-    /// Independent worst-case loss cap approved for this exact intent.
-    pub max_loss_usdt: String,
-    pub source_checksum_sha256: String,
-    pub issued_at_ms: u64,
-    pub expires_at_ms: u64,
-}
-
-impl ProductionLivePermit {
-    /// A durable STOP forbids new exposure but must not trap an exact owned
-    /// risk-reducing CLOSE. No ADD/HEDGE/partial REDUCE is admitted here.
-    fn stop_allows_action(stop_latched: bool, action: crate::ExecutionAction) -> bool {
-        !stop_latched || action == crate::ExecutionAction::Close
-    }
-
-    fn loss_within_pilot(plan: &ExecutionPlan, approved_loss: Decimal) -> bool {
-        // This operator-authorized pilot has a 10 USDT planned loss ceiling.
-        // Stop-loss is a modelled risk bound, NOT a guaranteed worst-case fill.
-        if approved_loss <= Decimal::ZERO || approved_loss > Decimal::from(10) {
-            return false;
-        }
-        match plan.action {
-            crate::ExecutionAction::Open => plan.open_risk.as_ref().is_some_and(|risk| {
-                let measured = Decimal::from_str(&risk.stop_loss_settle).ok();
-                let requested = Decimal::from_str(&risk.requested_max_loss_settle).ok();
-                measured
-                    .zip(requested)
-                    .is_some_and(|(measured, requested)| {
-                        measured > Decimal::ZERO
-                            && measured <= requested
-                            && requested <= approved_loss
-                    })
-            }),
-            crate::ExecutionAction::Close => true,
-            _ => false,
-        }
-    }
-
-    /// First live pilot deliberately excludes unprotected/untested mutations.
-    /// Full executor risk and venue gates remain additionally mandatory.
-    fn pilot_plan_supported(plan: &ExecutionPlan) -> bool {
-        plan.order_type == OrderType::Fok
-            // First Production pilot has one independently auditable currency.
-            // Do not compare USDC/USD settle loss with a USDT loss allowance.
-            && plan.instrument_id.ends_with("-USDT-SWAP")
-            && match plan.action {
-                crate::ExecutionAction::Open => {
-                    plan.open_risk.is_some() && plan.risk_binding.is_some()
-                }
-                crate::ExecutionAction::Close => true,
-                _ => false,
-            }
-    }
-
-    fn valid_for(
-        &self,
-        environment: OkxEnvironment,
-        ledger: &DurableExecutionLedger,
-        now_ms: u64,
-        intent_id: &str,
-    ) -> bool {
-        let lower_hex = |value: &str| {
-            value.len() == 64
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        };
-        // The 100 USDT cap belongs to the explicitly limited initial live
-        // pilot, not to the user's full exchange balance or later policy.
-        let max_cap = Decimal::from(100);
-        let max_allocation = self.max_allocation_usdt.parse::<Decimal>().ok();
-        let max_loss = self.max_loss_usdt.parse::<Decimal>().ok();
-        let Some(run) = ledger.capital_reservation() else {
-            return false;
-        };
-        let Some(source) = ledger.exchange_evidence_summary() else {
-            return false;
-        };
-        let Some(intent) = ledger.get(intent_id) else {
-            return false;
-        };
-        !environment.demo
-            && intent.record.state == ExecutionState::Prepared
-            && intent.record.plan.account_uid_fingerprint == self.account_uid_fingerprint
-            && Self::pilot_plan_supported(&intent.record.plan)
-            && lower_hex(&self.account_uid_fingerprint)
-            && !self.intent_id.is_empty()
-            && self.intent_id == intent_id
-            && lower_hex(&self.source_checksum_sha256)
-            && !self.allocation_id.is_empty()
-            && !self.operator_authority_id.is_empty()
-            && self.bound_child_pid != 0
-            && self.issued_at_ms > 0
-            && self.issued_at_ms <= now_ms
-            && self.expires_at_ms >= now_ms
-            && self
-                .expires_at_ms
-                .checked_sub(self.issued_at_ms)
-                .is_some_and(|age| age <= 10_000)
-            && now_ms
-                .checked_sub(self.issued_at_ms)
-                .is_some_and(|age| age <= 10_000)
-            && max_allocation.is_some_and(|cap| {
-                cap > Decimal::ZERO
-                    && cap <= max_cap
-                    && run
-                        .allocated_usdt
-                        .parse::<Decimal>()
-                        .is_ok_and(|allocated| allocated > Decimal::ZERO && allocated <= cap)
-            })
-            && max_loss.is_some_and(|loss| {
-                max_allocation.is_some_and(|cap| {
-                    loss > Decimal::ZERO && loss <= cap && loss <= Decimal::from(10)
-                }) && Self::loss_within_pilot(&intent.record.plan, loss)
-            })
-            && run.allocation_id == self.allocation_id
-            && run.account_uid_fingerprint == self.account_uid_fingerprint
-            && run.operator_authority_id == self.operator_authority_id
-            && source.run_id == self.allocation_id
-            && source.checksum_sha256 == self.source_checksum_sha256
-            && source.latest_source_complete
-            && !source.source_gap_over_two_hours
-            && source
-                .latest_source_asof_ms
-                .is_some_and(|asof| asof <= now_ms && now_ms - asof <= 30_000)
-            && Self::stop_allows_action(ledger.risk_stop().is_some(), intent.record.plan.action)
-            && ledger.finalized_run().is_none()
-            && ledger.unverified_run().is_none()
-            && ledger.entries().all(|entry| {
-                entry.record.plan.account_uid_fingerprint == self.account_uid_fingerprint
-            })
     }
 }
 
@@ -495,20 +343,12 @@ pub enum OrderExecutorError {
 
     #[error("demo mutation authority requires an OKX Demo environment")]
     DemoAuthorityRequiresDemoEnvironment,
-
-    #[error(
-        "production live requires a current native CONTROL-bound pilot permit, same UID, fresh source and open unstopped strategy run"
-    )]
-    ProductionLivePermitRejected,
 }
 
 pub struct OrderExecutor<G> {
     ledger: DurableExecutionLedger,
     gateway: G,
     mutation_authority: MutationAuthority,
-    // In-memory one-shot Production scope. Never persisted, never restored.
-    // Only submit_prepared_inner for this exact intent may use ProductionLive.
-    production_intent_id: Option<String>,
 }
 
 impl<G> OrderExecutor<G>
@@ -520,7 +360,6 @@ where
             ledger,
             gateway,
             mutation_authority: MutationAuthority::Disabled,
-            production_intent_id: None,
         }
     }
 
@@ -647,10 +486,10 @@ where
         self.mutation_authority
     }
 
-    /// Production live can only be active inside a single validated native
-    /// mutation boundary. Every constructor, failed check and restart is OFF.
+    // Demo acceptance is exchange mutation, but it is not production live trading.
+    // Keep this legacy safety signal false until the final production-live gate exists.
     pub const fn live_trading_enabled(&self) -> bool {
-        matches!(self.mutation_authority, MutationAuthority::ProductionLive)
+        false
     }
 
     pub fn enable_demo_acceptance(
@@ -660,54 +499,12 @@ where
         if !environment.demo {
             return Err(OrderExecutorError::DemoAuthorityRequiresDemoEnvironment);
         }
-        self.production_intent_id = None;
         self.mutation_authority = MutationAuthority::DemoAcceptance;
         Ok(())
     }
 
-    /// A trusted native child-pipe handler will supply this one-use proof.
-    /// The public exchange command path never accepts a caller-supplied
-    /// permit; an invalid proof leaves the executor Disabled.
-    pub fn enable_production_live(
-        &mut self,
-        environment: OkxEnvironment,
-        permit: &ProductionLivePermit,
-        intent_id: &str,
-        now_ms: u64,
-    ) -> Result<(), OrderExecutorError> {
-        self.disable_mutations();
-        if !permit.valid_for(environment, &self.ledger, now_ms, intent_id) {
-            return Err(OrderExecutorError::ProductionLivePermitRejected);
-        }
-        self.production_intent_id = Some(intent_id.to_owned());
-        self.mutation_authority = MutationAuthority::ProductionLive;
-        Ok(())
-    }
-
-    /// Read-only, no mutation authority: allow native CONTROL to validate an
-    /// operator-granted single prepared pilot against the SAME ledger.
-    pub fn production_pilot_candidate_valid(
-        &self,
-        environment: OkxEnvironment,
-        permit: &ProductionLivePermit,
-        now_ms: u64,
-    ) -> bool {
-        permit.valid_for(environment, &self.ledger, now_ms, &permit.intent_id)
-    }
-
     pub fn disable_mutations(&mut self) {
         self.mutation_authority = MutationAuthority::Disabled;
-        self.production_intent_id = None;
-    }
-
-    fn can_submit_prepared_intent(&self, intent_id: &str) -> bool {
-        match self.mutation_authority {
-            MutationAuthority::DemoAcceptance => true,
-            MutationAuthority::ProductionLive => {
-                self.production_intent_id.as_deref() == Some(intent_id)
-            }
-            MutationAuthority::Disabled => false,
-        }
     }
 
     pub fn prepare(
@@ -1490,8 +1287,7 @@ where
         // The production constructor is intentionally fail-closed. The hard
         // gate is the first operation: disabled execution must not validate,
         // persist SUBMITTING, or call the exchange gateway.
-        // A Production one-use grant never authorizes any OTHER intent.
-        require_live_trading_enabled(self.can_submit_prepared_intent(intent_id))?;
+        require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
 
         let entry = self
             .ledger
@@ -1842,7 +1638,6 @@ where
             ledger,
             gateway,
             mutation_authority: MutationAuthority::DemoAcceptance,
-            production_intent_id: None,
         }
     }
 
@@ -4590,183 +4385,6 @@ mod tests {
             ExecutionState::Prepared
         );
 
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn production_authority_cannot_submit_foreign_intent_or_unscoped_mutation() {
-        let (root, mut journal) = ledger("production-exact-intent-final-post-gate");
-        let plan = plan();
-        journal.prepare(plan.clone(), 101).expect("unsent prepared");
-        let gateway = MockGateway::new(vec![Ok(accepted_response(&plan))], vec![]);
-        let mut executor = OrderExecutor::new(journal, gateway);
-        executor.mutation_authority = MutationAuthority::ProductionLive;
-        executor.production_intent_id = Some("different_prepared_intent_0123456789".to_owned());
-        assert!(!MutationAuthority::ProductionLive.allows_exchange_mutation());
-        assert!(!executor.can_submit_prepared_intent(&plan.intent_id));
-        assert!(matches!(
-            executor
-                .submit_prepared(&plan.intent_id, timing(), 102)
-                .await,
-            Err(OrderExecutorError::Transition(
-                ExecutionTransitionError::LiveTradingDisabled
-            ))
-        ));
-        assert_eq!(executor.gateway().place_calls(), 0);
-        assert_eq!(
-            executor.ledger().get(&plan.intent_id).unwrap().record.state,
-            ExecutionState::Prepared
-        );
-        executor.disable_mutations();
-        assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
-        assert!(executor.production_intent_id.is_none());
-        assert!(!executor.can_submit_prepared_intent(&plan.intent_id));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn production_pilot_loss_and_stop_are_independent_of_capital() {
-        let mut open = protected_plan();
-        open.order_type = OrderType::Fok;
-        assert!(ProductionLivePermit::loss_within_pilot(&open, Decimal::ONE));
-        open.open_risk.as_mut().unwrap().requested_max_loss_settle = "11".to_owned();
-        assert!(
-            !ProductionLivePermit::loss_within_pilot(&open, Decimal::from(10)),
-            "an understated measured stop must not bypass the immutable requested loss budget"
-        );
-        open.open_risk.as_mut().unwrap().requested_max_loss_settle = "1".to_owned();
-        assert!(!ProductionLivePermit::loss_within_pilot(
-            &open,
-            Decimal::new(5, 1)
-        ));
-        assert!(!ProductionLivePermit::loss_within_pilot(
-            &open,
-            Decimal::ZERO
-        ));
-        assert!(!ProductionLivePermit::loss_within_pilot(
-            &open,
-            Decimal::new(1_001, 2)
-        ));
-        assert!(!ProductionLivePermit::stop_allows_action(
-            true,
-            crate::ExecutionAction::Open
-        ));
-        open.action = crate::ExecutionAction::Close;
-        assert!(ProductionLivePermit::loss_within_pilot(&open, Decimal::ONE));
-        // Risk-reducing CLOSE does not create exposure but may not be paired
-        // with an unbounded approval above this operator's 10 USDT limit.
-        assert!(!ProductionLivePermit::loss_within_pilot(
-            &open,
-            Decimal::new(1_001, 2)
-        ));
-        assert!(ProductionLivePermit::stop_allows_action(
-            true,
-            crate::ExecutionAction::Close
-        ));
-        assert!(!ProductionLivePermit::stop_allows_action(
-            true,
-            crate::ExecutionAction::Hedge
-        ));
-    }
-
-    #[test]
-    fn production_pilot_scope_denies_unprotected_and_unsupported_actions() {
-        let mut candidate = protected_plan();
-        candidate.order_type = OrderType::Fok;
-        // An OPEN with stop/target but without portfolio risk binding is still blocked.
-        assert!(!ProductionLivePermit::pilot_plan_supported(&candidate));
-        candidate.action = crate::ExecutionAction::Close;
-        assert!(ProductionLivePermit::pilot_plan_supported(&candidate));
-        candidate.order_type = OrderType::Limit;
-        assert!(!ProductionLivePermit::pilot_plan_supported(&candidate));
-        candidate.order_type = OrderType::Fok;
-        candidate.action = crate::ExecutionAction::Reduce;
-        assert!(!ProductionLivePermit::pilot_plan_supported(&candidate));
-        candidate.action = crate::ExecutionAction::Hedge;
-        assert!(!ProductionLivePermit::pilot_plan_supported(&candidate));
-    }
-
-    #[tokio::test]
-    async fn production_pilot_cannot_send_without_native_funded_period_and_source() {
-        let (root, mut journal) = ledger("production-native-pilot-fail-closed");
-        let plan = plan();
-        journal.prepare(plan.clone(), 101).expect("unsent prepared");
-        let gateway = MockGateway::new(vec![Ok(accepted_response(&plan))], vec![]);
-        let mut executor = OrderExecutor::new(journal, gateway);
-        let prod = OkxEnvironment::new(okx_api::Region::Global, false);
-        let demo = OkxEnvironment::new(okx_api::Region::Global, true);
-        let permit = ProductionLivePermit {
-            account_uid_fingerprint: "a".repeat(64),
-            intent_id: plan.intent_id.clone(),
-            allocation_id: "prod_pilot_20261017".to_owned(),
-            operator_authority_id: "native_control_approved_pilot".to_owned(),
-            bound_child_pid: std::process::id(),
-            max_allocation_usdt: "100".to_owned(),
-            max_loss_usdt: "5".to_owned(),
-            source_checksum_sha256: "b".repeat(64),
-            issued_at_ms: 101,
-            expires_at_ms: 10_101,
-        };
-        assert!(!executor.live_trading_enabled());
-        assert!(matches!(
-            executor.enable_production_live(prod, &permit, &plan.intent_id, 102),
-            Err(OrderExecutorError::ProductionLivePermitRejected)
-        ));
-        assert!(matches!(
-            executor.enable_production_live(demo, &permit, &plan.intent_id, 102),
-            Err(OrderExecutorError::ProductionLivePermitRejected)
-        ));
-        let mut stale = permit.clone();
-        stale.expires_at_ms = 101;
-        assert!(matches!(
-            executor.enable_production_live(prod, &stale, &plan.intent_id, 102),
-            Err(OrderExecutorError::ProductionLivePermitRejected)
-        ));
-        let mut above_loss_budget = permit.clone();
-        above_loss_budget.max_loss_usdt = "10.01".to_owned();
-        assert!(matches!(
-            executor.enable_production_live(prod, &above_loss_budget, &plan.intent_id, 102),
-            Err(OrderExecutorError::ProductionLivePermitRejected)
-        ));
-        let mut oversized = permit.clone();
-        oversized.max_allocation_usdt = "100.01".to_owned();
-        assert!(matches!(
-            executor.enable_production_live(prod, &oversized, &plan.intent_id, 102),
-            Err(OrderExecutorError::ProductionLivePermitRejected)
-        ));
-        let mut wrong_pid = permit.clone();
-        wrong_pid.bound_child_pid = 0;
-        assert!(matches!(
-            executor.enable_production_live(prod, &wrong_pid, &plan.intent_id, 102),
-            Err(OrderExecutorError::ProductionLivePermitRejected)
-        ));
-        let mut foreign = permit.clone();
-        foreign.account_uid_fingerprint = "not-an-uid".to_owned();
-        assert!(matches!(
-            executor.enable_production_live(prod, &foreign, &plan.intent_id, 102),
-            Err(OrderExecutorError::ProductionLivePermitRejected)
-        ));
-        let mut wrong_intent = permit.clone();
-        wrong_intent.intent_id = "unrelated_prepared_intent_0123456789".to_owned();
-        assert!(matches!(
-            executor.enable_production_live(prod, &wrong_intent, &plan.intent_id, 102),
-            Err(OrderExecutorError::ProductionLivePermitRejected)
-        ));
-        assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
-        assert!(!executor.live_trading_enabled());
-        assert!(matches!(
-            executor
-                .submit_prepared(&plan.intent_id, timing(), 102)
-                .await,
-            Err(OrderExecutorError::Transition(
-                ExecutionTransitionError::LiveTradingDisabled
-            ))
-        ));
-        assert_eq!(executor.gateway().place_calls(), 0);
-        assert_eq!(
-            executor.ledger().get(&plan.intent_id).unwrap().record.state,
-            ExecutionState::Prepared
-        );
         let _ = fs::remove_dir_all(root);
     }
 

@@ -13,7 +13,7 @@ use okx_execution::{
     ExecutionPlan, ExecutionRiskStop, ExecutionState, ExecutionStatusEnvelope,
     FencedProtectiveShrinkRequest, LeverageAttemptState, ManagedExecutionInventory,
     MutationAuthority, MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor,
-    OrderExecutorError, PositionSide, PrepareOutcome, ProductionLivePermit, ProductionMarkEvidence,
+    OrderExecutorError, PositionSide, PrepareOutcome, ProductionMarkEvidence,
     StrategyAllocationOpening, StrategyCapitalReservation, StrategyFinalization,
     StrategyUnverifiedClosure, SubmitDisposition, execution_status_with_ledger,
     managed_execution_inventory, reconcile_account_ledger,
@@ -161,16 +161,6 @@ impl MutationIngress {
     }
 }
 
-/// Cancelling or unwinding a Production send drops its ephemeral authority
-/// before releasing the existing one-owner executor mutex.
-struct ProductionAuthorityReset<'a>(&'a mut OrderExecutor<TradeApi>);
-
-impl Drop for ProductionAuthorityReset<'_> {
-    fn drop(&mut self) {
-        self.0.disable_mutations();
-    }
-}
-
 pub struct ExecutionRuntime {
     mutation_ingress: MutationIngress,
     environment: OkxEnvironment,
@@ -179,16 +169,6 @@ pub struct ExecutionRuntime {
     executor_account: AccountApi,
     public_data: PublicDataApi,
     executor: Mutex<OrderExecutor<TradeApi>>,
-    /// Only inherited native CONTROL can stage this one-use in-memory intent.
-    /// It does not enable executor mutations or authorize any MCP request.
-    production_pilot_staged: Mutex<Option<ProductionLivePermit>>,
-}
-
-fn strategy_nav_source_supported(demo: bool, mode: ExecutionRuntimeMode) -> bool {
-    matches!(
-        (demo, mode),
-        (true, ExecutionRuntimeMode::DemoAcceptance) | (false, ExecutionRuntimeMode::ReadOnly)
-    )
 }
 
 impl ExecutionRuntime {
@@ -262,36 +242,7 @@ impl ExecutionRuntime {
             executor_account,
             public_data,
             executor: Mutex::new(OrderExecutor::new(ledger, trade)),
-            production_pilot_staged: Mutex::new(None),
         })
-    }
-
-    /// Staging is *not* activation. The only source is the inherited native
-    /// child pipe, after independent Production REST/WS proof. No storage write
-    /// or exchange POST; expiry and UID are checked once more on any future use.
-    pub async fn stage_production_pilot_native(
-        &self,
-        permit: ProductionLivePermit,
-        now_ms: u64,
-    ) -> bool {
-        if self.environment.demo
-            || self.mode != ExecutionRuntimeMode::ReadOnly
-            || permit.bound_child_pid != std::process::id()
-        {
-            return false;
-        }
-        let mut slot = self.production_pilot_staged.lock().await;
-        if slot.is_some() {
-            return false;
-        }
-        let executor = self.executor.lock().await;
-        if executor.mutation_authority() != MutationAuthority::Disabled
-            || !executor.production_pilot_candidate_valid(self.environment, &permit, now_ms)
-        {
-            return false;
-        }
-        *slot = Some(permit);
-        true
     }
 
     pub const fn mode(&self) -> ExecutionRuntimeMode {
@@ -320,10 +271,6 @@ impl ExecutionRuntime {
             .drain()
             .await
             .map_err(|_| AgentError::SourceDrainTimeout)?;
-        // Native terminal Drain burns the staged in-memory pilot immediately.
-        // Even a subsequent ledger-assessment failure must never carry an
-        // approved intent into the next CONTROL handoff or restart.
-        self.production_pilot_staged.lock().await.take();
         // Covers any native financial checkpoint outside request ingress.
         // The source must never interpret missing archive evidence as clean.
         let mut executor = tokio::time::timeout_at(deadline, self.executor.lock())
@@ -365,7 +312,7 @@ impl ExecutionRuntime {
     /// Read-only admission for the in-process private-order event source.
     /// The executor ledger remains the sole owner of durable evidence.
     pub async fn strategy_financial_capture_active(&self) -> bool {
-        if !strategy_nav_source_supported(self.environment.demo, self.mode) {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !self.environment.demo {
             return false;
         }
         let executor = self.executor.lock().await;
@@ -377,7 +324,7 @@ impl ExecutionRuntime {
     /// Read-only, bounded decision for the EXISTING mailbox heartbeat.
     /// Never accepts a request-supplied cursor or treats a >2h gap as healed.
     pub async fn strategy_quiet_source_capture_due(&self, now_ms: u64) -> bool {
-        if !strategy_nav_source_supported(self.environment.demo, self.mode) {
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance || !self.environment.demo {
             return false;
         }
         let executor = self.executor.lock().await;
@@ -466,10 +413,8 @@ impl ExecutionRuntime {
         settle_currency: Option<&str>,
         contract_type: Option<&str>,
     ) -> Option<StrategyNavRiskEvidence> {
-        // Demo and Production use the SAME native NAV/risk mathematics.
-        // Production is still ReadOnly until a separate native one-use grant;
-        // producing a source-attested NAV cannot enable any exchange mutation.
-        if !strategy_nav_source_supported(self.environment.demo, self.mode)
+        if self.mode != ExecutionRuntimeMode::DemoAcceptance
+            || !self.environment.demo
             || !coherent
             || plan.action != ExecutionAction::Open
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
@@ -934,49 +879,6 @@ impl ExecutionRuntime {
             .submit_prepared(intent_id, timing, observed_at_ms)
             .await;
         executor.disable_mutations();
-        Ok(Some(result))
-    }
-
-    /// The future native CONTROL arm handler is the ONLY permitted issuer of
-    /// ProductionLivePermit. No public MCP or mailbox operation accepts this
-    /// proof. Keep the same Rust ledger/executor mutex as Demo, with authority
-    /// enabled for exactly one submission and disabled before releasing it.
-    /// Do not retry an uncertain result or mistake a valid pilot permit for
-    /// independent risk/venue/WS admission (which callers must revalidate).
-    pub async fn submit_prepared_production_authorized(
-        &self,
-        preflight: &ExecutorPreflightSnapshot,
-        permit: &ProductionLivePermit,
-        intent_id: &str,
-        timing: MutationTiming,
-        observed_at_ms: u64,
-    ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
-        let mut executor = self.executor.lock().await;
-        executor.disable_mutations();
-        if self.environment.demo
-            || self.mode != ExecutionRuntimeMode::ReadOnly
-            || !preflight.accepted
-            || !preflight.credential.accepted
-            || !preflight.credential.production_environment
-            || !preflight.credential.executor_ip_bound
-            || preflight.credential.account_uid_fingerprint.is_empty()
-            || preflight.credential.account_uid_fingerprint != permit.account_uid_fingerprint
-            || permit.bound_child_pid != std::process::id()
-        {
-            return Ok(None);
-        }
-        if executor
-            .enable_production_live(self.environment, permit, intent_id, observed_at_ms)
-            .is_err()
-        {
-            return Ok(None);
-        }
-        let guarded = ProductionAuthorityReset(&mut executor);
-        let result = guarded
-            .0
-            .submit_prepared(intent_id, timing, observed_at_ms)
-            .await;
-        drop(guarded);
         Ok(Some(result))
     }
 
@@ -1561,202 +1463,6 @@ mod tests {
     }
 
     #[test]
-    fn one_strategy_nav_gate_uses_correct_demo_and_production_mode() {
-        assert!(strategy_nav_source_supported(
-            true,
-            ExecutionRuntimeMode::DemoAcceptance
-        ));
-        assert!(strategy_nav_source_supported(
-            false,
-            ExecutionRuntimeMode::ReadOnly
-        ));
-        assert!(!strategy_nav_source_supported(
-            true,
-            ExecutionRuntimeMode::ReadOnly
-        ));
-        assert!(!strategy_nav_source_supported(
-            false,
-            ExecutionRuntimeMode::DemoAcceptance
-        ));
-    }
-
-    #[tokio::test]
-    async fn native_pilot_staging_alone_never_enables_exchange_mutation() {
-        let root = temp_root("pilot-staging-is-not-live");
-        let runtime = ExecutionRuntime::new(
-            &root,
-            OkxEnvironment::new(Region::Global, false),
-            credentials(),
-            100,
-            RateBudget::new(),
-        )
-        .expect("one native executor");
-        let permit = ProductionLivePermit {
-            account_uid_fingerprint: "a".repeat(64),
-            intent_id: "intent_0123456789abcdef".to_owned(),
-            allocation_id: "pilot_20261017".to_owned(),
-            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
-            bound_child_pid: std::process::id(),
-            max_allocation_usdt: "100".to_owned(),
-            max_loss_usdt: "5".to_owned(),
-            source_checksum_sha256: "c".repeat(64),
-            issued_at_ms: 101,
-            expires_at_ms: 10_101,
-        };
-        assert!(!runtime.stage_production_pilot_native(permit, 102).await);
-        assert_eq!(
-            runtime.mutation_authority().await,
-            MutationAuthority::Disabled
-        );
-        assert!(!runtime.live_trading_enabled().await);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn native_terminal_drain_burns_staged_pilot_without_live_authority() {
-        let root = temp_root("terminal-native-drain-burns-pilot");
-        let runtime = ExecutionRuntime::new(
-            &root,
-            OkxEnvironment::new(Region::Global, false),
-            credentials(),
-            100,
-            RateBudget::new(),
-        )
-        .expect("production owner with no live authority");
-        *runtime.production_pilot_staged.lock().await = Some(ProductionLivePermit {
-            account_uid_fingerprint: "a".repeat(64),
-            intent_id: "intent_test_0123456789abcdef".to_owned(),
-            allocation_id: "pilot_run_20261017".to_owned(),
-            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
-            bound_child_pid: std::process::id(),
-            max_allocation_usdt: "100".to_owned(),
-            max_loss_usdt: "10".to_owned(),
-            source_checksum_sha256: "c".repeat(64),
-            issued_at_ms: 101,
-            expires_at_ms: 10_101,
-        });
-        // A ledger-only handoff may refuse an unfunded source, but the
-        // in-memory permit and mutation ingress must still be dead.
-        let _ = runtime.drain_mutation_ingress(&"a".repeat(64)).await;
-        assert!(runtime.production_pilot_staged.lock().await.is_none());
-        assert!(runtime.admit_mutating_request().await.is_none());
-        assert_eq!(
-            runtime.mutation_authority().await,
-            MutationAuthority::Disabled
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn ephemeral_exchange_right_is_revoked_when_production_guard_drops() {
-        let root = temp_root("one-owner-production-right-reset");
-        let demo = OkxEnvironment::new(Region::Global, true);
-        let runtime = ExecutionRuntime::new_demo_acceptance(
-            &root,
-            demo,
-            credentials(),
-            101,
-            RateBudget::new(),
-        )
-        .expect("existing Rust trade engine");
-        let mut owner = runtime.executor.lock().await;
-        owner.enable_demo_acceptance(demo).expect("test authority");
-        {
-            let guard = ProductionAuthorityReset(&mut owner);
-            assert_eq!(
-                guard.0.mutation_authority(),
-                MutationAuthority::DemoAcceptance
-            );
-        }
-        assert_eq!(owner.mutation_authority(), MutationAuthority::Disabled);
-        drop(owner);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn production_submit_is_unreachable_without_native_bound_pilot_evidence() {
-        let root = temp_root("unarmed-production-pilot");
-        let prod = OkxEnvironment::new(Region::Global, false);
-        let runtime = ExecutionRuntime::new(&root, prod, credentials(), 101, RateBudget::new())
-            .expect("one existing production ledger and executor");
-        let mut evidence = preflight(true);
-        evidence.credential.production_environment = true;
-        evidence.credential.account_uid_fingerprint = "a".repeat(64);
-        let permit = ProductionLivePermit {
-            account_uid_fingerprint: "a".repeat(64),
-            intent_id: "missing_production_intent_0123456789".to_owned(),
-            allocation_id: "missing_new_production_run".to_owned(),
-            operator_authority_id: "unissued_operator_approval".to_owned(),
-            bound_child_pid: std::process::id(),
-            max_allocation_usdt: "100".to_owned(),
-            max_loss_usdt: "5".to_owned(),
-            source_checksum_sha256: "b".repeat(64),
-            issued_at_ms: 101,
-            expires_at_ms: 10_101,
-        };
-        let mut wrong_pid = permit.clone();
-        wrong_pid.bound_child_pid = std::process::id().wrapping_add(1);
-        assert!(
-            runtime
-                .submit_prepared_production_authorized(
-                    &evidence,
-                    &wrong_pid,
-                    "missing_production_intent_0123456789",
-                    timing(),
-                    102,
-                )
-                .await
-                .expect("wrong child PID rejected before POST")
-                .is_none()
-        );
-        assert_eq!(
-            runtime.mutation_authority().await,
-            MutationAuthority::Disabled
-        );
-        let result = runtime
-            .submit_prepared_production_authorized(
-                &evidence,
-                &permit,
-                "missing_production_intent_0123456789",
-                timing(),
-                102,
-            )
-            .await
-            .expect("native gate is local");
-        assert!(result.is_none());
-        assert_eq!(
-            runtime.mutation_authority().await,
-            MutationAuthority::Disabled
-        );
-        assert!(!runtime.live_trading_enabled().await);
-
-        // Demo may never reuse a production pilot permit or its UID.
-        let demo_root = root.join("demo");
-        let demo = ExecutionRuntime::new_demo_acceptance(
-            &demo_root,
-            OkxEnvironment::new(Region::Global, true),
-            credentials(),
-            101,
-            RateBudget::new(),
-        )
-        .expect("same engine, disjoint Demo journal");
-        assert!(
-            demo.submit_prepared_production_authorized(
-                &evidence,
-                &permit,
-                "missing_production_intent_0123456789",
-                timing(),
-                102,
-            )
-            .await
-            .expect("Demo rejected without POST")
-            .is_none()
-        );
-        assert_eq!(demo.mutation_authority().await, MutationAuthority::Disabled);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn quiet_source_capture_admission_never_relaxes_two_hour_coverage() {
         let start = 100_000;
         let one_hour = QUIET_SOURCE_COVERAGE_REFRESH_MS;
@@ -1989,66 +1695,6 @@ mod tests {
             MutationAuthority::Disabled
         );
 
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn production_readonly_uses_same_native_financial_capture_after_funded_run() {
-        let root = temp_root("production-native-financial-source");
-        let production = ExecutionRuntime::new(
-            &root,
-            OkxEnvironment::new(Region::Global, false),
-            credentials(),
-            100,
-            RateBudget::new(),
-        )
-        .expect("existing Production ledger owner");
-        assert!(!production.strategy_financial_capture_active().await);
-        assert!(!production.strategy_quiet_source_capture_due(102).await);
-        let uid = "a".repeat(64);
-        let approval = format!("sha256:{}", "b".repeat(64));
-        let opening = StrategyAllocationOpening {
-            account_uid_fingerprint: uid.clone(),
-            account_generation: "current-generation".to_owned(),
-            observed_usdt_equity: "1000".to_owned(),
-            observed_at_ms: 101,
-            source_history_complete: true,
-            zero_positions: true,
-            zero_pending_orders: true,
-            zero_native_protection: true,
-            operator_authority_id: approval.clone(),
-        };
-        let reservation = StrategyCapitalReservation {
-            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
-            allocation_id: "production_finance_capture_20261017".to_owned(),
-            account_uid_fingerprint: uid,
-            origin_schema: "okx.research.live-decision/v1".to_owned(),
-            origin_version: "run-2026-10-17".to_owned(),
-            mandate_version: "production-mandate-v1".to_owned(),
-            allocated_usdt: "100".to_owned(),
-            opening_account_usdt_equity: opening.observed_usdt_equity.clone(),
-            account_generation: opening.account_generation.clone(),
-            operator_authority_id: approval,
-            started_at_ms: 101,
-        };
-        production
-            .executor
-            .lock()
-            .await
-            .reserve_strategy_capital(reservation, &opening, 102)
-            .expect("existing durable capital owner");
-        assert!(production.strategy_financial_capture_active().await);
-        assert!(
-            production
-                .strategy_quiet_source_capture_due(101 + QUIET_SOURCE_COVERAGE_REFRESH_MS)
-                .await
-        );
-        assert!(!production.live_trading_enabled().await);
-        assert_eq!(
-            production.mutation_authority().await,
-            MutationAuthority::Disabled
-        );
-        drop(production);
         let _ = fs::remove_dir_all(root);
     }
 

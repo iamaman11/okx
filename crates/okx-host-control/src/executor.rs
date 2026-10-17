@@ -10,7 +10,6 @@ use std::{
 use okx_protocol::{
     HostControlOperation, NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX,
     NATIVE_CHILD_CONTROL_SCHEMA_V1, NativeChildOperation, NativeChildReply, NativeChildRequest,
-    NativeProductionPilotRequest,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -140,26 +139,6 @@ impl HostExecutor {
             HostControlOperation::StartAgent => self.start_agent(),
             HostControlOperation::StartDemoAcceptance => self.start_demo_acceptance(),
             HostControlOperation::RestoreProductionAgent => self.restore_production_agent(),
-            HostControlOperation::ArmProductionPilot {
-                account_uid_fingerprint,
-                intent_id,
-                allocation_id,
-                operator_authority_id,
-                max_allocation_usdt,
-                max_loss_usdt,
-                source_checksum_sha256,
-            } => self.arm_production_pilot_native(NativeProductionPilotRequest {
-                account_uid_fingerprint,
-                intent_id,
-                allocation_id,
-                operator_authority_id,
-                max_allocation_usdt,
-                max_loss_usdt,
-                source_checksum_sha256,
-                bound_child_pid: 0,
-                issued_at_ms: 0,
-                expires_at_ms: 0,
-            }),
             HostControlOperation::SelectReadOnlyAccount {
                 target_profile,
                 expected_source_uid_fingerprint,
@@ -1175,96 +1154,6 @@ impl HostExecutor {
         Ok(())
     }
 
-    /// One operator-scoped grant sent only to this verified Job-owned agent.
-    /// It STAGES an ephemeral intent but does not create a persistent trading
-    /// permission, allow MCP mutation or send an exchange request.
-    fn arm_production_pilot_native(
-        &mut self,
-        mut pilot: NativeProductionPilotRequest,
-    ) -> HostControlResult<Value> {
-        if !self.agent_is_running()?
-            || self.running_profile != Some(AgentProfile::Production)
-            || self.desired_profile != AgentProfile::Production
-            || self.desired_agent != AgentDesired::Running
-            || !self.desired_store.read_only_for(AgentProfile::Production)?
-            || self.desired_store.is_pending()?
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let launch = self
-            .agent_launch
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        if launch.profile != AgentProfile::Production
-            || self.agent_child.as_ref().map(Child::id) != Some(launch.pid)
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let state = self.status()?;
-        if state["release_parity"]["state"] != "MATCHED"
-            || state["installed_agent"]["state"] != "VERIFIED"
-            || state["agent_owned_running"] != true
-            || state["agent_pid"] != launch.pid
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        pilot.bound_child_pid = launch.pid;
-        pilot.issued_at_ms =
-            u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
-        pilot.expires_at_ms = pilot.issued_at_ms.saturating_add(10_000);
-        if !pilot.valid() {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let pipe = self
-            .native_child_pipe
-            .as_mut()
-            .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-        let mut entropy = [0u8; 32];
-        getrandom::fill(&mut entropy).map_err(|e| HostControlError::Random(e.to_string()))?;
-        let request_id = entropy
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
-        entropy.zeroize();
-        let req = NativeChildRequest {
-            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
-            request_id: request_id.clone(),
-            operation: NativeChildOperation::ArmProductionPilot,
-            expected_uid_fingerprint: pilot.account_uid_fingerprint.clone(),
-            pilot: Some(pilot),
-        };
-        if !req.valid() {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        let bytes = serde_json::to_vec(&req)?;
-        if bytes.len() + 1 > NATIVE_CHILD_CONTROL_MAX_BYTES {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        pipe.input.write_all(&bytes)?;
-        pipe.input.write_all(b"\n")?;
-        pipe.input.flush()?;
-        let reply = pipe
-            .replies
-            .recv_timeout(Duration::from_secs(11))
-            .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
-        if !reply.valid_for(&request_id)
-            || reply.disposition != "PILOT_ARMED"
-            || !self.agent_is_running()?
-            || self.agent_child.as_ref().map(Child::id) != Some(launch.pid)
-            || self.agent_launch.is_none_or(|current| {
-                current.pid != launch.pid
-                    || current.launch_lease_sha256 != launch.launch_lease_sha256
-            })
-        {
-            return Err(HostControlError::ProfileHandoffProofRequired);
-        }
-        Ok(json!({
-            "disposition": "PILOT_STAGED_NO_EXCHANGE_AUTHORITY",
-            "agent_pid": launch.pid,
-            "single_native_request": true,
-            "exchange_post_authorized": false
-        }))
-    }
-
     /// Native drained read-only source is still a candidate, NOT a
     /// CONTROL-authenticated one-use witness bound to exact PID/ReleaseSet.
     #[allow(dead_code)]
@@ -1300,7 +1189,6 @@ impl HostExecutor {
             request_id: request_id.clone(),
             operation: NativeChildOperation::Drain,
             expected_uid_fingerprint: expected_uid.to_owned(),
-            pilot: None,
         };
         let bytes = serde_json::to_vec(&request)?;
         if bytes.len() + 1 > NATIVE_CHILD_CONTROL_MAX_BYTES {
@@ -1497,7 +1385,6 @@ impl HostExecutor {
             request_id: request_id.clone(),
             operation: NativeChildOperation::VerifyReadOnly,
             expected_uid_fingerprint: expected_uid.to_owned(),
-            pilot: None,
         };
         if !req.valid() {
             return Err(HostControlError::ProfileHandoffProofRequired);
