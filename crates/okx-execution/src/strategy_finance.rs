@@ -899,19 +899,13 @@ mod tests {
             exchange_timestamp_ms: 100_000,
             received_at_ms: 130_000,
         };
-        assert_eq!(
-            attested_production_mark(&composed_stale, 160_000),
-            None
-        );
+        assert_eq!(attested_production_mark(&composed_stale, 160_000), None);
         // Exact end-to-end boundary is accepted; one millisecond older fails.
         assert_eq!(
             attested_production_mark(&composed_stale, 130_000),
             Some(Decimal::new(836368, 1))
         );
-        assert_eq!(
-            attested_production_mark(&composed_stale, 130_001),
-            None
-        );
+        assert_eq!(attested_production_mark(&composed_stale, 130_001), None);
     }
 
     #[test]
