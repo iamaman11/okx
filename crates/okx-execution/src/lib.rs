@@ -22,7 +22,9 @@ pub use exchange_evidence::{
 };
 pub use executor::{
     ExecutionGateway, FencedProtectiveShrinkRequest, MutationAuthority, MutationSubmitDisposition,
-    OrderExecutor, OrderExecutorError, ReconcileDisposition, SubmitDisposition,
+    OrderExecutor, OrderExecutorError, ProductionPermission, ProductionPolicyRejection,
+    ProductionRiskWitness, ProductionTradingPolicy, PRODUCTION_TRADING_POLICY_SCHEMA_V1,
+    ReconcileDisposition, SubmitDisposition,
 };
 pub use ledger::{
     DurableExecutionLedger, EXECUTION_LEDGER_SCHEMA_V1, EXECUTION_LEDGER_SCHEMA_V2,
