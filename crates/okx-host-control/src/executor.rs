@@ -857,11 +857,15 @@ impl HostExecutor {
         // No mutation-authorized source, unknown descendant or target process
         // can be force-resumed or switched by this operation.
         if self.agent_is_running()? {
-            let source_pid = self.agent_child.as_ref().map(Child::id)
+            let source_pid = self
+                .agent_child
+                .as_ref()
+                .map(Child::id)
                 .ok_or(HostControlError::ProfileHandoffProofRequired)?;
-            if !self.desired_store.permits_verified_read_only_source(
-                self.desired_profile, source_pid
-            )? {
+            if !self
+                .desired_store
+                .permits_verified_read_only_source(self.desired_profile, source_pid)?
+            {
                 return Err(HostControlError::ProfileHandoffProofRequired);
             }
             self.terminate_agent_owned()?;
