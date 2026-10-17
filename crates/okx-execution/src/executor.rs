@@ -296,7 +296,6 @@ pub enum MutationAuthority {
 /// This is a pure admission contract; constructing one does not enable trading.
 /// The one native execution owner must attest risk occupancy and source truth.
 pub const PRODUCTION_TRADING_POLICY_SCHEMA_V1: &str = "okx.production-trading-policy/v1";
-const MAX_OPERATOR_MODELLED_LOSS_USDT: Decimal = Decimal::TEN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -375,7 +374,7 @@ impl ProductionTradingPolicy {
                 !item.ends_with("-USDT-SWAP") || item.len() > 64
             })
             || max_loss <= Decimal::ZERO
-            || max_loss > MAX_OPERATOR_MODELLED_LOSS_USDT
+            || max_loss > Decimal::from(10)
         {
             return Err(Rejection::InvalidPolicy);
         }
