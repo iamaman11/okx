@@ -1600,7 +1600,10 @@ mod tests {
             expires_at_ms: 10_101,
         };
         assert!(!runtime.stage_production_pilot_native(permit, 102).await);
-        assert_eq!(runtime.mutation_authority().await, MutationAuthority::Disabled);
+        assert_eq!(
+            runtime.mutation_authority().await,
+            MutationAuthority::Disabled
+        );
         assert!(!runtime.live_trading_enabled().await);
         let _ = fs::remove_dir_all(root);
     }

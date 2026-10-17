@@ -43,7 +43,8 @@ impl NativeProductionPilotRequest {
     pub fn valid(&self) -> bool {
         let hex64 = |s: &str| {
             s.len() == 64
-                && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
         hex64(&self.account_uid_fingerprint)
             && hex64(&self.source_checksum_sha256)
@@ -58,7 +59,10 @@ impl NativeProductionPilotRequest {
             && (1..=128).contains(&self.max_loss_usdt.len())
             && self.bound_child_pid != 0
             && self.issued_at_ms > 0
-            && self.expires_at_ms.checked_sub(self.issued_at_ms).is_some_and(|age| age <= 10_000)
+            && self
+                .expires_at_ms
+                .checked_sub(self.issued_at_ms)
+                .is_some_and(|age| age <= 10_000)
     }
 }
 

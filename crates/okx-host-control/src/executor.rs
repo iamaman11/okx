@@ -1208,8 +1208,8 @@ impl HostExecutor {
             return Err(HostControlError::ProfileHandoffProofRequired);
         }
         pilot.bound_child_pid = launch.pid;
-        pilot.issued_at_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
-            .unwrap_or_default();
+        pilot.issued_at_ms =
+            u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
         pilot.expires_at_ms = pilot.issued_at_ms.saturating_add(10_000);
         if !pilot.valid() {
             return Err(HostControlError::ProfileHandoffProofRequired);
@@ -1219,9 +1219,11 @@ impl HostExecutor {
             .as_mut()
             .ok_or(HostControlError::ProfileHandoffProofRequired)?;
         let mut entropy = [0u8; 32];
-        getrandom::fill(&mut entropy)
-            .map_err(|e| HostControlError::Random(e.to_string()))?;
-        let request_id = entropy.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        getrandom::fill(&mut entropy).map_err(|e| HostControlError::Random(e.to_string()))?;
+        let request_id = entropy
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
         entropy.zeroize();
         let req = NativeChildRequest {
             schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
@@ -1240,9 +1242,12 @@ impl HostExecutor {
         pipe.input.write_all(&bytes)?;
         pipe.input.write_all(b"\n")?;
         pipe.input.flush()?;
-        let reply = pipe.replies.recv_timeout(Duration::from_secs(11))
+        let reply = pipe
+            .replies
+            .recv_timeout(Duration::from_secs(11))
             .map_err(|_| HostControlError::ProfileHandoffProofRequired)?;
-        if !reply.valid_for(&request_id) || reply.disposition != "PILOT_ARMED"
+        if !reply.valid_for(&request_id)
+            || reply.disposition != "PILOT_ARMED"
             || !self.agent_is_running()?
             || self.agent_child.as_ref().map(Child::id) != Some(launch.pid)
             || self.agent_launch.is_none_or(|current| {
