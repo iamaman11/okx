@@ -131,12 +131,13 @@ fn parse_native_production_policy(
     {
         return Err(AgentError::ProductionPolicyUnavailable);
     }
-    let policy = owner.production_policy.ok_or(AgentError::ProductionPolicyUnavailable)?;
+    let policy = owner
+        .production_policy
+        .ok_or(AgentError::ProductionPolicyUnavailable)?;
     policy.validate()?;
     if !matches!(
         policy.permission,
-        okx_protocol::ProductionPermission::Enabled
-            | okx_protocol::ProductionPermission::Stopped
+        okx_protocol::ProductionPermission::Enabled | okx_protocol::ProductionPermission::Stopped
     ) {
         return Err(AgentError::ProductionPolicyUnavailable);
     }
@@ -1046,19 +1047,22 @@ impl ExecutionRuntime {
             return Ok(None);
         }
         let close_owned_exact = if plan.action == ExecutionAction::Close {
-            let observed = facts.authoritative_positions.iter().filter(|position| {
-                position.instrument_id == plan.instrument_id
-                    && position.position_side == plan.position_side.as_str()
-                    && rust_decimal::Decimal::from_str(&position.position)
-                        .is_ok_and(|v| v > rust_decimal::Decimal::ZERO)
-            }).collect::<Vec<_>>();
+            let observed = facts
+                .authoritative_positions
+                .iter()
+                .filter(|position| {
+                    position.instrument_id == plan.instrument_id
+                        && position.position_side == plan.position_side.as_str()
+                        && rust_decimal::Decimal::from_str(&position.position)
+                            .is_ok_and(|v| v > rust_decimal::Decimal::ZERO)
+                })
+                .collect::<Vec<_>>();
             observed.len() == 1
                 && rust_decimal::Decimal::from_str(&observed[0].position)
                     .ok()
                     .is_some_and(|quantity| {
                         quantity > rust_decimal::Decimal::ZERO
-                            && rust_decimal::Decimal::from_str(&plan.size).ok()
-                                == Some(quantity)
+                            && rust_decimal::Decimal::from_str(&plan.size).ok() == Some(quantity)
                     })
                 && executor.ledger().capital_reservation().is_some_and(|run| {
                     executor.ledger().entries().any(|owned| {
@@ -1074,12 +1078,15 @@ impl ExecutionRuntime {
             false
         };
         let finance_complete = if new_risk {
-            executor.ledger().financial_period(facts, true).is_some_and(|period| {
-                period.state == "FLAT_RECONCILED"
-                    && period.nav_usdt.is_some()
-                    && period.funding_usdt.is_some()
-                    && period.reasons.is_empty()
-            })
+            executor
+                .ledger()
+                .financial_period(facts, true)
+                .is_some_and(|period| {
+                    period.state == "FLAT_RECONCILED"
+                        && period.nav_usdt.is_some()
+                        && period.funding_usdt.is_some()
+                        && period.reasons.is_empty()
+                })
         } else {
             false
         };
