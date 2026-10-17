@@ -596,7 +596,12 @@ where
         {
             return Err(Reject::ScopeMismatch);
         }
-        if self.has_unresolved_native_mutation(intent_id) {
+        // Never disable a verified risk-reducing CLOSE merely because an
+        // unrelated parent is UNKNOWN. Exact owned reduce-only venue evidence
+        // remains mandatory for every CLOSE.
+        if entry.record.plan.action.is_risk_increasing()
+            && self.has_unresolved_native_mutation(intent_id)
+        {
             return Err(Reject::SourceUnattested);
         }
         // A finalized or unverified run is never reopened by granting an
