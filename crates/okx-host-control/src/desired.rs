@@ -7,8 +7,8 @@ use std::{
 use okx_protocol::{
     ProductionPermission, ProductionTradingPolicy,
     host_state_proto::{
-        self, HostStateWire, LegacyProductionPolicyWire, SourceDrainHoldWire,
-        SourceWitnessWire, TransitionWire, HOST_STATE_VERSION,
+        self, HOST_STATE_VERSION, HostStateWire, LegacyProductionPolicyWire, SourceDrainHoldWire,
+        SourceWitnessWire, TransitionWire,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -273,7 +273,10 @@ impl DesiredStateStore {
 
     fn persist_full(&self, complete: &DesiredFileV3) -> HostControlResult<()> {
         complete.validate()?;
-        let parent = self.path.parent().ok_or(HostControlError::DesiredStateCorrupt)?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or(HostControlError::DesiredStateCorrupt)?;
         fs::create_dir_all(parent)?;
         let temp = temp_path(&self.path);
         let mut file = File::create(&temp)?;
@@ -534,7 +537,8 @@ mod tests {
         };
         before.validate().unwrap();
         let bytes = host_state_proto::encode_host_state(&desired_to_wire(&before)).unwrap();
-        let after = desired_from_wire(host_state_proto::decode_host_state(&bytes).unwrap()).unwrap();
+        let after =
+            desired_from_wire(host_state_proto::decode_host_state(&bytes).unwrap()).unwrap();
         let restored = after.transition.unwrap();
         assert_eq!(restored.witness, record.witness);
         assert_eq!(restored.checksum_sha256, record.checksum_sha256);
@@ -548,26 +552,34 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let old = DesiredStateStore::at(root.join("desired.json"));
         old.save(AgentDesiredState::production_running()).unwrap();
-        old.begin_source_drain_hold(
-            AgentProfile::Production, AgentProfile::DemoAcceptance, 41,
-        ).unwrap();
+        old.begin_source_drain_hold(AgentProfile::Production, AgentProfile::DemoAcceptance, 41)
+            .unwrap();
         let current = DesiredStateStore::at(root.join("host-state.pb"));
-        assert!(current.is_pending().unwrap(), "durable hold survives native migration");
-        assert_eq!(current.load().unwrap(), AgentDesiredState::production_running());
+        assert!(
+            current.is_pending().unwrap(),
+            "durable hold survives native migration"
+        );
+        assert_eq!(
+            current.load().unwrap(),
+            AgentDesiredState::production_running()
+        );
         assert!(root.join("host-state.pb").exists());
         assert!(!root.join("desired.json").exists());
         assert!(root.join("desired.json.migrated").exists());
-        assert!(current.recover_stopped_explicit().is_ok(), "explicit recovery only");
+        assert!(
+            current.recover_stopped_explicit().is_ok(),
+            "explicit recovery only"
+        );
         assert!(!current.is_pending().unwrap());
         assert_eq!(
             current.load().unwrap(),
             AgentDesiredState::stopped_on(AgentProfile::Production),
         );
         fs::remove_file(root.join("host-state.pb")).unwrap();
-        assert!(matches!(
-            current.load(),
-            Err(HostControlError::DesiredStateCorrupt),
-        ), "lost typed journal may never replay archived JSON");
+        assert!(
+            matches!(current.load(), Err(HostControlError::DesiredStateCorrupt),),
+            "lost typed journal may never replay archived JSON"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1791,7 +1803,9 @@ fn desired_from_wire(wire: HostStateWire) -> HostControlResult<DesiredFileV3> {
             allowed_instruments: p.allowed_instruments,
             max_total_modelled_loss_usdt: p.max_total_modelled_loss_usdt,
         };
-        policy.validate().map_err(|_| HostControlError::DesiredStateCorrupt)?;
+        policy
+            .validate()
+            .map_err(|_| HostControlError::DesiredStateCorrupt)?;
         Some(policy)
     } else {
         None
@@ -1806,7 +1820,9 @@ fn desired_from_wire(wire: HostStateWire) -> HostControlResult<DesiredFileV3> {
             Some(TransitionRecord {
                 schema: t.schema,
                 phase: phase_from_wire(t.phase)?,
-                witness: witness_from_wire(t.witness.ok_or(HostControlError::DesiredStateCorrupt)?)?,
+                witness: witness_from_wire(
+                    t.witness.ok_or(HostControlError::DesiredStateCorrupt)?,
+                )?,
                 consumed_at_ms: t.consumed_at_ms,
                 source_exited_at_ms: t.source_exited_at_ms,
                 checksum_sha256: t.checksum_sha256,
