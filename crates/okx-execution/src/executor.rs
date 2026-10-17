@@ -520,6 +520,51 @@ where
         &self.ledger
     }
 
+    /// Read-only native invariant. The ledger, not a caller-provided Boolean,
+    /// decides whether an uncertain in-flight mutation blocks another order.
+    /// The exact candidate's unsent PREPARED protection is not in-flight.
+    fn has_unresolved_native_mutation(&self, candidate_intent_id: &str) -> bool {
+        self.ledger.entries().any(|entry| {
+            let record = &entry.record;
+            let other = record.plan.intent_id != candidate_intent_id;
+            (other
+                && record.plan.action.is_risk_increasing()
+                && record.state == ExecutionState::Prepared)
+                || matches!(
+                    record.state,
+                    ExecutionState::Submitting | ExecutionState::UnknownSubmission
+                )
+                || record.mutations.iter().any(|mutation| {
+                    matches!(
+                        mutation.state,
+                        OrderMutationState::Submitting | OrderMutationState::Unknown
+                    )
+                })
+                || record.protection.as_ref().is_some_and(|protection| {
+                    (other
+                        && matches!(
+                            protection.status,
+                            crate::ProtectiveOrderStatus::Pending
+                                | crate::ProtectiveOrderStatus::Failed
+                        ))
+                        || protection.cleanup.as_ref().is_some_and(|cleanup| {
+                            matches!(
+                                cleanup.state,
+                                ProtectiveCleanupState::Submitting
+                                    | ProtectiveCleanupState::Unknown
+                            )
+                        })
+                        || protection.size_amend.as_ref().is_some_and(|amend| {
+                            matches!(
+                                amend.state,
+                                ProtectiveSizeAmendState::Submitting
+                                    | ProtectiveSizeAmendState::Unknown
+                            )
+                        })
+                })
+        })
+    }
+
     /// The single executor must cross-check a policy against its OWN durable
     /// run, STOP, exact prepared plan and account source. A caller-created
     /// policy/witness is never exchange-mutation authority; this is read-only
@@ -550,6 +595,14 @@ where
             })
         {
             return Err(Reject::ScopeMismatch);
+        }
+        // Never disable a verified risk-reducing CLOSE merely because an
+        // unrelated parent is UNKNOWN. Exact owned reduce-only venue evidence
+        // remains mandatory for every CLOSE.
+        if entry.record.plan.action.is_risk_increasing()
+            && self.has_unresolved_native_mutation(intent_id)
+        {
+            return Err(Reject::SourceUnattested);
         }
         // A finalized or unverified run is never reopened by granting an
         // authorization policy. Only the existing strict lifecycle may begin
@@ -4687,6 +4740,33 @@ mod tests {
             policy.evaluate(&run, &close, &witness),
             Err(ProductionPolicyRejection::ModeDenied)
         );
+    }
+
+    #[test]
+    fn production_owner_detects_durable_unknown_without_caller_assertion() {
+        let (root, mut ledger) = ledger("production-native-unknown");
+        let plan = protected_plan();
+        ledger.prepare(plan.clone(), 101).expect("prepare");
+        let executor = OrderExecutor::new(ledger, MockGateway::new(vec![], vec![]));
+        assert!(!executor.has_unresolved_native_mutation(&plan.intent_id));
+        assert_eq!(executor.gateway().place_calls(), 0);
+        drop(executor);
+
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 102).expect("reopen");
+        ledger
+            .begin_submission(&plan.intent_id, 103)
+            .expect("durable submitting");
+        ledger
+            .mark_unknown_submission(&plan.intent_id, 104)
+            .expect("unknown, never retry");
+        drop(ledger);
+
+        let restarted = DurableExecutionLedger::open(store, 105).expect("restart");
+        let executor = OrderExecutor::new(restarted, MockGateway::new(vec![], vec![]));
+        assert!(executor.has_unresolved_native_mutation(&plan.intent_id));
+        assert_eq!(executor.gateway().place_calls(), 0);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
