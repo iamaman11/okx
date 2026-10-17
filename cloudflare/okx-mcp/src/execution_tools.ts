@@ -83,12 +83,12 @@ const lineage = {
 export const EXECUTION_TOOLS: Json[] = [
   {
     name: "executor_preflight",
-    description: "READ ONLY: verify the exact active account/environment, Demo Trade executor credential, clock and admission readiness; no order created.",
+    description: "READ ONLY: verify the exact authenticated account/environment, Trade credential, clock and native executor admission; no order created.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "execution_action",
-    description: "WRITE: explicit, typed and single-intent trading operation. Only an authenticated active Demo runtime is presently authorized; production is ALWAYS read-only. Prepare persists risk/intent without exchange send; submit/mutate can send EXACTLY ONCE and require independent read-only reconciliation. Do not retry uncertain results or use as a batch/raw RPC.",
+    description: "WRITE: typed single-intent action through the ONE Rust executor. Authenticated Demo supports its accepted mutation set; authenticated Production may dispatch only begin_strategy_run, prepare_execution, submit_prepared_execution, finalize_strategy_run and quarantine_unverified_strategy_run. Production exchange POST additionally requires native CONTROL ENABLED, exact UID/run/instrument, STOP/UNKNOWN, fresh source and risk checks. Profile alone never grants a trade. Never retry an uncertain result or use as a batch/raw RPC.",
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
@@ -196,9 +196,23 @@ export function isExecutionMutation(operationType: unknown): boolean {
   ].includes(String(operationType));
 }
 
+// Transport admission is deliberately narrower than the native executor.
+ // Only the existing Rust owner can authorize exchange POST and determine
+ // whether a real Production policy is ENABLED or STOPPED.
+const PRODUCTION_NATIVE_ACTIONS = new Set([
+  "begin_strategy_run",
+  "prepare_execution",
+  "submit_prepared_execution",
+  "finalize_strategy_run",
+  "quarantine_unverified_strategy_run",
+]);
+
 export function executionProfilePermitsOperation(profile: string | undefined, operationType: unknown): boolean {
-  // The profile is authenticated from a single Windows Hello, not MCP input.
-  return !isExecutionMutation(operationType) || profile === "demo_acceptance";
+  if (!isExecutionMutation(operationType)) return true;
+  // Profile comes from the authenticated single-owner Windows Hello, not
+  // from user args or OAuth identity. Unverified always fails closed.
+  if (profile === "demo_acceptance") return true;
+  return profile === "production" && PRODUCTION_NATIVE_ACTIONS.has(String(operationType));
 }
 
 /** Return exactly one whitelisted native Rust AgentOperation, never arbitrary operation JSON. */
