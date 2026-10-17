@@ -335,10 +335,11 @@ impl<'a> ObservationQueryContext<'a> {
     pub fn central_policy_binding(
         &self,
     ) -> Option<crate::execution_runtime::CentralPolicyBinding<'a>> {
-        self.operator_policy.map(|policy| crate::execution_runtime::CentralPolicyBinding {
-            policy,
-            session_generation: self.transport_generation,
-        })
+        self.operator_policy
+            .map(|policy| crate::execution_runtime::CentralPolicyBinding {
+                policy,
+                session_generation: self.transport_generation,
+            })
     }
 
     pub fn central_uid_admitted(&self, uid: &str, now_ms: u64) -> bool {

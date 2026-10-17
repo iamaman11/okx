@@ -48,10 +48,10 @@ pub struct CentralPolicyBinding<'a> {
 
 impl CentralPolicyBinding<'_> {
     pub fn authorizes_uid(self, uid: &str, now_ms: u64) -> bool {
-        self.policy.authorizes_uid(uid, now_ms, self.session_generation)
+        self.policy
+            .authorizes_uid(uid, now_ms, self.session_generation)
     }
 }
-
 
 /// A Hedge Cross setting is accepted only when BOTH distinct sides are
 /// individually verified and have the same exact, positive leverage.
