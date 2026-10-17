@@ -1,4 +1,5 @@
 import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
+import { accountPolicyRequest } from "./account_policy.js";
 import {
   ACK_DEADLINE_MS,
   type Env,
@@ -36,6 +37,24 @@ export class RuntimeSession {
     }
     if (url.pathname === "/status") {
       return Response.json(await this.status(url.searchParams.get("probe") === "1"));
+    }
+    if (url.pathname === "/account-policy") {
+      // Internal Durable Object endpoint, reachable from authenticated OAuth
+      // MCP only; NOT exposed through the public Worker default handler.
+      let update: unknown;
+      if (request.method === "POST") {
+        if (Number(request.headers.get("content-length") ?? "0") > 4096) {
+          return Response.json({status:"FAILED",reason:"POLICY_TOO_LARGE"}, {status:413});
+        }
+        const body = await request.text();
+        if (body.length > 4096) {
+          return Response.json({status:"FAILED",reason:"POLICY_TOO_LARGE"}, {status:413});
+        }
+        try { update = JSON.parse(body); }
+        catch { return Response.json({status:"FAILED",reason:"INVALID_POLICY_UPDATE"}, {status:400}); }
+      }
+      const result = await accountPolicyRequest(this.state.storage, request.method, update);
+      return Response.json(result.body, { status: result.status, headers: {"cache-control":"no-store"} });
     }
     if (url.pathname === "/dispatch" && request.method === "POST") {
       const body = await request.json() as any;
