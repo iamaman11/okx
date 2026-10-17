@@ -215,6 +215,9 @@ pub enum ProtocolError {
     #[error("invalid research request: {0}")]
     InvalidResearchRequest(&'static str),
 
+    #[error("invalid durable Production trading policy")]
+    InvalidProductionTradingPolicy,
+
     #[error("position scenario requires exactly one exit_price or entry_move_ratio")]
     InvalidPositionScenarioExit,
 
@@ -1852,7 +1855,7 @@ impl ProductionTradingPolicy {
     /// Validate durable operator scope without floating-point arithmetic.
     /// Financial exposure is independently recomputed by okx-execution.
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        const BAD: ProtocolError = ProtocolError::InvalidAnalyticalQuery("invalid Production trading policy");
+        const BAD: ProtocolError = ProtocolError::InvalidProductionTradingPolicy;
         if self.schema != PRODUCTION_TRADING_POLICY_SCHEMA_V1
             || self.revision == 0
             || validate_sha256(&self.account_uid_fingerprint).is_err()
