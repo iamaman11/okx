@@ -4860,9 +4860,7 @@ mod tests {
             .expect_err("missing native source must deny before POST");
         assert!(matches!(
             error,
-            OrderExecutorError::ProductionPolicyDenied(
-                ProductionPolicyRejection::SourceUnattested
-            )
+            OrderExecutorError::ProductionPolicyDenied(ProductionPolicyRejection::SourceUnattested)
         ));
         assert_eq!(executor.mutation_authority(), MutationAuthority::Disabled);
         assert_eq!(executor.gateway().place_calls(), 0);
