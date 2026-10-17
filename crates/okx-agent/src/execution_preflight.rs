@@ -99,8 +99,7 @@ fn observed_execution_right(
         if !preflight.credential.executor_ip_bound {
             blockers.push("PRODUCTION_EXECUTOR_IP_NOT_BOUND");
         }
-        if demo_mutations_configured && preflight.accepted
-            && preflight.credential.executor_ip_bound
+        if demo_mutations_configured && preflight.accepted && preflight.credential.executor_ip_bound
         {
             "PRODUCTION_POLICY_SELECTED"
         } else {
