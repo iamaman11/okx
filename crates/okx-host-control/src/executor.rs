@@ -647,7 +647,17 @@ impl HostExecutor {
         } else {
             "demo_acceptance"
         };
-        self.select_read_only_account_internal(target_profile, None, Some(account_id))
+        let selected = self.select_read_only_account_internal(target_profile, None, Some(account_id))?;
+        // Public selection view: do not leak internal profile names, PID, STOP
+        // or historical financial-audit state into the account chooser.
+        Ok(json!({
+            "account_id": account_id,
+            "selected": true,
+            "changed": true,
+            "positions": selected["positions_observed"],
+            "orders": selected["orders_observed"],
+            "selection_changed_trading_rights": false,
+        }))
     }
 
     fn select_read_only_account(
