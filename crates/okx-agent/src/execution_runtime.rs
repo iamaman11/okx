@@ -940,8 +940,7 @@ impl ExecutionRuntime {
         if !preflight.accepted
             || preflight.account_uid_fingerprint != observed_uid
             || !ledger.capital_reservation().is_some_and(|run| {
-                run.allocation_id == expected_run_id
-                    && run.account_uid_fingerprint == observed_uid
+                run.allocation_id == expected_run_id && run.account_uid_fingerprint == observed_uid
             })
         {
             return false;
