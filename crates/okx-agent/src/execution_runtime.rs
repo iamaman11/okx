@@ -21,7 +21,7 @@ use okx_execution::{
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use tokio::time::timeout;
 
@@ -102,29 +102,19 @@ fn quiet_source_capture_due(
             >= QUIET_SOURCE_COVERAGE_REFRESH_MS
 }
 
-/// CONTROL is the only writer of this already-existing atomic desired file.
-/// The agent reads a typed, minimal view immediately before Production POST;
-/// no second credentials store, policy daemon or JSON application logic.
-const NATIVE_CONTROL_DESIRED: &str = r"C:\okx-control\desired.json";
-
-#[derive(Deserialize)]
-struct ProductionControlSnapshot {
-    schema: String,
-    agent: String,
-    profile: String,
-    read_only: bool,
-    production_policy: Option<okx_protocol::ProductionTradingPolicy>,
-    transition: Option<serde_json::Value>,
-    switch_hold: Option<serde_json::Value>,
-}
+/// The native CONTROL owns a typed crash-safe host-state journal.
+/// A legacy local Production permission is NOT created by account selection
+/// and is refused when the journal has an active switch or ReadOnly latch.
+/// The centralized operator policy is independent of this OS journal.
+const NATIVE_CONTROL_STATE: &str = r"C:\okx-control\host-state.pb";
 
 fn parse_native_production_policy(
     bytes: &[u8],
 ) -> AgentResult<okx_execution::ProductionTradingPolicy> {
-    let owner: ProductionControlSnapshot = serde_json::from_slice(bytes)?;
-    if owner.schema != "okx.host.desired/v3"
-        || owner.agent != "RUNNING"
-        || owner.profile != "production"
+    let owner = okx_protocol::host_state_proto::decode_host_state(bytes)
+        .ok_or(AgentError::ProductionPolicyUnavailable)?;
+    if owner.desired_agent != 1
+        || owner.selected_environment != 1
         || owner.read_only
         || owner.transition.is_some()
         || owner.switch_hold.is_some()
@@ -132,34 +122,42 @@ fn parse_native_production_policy(
         return Err(AgentError::ProductionPolicyUnavailable);
     }
     let policy = owner
-        .production_policy
+        .legacy_production_policy
         .ok_or(AgentError::ProductionPolicyUnavailable)?;
-    policy.validate()?;
-    if !matches!(
-        policy.permission,
-        okx_protocol::ProductionPermission::Enabled | okx_protocol::ProductionPermission::Stopped
-    ) {
-        return Err(AgentError::ProductionPolicyUnavailable);
-    }
     let permission = match policy.permission {
-        okx_protocol::ProductionPermission::Enabled => okx_execution::ProductionPermission::Enabled,
-        okx_protocol::ProductionPermission::Stopped => okx_execution::ProductionPermission::Stopped,
+        2 => okx_execution::ProductionPermission::Enabled,
+        3 => okx_execution::ProductionPermission::Stopped,
         _ => return Err(AgentError::ProductionPolicyUnavailable),
     };
-    Ok(okx_execution::ProductionTradingPolicy {
+    let validated = okx_protocol::ProductionTradingPolicy {
         schema: policy.schema,
         revision: policy.revision,
-        permission,
+        permission: if policy.permission == 2 {
+            okx_protocol::ProductionPermission::Enabled
+        } else {
+            okx_protocol::ProductionPermission::Stopped
+        },
         account_uid_fingerprint: policy.account_uid_fingerprint,
         strategy_run_id: policy.strategy_run_id,
         operator_authority_id: policy.operator_authority_id,
         allowed_instruments: policy.allowed_instruments,
         max_total_modelled_loss_usdt: policy.max_total_modelled_loss_usdt,
+    };
+    validated.validate()?;
+    Ok(okx_execution::ProductionTradingPolicy {
+        schema: validated.schema,
+        revision: validated.revision,
+        permission,
+        account_uid_fingerprint: validated.account_uid_fingerprint,
+        strategy_run_id: validated.strategy_run_id,
+        operator_authority_id: validated.operator_authority_id,
+        allowed_instruments: validated.allowed_instruments,
+        max_total_modelled_loss_usdt: validated.max_total_modelled_loss_usdt,
     })
 }
 
 fn read_native_production_policy() -> AgentResult<okx_execution::ProductionTradingPolicy> {
-    let bytes = std::fs::read(NATIVE_CONTROL_DESIRED)?;
+    let bytes = std::fs::read(NATIVE_CONTROL_STATE)?;
     parse_native_production_policy(&bytes)
 }
 
