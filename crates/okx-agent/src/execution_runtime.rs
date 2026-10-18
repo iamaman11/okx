@@ -1130,11 +1130,9 @@ impl ExecutionRuntime {
         // The existing local policy may only further restrict the ONE
         // centrally selected operator budget, never enlarge it. Parse exact
         // decimal values, never f64. No permission is created by this bound.
-        let Some(central_budget) = central
-            .and_then(|binding| rust_decimal::Decimal::from_str(
-                &binding.policy.max_total_modelled_loss_usdt,
-            ).ok())
-        else {
+        let Some(central_budget) = central.and_then(|binding| {
+            rust_decimal::Decimal::from_str(&binding.policy.max_total_modelled_loss_usdt).ok()
+        }) else {
             return Ok(None);
         };
         let Some(native_budget) =
