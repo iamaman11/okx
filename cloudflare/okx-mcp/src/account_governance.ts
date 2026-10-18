@@ -15,10 +15,32 @@ export type Limits = {
   max_drawdown_ratio:string|null;
   allowed_instruments:string[];
 };
+export type StrategyLimits = {
+  id:string;enabled:boolean;allocated_capital_usdt:string;
+  max_modelled_loss_usdt:string;max_daily_realized_loss_usdt:string|null;
+  max_drawdown_ratio:string|null;
+};
+function validStrategies(v:unknown,accountCap:string):v is StrategyLimits[]{
+  if(!Array.isArray(v)||v.length>32)return false;
+  const seen=new Set<string>();
+  let total=0n;
+  for(const s of v){
+    if(!record(s)||typeof s.id!=="string"||!ID.test(s.id)||seen.has(s.id)
+      ||typeof s.enabled!=="boolean"||!positive(s.allocated_capital_usdt)
+      ||!positive(s.max_modelled_loss_usdt)
+      ||units(s.max_modelled_loss_usdt)!>units(s.allocated_capital_usdt)!
+      ||!optionalPositive(s.max_daily_realized_loss_usdt)
+      ||!(s.max_drawdown_ratio===null||ratio(s.max_drawdown_ratio))
+      ||(s.enabled&&(s.max_daily_realized_loss_usdt===null||s.max_drawdown_ratio===null)))return false;
+    seen.add(s.id);
+    if(s.enabled)total+=units(s.max_modelled_loss_usdt)!;
+  }
+  return total<=units(accountCap)!;
+}
 export type Account = {
   id:string;label:string;venue:string;environment:"real"|"demo";
   uid_fingerprint:string;identity_verified:boolean;enabled:boolean;
-  limits:Limits;
+  limits:Limits;strategies:StrategyLimits[];
 };
 export type Governance = {
   schema:typeof GOVERNANCE_SCHEMA;
@@ -27,7 +49,7 @@ export type Governance = {
   max_total_modelled_loss_usdt:string;
   accounts:Account[];
 };
-export type AccountUpdate = {id:string;label:string;enabled:boolean;limits:Limits};
+export type AccountUpdate = {id:string;label:string;enabled:boolean;limits:Limits;strategies:StrategyLimits[]};
 export type GovernanceUpdate = {
   expected_revision:number;trading_requested:boolean;
   max_total_modelled_loss_usdt:string;accounts:AccountUpdate[];
@@ -60,9 +82,10 @@ function validLimits(value:unknown):value is Limits{
     &&x.allowed_instruments.every(t=>typeof t==="string"&&INSTR.test(t))
     &&new Set(x.allowed_instruments).size===x.allowed_instruments.length;
 }
+function optionalPositive(value:unknown):boolean{return value===null||positive(value);}
 function validAccount(a:unknown):a is Account{
   if(!record(a))return false;
-  const fields=["id","label","venue","environment","uid_fingerprint","identity_verified","enabled","limits"];
+  const fields=["id","label","venue","environment","uid_fingerprint","identity_verified","enabled","limits","strategies"];
   if(Object.keys(a).sort().join("|")!==fields.sort().join("|"))return false;
   return typeof a.id==="string"&&ID.test(a.id)
     &&typeof a.label==="string"&&a.label.length<=80
@@ -71,6 +94,7 @@ function validAccount(a:unknown):a is Account{
     &&typeof a.uid_fingerprint==="string"&&SHA.test(a.uid_fingerprint)
     &&typeof a.identity_verified==="boolean"&&typeof a.enabled==="boolean"
     &&(!a.enabled||a.identity_verified)&&validLimits(a.limits)
+    &&validStrategies(a.strategies,a.limits.max_modelled_loss_usdt)
     &&(!a.enabled||a.environment!=="real"
       ||(a.limits.max_notional_usdt!==null&&a.limits.max_leverage!==null
         &&a.limits.max_daily_realized_loss_usdt!==null
@@ -108,7 +132,7 @@ export function migrateV1(old:AccountPolicy):Governance|null {
       limits:{max_modelled_loss_usdt:old.max_total_modelled_loss_usdt,
         max_order_loss_usdt:old.max_total_modelled_loss_usdt,max_notional_usdt:null,
         max_leverage:null,max_daily_realized_loss_usdt:null,max_drawdown_ratio:null,
-        allowed_instruments:[]}
+        allowed_instruments:[]},strategies:[]
     }))
   };
   return validGovernance(result)?result:null;
@@ -127,8 +151,9 @@ export function reviseGovernance(previous:Governance,change:GovernanceUpdate):Go
   for(const row of change.accounts){
     const before=remaining.get(row.id);
     if(!before||!validLimits(row.limits)||typeof row.label!=="string"||row.label.length>80
-      ||typeof row.enabled!=="boolean"||(row.enabled&&!before.identity_verified))return null;
-    accounts.push({...before,enabled:row.enabled,label:row.label,limits:row.limits});
+      ||typeof row.enabled!=="boolean"||(row.enabled&&!before.identity_verified)
+      ||!validStrategies(row.strategies,row.limits.max_modelled_loss_usdt))return null;
+    accounts.push({...before,enabled:row.enabled,label:row.label,limits:row.limits,strategies:row.strategies});
     remaining.delete(row.id);
   }
   if(remaining.size!==0)return null;
