@@ -122,6 +122,7 @@ pub enum RiskCommandAction {
         policy_revision: u64,
         expected_risk_book_sequence: u64,
         source_proof_sha256: String,
+        census: NativeRiskCensus,
     },
     Resolve {
         reservation_key: String,
@@ -183,6 +184,7 @@ impl RiskCommand {
                 policy_revision,
                 expected_risk_book_sequence,
                 source_proof_sha256,
+                census,
             } => {
                 !reservation_key.is_empty()
                     && reservation_key.len() <= 512
@@ -190,6 +192,7 @@ impl RiskCommand {
                     && *policy_revision > 0
                     && *expected_risk_book_sequence > 0
                     && hash(source_proof_sha256)
+                    && census.valid()
             }
             RiskCommandAction::Resolve {
                 reservation_key,

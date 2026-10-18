@@ -90,12 +90,20 @@ const entry=(await readRiskBook(sa))!.entries[0];
 check((await transitionRisk(sa,entry.key,p,"UNKNOWN",d)).status==="DENIED",
   "caller-supplied proof digest does not unlock risk state transition");
 const beforePost=await readRiskBook(sa);
+const postProof={connection_generation:77,expected_book_sequence:beforePost!.sequence,
+ census,source_proof:native,now_ms:now};
+const manualExposure={...census,occupied:[
+ {...census.occupied[0],occupied_usdt:"8"},census.occupied[1]]};
 check((await beginRiskPost(sa,entry.key,p,1,d,{
- connection_generation:77,expected_book_sequence:beforePost!.sequence
-})).status==="POST_AUTHORIZED","one native POST granted after durable reserve");
+ ...postProof,census:manualExposure,source_proof:{...native,source_digest:d}
+})).status==="DENIED","new manual exposure after reserve cannot sneak through POST fence");
 check((await beginRiskPost(sa,entry.key,p,1,d,{
- connection_generation:77,expected_book_sequence:beforePost!.sequence
-})).status==="DENIED","same reservation cannot POST twice");
+ ...postProof,census:{...census,generated_at_ms:now-5001}
+})).status==="DENIED","stale census cannot grant POST");
+check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).status==="POST_AUTHORIZED",
+ "one native POST granted after fresh full-account census");
+check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).status==="DENIED",
+ "same reservation cannot POST twice");
 const transition=async(to:Parameters<typeof transitionRisk>[3],proof:string)=>{
  const current=await readRiskBook(sa);
  return transitionRisk(sa,entry.key,p,to,proof,{

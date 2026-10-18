@@ -93,10 +93,21 @@ export async function handleNativeRiskCommand(
       ||!Number.isSafeInteger(a.policy_revision)||!Number.isSafeInteger(a.expected_risk_book_sequence)
       ||typeof a.source_proof_sha256!=="string")
       return deny(id,"INVALID_POST_FENCE");
+    const proof=nativeEvidence(a.census,session.connection_generation);
+    if(!proof||!isObject(a.census)||!Array.isArray(a.census.account_keys)||
+      !Array.isArray(a.census.occupied))
+      return deny(id,"POST_CENSUS_UNVERIFIED");
+    const census:CompleteRiskCensus={
+      complete:true,source_digest:proof.source_digest,
+      generated_at_ms:a.census.generated_at_ms as number,
+      account_keys:a.census.account_keys as string[],
+      occupied:a.census.occupied as CompleteRiskCensus["occupied"],
+    };
     const result=await beginRiskPost(storage,a.reservation_key,a.plan_sha256,
       a.policy_revision as number,a.source_proof_sha256,
       {connection_generation:session.connection_generation,
-       expected_book_sequence:a.expected_risk_book_sequence as number});
+       expected_book_sequence:a.expected_risk_book_sequence as number,
+       census,source_proof:proof,now_ms});
     return result.status==="POST_AUTHORIZED"
       ?{schema:RESULT_SCHEMA,command_id:id,status:"POST_AUTHORIZED",reason:null,
         reservation_key:a.reservation_key,risk_book_sequence:result.book_sequence!,

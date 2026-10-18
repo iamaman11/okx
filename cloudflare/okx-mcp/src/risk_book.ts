@@ -338,12 +338,21 @@ export async function beginRiskPost(
   plan_hash:string,
   policy_revision:number,
   proof_digest:string,
-  native:{connection_generation:number;expected_book_sequence:number}|null,
+  native:{
+    connection_generation:number;expected_book_sequence:number;
+    census:CompleteRiskCensus;source_proof:NativeSessionRiskProof;now_ms:number;
+  }|null,
 ):Promise<{status:"POST_AUTHORIZED"|"DENIED";reason?:string;book_sequence?:number}>{
   if(!native||!HEX.test(plan_hash)||!HEX.test(proof_digest)||
     !Number.isSafeInteger(native.connection_generation)||native.connection_generation<1||
     !Number.isSafeInteger(native.expected_book_sequence)||native.expected_book_sequence<1||
-    !Number.isSafeInteger(policy_revision)||policy_revision<1)
+    !Number.isSafeInteger(policy_revision)||policy_revision<1||
+    native.source_proof.connection_generation!==native.connection_generation||
+    native.source_proof.source_digest!==native.census.source_digest||
+    !native.source_proof.native_account_evidence_complete||
+    !native.source_proof.native_order_evidence_complete||
+    !native.source_proof.native_ledger_evidence_complete||
+    !Number.isSafeInteger(native.now_ms)||native.now_ms<=0)
     return {status:"DENIED",reason:"INVALID_NATIVE_POST_FENCE"};
   return storage.transaction(async(tx:any)=>{
     const generation:unknown=await tx.get("generation");
@@ -356,6 +365,11 @@ export async function beginRiskPost(
     const authority=projectRiskPolicy(governance);
     if(!authority?.enabled)
       return {status:"DENIED" as const,reason:"CENTRAL_OPERATOR_GRANT_INACTIVE"};
+    // A fresh native inventory is mandatory AGAIN immediately before POST.
+    // Positions, unmanaged orders and another account can change after RESERVE.
+    const occupied=censusRisk(native.census,authority,native.now_ms);
+    if(occupied===null)
+      return {status:"DENIED" as const,reason:"POST_CENSUS_UNPROVEN_OR_STALE"};
     const stored:unknown=await tx.get(KEY);
     if(!validBook(stored))
       return {status:"DENIED" as const,reason:"RISK_BOOK_MISSING_OR_CORRUPT"};
@@ -366,8 +380,27 @@ export async function beginRiskPost(
       stored.entries[index].policy_revision!==policy_revision)
       return {status:"DENIED" as const,reason:"INTENT_NOT_HELD_EXACTLY_ONCE"};
     const entry=stored.entries[index];
-    if(!Object.hasOwn(authority.account_limits_usdt,accountKey(entry)))
-      return {status:"DENIED" as const,reason:"ACCOUNT_REVOKED"};
+    const account=governance.accounts.find(a=>
+      a.venue===entry.venue&&a.environment==="real"&&a.uid_fingerprint===entry.uid
+      &&a.enabled&&a.identity_verified);
+    if(!account||!account.limits.allowed_instruments.includes(entry.instrument_id))
+      return {status:"DENIED" as const,reason:"ACCOUNT_OR_INSTRUMENT_REVOKED"};
+    for(const held of stored.entries)if(held.state!=="RELEASED"){
+      const owner=accountKey(held);
+      if(!occupied.has(owner))
+        return {status:"DENIED" as const,reason:"POST_OCCUPANCY_COHORT_MISMATCH"};
+      occupied.set(owner,occupied.get(owner)!+units(held.loss_usdt)!);
+    }
+    let total=0n;
+    for(const [accountKey,value] of occupied){
+      const limit=units(authority.account_limits_usdt[accountKey]);
+      if(limit===null||value>limit)
+        return {status:"DENIED" as const,reason:"POST_ACCOUNT_RISK_EXCEEDED"};
+      total+=value;
+    }
+    const global=units(authority.global_limit_usdt);
+    if(global===null||total>global)
+      return {status:"DENIED" as const,reason:"POST_PORTFOLIO_RISK_EXCEEDED"};
     const entries=[...stored.entries];
     entries[index]={...entry,state:"POSTED" as const,transition_proof:proof_digest};
     await tx.put(KEY,{schema:RISK_BOOK_SCHEMA,sequence:stored.sequence+1,entries});
