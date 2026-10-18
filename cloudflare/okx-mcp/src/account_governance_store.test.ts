@@ -1,4 +1,4 @@
-import {governanceRequest} from "./account_governance_store.js";
+import {governanceRequest,enrollObservedAccount} from "./account_governance_store.js";
 import {defaultAccountPolicy} from "./account_policy.js";
 function ok(v:boolean,label:string){if(!v)throw Error(label);}
 class Storage{
@@ -60,3 +60,28 @@ ok(await badrisk.get("account_governance_v2")===undefined,
 const badgovernance=new Storage();
 await badgovernance.put("account_governance_v2",{bad:true});
 ok((await governanceRequest(badgovernance,"GET")).status===503,"corrupt policy fails closed");
+
+const fresh=new Storage();
+ok((await governanceRequest(fresh,"GET")).status===200,"initialize native registry");
+const observation={uid_fingerprint:"a".repeat(64),venue:"okx" as const,
+ environment:"real" as const,label:"Primary OKX"};
+const enrolled=await enrollObservedAccount(fresh,observation);
+ok(enrolled.status===200&&enrolled.body.status==="REGISTERED_DISABLED",
+ "fresh authenticated UID registers metadata into the same DO");
+const current=await governanceRequest(fresh,"GET");
+ok(current.status===200&&current.body.trading_requested===false
+ &&Array.isArray(current.body.accounts)&&current.body.accounts.length===1
+ &&(current.body.accounts[0] as any).enabled===false
+ &&(current.body.accounts[0] as any).identity_verified===true,
+ "registration is verified identity without automatically granting trading");
+ok((await enrollObservedAccount(fresh,observation)).body.status==="ALREADY_REGISTERED",
+ "same authenticated UID is idempotent");
+const initialRevision=(current.body.revision as number);
+ok((await enrollObservedAccount(fresh,{...observation,uid_fingerprint:"b".repeat(64)})).status===200,
+ "second account uses same catalog owner");
+ok((await governanceRequest(fresh,"GET")).body.revision===initialRevision+1,
+ "central revision advances once per new registered account");
+ok((await enrollObservedAccount(fresh,{...observation,uid_fingerprint:"x".repeat(64)})).status===400,
+ "caller cannot invent invalid UID fingerprints");
+ok((await governanceRequest(fresh,"GET")).body.trading_requested===false,
+ "new account never converts old operator authority into GO");
