@@ -1,4 +1,4 @@
-import {accountKey,amount,units,readRiskBook,reserveRisk,transitionRisk} from "./risk_book.js";
+import {accountKey,amount,units,readRiskBook,reserveRisk,transitionRisk,beginRiskPost} from "./risk_book.js";
 function check(value: boolean, label:string) { if(!value) throw Error(label); }
 class Storage {
   map=new Map<string,unknown>();
@@ -40,61 +40,66 @@ await sa.put("account_governance_v2",governance);
 const unattested=await reserveRisk(sa,policy,census,{...base,uid:a,
   intent_id:"intent_20261018_unproof",loss_usdt:"1"});
 check(unattested.status==="DENIED","raw census digest is not native attestation");
-const native={schema:"okx.risk-census-attestation/v1",connection_generation:77,
-  source_digest:census.source_digest,generated_at_ms:census.generated_at_ms,
-  account_keys:census.account_keys,occupied:census.occupied};
+const native={connection_generation:77,source_digest:census.source_digest,
+  native_account_evidence_complete:true,native_order_evidence_complete:true,
+  native_ledger_evidence_complete:true};
 await sa.put("generation",77);
-await sa.put("risk_census_attestation_v1",native);
-check((await reserveRisk(sa,policy,{...census,source_digest:p},{...base,uid:a,
+const reserve=(storage:Parameters<typeof reserveRisk>[0],bounds:Parameters<typeof reserveRisk>[1],
+  source:Parameters<typeof reserveRisk>[2],input:Parameters<typeof reserveRisk>[3])=>
+  reserveRisk(storage,bounds,source,input,native);
+check((await reserve(sa,policy,{...census,source_digest:p},{...base,uid:a,
   intent_id:"intent_20261018_tamper",loss_usdt:"1"})).status==="DENIED",
  "census digest mismatch never reserves");
 await sa.put("generation",78);
-check((await reserveRisk(sa,policy,census,{...base,uid:a,
+check((await reserve(sa,policy,census,{...base,uid:a,
   intent_id:"intent_20261018_stale",loss_usdt:"1"})).status==="DENIED",
  "prior-session risk census cannot be replayed");
 await sa.put("generation",77);
 const untrusted=new Storage();
-check((await reserveRisk(untrusted,policy,census,{...base,uid:a,intent_id:"intent_20261018_outs",loss_usdt:"1"})).status==="DENIED",
+check((await reserve(untrusted,policy,census,{...base,uid:a,intent_id:"intent_20261018_outs",loss_usdt:"1"})).status==="DENIED",
  "caller-supplied risk policy cannot mint capacity without persisted DO governance");
 const reqA={...base,uid:a,intent_id:"intent_20261018_aaaa",loss_usdt:"6"};
 const reqB={...base,uid:b,intent_id:"intent_20261018_bbbb",loss_usdt:"5"};
 check(units("1.000000001")===1000000001n,"exact 9-decimal");
 check(units("1e10")===null&&units("-1")===null&&units("0.0000000001")===null,"no float/exponents");
 check(amount(1000000001n)==="1.000000001","round-trip exact");
-const both=await Promise.all([reserveRisk(sa,policy,census,reqA),reserveRisk(sa,policy,census,reqB)]);
+const both=await Promise.all([reserve(sa,policy,census,reqA),reserve(sa,policy,census,reqB)]);
 check(both[0].status==="HELD"&&both[1].status==="DENIED","serial competition 6+5 >10");
 check((await readRiskBook(sa))?.entries.length===1,"one durable reservation");
-check((await reserveRisk(sa,policy,census,reqA)).status==="HELD","idempotent exact retry");
-check((await reserveRisk(sa,policy,census,{...reqA,plan_hash:d})).status==="DENIED","intent plan immutable");
-check((await reserveRisk(sa,policy,{...census,account_keys:["okx:real:"+a]},reqB)).status==="DENIED",
+check((await reserve(sa,policy,census,reqA)).status==="HELD","idempotent exact retry");
+check((await reserve(sa,policy,census,{...reqA,plan_hash:d})).status==="DENIED","intent plan immutable");
+check((await reserve(sa,policy,{...census,account_keys:["okx:real:"+a]},reqB)).status==="DENIED",
   "selected-only UID cannot assert empty other accounts");
-check((await reserveRisk(sa,policy,{...census,generated_at_ms:now-5001},reqB)).status==="DENIED",
+check((await reserve(sa,policy,{...census,generated_at_ms:now-5001},reqB)).status==="DENIED",
   "stale source is not zero risk");
-check((await reserveRisk(sa,{...policy,global_limit_usdt:"4"},census,reqB)).status==="DENIED",
+check((await reserve(sa,{...policy,global_limit_usdt:"4"},census,reqB)).status==="DENIED",
   "lowering limit does not free existing risk");
 const entry=(await readRiskBook(sa))!.entries[0];
-check((await transitionRisk(sa,entry.key,p,"UNKNOWN",d)).status==="DENIED",
+check((await transition("UNKNOWN",d)).status==="DENIED",
   "caller-supplied proof digest does not unlock risk state transition");
-async function attestTransition(to:string,proof:string){
+const beforePost=await readRiskBook(sa);
+check((await beginRiskPost(sa,entry.key,p,1,d,{
+ connection_generation:77,expected_book_sequence:beforePost!.sequence
+})).status==="POST_AUTHORIZED","one native POST granted after durable reserve");
+check((await beginRiskPost(sa,entry.key,p,1,d,{
+ connection_generation:77,expected_book_sequence:beforePost!.sequence
+})).status==="DENIED","same reservation cannot POST twice");
+const transition=async(to:Parameters<typeof transitionRisk>[3],proof:string)=>{
  const current=await readRiskBook(sa);
- await sa.put("risk_resolution_attestation_v1:"+entry.key,{
-   schema:"okx.risk-resolution-attestation/v1",
-   connection_generation:77,key:entry.key,plan_hash:p,next_state:to,
-   native_proof_digest:proof,expected_book_sequence:current!.sequence
+ return transitionRisk(sa,entry.key,p,to,proof,{
+  connection_generation:77,expected_book_sequence:current!.sequence
  });
-}
-await attestTransition("UNKNOWN",d);
-check((await transitionRisk(sa,entry.key,p,"UNKNOWN",d)).status==="UPDATED",
+};
+check((await transition("UNKNOWN",d)).status==="UPDATED",
   "ack-loss risk remains");
-check((await reserveRisk(sa,policy,census,reqB)).status==="DENIED","UNKNOWN consumes risk");
-check((await transitionRisk(sa,entry.key,p,"HELD",d)).status==="DENIED","no backward mutation");
-check((await transitionRisk(sa,entry.key,p,"RELEASED","invalid")).status==="DENIED","proof required");
-await attestTransition("RELEASED",d);
-check((await transitionRisk(sa,entry.key,p,"RELEASED",d)).status==="UPDATED","terminal reconcile release");
-check((await reserveRisk(sa,policy,census,reqA)).status==="DENIED","released intent tombstone never reused");
-check((await reserveRisk(sa,policy,census,reqB)).status==="HELD","risk freed after proof");
+check((await reserve(sa,policy,census,reqB)).status==="DENIED","UNKNOWN consumes risk");
+check((await transition("HELD",d)).status==="DENIED","no backward mutation");
+check((await transition("RELEASED","invalid")).status==="DENIED","proof required");
+check((await transition("RELEASED",d)).status==="UPDATED","terminal reconcile release");
+check((await reserve(sa,policy,census,reqA)).status==="DENIED","released intent tombstone never reused");
+check((await reserve(sa,policy,census,reqB)).status==="HELD","risk freed after proof");
 const v=await readRiskBook(sa);
 check(v?.entries.length===2&&v.entries[0].state==="RELEASED"&&v.entries[1].state==="HELD","durability");
 await sa.put("risk_book_v1",{fake:true});
-check((await reserveRisk(sa,policy,census,{...reqB,intent_id:"intent_20261018_cccc"})).status==="DENIED",
+check((await reserve(sa,policy,census,{...reqB,intent_id:"intent_20261018_cccc"})).status==="DENIED",
   "corrupt owner fails closed");
