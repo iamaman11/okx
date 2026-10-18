@@ -1767,6 +1767,18 @@ pub enum DirectTransportFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operator_policy: Option<CentralAccountPolicy>,
     },
+    RiskControl {
+        schema: String,
+        session_id: String,
+        connection_generation: u64,
+        command: risk_authority::RiskCommand,
+    },
+    RiskControlResult {
+        schema: String,
+        session_id: String,
+        connection_generation: u64,
+        result: risk_authority::RiskResult,
+    },
     DeliveryAck {
         schema: String,
         session_id: String,
@@ -1863,6 +1875,36 @@ impl DirectTransportFrame {
                 }
                 request.validate()
             }
+            Self::RiskControl {
+                schema,
+                session_id,
+                connection_generation,
+                command,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(session_id, 16, 128)?;
+                validate_connection_generation(*connection_generation)?;
+                if command.valid() {
+                    Ok(())
+                } else {
+                    Err(ProtocolError::InvalidProductionTradingPolicy)
+                }
+            }
+            Self::RiskControlResult {
+                schema,
+                session_id,
+                connection_generation,
+                result,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(session_id, 16, 128)?;
+                validate_connection_generation(*connection_generation)?;
+                if result.valid() {
+                    Ok(())
+                } else {
+                    Err(ProtocolError::InvalidProductionTradingPolicy)
+                }
+            }
             Self::DeliveryAck {
                 schema,
                 session_id,
@@ -1895,6 +1937,8 @@ impl DirectTransportFrame {
             | Self::Ping { schema, .. }
             | Self::Pong { schema, .. }
             | Self::Request { schema, .. }
+            | Self::RiskControl { schema, .. }
+            | Self::RiskControlResult { schema, .. }
             | Self::DeliveryAck { schema, .. }
             | Self::Response { schema, .. } => schema,
         }
