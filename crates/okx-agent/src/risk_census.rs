@@ -91,12 +91,9 @@ impl AccountRiskEvidence {
                 .ok()
                 .and_then(|v| u64::try_from(v.timestamp_millis()).ok())
         };
-        let received_at_ms = received(&snapshot.source_received_at)
-            .into_iter()
-            .chain(received(&facts.summary.source_received_at))
-            .chain(Some(algos.received_at_ms))
-            .min()
-            .ok_or(E::StaleSource)?;
+        let snapshot_at = received(&snapshot.source_received_at).ok_or(E::StaleSource)?;
+        let history_at = received(&facts.summary.source_received_at).ok_or(E::StaleSource)?;
+        let received_at_ms = snapshot_at.min(history_at).min(algos.received_at_ms);
         if received_at_ms == 0 || received_at_ms > now_ms || now_ms - received_at_ms > 5_000 {
             return Err(E::StaleSource);
         }
