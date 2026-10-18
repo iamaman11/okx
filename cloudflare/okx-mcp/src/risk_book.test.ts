@@ -67,6 +67,14 @@ check(amount(1000000001n)==="1.000000001","round-trip exact");
 const both=await Promise.all([reserve(sa,policy,census,reqA),reserve(sa,policy,census,reqB)]);
 check(both[0].status==="HELD"&&both[1].status==="DENIED","serial competition 6+5 >10");
 check((await readRiskBook(sa))?.entries.length===1,"one durable reservation");
+check((await reserve(sa,policy,census,{...reqB,loss_usdt:"7"})).status==="DENIED",
+ "per-order limit is enforced centrally before any reservation");
+check((await reserve(sa,policy,census,{...reqA,intent_id:"intent_20261018_extra",
+ loss_usdt:"1"})).status==="DENIED",
+ "strategy risk cap cannot be exceeded by splitting orders");
+check((await reserve(sa,policy,census,{...reqA,intent_id:"intent_20261018_fake",
+ strategy_id:"unknown_strat",loss_usdt:"1"})).status==="DENIED",
+ "unregistered strategy cannot reserve portfolio risk");
 check((await reserve(sa,policy,census,reqA)).status==="HELD","idempotent exact retry");
 check((await reserve(sa,policy,census,{...reqA,plan_hash:d})).status==="DENIED","intent plan immutable");
 check((await reserve(sa,policy,{...census,account_keys:["okx:real:"+a]},reqB)).status==="DENIED",
