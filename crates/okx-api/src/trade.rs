@@ -16,6 +16,19 @@ const ALGO_ORDER_DETAILS_PATH: &str = "/api/v5/trade/order-algo";
 const ALGO_PENDING_PATH: &str = "/api/v5/trade/orders-algo-pending";
 const PROTECTIVE_ALGO_PAGE_LIMIT: usize = 100;
 const PROTECTIVE_ALGO_SAMPLE_LIMIT: usize = 8;
+/// All derivatives algo types documented for the same pending-algo endpoint.
+/// No polling, pagination retries or alternate trade client: a full page
+/// is INCOMPLETE and cannot support a new-risk admission.
+const DERIVATIVE_ALGO_TYPES: [&str; 8] = [
+    "conditional",
+    "oco",
+    "trigger",
+    "move_order_stop",
+    "chase",
+    "iceberg",
+    "twap",
+    "smart_iceberg",
+];
 const ACCOUNT_RATE_LIMIT_PATH: &str = "/api/v5/trade/account-rate-limit";
 pub const ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V1: &str = "okx.account-rate-limit/v1";
 pub const ACCOUNT_RATE_LIMIT_EVIDENCE_SCHEMA_V2: &str = "okx.account-rate-limit/v2";
@@ -409,6 +422,81 @@ pub struct PendingProtectiveAlgoInventory {
     pub samples: Vec<PendingProtectiveAlgoSample>,
 }
 
+/// Read-only account-wide Futures/SWAP census, not a protection-only sample.
+/// A pending non-protective algo may open risk without an ordinary live order.
+/// More than one page in any scope yields INCOMPLETE, not a false empty source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingDerivativeAlgoRiskInventory {
+    pub schema: &'static str,
+    pub instrument_types: &'static str,
+    pub order_types: &'static str,
+    pub scopes_checked: usize,
+    pub rows: usize,
+    pub complete_within_bound: bool,
+    pub samples: Vec<PendingProtectiveAlgoSample>,
+}
+
+fn normalize_derivative_algo_risk_inventory(
+    batches: Vec<(String, String, Vec<PendingAlgoOrderDetails>)>,
+) -> Result<PendingDerivativeAlgoRiskInventory, OkxError> {
+    let mut ids = BTreeSet::<String>::new();
+    let mut seen = BTreeSet::<(String, String)>::new();
+    let mut rows_total = 0_usize;
+    let mut complete = true;
+    let mut samples = Vec::new();
+    for (instrument_type, order_type, rows) in batches {
+        if !matches!(instrument_type.as_str(), "SWAP" | "FUTURES")
+            || !DERIVATIVE_ALGO_TYPES.contains(&order_type.as_str())
+            || !seen.insert((instrument_type.clone(), order_type.clone()))
+            || rows.len() > PROTECTIVE_ALGO_PAGE_LIMIT
+        {
+            return Err(OkxError::Response(
+                "invalid or repeated derivatives risk algo query scope".to_owned(),
+            ));
+        }
+        if rows.len() == PROTECTIVE_ALGO_PAGE_LIMIT {
+            complete = false;
+        }
+        for item in rows {
+            if item.instrument_type != instrument_type
+                || item.order_type != order_type
+                || item.algo_order_id.is_empty()
+                || item.instrument_id.is_empty()
+                || !matches!(item.state.as_str(), "live" | "pause")
+                || !ids.insert(item.algo_order_id.clone())
+            {
+                return Err(OkxError::Response(
+                    "inconsistent or duplicate derivatives pending algo".to_owned(),
+                ));
+            }
+            rows_total += 1;
+            if samples.len() < PROTECTIVE_ALGO_SAMPLE_LIMIT {
+                samples.push(PendingProtectiveAlgoSample {
+                    instrument_id: item.instrument_id,
+                    algo_order_id: item.algo_order_id,
+                    client_order_id: item.client_order_id,
+                    order_type: item.order_type,
+                    state: item.state,
+                });
+            }
+        }
+    }
+    if seen.len() != DERIVATIVE_ALGO_TYPES.len() * 2 {
+        return Err(OkxError::Response(
+            "one or more derivatives pending algo categories are missing".to_owned(),
+        ));
+    }
+    Ok(PendingDerivativeAlgoRiskInventory {
+        schema: "okx.pending-derivative-risk-algos/v1",
+        instrument_types: "SWAP,FUTURES",
+        order_types: "conditional,oco,trigger,move_order_stop,chase,iceberg,twap,smart_iceberg",
+        scopes_checked: seen.len(),
+        rows: rows_total,
+        complete_within_bound: complete,
+        samples,
+    })
+}
+
 fn normalize_protective_algo_inventory(
     batches: Vec<(String, String, Vec<PendingAlgoOrderDetails>)>,
 ) -> Result<PendingProtectiveAlgoInventory, OkxError> {
@@ -505,6 +593,32 @@ impl TradeApi {
             }
         }
         normalize_protective_algo_inventory(batches)
+    }
+
+    /// Native read-only derivatives risk inventory, including all algo
+    /// categories capable of creating future exposure. Separate from the
+    /// cheaper conditional/OCO-only protection inventory for normal preflight.
+    pub async fn pending_derivative_risk_algos(
+        &self,
+    ) -> Result<PendingDerivativeAlgoRiskInventory, OkxError> {
+        let mut batches = Vec::with_capacity(DERIVATIVE_ALGO_TYPES.len() * 2);
+        for instrument_type in ["SWAP", "FUTURES"] {
+            for order_type in DERIVATIVE_ALGO_TYPES {
+                let rows: Vec<PendingAlgoOrderDetails> = self
+                    .client
+                    .private_get(
+                        ALGO_PENDING_PATH,
+                        &[
+                            ("ordType", order_type.to_owned()),
+                            ("instType", instrument_type.to_owned()),
+                            ("limit", PROTECTIVE_ALGO_PAGE_LIMIT.to_string()),
+                        ],
+                    )
+                    .await?;
+                batches.push((instrument_type.to_owned(), order_type.to_owned(), rows));
+            }
+        }
+        normalize_derivative_algo_risk_inventory(batches)
     }
 
     pub fn admit_place_order(
@@ -1027,6 +1141,52 @@ mod tests {
             "state": "live"
         }))
         .expect("fixture")
+    }
+
+    fn all_derivative_scopes() -> Vec<(String, String, Vec<PendingAlgoOrderDetails>)> {
+        ["SWAP", "FUTURES"]
+            .iter()
+            .flat_map(|instrument| {
+                DERIVATIVE_ALGO_TYPES.iter().map(move |kind| {
+                    ((*instrument).to_owned(), (*kind).to_owned(), Vec::new())
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn derivatives_risk_census_covers_non_protective_algos_without_phantom_zero() {
+        let mut all = all_derivative_scopes();
+        assert_eq!(all.len(), 16);
+        all.iter_mut()
+            .find(|(_, kind, _)| kind == "twap")
+            .unwrap()
+            .2
+            .push(pending_algo("twap_01", "twap", "SWAP"));
+        let inv = normalize_derivative_algo_risk_inventory(all.clone()).unwrap();
+        assert_eq!(inv.scopes_checked, 16);
+        assert_eq!(inv.rows, 1);
+        assert!(inv.complete_within_bound);
+        assert_eq!(inv.samples[0].order_type, "twap");
+        all.pop();
+        assert!(normalize_derivative_algo_risk_inventory(all).is_err());
+    }
+
+    #[test]
+    fn derivatives_risk_census_rejects_duplicates_and_full_pages() {
+        let mut all = all_derivative_scopes();
+        all[0].2 = (0..PROTECTIVE_ALGO_PAGE_LIMIT)
+            .map(|i| pending_algo(&format!("algo_{i}"), "conditional", "SWAP"))
+            .collect();
+        let inv = normalize_derivative_algo_risk_inventory(all.clone()).unwrap();
+        assert!(!inv.complete_within_bound);
+        assert_eq!(inv.rows, PROTECTIVE_ALGO_PAGE_LIMIT);
+        all[0].2.push(pending_algo("extra", "conditional", "SWAP"));
+        assert!(normalize_derivative_algo_risk_inventory(all).is_err());
+        let mut dupe = all_derivative_scopes();
+        dupe[0].2.push(pending_algo("shared", "conditional", "SWAP"));
+        dupe[1].2.push(pending_algo("shared", "oco", "SWAP"));
+        assert!(normalize_derivative_algo_risk_inventory(dupe).is_err());
     }
 
     fn all_protective_scopes(
