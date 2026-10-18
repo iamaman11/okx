@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
@@ -9,7 +9,7 @@ use okx_protocol::{
 };
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
 use tokio::{
-    sync::watch,
+    sync::{mpsc, oneshot, watch},
     time::{Instant, MissedTickBehavior, interval, sleep},
 };
 use tokio_tungstenite::{
@@ -29,6 +29,7 @@ use crate::{
     market_bootstrap::MarketBootstrapper,
     query::{ObservationQueryContext, dispatch},
     research_session::ResearchSessionHandle,
+    risk_bridge::{NativeRiskClient, OutboundRiskCommand},
 };
 
 const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
@@ -254,6 +255,11 @@ async fn run_session(
     // No two exchange-affecting commands may be outstanding on the same
     // transport generation. Read/status requests remain independently bounded.
     let mut active_mutation: Option<String> = None;
+    // One existing transport and exactly one outbound mutation owner.
+    let (risk_tx, mut risk_rx) = mpsc::channel::<OutboundRiskCommand>(4);
+    let risk_client = NativeRiskClient::new(risk_tx);
+    let mut pending_risk: HashMap<String, oneshot::Sender<okx_protocol::risk_authority::RiskResult>> =
+        HashMap::new();
 
     loop {
         tokio::select! {
@@ -298,6 +304,29 @@ async fn run_session(
                 heartbeat_deadline
                     .as_mut()
                     .reset(Instant::now() + Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
+            }
+            outbound_risk = risk_rx.recv() => {
+                if let Some(outbound) = outbound_risk {
+                    if active_mutation.is_none() || pending_risk.len() >= 4 {
+                        drop(outbound.return_to);
+                        continue;
+                    }
+                    let id = outbound.command.command_id.clone();
+                    if pending_risk.contains_key(&id) {
+                        drop(outbound.return_to);
+                        continue;
+                    }
+                    pending_risk.insert(id, outbound.return_to);
+                    send_frame(
+                        &mut sink,
+                        &DirectTransportFrame::RiskControl {
+                            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V1.to_owned(),
+                            session_id: session_id.clone(),
+                            connection_generation,
+                            command: outbound.command,
+                        },
+                    ).await?;
+                }
             }
             completed = in_flight.next(), if !in_flight.is_empty() => {
                 let Some((request_id, mutating, result)) = completed else {
@@ -498,7 +527,8 @@ async fn run_session(
                         in_flight.push(
                             async move {
                                 let query_context = query_context
-                                    .with_operator_policy(operator_policy.as_ref(), frame_generation);
+                                    .with_operator_policy(operator_policy.as_ref(), frame_generation)
+                                    .with_risk_client(Some(&risk_client));
                                 let result =
                                     dispatch(&request, query_context, &generated_at).await;
                                 (response_request_id, mutating, result)
@@ -506,12 +536,30 @@ async fn run_session(
                             .boxed(),
                         );
                     }
+                    DirectTransportFrame::RiskControlResult {
+                        session_id: frame_session,
+                        connection_generation: frame_generation,
+                        result,
+                        ..
+                    } => {
+                        require_session(
+                            &session_id,
+                            connection_generation,
+                            &frame_session,
+                            frame_generation,
+                        )?;
+                        let Some(tx) = pending_risk.remove(&result.command_id) else {
+                            return Err(AgentError::CloudflareTransport(
+                                "unsolicited risk authority result".to_owned(),
+                            ));
+                        };
+                        let _ = tx.send(result);
+                    }
                     DirectTransportFrame::Hello { .. }
                     | DirectTransportFrame::HelloAck { .. }
                     | DirectTransportFrame::DeliveryAck { .. }
                     | DirectTransportFrame::Response { .. }
-                    | DirectTransportFrame::RiskControl { .. }
-                    | DirectTransportFrame::RiskControlResult { .. } => {
+                    | DirectTransportFrame::RiskControl { .. } => {
                         return Err(AgentError::CloudflareTransport(
                             "unexpected direct transport frame from server".to_owned(),
                         ));
