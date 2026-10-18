@@ -304,6 +304,21 @@ pub(super) async fn dispatch(
         AgentOperation::AbandonPreparedExecution { intent_id } => {
             abandon_prepared_execution(request, context, generated_at, intent_id).await
         }
+        AgentOperation::ReconcileUnsentPrepared {
+            expected_manifest_sha256,
+            account_uid_fingerprint,
+            intent_ids,
+        } => {
+            reconcile_unsent_prepared(
+                request,
+                context,
+                generated_at,
+                expected_manifest_sha256,
+                account_uid_fingerprint,
+                intent_ids,
+            )
+            .await
+        }
         AgentOperation::ExecutionStatus { intent_id } => {
             execution_status_response(request, context, generated_at, intent_id).await
         }
@@ -1512,6 +1527,114 @@ async fn abandon_prepared_execution(
             ))
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+/// One independently witnessed, zero-POST historical source repair.
+/// The exact hash, UID and sorted COMPLETE native PREPARED inventory must
+/// match. Source changes invalidate the transaction before a single save.
+async fn reconcile_unsent_prepared(
+    request: &AgentRequest,
+    context: ObservationQueryContext<'_>,
+    generated_at: &str,
+    expected_manifest_sha256: &str,
+    account_uid_fingerprint: &str,
+    intent_ids: &[String],
+) -> AgentResult<AgentResponse> {
+    let deny = |reason: &str| {
+        failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_PREPARED_ABANDON_UNSAFE_CODE,
+            reason.to_owned(),
+            false,
+        )
+    };
+    let Some(execution) = context.execution else {
+        return Ok(execution_unavailable(request, generated_at));
+    };
+    if execution.mode() != crate::execution_runtime::ExecutionRuntimeMode::ReadOnly {
+        return Ok(deny(
+            "historical maintenance requires the REAL read-only executor",
+        ));
+    }
+    // A finance write, even though it never calls TradeApi, must enter through
+    // the one authenticated Cloudflare Worker session, not a legacy mailbox.
+    let now_ms = utc_now_ms();
+    if !context.operator_policy.is_some_and(|policy| {
+        policy.valid()
+            && policy.session_generation == context.transport_generation
+            && policy.issued_at_ms <= now_ms
+            && now_ms.saturating_sub(policy.issued_at_ms)
+                <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
+    }) {
+        return Ok(deny(
+            "trusted Worker maintenance session is absent or stale",
+        ));
+    }
+    let Some(observer) = context.account_fallback else {
+        return Ok(deny(
+            "independent authenticated account observer unavailable",
+        ));
+    };
+    let Some(ws) = context.private_ws else {
+        return Ok(deny("native private WebSocket continuity unavailable"));
+    };
+    let cursor = match ws.convergence_cursor().await {
+        Ok(value) => value,
+        Err(_) => return Ok(deny("private WS fence unavailable")),
+    };
+    let snapshot = match fresh_account(request, context, generated_at).await? {
+        FreshAccount::Ready(value) => value,
+        FreshAccount::Response(response) => return Ok(*response),
+    };
+    if snapshot.account_uid_fingerprint != account_uid_fingerprint {
+        return Ok(deny("authenticated account UID does not match exact batch"));
+    }
+    let facts = match observer.ledger_facts(&snapshot).await {
+        Ok(value) => value,
+        Err(_) => return Ok(deny("complete exchange order/fill history unavailable")),
+    };
+    let protection = match observer.pending_protective_algos().await {
+        Ok(value) => value,
+        Err(_) => return Ok(deny("native OCO inventory unavailable")),
+    };
+    let window = match ws.convergence_window(cursor).await {
+        Ok(value) => value,
+        Err(_) => return Ok(deny("private WS source generation changed")),
+    };
+    if !window.events.is_empty() {
+        return Ok(deny("private WS changed during read-only proof"));
+    }
+    // Source proof is checked again by the ONE Rust ledger owner while
+    // holding its mutation-ingress guard and mutex, immediately before save.
+    match execution
+        .close_historical_unsent_batch(
+            account_uid_fingerprint,
+            expected_manifest_sha256,
+            intent_ids,
+            &facts,
+            &protection,
+            utc_now_ms(),
+        )
+        .await
+    {
+        Ok(closed) => Ok(completed(
+            request,
+            generated_at,
+            "okx.historical-unsent-maintenance/v1",
+            serde_json::json!({
+                "closed": closed,
+                "exchange_mutations": 0,
+                "account_uid_fingerprint": account_uid_fingerprint,
+                "financial_audit": "REQUIRES_SEPARATE_EXCHANGE_BILLS_AND_NAV_PROOFS",
+                "scope": "NATIVE_LEDGER_ONLY",
+            }),
+        )),
+        Err(error) => Ok(deny(&format!(
+            "exact native source or atomic ledger gate rejected maintenance: {error}"
+        ))),
     }
 }
 

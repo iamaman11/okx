@@ -989,6 +989,19 @@ where
         Ok(self.ledger.abort_reverse(root_intent_id, observed_at_ms)?)
     }
 
+    /// One durable batch; never uses TradeApi. Only the existing native
+    /// owner may call after independent source/UID/manifest verification.
+    pub fn abandon_prepared_batch(
+        &mut self,
+        account_uid: &str,
+        exact_intents: &[String],
+        observed_at_ms: u64,
+    ) -> Result<usize, OrderExecutorError> {
+        Ok(self
+            .ledger
+            .abandon_prepared_batch(account_uid, exact_intents, observed_at_ms)?)
+    }
+
     pub fn abandon_prepared(
         &mut self,
         intent_id: &str,

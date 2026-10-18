@@ -1465,6 +1465,59 @@ impl ExecutionRuntime {
             .abandon_prepared(intent_id, observed_at_ms)
     }
 
+    /// Production read-only financial maintenance. Source proof is obtained
+    /// from the existing authenticated observer with a native WS cursor.
+    /// This path NEVER calls the exchange mutation gateway or grants new risk.
+    pub async fn close_historical_unsent_batch(
+        &self,
+        expected_uid: &str,
+        expected_manifest_sha256: &str,
+        exact_intents: &[String],
+        facts: &AccountLedgerFacts,
+        native_protection: &PendingProtectiveAlgoInventory,
+        observed_at_ms: u64,
+    ) -> AgentResult<usize> {
+        if self.environment.demo
+            || self.mode != ExecutionRuntimeMode::ReadOnly
+            || facts.summary.authority.account_uid_fingerprint != expected_uid
+            || facts.summary.open_positions != 0
+            || facts.summary.pending_orders != 0
+            || !facts.exchange_orders.is_empty()
+            || !facts.exchange_fills.is_empty()
+            || !facts.exchange_orders_history_complete
+            || !facts.exchange_fills_history_complete
+            || !facts.bills_history_complete
+            || facts.summary.history_coverage.is_empty()
+            || !facts
+                .summary
+                .history_coverage
+                .iter()
+                .all(|scope| scope.complete_within_bound)
+            || !native_protection.complete_within_bound
+            || native_protection.rows != 0
+            || expected_manifest_sha256.len() != 64
+            || !expected_manifest_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(AgentError::ProductionPolicyUnavailable);
+        }
+        let mut owner = self.executor.lock().await;
+        let storage = owner.ledger().attest_storage()?;
+        if storage.manifest_sha256 != expected_manifest_sha256 {
+            return Err(AgentError::ProductionPolicyUnavailable);
+        }
+        let changed = owner.abandon_prepared_batch(expected_uid, exact_intents, observed_at_ms)?;
+        // Successful commit must be independently readable from durable disk.
+        let new_storage = owner.ledger().attest_storage()?;
+        if new_storage.manifest_sha256 == storage.manifest_sha256
+            || new_storage.on_disk_schema.is_empty()
+        {
+            return Err(AgentError::ProductionPolicyUnavailable);
+        }
+        Ok(changed)
+    }
+
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {
         self.executor.lock().await.ledger().get(intent_id).cloned()
     }

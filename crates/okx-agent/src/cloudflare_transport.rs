@@ -49,6 +49,9 @@ fn direct_operation_allowed(
     operation: &AgentOperation,
 ) -> bool {
     operation.direct_transport_read_only()
+        || (profile == DirectRuntimeProfile::Production
+            && runtime_mode == Some(ExecutionRuntimeMode::ReadOnly)
+            && matches!(operation, AgentOperation::ReconcileUnsentPrepared { .. }))
         || (profile == DirectRuntimeProfile::DemoAcceptance
             && runtime_mode == Some(ExecutionRuntimeMode::DemoAcceptance)
             && operation.direct_transport_demo_execution())

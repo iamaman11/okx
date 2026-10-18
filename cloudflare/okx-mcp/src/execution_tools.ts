@@ -92,12 +92,14 @@ export const EXECUTION_TOOLS: Json[] = [
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
-        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage","migrate_finalized_ledger_storage"] },
+        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage","migrate_finalized_ledger_storage","reconcile_unsent_prepared"] },
         intent_id: ID, instrument: INSTRUMENT,
         trade_mode: { type: "string", enum: ["cross","isolated"] },
         order_type: { type: "string", enum: ["limit","post_only","fok","ioc"] },
         spec, risk, lineage, mutation_id: MUTATION_ID, new_size: POSITIVE, new_price: POSITIVE,
         expected_manifest_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+        account_uid_fingerprint: { type: "string", pattern: "^[0-9a-f]{64}$" },
+        intent_ids: { type: "array", minItems: 1, maxItems: 32, uniqueItems: true, items: ID },
         expected_finalized_checksum_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
         expected_stopped_at_ms: { type: "integer", minimum: 1 },
         origin_schema: VERSION, origin_version: VERSION, mandate_version: VERSION,
@@ -192,7 +194,7 @@ export function isExecutionMutation(operationType: unknown): boolean {
     "prepare_execution", "submit_prepared_execution",
     "mutate_execution", "abort_reverse_execution", "abandon_prepared_execution",
     "begin_strategy_run", "finalize_strategy_run", "quarantine_unverified_strategy_run", "set_leverage",
-    "migrate_finalized_ledger_storage",
+    "migrate_finalized_ledger_storage", "reconcile_unsent_prepared",
   ].includes(String(operationType));
 }
 
@@ -205,6 +207,7 @@ const PRODUCTION_NATIVE_ACTIONS = new Set([
   "submit_prepared_execution",
   "finalize_strategy_run",
   "quarantine_unverified_strategy_run",
+  "reconcile_unsent_prepared",
 ]);
 
 export function executionProfilePermitsOperation(profile: string | undefined, operationType: unknown): boolean {
@@ -220,6 +223,28 @@ export function buildExecutionOperation(args: Record<string, unknown>): Record<s
   if (!token(args.intent_id,16,128) || typeof args.action !== "string") return null;
   const intent_id=args.intent_id;
   switch(args.action){
+    case "reconcile_unsent_prepared": {
+      // Exact whole-inventory maintenance: not a trade, not a dry-run signal
+      // and never operator-supplied evidence about OKX orders/fills.
+      const ids=args.intent_ids;
+      if (!exactKeys(args, [
+          "action","intent_id","expected_manifest_sha256",
+          "account_uid_fingerprint","intent_ids"
+        ])
+        || typeof args.expected_manifest_sha256 !== "string"
+        || !/^[0-9a-f]{64}$/.test(args.expected_manifest_sha256)
+        || typeof args.account_uid_fingerprint !== "string"
+        || !/^[0-9a-f]{64}$/.test(args.account_uid_fingerprint)
+        || !Array.isArray(ids) || ids.length===0 || ids.length>32
+        || !ids.every(v=>token(v,16,128))
+        || !ids.every((v,i)=>i===0 || String(ids[i-1])<String(v))) return null;
+      return {
+        type:"reconcile_unsent_prepared",
+        expected_manifest_sha256:args.expected_manifest_sha256,
+        account_uid_fingerprint:args.account_uid_fingerprint,
+        intent_ids:ids,
+      };
+    }
     case "migrate_finalized_ledger_storage": {
       if (!exactKeys(args,[
         "action","intent_id","expected_manifest_sha256",
