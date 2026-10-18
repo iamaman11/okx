@@ -1,6 +1,6 @@
 import {accountPolicyRequest,defaultAccountPolicy,validAccountPolicy} from "./account_policy.js";
 import {GOVERNANCE_SCHEMA,migrateV1,reviseGovernance,validGovernance,type GovernanceUpdate,type Governance} from "./account_governance.js";
-import {readRiskBook} from "./risk_book.js";
+import {readRiskBook,units,amount,type RiskBook} from "./risk_book.js";
 
 export const GOVERNANCE_STORAGE_KEY="account_governance_v2" as const;
 const LEGACY_KEY="account_policy_v1";
@@ -16,10 +16,21 @@ function parseUpdate(raw:unknown):GovernanceUpdate|null{
     ||!Array.isArray(raw.accounts)||raw.accounts.length>32)return null;
   return raw as unknown as GovernanceUpdate;
 }
-function result(policy:Governance,riskSequence:number){
+function result(policy:Governance,book:RiskBook){
+  let reserved=0n,unknown=0;
+  for(const item of book.entries){
+    if(item.state==="RELEASED")continue;
+    reserved+=units(item.loss_usdt)!;
+    if(item.state==="UNKNOWN")unknown++;
+  }
   return {
     ...policy,
-    risk_book_sequence:riskSequence,
+    risk_book_sequence:book.sequence,
+    risk_book_occupied_loss_usdt:amount(reserved),
+    risk_book_unknown_count:unknown,
+    complete_all_account_census:false,
+    available_for_new_risk_usdt:null,
+    available_risk_reason:"NATIVE_COMPLETE_ACCOUNT_CENSUS_UNPROVEN",
     effective_trading:false,
     effective_reason:"RUST_NATIVE_GOVERNANCE_AND_SOURCE_RESERVATION_NOT_ACCEPTED",
     status:"CONFIGURED"
@@ -48,13 +59,14 @@ export async function governanceRequest(
       const converted=migrateV1(legacy===undefined?defaultAccountPolicy():legacy);
       if(converted===null)return {status:503,body:{status:"FAILED",reason:"GOVERNANCE_MIGRATION_INVALID"}};
       policy=converted;
-      await tx.put(GOVERNANCE_STORAGE_KEY,policy);
     } else if(!validGovernance(stored)){
       return {status:503,body:{status:"FAILED",reason:"GOVERNANCE_CORRUPT"}};
     } else policy=stored;
     const book=await readRiskBook(tx);
     if(book===null)return {status:503,body:{status:"FAILED",reason:"RISK_BOOK_CORRUPT"}};
-    if(method==="GET")return {status:200,body:result(policy,book.sequence)};
+    // Materialize v2 only after BOTH policy and risk journal are valid.
+    if(stored===undefined)await tx.put(GOVERNANCE_STORAGE_KEY,policy);
+    if(method==="GET")return {status:200,body:result(policy,book)};
     if(input===null) return {status:400,body:{status:"FAILED",reason:"INVALID_GOVERNANCE_REQUEST"}};
     const revised=reviseGovernance(policy,input);
     if(!revised){
@@ -62,6 +74,6 @@ export async function governanceRequest(
     }
     // Without native grant/identity attestation, writes never create authority.
     await tx.put(GOVERNANCE_STORAGE_KEY,revised);
-    return {status:200,body:result(revised,book.sequence)};
+    return {status:200,body:result(revised,book)};
   });
 }

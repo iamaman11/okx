@@ -11,6 +11,10 @@ const s=new Storage();
 const first=await governanceRequest(s,"GET");
 ok(first.status===200&&first.body.revision===0&&first.body.trading_requested===false,"cold migration OFF");
 ok(first.body.effective_trading===false&&first.body.risk_book_sequence===0,"never advertise native GO");
+ok(first.body.available_for_new_risk_usdt===null&&first.body.complete_all_account_census===false,
+ "empty RiskBook does not prove free portfolio budget");
+ok(first.body.available_risk_reason==="NATIVE_COMPLETE_ACCOUNT_CENSUS_UNPROVEN",
+ "explicit native risk blocker");
 const update={expected_revision:0,trading_requested:false,max_total_modelled_loss_usdt:"2.75",accounts:[]};
 const changed=await governanceRequest(s,"POST",update);
 ok(changed.status===200&&changed.body.revision===1&&changed.body.max_total_modelled_loss_usdt==="2.75",
@@ -36,6 +40,8 @@ ok((await governanceRequest(corrupted,"GET")).status===503,"corrupt legacy fails
 const badrisk=new Storage();
 await badrisk.put("risk_book_v1",{fake:true});
 ok((await governanceRequest(badrisk,"GET")).status===503,"corrupt risk owner fails closed");
+ok(await badrisk.get("account_governance_v2")===undefined,
+  "corrupt risk owner never partially writes a migrated governance policy");
 const badgovernance=new Storage();
 await badgovernance.put("account_governance_v2",{bad:true});
 ok((await governanceRequest(badgovernance,"GET")).status===503,"corrupt policy fails closed");
