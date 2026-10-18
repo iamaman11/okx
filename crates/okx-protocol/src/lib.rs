@@ -4165,15 +4165,31 @@ mod direct_transport_tests {
             session_generation: 7,
         };
         assert!(policy.authorizes_uid(&uid, 1001, 7));
-        for budget in ["0.000000001","0.5","1","5.5","10","10.000000000"] {
+        for budget in ["0.000000001", "0.5", "1", "5.5", "10", "10.000000000"] {
             let mut adjusted = policy.clone();
             adjusted.max_total_modelled_loss_usdt = budget.to_owned();
-            assert!(adjusted.authorizes_uid(&uid, 1001, 7), "valid budget: {budget}");
+            assert!(
+                adjusted.authorizes_uid(&uid, 1001, 7),
+                "valid budget: {budget}"
+            );
         }
-        for budget in ["0","0.000000000","0.0000000001","-1","11","10.000000001","NaN","1e0","01"] {
+        for budget in [
+            "0",
+            "0.000000000",
+            "0.0000000001",
+            "-1",
+            "11",
+            "10.000000001",
+            "NaN",
+            "1e0",
+            "01",
+        ] {
             let mut adjusted = policy.clone();
             adjusted.max_total_modelled_loss_usdt = budget.to_owned();
-            assert!(!adjusted.authorizes_uid(&uid, 1001, 7), "invalid budget: {budget}");
+            assert!(
+                !adjusted.authorizes_uid(&uid, 1001, 7),
+                "invalid budget: {budget}"
+            );
         }
         assert!(!policy.authorizes_uid(&uid, 1001, 8));
         assert!(!policy.authorizes_uid(&uid, 1000 + CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS + 1, 7));
