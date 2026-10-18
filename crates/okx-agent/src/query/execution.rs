@@ -1530,6 +1530,19 @@ async fn abandon_prepared_execution(
     }
 }
 
+/// Direct WebSocket runner supplies a nonzero verified transport generation.
+/// GitHub mailbox and all standalone/local contexts always use zero.
+fn historical_maintenance_transport_admitted(generation: u64) -> bool {
+    generation != 0
+}
+
+#[cfg(test)]
+#[test]
+fn historical_maintenance_follows_authenticated_transport_not_trade_policy() {
+    assert!(!historical_maintenance_transport_admitted(0));
+    assert!(historical_maintenance_transport_admitted(488));
+}
+
 /// One independently witnessed, zero-POST historical source repair.
 /// The exact hash, UID and sorted COMPLETE native PREPARED inventory must
 /// match. Source changes invalidate the transaction before a single save.
@@ -1559,18 +1572,14 @@ async fn reconcile_unsent_prepared(
             "historical maintenance requires the REAL read-only executor",
         ));
     }
-    // A finance write, even though it never calls TradeApi, must enter through
-    // the one authenticated Cloudflare Worker session, not a legacy mailbox.
-    let now_ms = utc_now_ms();
-    if !context.operator_policy.is_some_and(|policy| {
-        policy.valid()
-            && policy.session_generation == context.transport_generation
-            && policy.issued_at_ms <= now_ms
-            && now_ms.saturating_sub(policy.issued_at_ms)
-                <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
-    }) {
+    // A finance-only write requires the authenticated direct Worker session,
+    // never the GitHub mailbox. Its transport generation is assigned locally
+    // after the existing WS session handshake, not by the OAuth caller.
+    // Central *trading* policy is deliberately independent: disabled trading
+    // must not prevent a zero-POST correction of strictly unsent old intents.
+    if !historical_maintenance_transport_admitted(context.transport_generation) {
         return Ok(deny(
-            "trusted Worker maintenance session is absent or stale",
+            "authenticated Worker maintenance transport unavailable",
         ));
     }
     let Some(observer) = context.account_fallback else {
