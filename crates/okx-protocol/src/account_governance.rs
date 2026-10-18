@@ -174,10 +174,7 @@ impl AccountControlV2 {
         let venue_valid = (2..=32).contains(&self.venue.len())
             && self.venue.starts_with(|c: char| c.is_ascii_lowercase())
             && self.venue.bytes().all(|byte| {
-                byte.is_ascii_lowercase()
-                    || byte.is_ascii_digit()
-                    || byte == b'_'
-                    || byte == b'-'
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
             });
         if !token(&self.id)
             || self.label.len() > 80
