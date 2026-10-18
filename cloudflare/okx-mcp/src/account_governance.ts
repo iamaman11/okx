@@ -82,7 +82,6 @@ function validLimits(value:unknown):value is Limits{
     &&x.allowed_instruments.every(t=>typeof t==="string"&&INSTR.test(t))
     &&new Set(x.allowed_instruments).size===x.allowed_instruments.length;
 }
-function optionalPositive(value:unknown):boolean{return value===null||positive(value);}
 function validAccount(a:unknown):a is Account{
   if(!record(a))return false;
   const fields=["id","label","venue","environment","uid_fingerprint","identity_verified","enabled","limits","strategies"];
