@@ -1,10 +1,14 @@
 //! One native source-complete account cohort. Never infer portfolio flat
 //! from only the selected account. Only Rust/venue may construct evidence.
-use okx_observation::AccountLedgerFacts;
+use okx_api::PendingDerivativeAlgoRiskInventory;
+use okx_execution::{DurableExecutionLedger, ExecutionState};
+use okx_observation::{AccountLedgerFacts, AccountSnapshot};
+use okx_runtime::{PrivateConnectionState, PrivateConvergenceWindow};
 use okx_protocol::account_governance::{
     AccountEnvironmentV2, AuthorizationStatus, CentralGovernanceSnapshotV2,
 };
 use okx_protocol::risk_authority::{NativeRiskCensus, RiskAccountOccupancy};
+use chrono::DateTime;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -20,20 +24,21 @@ pub enum CensusFailure {
     PrivateStreamGap,
     UnknownMutation,
     UnpricedExposure,
+    InconsistentAuthenticatedIdentity,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountRiskEvidence {
-    pub account_key: String,
-    pub source_generation: String,
-    pub received_at_ms: u64,
-    pub account_inventory_complete: bool,
-    pub orders_algos_complete: bool,
-    pub financial_history_complete: bool,
-    pub private_stream_continuous: bool,
-    pub unknown_mutations_reconciled: bool,
+    account_key: String,
+    source_generation: String,
+    received_at_ms: u64,
+    account_inventory_complete: bool,
+    orders_algos_complete: bool,
+    financial_history_complete: bool,
+    private_stream_continuous: bool,
+    unknown_mutations_reconciled: bool,
     /// None means unknown or potentially unbounded manual/owned risk.
-    pub all_exposure_modelled_loss_usdt: Option<String>,
+    all_exposure_modelled_loss_usdt: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub struct PortfolioRiskSources {
@@ -63,6 +68,117 @@ fn loss_valid(value: &str) -> bool {
         && value.len() <= 25
         && !value.contains(['e', 'E', '_', '+', '-'])
 }
+impl AccountRiskEvidence {
+    /// A genuinely authenticated, exactly FLAT derivatives source. Only the
+    /// native Rust owner can build it, after signed REST and a private WS
+    /// convergence cursor. This deliberately cannot price open/manual risk:
+    /// such exposure must use a separately validated native risk model.
+    ///
+    /// Existing PREPARED candidate is allowed in the ledger because it has
+    /// not sent an order. Any other nonterminal mutation is disqualifying.
+    pub fn from_native_flat_read(
+        snapshot: &AccountSnapshot,
+        facts: &AccountLedgerFacts,
+        algos: &PendingDerivativeAlgoRiskInventory,
+        private_window: &PrivateConvergenceWindow,
+        ledger: &DurableExecutionLedger,
+        prepared_intent: Option<&str>,
+        now_ms: u64,
+    ) -> Result<Self, CensusFailure> {
+        use CensusFailure as E;
+        let received_at_ms = DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+            .ok()
+            .and_then(|v| u64::try_from(v.timestamp_millis()).ok())
+            .ok_or(E::StaleSource)?;
+        if received_at_ms == 0
+            || received_at_ms > now_ms
+            || now_ms - received_at_ms > 5_000
+        {
+            return Err(E::StaleSource);
+        }
+        let uid = &snapshot.account_uid_fingerprint;
+        let account_key = format!("okx:real:{uid}");
+        if !account_key_valid(&account_key)
+            || facts.summary.authority.account_uid_fingerprint != *uid
+            || facts.summary.account_generation != snapshot.account_generation
+            || snapshot.api_key_permissions.as_slice() != ["read_only"]
+        {
+            return Err(E::InconsistentAuthenticatedIdentity);
+        }
+
+        if algos.schema != "okx.pending-derivative-risk-algos/v1"
+            || algos.scopes_checked != 16
+            || !algos.complete_within_bound
+            || algos.rows != 0
+            || snapshot.pending_orders.len() != facts.summary.pending_orders
+            || snapshot.positions.len() != facts.summary.open_positions
+            || !snapshot.pending_orders.is_empty()
+            || !snapshot.positions.is_empty()
+            || !facts.authoritative_positions.is_empty()
+        {
+            return Err(E::UnpricedExposure);
+        }
+        if !facts.bills_history_complete
+            || !facts.exchange_orders_history_complete
+            || !facts.exchange_fills_history_complete
+            || facts.summary.history_coverage.is_empty()
+            || facts
+                .summary
+                .history_coverage
+                .iter()
+                .any(|source| !source.complete_within_bound)
+        {
+            return Err(E::IncompleteHistory);
+        }
+        let ws = &private_window.status;
+        if !private_window.events.is_empty()
+            || private_window.generation != ws.connection_generation
+            || ws.connection_state != PrivateConnectionState::Connected
+            || !ws.logged_in
+            || !ws.subscriptions_complete
+            || !ws.account_data_seen
+            || !ws.positions_data_seen
+            || !snapshot.private_ws_connected
+            || snapshot.private_ws_generation != Some(ws.connection_generation)
+            || snapshot.private_ws_connection_fingerprint
+                != ws.connection_id_fingerprint
+        {
+            return Err(E::PrivateStreamGap);
+        }
+
+        let native = ledger
+            .profile_handoff_ledger_assessment(uid)
+            .map_err(|_| E::UnknownMutation)?;
+        let prepared = prepared_intent
+            .and_then(|id| ledger.get(id))
+            .is_some_and(|record| record.record.state == ExecutionState::Prepared
+                && record.record.plan.account_uid_fingerprint == *uid);
+        if native.account_uid_mismatches != 0
+            || native.unresolved_order_mutations != 0
+            || native.unresolved_protective_lifecycle != 0
+            || native.nonterminal_intents != usize::from(prepared)
+            || prepared_intent.is_some() && !prepared
+            || ledger.risk_stop().is_some()
+        {
+            return Err(E::UnknownMutation);
+        }
+        Ok(Self {
+            account_key,
+            source_generation: format!(
+                "{}:{}",
+                snapshot.account_generation, ws.connection_generation
+            ),
+            received_at_ms,
+            account_inventory_complete: true,
+            orders_algos_complete: true,
+            financial_history_complete: true,
+            private_stream_continuous: true,
+            unknown_mutations_reconciled: true,
+            all_exposure_modelled_loss_usdt: Some("0".to_owned()),
+        })
+    }
+}
+
 impl PortfolioRiskSources {
     /// Bind all registered Real accounts (including disabled ones) to the
     /// authenticated DO governance snapshot. Missing/unverified account
