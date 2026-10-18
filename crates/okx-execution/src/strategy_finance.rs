@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::{
     DurableExchangeEvidence, ExecutionAction, ExecutionLedgerEntry, StrategyCapitalReservation,
+    account_cashflow::{AccountBillClass, AccountBillSource, classify_native_account_bill},
 };
 
 pub const STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1: &str = "okx.strategy-financial-period/v1";
@@ -722,7 +723,26 @@ pub fn assess_persisted_financial_period_with_verified_source(
         if matches!(string(&bill.payload, "subType"), Some("173" | "174")) {
             reasons.insert("funding_unallocated");
         } else if !linked_bills.contains(key.trim_start_matches("bill:")) {
-            reasons.insert("unattributed_account_bill");
+            let payload = &bill.payload;
+            let kind = classify_native_account_bill(AccountBillSource {
+                bill_type: string(payload, "type").unwrap_or(""),
+                sub_type: string(payload, "subType").unwrap_or(""),
+                currency: string(payload, "ccy").unwrap_or(""),
+                balance_change: string(payload, "balChg"),
+                instrument_id: string(payload, "instId").unwrap_or(""),
+                order_id: string(payload, "ordId"),
+                trade_id: string(payload, "tradeId"),
+                client_order_id: string(payload, "clOrdId"),
+                fee: string(payload, "fee"),
+                pnl: string(payload, "pnl"),
+            });
+            reasons.insert(match kind {
+                AccountBillClass::TransferIn(_) | AccountBillClass::TransferOut(_) => {
+                    "account_cashflow_not_allocated_to_run"
+                }
+                AccountBillClass::UnverifiedTransfer => "account_cashflow_source_unverified",
+                AccountBillClass::Other => "unattributed_account_bill",
+            });
         }
     }
 

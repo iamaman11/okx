@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::{
     DurableExecutionLedger, ExecutionAction, ExecutionState, PositionSide, ProtectiveOrderStatus,
     StrategyCapitalReservation,
+    account_cashflow::{AccountBillClass, AccountBillSource, classify_native_account_bill},
 };
 
 pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str = "okx.account-ledger-reconciliation/v1";
@@ -57,6 +58,9 @@ pub struct StrategyPeriodFinancialAudit {
     pub unverified_total: usize,
     pub account_unallocated_funding_bills: usize,
     pub account_unlinked_other_bills: usize,
+    pub account_transfer_in_bills: usize,
+    pub account_transfer_out_bills: usize,
+    pub account_unverified_transfer_bills: usize,
     pub intents_outside_exchange_history: usize,
     pub strategy_nav_risk_usable: bool,
     /// Independent, current-run persisted finance proof. It is never a trade
@@ -88,6 +92,18 @@ pub struct UnlinkedAccountBillEvidence {
     pub trade_id: Option<String>,
     pub client_order_id: Option<String>,
     pub timestamp_ms: u64,
+    pub accounting_class: &'static str,
+}
+
+/// Account cash movements are NOT strategy profits, run allocations or funding.
+/// Signed totals use native balChg, grouped by currency without FX conversion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccountCashflowSummary {
+    pub scope: &'static str,
+    pub transfer_in_bills: usize,
+    pub transfer_out_bills: usize,
+    pub unverified_transfer_bills: usize,
+    pub net_transfer_totals: Vec<LinkedCurrencyAmount>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -108,6 +124,8 @@ pub struct StrategyExchangeAttribution {
     pub unallocated_funding_bills: usize,
     pub unallocated_funding_totals: Vec<LinkedCurrencyAmount>,
     pub unlinked_nonfunding_bills: usize,
+    pub unlinked_other_bills: usize,
+    pub account_cashflows: AccountCashflowSummary,
     /// Deterministically sorted diagnostic witnesses, never risk authority.
     pub unlinked_nonfunding_bill_samples: Vec<UnlinkedAccountBillEvidence>,
     pub unlinked_nonfunding_bill_samples_truncated: bool,
@@ -464,7 +482,11 @@ fn assemble_period_financial_audit(
 
     let attribution = report.strategy_attribution.as_ref();
     let unallocated_funding = attribution.map_or(0, |value| value.unallocated_funding_bills);
-    let unlinked_bills = attribution.map_or(0, |value| value.unlinked_nonfunding_bills);
+    let unlinked_bills = attribution.map_or(0, |value| value.unlinked_other_bills);
+    let incoming = attribution.map_or(0, |value| value.account_cashflows.transfer_in_bills);
+    let outgoing = attribution.map_or(0, |value| value.account_cashflows.transfer_out_bills);
+    let invalid_cashflow =
+        attribution.map_or(0, |value| value.account_cashflows.unverified_transfer_bills);
     let nav_usable = report
         .strategy_nav
         .as_ref()
@@ -504,6 +526,12 @@ fn assemble_period_financial_audit(
     if unlinked_bills > 0 {
         reasons.push("ACCOUNT_BILLS_NOT_BOUND_TO_MANAGED_FILLS");
     }
+    if incoming + outgoing > 0 {
+        reasons.push("ACCOUNT_TRANSFERS_ARE_NOT_STRATEGY_CASHFLOWS");
+    }
+    if invalid_cashflow > 0 {
+        reasons.push("ACCOUNT_TRANSFER_IDENTITY_UNVERIFIED");
+    }
     if report.unverified_runs_count > 0 || report.unverified_run.is_some() {
         reasons.push("UNVERIFIED_HISTORICAL_RUNS");
     }
@@ -535,6 +563,9 @@ fn assemble_period_financial_audit(
             + usize::from(report.unverified_run.is_some()),
         account_unallocated_funding_bills: unallocated_funding,
         account_unlinked_other_bills: unlinked_bills,
+        account_transfer_in_bills: incoming,
+        account_transfer_out_bills: outgoing,
+        account_unverified_transfer_bills: invalid_cashflow,
         intents_outside_exchange_history: report.unmatched_historical_total,
         strategy_nav_risk_usable: nav_usable,
         current_period_proven,
@@ -898,6 +929,11 @@ fn attribute_strategy_exchange_evidence(
 
     let mut unallocated_funding_bills = 0usize;
     let mut unlinked_nonfunding_bills = 0usize;
+    let mut unlinked_other_bills = 0usize;
+    let mut transfer_in_bills = 0usize;
+    let mut transfer_out_bills = 0usize;
+    let mut unverified_transfer_bills = 0usize;
+    let mut account_transfer_totals = BTreeMap::<String, Decimal>::new();
     let mut unlinked_nonfunding_bill_samples = Vec::new();
     for bill in bills {
         if matches!(bill.sub_type.as_str(), "173" | "174") {
@@ -908,6 +944,34 @@ fn attribute_strategy_exchange_evidence(
             }
         } else if !verified_bills.contains(&bill.bill_id) {
             unlinked_nonfunding_bills += 1;
+            let classification = classify_native_account_bill(AccountBillSource {
+                bill_type: &bill.bill_type,
+                sub_type: &bill.sub_type,
+                currency: &bill.currency,
+                balance_change: bill.balance_change.as_deref(),
+                instrument_id: &bill.instrument_id,
+                order_id: bill.order_id.as_deref(),
+                trade_id: bill.trade_id.as_deref(),
+                client_order_id: bill.client_order_id.as_deref(),
+                fee: bill.fee.as_deref(),
+                pnl: bill.pnl.as_deref(),
+            });
+            match classification {
+                AccountBillClass::TransferIn(value) => {
+                    transfer_in_bills += 1;
+                    *account_transfer_totals
+                        .entry(bill.currency.clone())
+                        .or_default() += value;
+                }
+                AccountBillClass::TransferOut(value) => {
+                    transfer_out_bills += 1;
+                    *account_transfer_totals
+                        .entry(bill.currency.clone())
+                        .or_default() += value;
+                }
+                AccountBillClass::UnverifiedTransfer => unverified_transfer_bills += 1,
+                AccountBillClass::Other => unlinked_other_bills += 1,
+            }
             unlinked_nonfunding_bill_samples.push(UnlinkedAccountBillEvidence {
                 bill_id: bill.bill_id.clone(),
                 bill_type: bill.bill_type.clone(),
@@ -919,6 +983,7 @@ fn attribute_strategy_exchange_evidence(
                 trade_id: bill.trade_id.clone(),
                 client_order_id: bill.client_order_id.clone(),
                 timestamp_ms: bill.timestamp_ms,
+                accounting_class: classification.label(),
             });
         }
     }
@@ -958,8 +1023,14 @@ fn attribute_strategy_exchange_evidence(
         // Instrument and timestamp alone do not establish an owner.
         reasons.push("funding_not_allocated_to_exact_strategy_position");
     }
-    if unlinked_nonfunding_bills > 0 {
+    if unlinked_other_bills > 0 {
         reasons.push("account_bill_activity_outside_exact_managed_fill_links");
+    }
+    if transfer_in_bills + transfer_out_bills > 0 {
+        reasons.push("account_transfers_not_owned_by_strategy_run");
+    }
+    if unverified_transfer_bills > 0 {
+        reasons.push("account_transfer_source_fields_unverified");
     }
     // Origin/version alone cannot prove that a capital pool is exclusive.
     // Even a single cohort still lacks strategy capital and funding ownership.
@@ -1009,6 +1080,14 @@ fn attribute_strategy_exchange_evidence(
         unallocated_funding_bills,
         unallocated_funding_totals: linked_amounts(funding),
         unlinked_nonfunding_bills,
+        unlinked_other_bills,
+        account_cashflows: AccountCashflowSummary {
+            scope: "AUTHENTICATED_ACCOUNT_ONLY_NOT_STRATEGY_PNL",
+            transfer_in_bills,
+            transfer_out_bills,
+            unverified_transfer_bills,
+            net_transfer_totals: linked_amounts(account_transfer_totals),
+        },
         unlinked_nonfunding_bill_samples,
         unlinked_nonfunding_bill_samples_truncated,
         orders_history_complete: orders_complete,
@@ -1253,12 +1332,30 @@ fn assess_flat_strategy_nav(
     }
     // Includes cash transfers and funding: none may inherit a strategy
     // owner merely from the instrument or event timestamp.
-    if facts
+    for bill in facts
         .exchange_bills
         .iter()
-        .any(|b| b.timestamp_ms >= capital.started_at_ms && !exact.contains(&b.bill_id))
+        .filter(|b| b.timestamp_ms >= capital.started_at_ms && !exact.contains(&b.bill_id))
     {
-        reasons.push("nav_unowned_account_bill_or_funding");
+        let kind = classify_native_account_bill(AccountBillSource {
+            bill_type: &bill.bill_type,
+            sub_type: &bill.sub_type,
+            currency: &bill.currency,
+            balance_change: bill.balance_change.as_deref(),
+            instrument_id: &bill.instrument_id,
+            order_id: bill.order_id.as_deref(),
+            trade_id: bill.trade_id.as_deref(),
+            client_order_id: bill.client_order_id.as_deref(),
+            fee: bill.fee.as_deref(),
+            pnl: bill.pnl.as_deref(),
+        });
+        reasons.push(match kind {
+            AccountBillClass::TransferIn(_) | AccountBillClass::TransferOut(_) => {
+                "nav_account_cashflow_unallocated"
+            }
+            AccountBillClass::UnverifiedTransfer => "nav_account_cashflow_unverified",
+            AccountBillClass::Other => "nav_unowned_account_bill_or_funding",
+        });
     }
     let allocated = decimal("nav.allocated_usdt", &capital.allocated_usdt)?;
     let nav = allocated + pnl + fee;
@@ -1973,6 +2070,72 @@ mod tests {
                 .contains(&"account_bill_activity_outside_exact_managed_fill_links")
         );
         assert!(!r.strategy_nav_available);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn transfer_in_out_are_account_cashflows_not_strategy_pnl_or_funding() {
+        let (ledger, plan, p) = acknowledged_test_ledger("native-transfer-cashflow");
+        let (_, mut incoming) =
+            linked_accounting_pair(&plan, "not-a-trade", "transfer-in-127", "0", "USDT", "0");
+        incoming.bill_type = "1".to_owned();
+        incoming.sub_type = "11".to_owned();
+        incoming.balance_change = Some("127".to_owned());
+        incoming.instrument_id.clear();
+        incoming.order_id = None;
+        incoming.client_order_id = None;
+        incoming.trade_id = Some("0".to_owned());
+        let mut outgoing = incoming.clone();
+        outgoing.bill_id = "transfer-out-10".to_owned();
+        outgoing.sub_type = "12".to_owned();
+        outgoing.balance_change = Some("-10".to_owned());
+        let mut bad = incoming.clone();
+        bad.bill_id = "transfer-bad-sign".to_owned();
+        bad.sub_type = "12".to_owned();
+        let a = attribute_strategy_exchange_evidence(
+            &ledger,
+            &[],
+            &[],
+            &[outgoing, incoming, bad],
+            true,
+            true,
+            true,
+        )
+        .expect("exact account-only transfers");
+        assert_eq!(a.unlinked_nonfunding_bills, 3);
+        assert_eq!(a.unlinked_other_bills, 0);
+        assert_eq!(a.account_cashflows.transfer_in_bills, 1);
+        assert_eq!(a.account_cashflows.transfer_out_bills, 1);
+        assert_eq!(a.account_cashflows.unverified_transfer_bills, 1);
+        assert_eq!(a.account_cashflows.net_transfer_totals[0].currency, "USDT");
+        assert_eq!(a.account_cashflows.net_transfer_totals[0].amount, "117");
+        assert!(a.fills_fee_totals.is_empty());
+        assert!(a.linked_trade_bill_pnl_totals.is_empty());
+        assert!(!a.strategy_nav_available);
+        assert!(
+            a.incomplete_reasons
+                .contains(&"account_transfers_not_owned_by_strategy_run")
+        );
+        assert!(
+            a.incomplete_reasons
+                .contains(&"account_transfer_source_fields_unverified")
+        );
+        assert!(
+            !a.incomplete_reasons
+                .contains(&"account_bill_activity_outside_exact_managed_fill_links")
+        );
+        assert_eq!(
+            a.unlinked_nonfunding_bill_samples[0].accounting_class,
+            "UNVERIFIED_ACCOUNT_TRANSFER"
+        );
+        assert_eq!(
+            a.unlinked_nonfunding_bill_samples[1].accounting_class,
+            "ACCOUNT_TRANSFER_IN"
+        );
+        assert_eq!(
+            a.unlinked_nonfunding_bill_samples[2].accounting_class,
+            "ACCOUNT_TRANSFER_OUT"
+        );
         let _ = std::fs::remove_file(p);
     }
 
