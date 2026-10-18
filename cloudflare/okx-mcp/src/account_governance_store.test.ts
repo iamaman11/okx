@@ -1,4 +1,4 @@
-import {governanceRequest,enrollObservedAccount} from "./account_governance_store.js";
+import {governanceRequest,enrollObservedAccount,stopNewRealRisk,activateExistingOperatorGrant} from "./account_governance_store.js";
 import {defaultAccountPolicy} from "./account_policy.js";
 function ok(v:boolean,label:string){if(!v)throw Error(label);}
 class Storage{
@@ -85,3 +85,33 @@ ok((await enrollObservedAccount(fresh,{...observation,uid_fingerprint:"x".repeat
  "caller cannot invent invalid UID fingerprints");
 ok((await governanceRequest(fresh,"GET")).body.trading_requested===false,
  "new account never converts old operator authority into GO");
+
+const authBefore=await governanceRequest(fresh,"GET");
+const grant=await activateExistingOperatorGrant(fresh,authBefore.body.revision as number,
+ "sha256:"+"c".repeat(64));
+ok(grant.status===200&&grant.body.status==="AUTHORIZED_NOT_TRADING"
+ &&grant.body.effective_trading===false,"operator grant is separate from LIVE enable");
+ok((await activateExistingOperatorGrant(fresh,authBefore.body.revision as number,
+ "sha256:"+"d".repeat(64))).status===409,"stale duplicate grant denied");
+const verified=(await governanceRequest(fresh,"GET")).body;
+const accounts=(verified.accounts as any[]).map((a,i)=>({
+ id:a.id,label:a.label,enabled:i===0,
+ limits:i===0?{...a.limits,max_notional_usdt:"100",max_leverage:"3",
+   max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1",
+   allowed_instruments:["BTC-USDT-SWAP"]}:a.limits,
+ strategies:[]
+}));
+const selected=await governanceRequest(fresh,"POST",{
+ expected_revision:verified.revision,trading_requested:true,
+ max_total_modelled_loss_usdt:"4",accounts
+});
+ok(selected.status===200&&selected.body.trading_requested===true,
+ "central verified account may request trading only with active grant and complete limits");
+const stop=await stopNewRealRisk(fresh);
+ok(stop.status===200&&stop.body.status==="STOPPED"&&stop.body.effective_trading===false,
+ "central STOP is immediate and durable");
+const afterStop=await governanceRequest(fresh,"GET");
+ok(afterStop.body.trading_requested===false&&afterStop.body.revision===selected.body.revision as number+1,
+ "STOP advances policy revision and invalidates stale risk reservations");
+ok((await stopNewRealRisk(fresh)).body.revision===afterStop.body.revision,
+ "repeated STOP does not create rev churn");
