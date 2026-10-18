@@ -134,3 +134,56 @@ export async function enrollObservedAccount(
     }};
   });
 }
+
+
+/**
+ * Native central operator STOP: independent of app restart or account selection,
+ * and never releases UNKNOWN / OPEN entries. It does not delete authorization.
+ */
+export async function stopNewRealRisk(storage:any):Promise<{status:number;body:Record<string,unknown>}>{
+  return storage.transaction(async(tx:any)=>{
+    const v:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
+    if(!validGovernance(v))return {status:503,body:{status:"FAILED",reason:"GOVERNANCE_UNAVAILABLE"}};
+    if(!v.trading_requested)return {status:200,body:{status:"STOPPED",revision:v.revision,
+      effective_trading:false}};
+    if(v.revision===Number.MAX_SAFE_INTEGER)
+      return {status:503,body:{status:"FAILED",reason:"REVISION_EXHAUSTED"}};
+    const next:Governance={...v,revision:v.revision+1,trading_requested:false};
+    await tx.put(GOVERNANCE_STORAGE_KEY,next);
+    return {status:200,body:{status:"STOPPED",revision:next.revision,effective_trading:false}};
+  });
+}
+
+/**
+ * Explicit OAuth operator authorization is a distinct CAS from selecting
+ * business limits. No risk budget may exceed the already recorded grant
+ * ceiling. Authentication of this operation belongs exclusively to the
+ * Worker OAuth tool boundary, never to public /dispatch or native WS.
+ */
+export async function activateExistingOperatorGrant(
+ storage:any,expectedRevision:number,approvalId:string
+):Promise<{status:number;body:Record<string,unknown>}>{
+  if(!Number.isSafeInteger(expectedRevision)||expectedRevision<0||
+    !/^sha256:[0-9a-f]{64}$/.test(approvalId)||
+    /^sha256:0{64}$/.test(approvalId))
+    return {status:400,body:{status:"FAILED",reason:"INVALID_OPERATOR_AUTHORIZATION"}};
+  return storage.transaction(async(tx:any)=>{
+    const v:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
+    if(!validGovernance(v))return {status:503,body:{status:"FAILED",reason:"GOVERNANCE_UNAVAILABLE"}};
+    if(expectedRevision!==v.revision||v.revision===Number.MAX_SAFE_INTEGER)
+      return {status:409,body:{status:"FAILED",reason:"STALE_AUTHORIZATION_REVISION",revision:v.revision}};
+    if(v.operator_authorization.status==="REVOKED")
+      return {status:409,body:{status:"FAILED",reason:"AUTHORIZATION_REVOKED"}};
+    if(v.operator_authorization.status==="ACTIVE")
+      return {status:409,body:{status:"FAILED",reason:"AUTHORIZATION_ALREADY_ACTIVE"}};
+    const next:Governance={...v,revision:v.revision+1,trading_requested:false,
+      operator_authorization:{...v.operator_authorization,status:"ACTIVE",id:approvalId}};
+    if(!validGovernance(next))return {status:503,body:{status:"FAILED",reason:"AUTHORIZATION_INVALID"}};
+    await tx.put(GOVERNANCE_STORAGE_KEY,next);
+    return {status:200,body:{
+      status:"AUTHORIZED_NOT_TRADING",revision:next.revision,
+      authorized_risk_ceiling_usdt:next.operator_authorization.ceiling_usdt,
+      effective_trading:false
+    }};
+  });
+}
