@@ -1,6 +1,9 @@
 //! One native source-complete account cohort. Never infer portfolio flat
 //! from only the selected account. Only Rust/venue may construct evidence.
 use okx_observation::AccountLedgerFacts;
+use okx_protocol::account_governance::{
+    AccountEnvironmentV2, AuthorizationStatus, CentralGovernanceSnapshotV2,
+};
 use okx_protocol::risk_authority::{NativeRiskCensus, RiskAccountOccupancy};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -34,12 +37,13 @@ pub struct AccountRiskEvidence {
 }
 #[derive(Debug, Clone)]
 pub struct PortfolioRiskSources {
-    /// Sorted exact identities from authenticated central governance.
-    pub registered_real_accounts: Vec<String>,
-    pub registry_revision: u64,
-    pub registry_verified: bool,
-    pub observed: Vec<AccountRiskEvidence>,
-    pub now_ms: u64,
+    /// Only the authoritative v2 constructor may establish this cohort.
+    /// One selected authenticated account cannot self-certify the other UIDs.
+    registered_real_accounts: Vec<String>,
+    registry_revision: u64,
+    registry_verified: bool,
+    observed: Vec<AccountRiskEvidence>,
+    now_ms: u64,
 }
 fn account_key_valid(key: &str) -> bool {
     let Some(uid) = key.strip_prefix("okx:real:") else {
@@ -60,6 +64,50 @@ fn loss_valid(value: &str) -> bool {
         && !value.contains(['e', 'E', '_', '+', '-'])
 }
 impl PortfolioRiskSources {
+    /// Bind all registered Real accounts (including disabled ones) to the
+    /// authenticated DO governance snapshot. Missing/unverified account
+    /// sources must fail later at census(), never silently disappear.
+    pub fn from_governance(
+        scope: &CentralGovernanceSnapshotV2,
+        observed: Vec<AccountRiskEvidence>,
+        now_ms: u64,
+    ) -> Result<Self, CensusFailure> {
+        if !scope.valid()
+            || !scope.state.trading_requested
+            || scope.state.operator_authorization.status != AuthorizationStatus::Active
+            || scope.state.revision == 0
+            || scope.issued_at_ms > now_ms
+            || now_ms.saturating_sub(scope.issued_at_ms) > 15_000
+        {
+            return Err(CensusFailure::RegistryUnverified);
+        }
+        let mut keys = Vec::new();
+        for account in &scope.state.accounts {
+            if account.environment != AccountEnvironmentV2::Real {
+                continue;
+            }
+            // Cross-venue aggregation needs an equally source-proven reader
+            // for each venue; never omit unsupported Real accounts.
+            if account.venue != "okx" || !account.identity_verified {
+                return Err(CensusFailure::RegistryUnverified);
+            }
+            keys.push(format!("{}:real:{}", account.venue, account.uid_fingerprint));
+        }
+        keys.sort();
+        if keys.is_empty() || keys.len() > 32
+            || keys.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(CensusFailure::MissingOrDuplicateAccount);
+        }
+        Ok(Self {
+            registered_real_accounts: keys,
+            registry_revision: scope.state.revision,
+            registry_verified: true,
+            observed,
+            now_ms,
+        })
+    }
+
     pub fn census(&self) -> Result<NativeRiskCensus, CensusFailure> {
         use CensusFailure as E;
         if !self.registry_verified || self.registry_revision == 0 {
@@ -168,6 +216,85 @@ mod tests {
             all_exposure_modelled_loss_usdt: Some(if v == 'a' { "0" } else { "2.25" }.into()),
         }
     }
+    fn governance() -> CentralGovernanceSnapshotV2 {
+        use okx_protocol::account_governance::{
+            AccountControlV2, AccountGovernanceV2, AccountLimitsV2,
+            OperatorAuthorizationV2, GOVERNANCE_SCHEMA_V2,
+        };
+        let account = |id: &str, uid: char, enabled: bool| AccountControlV2 {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            venue: "okx".to_owned(),
+            environment: AccountEnvironmentV2::Real,
+            uid_fingerprint: uid.to_string().repeat(64),
+            identity_verified: true,
+            enabled,
+            limits: AccountLimitsV2 {
+                max_modelled_loss_usdt: "10".into(),
+                max_order_loss_usdt: "5".into(),
+                max_notional_usdt: Some("100".into()),
+                max_leverage: Some("3".into()),
+                max_daily_realized_loss_usdt: Some("2".into()),
+                max_drawdown_ratio: Some("0.1".into()),
+                allowed_instruments: vec!["BTC-USDT-SWAP".into()],
+            },
+            strategies: Vec::new(),
+        };
+        CentralGovernanceSnapshotV2 {
+            state: AccountGovernanceV2 {
+                schema: GOVERNANCE_SCHEMA_V2.into(),
+                revision: 4,
+                trading_requested: true,
+                operator_authorization: OperatorAuthorizationV2 {
+                    id: format!("sha256:{}", "c".repeat(64)),
+                    status: AuthorizationStatus::Active,
+                    ceiling_usdt: "10".into(),
+                },
+                max_total_modelled_loss_usdt: "10".into(),
+                accounts: vec![account("acct_a", 'a', true), account("acct_b", 'b', false)],
+            },
+            issued_at_ms: 1_000,
+            session_generation: 77,
+        }
+    }
+
+    #[test]
+    fn central_scope_cannot_drop_disabled_or_unverified_real_accounts() {
+        let g = governance();
+        let source = PortfolioRiskSources::from_governance(
+            &g,
+            vec![row('a'), row('b')],
+            1_000,
+        ).expect("native cohort");
+        assert_eq!(source.census().unwrap().account_keys, vec![key('a'), key('b')]);
+        let incomplete = PortfolioRiskSources::from_governance(
+            &g,
+            vec![row('a')],
+            1_000,
+        ).unwrap();
+        assert_eq!(incomplete.census().unwrap_err(), CensusFailure::MissingOrDuplicateAccount);
+
+        let mut bad = governance();
+        bad.state.accounts[1].identity_verified = false;
+        assert_eq!(
+            PortfolioRiskSources::from_governance(&bad, vec![row('a'), row('b')], 1_000)
+                .unwrap_err(),
+            CensusFailure::RegistryUnverified
+        );
+        let mut other_venue = governance();
+        other_venue.state.accounts[1].venue = "other".into();
+        assert_eq!(
+            PortfolioRiskSources::from_governance(&other_venue, vec![row('a'), row('b')], 1_000)
+                .unwrap_err(),
+            CensusFailure::RegistryUnverified
+        );
+        assert_eq!(
+            PortfolioRiskSources::from_governance(&g, vec![row('a'), row('b')], 16_001)
+                .unwrap_err(),
+            CensusFailure::RegistryUnverified
+        );
+    }
+
     fn cohort() -> PortfolioRiskSources {
         PortfolioRiskSources {
             registered_real_accounts: vec![key('a'), key('b')],
