@@ -86,9 +86,16 @@ impl AccountRiskEvidence {
         now_ms: u64,
     ) -> Result<Self, CensusFailure> {
         use CensusFailure as E;
-        let received_at_ms = DateTime::parse_from_rfc3339(&snapshot.source_received_at)
-            .ok()
-            .and_then(|v| u64::try_from(v.timestamp_millis()).ok())
+        let received = |raw: &str| {
+            DateTime::parse_from_rfc3339(raw)
+                .ok()
+                .and_then(|v| u64::try_from(v.timestamp_millis()).ok())
+        };
+        let received_at_ms = received(&snapshot.source_received_at)
+            .into_iter()
+            .chain(received(&facts.summary.source_received_at))
+            .chain(Some(algos.received_at_ms))
+            .min()
             .ok_or(E::StaleSource)?;
         if received_at_ms == 0 || received_at_ms > now_ms || now_ms - received_at_ms > 5_000 {
             return Err(E::StaleSource);
@@ -131,6 +138,7 @@ impl AccountRiskEvidence {
         if !private_window.events.is_empty()
             || private_window.generation != ws.connection_generation
             || ws.connection_state != PrivateConnectionState::Connected
+            || ws.connection_id_fingerprint.is_none()
             || !ws.logged_in
             || !ws.subscriptions_complete
             || !ws.account_data_seen

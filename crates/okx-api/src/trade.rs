@@ -433,6 +433,8 @@ pub struct PendingDerivativeAlgoRiskInventory {
     pub scopes_checked: usize,
     pub rows: usize,
     pub complete_within_bound: bool,
+    /// Native REST completion receipt; zero on synthetic normalized test data.
+    pub received_at_ms: u64,
     pub samples: Vec<PendingProtectiveAlgoSample>,
 }
 
@@ -493,6 +495,7 @@ fn normalize_derivative_algo_risk_inventory(
         scopes_checked: seen.len(),
         rows: rows_total,
         complete_within_bound: complete,
+        received_at_ms: 0,
         samples,
     })
 }
@@ -618,7 +621,9 @@ impl TradeApi {
                 batches.push((instrument_type.to_owned(), order_type.to_owned(), rows));
             }
         }
-        normalize_derivative_algo_risk_inventory(batches)
+        let mut result = normalize_derivative_algo_risk_inventory(batches)?;
+        result.received_at_ms = chrono::Utc::now().timestamp_millis().max(1) as u64;
+        Ok(result)
     }
 
     pub fn admit_place_order(
