@@ -132,6 +132,10 @@ pub struct ExchangeFillIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExchangeBillIdentity {
     pub bill_id: String,
+    /// Venue-native event type, not a strategy ownership declaration.
+    pub bill_type: String,
+    /// Venue-reported balance movement; never treated as strategy PnL.
+    pub balance_change: Option<String>,
     pub instrument_id: String,
     pub order_id: Option<String>,
     pub trade_id: Option<String>,
@@ -445,6 +449,8 @@ impl AccountLedgerFacts {
             }
             exchange_bills.push(ExchangeBillIdentity {
                 bill_id: bill_id.to_owned(),
+                bill_type: bill.bill_type.clone(),
+                balance_change: optional(&bill.balance_change).map(str::to_owned),
                 instrument_id: bill.instrument_id.clone(),
                 order_id: optional(&bill.order_id).map(str::to_owned),
                 trade_id: optional(&bill.trade_id).map(str::to_owned),

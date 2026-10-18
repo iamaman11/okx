@@ -19,6 +19,7 @@ use crate::{
 pub const ACCOUNT_LEDGER_RECONCILIATION_SCHEMA_V1: &str = "okx.account-ledger-reconciliation/v1";
 const MAX_POSITION_ATTRIBUTION_ROWS: usize = 20;
 const MAX_ORIGIN_COHORT_ROWS: usize = 8;
+const MAX_UNLINKED_BILL_SAMPLES: usize = 8;
 const MAX_ARCHIVE_PROOF_ROWS: usize = 16;
 const MAX_UNMATCHED_HISTORICAL_ROWS: usize = 16;
 pub const STRATEGY_ATTRIBUTION_SCHEMA_V1: &str = "okx.strategy-exchange-attribution/v1";
@@ -72,6 +73,23 @@ pub struct LinkedCurrencyAmount {
     pub amount: String,
 }
 
+/// Bounded source-native identity for a bill that has NO verified managed-fill
+/// linkage. The venue type and balance movement are diagnostic data only; they
+/// are never silently included in strategy capital, PnL, fees or funding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnlinkedAccountBillEvidence {
+    pub bill_id: String,
+    pub bill_type: String,
+    pub sub_type: String,
+    pub currency: String,
+    pub balance_change: Option<String>,
+    pub instrument_id: String,
+    pub order_id: Option<String>,
+    pub trade_id: Option<String>,
+    pub client_order_id: Option<String>,
+    pub timestamp_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StrategyExchangeAttribution {
     pub schema: &'static str,
@@ -90,6 +108,9 @@ pub struct StrategyExchangeAttribution {
     pub unallocated_funding_bills: usize,
     pub unallocated_funding_totals: Vec<LinkedCurrencyAmount>,
     pub unlinked_nonfunding_bills: usize,
+    /// Deterministically sorted diagnostic witnesses, never risk authority.
+    pub unlinked_nonfunding_bill_samples: Vec<UnlinkedAccountBillEvidence>,
+    pub unlinked_nonfunding_bill_samples_truncated: bool,
     pub orders_history_complete: bool,
     pub fills_history_complete: bool,
     /// Different decision-origin/mandate cohorts are NOT a single strategy NAV.
@@ -731,7 +752,10 @@ fn attribute_strategy_exchange_evidence(
     let mut fee_bill_mismatches = 0usize;
     let mut fill_pnl_bill_mismatches = 0usize;
     let mut seen_fills = BTreeSet::new();
-    let mut seen_bills = BTreeSet::new();
+    // Separate attempted claims from fully verified links: a mismatched fee,
+    // PnL, order or trade ID must not hide a bill from the unlinked census.
+    let mut claimed_bills = BTreeSet::new();
+    let mut verified_bills = BTreeSet::new();
     let mut fees = BTreeMap::<String, Decimal>::new();
     let mut pnl = BTreeMap::<String, Decimal>::new();
     let mut funding = BTreeMap::<String, Decimal>::new();
@@ -809,7 +833,7 @@ fn attribute_strategy_exchange_evidence(
                 missing_exact_bill_links += 1;
                 continue;
             };
-            if !seen_bills.insert(&bill.bill_id) {
+            if !claimed_bills.insert(&bill.bill_id) {
                 duplicate_claims += 1;
                 continue;
             }
@@ -860,6 +884,7 @@ fn attribute_strategy_exchange_evidence(
             // Only source-complete, independently cross-checked financial
             // events enter either total; bill fee is NOT added to fill fee.
             exact_trade_bills += 1;
+            verified_bills.insert(&bill.bill_id);
             *fees.entry(fill_currency.to_owned()).or_default() +=
                 decimal("attribution.verified_fee", fill_fee)?;
             *pnl.entry(bill.currency.clone()).or_default() += bill_realized;
@@ -873,6 +898,7 @@ fn attribute_strategy_exchange_evidence(
 
     let mut unallocated_funding_bills = 0usize;
     let mut unlinked_nonfunding_bills = 0usize;
+    let mut unlinked_nonfunding_bill_samples = Vec::new();
     for bill in bills {
         if matches!(bill.sub_type.as_str(), "173" | "174") {
             unallocated_funding_bills += 1;
@@ -880,10 +906,26 @@ fn attribute_strategy_exchange_evidence(
                 *funding.entry(bill.currency.clone()).or_default() +=
                     decimal("attribution.unallocated_funding", value)?;
             }
-        } else if !seen_bills.contains(&bill.bill_id) {
+        } else if !verified_bills.contains(&bill.bill_id) {
             unlinked_nonfunding_bills += 1;
+            unlinked_nonfunding_bill_samples.push(UnlinkedAccountBillEvidence {
+                bill_id: bill.bill_id.clone(),
+                bill_type: bill.bill_type.clone(),
+                sub_type: bill.sub_type.clone(),
+                currency: bill.currency.clone(),
+                balance_change: bill.balance_change.clone(),
+                instrument_id: bill.instrument_id.clone(),
+                order_id: bill.order_id.clone(),
+                trade_id: bill.trade_id.clone(),
+                client_order_id: bill.client_order_id.clone(),
+                timestamp_ms: bill.timestamp_ms,
+            });
         }
     }
+    unlinked_nonfunding_bill_samples.sort_by(|a, b| a.bill_id.cmp(&b.bill_id));
+    let unlinked_nonfunding_bill_samples_truncated =
+        unlinked_nonfunding_bill_samples.len() > MAX_UNLINKED_BILL_SAMPLES;
+    unlinked_nonfunding_bill_samples.truncate(MAX_UNLINKED_BILL_SAMPLES);
 
     let managed_intents = ledger.len();
     let mut reasons = Vec::new();
@@ -967,6 +1009,8 @@ fn attribute_strategy_exchange_evidence(
         unallocated_funding_bills,
         unallocated_funding_totals: linked_amounts(funding),
         unlinked_nonfunding_bills,
+        unlinked_nonfunding_bill_samples,
+        unlinked_nonfunding_bill_samples_truncated,
         orders_history_complete: orders_complete,
         fills_history_complete: fills_complete,
         origin_cohorts_total,
@@ -1647,6 +1691,8 @@ mod tests {
             fill_time_ms: 1791828000000,
         };
         let bill = ExchangeBillIdentity {
+            bill_type: "2".to_owned(),
+            balance_change: Some("0.13".to_owned()),
             bill_id: "bill-exact".to_owned(),
             instrument_id: plan.instrument_id.clone(),
             order_id: Some("ord-exact".to_owned()),
@@ -1659,6 +1705,8 @@ mod tests {
             timestamp_ms: 1791828000000,
         };
         let funding = ExchangeBillIdentity {
+            bill_type: "8".to_owned(),
+            balance_change: Some("-0.01".to_owned()),
             bill_id: "bill-funding".to_owned(),
             instrument_id: plan.instrument_id.clone(),
             order_id: None,
@@ -1731,6 +1779,8 @@ mod tests {
             fill_time_ms: 1791828000000,
         };
         let bill = ExchangeBillIdentity {
+            bill_type: "2".to_owned(),
+            balance_change: Some("0.13".to_owned()),
             bill_id: bill_id.to_owned(),
             instrument_id: plan.instrument_id.clone(),
             order_id: Some("ord-exact".to_owned()),
@@ -1802,6 +1852,8 @@ mod tests {
         let bad = analyze(fill.clone(), altered_fee);
         assert_eq!(bad.exact_trade_bills, 0);
         assert_eq!(bad.fee_bill_mismatches, 1);
+        assert_eq!(bad.unlinked_nonfunding_bills, 1);
+        assert_eq!(bad.unlinked_nonfunding_bill_samples[0].bill_id, "bill-1");
         assert!(bad.fills_fee_totals.is_empty());
         assert!(
             bad.incomplete_reasons
@@ -1840,6 +1892,7 @@ mod tests {
         let bad = analyze(fill.clone(), wrong_order);
         assert_eq!(bad.unmatched_lineage_fills, 1);
         assert_eq!(bad.exact_trade_bills, 0);
+        assert_eq!(bad.unlinked_nonfunding_bills, 1);
         assert!(bad.fills_fee_totals.is_empty());
 
         let mut wrong_trade = bill.clone();
@@ -1899,6 +1952,16 @@ mod tests {
         assert_eq!(r.exact_fills, 2);
         assert_eq!(r.exact_trade_bills, 2);
         assert_eq!(r.unlinked_nonfunding_bills, 1);
+        assert_eq!(r.unlinked_nonfunding_bill_samples.len(), 1);
+        assert_eq!(
+            r.unlinked_nonfunding_bill_samples[0].bill_id,
+            "manual-unmanaged-bill"
+        );
+        assert_eq!(
+            r.unlinked_nonfunding_bill_samples[0].trade_id.as_deref(),
+            Some("external-trade")
+        );
+        assert!(!r.unlinked_nonfunding_bill_samples_truncated);
         assert_eq!(r.fills_fee_totals.len(), 2);
         assert_eq!(r.fills_fee_totals[0].currency, "USDC");
         assert_eq!(r.fills_fee_totals[0].amount, "0.004");
@@ -1910,6 +1973,56 @@ mod tests {
                 .contains(&"account_bill_activity_outside_exact_managed_fill_links")
         );
         assert!(!r.strategy_nav_available);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn unlinked_bill_witnesses_are_exact_sorted_bounded_and_never_grant_nav() {
+        let (ledger, plan, p) = acknowledged_test_ledger("bounded-bill-diagnostics");
+        let (_, example) =
+            linked_accounting_pair(&plan, "trade-other", "bill-other", "-0.01", "USDT", "0");
+        let bills = (0..11)
+            .rev()
+            .map(|i| {
+                let mut event = example.clone();
+                event.bill_id = format!("external-{i:02}");
+                event.trade_id = None;
+                event.order_id = None;
+                event.client_order_id = None;
+                event.bill_type = "1".to_owned();
+                event.sub_type = "12".to_owned();
+                event.balance_change = Some("15".to_owned());
+                event
+            })
+            .collect::<Vec<_>>();
+        let report =
+            attribute_strategy_exchange_evidence(&ledger, &[], &[], &bills, true, true, true)
+                .expect("read-only source witness");
+        assert_eq!(report.unlinked_nonfunding_bills, 11);
+        assert_eq!(
+            report.unlinked_nonfunding_bill_samples.len(),
+            MAX_UNLINKED_BILL_SAMPLES
+        );
+        assert!(report.unlinked_nonfunding_bill_samples_truncated);
+        assert_eq!(
+            report.unlinked_nonfunding_bill_samples[0].bill_id,
+            "external-00"
+        );
+        assert_eq!(
+            report.unlinked_nonfunding_bill_samples[7].bill_id,
+            "external-07"
+        );
+        assert_eq!(
+            report.unlinked_nonfunding_bill_samples[0]
+                .balance_change
+                .as_deref(),
+            Some("15")
+        );
+        assert_eq!(report.exact_trade_bills, 0);
+        assert!(report.fills_fee_totals.is_empty());
+        assert!(report.linked_trade_bill_pnl_totals.is_empty());
+        assert_eq!(report.status, "INCOMPLETE");
+        assert!(!report.strategy_nav_available);
         let _ = std::fs::remove_file(p);
     }
 
