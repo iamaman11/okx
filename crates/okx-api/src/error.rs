@@ -16,6 +16,11 @@ pub enum OkxError {
     #[error("OKX response error: {0}")]
     Response(String),
 
+    /// HTTP 401/403 is classified without echoing the untrusted response
+    /// body or any request credential. The OKX numeric code may be absent.
+    #[error("OKX private REST authentication rejected: HTTP {status}; code={okx_code}")]
+    AuthenticationRejected { status: u16, okx_code: String },
+
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 

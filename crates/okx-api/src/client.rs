@@ -421,6 +421,28 @@ where
         });
     }
 
+    // reqwest::error_for_status() discards the exchange error envelope.
+    // Preserve ONLY a validated numeric OKX code for native operator diagnosis;
+    // never return a raw authentication response, headers or any secret.
+    if matches!(
+        response.status(),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ) {
+        let status = response.status().as_u16();
+        let mut rejected = response;
+        // A single bounded chunk avoids unbounded HTML/gateway response bodies.
+        let code = rejected
+            .chunk()
+            .await?
+            .as_deref()
+            .and_then(auth_rejection_code)
+            .unwrap_or_else(|| "NOT_PROVIDED".to_owned());
+        return Err(OkxError::AuthenticationRejected {
+            status,
+            okx_code: code,
+        });
+    }
+
     let response = response.error_for_status()?;
     let body = response.bytes().await?;
     let envelope: ApiEnvelope<T> = serde_json::from_slice(&body)?;
@@ -437,6 +459,18 @@ where
     }
 
     Ok((envelope, body.to_vec()))
+}
+
+/// The response is untrusted and may be an HTML gateway page rather than
+/// an OKX JSON envelope. Only an exact 5-digit code is safe to surface.
+fn auth_rejection_code(body: &[u8]) -> Option<String> {
+    if body.len() > 4096 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let code = value.get("code")?.as_str()?;
+    (code.len() == 5 && code.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| code.to_owned())
 }
 
 fn throttle_code_from_http_429_body(body: &[u8]) -> String {
@@ -467,6 +501,24 @@ fn retry_after_ms(response: &reqwest::Response) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_rejection_exposes_only_a_bounded_numeric_okx_code() {
+        assert_eq!(
+            auth_rejection_code(br#"{"code":"50119","msg":"key invalid","data":[]}"#),
+            Some("50119".to_owned())
+        );
+        assert_eq!(auth_rejection_code(b"<html>Unauthorized</html>"), None);
+        assert_eq!(
+            auth_rejection_code(br#"{"code":"INVALID_KEY","msg":"sensitive"}"#),
+            None
+        );
+        assert_eq!(
+            auth_rejection_code(br#"{"code":"50119","secret":"sensitive","nested":[]}"#),
+            Some("50119".to_owned())
+        );
+        assert_eq!(auth_rejection_code(&vec![b'a'; 4097]), None);
+    }
 
     #[test]
     fn throttle_code_from_http_429_body_preserves_okx_code() {
