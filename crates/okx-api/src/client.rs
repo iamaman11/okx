@@ -469,8 +469,7 @@ fn auth_rejection_code(body: &[u8]) -> Option<String> {
     }
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let code = value.get("code")?.as_str()?;
-    (code.len() == 5 && code.bytes().all(|byte| byte.is_ascii_digit()))
-        .then(|| code.to_owned())
+    (code.len() == 5 && code.bytes().all(|byte| byte.is_ascii_digit())).then(|| code.to_owned())
 }
 
 fn throttle_code_from_http_429_body(body: &[u8]) -> String {
