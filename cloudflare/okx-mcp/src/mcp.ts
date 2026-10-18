@@ -164,7 +164,8 @@ export const mcpApi = {
             inputSchema: {
               type: "object",
               properties: {
-                action: { type: "string", enum: ["status", "configure"] },
+                action: { type: "string", enum: ["status", "configure", "enroll"] },
+                label: {type:"string",minLength:2,maxLength:80,description:"Account display label. UID comes ONLY from authenticated native observation."},
                 expected_revision: { type: "integer", minimum: 0 },
                 trading_requested: { type: "boolean" },
                 max_total_modelled_loss_usdt: {
@@ -607,6 +608,33 @@ export const mcpApi = {
         return jsonRpc(id, toolResult(contractStatus(await runtimeFetch(env, "/status?probe=1"))));
       }
       if (name === "account_control") {
+        if(args.action==="enroll"&&hasOnlyKeys(args,["action","label"])&&
+          typeof args.label==="string"&&args.label.trim().length>=2&&args.label.length<=80){
+          const session=await runtimeFetch(env,"/status?probe=1");
+          if(!isObject(session)||session.status!=="PASS"||session.session_fresh!==true||
+            (session.runtime_profile!=="production"&&session.runtime_profile!=="demo_acceptance"))
+            return jsonRpc(id,toolResult({status:"FAILED",reason:"NATIVE_ACCOUNT_SESSION_UNVERIFIED"}));
+          const snapshot=await dispatchRuntime(env,{
+            schema:"okx.agent.request/v1",request_id:requestId(),
+            operation:{type:"trader_snapshot"},
+          });
+          if(!isObject(snapshot)||snapshot.status!=="completed"||snapshot.quality!=="FRESH"
+            ||!isObject(snapshot.result)||!isObject(snapshot.result.account)
+            ||snapshot.result.account.scope!=="AUTHENTICATED_ACCOUNT_ONLY"
+            ||!isObject(snapshot.result.evidence)||snapshot.result.evidence.quality!=="FRESH"
+            ||typeof snapshot.result.account.uid_fingerprint!=="string"
+            ||!/^[0-9a-f]{64}$/.test(snapshot.result.account.uid_fingerprint))
+            return jsonRpc(id,toolResult({status:"FAILED",reason:"AUTHENTICATED_NATIVE_UID_PROOF_UNAVAILABLE"}));
+          const enrollment=await runtimeFetch(env,"/account-governance/enroll",{
+            method:"POST",headers:{"content-type":"application/json"},
+            body:JSON.stringify({
+              venue:"okx",environment:session.runtime_profile==="production"?"real":"demo",
+              uid_fingerprint:snapshot.result.account.uid_fingerprint,
+              label:args.label.trim()
+            }),
+          });
+          return jsonRpc(id,toolResult(enrollment));
+        }
         if (args.action === "status" && hasOnlyKeys(args, ["action"])) {
           return jsonRpc(id, toolResult(await runtimeFetch(env, "/account-governance")));
         }

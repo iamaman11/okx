@@ -1,7 +1,7 @@
 import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
 import { defaultAccountPolicy, validAccountPolicy } from "./account_policy.js";
 import { accountPolicyRequest } from "./account_policy.js";
-import { governanceRequest, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
+import { governanceRequest, enrollObservedAccount, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
 import { handleNativeRiskCommand } from "./risk_authority.js";
 import {
   ACK_DEADLINE_MS,
@@ -40,6 +40,26 @@ export class RuntimeSession {
     }
     if (url.pathname === "/status") {
       return Response.json(await this.status(url.searchParams.get("probe") === "1"));
+    }
+    if(url.pathname==="/account-governance/enroll"&&request.method==="POST"){
+      // Internal DO endpoint; Worker alone constructs the observation from
+      // an authenticated native trader_snapshot. It is never an MCP UID field.
+      const body=await request.text();
+      if(body.length>1024)return Response.json({status:"FAILED",reason:"ENROLLMENT_TOO_LARGE"},{status:413});
+      let raw:unknown;
+      try{raw=JSON.parse(body);}catch{
+        return Response.json({status:"FAILED",reason:"INVALID_ENROLLMENT"},{status:400});
+      }
+      const r=raw as Record<string,unknown>;
+      if(!r||typeof r.uid_fingerprint!=="string"||r.venue!=="okx"
+        ||!["real","demo"].includes(String(r.environment))
+        ||typeof r.label!=="string")
+        return Response.json({status:"FAILED",reason:"INVALID_ENROLLMENT"},{status:400});
+      const out=await enrollObservedAccount(this.state.storage,{
+        uid_fingerprint:r.uid_fingerprint,venue:"okx",
+        environment:r.environment as "real"|"demo",label:r.label,
+      });
+      return Response.json(out.body,{status:out.status,headers:{"cache-control":"no-store"}});
     }
     if (url.pathname === "/account-governance") {
       // Same RuntimeSession owner, no additional DO instance or service.
