@@ -59,6 +59,18 @@ impl CentralPolicyBinding<'_> {
             .authorizes_uid(uid, now_ms, self.session_generation)
     }
 }
+/// Typed central delivery scope; a DO risk receipt remains mandatory for POST.
+#[derive(Clone, Copy)]
+pub struct CentralGovernanceBinding<'a> {
+    pub scope: &'a okx_protocol::account_governance::CentralGovernanceSnapshotV2,
+    pub session_generation: u64,
+}
+impl CentralGovernanceBinding<'_> {
+    pub fn authorizes_uid(self, uid: &str, now_ms: u64) -> bool {
+        self.scope
+            .authorizes_delivery(uid, now_ms, self.session_generation)
+    }
+}
 
 /// A Hedge Cross setting is accepted only when BOTH distinct sides are
 /// individually verified and have the same exact, positive leverage.
@@ -1097,14 +1109,15 @@ impl ExecutionRuntime {
         observed_at_ms: u64,
         sources: ProductionSubmitSources<'_>,
         central: Option<CentralPolicyBinding<'_>>,
+        governance: Option<CentralGovernanceBinding<'_>>,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
         let ProductionSubmitSources { facts, protection } = sources;
-        if !central.is_some_and(|p| {
-            p.authorizes_uid(
-                &preflight.credential.account_uid_fingerprint,
-                Utc::now().timestamp_millis().max(1) as u64,
-            )
-        }) {
+        let native_uid = &preflight.credential.account_uid_fingerprint;
+        let fresh_now = Utc::now().timestamp_millis().max(1) as u64;
+        if central.is_some() == governance.is_some()
+            || !(central.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now))
+                || governance.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now)))
+        {
             return Ok(None);
         }
         if !self.production_trading_requested()
@@ -1130,9 +1143,16 @@ impl ExecutionRuntime {
         // The existing local policy may only further restrict the ONE
         // centrally selected operator budget, never enlarge it. Parse exact
         // decimal values, never f64. No permission is created by this bound.
-        let Some(central_budget) = central.and_then(|binding| {
-            rust_decimal::Decimal::from_str(&binding.policy.max_total_modelled_loss_usdt).ok()
-        }) else {
+        let Some(central_budget) = central
+            .and_then(|binding| {
+                rust_decimal::Decimal::from_str(&binding.policy.max_total_modelled_loss_usdt).ok()
+            })
+            .or_else(|| governance.and_then(|binding| {
+                rust_decimal::Decimal::from_str(
+                    &binding.scope.state.max_total_modelled_loss_usdt
+                ).ok()
+            }))
+        else {
             return Ok(None);
         };
         let Some(native_budget) =
@@ -1242,12 +1262,10 @@ impl ExecutionRuntime {
         };
         // Final central revision/UID/expiry fence immediately before the
         // native gateway owner enters its durable SUBMITTING and single POST.
-        if !central.is_some_and(|p| {
-            p.authorizes_uid(
-                &preflight.credential.account_uid_fingerprint,
-                Utc::now().timestamp_millis().max(1) as u64,
-            )
-        }) {
+        let fresh_now = Utc::now().timestamp_millis().max(1) as u64;
+        if !(central.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now))
+            || governance.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now)))
+        {
             return Ok(None);
         }
         Ok(Some(

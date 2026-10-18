@@ -610,6 +610,7 @@ async fn begin_strategy_run(
                 observed_at_ms,
                 rearm.as_ref(),
                 context.central_policy_binding(),
+                context.central_governance_binding(),
             )
             .await?
     } else {

@@ -363,6 +363,16 @@ impl<'a> ObservationQueryContext<'a> {
         self.risk_client
     }
 
+    pub fn central_governance_binding(
+        &self,
+    ) -> Option<crate::execution_runtime::CentralGovernanceBinding<'a>> {
+        self.operator_governance
+            .map(|scope| crate::execution_runtime::CentralGovernanceBinding {
+                scope,
+                session_generation: self.transport_generation,
+            })
+    }
+
     pub fn central_policy_binding(
         &self,
     ) -> Option<crate::execution_runtime::CentralPolicyBinding<'a>> {
