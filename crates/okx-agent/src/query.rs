@@ -176,6 +176,7 @@ pub struct ObservationQueryContext<'a> {
     research_session: Option<&'a ResearchSessionHandle>,
     operator_policy: Option<&'a CentralAccountPolicy>,
     transport_generation: u64,
+    risk_client: Option<&'a crate::risk_bridge::NativeRiskClient>,
 }
 
 impl<'a> ObservationQueryContext<'a> {
@@ -192,6 +193,7 @@ impl<'a> ObservationQueryContext<'a> {
             research_session: None,
             operator_policy: None,
             transport_generation: 0,
+            risk_client: None,
         }
     }
 
@@ -219,6 +221,7 @@ impl<'a> ObservationQueryContext<'a> {
             research_session: None,
             operator_policy: None,
             transport_generation: 0,
+            risk_client: None,
         }
     }
 
@@ -317,6 +320,7 @@ impl<'a> ObservationQueryContext<'a> {
             research_session,
             operator_policy: None,
             transport_generation: 0,
+            risk_client: None,
         }
     }
 
@@ -330,6 +334,22 @@ impl<'a> ObservationQueryContext<'a> {
         self.operator_policy = policy;
         self.transport_generation = generation;
         self
+    }
+
+    /// Bound only for the direct authenticated WS session. Mailbox and
+    /// standalone paths never receive access to the native risk owner.
+    pub const fn with_risk_client(
+        mut self,
+        risk_client: Option<&'a crate::risk_bridge::NativeRiskClient>,
+    ) -> Self {
+        self.risk_client = risk_client;
+        self
+    }
+
+    pub const fn native_risk_client(
+        &self,
+    ) -> Option<&'a crate::risk_bridge::NativeRiskClient> {
+        self.risk_client
     }
 
     pub fn central_policy_binding(
@@ -1151,6 +1171,7 @@ mod tests {
                 research_session: None,
                 operator_policy: None,
                 transport_generation: 0,
+            risk_client: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1194,6 +1215,7 @@ mod tests {
                 research_session: None,
                 operator_policy: None,
                 transport_generation: 0,
+            risk_client: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1238,6 +1260,7 @@ mod tests {
                 research_session: None,
                 operator_policy: None,
                 transport_generation: 0,
+            risk_client: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
