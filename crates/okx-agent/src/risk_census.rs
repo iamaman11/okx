@@ -117,11 +117,13 @@ impl PortfolioRiskSources {
             });
         }
         occupied.sort_by(|a, b| a.account_key.cmp(&b.account_key));
+        let mut canonical_sources = self.observed.iter().collect::<Vec<_>>();
+        canonical_sources.sort_by(|a, b| a.account_key.cmp(&b.account_key));
         let bytes = serde_json::to_vec(&(
             "okx.native-risk-source/v1",
             self.registry_revision,
             keys,
-            &self.observed,
+            canonical_sources,
         ))
         .map_err(|_| E::IncompleteHistory)?;
         let digest = Sha256::digest(bytes);
@@ -181,6 +183,9 @@ mod tests {
         assert!(c.valid());
         assert_eq!(c.occupied[0].occupied_usdt, "0");
         assert_eq!(c.occupied[1].occupied_usdt, "2.25");
+        let mut reordered = cohort();
+        reordered.observed.reverse();
+        assert_eq!(reordered.census().unwrap().source_digest, c.source_digest);
     }
     #[test]
     fn missing_duplicate_unpriced_stale_and_unknown_never_become_zero() {
