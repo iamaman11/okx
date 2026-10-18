@@ -75,7 +75,7 @@ check((await reserve(sa,policy,{...census,generated_at_ms:now-5001},reqB)).statu
 check((await reserve(sa,{...policy,global_limit_usdt:"4"},census,reqB)).status==="DENIED",
   "lowering limit does not free existing risk");
 const entry=(await readRiskBook(sa))!.entries[0];
-check((await transition("UNKNOWN",d)).status==="DENIED",
+check((await transitionRisk(sa,entry.key,p,"UNKNOWN",d)).status==="DENIED",
   "caller-supplied proof digest does not unlock risk state transition");
 const beforePost=await readRiskBook(sa);
 check((await beginRiskPost(sa,entry.key,p,1,d,{
