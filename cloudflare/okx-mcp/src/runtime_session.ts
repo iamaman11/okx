@@ -2,6 +2,7 @@ import { executionProfilePermitsOperation, isExecutionMutation } from "./executi
 import { defaultAccountPolicy, validAccountPolicy } from "./account_policy.js";
 import { accountPolicyRequest } from "./account_policy.js";
 import { governanceRequest, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
+import { handleNativeRiskCommand } from "./risk_authority.js";
 import {
   ACK_DEADLINE_MS,
   type Env,
@@ -179,6 +180,20 @@ export class RuntimeSession {
       attachment.lastPongAtMs = Date.now();
       ws.serializeAttachment(attachment);
       this.resolvePending(`pong:${frame.nonce}`, attachment.generation, frame);
+      return;
+    }
+    if(frame.type==="risk_control") {
+      const result=await handleNativeRiskCommand(this.state.storage,{
+        connection_generation:attachment.generation,
+        runtime_profile:attachment.runtimeProfile??"unverified",
+        hello:attachment.hello
+      },frame.command,Date.now());
+      ws.send(JSON.stringify({
+        type:"risk_control_result",schema:FRAME_SCHEMA,
+        session_id:attachment.sessionId,
+        connection_generation:attachment.generation,
+        result
+      }));
       return;
     }
     if (frame.type === "delivery_ack" && typeof frame.request_id === "string") {
