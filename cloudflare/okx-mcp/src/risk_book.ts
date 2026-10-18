@@ -33,7 +33,7 @@ export interface RiskPolicy {
   account_limits_usdt: Record<string, string>;
 }
 export interface AccountRiskWitness {
-  uid: string;
+  account_key: string;
   occupied_usdt: string;
 }
 /**
@@ -42,7 +42,7 @@ export interface AccountRiskWitness {
  * sufficient. Do not expose a caller-writable census via MCP.
  */
 export interface CompleteRiskCensus {
-  account_uids: string[];
+  account_keys: string[];
   occupied: AccountRiskWitness[];
   generated_at_ms: number;
   source_digest: string;
@@ -93,6 +93,9 @@ function validEntry(entry: RiskEntry): boolean {
     && (entry.transition_proof === null || HEX.test(entry.transition_proof))
     && entry.key === riskKey(entry);
 }
+export function accountKey(entry: Pick<RiskEntry, "venue"|"environment"|"uid">): string {
+  return `${entry.venue}:${entry.environment}:${entry.uid}`;
+}
 function riskKey(entry: Pick<RiskEntry, "venue"|"environment"|"uid"|"run_id"|"intent_id">): string {
   // Length-delimited canonical components; no separator collision.
   return [entry.venue, entry.environment, entry.uid, entry.run_id, entry.intent_id]
@@ -118,15 +121,15 @@ function censusRisk(census: CompleteRiskCensus, policy: RiskPolicy, now: number)
     || census.generated_at_ms > now || now - census.generated_at_ms > MAX_CENSUS_AGE_MS
     || !Number.isSafeInteger(now) || !Number.isSafeInteger(census.generated_at_ms)) return null;
   const required = Object.keys(policy.account_limits_usdt).sort();
-  if (!Array.isArray(census.account_uids)
-    || required.join(",") !== [...census.account_uids].sort().join(",")
-    || new Set(census.account_uids).size !== required.length
+  if (!Array.isArray(census.account_keys)
+    || required.join(",") !== [...census.account_keys].sort().join(",")
+    || new Set(census.account_keys).size !== required.length
     || !Array.isArray(census.occupied) || census.occupied.length !== required.length) return null;
   const result = new Map<string,bigint>();
   for (const position of census.occupied) {
     const value = units(position.occupied_usdt);
-    if (!required.includes(position.uid) || result.has(position.uid) || value === null) return null;
-    result.set(position.uid, value);
+    if (!required.includes(position.account_key) || result.has(position.account_key) || value === null) return null;
+    result.set(position.account_key, value);
   }
   return result;
 }
@@ -138,7 +141,8 @@ function budget(policy: RiskPolicy): { global: bigint; authorized: bigint; accou
   const accounts = new Map<string,bigint>();
   for (const [uid, text] of Object.entries(policy.account_limits_usdt)) {
     const value = units(text);
-    if (!HEX.test(uid) || value === null || value <= 0n || value > authorized) return null;
+    if (!/^[a-z][a-z0-9_-]{1,31}:real:[0-9a-f]{64}$/.test(uid)
+      || value === null || value <= 0n || value > authorized) return null;
     accounts.set(uid, value);
   }
   return accounts.size ? {global, authorized, accounts} : null;
@@ -170,7 +174,7 @@ export async function reserveRisk(
     || !TOKEN.test(input.run_id) || !TOKEN.test(input.intent_id)
     || !/^[a-z][a-z0-9_-]{1,31}$/.test(input.venue)
     || !Number.isSafeInteger(input.now_ms) || input.now_ms <= 0
-    || !bounds.accounts.has(input.uid)) return {status:"DENIED", reason:"INVALID_SCOPE_OR_POLICY"};
+    || !bounds.accounts.has(accountKey(input))) return {status:"DENIED", reason:"INVALID_SCOPE_OR_POLICY"};
   const externallyOccupied = censusRisk(census, policy, input.now_ms);
   if (externallyOccupied === null) return {status:"DENIED", reason:"COMPLETE_ACCOUNT_CENSUS_UNPROVEN"};
   return storage.transaction(async (tx: any): Promise<RiskDecision> => {
@@ -188,8 +192,9 @@ export async function reserveRisk(
     const occupied = new Map(externallyOccupied);
     for (const e of book.entries) {
       if (e.state === "RELEASED") continue;
-      if (!occupied.has(e.uid)) return {status:"DENIED", reason:"EXPOSURE_UNREGISTERED"};
-      occupied.set(e.uid, occupied.get(e.uid)! + units(e.loss_usdt)!);
+      const owner = accountKey(e);
+      if (!occupied.has(owner)) return {status:"DENIED", reason:"EXPOSURE_UNREGISTERED"};
+      occupied.set(owner, occupied.get(owner)! + units(e.loss_usdt)!);
     }
     let total = 0n;
     for (const [uid,value] of occupied) {
@@ -197,7 +202,7 @@ export async function reserveRisk(
       total += value;
     }
     if (total + requested > bounds.global
-      || occupied.get(input.uid)! + requested > bounds.accounts.get(input.uid)!)
+      || occupied.get(accountKey(input))! + requested > bounds.accounts.get(accountKey(input))!)
       return {status:"DENIED", reason:"INSUFFICIENT_AGGREGATE_OR_ACCOUNT_RISK"};
     const entry: RiskEntry = {
       key, venue:input.venue, environment:"real", uid:input.uid,
