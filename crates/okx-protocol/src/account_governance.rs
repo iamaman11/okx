@@ -236,6 +236,7 @@ impl AccountGovernanceV2 {
             return false;
         };
         if self.schema != GOVERNANCE_SCHEMA_V2
+            || (self.trading_requested && self.revision == 0)
             || !self.operator_authorization.id.starts_with("sha256:")
             || !lower_sha256(&self.operator_authorization.id[7..])
             || global > ceiling

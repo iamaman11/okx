@@ -106,7 +106,9 @@ export function validGovernance(value:unknown):value is Governance{
   const op=value.operator_authorization;
   if(value.schema!==GOVERNANCE_SCHEMA||!Number.isSafeInteger(value.revision)
     ||(value.revision as number)<0||typeof value.trading_requested!=="boolean"
-    ||!record(op)||typeof op.id!=="string"||!/^sha256:[0-9a-f]{64}$/.test(op.id)
+    ||(value.trading_requested&&value.revision===0)
+    ||!record(op)||Object.keys(op).sort().join("|")!=="ceiling_usdt|id|status"
+    ||typeof op.id!=="string"||!/^sha256:[0-9a-f]{64}$/.test(op.id)
     ||!["UNVERIFIED","ACTIVE","REVOKED"].includes(String(op.status))
     ||!positive(op.ceiling_usdt)||!positive(value.max_total_modelled_loss_usdt)
     ||units(value.max_total_modelled_loss_usdt)!>units(op.ceiling_usdt)!
