@@ -21,6 +21,25 @@ const census={complete:true as const,source_digest:d,generated_at_ms:now,
 const base={venue:"okx",environment:"real" as const,run_id:"run_20261018_AAA",
   plan_hash:p,policy_revision:1,now_ms:now};
 const sa=new Storage();
+function account(uid:string){
+ return {
+  id:"acct_"+uid.slice(0,8),label:uid.slice(0,8),venue:"okx",
+  environment:"real",uid_fingerprint:uid,identity_verified:true,enabled:true,
+  strategies:[],
+  limits:{max_modelled_loss_usdt:"10",max_order_loss_usdt:"6",max_notional_usdt:"100",
+    max_leverage:"3",max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1",
+    allowed_instruments:["BTC-USDT-SWAP"]}
+ };
+}
+const governance={
+ schema:"okx.governance/v2",revision:1,trading_requested:true,
+ operator_authorization:{id:"sha256:"+d,status:"ACTIVE",ceiling_usdt:"10"},
+ max_total_modelled_loss_usdt:"10",accounts:[account(a),account(b)]
+};
+await sa.put("account_governance_v2",governance);
+const untrusted=new Storage();
+check((await reserveRisk(untrusted,policy,census,{...base,uid:a,intent_id:"intent_20261018_outs",loss_usdt:"1"})).status==="DENIED",
+ "caller-supplied risk policy cannot mint capacity without persisted DO governance");
 const reqA={...base,uid:a,intent_id:"intent_20261018_aaaa",loss_usdt:"6"};
 const reqB={...base,uid:b,intent_id:"intent_20261018_bbbb",loss_usdt:"5"};
 check(units("1.000000001")===1000000001n,"exact 9-decimal");

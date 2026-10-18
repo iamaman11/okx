@@ -1,3 +1,5 @@
+import {validGovernance,projectRiskPolicy} from "./account_governance.js";
+
 /**
  * Durable Object risk ledger primitive. This is NOT an exchange admission endpoint.
  * Only the authenticated Windows execution owner may eventually bind a native,
@@ -178,6 +180,22 @@ export async function reserveRisk(
   const externallyOccupied = censusRisk(census, policy, input.now_ms);
   if (externallyOccupied === null) return {status:"DENIED", reason:"COMPLETE_ACCOUNT_CENSUS_UNPROVEN"};
   return storage.transaction(async (tx: any): Promise<RiskDecision> => {
+    // One transaction snapshots BOTH central policy and risk occupancy.
+    // A caller-supplied policy (or a snapshot from a prior CAS revision)
+    // can never mint risk capacity independently of the DO's persisted grant.
+    const governance:unknown=await tx.get("account_governance_v2");
+    if(!validGovernance(governance))
+      return {status:"DENIED",reason:"AUTHORITATIVE_GOVERNANCE_UNAVAILABLE"};
+    const authority=projectRiskPolicy(governance);
+    if(authority===null||!authority.enabled||authority.revision!==policy.revision
+       ||authority.global_limit_usdt!==policy.global_limit_usdt
+       ||authority.authorized_ceiling_usdt!==policy.authorized_ceiling_usdt
+       ||Object.keys(authority.account_limits_usdt).sort().join("|")
+         !==Object.keys(policy.account_limits_usdt).sort().join("|")
+       ||Object.entries(authority.account_limits_usdt).some(
+           ([k,v])=>policy.account_limits_usdt[k]!==v
+       ))
+      return {status:"DENIED",reason:"POLICY_SNAPSHOT_NOT_AUTHORITATIVE"};
     const stored: unknown = await tx.get(KEY);
     if (stored !== undefined && !validBook(stored)) return {status:"DENIED", reason:"RISK_BOOK_CORRUPT"};
     const book = (stored ?? emptyBook()) as RiskBook;
