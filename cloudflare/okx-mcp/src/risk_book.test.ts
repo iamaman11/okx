@@ -109,6 +109,13 @@ check((await reserve(sa,policy,census,reqA)).status==="DENIED","released intent 
 check((await reserve(sa,policy,census,reqB)).status==="HELD","risk freed after proof");
 const v=await readRiskBook(sa);
 check(v?.entries.length===2&&v.entries[0].state==="RELEASED"&&v.entries[1].state==="HELD","durability");
+const disabled={...governance,accounts:governance.accounts.map(ac=>
+  ac.uid_fingerprint===b?{...ac,enabled:false}:ac)};
+await sa.put("account_governance_v2",disabled);
+check((await reserve(sa,policy,census,{...base,uid:b,
+  intent_id:"intent_20261018_disabled",loss_usdt:"1"})).status==="DENIED",
+ "disabled account cannot open new risk");
+await sa.put("account_governance_v2",governance);
 await sa.put("risk_book_v1",{fake:true});
 check((await reserve(sa,policy,census,{...reqB,intent_id:"intent_20261018_cccc"})).status==="DENIED",
   "corrupt owner fails closed");

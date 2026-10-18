@@ -39,3 +39,9 @@ yes(reviseGovernance(p,{...change,accounts:[{...change.accounts[0],
 yes(reviseGovernance(p,{...change,accounts:[{...change.accounts[0],
  strategies:[{...strategy,max_drawdown_ratio:null}]}]})===null,
  "enabled strategy needs explicit drawdown gate");
+
+const verified={...p,accounts:p.accounts.map(a=>({...a,identity_verified:true,enabled:false}))};
+const cohort=projectRiskPolicy(verified);
+yes(cohort!==null&&Object.keys(cohort.account_limits_usdt).length===1,
+ "disabled registered Real accounts remain in the risk cohort");
+yes(projectRiskPolicy(p)===null,"unverified account cannot masquerade as zero exposure");

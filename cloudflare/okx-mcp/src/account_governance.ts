@@ -166,10 +166,15 @@ export function reviseGovernance(previous:Governance,change:GovernanceUpdate):Go
 export function projectRiskPolicy(state:Governance):RiskPolicy|null{
   if(!validGovernance(state))return null;
   const accounts:Record<string,string>={};
-  for(const a of state.accounts)if(a.enabled&&a.identity_verified&&a.environment==="real")
+  for(const a of state.accounts)if(a.environment==="real"){
+    // Disabled registered accounts still occupy risk. An unverified UID
+    // cannot be silently excluded as if it had zero exchange exposure.
+    if(!a.identity_verified)return null;
     accounts[a.venue+":"+a.environment+":"+a.uid_fingerprint]=a.limits.max_modelled_loss_usdt;
+  }
   return {revision:state.revision,
     enabled:state.trading_requested&&state.operator_authorization.status==="ACTIVE"
+      &&state.accounts.some(a=>a.environment==="real"&&a.enabled)
       &&Object.keys(accounts).length>0,
     authorized_ceiling_usdt:state.operator_authorization.ceiling_usdt,
     global_limit_usdt:state.max_total_modelled_loss_usdt,
