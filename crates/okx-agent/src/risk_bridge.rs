@@ -1,6 +1,8 @@
 //! One bounded native requester over the existing authenticated WS ownership chain.
 //! Timeout is UNKNOWN. Never retry a risk mutation or an exchange POST.
-use okx_protocol::risk_authority::{RiskCommand, RiskCommandAction, RiskDecisionStatus, RiskResult};
+use okx_protocol::risk_authority::{
+    RiskCommand, RiskCommandAction, RiskDecisionStatus, RiskResult,
+};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -95,15 +97,14 @@ impl NativeRiskClient {
         }
         Ok(authorized)
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use okx_protocol::risk_authority::{
-        NativeRiskCensus, RiskAccountOccupancy, RiskCommandAction, RiskDecisionStatus,
-        RISK_COMMAND_SCHEMA_V1, RISK_RESULT_SCHEMA_V1,
+        NativeRiskCensus, RISK_COMMAND_SCHEMA_V1, RISK_RESULT_SCHEMA_V1, RiskAccountOccupancy,
+        RiskCommandAction, RiskDecisionStatus,
     };
     fn census() -> NativeRiskCensus {
         let uid = "a".repeat(64);
@@ -170,20 +171,27 @@ mod tests {
         let client = NativeRiskClient::new(tx);
         let server = tokio::spawn(async move {
             let r1 = rx.recv().await.unwrap();
-            let _ = r1.return_to.send(reply(
-                r1.command.command_id, RiskDecisionStatus::Held, 1,
-            ));
+            let _ = r1
+                .return_to
+                .send(reply(r1.command.command_id, RiskDecisionStatus::Held, 1));
             let r2 = rx.recv().await.unwrap();
-            assert!(matches!(r2.command.action, RiskCommandAction::BeginPost { .. }));
+            assert!(matches!(
+                r2.command.action,
+                RiskCommandAction::BeginPost { .. }
+            ));
             let _ = r2.return_to.send(reply(
-                r2.command.command_id, RiskDecisionStatus::PostAuthorized, 2,
+                r2.command.command_id,
+                RiskDecisionStatus::PostAuthorized,
+                2,
             ));
         });
         let accepted = client
             .reserve_then_fence(reserve(), |held| {
                 let next = post(held);
                 async move { Ok(next) }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
         assert_eq!(accepted.status, RiskDecisionStatus::PostAuthorized);
         server.await.unwrap();
     }
@@ -193,16 +201,17 @@ mod tests {
         let client = NativeRiskClient::new(tx);
         let server = tokio::spawn(async move {
             let req = rx.recv().await.unwrap();
-            let _ = req.return_to.send(reply(
-                req.command.command_id, RiskDecisionStatus::Denied, 1,
-            ));
+            let _ =
+                req.return_to
+                    .send(reply(req.command.command_id, RiskDecisionStatus::Denied, 1));
             assert!(rx.try_recv().is_err());
         });
         let result = client
             .reserve_then_fence(reserve(), |held| {
                 let p = post(held);
                 async move { Ok(p) }
-            }).await;
+            })
+            .await;
         assert!(matches!(result, Err("RISK_RESERVATION_NOT_HELD")));
         server.await.unwrap();
     }
@@ -212,9 +221,9 @@ mod tests {
         let client = NativeRiskClient::new(tx);
         let server = tokio::spawn(async move {
             let req = rx.recv().await.unwrap();
-            let _ = req.return_to.send(reply(
-                req.command.command_id, RiskDecisionStatus::Held, 1,
-            ));
+            let _ = req
+                .return_to
+                .send(reply(req.command.command_id, RiskDecisionStatus::Held, 1));
             assert!(rx.try_recv().is_err());
         });
         let result = client
@@ -224,8 +233,12 @@ mod tests {
                     *plan_sha256 = "f".repeat(64);
                 }
                 async move { Ok(p) }
-            }).await;
-        assert!(matches!(result, Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH")));
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH")
+        ));
         server.await.unwrap();
     }
 }
