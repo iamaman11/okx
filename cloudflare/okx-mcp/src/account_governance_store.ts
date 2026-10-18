@@ -1,4 +1,4 @@
-import {accountPolicyRequest,defaultAccountPolicy,validAccountPolicy} from "./account_policy.js";
+import {defaultAccountPolicy,validAccountPolicy} from "./account_policy.js";
 import {GOVERNANCE_SCHEMA,migrateV1,reviseGovernance,validGovernance,type GovernanceUpdate,type Governance} from "./account_governance.js";
 import {readRiskBook,units,amount,type RiskBook} from "./risk_book.js";
 

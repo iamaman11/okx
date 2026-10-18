@@ -5,7 +5,14 @@ class Storage{
   map=new Map<string,unknown>();
   async get(key:string){return this.map.get(key);}
   async put(key:string,value:unknown){this.map.set(key,value);}
-  async transaction<T>(fn:(tx:Storage)=>Promise<T>):Promise<T>{return fn(this);}
+  private queue=Promise.resolve();
+  async transaction<T>(fn:(tx:Storage)=>Promise<T>):Promise<T>{
+    const preceding=this.queue;
+    let unlock!:()=>void;
+    this.queue=new Promise<void>(resolve=>{unlock=resolve;});
+    await preceding;
+    try{return await fn(this);}finally{unlock();}
+  }
 }
 const s=new Storage();
 const first=await governanceRequest(s,"GET");
@@ -26,6 +33,14 @@ ok((await governanceRequest(s,"POST",{...update,expected_revision:1,max_total_mo
  "operator cannot exceed grant");
 const noDual=await governanceRequest(s,"GET");
 ok(noDual.status===200&&noDual.body.revision===1,"durable readback");
+const concurrent=await Promise.all([
+ governanceRequest(s,"POST",{...update,expected_revision:1,max_total_modelled_loss_usdt:"3"}),
+ governanceRequest(s,"POST",{...update,expected_revision:1,max_total_modelled_loss_usdt:"4"})
+]);
+ok(concurrent.filter(row=>row.status===200).length===1
+  &&concurrent.filter(row=>row.status===409).length===1,
+ "simultaneous configured-limit writes cannot both win a CAS revision");
+ok((await governanceRequest(s,"GET")).body.revision===2,"one durable winning revision");
 const legacy=new Storage();
 await legacy.put("account_policy_v1",{...defaultAccountPolicy(),
  revision:3,trading_requested:true,allowed_account_uids:["a".repeat(64)]});
