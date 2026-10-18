@@ -13,6 +13,7 @@ import {
   normalizeInstrument,
   requestId,
   runtimeFetch,
+  sha256Hex,
   TOOL_CONTRACT_VERSION,
   toolResult,
   transportFailure,
@@ -164,7 +165,7 @@ export const mcpApi = {
             inputSchema: {
               type: "object",
               properties: {
-                action: { type: "string", enum: ["status", "configure", "enroll"] },
+                action: { type: "string", enum: ["status", "configure", "enroll", "authorize", "stop"] },
                 label: {type:"string",minLength:2,maxLength:80,description:"Account display label. UID comes ONLY from authenticated native observation."},
                 expected_revision: { type: "integer", minimum: 0 },
                 trading_requested: { type: "boolean" },
@@ -608,6 +609,21 @@ export const mcpApi = {
         return jsonRpc(id, toolResult(contractStatus(await runtimeFetch(env, "/status?probe=1"))));
       }
       if (name === "account_control") {
+        if(args.action==="stop"&&hasOnlyKeys(args,["action"])){
+          return jsonRpc(id,toolResult(await runtimeFetch(env,"/account-governance/stop",{
+            method:"POST"
+          })));
+        }
+        if(args.action==="authorize"&&hasOnlyKeys(args,["action","expected_revision"])
+          &&Number.isSafeInteger(args.expected_revision)&&(args.expected_revision as number)>=0){
+          const approval_id="sha256:"+await sha256Hex(
+            "okx-operator-authorization/v1:"+requestId()+":"+crypto.randomUUID()
+          );
+          return jsonRpc(id,toolResult(await runtimeFetch(env,"/account-governance/authorize",{
+            method:"POST",headers:{"content-type":"application/json"},
+            body:JSON.stringify({expected_revision:args.expected_revision,approval_id})
+          })));
+        }
         if(args.action==="enroll"&&hasOnlyKeys(args,["action","label"])&&
           typeof args.label==="string"&&args.label.trim().length>=2&&args.label.length<=80){
           const session=await runtimeFetch(env,"/status?probe=1");

@@ -1,7 +1,7 @@
 import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
 import { defaultAccountPolicy, validAccountPolicy } from "./account_policy.js";
 import { accountPolicyRequest } from "./account_policy.js";
-import { governanceRequest, enrollObservedAccount, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
+import { governanceRequest, enrollObservedAccount, stopNewRealRisk, activateExistingOperatorGrant, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
 import { handleNativeRiskCommand } from "./risk_authority.js";
 import {
   ACK_DEADLINE_MS,
@@ -40,6 +40,26 @@ export class RuntimeSession {
     }
     if (url.pathname === "/status") {
       return Response.json(await this.status(url.searchParams.get("probe") === "1"));
+    }
+    if(url.pathname==="/account-governance/stop"&&request.method==="POST"){
+      await governanceRequest(this.state.storage,"GET");
+      const value=await stopNewRealRisk(this.state.storage);
+      return Response.json(value.body,{status:value.status,headers:{"cache-control":"no-store"}});
+    }
+    if(url.pathname==="/account-governance/authorize"&&request.method==="POST"){
+      const body=await request.text();
+      if(body.length>512)return Response.json({status:"FAILED",reason:"AUTHORIZATION_TOO_LARGE"},{status:413});
+      let value:unknown;
+      try{value=JSON.parse(body);}catch{
+        return Response.json({status:"FAILED",reason:"INVALID_AUTHORIZATION"},{status:400});
+      }
+      const args=value as Record<string,unknown>;
+      if(!args||!Number.isSafeInteger(args.expected_revision)||
+        typeof args.approval_id!=="string")
+        return Response.json({status:"FAILED",reason:"INVALID_AUTHORIZATION"},{status:400});
+      const result=await activateExistingOperatorGrant(this.state.storage,
+        args.expected_revision as number,args.approval_id);
+      return Response.json(result.body,{status:result.status,headers:{"cache-control":"no-store"}});
     }
     if(url.pathname==="/account-governance/enroll"&&request.method==="POST"){
       // Internal DO endpoint; Worker alone constructs the observation from
