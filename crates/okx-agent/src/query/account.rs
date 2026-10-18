@@ -351,6 +351,21 @@ fn compact_trader_packet(
     // Pure read-only finance evidence; no trader admission path consumes it.
     let current_period_proven =
         boolean("/reconciliation/strategy_period_financial_audit/current_period_proven");
+    // NAV watermarks are historical durable observations, not a current
+    // account-equity proxy. Do not display a watermark for a different run.
+    let watermark_matches_current_run = state("/reconciliation/strategy_nav_watermark/run_id")
+        .is_some()
+        && state("/reconciliation/strategy_nav_watermark/run_id")
+            == state("/reconciliation/financial_period/run_id");
+    // A partially reconciled period may contain partial linked bills, but
+    // must not expose them to the trader as accepted strategy profit.
+    let current_pnl_attested = current_period_proven
+        && matches!(
+            state("/reconciliation/financial_period/state"),
+            Some("FLAT_RECONCILED" | "ACTIVE_VALUED")
+        )
+        && state("/reconciliation/financial_period/funding_usdt") == Some("0")
+        && state("/reconciliation/financial_period/nav_usdt").is_some();
     let history_complete = full
         .pointer("/account_ledger/history_coverage")
         .and_then(Value::as_array)
@@ -380,6 +395,11 @@ fn compact_trader_packet(
         .is_some_and(|amount| amount > 0)
     {
         reasons.push("FUNDING_NOT_ATTRIBUTED");
+    }
+    if count("/reconciliation/strategy_attribution/account_cashflows/unverified_transfer_bills")
+        .is_some_and(|amount| amount > 0)
+    {
+        reasons.push("ACCOUNT_TRANSFER_SOURCE_UNVERIFIED");
     }
     if !coherent {
         reasons.push("PRIVATE_SOURCE_NOT_COHERENT");
@@ -464,6 +484,17 @@ fn compact_trader_packet(
             "active_run_id": get("/reconciliation/financial_period/run_id"),
             "period_state": get("/reconciliation/financial_period/state"),
             "current_nav_usdt": get("/reconciliation/financial_period/nav_usdt"),
+            "current_trading_pnl": if current_pnl_attested {
+                json!({
+                    "scope": "EXACT_RUN_FINANCIAL_PERIOD_ONLY",
+                    "realized_usdt": get("/reconciliation/financial_period/realized_usdt"),
+                    "fees_usdt": get("/reconciliation/financial_period/fees_usdt"),
+                    "funding_usdt": get("/reconciliation/financial_period/funding_usdt"),
+                    "unrealized_usdt": get("/reconciliation/financial_period/unrealized_usdt")
+                })
+            } else {
+                Value::Null
+            },
             "finalized_run_id": get("/reconciliation/finalized_run/run_id"),
             "finalized_nav_usdt": get("/reconciliation/finalized_run/nav_usdt"),
             "finalized_realized_usdt": get("/reconciliation/finalized_run/realized_usdt"),
@@ -475,8 +506,31 @@ fn compact_trader_packet(
             "archive_free_slots": get("/reconciliation/archived_run_slots_remaining"),
             "period_audit_status": get("/reconciliation/strategy_period_financial_audit/status"),
             "current_period_proven": current_period_proven,
+            "nav_checkpoint": if watermark_matches_current_run {
+                json!({
+                    "run_id": get("/reconciliation/strategy_nav_watermark/run_id"),
+                    "asof_ms": get("/reconciliation/strategy_nav_watermark/account_as_of_ms"),
+                    "nav_usdt": get("/reconciliation/strategy_nav_watermark/nav_usdt"),
+                    "high_water_usdt": get("/reconciliation/strategy_nav_watermark/high_water_usdt"),
+                    "utc_daily_gross_loss_usdt": get("/reconciliation/strategy_nav_watermark/daily_gross_loss_usdt"),
+                    "checksum_sha256": get("/reconciliation/strategy_nav_watermark/checksum_sha256"),
+                    "scope": "PERSISTED_OBSERVATION_NOT_TRADE_ADMISSION"
+                })
+            } else {
+                Value::Null
+            },
             "periods_total": get("/reconciliation/strategy_period_financial_audit/periods_total"),
             "period_proofs_truncated": get("/reconciliation/strategy_period_financial_audit/periods_truncated")
+        },
+        "account_cashflows": {
+            // Exchange bill history is bounded; neither the total nor an
+            // individual incoming transfer is run-owned strategy PnL.
+            "scope": "AUTHENTICATED_ACCOUNT_BOUNDED_BILL_WINDOW",
+            "transfer_in_bills": get("/reconciliation/strategy_attribution/account_cashflows/transfer_in_bills"),
+            "transfer_out_bills": get("/reconciliation/strategy_attribution/account_cashflows/transfer_out_bills"),
+            "unverified_transfer_bills": get("/reconciliation/strategy_attribution/account_cashflows/unverified_transfer_bills"),
+            "net_transfers_by_currency": get("/reconciliation/strategy_attribution/account_cashflows/net_transfer_totals"),
+            "attributed_to_strategy_pnl": false
         },
         "funding": {
             "allocated_to_strategy_usdt": get("/reconciliation/financial_period/funding_usdt"),
@@ -3119,7 +3173,25 @@ mod tests {
                 "archived_runs_count": 4,
                 "unverified_runs_count": 1,
                 "archived_run_slots_remaining": 251,
-                "strategy_attribution": {"unallocated_funding_bills": 2},
+                "strategy_attribution": {
+                    "unallocated_funding_bills": 2,
+                    "account_cashflows": {
+                        "transfer_in_bills": 1,
+                        "transfer_out_bills": 0,
+                        "unverified_transfer_bills": 0,
+                        "net_transfer_totals": [
+                            {"currency":"USDT", "amount":"127"}
+                        ]
+                    }
+                },
+                "strategy_nav_watermark": {
+                    "run_id": "stage5b_physical_test_run",
+                    "account_as_of_ms": 1792024604593u64,
+                    "nav_usdt": "99.996587799",
+                    "high_water_usdt": "100",
+                    "daily_gross_loss_usdt": "0.008174201",
+                    "checksum_sha256": "abc"
+                },
                 "strategy_period_financial_audit": {
                     "status": "INCOMPLETE", "periods_total": 6,
                     "current_period_proven": true,
@@ -3153,6 +3225,19 @@ mod tests {
         );
         assert_eq!(p["funding"]["unallocated_exchange_bills"], 2);
         assert_eq!(p["strategy"]["period_audit_status"], "INCOMPLETE");
+        assert_eq!(p["account_cashflows"]["transfer_in_bills"], 1);
+        assert_eq!(p["account_cashflows"]["transfer_out_bills"], 0);
+        assert_eq!(
+            p["account_cashflows"]["net_transfers_by_currency"][0]["amount"],
+            "127"
+        );
+        assert_eq!(p["account_cashflows"]["attributed_to_strategy_pnl"], false);
+        assert!(p["strategy"]["current_trading_pnl"].is_null());
+        assert_eq!(p["strategy"]["nav_checkpoint"]["high_water_usdt"], "100");
+        assert_eq!(
+            p["strategy"]["nav_checkpoint"]["scope"],
+            "PERSISTED_OBSERVATION_NOT_TRADE_ADMISSION"
+        );
         // A source-proven current run does NOT clear old financial gaps,
         // durable STOP, or the separate live order admission requirement.
         assert_eq!(p["strategy"]["current_period_proven"], true);
