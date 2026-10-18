@@ -73,7 +73,6 @@ pub struct LinkedCurrencyAmount {
     pub amount: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 /// Bounded source-native identity for a bill that has NO verified managed-fill
 /// linkage. The venue type and balance movement are diagnostic data only; they
 /// are never silently included in strategy capital, PnL, fees or funding.
@@ -91,6 +90,7 @@ pub struct UnlinkedAccountBillEvidence {
     pub timestamp_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StrategyExchangeAttribution {
     pub schema: &'static str,
     pub status: &'static str,
