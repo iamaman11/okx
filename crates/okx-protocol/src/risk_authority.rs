@@ -163,7 +163,9 @@ impl RiskCommand {
                     && token(intent_id)
                     && (2..=64).contains(&strategy_id.len())
                     && strategy_id.as_bytes()[0].is_ascii_alphabetic()
-                    && strategy_id.bytes().all(|c| c.is_ascii_alphanumeric() || c==b'_' || c==b'-')
+                    && strategy_id
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
                     && hash(plan_sha256)
                     && positive(requested_loss_usdt)
                     && *policy_revision > 0
