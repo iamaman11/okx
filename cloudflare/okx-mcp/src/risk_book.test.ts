@@ -1,4 +1,4 @@
-import {amount,units,readRiskBook,reserveRisk,transitionRisk} from "./risk_book.js";
+import {accountKey,amount,units,readRiskBook,reserveRisk,transitionRisk} from "./risk_book.js";
 function check(value: boolean, label:string) { if(!value) throw Error(label); }
 class Storage {
   map=new Map<string,unknown>();
@@ -15,9 +15,9 @@ class Storage {
 const a="a".repeat(64),b="b".repeat(64),p="c".repeat(64),d="d".repeat(64);
 const now=1792344435177;
 const policy={revision:1,enabled:true,authorized_ceiling_usdt:"10",
-  global_limit_usdt:"10",account_limits_usdt:{[a]:"10",[b]:"10"}};
+  global_limit_usdt:"10",account_limits_usdt:{["okx:real:"+a]:"10",["okx:real:"+b]:"10"}};
 const census={complete:true as const,source_digest:d,generated_at_ms:now,
-  account_uids:[a,b],occupied:[{uid:a,occupied_usdt:"0"},{uid:b,occupied_usdt:"0"}]};
+  account_keys:["okx:real:"+a,"okx:real:"+b],occupied:[{account_key:"okx:real:"+a,occupied_usdt:"0"},{account_key:"okx:real:"+b,occupied_usdt:"0"}]};
 const base={venue:"okx",environment:"real" as const,run_id:"run_20261018_AAA",
   plan_hash:p,policy_revision:1,now_ms:now};
 const sa=new Storage();
@@ -31,7 +31,7 @@ check(both[0].status==="HELD"&&both[1].status==="DENIED","serial competition 6+5
 check((await readRiskBook(sa))?.entries.length===1,"one durable reservation");
 check((await reserveRisk(sa,policy,census,reqA)).status==="HELD","idempotent exact retry");
 check((await reserveRisk(sa,policy,census,{...reqA,plan_hash:d})).status==="DENIED","intent plan immutable");
-check((await reserveRisk(sa,policy,{...census,account_uids:[a]},reqB)).status==="DENIED",
+check((await reserveRisk(sa,policy,{...census,account_keys:["okx:real:"+a]},reqB)).status==="DENIED",
   "selected-only UID cannot assert empty other accounts");
 check((await reserveRisk(sa,policy,{...census,generated_at_ms:now-5001},reqB)).status==="DENIED",
   "stale source is not zero risk");
