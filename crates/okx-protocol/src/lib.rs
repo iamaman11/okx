@@ -1649,6 +1649,30 @@ impl AgentOperation {
 pub const CENTRAL_ACCOUNT_POLICY_SCHEMA_V1: &str = "okx.account-policy/v1";
 pub const CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS: u64 = 15_000;
 
+// Parse the operator-selectable modelled-loss budget without floats. A
+// session policy cannot extend the current authorization of 10 USDT.
+// Changing the selected value is distinct from establishing atomic shared
+// reservations; until those are proven, native execution must reject OPEN.
+fn valid_central_modelled_loss_budget(value: &str) -> bool {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if whole.is_empty()
+        || whole.len() > 2
+        || (whole.len() > 1 && whole.starts_with('0'))
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || value.ends_with('.')
+        || fraction.len() > 9
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        return false;
+    }
+    let Ok(integer) = whole.parse::<u8>() else {
+        return false;
+    };
+    integer <= 10
+        && (integer != 10 || fraction.bytes().all(|b| b == b'0'))
+        && (integer != 0 || fraction.bytes().any(|b| b != b'0'))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CentralAccountPolicy {
@@ -1667,7 +1691,7 @@ impl CentralAccountPolicy {
             && self.session_generation > 0
             && (!self.trading_requested || self.revision > 0)
             && self.issued_at_ms > 0
-            && self.max_total_modelled_loss_usdt == "10"
+            && valid_central_modelled_loss_budget(&self.max_total_modelled_loss_usdt)
             && (!self.trading_requested || !self.allowed_account_uids.is_empty())
             && self.allowed_account_uids.len() <= 16
             && self
@@ -4141,6 +4165,16 @@ mod direct_transport_tests {
             session_generation: 7,
         };
         assert!(policy.authorizes_uid(&uid, 1001, 7));
+        for budget in ["0.000000001","0.5","1","5.5","10","10.000000000"] {
+            let mut adjusted = policy.clone();
+            adjusted.max_total_modelled_loss_usdt = budget.to_owned();
+            assert!(adjusted.authorizes_uid(&uid, 1001, 7), "valid budget: {budget}");
+        }
+        for budget in ["0","0.000000000","0.0000000001","-1","11","10.000000001","NaN","1e0","01"] {
+            let mut adjusted = policy.clone();
+            adjusted.max_total_modelled_loss_usdt = budget.to_owned();
+            assert!(!adjusted.authorizes_uid(&uid, 1001, 7), "invalid budget: {budget}");
+        }
         assert!(!policy.authorizes_uid(&uid, 1001, 8));
         assert!(!policy.authorizes_uid(&uid, 1000 + CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS + 1, 7));
         assert!(!policy.authorizes_uid(&"b".repeat(64), 1001, 7));
