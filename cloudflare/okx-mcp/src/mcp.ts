@@ -160,13 +160,17 @@ export const mcpApi = {
           },
           {
             name: "account_control",
-            description: "Read or configure the ONE central account trading request, with one aggregate $10 modelled-loss budget, immutable account UID allowlist, and CAS revision. Configuration is NOT an executable trading permit; native OKX Trade credentials, financial STOP and Rust risk still decide effective admission.",
+            description: "Read or configure ONE central account trading request with a per-revision aggregate modelled-loss budget, account UID allowlist and CAS. Current operator-authorized maximum is 10 USDT; a configured budget is NOT trade admission without native credentials, finance, STOP and atomically reserved cross-account risk.",
             inputSchema: {
               type: "object",
               properties: {
                 action: { type: "string", enum: ["status", "configure"] },
                 expected_revision: { type: "integer", minimum: 0 },
                 trading_requested: { type: "boolean" },
+                max_total_modelled_loss_usdt: {
+                  type: "string", pattern: "^(?:0|[1-9][0-9]?)(?:\\.[0-9]{1,9})?$",
+                  description: "Optional exact USDT operator budget. Current maximum authorization is 10; positive values only.",
+                },
                 allowed_account_uids: {
                   type: "array", minItems: 0, maxItems: 16, uniqueItems: true,
                   items: { type: "string", pattern: "^[0-9a-f]{64}$" },
@@ -581,7 +585,8 @@ export const mcpApi = {
         }
         if (args.action === "configure" && hasOnlyKeys(args, [
           "action","expected_revision","trading_requested","allowed_account_uids",
-        ]) && Object.keys(args).length === 4) {
+          "max_total_modelled_loss_usdt",
+        ]) && (Object.keys(args).length === 4 || Object.keys(args).length === 5)) {
           return jsonRpc(id, toolResult(await runtimeFetch(env, "/account-policy", {
             method: "POST",
             headers: {"content-type":"application/json"},
@@ -589,6 +594,9 @@ export const mcpApi = {
               expected_revision: args.expected_revision,
               trading_requested: args.trading_requested,
               allowed_account_uids: args.allowed_account_uids,
+              ...(args.max_total_modelled_loss_usdt === undefined ? {} : {
+                max_total_modelled_loss_usdt: args.max_total_modelled_loss_usdt,
+              }),
             }),
           })));
         }
