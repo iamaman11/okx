@@ -391,7 +391,8 @@ export async function beginRiskPost(
       return {status:"DENIED" as const,reason:"INTENT_NOT_HELD_EXACTLY_ONCE"};
     const entry=stored.entries[index];
     // Reusing a recently sampled RESERVE census is not a new source read.
-    if(native.census.generated_at_ms<=entry.created_at_ms)
+    if(native.census.generated_at_ms<=entry.created_at_ms ||
+       native.census.source_read_floor_ms<=entry.created_at_ms)
       return {status:"DENIED" as const,reason:"POST_CENSUS_NOT_AFTER_RESERVE"};
     // Every registered Real UID must have been read again. Identical
     // exchange content is valid; advancing only a command clock is not.
