@@ -485,7 +485,8 @@ fn assemble_period_financial_audit(
     let unlinked_bills = attribution.map_or(0, |value| value.unlinked_other_bills);
     let incoming = attribution.map_or(0, |value| value.account_cashflows.transfer_in_bills);
     let outgoing = attribution.map_or(0, |value| value.account_cashflows.transfer_out_bills);
-    let invalid_cashflow = attribution.map_or(0, |value| value.account_cashflows.unverified_transfer_bills);
+    let invalid_cashflow =
+        attribution.map_or(0, |value| value.account_cashflows.unverified_transfer_bills);
     let nav_usable = report
         .strategy_nav
         .as_ref()
@@ -958,11 +959,15 @@ fn attribute_strategy_exchange_evidence(
             match classification {
                 AccountBillClass::TransferIn(value) => {
                     transfer_in_bills += 1;
-                    *account_transfer_totals.entry(bill.currency.clone()).or_default() += value;
+                    *account_transfer_totals
+                        .entry(bill.currency.clone())
+                        .or_default() += value;
                 }
                 AccountBillClass::TransferOut(value) => {
                     transfer_out_bills += 1;
-                    *account_transfer_totals.entry(bill.currency.clone()).or_default() += value;
+                    *account_transfer_totals
+                        .entry(bill.currency.clone())
+                        .or_default() += value;
                 }
                 AccountBillClass::UnverifiedTransfer => unverified_transfer_bills += 1,
                 AccountBillClass::Other => unlinked_other_bills += 1,
@@ -2071,9 +2076,8 @@ mod tests {
     #[test]
     fn transfer_in_out_are_account_cashflows_not_strategy_pnl_or_funding() {
         let (ledger, plan, p) = acknowledged_test_ledger("native-transfer-cashflow");
-        let (_, mut incoming) = linked_accounting_pair(
-            &plan, "not-a-trade", "transfer-in-127", "0", "USDT", "0"
-        );
+        let (_, mut incoming) =
+            linked_accounting_pair(&plan, "not-a-trade", "transfer-in-127", "0", "USDT", "0");
         incoming.bill_type = "1".to_owned();
         incoming.sub_type = "11".to_owned();
         incoming.balance_change = Some("127".to_owned());
@@ -2089,8 +2093,15 @@ mod tests {
         bad.bill_id = "transfer-bad-sign".to_owned();
         bad.sub_type = "12".to_owned();
         let a = attribute_strategy_exchange_evidence(
-            &ledger, &[], &[], &[outgoing, incoming, bad], true, true, true
-        ).expect("exact account-only transfers");
+            &ledger,
+            &[],
+            &[],
+            &[outgoing, incoming, bad],
+            true,
+            true,
+            true,
+        )
+        .expect("exact account-only transfers");
         assert_eq!(a.unlinked_nonfunding_bills, 3);
         assert_eq!(a.unlinked_other_bills, 0);
         assert_eq!(a.account_cashflows.transfer_in_bills, 1);
@@ -2101,12 +2112,30 @@ mod tests {
         assert!(a.fills_fee_totals.is_empty());
         assert!(a.linked_trade_bill_pnl_totals.is_empty());
         assert!(!a.strategy_nav_available);
-        assert!(a.incomplete_reasons.contains(&"account_transfers_not_owned_by_strategy_run"));
-        assert!(a.incomplete_reasons.contains(&"account_transfer_source_fields_unverified"));
-        assert!(!a.incomplete_reasons.contains(&"account_bill_activity_outside_exact_managed_fill_links"));
-        assert_eq!(a.unlinked_nonfunding_bill_samples[0].accounting_class, "ACCOUNT_TRANSFER_IN");
-        assert_eq!(a.unlinked_nonfunding_bill_samples[1].accounting_class, "ACCOUNT_TRANSFER_OUT");
-        assert_eq!(a.unlinked_nonfunding_bill_samples[2].accounting_class, "UNVERIFIED_ACCOUNT_TRANSFER");
+        assert!(
+            a.incomplete_reasons
+                .contains(&"account_transfers_not_owned_by_strategy_run")
+        );
+        assert!(
+            a.incomplete_reasons
+                .contains(&"account_transfer_source_fields_unverified")
+        );
+        assert!(
+            !a.incomplete_reasons
+                .contains(&"account_bill_activity_outside_exact_managed_fill_links")
+        );
+        assert_eq!(
+            a.unlinked_nonfunding_bill_samples[0].accounting_class,
+            "UNVERIFIED_ACCOUNT_TRANSFER"
+        );
+        assert_eq!(
+            a.unlinked_nonfunding_bill_samples[1].accounting_class,
+            "ACCOUNT_TRANSFER_IN"
+        );
+        assert_eq!(
+            a.unlinked_nonfunding_bill_samples[2].accounting_class,
+            "ACCOUNT_TRANSFER_OUT"
+        );
         let _ = std::fs::remove_file(p);
     }
 

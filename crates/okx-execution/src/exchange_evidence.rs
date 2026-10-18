@@ -300,12 +300,19 @@ impl DurableExchangeEvidence {
             } else {
                 None
             };
-            self.add(format!("bill:{}", b.bill_id), item(json!({
-                "source":"OKX_REST_BILL","billId":b.bill_id,"instId":b.instrument_id,
-                "ordId":b.order_id,"clOrdId":b.client_order_id,"tradeId":b.trade_id,
-                "ccy":b.currency,"type":b.bill_type,"subType":b.sub_type,
-                "balChg":b.balance_change,"fee":b.fee,"pnl":b.pnl,"ts":b.timestamp_ms
-            }), e, funding))?;
+            self.add(
+                format!("bill:{}", b.bill_id),
+                item(
+                    json!({
+                        "source":"OKX_REST_BILL","billId":b.bill_id,"instId":b.instrument_id,
+                        "ordId":b.order_id,"clOrdId":b.client_order_id,"tradeId":b.trade_id,
+                        "ccy":b.currency,"type":b.bill_type,"subType":b.sub_type,
+                        "balChg":b.balance_change,"fee":b.fee,"pnl":b.pnl,"ts":b.timestamp_ms
+                    }),
+                    e,
+                    funding,
+                ),
+            )?;
         }
         let new_native_evidence = self.events.len() != original_events;
         if !should_persist_source_cursor(

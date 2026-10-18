@@ -43,10 +43,7 @@ fn absent_native_id(value: Option<&str>) -> bool {
 }
 
 fn zero_or_absent(value: Option<&str>) -> bool {
-    value.is_none_or(|v| {
-        v.trim().is_empty()
-            || Decimal::from_str(v).ok() == Some(Decimal::ZERO)
-    })
+    value.is_none_or(|v| v.trim().is_empty() || Decimal::from_str(v).ok() == Some(Decimal::ZERO))
 }
 
 /// Classification is deliberately strict and account-scoped.
@@ -117,18 +114,54 @@ mod tests {
     #[test]
     fn malformed_or_trade_linked_transfer_fails_closed() {
         for case in [
-            AccountBillSource { sub_type: "12", ..source() },
-            AccountBillSource { balance_change: Some("-1"), ..source() },
-            AccountBillSource { balance_change: None, ..source() },
-            AccountBillSource { balance_change: Some("NaN"), ..source() },
-            AccountBillSource { order_id: Some("1234"), ..source() },
-            AccountBillSource { trade_id: Some("55"), ..source() },
-            AccountBillSource { client_order_id: Some("external"), ..source() },
-            AccountBillSource { instrument_id: "BTC-USDT-SWAP", ..source() },
-            AccountBillSource { fee: Some("-0.1"), ..source() },
-            AccountBillSource { pnl: Some("1"), ..source() },
-            AccountBillSource { sub_type: "200", ..source() },
-            AccountBillSource { currency: "", ..source() },
+            AccountBillSource {
+                sub_type: "12",
+                ..source()
+            },
+            AccountBillSource {
+                balance_change: Some("-1"),
+                ..source()
+            },
+            AccountBillSource {
+                balance_change: None,
+                ..source()
+            },
+            AccountBillSource {
+                balance_change: Some("NaN"),
+                ..source()
+            },
+            AccountBillSource {
+                order_id: Some("1234"),
+                ..source()
+            },
+            AccountBillSource {
+                trade_id: Some("55"),
+                ..source()
+            },
+            AccountBillSource {
+                client_order_id: Some("external"),
+                ..source()
+            },
+            AccountBillSource {
+                instrument_id: "BTC-USDT-SWAP",
+                ..source()
+            },
+            AccountBillSource {
+                fee: Some("-0.1"),
+                ..source()
+            },
+            AccountBillSource {
+                pnl: Some("1"),
+                ..source()
+            },
+            AccountBillSource {
+                sub_type: "200",
+                ..source()
+            },
+            AccountBillSource {
+                currency: "",
+                ..source()
+            },
         ] {
             assert_eq!(
                 classify_native_account_bill(case),
