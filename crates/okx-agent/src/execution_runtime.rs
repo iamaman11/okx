@@ -1236,7 +1236,10 @@ impl ExecutionRuntime {
             // The executor independently scans durable parent/mutation/OCO
             // UNKNOWN states; this cannot override native state.
             unknown_mutations_reconciled: true,
-            existing_modelled_loss_usdt: rust_decimal::Decimal::ZERO,
+            // No atomic all-account reservation proof has been delivered by
+            // the single global owner. Unknown occupied risk is NOT zero.
+            // Keep Real OPEN closed until exact reservation integration.
+            existing_modelled_loss_usdt: None,
             exact_owned_reduce_only_close: close_owned_exact,
         };
         // Final central revision/UID/expiry fence immediately before the
