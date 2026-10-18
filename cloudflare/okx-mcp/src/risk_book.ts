@@ -61,6 +61,17 @@ export interface RiskReservation {
   policy_revision: number;
   now_ms: number;
 }
+/** Created only inside an authenticated, current-generation native WS frame handler.
+ * Never expose this object through public MCP arguments.
+ */
+export interface NativeSessionRiskProof {
+  connection_generation:number;
+  source_digest:string;
+  native_account_evidence_complete:boolean;
+  native_order_evidence_complete:boolean;
+  native_ledger_evidence_complete:boolean;
+}
+
 export type RiskDecision =
   | { status: "HELD"; entry: RiskEntry; book_sequence: number; occupied_global_usdt: string }
   | { status: "DENIED"; reason: string };
@@ -166,9 +177,15 @@ export async function reserveRisk(
   policy: RiskPolicy,
   census: CompleteRiskCensus,
   input: RiskReservation,
+  native: NativeSessionRiskProof | null = null,
 ): Promise<RiskDecision> {
   const bounds = budget(policy);
   const requested = units(input.loss_usdt);
+  if(!native || !native.native_account_evidence_complete ||
+    !native.native_order_evidence_complete || !native.native_ledger_evidence_complete ||
+    !Number.isSafeInteger(native.connection_generation) || native.connection_generation < 1 ||
+    native.source_digest !== census.source_digest)
+      return {status:"DENIED",reason:"NATIVE_COMPLETE_RISK_SOURCE_UNPROVEN"};
   if (!policy.enabled || bounds === null || input.environment !== "real"
     || input.policy_revision !== policy.revision
     || requested === null || requested <= 0n
@@ -196,23 +213,11 @@ export async function reserveRisk(
            ([k,v])=>policy.account_limits_usdt[k]!==v
        ))
       return {status:"DENIED",reason:"POLICY_SNAPSHOT_NOT_AUTHORITATIVE"};
-    // A caller's own "complete:true" and arbitrary digest are not proof.
-    // This private record may ONLY be persisted after this RuntimeSession's
-    // authenticated Windows WS proves a full native account/venue census.
-    // No such writer is deployed yet: therefore all Real reservations deny.
-    const witness:unknown=await tx.get("risk_census_attestation_v1");
+    // Current authenticated generation is authoritative for the transaction.
+    // No persisted intermediate attestation / second control journal.
     const generation:unknown=await tx.get("generation");
-    if(typeof generation!=="number"||!Number.isSafeInteger(generation)
-      ||generation<=0||typeof witness!=="object"||witness===null||Array.isArray(witness))
-      return {status:"DENIED",reason:"AUTHENTICATED_CENSUS_ATTESTATION_ABSENT"};
-    const att=witness as Record<string,unknown>;
-    if(att.schema!=="okx.risk-census-attestation/v1"
-      ||att.connection_generation!==generation
-      ||att.source_digest!==census.source_digest
-      ||att.generated_at_ms!==census.generated_at_ms
-      ||JSON.stringify(att.account_keys)!==JSON.stringify(census.account_keys)
-      ||JSON.stringify(att.occupied)!==JSON.stringify(census.occupied))
-      return {status:"DENIED",reason:"AUTHENTICATED_CENSUS_ATTESTATION_MISMATCH"};
+    if(generation!==native.connection_generation)
+      return {status:"DENIED",reason:"STALE_RUNTIME_GENERATION"};
     const stored: unknown = await tx.get(KEY);
     if (stored !== undefined && !validBook(stored)) return {status:"DENIED", reason:"RISK_BOOK_CORRUPT"};
     const book = (stored ?? emptyBook()) as RiskBook;
@@ -260,8 +265,12 @@ export async function transitionRisk(
   plan_hash: string,
   to: RiskEntryState,
   exact_native_proof_digest: string,
+  native: {connection_generation:number;expected_book_sequence:number}|null = null,
 ): Promise<{status:"UPDATED"|"DENIED";reason?:string}> {
-  if (!HEX.test(plan_hash) || !HEX.test(exact_native_proof_digest))
+  if (!HEX.test(plan_hash) || !HEX.test(exact_native_proof_digest) ||
+      !native || !Number.isSafeInteger(native.connection_generation) ||
+      native.connection_generation<1 || !Number.isSafeInteger(native.expected_book_sequence) ||
+      native.expected_book_sequence<1)
     return {status:"DENIED",reason:"MISSING_NATIVE_PROOF"};
   const transitions: Record<RiskEntryState,RiskEntryState[]> = {
     HELD:["POSTED","UNKNOWN","RELEASED"],
@@ -275,17 +284,9 @@ export async function transitionRisk(
     if (!validBook(value)) return {status:"DENIED" as const,reason:"RISK_BOOK_MISSING_OR_CORRUPT"};
     const book = value as RiskBook;
     const generation:unknown=await tx.get("generation");
-    const witness:unknown=await tx.get("risk_resolution_attestation_v1:"+key);
-    if(typeof generation!=="number"||generation<=0||!Number.isSafeInteger(generation)
-      ||typeof witness!=="object"||witness===null||Array.isArray(witness))
-      return {status:"DENIED" as const,reason:"NATIVE_RESOLUTION_ATTESTATION_ABSENT"};
-    const att=witness as Record<string,unknown>;
-    if(att.schema!=="okx.risk-resolution-attestation/v1"
-      ||att.connection_generation!==generation
-      ||att.key!==key||att.plan_hash!==plan_hash||att.next_state!==to
-      ||att.native_proof_digest!==exact_native_proof_digest
-      ||att.expected_book_sequence!==book.sequence)
-      return {status:"DENIED" as const,reason:"NATIVE_RESOLUTION_ATTESTATION_MISMATCH"};
+    if(generation!==native.connection_generation ||
+      book.sequence!==native.expected_book_sequence)
+      return {status:"DENIED" as const,reason:"STALE_SESSION_OR_BOOK_SEQUENCE"};
     const index = book.entries.findIndex(e=>e.key===key && e.plan_hash===plan_hash);
     if (index<0 || !transitions[book.entries[index].state].includes(to))
       return {status:"DENIED" as const,reason:"INVALID_RISK_TRANSITION"};
@@ -295,6 +296,54 @@ export async function transitionRisk(
     return {status:"UPDATED" as const};
   });
 }
+
+/** Pre-POST fence. A previous HELD reservation is *not* exchange permission.
+ * This transaction checks current centralized policy+session and durably
+ * marks the only possible send POSTED; replay/timeout never authorizes POST.
+ */
+export async function beginRiskPost(
+  storage:any,
+  key:string,
+  plan_hash:string,
+  policy_revision:number,
+  proof_digest:string,
+  native:{connection_generation:number;expected_book_sequence:number}|null,
+):Promise<{status:"POST_AUTHORIZED"|"DENIED";reason?:string;book_sequence?:number}>{
+  if(!native||!HEX.test(plan_hash)||!HEX.test(proof_digest)||
+    !Number.isSafeInteger(native.connection_generation)||native.connection_generation<1||
+    !Number.isSafeInteger(native.expected_book_sequence)||native.expected_book_sequence<1||
+    !Number.isSafeInteger(policy_revision)||policy_revision<1)
+    return {status:"DENIED",reason:"INVALID_NATIVE_POST_FENCE"};
+  return storage.transaction(async(tx:any)=>{
+    const generation:unknown=await tx.get("generation");
+    if(generation!==native.connection_generation)
+      return {status:"DENIED" as const,reason:"STALE_RUNTIME_GENERATION"};
+    const governance:unknown=await tx.get("account_governance_v2");
+    if(!validGovernance(governance)||!governance.trading_requested||
+      governance.revision!==policy_revision)
+      return {status:"DENIED" as const,reason:"CENTRAL_REVOCATION_OR_POLICY_CHANGE"};
+    const authority=projectRiskPolicy(governance);
+    if(!authority?.enabled)
+      return {status:"DENIED" as const,reason:"CENTRAL_OPERATOR_GRANT_INACTIVE"};
+    const stored:unknown=await tx.get(KEY);
+    if(!validBook(stored))
+      return {status:"DENIED" as const,reason:"RISK_BOOK_MISSING_OR_CORRUPT"};
+    if(stored.sequence!==native.expected_book_sequence)
+      return {status:"DENIED" as const,reason:"STALE_RISK_BOOK_SEQUENCE"};
+    const index=stored.entries.findIndex(e=>e.key===key&&e.plan_hash===plan_hash);
+    if(index<0||stored.entries[index].state!=="HELD"||
+      stored.entries[index].policy_revision!==policy_revision)
+      return {status:"DENIED" as const,reason:"INTENT_NOT_HELD_EXACTLY_ONCE"};
+    const entry=stored.entries[index];
+    if(!Object.hasOwn(authority.account_limits_usdt,accountKey(entry)))
+      return {status:"DENIED" as const,reason:"ACCOUNT_REVOKED"};
+    const entries=[...stored.entries];
+    entries[index]={...entry,state:"POSTED" as const,transition_proof:proof_digest};
+    await tx.put(KEY,{schema:RISK_BOOK_SCHEMA,sequence:stored.sequence+1,entries});
+    return {status:"POST_AUTHORIZED" as const,book_sequence:stored.sequence+1};
+  });
+}
+
 export async function readRiskBook(storage:any):Promise<RiskBook|null> {
   const value:unknown=await storage.get(KEY);
   return value===undefined?emptyBook():validBook(value)?value:null;
