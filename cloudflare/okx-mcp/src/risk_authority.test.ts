@@ -20,7 +20,8 @@ await s.put("account_governance_v2",migrateV1(defaultAccountPolicy()));
 const base={schema:"okx.risk-command/v1",command_id:"risk_command_00001",
  action:{action:"RESERVE",venue:"okx",account_uid:uid,run_id:"run_12345678",
  intent_id:"intent_12345678",strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP",plan_sha256:hash,requested_loss_usdt:"1",
- policy_revision:1,census:{complete:true,source_digest:hash,generated_at_ms:now,
+ policy_revision:1,census:{complete:true,source_digest:hash,
+ content_digest:hash,source_read_floor_ms:now,generated_at_ms:now,
  account_keys:["okx:real:"+uid],occupied:[{account_key:"okx:real:"+uid,occupied_usdt:"0"}],
  native_account_evidence_complete:true,native_order_evidence_complete:true,
  native_ledger_evidence_complete:true}}};

@@ -29,7 +29,10 @@ function nativeEvidence(raw:unknown,generation:number):NativeSessionRiskProof|nu
     ||raw.native_account_evidence_complete!==true
     ||raw.native_order_evidence_complete!==true
     ||raw.native_ledger_evidence_complete!==true
-    ||typeof raw.source_digest!=="string"||!SHA.test(raw.source_digest))
+    ||typeof raw.source_digest!=="string"||!SHA.test(raw.source_digest)
+    ||typeof raw.content_digest!=="string"||!SHA.test(raw.content_digest)
+    ||!Number.isSafeInteger(raw.source_read_floor_ms)
+    ||(raw.source_read_floor_ms as number)<=0)
     return null;
   return {
     connection_generation:generation,source_digest:raw.source_digest,
@@ -71,6 +74,8 @@ export async function handleNativeRiskCommand(
     if(!policy?.enabled)return deny(id,"CENTRAL_REAL_AUTHORIZATION_INACTIVE");
     const census:CompleteRiskCensus={
       complete:true,source_digest:proof.source_digest,
+      content_digest:a.census.content_digest as string,
+      source_read_floor_ms:a.census.source_read_floor_ms as number,
       generated_at_ms:a.census.generated_at_ms as number,
       account_keys:a.census.account_keys as string[],
       occupied:a.census.occupied as CompleteRiskCensus["occupied"],
@@ -99,6 +104,8 @@ export async function handleNativeRiskCommand(
       return deny(id,"POST_CENSUS_UNVERIFIED");
     const census:CompleteRiskCensus={
       complete:true,source_digest:proof.source_digest,
+      content_digest:a.census.content_digest as string,
+      source_read_floor_ms:a.census.source_read_floor_ms as number,
       generated_at_ms:a.census.generated_at_ms as number,
       account_keys:a.census.account_keys as string[],
       occupied:a.census.occupied as CompleteRiskCensus["occupied"],

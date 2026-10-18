@@ -26,6 +26,7 @@ export interface RiskEntry {
    * remain accounted for but cannot receive a positive POST authorization.
    */
   reserve_source_digest?: string;
+  reserve_source_read_floor_ms?: number;
   transition_proof: string | null;
 }
 export interface RiskBook {
@@ -54,6 +55,8 @@ export interface CompleteRiskCensus {
   occupied: AccountRiskWitness[];
   generated_at_ms: number;
   source_digest: string;
+  content_digest: string;
+  source_read_floor_ms: number;
   complete: true;
 }
 export interface RiskReservation {
@@ -112,6 +115,8 @@ function validEntry(entry: RiskEntry): boolean {
     && Number.isSafeInteger(entry.policy_revision) && entry.policy_revision > 0
     && Number.isSafeInteger(entry.created_at_ms) && entry.created_at_ms > 0
     && (entry.reserve_source_digest === undefined || HEX.test(entry.reserve_source_digest))
+    && (entry.reserve_source_read_floor_ms === undefined ||
+        Number.isSafeInteger(entry.reserve_source_read_floor_ms) && entry.reserve_source_read_floor_ms > 0)
     && units(entry.loss_usdt) !== null && units(entry.loss_usdt)! > 0n
     && ["HELD","POSTED","UNKNOWN","OPEN","RELEASED"].includes(entry.state)
     && (entry.transition_proof === null || HEX.test(entry.transition_proof))
@@ -142,6 +147,10 @@ function validBook(value: unknown): value is RiskBook {
 function emptyBook(): RiskBook { return { schema: RISK_BOOK_SCHEMA, sequence: 0, entries: [] }; }
 function censusRisk(census: CompleteRiskCensus, policy: RiskPolicy, now: number): Map<string,bigint> | null {
   if (census.complete !== true || !HEX.test(census.source_digest)
+    || !HEX.test(census.content_digest)
+    || !Number.isSafeInteger(census.source_read_floor_ms)
+    || census.source_read_floor_ms <= 0
+    || census.source_read_floor_ms > census.generated_at_ms
     || census.generated_at_ms > now || now - census.generated_at_ms > MAX_CENSUS_AGE_MS
     || !Number.isSafeInteger(now) || !Number.isSafeInteger(census.generated_at_ms)) return null;
   const required = Object.keys(policy.account_limits_usdt).sort();
@@ -278,7 +287,9 @@ export async function reserveRisk(
       intent_id:input.intent_id, plan_hash:input.plan_hash,
       policy_revision:input.policy_revision, loss_usdt:input.loss_usdt,
       state:"HELD", created_at_ms:input.now_ms,
-      reserve_source_digest:census.source_digest,transition_proof:null,
+      reserve_source_digest:census.source_digest,
+      reserve_source_read_floor_ms:census.source_read_floor_ms,
+      transition_proof:null,
     };
     const next: RiskBook = {schema:RISK_BOOK_SCHEMA, sequence:book.sequence+1, entries:[...book.entries,entry]};
     await tx.put(KEY,next);
@@ -382,8 +393,11 @@ export async function beginRiskPost(
     // Reusing a recently sampled RESERVE census is not a new source read.
     if(native.census.generated_at_ms<=entry.created_at_ms)
       return {status:"DENIED" as const,reason:"POST_CENSUS_NOT_AFTER_RESERVE"};
-    // A newer clock stamp with the same source digest is not a new read.
+    // Every registered Real UID must have been read again. Identical
+    // exchange content is valid; advancing only a command clock is not.
     if (!entry.reserve_source_digest ||
+        !entry.reserve_source_read_floor_ms ||
+        native.census.source_read_floor_ms <= entry.reserve_source_read_floor_ms ||
         native.census.source_digest===entry.reserve_source_digest)
       return {status:"DENIED" as const,reason:"POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN"};
     const account=governance.accounts.find(a=>

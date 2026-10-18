@@ -166,6 +166,20 @@ impl PortfolioRiskSources {
             });
         }
         occupied.sort_by(|a, b| a.account_key.cmp(&b.account_key));
+        let source_read_floor_ms = self
+            .observed
+            .iter()
+            .map(|row| row.received_at_ms)
+            .min()
+            .ok_or(E::MissingOrDuplicateAccount)?;
+        let canonical_content = serde_json::to_vec(&(
+            "okx.native-risk-content/v1",
+            self.registry_revision,
+            keys,
+            &occupied,
+        ))
+        .map_err(|_| E::IncompleteHistory)?;
+        let content_digest = format!("{:x}", Sha256::digest(canonical_content));
         let mut canonical_sources = self.observed.iter().collect::<Vec<_>>();
         canonical_sources.sort_by(|a, b| a.account_key.cmp(&b.account_key));
         let bytes = serde_json::to_vec(&(
@@ -181,6 +195,8 @@ impl PortfolioRiskSources {
             occupied,
             generated_at_ms: self.now_ms,
             source_digest: format!("{digest:x}"),
+            content_digest,
+            source_read_floor_ms,
             complete: true,
             native_account_evidence_complete: true,
             native_order_evidence_complete: true,
@@ -313,6 +329,24 @@ mod tests {
         let mut reordered = cohort();
         reordered.observed.reverse();
         assert_eq!(reordered.census().unwrap().source_digest, c.source_digest);
+        let mut fresh = cohort();
+        fresh.now_ms = 1_001;
+        for row in &mut fresh.observed {
+            row.received_at_ms = 1_001;
+        }
+        let later = fresh.census().unwrap();
+        assert_eq!(later.content_digest, c.content_digest);
+        assert_ne!(later.source_digest, c.source_digest);
+        assert!(later.source_read_floor_ms > c.source_read_floor_ms);
+        // Only advancing the envelope timestamp cannot fabricate a new read.
+        let mut old_rows = cohort();
+        old_rows.now_ms = 1_001;
+        let envelope_only = old_rows.census().unwrap();
+        assert_eq!(envelope_only.source_digest, c.source_digest);
+        assert_eq!(envelope_only.source_read_floor_ms, c.source_read_floor_ms);
+        // Refreshing one of two registered accounts is also insufficient.
+        old_rows.observed[0].received_at_ms = 1_001;
+        assert_eq!(old_rows.census().unwrap().source_read_floor_ms, c.source_read_floor_ms);
     }
     #[test]
     fn missing_duplicate_unpriced_stale_and_unknown_never_become_zero() {

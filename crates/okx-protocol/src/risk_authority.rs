@@ -46,6 +46,10 @@ pub struct NativeRiskCensus {
     pub occupied: Vec<RiskAccountOccupancy>,
     pub generated_at_ms: u64,
     pub source_digest: String,
+    /// Canonical content hash. Independent reads may return identical data.
+    pub content_digest: String,
+    /// Oldest completed native read across the entire registered Real cohort.
+    pub source_read_floor_ms: u64,
     pub complete: bool,
     pub native_account_evidence_complete: bool,
     pub native_order_evidence_complete: bool,
@@ -65,6 +69,9 @@ impl NativeRiskCensus {
             && self.native_ledger_evidence_complete
             && self.generated_at_ms > 0
             && hash(&self.source_digest)
+            && hash(&self.content_digest)
+            && self.source_read_floor_ms > 0
+            && self.source_read_floor_ms <= self.generated_at_ms
             && !self.account_keys.is_empty()
             && self.account_keys.len() <= 32
             && self.account_keys.windows(2).all(|v| v[0] < v[1])
@@ -271,6 +278,8 @@ mod tests {
                     }],
                     generated_at_ms: 1,
                     source_digest: "b".repeat(64),
+                    content_digest: "c".repeat(64),
+                    source_read_floor_ms: 1,
                     complete: false,
                     native_account_evidence_complete: true,
                     native_order_evidence_complete: true,

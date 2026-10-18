@@ -16,7 +16,8 @@ const a="a".repeat(64),b="b".repeat(64),p="c".repeat(64),d="d".repeat(64);
 const now=1792344435177;
 const policy={revision:1,enabled:true,authorized_ceiling_usdt:"10",
   global_limit_usdt:"10",account_limits_usdt:{["okx:real:"+a]:"10",["okx:real:"+b]:"10"}};
-const census={complete:true as const,source_digest:d,generated_at_ms:now,
+const census={complete:true as const,source_digest:d,content_digest:a,
+  source_read_floor_ms:now,generated_at_ms:now,
   account_keys:["okx:real:"+a,"okx:real:"+b],occupied:[{account_key:"okx:real:"+a,occupied_usdt:"0"},{account_key:"okx:real:"+b,occupied_usdt:"0"}]};
 const base={venue:"okx",environment:"real" as const,run_id:"run_20261018_AAA",
   plan_hash:p,policy_revision:1,now_ms:now,strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP"};
@@ -88,12 +89,14 @@ check((await reserve(sa,policy,census,{...reqA,intent_id:"intent_20261018_eth",
  instrument_id:"ETH-USDT-SWAP",loss_usdt:"1"})).status==="DENIED",
  "native risk cannot reserve an instrument omitted from central account policy");
 const entry=(await readRiskBook(sa))!.entries[0];
-check(entry.reserve_source_digest===census.source_digest,
- "first native source digest is durable");
+check(entry.reserve_source_digest===census.source_digest
+  &&entry.reserve_source_read_floor_ms===census.source_read_floor_ms,
+ "first native source proof is durable");
 check((await transitionRisk(sa,entry.key,p,"UNKNOWN",d)).status==="DENIED",
   "caller-supplied proof digest does not unlock risk state transition");
 const beforePost=await readRiskBook(sa);
-const postCensus={...census,generated_at_ms:now+1,source_digest:p};
+const postCensus={...census,generated_at_ms:now+1,
+  source_read_floor_ms:now+1,source_digest:p};
 const postNative={...native,source_digest:p};
 const postProof={connection_generation:77,expected_book_sequence:beforePost!.sequence,
  census:postCensus,source_proof:postNative,now_ms:now+1};
@@ -111,6 +114,12 @@ check((await beginRiskPost(sa,entry.key,p,1,d,{
  source_proof:native
 })).reason==="POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN",
  "new timestamp with reused census source digest cannot POST");
+check((await beginRiskPost(sa,entry.key,p,1,d,{
+ ...postProof,census:{...postCensus,source_read_floor_ms:now}
+})).reason==="POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN",
+ "later command time cannot replace all-UID source read");
+check(postCensus.content_digest===census.content_digest,
+ "two independent reads can observe identical positions and risk");
 check((await beginRiskPost(sa,entry.key,p,1,d,{
  ...postProof,census:{...postCensus,generated_at_ms:now-5001}
 })).status==="DENIED","stale census cannot grant POST");

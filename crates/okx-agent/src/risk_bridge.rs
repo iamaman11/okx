@@ -55,7 +55,8 @@ impl NativeRiskClient {
         F: FnOnce(&RiskResult) -> Fut,
         Fut: std::future::Future<Output = Result<RiskCommand, &'static str>>,
     {
-        let (plan, revision, reserve_at_ms, reserve_digest) = match &reserve.action {
+        let (plan, revision, reserve_at_ms, reserve_digest, reserve_read_floor) =
+            match &reserve.action {
             RiskCommandAction::Reserve {
                 plan_sha256,
                 policy_revision,
@@ -66,6 +67,7 @@ impl NativeRiskClient {
                 *policy_revision,
                 census.generated_at_ms,
                 census.source_digest.clone(),
+                census.source_read_floor_ms,
             ),
             _ => return Err("RISK_RESERVE_COMMAND_REQUIRED"),
         };
@@ -91,6 +93,7 @@ impl NativeRiskClient {
                 && *policy_revision == revision
                 && Some(*expected_risk_book_sequence) == held.risk_book_sequence
                 && census.generated_at_ms > reserve_at_ms
+                && census.source_read_floor_ms > reserve_read_floor
                 && census.source_digest != reserve_digest
         );
         if !correct {
@@ -125,6 +128,8 @@ mod tests {
             }],
             generated_at_ms: 1_000,
             source_digest: "c".repeat(64),
+            content_digest: "f".repeat(64),
+            source_read_floor_ms: 1_000,
             complete: true,
             native_account_evidence_complete: true,
             native_order_evidence_complete: true,
@@ -163,6 +168,7 @@ mod tests {
     fn post(held: &RiskResult) -> RiskCommand {
         let mut fresh = census();
         fresh.generated_at_ms = 1_001;
+        fresh.source_read_floor_ms = 1_001;
         fresh.source_digest = "e".repeat(64);
         RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
@@ -254,6 +260,28 @@ mod tests {
         ));
         server.await.unwrap();
     }
+    #[tokio::test]
+    async fn later_envelope_timestamp_without_all_account_re_read_cannot_post() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let client = NativeRiskClient::new(tx);
+        let server = tokio::spawn(async move {
+            let r = rx.recv().await.unwrap();
+            let _ = r.return_to.send(reply(r.command.command_id, RiskDecisionStatus::Held, 1));
+            assert!(rx.try_recv().is_err());
+        });
+        let result = client
+            .reserve_then_fence(reserve(), |held| {
+                let mut p = post(held);
+                if let RiskCommandAction::BeginPost { census, .. } = &mut p.action {
+                    census.source_read_floor_ms = 1_000;
+                }
+                async move { Ok(p) }
+            })
+            .await;
+        assert!(matches!(result, Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH")));
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn changed_plan_cannot_turn_held_into_post() {
         let (tx, mut rx) = mpsc::channel(4);
