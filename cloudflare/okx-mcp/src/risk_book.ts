@@ -56,6 +56,7 @@ export interface RiskReservation {
   environment: "real";
   uid: string;
   run_id: string;
+  strategy_id: string;
   intent_id: string;
   plan_hash: string;
   loss_usdt: string;
