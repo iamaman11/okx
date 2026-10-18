@@ -357,6 +357,15 @@ fn compact_trader_packet(
         state("/reconciliation/strategy_nav_watermark/run_id").is_some()
             && state("/reconciliation/strategy_nav_watermark/run_id")
                 == state("/reconciliation/financial_period/run_id");
+    // A partially reconciled period may contain partial linked bills, but
+    // must not expose them to the trader as accepted strategy profit.
+    let current_pnl_attested = current_period_proven
+        && matches!(
+            state("/reconciliation/financial_period/state"),
+            Some("FLAT_RECONCILED" | "ACTIVE_VALUED")
+        )
+        && state("/reconciliation/financial_period/funding_usdt") == Some("0")
+        && state("/reconciliation/financial_period/nav_usdt").is_some();
     let history_complete = full
         .pointer("/account_ledger/history_coverage")
         .and_then(Value::as_array)
@@ -475,6 +484,17 @@ fn compact_trader_packet(
             "active_run_id": get("/reconciliation/financial_period/run_id"),
             "period_state": get("/reconciliation/financial_period/state"),
             "current_nav_usdt": get("/reconciliation/financial_period/nav_usdt"),
+            "current_trading_pnl": if current_pnl_attested {
+                json!({
+                    "scope": "EXACT_RUN_FINANCIAL_PERIOD_ONLY",
+                    "realized_usdt": get("/reconciliation/financial_period/realized_usdt"),
+                    "fees_usdt": get("/reconciliation/financial_period/fees_usdt"),
+                    "funding_usdt": get("/reconciliation/financial_period/funding_usdt"),
+                    "unrealized_usdt": get("/reconciliation/financial_period/unrealized_usdt")
+                })
+            } else {
+                Value::Null
+            },
             "finalized_run_id": get("/reconciliation/finalized_run/run_id"),
             "finalized_nav_usdt": get("/reconciliation/finalized_run/nav_usdt"),
             "finalized_realized_usdt": get("/reconciliation/finalized_run/realized_usdt"),
@@ -3209,6 +3229,7 @@ mod tests {
         assert_eq!(p["account_cashflows"]["transfer_out_bills"], 0);
         assert_eq!(p["account_cashflows"]["net_transfers_by_currency"][0]["amount"], "127");
         assert_eq!(p["account_cashflows"]["attributed_to_strategy_pnl"], false);
+        assert!(p["strategy"]["current_trading_pnl"].is_null());
         assert_eq!(p["strategy"]["nav_checkpoint"]["high_water_usdt"], "100");
         assert_eq!(
             p["strategy"]["nav_checkpoint"]["scope"],
