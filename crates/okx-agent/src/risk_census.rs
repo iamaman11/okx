@@ -46,13 +46,17 @@ fn account_key_valid(key: &str) -> bool {
         return false;
     };
     uid.len() == 64
-        && uid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && uid
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 fn loss_valid(value: &str) -> bool {
     let Ok(n) = Decimal::from_str(value) else {
         return false;
     };
-    n >= Decimal::ZERO && n.scale() <= 9 && value.len() <= 25
+    n >= Decimal::ZERO
+        && n.scale() <= 9
+        && value.len() <= 25
         && !value.contains(['e', 'E', '_', '+', '-'])
 }
 impl PortfolioRiskSources {
@@ -62,7 +66,8 @@ impl PortfolioRiskSources {
             return Err(E::RegistryUnverified);
         }
         let keys = &self.registered_real_accounts;
-        if keys.is_empty() || keys.len() > 32
+        if keys.is_empty()
+            || keys.len() > 32
             || keys.iter().any(|k| !account_key_valid(k))
             || keys.windows(2).any(|pair| pair[0] >= pair[1])
             || self.observed.len() != keys.len()
@@ -78,12 +83,14 @@ impl PortfolioRiskSources {
             {
                 return Err(E::MissingOrDuplicateAccount);
             }
-            if source.received_at_ms == 0 || source.received_at_ms > self.now_ms
+            if source.received_at_ms == 0
+                || source.received_at_ms > self.now_ms
                 || self.now_ms - source.received_at_ms > 5_000
             {
                 return Err(E::StaleSource);
             }
-            if !source.account_inventory_complete || !source.orders_algos_complete
+            if !source.account_inventory_complete
+                || !source.orders_algos_complete
                 || !source.financial_history_complete
             {
                 return Err(E::IncompleteHistory);
@@ -94,7 +101,9 @@ impl PortfolioRiskSources {
             if !source.unknown_mutations_reconciled {
                 return Err(E::UnknownMutation);
             }
-            let amount = source.all_exposure_modelled_loss_usdt.as_deref()
+            let amount = source
+                .all_exposure_modelled_loss_usdt
+                .as_deref()
                 .ok_or(E::UnpricedExposure)?;
             if !loss_valid(amount) {
                 return Err(E::UnpricedExposure);
@@ -102,19 +111,27 @@ impl PortfolioRiskSources {
             occupied.push(RiskAccountOccupancy {
                 account_key: source.account_key.clone(),
                 occupied_usdt: Decimal::from_str(amount)
-                    .map_err(|_| E::UnpricedExposure)?.normalize().to_string(),
+                    .map_err(|_| E::UnpricedExposure)?
+                    .normalize()
+                    .to_string(),
             });
         }
         occupied.sort_by(|a, b| a.account_key.cmp(&b.account_key));
         let bytes = serde_json::to_vec(&(
-            "okx.native-risk-source/v1", self.registry_revision, keys, &self.observed,
-        )).map_err(|_| E::IncompleteHistory)?;
+            "okx.native-risk-source/v1",
+            self.registry_revision,
+            keys,
+            &self.observed,
+        ))
+        .map_err(|_| E::IncompleteHistory)?;
         let digest = Sha256::digest(bytes);
         let census = NativeRiskCensus {
             account_keys: keys.clone(),
-            occupied, generated_at_ms: self.now_ms,
+            occupied,
+            generated_at_ms: self.now_ms,
             source_digest: format!("{digest:x}"),
-            complete: true, native_account_evidence_complete: true,
+            complete: true,
+            native_account_evidence_complete: true,
             native_order_evidence_complete: true,
             native_ledger_evidence_complete: true,
         };
@@ -138,18 +155,24 @@ mod tests {
     }
     fn row(v: char) -> AccountRiskEvidence {
         AccountRiskEvidence {
-            account_key: key(v), source_generation: "generation_verified".into(),
-            received_at_ms: 1_000, account_inventory_complete: true,
-            orders_algos_complete: true, financial_history_complete: true,
-            private_stream_continuous: true, unknown_mutations_reconciled: true,
-            all_exposure_modelled_loss_usdt: Some(if v == 'a' {"0"} else {"2.25"}.into()),
+            account_key: key(v),
+            source_generation: "generation_verified".into(),
+            received_at_ms: 1_000,
+            account_inventory_complete: true,
+            orders_algos_complete: true,
+            financial_history_complete: true,
+            private_stream_continuous: true,
+            unknown_mutations_reconciled: true,
+            all_exposure_modelled_loss_usdt: Some(if v == 'a' { "0" } else { "2.25" }.into()),
         }
     }
     fn cohort() -> PortfolioRiskSources {
         PortfolioRiskSources {
-            registered_real_accounts: vec![key('a'),key('b')],
-            registry_revision: 4, registry_verified: true,
-            observed: vec![row('a'),row('b')], now_ms: 1_000,
+            registered_real_accounts: vec![key('a'), key('b')],
+            registry_revision: 4,
+            registry_verified: true,
+            observed: vec![row('a'), row('b')],
+            now_ms: 1_000,
         }
     }
     #[test]
@@ -163,10 +186,16 @@ mod tests {
     fn missing_duplicate_unpriced_stale_and_unknown_never_become_zero() {
         let mut c = cohort();
         c.observed.pop();
-        assert_eq!(c.census().unwrap_err(), CensusFailure::MissingOrDuplicateAccount);
+        assert_eq!(
+            c.census().unwrap_err(),
+            CensusFailure::MissingOrDuplicateAccount
+        );
         c = cohort();
         c.observed[1] = c.observed[0].clone();
-        assert_eq!(c.census().unwrap_err(), CensusFailure::MissingOrDuplicateAccount);
+        assert_eq!(
+            c.census().unwrap_err(),
+            CensusFailure::MissingOrDuplicateAccount
+        );
         c = cohort();
         c.observed[1].all_exposure_modelled_loss_usdt = None;
         assert_eq!(c.census().unwrap_err(), CensusFailure::UnpricedExposure);
