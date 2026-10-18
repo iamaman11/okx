@@ -1569,7 +1569,9 @@ async fn reconcile_unsent_prepared(
             && now_ms.saturating_sub(policy.issued_at_ms)
                 <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
     }) {
-        return Ok(deny("trusted Worker maintenance session is absent or stale"));
+        return Ok(deny(
+            "trusted Worker maintenance session is absent or stale",
+        ));
     }
     let Some(observer) = context.account_fallback else {
         return Ok(deny(
