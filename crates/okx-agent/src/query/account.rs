@@ -353,10 +353,10 @@ fn compact_trader_packet(
         boolean("/reconciliation/strategy_period_financial_audit/current_period_proven");
     // NAV watermarks are historical durable observations, not a current
     // account-equity proxy. Do not display a watermark for a different run.
-    let watermark_matches_current_run =
-        state("/reconciliation/strategy_nav_watermark/run_id").is_some()
-            && state("/reconciliation/strategy_nav_watermark/run_id")
-                == state("/reconciliation/financial_period/run_id");
+    let watermark_matches_current_run = state("/reconciliation/strategy_nav_watermark/run_id")
+        .is_some()
+        && state("/reconciliation/strategy_nav_watermark/run_id")
+            == state("/reconciliation/financial_period/run_id");
     // A partially reconciled period may contain partial linked bills, but
     // must not expose them to the trader as accepted strategy profit.
     let current_pnl_attested = current_period_proven
@@ -3227,7 +3227,10 @@ mod tests {
         assert_eq!(p["strategy"]["period_audit_status"], "INCOMPLETE");
         assert_eq!(p["account_cashflows"]["transfer_in_bills"], 1);
         assert_eq!(p["account_cashflows"]["transfer_out_bills"], 0);
-        assert_eq!(p["account_cashflows"]["net_transfers_by_currency"][0]["amount"], "127");
+        assert_eq!(
+            p["account_cashflows"]["net_transfers_by_currency"][0]["amount"],
+            "127"
+        );
         assert_eq!(p["account_cashflows"]["attributed_to_strategy_pnl"], false);
         assert!(p["strategy"]["current_trading_pnl"].is_null());
         assert_eq!(p["strategy"]["nav_checkpoint"]["high_water_usdt"], "100");
