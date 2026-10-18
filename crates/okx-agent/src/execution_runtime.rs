@@ -1183,6 +1183,14 @@ impl ExecutionRuntime {
         };
         let plan = &entry.record.plan;
         let new_risk = plan.action.is_risk_increasing();
+        // One selected account being flat is NOT a complete central risk
+        // cohort. Fail closed even if a future code change accidentally
+        // supplies a synthetic zero in ProductionRiskWitness.
+        if new_risk
+            && crate::risk_census::PortfolioRiskSources::selected_account_is_insufficient(facts)
+        {
+            return Ok(None);
+        }
         let flat = facts.summary.open_positions == 0
             && facts.summary.pending_orders == 0
             && facts.authoritative_positions.iter().all(|position| {
