@@ -3,7 +3,8 @@
 // not an exchange POST permit. Rust must validate the actual account UID,
 // venue permissions, NAV, STOP, and one global risk budget before any live POST.
 export const ACCOUNT_POLICY_SCHEMA = "okx.account-policy/v1" as const;
-export const AGGREGATE_RISK_CAP_USDT = "10" as const;
+// Authorization ceiling for this operator; budget itself is policy data.
+export const AUTHORIZED_RISK_CEILING_USDT = "10" as const;
 const KEY = "account_policy_v1";
 
 export interface AccountPolicy {
@@ -11,14 +12,26 @@ export interface AccountPolicy {
   revision: number;
   trading_requested: boolean;
   allowed_account_uids: string[];
-  max_total_modelled_loss_usdt: typeof AGGREGATE_RISK_CAP_USDT;
+  max_total_modelled_loss_usdt: string;
 }
 
 export type AccountPolicyUpdate = {
   expected_revision: number;
   trading_requested: boolean;
   allowed_account_uids: string[];
+  max_total_modelled_loss_usdt?: string;
 };
+
+// Exact monetary parsing; CAS may lower the selected budget but cannot
+// raise the outer ceiling of this operator's current authorization.
+export function validOperatorRiskBudget(value: unknown): value is string {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]?)(?:\.[0-9]{1,9})?$/.test(value)) return false;
+  const [whole, fraction = ""] = value.split(".");
+  const units = BigInt(whole) * 1_000_000_000n
+    + BigInt(fraction.padEnd(9, "0") || "0");
+  const ceiling = BigInt(AUTHORIZED_RISK_CEILING_USDT) * 1_000_000_000n;
+  return units > 0n && units <= ceiling;
+}
 
 export function defaultAccountPolicy(): AccountPolicy {
   return {
@@ -26,7 +39,7 @@ export function defaultAccountPolicy(): AccountPolicy {
     revision: 0,
     trading_requested: false,
     allowed_account_uids: [],
-    max_total_modelled_loss_usdt: AGGREGATE_RISK_CAP_USDT,
+    max_total_modelled_loss_usdt: AUTHORIZED_RISK_CEILING_USDT,
   };
 }
 
@@ -42,7 +55,7 @@ export function validAccountPolicy(value: unknown): value is AccountPolicy {
   if (p.schema !== ACCOUNT_POLICY_SCHEMA
       || !Number.isSafeInteger(p.revision) || (p.revision as number) < 0
       || typeof p.trading_requested !== "boolean"
-      || p.max_total_modelled_loss_usdt !== AGGREGATE_RISK_CAP_USDT
+      || !validOperatorRiskBudget(p.max_total_modelled_loss_usdt)
       || !Array.isArray(p.allowed_account_uids)
       || p.allowed_account_uids.length > 16
       || !p.allowed_account_uids.every(isLowerSha256)
@@ -54,8 +67,10 @@ export function validAccountPolicy(value: unknown): value is AccountPolicy {
 export function parseAccountPolicyUpdate(value: unknown): AccountPolicyUpdate | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const request = value as Record<string, unknown>;
-  if (Object.keys(request).sort().join(",") !==
-      "allowed_account_uids,expected_revision,trading_requested") return null;
+  const fields = Object.keys(request).sort().join(",");
+  if (fields !== "allowed_account_uids,expected_revision,trading_requested"
+      && fields !== "allowed_account_uids,expected_revision,max_total_modelled_loss_usdt,trading_requested")
+    return null;
   if (!Number.isSafeInteger(request.expected_revision)
       || (request.expected_revision as number) < 0
       || typeof request.trading_requested !== "boolean"
@@ -63,7 +78,9 @@ export function parseAccountPolicyUpdate(value: unknown): AccountPolicyUpdate | 
       || request.allowed_account_uids.length > 16
       || !request.allowed_account_uids.every(isLowerSha256)
       || new Set(request.allowed_account_uids).size !== request.allowed_account_uids.length
-      || (request.trading_requested && request.allowed_account_uids.length === 0)) return null;
+      || (request.trading_requested && request.allowed_account_uids.length === 0)
+      || (request.max_total_modelled_loss_usdt !== undefined
+          && !validOperatorRiskBudget(request.max_total_modelled_loss_usdt))) return null;
   return request as AccountPolicyUpdate;
 }
 
@@ -78,7 +95,8 @@ export function revisedAccountPolicy(
     revision: previous.revision + 1,
     trading_requested: update.trading_requested,
     allowed_account_uids: [...update.allowed_account_uids].sort(),
-    max_total_modelled_loss_usdt: AGGREGATE_RISK_CAP_USDT,
+    max_total_modelled_loss_usdt: update.max_total_modelled_loss_usdt
+      ?? previous.max_total_modelled_loss_usdt,
   };
 }
 
