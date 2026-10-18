@@ -272,6 +272,37 @@ impl AccountGovernanceV2 {
     }
 }
 
+
+/// A short-lived snapshot forwarded ONLY by the authenticated RuntimeSession.
+/// It is a delivery/UID scope proof, not a reservation or POST permit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CentralGovernanceSnapshotV2 {
+    pub state: AccountGovernanceV2,
+    pub issued_at_ms: u64,
+    pub session_generation: u64,
+}
+impl CentralGovernanceSnapshotV2 {
+    pub fn valid(&self) -> bool {
+        self.state.valid() && self.issued_at_ms > 0 && self.session_generation > 0
+    }
+    pub fn authorizes_delivery(
+        &self, uid: &str, now_ms: u64, generation: u64,
+    ) -> bool {
+        self.valid()
+            && self.session_generation == generation
+            && self.issued_at_ms <= now_ms
+            && now_ms.saturating_sub(self.issued_at_ms) <= 15_000
+            && self.state.revision > 0
+            && self.state.trading_requested
+            && self.state.operator_authorization.status == AuthorizationStatus::Active
+            && self.state.accounts.iter().any(|a| {
+                a.venue == "okx" && a.environment == AccountEnvironmentV2::Real
+                    && a.enabled && a.identity_verified && a.uid_fingerprint == uid
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +334,12 @@ mod tests {
         altered.max_total_modelled_loss_usdt = "1".to_owned();
         altered.trading_requested = true;
         assert!(!altered.valid());
+        let scope = CentralGovernanceSnapshotV2 {
+            state: altered,
+            issued_at_ms: 1000,
+            session_generation: 42,
+        };
+        assert!(!scope.authorizes_delivery(&"a".repeat(64), 2000, 42));
+        assert!(!scope.authorizes_delivery(&"a".repeat(64), 20_000, 42));
     }
 }
