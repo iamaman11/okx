@@ -1559,6 +1559,18 @@ async fn reconcile_unsent_prepared(
             "historical maintenance requires the REAL read-only executor",
         ));
     }
+    // A finance write, even though it never calls TradeApi, must enter through
+    // the one authenticated Cloudflare Worker session, not a legacy mailbox.
+    let now_ms = utc_now_ms();
+    if !context.operator_policy.is_some_and(|policy| {
+        policy.valid()
+            && policy.session_generation == context.transport_generation
+            && policy.issued_at_ms <= now_ms
+            && now_ms.saturating_sub(policy.issued_at_ms)
+                <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
+    }) {
+        return Ok(deny("trusted Worker maintenance session is absent or stale"));
+    }
     let Some(observer) = context.account_fallback else {
         return Ok(deny(
             "independent authenticated account observer unavailable",

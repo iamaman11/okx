@@ -176,6 +176,7 @@ fn response_budget(operation: &AgentOperation) -> ResponseBudget {
         | AgentOperation::MutateExecution { .. }
         | AgentOperation::AbortReverseExecution { .. }
         | AgentOperation::AbandonPreparedExecution { .. }
+        | AgentOperation::ReconcileUnsentPrepared { .. }
         | AgentOperation::ExecutionStatus { .. }
         | AgentOperation::HistoryBehavior { .. }
         | AgentOperation::SnapshotQuality { .. }
