@@ -386,9 +386,9 @@ impl<'a> ObservationQueryContext<'a> {
     pub fn central_uid_admitted(&self, uid: &str, now_ms: u64) -> bool {
         self.operator_governance
             .is_some_and(|scope| scope.authorizes_delivery(uid, now_ms, self.transport_generation))
-            || self.operator_policy.is_some_and(|policy| {
-                policy.authorizes_uid(uid, now_ms, self.transport_generation)
-            })
+            || self
+                .operator_policy
+                .is_some_and(|policy| policy.authorizes_uid(uid, now_ms, self.transport_generation))
     }
 }
 
@@ -1194,7 +1194,7 @@ mod tests {
                 research_root: None,
                 research_session: None,
                 operator_policy: None,
-            operator_governance: None,
+                operator_governance: None,
                 transport_generation: 0,
                 risk_client: None,
             },
@@ -1239,7 +1239,7 @@ mod tests {
                 research_root: None,
                 research_session: None,
                 operator_policy: None,
-            operator_governance: None,
+                operator_governance: None,
                 transport_generation: 0,
                 risk_client: None,
             },
@@ -1285,7 +1285,7 @@ mod tests {
                 research_root: None,
                 research_session: None,
                 operator_policy: None,
-            operator_governance: None,
+                operator_governance: None,
                 transport_generation: 0,
                 risk_client: None,
             },

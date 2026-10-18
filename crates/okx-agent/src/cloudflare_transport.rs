@@ -1,8 +1,8 @@
 use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
-use okx_protocol::account_governance::{AuthorizationStatus, CentralGovernanceSnapshotV2};
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use okx_protocol::account_governance::{AuthorizationStatus, CentralGovernanceSnapshotV2};
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentResponse, AgentResponseStatus,
     CentralAccountPolicy, DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES,
@@ -812,7 +812,9 @@ mod tests {
             session_generation: 7,
         };
         let admit = |policy: Option<&CentralAccountPolicy>, profile, mode, generation, now| {
-            central_production_delivery_admitted(profile, mode, &submit, policy, None, generation, now)
+            central_production_delivery_admitted(
+                profile, mode, &submit, policy, None, generation, now,
+            )
         };
         assert!(admit(
             Some(&p),

@@ -1147,11 +1147,14 @@ impl ExecutionRuntime {
             .and_then(|binding| {
                 rust_decimal::Decimal::from_str(&binding.policy.max_total_modelled_loss_usdt).ok()
             })
-            .or_else(|| governance.and_then(|binding| {
-                rust_decimal::Decimal::from_str(
-                    &binding.scope.state.max_total_modelled_loss_usdt
-                ).ok()
-            }))
+            .or_else(|| {
+                governance.and_then(|binding| {
+                    rust_decimal::Decimal::from_str(
+                        &binding.scope.state.max_total_modelled_loss_usdt,
+                    )
+                    .ok()
+                })
+            })
         else {
             return Ok(None);
         };

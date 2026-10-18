@@ -272,7 +272,6 @@ impl AccountGovernanceV2 {
     }
 }
 
-
 /// A short-lived snapshot forwarded ONLY by the authenticated RuntimeSession.
 /// It is a delivery/UID scope proof, not a reservation or POST permit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,9 +285,7 @@ impl CentralGovernanceSnapshotV2 {
     pub fn valid(&self) -> bool {
         self.state.valid() && self.issued_at_ms > 0 && self.session_generation > 0
     }
-    pub fn authorizes_delivery(
-        &self, uid: &str, now_ms: u64, generation: u64,
-    ) -> bool {
+    pub fn authorizes_delivery(&self, uid: &str, now_ms: u64, generation: u64) -> bool {
         self.valid()
             && self.session_generation == generation
             && self.issued_at_ms <= now_ms
@@ -297,8 +294,11 @@ impl CentralGovernanceSnapshotV2 {
             && self.state.trading_requested
             && self.state.operator_authorization.status == AuthorizationStatus::Active
             && self.state.accounts.iter().any(|a| {
-                a.venue == "okx" && a.environment == AccountEnvironmentV2::Real
-                    && a.enabled && a.identity_verified && a.uid_fingerprint == uid
+                a.venue == "okx"
+                    && a.environment == AccountEnvironmentV2::Real
+                    && a.enabled
+                    && a.identity_verified
+                    && a.uid_fingerprint == uid
             })
     }
 }
