@@ -14,6 +14,7 @@ mod query;
 pub mod reference_bootstrap;
 pub mod research_session;
 pub mod risk_bridge;
+pub mod risk_census;
 pub mod runtime;
 
 use thiserror::Error;
