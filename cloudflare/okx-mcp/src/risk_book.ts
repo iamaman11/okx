@@ -58,6 +58,7 @@ export interface RiskReservation {
   uid: string;
   run_id: string;
   strategy_id: string;
+  instrument_id: string;
   intent_id: string;
   plan_hash: string;
   loss_usdt: string;

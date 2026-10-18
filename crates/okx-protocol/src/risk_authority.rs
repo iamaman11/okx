@@ -169,7 +169,9 @@ impl RiskCommand {
                         .bytes()
                         .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
                     && (3..=64).contains(&instrument_id.len())
-                    && instrument_id.bytes().all(|c| c.is_ascii_uppercase()||c.is_ascii_digit()||c==b'-'||c==b'_')
+                    && instrument_id.bytes().all(|c| {
+                        c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'-' || c == b'_'
+                    })
                     && hash(plan_sha256)
                     && positive(requested_loss_usdt)
                     && *policy_revision > 0
