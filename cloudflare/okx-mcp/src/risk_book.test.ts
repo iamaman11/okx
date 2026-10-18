@@ -114,6 +114,15 @@ check((await beginRiskPost(sa,entry.key,p,1,d,{
 check((await beginRiskPost(sa,entry.key,p,1,d,{
  ...postProof,census:{...postCensus,generated_at_ms:now-5001}
 })).status==="DENIED","stale census cannot grant POST");
+// Existing reservations predating source binding keep consuming risk but
+// cannot become POST_AUTHORIZED by fabricated after-the-fact provenance.
+const legacyEntry={...entry};
+delete legacyEntry.reserve_source_digest;
+await sa.put("risk_book_v1",{...beforePost!,entries:[legacyEntry]});
+check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).reason===
+ "POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN",
+ "legacy HELD without the initial native source digest cannot POST");
+await sa.put("risk_book_v1",beforePost!);
 check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).status==="POST_AUTHORIZED",
  "one native POST granted after fresh full-account census");
 check((await reserve(sa,policy,census,reqA)).status==="DENIED",

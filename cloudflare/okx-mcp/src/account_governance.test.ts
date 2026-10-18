@@ -4,6 +4,13 @@ function yes(v:boolean,s:string){if(!v)throw Error(s);}
 const a="a".repeat(64), old=defaultAccountPolicy();
 const migrated=migrateV1(old);
 yes(migrated!==null&&validGovernance(migrated),"migration parses");
+const migratedLower=migrateV1({...old,max_total_modelled_loss_usdt:"3.75"});
+yes(migratedLower!==null&&validGovernance(migratedLower)
+  &&migratedLower.operator_authorization.ceiling_usdt==="3.75"
+  &&migratedLower.max_total_modelled_loss_usdt==="3.75"
+  &&migratedLower.operator_authorization.status==="UNVERIFIED",
+  "legacy migration preserves configured budget without any fixed 10 USDT");
+
 yes(migrated!.operator_authorization.status==="UNVERIFIED"
   &&!migrated!.trading_requested&&!projectRiskPolicy(migrated!)?.enabled,
   "migration preserves fail-closed rights");
