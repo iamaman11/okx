@@ -161,7 +161,7 @@ export const mcpApi = {
           },
           {
             name: "account_control",
-            description: "Status or CAS-update ONE centrally persisted v2 governance configuration (portfolio/account/strategy limits). Migrated UID entries stay UNVERIFIED; only native attestation can authorize them. This interface NEVER grants Real trading.",
+            description: "One central account-control surface: status, enroll a native-verified account, atomically configure limits, explicitly approve the existing operator ceiling, or STOP new Real risk. Enrollment and authorization never create an exchange POST permit; STOP keeps outstanding UNKNOWN/OPEN risk.",
             inputSchema: {
               type: "object",
               properties: {
