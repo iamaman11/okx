@@ -1,4 +1,5 @@
 pub mod account_governance;
+pub mod risk_authority;
 pub mod crypto;
 pub mod host_state_proto;
 
