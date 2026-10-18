@@ -1,3 +1,4 @@
+pub mod account_governance;
 pub mod crypto;
 pub mod host_state_proto;
 
