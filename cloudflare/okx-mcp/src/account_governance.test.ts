@@ -14,7 +14,7 @@ const limits={...p.accounts[0].limits,max_modelled_loss_usdt:"2.5",max_order_los
   max_notional_usdt:"100",max_leverage:"3",max_daily_realized_loss_usdt:"1",
   max_drawdown_ratio:"0.1",allowed_instruments:["BTC-USDT-SWAP"]};
 const change={expected_revision:3,trading_requested:false,max_total_modelled_loss_usdt:"5",
-  accounts:[{id:p.accounts[0].id,label:"Primary",enabled:false,limits}]};
+  accounts:[{id:p.accounts[0].id,label:"Primary",enabled:false,limits,strategies:[]}]};
 const updated=reviseGovernance(p,change);
 yes(updated!==null&&updated.revision===4&&updated.accounts[0].limits.max_order_loss_usdt==="1",
   "bounded atomic config");
@@ -28,3 +28,14 @@ yes(reviseGovernance(p,{...change,accounts:[{...change.accounts[0],
   limits:{...limits,max_order_loss_usdt:"3"}}]})===null,"per-order cap");
 yes(reviseGovernance(p,{...change,accounts:[{...change.accounts[0],
   limits:{...limits,max_drawdown_ratio:"1.01"}}]})===null,"ratio bound");
+
+const strategy={id:"momentum_A",enabled:true,allocated_capital_usdt:"2",
+ max_modelled_loss_usdt:"1",max_daily_realized_loss_usdt:"0.5",max_drawdown_ratio:"0.1"};
+const allocated=reviseGovernance(p,{...change,accounts:[{...change.accounts[0],strategies:[strategy]}]});
+yes(allocated!==null&&allocated.accounts[0].strategies.length===1,"strategy capital policy typed");
+yes(reviseGovernance(p,{...change,accounts:[{...change.accounts[0],
+ strategies:[strategy,{...strategy,id:"momentum_B",max_modelled_loss_usdt:"2"}]}]})===null,
+ "sum of strategy risks cannot exceed account loss cap");
+yes(reviseGovernance(p,{...change,accounts:[{...change.accounts[0],
+ strategies:[{...strategy,max_drawdown_ratio:null}]}]})===null,
+ "enabled strategy needs explicit drawdown gate");
