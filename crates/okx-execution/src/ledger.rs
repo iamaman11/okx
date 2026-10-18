@@ -4753,6 +4753,9 @@ mod tests {
         for (i, id) in ids.iter().enumerate() {
             let mut request = plan(id);
             request.account_uid_fingerprint = "a".repeat(64);
+            if i == 1 {
+                request.instrument_id = "BTC-USDT-SWAP".to_owned();
+            }
             ledger.prepare(request, 101 + i as u64).unwrap();
         }
         let previous = fs::read(store.path()).unwrap();
