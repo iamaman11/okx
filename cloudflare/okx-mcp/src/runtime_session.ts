@@ -2,6 +2,7 @@ import { executionProfilePermitsOperation, isExecutionMutation } from "./executi
 import { defaultAccountPolicy, validAccountPolicy } from "./account_policy.js";
 import { accountPolicyRequest } from "./account_policy.js";
 import { governanceRequest, enrollObservedAccount, stopNewRealRisk, activateExistingOperatorGrant, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
+import {validGovernance} from "./account_governance.js";
 import { handleNativeRiskCommand } from "./risk_authority.js";
 import {
   ACK_DEADLINE_MS,
@@ -327,29 +328,38 @@ export class RuntimeSession {
       // cache it across calls or accept caller-supplied policy fields.
       // Native Rust still owns credential/UID/STOP/risk and exchange POST.
       let operator_policy: Record<string, unknown> | undefined;
+      let operator_governance: Record<string, unknown> | undefined;
       if (isExecutionMutation(request.operation?.type) &&
           active.attachment.runtimeProfile === "production") {
-        // v2 can be configured but Rust still speaks v1. Never let a stale v1
-        // policy grant POST after the v2 migration has become authoritative.
-        if (await this.state.storage.get(GOVERNANCE_STORAGE_KEY) !== undefined)
-          return transportFailure("NATIVE_GOVERNANCE_V2_ADMISSION_NOT_INSTALLED",false);
-        const stored: unknown = await this.state.storage.get("account_policy_v1");
-        if (stored !== undefined && !validAccountPolicy(stored)) {
-          return transportFailure("CENTRAL_POLICY_CORRUPT", false);
+        const current:unknown=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);
+        if(current!==undefined){
+          if(!validGovernance(current))
+            return transportFailure("CENTRAL_GOVERNANCE_CORRUPT",false);
+          if(!current.trading_requested||current.operator_authorization.status!=="ACTIVE")
+            return transportFailure("CENTRAL_NEW_RISK_STOPPED",false);
+          // Typed fresh request-scoped delivery proof. This is NOT the POST
+          // permit; the native executor still needs an exact DO reservation.
+          operator_governance={
+            state:current,issued_at_ms:Date.now(),
+            session_generation:active.attachment.generation
+          };
+        }else{
+          const stored: unknown = await this.state.storage.get("account_policy_v1");
+          if (stored !== undefined && !validAccountPolicy(stored)) {
+            return transportFailure("CENTRAL_POLICY_CORRUPT", false);
+          }
+          const policy = stored ?? defaultAccountPolicy();
+          if (!validAccountPolicy(policy))
+            return transportFailure("CENTRAL_POLICY_UNAVAILABLE", false);
+          operator_policy = {
+            schema: policy.schema,revision:policy.revision,
+            trading_requested:policy.trading_requested,
+            allowed_account_uids:policy.allowed_account_uids,
+            max_total_modelled_loss_usdt:policy.max_total_modelled_loss_usdt,
+            issued_at_ms:Date.now(),
+            session_generation:active.attachment.generation,
+          };
         }
-        const policy = stored ?? defaultAccountPolicy();
-        if (!validAccountPolicy(policy)) {
-          return transportFailure("CENTRAL_POLICY_UNAVAILABLE", false);
-        }
-        operator_policy = {
-          schema: policy.schema,
-          revision: policy.revision,
-          trading_requested: policy.trading_requested,
-          allowed_account_uids: policy.allowed_account_uids,
-          max_total_modelled_loss_usdt: policy.max_total_modelled_loss_usdt,
-          issued_at_ms: Date.now(),
-          session_generation: active.attachment.generation,
-        };
       }
       active.ws.send(JSON.stringify({
         type: "request",
@@ -358,6 +368,7 @@ export class RuntimeSession {
         connection_generation: active.attachment.generation,
         request,
         ...(operator_policy === undefined ? {} : { operator_policy }),
+        ...(operator_governance === undefined ? {} : { operator_governance }),
       }));
       await ack;
       return await response as Json;
