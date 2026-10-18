@@ -1702,7 +1702,7 @@ async fn executor_preflight_check(
                 AgentResponseStatus::Failed,
                 EXECUTION_PREFLIGHT_UNAVAILABLE_CODE,
                 error.to_string(),
-                true,
+                !matches!(error, okx_api::OkxError::AuthenticationRejected { .. }),
             ),
         ))),
         Err(error) => Err(error),
