@@ -91,12 +91,13 @@ impl PortfolioRiskSources {
             if account.venue != "okx" || !account.identity_verified {
                 return Err(CensusFailure::RegistryUnverified);
             }
-            keys.push(format!("{}:real:{}", account.venue, account.uid_fingerprint));
+            keys.push(format!(
+                "{}:real:{}",
+                account.venue, account.uid_fingerprint
+            ));
         }
         keys.sort();
-        if keys.is_empty() || keys.len() > 32
-            || keys.windows(2).any(|pair| pair[0] >= pair[1])
-        {
+        if keys.is_empty() || keys.len() > 32 || keys.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(CensusFailure::MissingOrDuplicateAccount);
         }
         Ok(Self {
@@ -218,8 +219,8 @@ mod tests {
     }
     fn governance() -> CentralGovernanceSnapshotV2 {
         use okx_protocol::account_governance::{
-            AccountControlV2, AccountGovernanceV2, AccountLimitsV2,
-            OperatorAuthorizationV2, GOVERNANCE_SCHEMA_V2,
+            AccountControlV2, AccountGovernanceV2, AccountLimitsV2, GOVERNANCE_SCHEMA_V2,
+            OperatorAuthorizationV2,
         };
         let account = |id: &str, uid: char, enabled: bool| AccountControlV2 {
             id: id.to_owned(),
@@ -261,18 +262,17 @@ mod tests {
     #[test]
     fn central_scope_cannot_drop_disabled_or_unverified_real_accounts() {
         let g = governance();
-        let source = PortfolioRiskSources::from_governance(
-            &g,
-            vec![row('a'), row('b')],
-            1_000,
-        ).expect("native cohort");
-        assert_eq!(source.census().unwrap().account_keys, vec![key('a'), key('b')]);
-        let incomplete = PortfolioRiskSources::from_governance(
-            &g,
-            vec![row('a')],
-            1_000,
-        ).unwrap();
-        assert_eq!(incomplete.census().unwrap_err(), CensusFailure::MissingOrDuplicateAccount);
+        let source = PortfolioRiskSources::from_governance(&g, vec![row('a'), row('b')], 1_000)
+            .expect("native cohort");
+        assert_eq!(
+            source.census().unwrap().account_keys,
+            vec![key('a'), key('b')]
+        );
+        let incomplete = PortfolioRiskSources::from_governance(&g, vec![row('a')], 1_000).unwrap();
+        assert_eq!(
+            incomplete.census().unwrap_err(),
+            CensusFailure::MissingOrDuplicateAccount
+        );
 
         let mut bad = governance();
         bad.state.accounts[1].identity_verified = false;
