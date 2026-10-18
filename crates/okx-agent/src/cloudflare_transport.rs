@@ -1,6 +1,7 @@
 use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
+use okx_protocol::account_governance::{AuthorizationStatus, CentralGovernanceSnapshotV2};
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentResponse, AgentResponseStatus,
@@ -65,6 +66,7 @@ fn central_production_delivery_admitted(
     mode: Option<ExecutionRuntimeMode>,
     operation: &AgentOperation,
     policy: Option<&CentralAccountPolicy>,
+    governance: Option<&CentralGovernanceSnapshotV2>,
     generation: u64,
     now_ms: u64,
 ) -> bool {
@@ -78,7 +80,7 @@ fn central_production_delivery_admitted(
                 | AgentOperation::FinalizeStrategyRun { .. }
                 | AgentOperation::QuarantineUnverifiedStrategyRun { .. }
         )
-        && policy.is_some_and(|p| {
+        && (policy.is_some_and(|p| {
             p.valid()
                 && p.trading_requested
                 && p.revision > 0
@@ -86,7 +88,14 @@ fn central_production_delivery_admitted(
                 && p.issued_at_ms <= now_ms
                 && now_ms.saturating_sub(p.issued_at_ms)
                     <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
-        })
+        }) || governance.is_some_and(|g| {
+            g.valid()
+                && g.session_generation == generation
+                && g.issued_at_ms <= now_ms
+                && now_ms.saturating_sub(g.issued_at_ms) <= 15_000
+                && g.state.trading_requested
+                && g.state.operator_authorization.status == AuthorizationStatus::Active
+        }))
 }
 
 pub struct CloudflareTransportConfig {
@@ -407,6 +416,7 @@ async fn run_session(
                         connection_generation: frame_generation,
                         request,
                         operator_policy,
+                        operator_governance,
                         ..
                     } => {
                         require_session(
@@ -464,6 +474,7 @@ async fn run_session(
                             context.execution.map(ExecutionRuntime::mode),
                             &request.operation,
                             operator_policy.as_ref(),
+                            operator_governance.as_ref(),
                             frame_generation,
                             Utc::now().timestamp_millis().max(1) as u64,
                         );
@@ -531,6 +542,7 @@ async fn run_session(
                             async move {
                                 let query_context = query_context
                                     .with_operator_policy(operator_policy.as_ref(), frame_generation)
+                                    .with_operator_governance(operator_governance.as_ref())
                                     .with_risk_client(Some(&risk_client));
                                 let result =
                                     dispatch(&request, query_context, &generated_at).await;
@@ -800,7 +812,7 @@ mod tests {
             session_generation: 7,
         };
         let admit = |policy: Option<&CentralAccountPolicy>, profile, mode, generation, now| {
-            central_production_delivery_admitted(profile, mode, &submit, policy, generation, now)
+            central_production_delivery_admitted(profile, mode, &submit, policy, None, generation, now)
         };
         assert!(admit(
             Some(&p),
