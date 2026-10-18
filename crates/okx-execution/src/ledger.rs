@@ -2326,11 +2326,14 @@ impl DurableExecutionLedger {
             || expected_ids.len() > 32
             || !expected_ids.windows(2).all(|pair| pair[0] < pair[1])
         {
-            return Err(ExecutionLedgerError::Corrupt("invalid exact historical batch"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "invalid exact historical batch",
+            ));
         }
         // Exact set equality avoids accidentally clearing only a subset and
         // reporting readiness while other unsent records remain outstanding.
-        let pending = self.entries
+        let pending = self
+            .entries
             .iter()
             .filter(|(_, entry)| entry.record.state == ExecutionState::Prepared)
             .map(|(id, _)| id.as_str())
@@ -2345,11 +2348,14 @@ impl DurableExecutionLedger {
                     ExecutionState::Submitting | ExecutionState::UnknownSubmission
                 )
         }) {
-            return Err(ExecutionLedgerError::Corrupt("ledger account or unresolved POST mismatch"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "ledger account or unresolved POST mismatch",
+            ));
         }
         let mut next = self.entries.clone();
         for id in expected_ids {
-            let entry = next.get_mut(id)
+            let entry = next
+                .get_mut(id)
                 .ok_or_else(|| ExecutionLedgerError::IntentNotFound(id.clone()))?;
             let timestamp = monotonic_timestamp(entry, observed_at_ms)?;
             // This enforces the same protection, reverse and mutation
@@ -4751,11 +4757,24 @@ mod tests {
         }
         let previous = fs::read(store.path()).unwrap();
         let incomplete = vec![ids[0].clone()];
-        assert!(ledger.abandon_prepared_batch(&"a".repeat(64), &incomplete, 200).is_err());
+        assert!(
+            ledger
+                .abandon_prepared_batch(&"a".repeat(64), &incomplete, 200)
+                .is_err()
+        );
         assert_eq!(fs::read(store.path()).unwrap(), previous);
-        assert!(ledger.abandon_prepared_batch("other-uid", &ids, 200).is_err());
+        assert!(
+            ledger
+                .abandon_prepared_batch("other-uid", &ids, 200)
+                .is_err()
+        );
         assert_eq!(fs::read(store.path()).unwrap(), previous);
-        assert_eq!(ledger.abandon_prepared_batch(&"a".repeat(64), &ids, 200).unwrap(), 2);
+        assert_eq!(
+            ledger
+                .abandon_prepared_batch(&"a".repeat(64), &ids, 200)
+                .unwrap(),
+            2
+        );
         assert_ne!(fs::read(store.path()).unwrap(), previous);
         for id in &ids {
             let e = ledger.get(id).unwrap();
@@ -4767,9 +4786,16 @@ mod tests {
         }
         let reopened = DurableExecutionLedger::open(store, 210).unwrap();
         for id in &ids {
-            assert_eq!(reopened.get(id).unwrap().record.state, ExecutionState::Rejected);
+            assert_eq!(
+                reopened.get(id).unwrap().record.state,
+                ExecutionState::Rejected
+            );
         }
-        assert!(ledger.abandon_prepared_batch(&"a".repeat(64), &ids, 220).is_err());
+        assert!(
+            ledger
+                .abandon_prepared_batch(&"a".repeat(64), &ids, 220)
+                .is_err()
+        );
         let _ = fs::remove_dir_all(root);
     }
 

@@ -308,10 +308,17 @@ pub(super) async fn dispatch(
             expected_manifest_sha256,
             account_uid_fingerprint,
             intent_ids,
-        } => reconcile_unsent_prepared(
-            request, context, generated_at,
-            expected_manifest_sha256, account_uid_fingerprint, intent_ids,
-        ).await,
+        } => {
+            reconcile_unsent_prepared(
+                request,
+                context,
+                generated_at,
+                expected_manifest_sha256,
+                account_uid_fingerprint,
+                intent_ids,
+            )
+            .await
+        }
         AgentOperation::ExecutionStatus { intent_id } => {
             execution_status_response(request, context, generated_at, intent_id).await
         }
@@ -1534,18 +1541,28 @@ async fn reconcile_unsent_prepared(
     account_uid_fingerprint: &str,
     intent_ids: &[String],
 ) -> AgentResult<AgentResponse> {
-    let deny = |reason: &str| failure_response(
-        request, generated_at, AgentResponseStatus::Rejected,
-        EXECUTION_PREPARED_ABANDON_UNSAFE_CODE, reason.to_owned(), false,
-    );
+    let deny = |reason: &str| {
+        failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_PREPARED_ABANDON_UNSAFE_CODE,
+            reason.to_owned(),
+            false,
+        )
+    };
     let Some(execution) = context.execution else {
         return Ok(execution_unavailable(request, generated_at));
     };
     if execution.mode() != crate::execution_runtime::ExecutionRuntimeMode::ReadOnly {
-        return Ok(deny("historical maintenance requires the REAL read-only executor"));
+        return Ok(deny(
+            "historical maintenance requires the REAL read-only executor",
+        ));
     }
     let Some(observer) = context.account_fallback else {
-        return Ok(deny("independent authenticated account observer unavailable"));
+        return Ok(deny(
+            "independent authenticated account observer unavailable",
+        ));
     };
     let Some(ws) = context.private_ws else {
         return Ok(deny("native private WebSocket continuity unavailable"));
@@ -1578,14 +1595,17 @@ async fn reconcile_unsent_prepared(
     }
     // Source proof is checked again by the ONE Rust ledger owner while
     // holding its mutation-ingress guard and mutex, immediately before save.
-    match execution.close_historical_unsent_batch(
-        account_uid_fingerprint,
-        expected_manifest_sha256,
-        intent_ids,
-        &facts,
-        &protection,
-        utc_now_ms(),
-    ).await {
+    match execution
+        .close_historical_unsent_batch(
+            account_uid_fingerprint,
+            expected_manifest_sha256,
+            intent_ids,
+            &facts,
+            &protection,
+            utc_now_ms(),
+        )
+        .await
+    {
         Ok(closed) => Ok(completed(
             request,
             generated_at,

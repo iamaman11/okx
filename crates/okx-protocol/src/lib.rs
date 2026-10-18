@@ -1539,7 +1539,9 @@ impl AgentOperation {
                 intent_ids,
             } => {
                 if expected_manifest_sha256.len() != 64
-                    || !expected_manifest_sha256.bytes().all(|v| v.is_ascii_hexdigit())
+                    || !expected_manifest_sha256
+                        .bytes()
+                        .all(|v| v.is_ascii_hexdigit())
                     || validate_sha256(account_uid_fingerprint).is_err()
                     || intent_ids.is_empty()
                     || intent_ids.len() > 32

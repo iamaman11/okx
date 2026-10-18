@@ -997,7 +997,9 @@ where
         exact_intents: &[String],
         observed_at_ms: u64,
     ) -> Result<usize, OrderExecutorError> {
-        Ok(self.ledger.abandon_prepared_batch(account_uid, exact_intents, observed_at_ms)?)
+        Ok(self
+            .ledger
+            .abandon_prepared_batch(account_uid, exact_intents, observed_at_ms)?)
     }
 
     pub fn abandon_prepared(

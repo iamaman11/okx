@@ -1488,11 +1488,17 @@ impl ExecutionRuntime {
             || !facts.exchange_fills_history_complete
             || !facts.bills_history_complete
             || facts.summary.history_coverage.is_empty()
-            || !facts.summary.history_coverage.iter().all(|scope| scope.complete_within_bound)
+            || !facts
+                .summary
+                .history_coverage
+                .iter()
+                .all(|scope| scope.complete_within_bound)
             || !native_protection.complete_within_bound
             || native_protection.rows != 0
             || expected_manifest_sha256.len() != 64
-            || !expected_manifest_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || !expected_manifest_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
         {
             return Err(AgentError::ProductionPolicyUnavailable);
         }
@@ -1501,9 +1507,7 @@ impl ExecutionRuntime {
         if storage.manifest_sha256 != expected_manifest_sha256 {
             return Err(AgentError::ProductionPolicyUnavailable);
         }
-        let changed = owner.abandon_prepared_batch(
-            expected_uid, exact_intents, observed_at_ms,
-        )?;
+        let changed = owner.abandon_prepared_batch(expected_uid, exact_intents, observed_at_ms)?;
         // Successful commit must be independently readable from durable disk.
         let new_storage = owner.ledger().attest_storage()?;
         if new_storage.manifest_sha256 == storage.manifest_sha256
