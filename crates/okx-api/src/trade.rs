@@ -1147,9 +1147,9 @@ mod tests {
         ["SWAP", "FUTURES"]
             .iter()
             .flat_map(|instrument| {
-                DERIVATIVE_ALGO_TYPES.iter().map(move |kind| {
-                    ((*instrument).to_owned(), (*kind).to_owned(), Vec::new())
-                })
+                DERIVATIVE_ALGO_TYPES
+                    .iter()
+                    .map(move |kind| ((*instrument).to_owned(), (*kind).to_owned(), Vec::new()))
             })
             .collect()
     }
@@ -1184,7 +1184,9 @@ mod tests {
         all[0].2.push(pending_algo("extra", "conditional", "SWAP"));
         assert!(normalize_derivative_algo_risk_inventory(all).is_err());
         let mut dupe = all_derivative_scopes();
-        dupe[0].2.push(pending_algo("shared", "conditional", "SWAP"));
+        dupe[0]
+            .2
+            .push(pending_algo("shared", "conditional", "SWAP"));
         dupe[1].2.push(pending_algo("shared", "oco", "SWAP"));
         assert!(normalize_derivative_algo_risk_inventory(dupe).is_err());
     }
