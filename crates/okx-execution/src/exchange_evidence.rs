@@ -135,9 +135,34 @@ impl DurableExchangeEvidence {
         self.validate()
     }
 
+    /// Only the additive venue bill fields introduced after the original
+    /// immutable v1 captures may be absent in an already-sealed historical bill.
+    /// Preserve the exact original bytes; never backfill or rewrite a prior
+    /// checksum, and reject all differences in previously captured fields.
+    fn same_legacy_bill_source(old: &StoredExchangeEvent, current: &StoredExchangeEvent) -> bool {
+        if old.payload.get("source").and_then(Value::as_str) != Some("OKX_REST_BILL")
+            || current.payload.get("source").and_then(Value::as_str) != Some("OKX_REST_BILL")
+        {
+            return false;
+        }
+        let Value::Object(old_fields) = &old.payload else {
+            return false;
+        };
+        if old_fields.contains_key("type") || old_fields.contains_key("balChg") {
+            return false;
+        }
+        let mut original_shape = current.clone();
+        let Value::Object(ref mut fields) = original_shape.payload else {
+            return false;
+        };
+        fields.remove("type");
+        fields.remove("balChg");
+        &original_shape == old
+    }
+
     fn add(&mut self, key: String, value: StoredExchangeEvent) -> Result<(), ExecutionLedgerError> {
         if let Some(old) = self.events.get(&key) {
-            return if old == &value {
+            return if old == &value || Self::same_legacy_bill_source(old, &value) {
                 Ok(())
             } else {
                 Err(ExecutionLedgerError::ExchangeEvidenceConflict)
@@ -590,6 +615,55 @@ mod tests {
         evidence.validate().unwrap();
         assert_eq!(evidence.checksum_sha256, intact_hash);
         assert_eq!(evidence.cursors.len(), MAX_CURSORS);
+    }
+
+    #[test]
+    fn old_sealed_bill_remains_byte_identical_after_new_source_observation() {
+        let mut ledger = DurableExchangeEvidence {
+            schema: EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
+            account_uid: "uid".to_owned(),
+            run_id: "run".to_owned(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        ledger.seal().unwrap();
+        let old = StoredExchangeEvent {
+            payload: json!({
+                "source":"OKX_REST_BILL", "billId":"b-1", "ccy":"USDT",
+                "subType":"11", "ts":100, "fee":null, "pnl":null,
+                "ordId":null, "clOrdId":null, "tradeId":"0", "instId":""
+            }),
+            source_intent_id: None,
+            strategy_run_id: None,
+            allocation: "UNALLOCATED".to_owned(),
+        };
+        ledger.add("bill:b-1".to_owned(), old.clone()).unwrap();
+        ledger.seal().unwrap();
+        let original_hash = ledger.checksum_sha256.clone();
+        let bytes = serde_json::to_vec(&ledger).unwrap();
+        let mut restored: DurableExchangeEvidence = serde_json::from_slice(&bytes).unwrap();
+        restored.validate().unwrap();
+        let mut new = old.clone();
+        new.payload["type"] = json!("1");
+        new.payload["balChg"] = json!("127");
+        restored.add("bill:b-1".to_owned(), new.clone()).unwrap();
+        restored.seal().unwrap();
+        assert_eq!(restored.checksum_sha256, original_hash);
+        assert_eq!(restored.events["bill:b-1"], old);
+        let mut conflicting = new.clone();
+        conflicting.payload["fee"] = json!("-0.01");
+        assert!(matches!(
+            restored.add("bill:b-1".to_owned(), conflicting),
+            Err(ExecutionLedgerError::ExchangeEvidenceConflict)
+        ));
+        // A newly observed bill must retain the extra fields rather than
+        // acquiring the legacy shape of an unrelated historical witness.
+        new.payload["billId"] = json!("b-2");
+        restored.add("bill:b-2".to_owned(), new.clone()).unwrap();
+        restored.seal().unwrap();
+        assert_eq!(restored.events["bill:b-2"], new);
+        assert_ne!(restored.checksum_sha256, original_hash);
     }
 
     #[test]
