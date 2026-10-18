@@ -77,3 +77,60 @@ export async function governanceRequest(
     return {status:200,body:result(revised,book)};
   });
 }
+
+
+/**
+ * Enrolment proof comes ONLY from the Worker-side authenticated Rust
+ * trader_snapshot, never from an MCP-supplied UID. Metadata registration
+ * does not activate the account or the separate operator authorization.
+ */
+export async function enrollObservedAccount(
+  storage:any,
+  observed:{uid_fingerprint:string;venue:"okx";environment:"real"|"demo";label:string}
+):Promise<{status:number;body:Record<string,unknown>}>{
+  if(!/^[0-9a-f]{64}$/.test(observed.uid_fingerprint)
+    ||observed.venue!=="okx"
+    ||!["real","demo"].includes(observed.environment)
+    ||!observed.label||observed.label.length>80)
+    return {status:400,body:{status:"FAILED",reason:"INVALID_AUTHENTICATED_ACCOUNT_OBSERVATION"}};
+  return storage.transaction(async(tx:any)=>{
+    const previous:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
+    if(!validGovernance(previous))
+      return {status:409,body:{status:"FAILED",reason:"GOVERNANCE_NOT_INITIALIZED_OR_CORRUPT"}};
+    const book=await readRiskBook(tx);
+    if(book===null)return {status:503,body:{status:"FAILED",reason:"RISK_BOOK_CORRUPT"}};
+    const already=previous.accounts.find(a=>
+      a.venue===observed.venue&&a.environment===observed.environment
+      &&a.uid_fingerprint===observed.uid_fingerprint);
+    if(already) return {status:200,body:{
+      status:"ALREADY_REGISTERED",revision:previous.revision,
+      account:already,effective_trading:false
+    }};
+    if(previous.accounts.length>=32||previous.revision===Number.MAX_SAFE_INTEGER)
+      return {status:409,body:{status:"FAILED",reason:"ACCOUNT_REGISTRY_CAPACITY"}};
+    const id=observed.venue+"_"+observed.environment+"_"+observed.uid_fingerprint.slice(0,12);
+    if(previous.accounts.some(a=>a.id===id))
+      return {status:409,body:{status:"FAILED",reason:"ACCOUNT_ID_COLLISION"}};
+    const account={
+      id,label:observed.label,venue:observed.venue,
+      environment:observed.environment,uid_fingerprint:observed.uid_fingerprint,
+      identity_verified:true,enabled:false,strategies:[],
+      limits:{
+        max_modelled_loss_usdt:previous.operator_authorization.ceiling_usdt,
+        max_order_loss_usdt:previous.operator_authorization.ceiling_usdt,
+        max_notional_usdt:null,max_leverage:null,
+        max_daily_realized_loss_usdt:null,max_drawdown_ratio:null,
+        allowed_instruments:[]
+      }
+    };
+    const next={...previous,revision:previous.revision+1,
+      trading_requested:false,accounts:[...previous.accounts,account]};
+    if(!validGovernance(next))
+      return {status:503,body:{status:"FAILED",reason:"REGISTRATION_INVARIANTS_REJECTED"}};
+    await tx.put(GOVERNANCE_STORAGE_KEY,next);
+    return {status:200,body:{
+      status:"REGISTERED_DISABLED",revision:next.revision,
+      account,effective_trading:false
+    }};
+  });
+}
