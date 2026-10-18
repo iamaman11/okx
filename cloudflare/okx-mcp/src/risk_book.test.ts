@@ -116,7 +116,7 @@ check((await beginRiskPost(sa,entry.key,p,1,d,{
  "new timestamp with reused census source digest cannot POST");
 check((await beginRiskPost(sa,entry.key,p,1,d,{
  ...postProof,census:{...postCensus,source_read_floor_ms:now}
-})).reason==="POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN",
+})).reason==="POST_CENSUS_NOT_AFTER_RESERVE",
  "later command time cannot replace all-UID source read");
 check(postCensus.content_digest===census.content_digest,
  "two independent reads can observe identical positions and risk");
