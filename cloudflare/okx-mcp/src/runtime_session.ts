@@ -1,6 +1,7 @@
 import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
 import { defaultAccountPolicy, validAccountPolicy } from "./account_policy.js";
 import { accountPolicyRequest } from "./account_policy.js";
+import { governanceRequest, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
 import {
   ACK_DEADLINE_MS,
   type Env,
@@ -38,6 +39,18 @@ export class RuntimeSession {
     }
     if (url.pathname === "/status") {
       return Response.json(await this.status(url.searchParams.get("probe") === "1"));
+    }
+    if (url.pathname === "/account-governance") {
+      // Same RuntimeSession owner, no additional DO instance or service.
+      let update:unknown;
+      if(request.method==="POST"){
+        const body=await request.text();
+        if(body.length>32768)return Response.json({status:"FAILED",reason:"GOVERNANCE_TOO_LARGE"},{status:413});
+        try{update=JSON.parse(body);}
+        catch{return Response.json({status:"FAILED",reason:"INVALID_GOVERNANCE_REQUEST"},{status:400});}
+      }
+      const answer=await governanceRequest(this.state.storage,request.method,update);
+      return Response.json(answer.body,{status:answer.status,headers:{"cache-control":"no-store"}});
     }
     if (url.pathname === "/account-policy") {
       // Internal Durable Object endpoint, reachable from authenticated OAuth
@@ -261,6 +274,10 @@ export class RuntimeSession {
       let operator_policy: Record<string, unknown> | undefined;
       if (isExecutionMutation(request.operation?.type) &&
           active.attachment.runtimeProfile === "production") {
+        // v2 can be configured but Rust still speaks v1. Never let a stale v1
+        // policy grant POST after the v2 migration has become authoritative.
+        if (await this.state.storage.get(GOVERNANCE_STORAGE_KEY) !== undefined)
+          return transportFailure("NATIVE_GOVERNANCE_V2_ADMISSION_NOT_INSTALLED",false);
         const stored: unknown = await this.state.storage.get("account_policy_v1");
         if (stored !== undefined && !validAccountPolicy(stored)) {
           return transportFailure("CENTRAL_POLICY_CORRUPT", false);

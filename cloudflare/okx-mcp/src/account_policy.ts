@@ -128,6 +128,11 @@ export async function accountPolicyRequest(
   if (method !== "POST") {
     return { status: 405, body: { status: "FAILED", reason: "METHOD_NOT_ALLOWED" } };
   }
+  // Once v2 is initialized, old v1 configuration cannot become an alternate
+  // positive authority. Migration is monotonic and fails closed.
+  if (await storage.get("account_governance_v2") !== undefined) {
+    return {status:409,body:{status:"FAILED",reason:"POLICY_V1_RETIRED_USE_ACCOUNT_GOVERNANCE"}};
+  }
   const update = parseAccountPolicyUpdate(input);
   if (!update) return { status: 400, body: { status: "FAILED", reason: "INVALID_POLICY_UPDATE" } };
   return storage.transaction(async (tx: any) => {
