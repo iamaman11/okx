@@ -258,8 +258,10 @@ async fn run_session(
     // One existing transport and exactly one outbound mutation owner.
     let (risk_tx, mut risk_rx) = mpsc::channel::<OutboundRiskCommand>(4);
     let risk_client = NativeRiskClient::new(risk_tx);
-    let mut pending_risk: HashMap<String, oneshot::Sender<okx_protocol::risk_authority::RiskResult>> =
-        HashMap::new();
+    let mut pending_risk: HashMap<
+        String,
+        oneshot::Sender<okx_protocol::risk_authority::RiskResult>,
+    > = HashMap::new();
 
     loop {
         tokio::select! {

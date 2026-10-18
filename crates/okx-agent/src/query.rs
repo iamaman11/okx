@@ -346,9 +346,7 @@ impl<'a> ObservationQueryContext<'a> {
         self
     }
 
-    pub const fn native_risk_client(
-        &self,
-    ) -> Option<&'a crate::risk_bridge::NativeRiskClient> {
+    pub const fn native_risk_client(&self) -> Option<&'a crate::risk_bridge::NativeRiskClient> {
         self.risk_client
     }
 
@@ -1171,7 +1169,7 @@ mod tests {
                 research_session: None,
                 operator_policy: None,
                 transport_generation: 0,
-            risk_client: None,
+                risk_client: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1215,7 +1213,7 @@ mod tests {
                 research_session: None,
                 operator_policy: None,
                 transport_generation: 0,
-            risk_client: None,
+                risk_client: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
@@ -1260,7 +1258,7 @@ mod tests {
                 research_session: None,
                 operator_policy: None,
                 transport_generation: 0,
-            risk_client: None,
+                risk_client: None,
             },
             "2026-09-27T00:00:01.000Z",
         )
