@@ -22,6 +22,10 @@ export interface RiskEntry {
   loss_usdt: string;
   state: RiskEntryState;
   created_at_ms: number;
+  /** Native census digest at RESERVE. Legacy holdings without this evidence
+   * remain accounted for but cannot receive a positive POST authorization.
+   */
+  reserve_source_digest?: string;
   transition_proof: string | null;
 }
 export interface RiskBook {
@@ -107,6 +111,7 @@ function validEntry(entry: RiskEntry): boolean {
     && TOKEN.test(entry.intent_id)
     && Number.isSafeInteger(entry.policy_revision) && entry.policy_revision > 0
     && Number.isSafeInteger(entry.created_at_ms) && entry.created_at_ms > 0
+    && (entry.reserve_source_digest === undefined || HEX.test(entry.reserve_source_digest))
     && units(entry.loss_usdt) !== null && units(entry.loss_usdt)! > 0n
     && ["HELD","POSTED","UNKNOWN","OPEN","RELEASED"].includes(entry.state)
     && (entry.transition_proof === null || HEX.test(entry.transition_proof))
@@ -166,14 +171,6 @@ function budget(policy: RiskPolicy): { global: bigint; authorized: bigint; accou
   }
   return accounts.size ? {global, authorized, accounts} : null;
 }
-function replayed(existing: RiskEntry, input: RiskReservation): boolean {
-  return existing.plan_hash === input.plan_hash
-    && existing.loss_usdt === input.loss_usdt
-    && existing.policy_revision === input.policy_revision
-    && existing.strategy_id === input.strategy_id
-    && existing.instrument_id === input.instrument_id;
-}
-
 /**
  * One transaction per reservation. Includes risk of all HELD / POSTED /
  * UNKNOWN / OPEN entries plus pessimistic source-attested external occupancy.
@@ -234,10 +231,10 @@ export async function reserveRisk(
     const key = riskKey(input);
     const prior = book.entries.find(e => e.key === key);
     if (prior) {
-      if (prior.state === "HELD" && replayed(prior, input))
-        return {status:"HELD", entry:prior, book_sequence:book.sequence, occupied_global_usdt:"UNKNOWN_IDEMPOTENT"};
+      // A lost RESERVE response is UNKNOWN to the native caller. Reissuing
+      // HELD would allow another positive grant after an uncertain attempt.
       return {status:"DENIED", reason:prior.state === "HELD"
-        ? "IMMUTABLE_INTENT_REUSE" : "INTENT_ALREADY_POSTED_OR_RESOLVED"};
+        ? "INTENT_ALREADY_RESERVED_DO_NOT_REPLAY" : "INTENT_ALREADY_POSTED_OR_RESOLVED"};
     }
     if (book.entries.length >= MAX_ENTRIES) return {status:"DENIED", reason:"RISK_BOOK_CAPACITY"};
     const account=governance.accounts.find(a=>
@@ -280,7 +277,8 @@ export async function reserveRisk(
       run_id:input.run_id, strategy_id:input.strategy_id, instrument_id:input.instrument_id,
       intent_id:input.intent_id, plan_hash:input.plan_hash,
       policy_revision:input.policy_revision, loss_usdt:input.loss_usdt,
-      state:"HELD", created_at_ms:input.now_ms, transition_proof:null,
+      state:"HELD", created_at_ms:input.now_ms,
+      reserve_source_digest:census.source_digest,transition_proof:null,
     };
     const next: RiskBook = {schema:RISK_BOOK_SCHEMA, sequence:book.sequence+1, entries:[...book.entries,entry]};
     await tx.put(KEY,next);
@@ -384,6 +382,10 @@ export async function beginRiskPost(
     // Reusing a recently sampled RESERVE census is not a new source read.
     if(native.census.generated_at_ms<=entry.created_at_ms)
       return {status:"DENIED" as const,reason:"POST_CENSUS_NOT_AFTER_RESERVE"};
+    // A newer clock stamp with the same source digest is not a new read.
+    if (!entry.reserve_source_digest ||
+        native.census.source_digest===entry.reserve_source_digest)
+      return {status:"DENIED" as const,reason:"POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN"};
     const account=governance.accounts.find(a=>
       a.venue===entry.venue&&a.environment==="real"&&a.uid_fingerprint===entry.uid
       &&a.enabled&&a.identity_verified);

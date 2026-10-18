@@ -125,7 +125,8 @@ export function migrateV1(old:AccountPolicy):Governance|null {
   if(!validAccountPolicy(old))return null;
   const result:Governance={
     schema:GOVERNANCE_SCHEMA,revision:old.revision,trading_requested:false,
-    operator_authorization:{id:"sha256:"+"0".repeat(64),status:"UNVERIFIED",ceiling_usdt:"10"},
+    operator_authorization:{id:"sha256:"+"0".repeat(64),status:"UNVERIFIED",
+      ceiling_usdt:old.max_total_modelled_loss_usdt},
     max_total_modelled_loss_usdt:old.max_total_modelled_loss_usdt,
     accounts:old.allowed_account_uids.map((uid,i)=>({
       id:"legacy_"+(i+1),label:"Unverified "+uid.slice(0,8),venue:"okx",

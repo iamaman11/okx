@@ -75,7 +75,8 @@ check((await reserve(sa,policy,census,{...reqA,intent_id:"intent_20261018_extra"
 check((await reserve(sa,policy,census,{...reqA,intent_id:"intent_20261018_fake",
  strategy_id:"unknown_strat",loss_usdt:"1"})).status==="DENIED",
  "unregistered strategy cannot reserve portfolio risk");
-check((await reserve(sa,policy,census,reqA)).status==="HELD","idempotent exact retry");
+check((await reserve(sa,policy,census,reqA)).status==="DENIED",
+ "uncertain HELD reservation never grants another positive receipt");
 check((await reserve(sa,policy,census,{...reqA,plan_hash:d})).status==="DENIED","intent plan immutable");
 check((await reserve(sa,policy,{...census,account_keys:["okx:real:"+a]},reqB)).status==="DENIED",
   "selected-only UID cannot assert empty other accounts");
@@ -87,6 +88,8 @@ check((await reserve(sa,policy,census,{...reqA,intent_id:"intent_20261018_eth",
  instrument_id:"ETH-USDT-SWAP",loss_usdt:"1"})).status==="DENIED",
  "native risk cannot reserve an instrument omitted from central account policy");
 const entry=(await readRiskBook(sa))!.entries[0];
+check(entry.reserve_source_digest===census.source_digest,
+ "first native source digest is durable");
 check((await transitionRisk(sa,entry.key,p,"UNKNOWN",d)).status==="DENIED",
   "caller-supplied proof digest does not unlock risk state transition");
 const beforePost=await readRiskBook(sa);
@@ -103,6 +106,11 @@ check((await beginRiskPost(sa,entry.key,p,1,d,{
 check((await beginRiskPost(sa,entry.key,p,1,d,{
  ...postProof,census:manualExposure
 })).status==="DENIED","new manual exposure after reserve cannot sneak through POST fence");
+check((await beginRiskPost(sa,entry.key,p,1,d,{
+ ...postProof,census:{...postCensus,source_digest:census.source_digest},
+ source_proof:native
+})).reason==="POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN",
+ "new timestamp with reused census source digest cannot POST");
 check((await beginRiskPost(sa,entry.key,p,1,d,{
  ...postProof,census:{...postCensus,generated_at_ms:now-5001}
 })).status==="DENIED","stale census cannot grant POST");
