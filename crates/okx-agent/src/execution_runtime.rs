@@ -1123,10 +1123,32 @@ impl ExecutionRuntime {
         // Serialize policy reading with all other execution submissions:
         // revocation cannot be hidden behind a prior wait on the ledger lock.
         let mut executor = self.executor.lock().await;
-        let policy = read_native_production_policy()?;
+        let mut policy = read_native_production_policy()?;
         if policy.account_uid_fingerprint != preflight.credential.account_uid_fingerprint {
             return Ok(None);
         }
+        // The existing local policy may only further restrict the ONE
+        // centrally selected operator budget, never enlarge it. Parse exact
+        // decimal values, never f64. No permission is created by this bound.
+        let Some(central_budget) = central
+            .and_then(|binding| rust_decimal::Decimal::from_str(
+                &binding.policy.max_total_modelled_loss_usdt,
+            ).ok())
+        else {
+            return Ok(None);
+        };
+        let Some(native_budget) =
+            rust_decimal::Decimal::from_str(&policy.max_total_modelled_loss_usdt).ok()
+        else {
+            return Ok(None);
+        };
+        if central_budget <= rust_decimal::Decimal::ZERO
+            || native_budget <= rust_decimal::Decimal::ZERO
+        {
+            return Ok(None);
+        }
+        policy.max_total_modelled_loss_usdt =
+            central_budget.min(native_budget).normalize().to_string();
         let Some(entry) = executor.ledger().get(intent_id) else {
             return Ok(None);
         };
