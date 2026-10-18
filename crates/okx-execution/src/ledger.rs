@@ -2310,6 +2310,68 @@ impl DurableExecutionLedger {
         })
     }
 
+    /// One atomic, idempotent financial-maintenance commit for historical
+    /// intents that have NEVER entered SUBMITTING. Caller proves a fresh,
+    /// independent venue account/WS/history snapshot before reaching here.
+    /// No order gateway is referenced or called by this operation.
+    pub fn abandon_prepared_batch(
+        &mut self,
+        account_uid: &str,
+        expected_ids: &[String],
+        observed_at_ms: u64,
+    ) -> Result<usize, ExecutionLedgerError> {
+        require_timestamp(observed_at_ms)?;
+        if account_uid.len() != 64
+            || expected_ids.is_empty()
+            || expected_ids.len() > 32
+            || !expected_ids.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            return Err(ExecutionLedgerError::Corrupt("invalid exact historical batch"));
+        }
+        // Exact set equality avoids accidentally clearing only a subset and
+        // reporting readiness while other unsent records remain outstanding.
+        let pending = self.entries
+            .iter()
+            .filter(|(_, entry)| entry.record.state == ExecutionState::Prepared)
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>();
+        if pending != expected_ids.iter().map(String::as_str).collect::<Vec<_>>() {
+            return Err(ExecutionLedgerError::Corrupt("prepared inventory mismatch"));
+        }
+        if self.entries.values().any(|entry| {
+            entry.record.plan.account_uid_fingerprint != account_uid
+                || matches!(
+                    entry.record.state,
+                    ExecutionState::Submitting | ExecutionState::UnknownSubmission
+                )
+        }) {
+            return Err(ExecutionLedgerError::Corrupt("ledger account or unresolved POST mismatch"));
+        }
+        let mut next = self.entries.clone();
+        for id in expected_ids {
+            let entry = next.get_mut(id)
+                .ok_or_else(|| ExecutionLedgerError::IntentNotFound(id.clone()))?;
+            let timestamp = monotonic_timestamp(entry, observed_at_ms)?;
+            // This enforces the same protection, reverse and mutation
+            // invariants as single-intent abandon_prepared().
+            entry.record.abandon_prepared()?;
+            entry.updated_at_ms = timestamp;
+            validate_entry(entry)?;
+        }
+        // One durable save / one atomic rename. On any failure, the original
+        // in-memory ledger and all of its immutable financial proofs survive.
+        self.store.save(
+            &next,
+            self.risk_stop.as_ref(),
+            self.capital_reservation.as_ref(),
+            self.exchange_evidence.as_ref(),
+            &self.strategy_periods,
+            &self.leverage_attempts,
+        )?;
+        self.entries = next;
+        Ok(expected_ids.len())
+    }
+
     fn prepare_record(
         &mut self,
         mut record: ExecutionRecord,
@@ -4669,6 +4731,45 @@ mod tests {
             ledger.prepare(close, 1103).is_ok(),
             "safe exits are not locked"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn atomic_historical_unsent_batch_commits_all_or_none_without_exchange() {
+        let root = temp_root("historical-unsent-batch-atomic");
+        let _ = fs::remove_dir_all(&root);
+        let store = ExecutionLedgerStore::at(root.join("ledger.json"));
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 100).unwrap();
+        let ids = vec![
+            "intent_historical_unsent_A_01234".to_owned(),
+            "intent_historical_unsent_B_01234".to_owned(),
+        ];
+        for (i, id) in ids.iter().enumerate() {
+            let mut request = plan(id);
+            request.account_uid_fingerprint = "a".repeat(64);
+            ledger.prepare(request, 101 + i as u64).unwrap();
+        }
+        let previous = fs::read(store.path()).unwrap();
+        let incomplete = vec![ids[0].clone()];
+        assert!(ledger.abandon_prepared_batch(&"a".repeat(64), &incomplete, 200).is_err());
+        assert_eq!(fs::read(store.path()).unwrap(), previous);
+        assert!(ledger.abandon_prepared_batch("other-uid", &ids, 200).is_err());
+        assert_eq!(fs::read(store.path()).unwrap(), previous);
+        assert_eq!(ledger.abandon_prepared_batch(&"a".repeat(64), &ids, 200).unwrap(), 2);
+        assert_ne!(fs::read(store.path()).unwrap(), previous);
+        for id in &ids {
+            let e = ledger.get(id).unwrap();
+            assert_eq!(e.record.state, ExecutionState::Rejected);
+            assert_eq!(
+                e.record.rejection_code.as_deref(),
+                Some(crate::state::LOCAL_PREPARED_ABANDONED_CODE),
+            );
+        }
+        let reopened = DurableExecutionLedger::open(store, 210).unwrap();
+        for id in &ids {
+            assert_eq!(reopened.get(id).unwrap().record.state, ExecutionState::Rejected);
+        }
+        assert!(ledger.abandon_prepared_batch(&"a".repeat(64), &ids, 220).is_err());
         let _ = fs::remove_dir_all(root);
     }
 

@@ -1207,6 +1207,13 @@ pub enum AgentOperation {
     AbandonPreparedExecution {
         intent_id: String,
     },
+    /// Explicit native maintenance of a complete, source-proven historical
+    /// UNSENT batch. Never authorizes exchange POST or new trading risk.
+    ReconcileUnsentPrepared {
+        expected_manifest_sha256: String,
+        account_uid_fingerprint: String,
+        intent_ids: Vec<String>,
+    },
     ExecutionStatus {
         intent_id: String,
     },
@@ -1300,6 +1307,7 @@ impl AgentOperation {
                 | Self::MutateExecution { .. }
                 | Self::AbortReverseExecution { .. }
                 | Self::AbandonPreparedExecution { .. }
+                | Self::ReconcileUnsentPrepared { .. }
         )
     }
 
@@ -1522,6 +1530,25 @@ impl AgentOperation {
                         ));
                     }
                     validate_execution_lineage(lineage)?;
+                }
+                Ok(())
+            }
+            Self::ReconcileUnsentPrepared {
+                expected_manifest_sha256,
+                account_uid_fingerprint,
+                intent_ids,
+            } => {
+                if expected_manifest_sha256.len() != 64
+                    || !expected_manifest_sha256.bytes().all(|v| v.is_ascii_hexdigit())
+                    || validate_sha256(account_uid_fingerprint).is_err()
+                    || intent_ids.is_empty()
+                    || intent_ids.len() > 32
+                    || !intent_ids.windows(2).all(|p| p[0] < p[1])
+                {
+                    return Err(ProtocolError::InvalidProductionTradingPolicy);
+                }
+                for id in intent_ids {
+                    validate_request_id(id)?;
                 }
                 Ok(())
             }
