@@ -71,6 +71,29 @@ impl CentralGovernanceBinding<'_> {
             .authorizes_delivery(uid, now_ms, self.session_generation)
     }
 }
+/// One central delivery binding per intent. V1 is rolling-upgrade only;
+/// both forms still require a separate transactional risk POST fence.
+#[derive(Clone, Copy)]
+pub enum CentralAuthorizationBinding<'a> {
+    Legacy(CentralPolicyBinding<'a>),
+    Governance(CentralGovernanceBinding<'a>),
+}
+impl CentralAuthorizationBinding<'_> {
+    pub fn authorizes_uid(self, uid: &str, now_ms: u64) -> bool {
+        match self {
+            Self::Legacy(v) => v.authorizes_uid(uid, now_ms),
+            Self::Governance(v) => v.authorizes_uid(uid, now_ms),
+        }
+    }
+
+    pub fn budget(self) -> Option<rust_decimal::Decimal> {
+        let text = match self {
+            Self::Legacy(v) => &v.policy.max_total_modelled_loss_usdt,
+            Self::Governance(v) => &v.scope.state.max_total_modelled_loss_usdt,
+        };
+        rust_decimal::Decimal::from_str(text).ok()
+    }
+}
 
 /// A Hedge Cross setting is accepted only when BOTH distinct sides are
 /// individually verified and have the same exact, positive leverage.
@@ -1108,16 +1131,12 @@ impl ExecutionRuntime {
         timing: MutationTiming,
         observed_at_ms: u64,
         sources: ProductionSubmitSources<'_>,
-        central: Option<CentralPolicyBinding<'_>>,
-        governance: Option<CentralGovernanceBinding<'_>>,
+        authorization: Option<CentralAuthorizationBinding<'_>>,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
         let ProductionSubmitSources { facts, protection } = sources;
         let native_uid = &preflight.credential.account_uid_fingerprint;
         let fresh_now = Utc::now().timestamp_millis().max(1) as u64;
-        if central.is_some() == governance.is_some()
-            || !(central.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now))
-                || governance.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now)))
-        {
+        if !authorization.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now)) {
             return Ok(None);
         }
         if !self.production_trading_requested()
@@ -1143,18 +1162,7 @@ impl ExecutionRuntime {
         // The existing local policy may only further restrict the ONE
         // centrally selected operator budget, never enlarge it. Parse exact
         // decimal values, never f64. No permission is created by this bound.
-        let Some(central_budget) = central
-            .and_then(|binding| {
-                rust_decimal::Decimal::from_str(&binding.policy.max_total_modelled_loss_usdt).ok()
-            })
-            .or_else(|| {
-                governance.and_then(|binding| {
-                    rust_decimal::Decimal::from_str(
-                        &binding.scope.state.max_total_modelled_loss_usdt,
-                    )
-                    .ok()
-                })
-            })
+        let Some(central_budget) = authorization.and_then(CentralAuthorizationBinding::budget)
         else {
             return Ok(None);
         };
@@ -1266,9 +1274,7 @@ impl ExecutionRuntime {
         // Final central revision/UID/expiry fence immediately before the
         // native gateway owner enters its durable SUBMITTING and single POST.
         let fresh_now = Utc::now().timestamp_millis().max(1) as u64;
-        if !(central.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now))
-            || governance.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now)))
-        {
+        if !authorization.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now)) {
             return Ok(None);
         }
         Ok(Some(

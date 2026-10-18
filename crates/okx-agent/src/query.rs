@@ -373,6 +373,21 @@ impl<'a> ObservationQueryContext<'a> {
             })
     }
 
+    pub fn central_authorization_binding(
+        &self,
+    ) -> Option<crate::execution_runtime::CentralAuthorizationBinding<'a>> {
+        use crate::execution_runtime::CentralAuthorizationBinding;
+        if self.operator_governance.is_some() && self.operator_policy.is_some() {
+            return None;
+        }
+        self.central_governance_binding()
+            .map(CentralAuthorizationBinding::Governance)
+            .or_else(|| {
+                self.central_policy_binding()
+                    .map(CentralAuthorizationBinding::Legacy)
+            })
+    }
+
     pub fn central_policy_binding(
         &self,
     ) -> Option<crate::execution_runtime::CentralPolicyBinding<'a>> {

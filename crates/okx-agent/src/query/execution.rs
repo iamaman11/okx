@@ -1869,8 +1869,7 @@ async fn submit_prepared(
                     facts,
                     protection: &protection,
                 },
-                context.central_policy_binding(),
-                context.central_governance_binding(),
+                context.central_authorization_binding(),
             )
             .await?
         {
