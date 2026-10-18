@@ -55,12 +55,14 @@ impl NativeRiskClient {
         F: FnOnce(&RiskResult) -> Fut,
         Fut: std::future::Future<Output = Result<RiskCommand, &'static str>>,
     {
-        let (plan, revision) = match &reserve.action {
+        let (plan, revision, reserve_at_ms, reserve_digest) = match &reserve.action {
             RiskCommandAction::Reserve {
                 plan_sha256,
                 policy_revision,
+                census,
                 ..
-            } => (plan_sha256.clone(), *policy_revision),
+            } => (plan_sha256.clone(), *policy_revision,
+                  census.generated_at_ms, census.source_digest.clone()),
             _ => return Err("RISK_RESERVE_COMMAND_REQUIRED"),
         };
         let held = self.request(reserve).await?;
@@ -78,11 +80,14 @@ impl NativeRiskClient {
                 plan_sha256,
                 policy_revision,
                 expected_risk_book_sequence,
+                census,
                 ..
             } if Some(reservation_key.as_str()) == held.reservation_key.as_deref()
                 && plan_sha256 == &plan
                 && *policy_revision == revision
                 && Some(*expected_risk_book_sequence) == held.risk_book_sequence
+                && census.generated_at_ms > reserve_at_ms
+                && census.source_digest != reserve_digest
         );
         if !correct {
             return Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH");
@@ -152,6 +157,9 @@ mod tests {
         }
     }
     fn post(held: &RiskResult) -> RiskCommand {
+        let mut fresh = census();
+        fresh.generated_at_ms = 1_001;
+        fresh.source_digest = "e".repeat(64);
         RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
             command_id: "risk_post_000001".to_owned(),
@@ -161,7 +169,7 @@ mod tests {
                 policy_revision: 1,
                 expected_risk_book_sequence: held.risk_book_sequence.unwrap(),
                 source_proof_sha256: "d".repeat(64),
-                census: census(),
+                census: fresh,
             },
         }
     }
@@ -213,6 +221,26 @@ mod tests {
             })
             .await;
         assert!(matches!(result, Err("RISK_RESERVATION_NOT_HELD")));
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn reserve_time_census_cannot_enter_begin_post() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let client = NativeRiskClient::new(tx);
+        let server = tokio::spawn(async move {
+            let req = rx.recv().await.unwrap();
+            let _ = req.return_to.send(reply(req.command.command_id, RiskDecisionStatus::Held, 1));
+            assert!(rx.try_recv().is_err());
+        });
+        let result = client.reserve_then_fence(reserve(), |held| {
+            let mut p = post(held);
+            if let RiskCommandAction::BeginPost { census, .. } = &mut p.action {
+                census.generated_at_ms = 1_000;
+                census.source_digest = "c".repeat(64);
+            }
+            async move { Ok(p) }
+        }).await;
+        assert!(matches!(result, Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH")));
         server.await.unwrap();
     }
     #[tokio::test]

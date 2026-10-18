@@ -234,9 +234,10 @@ export async function reserveRisk(
     const key = riskKey(input);
     const prior = book.entries.find(e => e.key === key);
     if (prior) {
-      if (prior.state !== "RELEASED" && replayed(prior, input))
+      if (prior.state === "HELD" && replayed(prior, input))
         return {status:"HELD", entry:prior, book_sequence:book.sequence, occupied_global_usdt:"UNKNOWN_IDEMPOTENT"};
-      return {status:"DENIED", reason:"IMMUTABLE_INTENT_REUSE"};
+      return {status:"DENIED", reason:prior.state === "HELD"
+        ? "IMMUTABLE_INTENT_REUSE" : "INTENT_ALREADY_POSTED_OR_RESOLVED"};
     }
     if (book.entries.length >= MAX_ENTRIES) return {status:"DENIED", reason:"RISK_BOOK_CAPACITY"};
     const account=governance.accounts.find(a=>
@@ -380,6 +381,9 @@ export async function beginRiskPost(
       stored.entries[index].policy_revision!==policy_revision)
       return {status:"DENIED" as const,reason:"INTENT_NOT_HELD_EXACTLY_ONCE"};
     const entry=stored.entries[index];
+    // Reusing a recently sampled RESERVE census is not a new source read.
+    if(native.census.generated_at_ms<=entry.created_at_ms)
+      return {status:"DENIED" as const,reason:"POST_CENSUS_NOT_AFTER_RESERVE"};
     const account=governance.accounts.find(a=>
       a.venue===entry.venue&&a.environment==="real"&&a.uid_fingerprint===entry.uid
       &&a.enabled&&a.identity_verified);

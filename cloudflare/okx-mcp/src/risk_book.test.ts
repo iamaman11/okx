@@ -90,18 +90,26 @@ const entry=(await readRiskBook(sa))!.entries[0];
 check((await transitionRisk(sa,entry.key,p,"UNKNOWN",d)).status==="DENIED",
   "caller-supplied proof digest does not unlock risk state transition");
 const beforePost=await readRiskBook(sa);
+const postCensus={...census,generated_at_ms:now+1,source_digest:p};
+const postNative={...native,source_digest:p};
 const postProof={connection_generation:77,expected_book_sequence:beforePost!.sequence,
- census,source_proof:native,now_ms:now};
-const manualExposure={...census,occupied:[
+ census:postCensus,source_proof:postNative,now_ms:now+1};
+const manualExposure={...postCensus,occupied:[
  {...census.occupied[0],occupied_usdt:"8"},census.occupied[1]]};
 check((await beginRiskPost(sa,entry.key,p,1,d,{
- ...postProof,census:manualExposure,source_proof:{...native,source_digest:d}
+ ...postProof,census,source_proof:native,now_ms:now
+})).reason==="POST_CENSUS_NOT_AFTER_RESERVE",
+ "reserve-time census cannot authorize POST");
+check((await beginRiskPost(sa,entry.key,p,1,d,{
+ ...postProof,census:manualExposure
 })).status==="DENIED","new manual exposure after reserve cannot sneak through POST fence");
 check((await beginRiskPost(sa,entry.key,p,1,d,{
- ...postProof,census:{...census,generated_at_ms:now-5001}
+ ...postProof,census:{...postCensus,generated_at_ms:now-5001}
 })).status==="DENIED","stale census cannot grant POST");
 check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).status==="POST_AUTHORIZED",
  "one native POST granted after fresh full-account census");
+check((await reserve(sa,policy,census,reqA)).status==="DENIED",
+ "POSTED cannot recover HELD");
 check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).status==="DENIED",
  "same reservation cannot POST twice");
 const transition=async(to:Parameters<typeof transitionRisk>[3],proof:string)=>{
@@ -112,6 +120,8 @@ const transition=async(to:Parameters<typeof transitionRisk>[3],proof:string)=>{
 };
 check((await transition("UNKNOWN",d)).status==="UPDATED",
   "ack-loss risk remains");
+check((await reserve(sa,policy,census,reqA)).status==="DENIED",
+ "UNKNOWN cannot recover HELD");
 check((await reserve(sa,policy,census,reqB)).status==="DENIED","UNKNOWN consumes risk");
 check((await transition("HELD",d)).status==="DENIED","no backward mutation");
 check((await transition("RELEASED","invalid")).status==="DENIED","proof required");
