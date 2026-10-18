@@ -509,7 +509,9 @@ async fn run_session(
                     DirectTransportFrame::Hello { .. }
                     | DirectTransportFrame::HelloAck { .. }
                     | DirectTransportFrame::DeliveryAck { .. }
-                    | DirectTransportFrame::Response { .. } => {
+                    | DirectTransportFrame::Response { .. }
+                    | DirectTransportFrame::RiskControl { .. }
+                    | DirectTransportFrame::RiskControlResult { .. } => {
                         return Err(AgentError::CloudflareTransport(
                             "unexpected direct transport frame from server".to_owned(),
                         ));
