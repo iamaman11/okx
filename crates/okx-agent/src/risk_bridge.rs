@@ -61,8 +61,12 @@ impl NativeRiskClient {
                 policy_revision,
                 census,
                 ..
-            } => (plan_sha256.clone(), *policy_revision,
-                  census.generated_at_ms, census.source_digest.clone()),
+            } => (
+                plan_sha256.clone(),
+                *policy_revision,
+                census.generated_at_ms,
+                census.source_digest.clone(),
+            ),
             _ => return Err("RISK_RESERVE_COMMAND_REQUIRED"),
         };
         let held = self.request(reserve).await?;
@@ -229,18 +233,25 @@ mod tests {
         let client = NativeRiskClient::new(tx);
         let server = tokio::spawn(async move {
             let req = rx.recv().await.unwrap();
-            let _ = req.return_to.send(reply(req.command.command_id, RiskDecisionStatus::Held, 1));
+            let _ = req
+                .return_to
+                .send(reply(req.command.command_id, RiskDecisionStatus::Held, 1));
             assert!(rx.try_recv().is_err());
         });
-        let result = client.reserve_then_fence(reserve(), |held| {
-            let mut p = post(held);
-            if let RiskCommandAction::BeginPost { census, .. } = &mut p.action {
-                census.generated_at_ms = 1_000;
-                census.source_digest = "c".repeat(64);
-            }
-            async move { Ok(p) }
-        }).await;
-        assert!(matches!(result, Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH")));
+        let result = client
+            .reserve_then_fence(reserve(), |held| {
+                let mut p = post(held);
+                if let RiskCommandAction::BeginPost { census, .. } = &mut p.action {
+                    census.generated_at_ms = 1_000;
+                    census.source_digest = "c".repeat(64);
+                }
+                async move { Ok(p) }
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH")
+        ));
         server.await.unwrap();
     }
     #[tokio::test]
