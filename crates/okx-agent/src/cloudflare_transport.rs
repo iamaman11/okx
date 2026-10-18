@@ -524,6 +524,7 @@ async fn run_session(
                         if mutating {
                             active_mutation = Some(response_request_id.clone());
                         }
+                        let risk_client = risk_client.clone();
                         in_flight.push(
                             async move {
                                 let query_context = query_context
