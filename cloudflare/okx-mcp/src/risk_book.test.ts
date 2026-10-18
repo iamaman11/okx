@@ -19,13 +19,14 @@ const policy={revision:1,enabled:true,authorized_ceiling_usdt:"10",
 const census={complete:true as const,source_digest:d,generated_at_ms:now,
   account_keys:["okx:real:"+a,"okx:real:"+b],occupied:[{account_key:"okx:real:"+a,occupied_usdt:"0"},{account_key:"okx:real:"+b,occupied_usdt:"0"}]};
 const base={venue:"okx",environment:"real" as const,run_id:"run_20261018_AAA",
-  plan_hash:p,policy_revision:1,now_ms:now};
+  plan_hash:p,policy_revision:1,now_ms:now,strategy_id:"momentum_A"};
 const sa=new Storage();
 function account(uid:string){
  return {
   id:"acct_"+uid.slice(0,8),label:uid.slice(0,8),venue:"okx",
   environment:"real",uid_fingerprint:uid,identity_verified:true,enabled:true,
-  strategies:[],
+  strategies:[{id:"momentum_A",enabled:true,allocated_capital_usdt:"6",
+    max_modelled_loss_usdt:"6",max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1"}],
   limits:{max_modelled_loss_usdt:"10",max_order_loss_usdt:"6",max_notional_usdt:"100",
     max_leverage:"3",max_daily_realized_loss_usdt:"2",max_drawdown_ratio:"0.1",
     allowed_instruments:["BTC-USDT-SWAP"]}
