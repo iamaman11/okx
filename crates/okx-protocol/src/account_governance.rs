@@ -58,7 +58,9 @@ fn token(text: &str) -> bool {
             .as_bytes()
             .first()
             .is_some_and(|byte| byte.is_ascii_alphabetic())
-        && text.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,7 +114,11 @@ impl AccountLimitsV2 {
                             || byte == b'_'
                     })
             })
-            && self.allowed_instruments.iter().collect::<BTreeSet<_>>().len()
+            && self
+                .allowed_instruments
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
                 == self.allowed_instruments.len()
     }
 }
@@ -132,8 +138,7 @@ impl StrategyLimitsV2 {
     pub fn valid(&self) -> bool {
         token(&self.id)
             && positive(&self.allocated_capital_usdt).is_some_and(|capital| {
-                positive(&self.max_modelled_loss_usdt)
-                    .is_some_and(|risk| risk <= capital)
+                positive(&self.max_modelled_loss_usdt).is_some_and(|risk| risk <= capital)
             })
             && optional_positive(&self.max_daily_realized_loss_usdt)
             && ratio(&self.max_drawdown_ratio)
@@ -171,7 +176,10 @@ impl AccountControlV2 {
             || !((2..=32).contains(&self.venue.len())
                 && self.venue.starts_with(|c: char| c.is_ascii_lowercase())
                 && self.venue.bytes().all(|byte| {
-                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'
+                        || byte == b'-'
                 }))
             || !lower_sha256(&self.uid_fingerprint)
             || (self.enabled && !self.identity_verified)
@@ -253,10 +261,9 @@ impl AccountGovernanceV2 {
         }
         !self.trading_requested
             || (self.operator_authorization.status == AuthorizationStatus::Active
-                && self
-                    .accounts
-                    .iter()
-                    .any(|account| account.enabled && account.environment == AccountEnvironmentV2::Real))
+                && self.accounts.iter().any(|account| {
+                    account.enabled && account.environment == AccountEnvironmentV2::Real
+                }))
     }
 
     /// Never make native POST admission from configuration alone. This must
