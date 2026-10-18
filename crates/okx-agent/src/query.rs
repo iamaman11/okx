@@ -175,6 +175,7 @@ pub struct ObservationQueryContext<'a> {
     research_root: Option<&'a Path>,
     research_session: Option<&'a ResearchSessionHandle>,
     operator_policy: Option<&'a CentralAccountPolicy>,
+    operator_governance: Option<&'a okx_protocol::account_governance::CentralGovernanceSnapshotV2>,
     transport_generation: u64,
     risk_client: Option<&'a crate::risk_bridge::NativeRiskClient>,
 }
@@ -192,6 +193,7 @@ impl<'a> ObservationQueryContext<'a> {
             research_root: None,
             research_session: None,
             operator_policy: None,
+            operator_governance: None,
             transport_generation: 0,
             risk_client: None,
         }
@@ -220,6 +222,7 @@ impl<'a> ObservationQueryContext<'a> {
             research_root: None,
             research_session: None,
             operator_policy: None,
+            operator_governance: None,
             transport_generation: 0,
             risk_client: None,
         }
@@ -319,6 +322,7 @@ impl<'a> ObservationQueryContext<'a> {
             research_root,
             research_session,
             operator_policy: None,
+            operator_governance: None,
             transport_generation: 0,
             risk_client: None,
         }
@@ -333,6 +337,15 @@ impl<'a> ObservationQueryContext<'a> {
     ) -> Self {
         self.operator_policy = policy;
         self.transport_generation = generation;
+        self
+    }
+
+    /// A typed v2 snapshot is a delivery scope only; it never reserves risk.
+    pub const fn with_operator_governance(
+        mut self,
+        governance: Option<&'a okx_protocol::account_governance::CentralGovernanceSnapshotV2>,
+    ) -> Self {
+        self.operator_governance = governance;
         self
     }
 
@@ -361,8 +374,11 @@ impl<'a> ObservationQueryContext<'a> {
     }
 
     pub fn central_uid_admitted(&self, uid: &str, now_ms: u64) -> bool {
-        self.operator_policy
-            .is_some_and(|policy| policy.authorizes_uid(uid, now_ms, self.transport_generation))
+        self.operator_governance
+            .is_some_and(|scope| scope.authorizes_delivery(uid, now_ms, self.transport_generation))
+            || self.operator_policy.is_some_and(|policy| {
+                policy.authorizes_uid(uid, now_ms, self.transport_generation)
+            })
     }
 }
 
@@ -1168,6 +1184,7 @@ mod tests {
                 research_root: None,
                 research_session: None,
                 operator_policy: None,
+            operator_governance: None,
                 transport_generation: 0,
                 risk_client: None,
             },
@@ -1212,6 +1229,7 @@ mod tests {
                 research_root: None,
                 research_session: None,
                 operator_policy: None,
+            operator_governance: None,
                 transport_generation: 0,
                 risk_client: None,
             },
@@ -1257,6 +1275,7 @@ mod tests {
                 research_root: None,
                 research_session: None,
                 operator_policy: None,
+            operator_governance: None,
                 transport_generation: 0,
                 risk_client: None,
             },
