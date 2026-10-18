@@ -196,6 +196,23 @@ export async function reserveRisk(
            ([k,v])=>policy.account_limits_usdt[k]!==v
        ))
       return {status:"DENIED",reason:"POLICY_SNAPSHOT_NOT_AUTHORITATIVE"};
+    // A caller's own "complete:true" and arbitrary digest are not proof.
+    // This private record may ONLY be persisted after this RuntimeSession's
+    // authenticated Windows WS proves a full native account/venue census.
+    // No such writer is deployed yet: therefore all Real reservations deny.
+    const witness:unknown=await tx.get("risk_census_attestation_v1");
+    const generation:unknown=await tx.get("generation");
+    if(typeof generation!=="number"||!Number.isSafeInteger(generation)
+      ||generation<=0||typeof witness!=="object"||witness===null||Array.isArray(witness))
+      return {status:"DENIED",reason:"AUTHENTICATED_CENSUS_ATTESTATION_ABSENT"};
+    const att=witness as Record<string,unknown>;
+    if(att.schema!=="okx.risk-census-attestation/v1"
+      ||att.connection_generation!==generation
+      ||att.source_digest!==census.source_digest
+      ||att.generated_at_ms!==census.generated_at_ms
+      ||JSON.stringify(att.account_keys)!==JSON.stringify(census.account_keys)
+      ||JSON.stringify(att.occupied)!==JSON.stringify(census.occupied))
+      return {status:"DENIED",reason:"AUTHENTICATED_CENSUS_ATTESTATION_MISMATCH"};
     const stored: unknown = await tx.get(KEY);
     if (stored !== undefined && !validBook(stored)) return {status:"DENIED", reason:"RISK_BOOK_CORRUPT"};
     const book = (stored ?? emptyBook()) as RiskBook;

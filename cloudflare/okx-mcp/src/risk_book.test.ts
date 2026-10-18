@@ -37,6 +37,22 @@ const governance={
  max_total_modelled_loss_usdt:"10",accounts:[account(a),account(b)]
 };
 await sa.put("account_governance_v2",governance);
+const unattested=await reserveRisk(sa,policy,census,{...base,uid:a,
+  intent_id:"intent_20261018_unproof",loss_usdt:"1"});
+check(unattested.status==="DENIED","raw census digest is not native attestation");
+const native={schema:"okx.risk-census-attestation/v1",connection_generation:77,
+  source_digest:census.source_digest,generated_at_ms:census.generated_at_ms,
+  account_keys:census.account_keys,occupied:census.occupied};
+await sa.put("generation",77);
+await sa.put("risk_census_attestation_v1",native);
+check((await reserveRisk(sa,policy,{...census,source_digest:p},{...base,uid:a,
+  intent_id:"intent_20261018_tamper",loss_usdt:"1"})).status==="DENIED",
+ "census digest mismatch never reserves");
+await sa.put("generation",78);
+check((await reserveRisk(sa,policy,census,{...base,uid:a,
+  intent_id:"intent_20261018_stale",loss_usdt:"1"})).status==="DENIED",
+ "prior-session risk census cannot be replayed");
+await sa.put("generation",77);
 const untrusted=new Storage();
 check((await reserveRisk(untrusted,policy,census,{...base,uid:a,intent_id:"intent_20261018_outs",loss_usdt:"1"})).status==="DENIED",
  "caller-supplied risk policy cannot mint capacity without persisted DO governance");
