@@ -1953,8 +1953,14 @@ mod tests {
         assert_eq!(r.exact_trade_bills, 2);
         assert_eq!(r.unlinked_nonfunding_bills, 1);
         assert_eq!(r.unlinked_nonfunding_bill_samples.len(), 1);
-        assert_eq!(r.unlinked_nonfunding_bill_samples[0].bill_id, "manual-unmanaged-bill");
-        assert_eq!(r.unlinked_nonfunding_bill_samples[0].trade_id.as_deref(), Some("external-trade"));
+        assert_eq!(
+            r.unlinked_nonfunding_bill_samples[0].bill_id,
+            "manual-unmanaged-bill"
+        );
+        assert_eq!(
+            r.unlinked_nonfunding_bill_samples[0].trade_id.as_deref(),
+            Some("external-trade")
+        );
         assert!(!r.unlinked_nonfunding_bill_samples_truncated);
         assert_eq!(r.fills_fee_totals.len(), 2);
         assert_eq!(r.fills_fee_totals[0].currency, "USDC");
@@ -1989,16 +1995,29 @@ mod tests {
                 event
             })
             .collect::<Vec<_>>();
-        let report = attribute_strategy_exchange_evidence(
-            &ledger, &[], &[], &bills, true, true, true,
-        )
-        .expect("read-only source witness");
+        let report =
+            attribute_strategy_exchange_evidence(&ledger, &[], &[], &bills, true, true, true)
+                .expect("read-only source witness");
         assert_eq!(report.unlinked_nonfunding_bills, 11);
-        assert_eq!(report.unlinked_nonfunding_bill_samples.len(), MAX_UNLINKED_BILL_SAMPLES);
+        assert_eq!(
+            report.unlinked_nonfunding_bill_samples.len(),
+            MAX_UNLINKED_BILL_SAMPLES
+        );
         assert!(report.unlinked_nonfunding_bill_samples_truncated);
-        assert_eq!(report.unlinked_nonfunding_bill_samples[0].bill_id, "external-00");
-        assert_eq!(report.unlinked_nonfunding_bill_samples[7].bill_id, "external-07");
-        assert_eq!(report.unlinked_nonfunding_bill_samples[0].balance_change.as_deref(), Some("15"));
+        assert_eq!(
+            report.unlinked_nonfunding_bill_samples[0].bill_id,
+            "external-00"
+        );
+        assert_eq!(
+            report.unlinked_nonfunding_bill_samples[7].bill_id,
+            "external-07"
+        );
+        assert_eq!(
+            report.unlinked_nonfunding_bill_samples[0]
+                .balance_change
+                .as_deref(),
+            Some("15")
+        );
         assert_eq!(report.exact_trade_bills, 0);
         assert!(report.fills_fee_totals.is_empty());
         assert!(report.linked_trade_bill_pnl_totals.is_empty());
