@@ -60,6 +60,7 @@ export async function handleNativeRiskCommand(
       return deny(id,"ALL_ACCOUNT_NATIVE_EVIDENCE_UNPROVEN");
     if(typeof a.venue!=="string"||typeof a.account_uid!=="string"||
       typeof a.run_id!=="string"||typeof a.intent_id!=="string"||typeof a.strategy_id!=="string"||
+      typeof a.instrument_id!=="string"||
       typeof a.plan_sha256!=="string"||typeof a.requested_loss_usdt!=="string"||
       !Number.isSafeInteger(a.policy_revision))
       return deny(id,"INVALID_RESERVATION_INPUT");
@@ -76,7 +77,8 @@ export async function handleNativeRiskCommand(
     };
     const input:RiskReservation={
       venue:a.venue,environment:"real",uid:a.account_uid,run_id:a.run_id,
-      intent_id:a.intent_id,strategy_id:a.strategy_id,plan_hash:a.plan_sha256,loss_usdt:a.requested_loss_usdt,
+      intent_id:a.intent_id,strategy_id:a.strategy_id,instrument_id:a.instrument_id,
+      plan_hash:a.plan_sha256,loss_usdt:a.requested_loss_usdt,
       policy_revision:a.policy_revision as number,now_ms,
     };
     const decision=await reserveRisk(storage,policy,census,input,proof);

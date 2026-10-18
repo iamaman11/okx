@@ -19,7 +19,7 @@ const policy={revision:1,enabled:true,authorized_ceiling_usdt:"10",
 const census={complete:true as const,source_digest:d,generated_at_ms:now,
   account_keys:["okx:real:"+a,"okx:real:"+b],occupied:[{account_key:"okx:real:"+a,occupied_usdt:"0"},{account_key:"okx:real:"+b,occupied_usdt:"0"}]};
 const base={venue:"okx",environment:"real" as const,run_id:"run_20261018_AAA",
-  plan_hash:p,policy_revision:1,now_ms:now,strategy_id:"momentum_A"};
+  plan_hash:p,policy_revision:1,now_ms:now,strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP"};
 const sa=new Storage();
 function account(uid:string){
  return {
@@ -83,6 +83,9 @@ check((await reserve(sa,policy,{...census,generated_at_ms:now-5001},reqB)).statu
   "stale source is not zero risk");
 check((await reserve(sa,{...policy,global_limit_usdt:"4"},census,reqB)).status==="DENIED",
   "lowering limit does not free existing risk");
+check((await reserve(sa,policy,census,{...reqA,intent_id:"intent_20261018_eth",
+ instrument_id:"ETH-USDT-SWAP",loss_usdt:"1"})).status==="DENIED",
+ "native risk cannot reserve an instrument omitted from central account policy");
 const entry=(await readRiskBook(sa))!.entries[0];
 check((await transitionRisk(sa,entry.key,p,"UNKNOWN",d)).status==="DENIED",
   "caller-supplied proof digest does not unlock risk state transition");

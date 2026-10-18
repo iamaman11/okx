@@ -110,6 +110,7 @@ pub enum RiskCommandAction {
         run_id: String,
         intent_id: String,
         strategy_id: String,
+        instrument_id: String,
         plan_sha256: String,
         requested_loss_usdt: String,
         policy_revision: u64,
@@ -149,6 +150,7 @@ impl RiskCommand {
                 run_id,
                 intent_id,
                 strategy_id,
+                instrument_id,
                 plan_sha256,
                 requested_loss_usdt,
                 policy_revision,
@@ -166,6 +168,8 @@ impl RiskCommand {
                     && strategy_id
                         .bytes()
                         .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+                    && (3..=64).contains(&instrument_id.len())
+                    && instrument_id.bytes().all(|c| c.is_ascii_uppercase()||c.is_ascii_digit()||c==b'-'||c==b'_')
                     && hash(plan_sha256)
                     && positive(requested_loss_usdt)
                     && *policy_revision > 0
@@ -250,6 +254,7 @@ mod tests {
                 run_id: "run_12345678".to_owned(),
                 intent_id: "intent_12345678".to_owned(),
                 strategy_id: "momentum_A".to_owned(),
+                instrument_id: "BTC-USDT-SWAP".to_owned(),
                 plan_sha256: "c".repeat(64),
                 requested_loss_usdt: "1".to_owned(),
                 policy_revision: 1,

@@ -15,6 +15,7 @@ export interface RiskEntry {
   uid: string;
   run_id: string;
   strategy_id: string;
+  instrument_id: string;
   intent_id: string;
   plan_hash: string;
   policy_revision: number;
@@ -101,6 +102,7 @@ function validEntry(entry: RiskEntry): boolean {
   return entry.environment === "real" && /^[a-z][a-z0-9_-]{1,31}$/.test(entry.venue)
     && HEX.test(entry.uid) && HEX.test(entry.plan_hash)
     && TOKEN.test(entry.run_id) && /^[A-Za-z][A-Za-z0-9_-]{1,63}$/.test(entry.strategy_id)
+    && /^[A-Z0-9_-]{3,64}$/.test(entry.instrument_id)
     && TOKEN.test(entry.intent_id)
     && Number.isSafeInteger(entry.policy_revision) && entry.policy_revision > 0
     && Number.isSafeInteger(entry.created_at_ms) && entry.created_at_ms > 0
@@ -167,7 +169,8 @@ function replayed(existing: RiskEntry, input: RiskReservation): boolean {
   return existing.plan_hash === input.plan_hash
     && existing.loss_usdt === input.loss_usdt
     && existing.policy_revision === input.policy_revision
-    && existing.strategy_id === input.strategy_id;
+    && existing.strategy_id === input.strategy_id
+    && existing.instrument_id === input.instrument_id;
 }
 
 /**
@@ -196,6 +199,7 @@ export async function reserveRisk(
     || !HEX.test(input.uid) || !HEX.test(input.plan_hash)
     || !TOKEN.test(input.run_id) || !TOKEN.test(input.intent_id)
     || !/^[A-Za-z][A-Za-z0-9_-]{1,63}$/.test(input.strategy_id)
+    || !/^[A-Z0-9_-]{3,64}$/.test(input.instrument_id)
     || !/^[a-z][a-z0-9_-]{1,31}$/.test(input.venue)
     || !Number.isSafeInteger(input.now_ms) || input.now_ms <= 0
     || !bounds.accounts.has(accountKey(input))) return {status:"DENIED", reason:"INVALID_SCOPE_OR_POLICY"};
@@ -239,6 +243,8 @@ export async function reserveRisk(
       a.identity_verified && a.enabled);
     const strategy=account?.strategies.find(s=>s.id===input.strategy_id && s.enabled);
     if(!account||!strategy)return {status:"DENIED",reason:"ACCOUNT_OR_STRATEGY_NOT_ACTIVE"};
+    if(!account.limits.allowed_instruments.includes(input.instrument_id))
+      return {status:"DENIED",reason:"INSTRUMENT_NOT_ALLOWED_BY_ACCOUNT"};
     const maxOrder=units(account.limits.max_order_loss_usdt);
     const maxStrategy=units(strategy.max_modelled_loss_usdt);
     if(maxOrder===null||maxStrategy===null||requested>maxOrder||requested>maxStrategy)
@@ -269,7 +275,8 @@ export async function reserveRisk(
       return {status:"DENIED", reason:"INSUFFICIENT_AGGREGATE_OR_ACCOUNT_RISK"};
     const entry: RiskEntry = {
       key, venue:input.venue, environment:"real", uid:input.uid,
-      run_id:input.run_id, strategy_id:input.strategy_id, intent_id:input.intent_id, plan_hash:input.plan_hash,
+      run_id:input.run_id, strategy_id:input.strategy_id, instrument_id:input.instrument_id,
+      intent_id:input.intent_id, plan_hash:input.plan_hash,
       policy_revision:input.policy_revision, loss_usdt:input.loss_usdt,
       state:"HELD", created_at_ms:input.now_ms, transition_proof:null,
     };
