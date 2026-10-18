@@ -73,11 +73,23 @@ check((await reserveRisk(sa,policy,{...census,generated_at_ms:now-5001},reqB)).s
 check((await reserveRisk(sa,{...policy,global_limit_usdt:"4"},census,reqB)).status==="DENIED",
   "lowering limit does not free existing risk");
 const entry=(await readRiskBook(sa))!.entries[0];
+check((await transitionRisk(sa,entry.key,p,"UNKNOWN",d)).status==="DENIED",
+  "caller-supplied proof digest does not unlock risk state transition");
+async function attestTransition(to:string,proof:string){
+ const current=await readRiskBook(sa);
+ await sa.put("risk_resolution_attestation_v1:"+entry.key,{
+   schema:"okx.risk-resolution-attestation/v1",
+   connection_generation:77,key:entry.key,plan_hash:p,next_state:to,
+   native_proof_digest:proof,expected_book_sequence:current!.sequence
+ });
+}
+await attestTransition("UNKNOWN",d);
 check((await transitionRisk(sa,entry.key,p,"UNKNOWN",d)).status==="UPDATED",
   "ack-loss risk remains");
 check((await reserveRisk(sa,policy,census,reqB)).status==="DENIED","UNKNOWN consumes risk");
 check((await transitionRisk(sa,entry.key,p,"HELD",d)).status==="DENIED","no backward mutation");
 check((await transitionRisk(sa,entry.key,p,"RELEASED","invalid")).status==="DENIED","proof required");
+await attestTransition("RELEASED",d);
 check((await transitionRisk(sa,entry.key,p,"RELEASED",d)).status==="UPDATED","terminal reconcile release");
 check((await reserveRisk(sa,policy,census,reqA)).status==="DENIED","released intent tombstone never reused");
 check((await reserveRisk(sa,policy,census,reqB)).status==="HELD","risk freed after proof");

@@ -274,6 +274,18 @@ export async function transitionRisk(
     const value: unknown = await tx.get(KEY);
     if (!validBook(value)) return {status:"DENIED" as const,reason:"RISK_BOOK_MISSING_OR_CORRUPT"};
     const book = value as RiskBook;
+    const generation:unknown=await tx.get("generation");
+    const witness:unknown=await tx.get("risk_resolution_attestation_v1:"+key);
+    if(typeof generation!=="number"||generation<=0||!Number.isSafeInteger(generation)
+      ||typeof witness!=="object"||witness===null||Array.isArray(witness))
+      return {status:"DENIED" as const,reason:"NATIVE_RESOLUTION_ATTESTATION_ABSENT"};
+    const att=witness as Record<string,unknown>;
+    if(att.schema!=="okx.risk-resolution-attestation/v1"
+      ||att.connection_generation!==generation
+      ||att.key!==key||att.plan_hash!==plan_hash||att.next_state!==to
+      ||att.native_proof_digest!==exact_native_proof_digest
+      ||att.expected_book_sequence!==book.sequence)
+      return {status:"DENIED" as const,reason:"NATIVE_RESOLUTION_ATTESTATION_MISMATCH"};
     const index = book.entries.findIndex(e=>e.key===key && e.plan_hash===plan_hash);
     if (index<0 || !transitions[book.entries[index].state].includes(to))
       return {status:"DENIED" as const,reason:"INVALID_RISK_TRANSITION"};
