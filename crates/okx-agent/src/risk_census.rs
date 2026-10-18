@@ -346,7 +346,10 @@ mod tests {
         assert_eq!(envelope_only.source_read_floor_ms, c.source_read_floor_ms);
         // Refreshing one of two registered accounts is also insufficient.
         old_rows.observed[0].received_at_ms = 1_001;
-        assert_eq!(old_rows.census().unwrap().source_read_floor_ms, c.source_read_floor_ms);
+        assert_eq!(
+            old_rows.census().unwrap().source_read_floor_ms,
+            c.source_read_floor_ms
+        );
     }
     #[test]
     fn missing_duplicate_unpriced_stale_and_unknown_never_become_zero() {

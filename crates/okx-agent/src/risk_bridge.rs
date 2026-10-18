@@ -57,20 +57,20 @@ impl NativeRiskClient {
     {
         let (plan, revision, reserve_at_ms, reserve_digest, reserve_read_floor) =
             match &reserve.action {
-            RiskCommandAction::Reserve {
-                plan_sha256,
-                policy_revision,
-                census,
-                ..
-            } => (
-                plan_sha256.clone(),
-                *policy_revision,
-                census.generated_at_ms,
-                census.source_digest.clone(),
-                census.source_read_floor_ms,
-            ),
-            _ => return Err("RISK_RESERVE_COMMAND_REQUIRED"),
-        };
+                RiskCommandAction::Reserve {
+                    plan_sha256,
+                    policy_revision,
+                    census,
+                    ..
+                } => (
+                    plan_sha256.clone(),
+                    *policy_revision,
+                    census.generated_at_ms,
+                    census.source_digest.clone(),
+                    census.source_read_floor_ms,
+                ),
+                _ => return Err("RISK_RESERVE_COMMAND_REQUIRED"),
+            };
         let held = self.request(reserve).await?;
         if held.status != RiskDecisionStatus::Held
             || held.policy_revision != Some(revision)
@@ -266,7 +266,9 @@ mod tests {
         let client = NativeRiskClient::new(tx);
         let server = tokio::spawn(async move {
             let r = rx.recv().await.unwrap();
-            let _ = r.return_to.send(reply(r.command.command_id, RiskDecisionStatus::Held, 1));
+            let _ = r
+                .return_to
+                .send(reply(r.command.command_id, RiskDecisionStatus::Held, 1));
             assert!(rx.try_recv().is_err());
         });
         let result = client
@@ -278,7 +280,10 @@ mod tests {
                 async move { Ok(p) }
             })
             .await;
-        assert!(matches!(result, Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH")));
+        assert!(matches!(
+            result,
+            Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH")
+        ));
         server.await.unwrap();
     }
 
