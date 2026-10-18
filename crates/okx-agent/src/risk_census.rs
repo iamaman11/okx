@@ -1,14 +1,14 @@
 //! One native source-complete account cohort. Never infer portfolio flat
 //! from only the selected account. Only Rust/venue may construct evidence.
+use chrono::DateTime;
 use okx_api::PendingDerivativeAlgoRiskInventory;
 use okx_execution::{DurableExecutionLedger, ExecutionState};
 use okx_observation::{AccountLedgerFacts, AccountSnapshot};
-use okx_runtime::{PrivateConnectionState, PrivateConvergenceWindow};
 use okx_protocol::account_governance::{
     AccountEnvironmentV2, AuthorizationStatus, CentralGovernanceSnapshotV2,
 };
 use okx_protocol::risk_authority::{NativeRiskCensus, RiskAccountOccupancy};
-use chrono::DateTime;
+use okx_runtime::{PrivateConnectionState, PrivateConvergenceWindow};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -90,10 +90,7 @@ impl AccountRiskEvidence {
             .ok()
             .and_then(|v| u64::try_from(v.timestamp_millis()).ok())
             .ok_or(E::StaleSource)?;
-        if received_at_ms == 0
-            || received_at_ms > now_ms
-            || now_ms - received_at_ms > 5_000
-        {
+        if received_at_ms == 0 || received_at_ms > now_ms || now_ms - received_at_ms > 5_000 {
             return Err(E::StaleSource);
         }
         let uid = &snapshot.account_uid_fingerprint;
@@ -140,8 +137,7 @@ impl AccountRiskEvidence {
             || !ws.positions_data_seen
             || !snapshot.private_ws_connected
             || snapshot.private_ws_generation != Some(ws.connection_generation)
-            || snapshot.private_ws_connection_fingerprint
-                != ws.connection_id_fingerprint
+            || snapshot.private_ws_connection_fingerprint != ws.connection_id_fingerprint
         {
             return Err(E::PrivateStreamGap);
         }
@@ -151,8 +147,10 @@ impl AccountRiskEvidence {
             .map_err(|_| E::UnknownMutation)?;
         let prepared = prepared_intent
             .and_then(|id| ledger.get(id))
-            .is_some_and(|record| record.record.state == ExecutionState::Prepared
-                && record.record.plan.account_uid_fingerprint == *uid);
+            .is_some_and(|record| {
+                record.record.state == ExecutionState::Prepared
+                    && record.record.plan.account_uid_fingerprint == *uid
+            });
         if native.account_uid_mismatches != 0
             || native.unresolved_order_mutations != 0
             || native.unresolved_protective_lifecycle != 0
