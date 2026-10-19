@@ -3831,6 +3831,10 @@ async fn fresh_account(
 /// The existing live per-instrument WS readiness owns tick/mark/index/book,
 /// acknowledged subscriptions, age, and book sequence continuity. A connected
 /// socket alone is not authority to increase risk. No REST fallback for POST.
+/// Funding/OI are required, generation-bound context but not tick-by-tick price.
+/// Their 180s hard TTL cannot relax the 60s price/book TTL.
+const NEW_RISK_CONTEXT_MAX_AGE_MS: u64 = 180_000;
+
 async fn risk_increasing_market_quality(
     context: ObservationQueryContext<'_>,
     instrument: &str,
@@ -3841,11 +3845,11 @@ async fn risk_increasing_market_quality(
     let quality = state
         .read()
         .await
-        .quality_snapshot(
+        .risk_quality_snapshot(
             instrument,
             utc_now_ms(),
             MARKET_INTELLIGENCE_MAX_AGE_MS,
-            false,
+            NEW_RISK_CONTEXT_MAX_AGE_MS,
         )
         .map_err(|error| format!("instrument WS quality unavailable: {error}"))?;
     verify_risk_market_quality(&quality, expected_reference_generation)
