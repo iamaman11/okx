@@ -161,9 +161,13 @@ impl HostExecutor {
                 self.provision_cloudflare_runtime_token()
             }
             HostControlOperation::StartAgent => self.start_agent(),
-            HostControlOperation::StartDemoAcceptance => self.start_demo_acceptance(),
-            HostControlOperation::RestoreProductionAgent => self.restore_production_agent(),
-            HostControlOperation::SelectAccount { account_id } => self.select_account(&account_id),
+            HostControlOperation::StartDemoAcceptance
+            | HostControlOperation::RestoreProductionAgent => {
+                Err(HostControlError::InvalidExecutionPath)
+            }
+            HostControlOperation::SelectAccount { venue, account_id } => {
+                self.select_account(venue, &account_id)
+            },
             HostControlOperation::SelectReadOnlyAccount {
                 target_profile,
                 expected_source_uid_fingerprint,
@@ -571,15 +575,9 @@ impl HostExecutor {
     }
 
     fn start_agent(&mut self) -> HostControlResult<Value> {
-        self.switch_agent_profile(AgentProfile::Production)
-    }
-
-    fn start_demo_acceptance(&mut self) -> HostControlResult<Value> {
-        self.switch_agent_profile(AgentProfile::DemoAcceptance)
-    }
-
-    fn restore_production_agent(&mut self) -> HostControlResult<Value> {
-        self.switch_agent_profile(AgentProfile::Production)
+        // Start the account already selected by the one durable CONTROL owner.
+        // Starting a process is not permission to change its account or trade.
+        self.switch_agent_profile(self.desired_profile)
     }
 
     fn switch_agent_profile(&mut self, profile: AgentProfile) -> HostControlResult<Value> {
@@ -641,16 +639,24 @@ impl HostExecutor {
     /// Single owner sequence, never a production trading grant.
     /// Every uncertain condition blocks new risk. The target is started
     /// ONLY after native drain, consumed exact witness and an empty Job.
-    fn select_account(&mut self, account_id: &str) -> HostControlResult<Value> {
-        let target = match account_id {
-            "real" => AgentProfile::Production,
-            "demo" => AgentProfile::DemoAcceptance,
-            _ => return Err(HostControlError::ProfileHandoffProofRequired),
+    fn select_account(
+        &mut self,
+        venue: okx_protocol::TradingVenue,
+        account_id: &str,
+    ) -> HostControlResult<Value> {
+        // AccountRegistry owns the venue+account route; CONTROL owns the
+        // physically fenced transition. No caller-supplied profile/UID.
+        let target = match crate::account_catalog::AccountCatalogStore::canonical()
+            .resolve(venue, account_id)?
+        {
+            crate::account_catalog::AccountRoute::Real => AgentProfile::Production,
+            crate::account_catalog::AccountRoute::Demo => AgentProfile::DemoAcceptance,
         };
         // Selecting an already active account is harmless and idempotent.
         // It never changes trading admission or revokes its existing rights.
         if target == self.desired_profile && self.agent_is_running()? {
             return Ok(json!({
+                "venue": venue.as_str(),
                 "account_id": account_id,
                 "disposition": "ALREADY_SELECTED",
                 "pid": self.agent_child.as_ref().map(Child::id),
@@ -667,6 +673,7 @@ impl HostExecutor {
         // Public selection view: do not leak internal profile names, PID, STOP
         // or historical financial-audit state into the account chooser.
         Ok(json!({
+            "venue": venue.as_str(),
             "account_id": account_id,
             "selected": true,
             "changed": true,

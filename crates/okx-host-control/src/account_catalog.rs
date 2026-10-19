@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use okx_protocol::{ACCOUNT_CATALOG_ENTRY_SCHEMA_V1, AccountCatalogEntry};
+use okx_protocol::{ACCOUNT_CATALOG_ENTRY_SCHEMA_V1, AccountCatalogEntry, TradingVenue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -61,12 +61,17 @@ impl AccountCatalogFile {
             "selectable": false,
             "entries": self.entries.iter().map(|e| json!({
                 "schema": ACCOUNT_CATALOG_ENTRY_SCHEMA_V1,
+                "venue": e.venue.as_str(),
                 "account_id": e.account_id,
                 "label": e.label,
                 "environment": e.environment,
                 "expected_uid_fingerprint": e.expected_uid_fingerprint,
                 // A deterministic GitHub Environment name, not a second secret owner.
-                "observer_github_environment": format!("okx-{}-global-observer", e.account_id),
+                "observer_github_environment": format!(
+                    "{}-{}-global-observer",
+                    e.venue.as_str(),
+                    e.account_id
+                ),
                 "identity": "UNVERIFIED",
                 "credentials": "NOT_ATTESTED",
                 "selectable": false,
@@ -74,6 +79,14 @@ impl AccountCatalogFile {
             })).collect::<Vec<_>>()
         })
     }
+}
+
+/// An implemented native exchange/account slot. Additional venues fail closed
+/// until a verified adapter and credential binding exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountRoute {
+    Real,
+    Demo,
 }
 
 /// Static onboarding metadata is not a second lifecycle journal.
@@ -116,7 +129,34 @@ impl AccountCatalogStore {
     }
 
     pub fn status(&self) -> HostControlResult<Value> {
-        Ok(self.load()?.public_value())
+        let mut status = self.load()?.public_value();
+        // The two existing exchange-bound slots share the same account selector.
+        // Selectable is only a command shape: each live handoff independently
+        // proves installed credentials, UID, flat/UNKNOWN and venue sources.
+        status["selectable_account_ids"] = json!([
+            {"venue":"okx","account_id":"real","identity":"VERIFY_ON_SELECTION"},
+            {"venue":"okx","account_id":"demo","identity":"VERIFY_ON_SELECTION"}
+        ]);
+        status["implemented_venue_adapters"] = json!(["okx"]);
+        Ok(status)
+    }
+
+    /// The single native account router. A metadata-only named account (or an
+    /// unimplemented venue adapter) is never promoted to a running profile.
+    pub fn resolve(&self, venue: TradingVenue, account_id: &str) -> HostControlResult<AccountRoute> {
+        let catalog = self.load()?;
+        if catalog
+            .entries
+            .iter()
+            .any(|e| e.venue == venue && e.account_id == account_id)
+        {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        match (venue, account_id) {
+            (TradingVenue::Okx, "real") => Ok(AccountRoute::Real),
+            (TradingVenue::Okx, "demo") => Ok(AccountRoute::Demo),
+            _ => Err(HostControlError::ProfileHandoffProofRequired),
+        }
     }
 
     /// Ordinary CONTROL status stays small even at full catalog capacity.
@@ -197,6 +237,7 @@ mod tests {
     fn entry(id: &str, uid: char) -> AccountCatalogEntry {
         AccountCatalogEntry {
             schema: ACCOUNT_CATALOG_ENTRY_SCHEMA_V1.to_owned(),
+            venue: TradingVenue::Okx,
             account_id: id.to_owned(),
             label: format!("Readonly {id}"),
             environment: AccountCatalogEnvironment::Production,
@@ -224,6 +265,7 @@ mod tests {
         let status = store.status().unwrap();
         assert_eq!(status["entries_total"], 1);
         assert_eq!(status["entries"][0]["identity"], "UNVERIFIED");
+        assert_eq!(status["entries"][0]["venue"], "okx");
         assert_eq!(
             status["entries"][0]["observer_github_environment"],
             "okx-sub-a-global-observer"
@@ -239,6 +281,28 @@ mod tests {
             Err(HostControlError::AccountCatalogConflict)
         ));
         assert_eq!(store.status().unwrap()["entries_total"], 1);
+        let _ = fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn one_router_rejects_unimplemented_venues_and_unverified_accounts() {
+        let store = at("routes");
+        let _ = fs::remove_file(&store.path);
+        assert_eq!(
+            store.resolve(TradingVenue::Okx, "real").unwrap(),
+            AccountRoute::Real
+        );
+        assert_eq!(
+            store.resolve(TradingVenue::Okx, "demo").unwrap(),
+            AccountRoute::Demo
+        );
+        assert!(store.resolve(TradingVenue::Bybit, "real").is_err());
+        assert!(store.resolve(TradingVenue::Okx, "unknown").is_err());
+        store.register(entry("sub-a", 'a')).unwrap();
+        assert!(store.resolve(TradingVenue::Okx, "sub-a").is_err());
+        let status = store.status().unwrap();
+        assert_eq!(status["implemented_venue_adapters"][0], "okx");
+        assert_eq!(status["selectable_account_ids"][0]["account_id"], "real");
         let _ = fs::remove_file(&store.path);
     }
 

@@ -88,7 +88,7 @@ export const EXECUTION_TOOLS: Json[] = [
   },
   {
     name: "execution_action",
-    description: "WRITE: typed single-intent action through the ONE Rust executor. Authenticated Demo supports its accepted mutation set; authenticated Production may dispatch only begin_strategy_run, prepare_execution, submit_prepared_execution, finalize_strategy_run and quarantine_unverified_strategy_run. Production exchange POST additionally requires native CONTROL ENABLED, exact UID/run/instrument, STOP/UNKNOWN, fresh source and risk checks. Profile alone never grants a trade. Never retry an uncertain result or use as a batch/raw RPC.",
+    description: "WRITE: one typed action contract for the selected authenticated account, including Demo and Real. The existing Rust owner independently enforces account UID, execution permission, venue capabilities, STOP/UNKNOWN, source quality and RiskBook for each mutation; some actions are not yet accepted on every account. Never retry an uncertain result or use as a batch/raw RPC.",
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
@@ -198,24 +198,13 @@ export function isExecutionMutation(operationType: unknown): boolean {
   ].includes(String(operationType));
 }
 
-// Transport admission is deliberately narrower than the native executor.
- // Only the existing Rust owner can authorize exchange POST and determine
- // whether a real Production policy is ENABLED or STOPPED.
-const PRODUCTION_NATIVE_ACTIONS = new Set([
-  "begin_strategy_run",
-  "prepare_execution",
-  "submit_prepared_execution",
-  "finalize_strategy_run",
-  "quarantine_unverified_strategy_run",
-  "reconcile_unsent_prepared",
-]);
-
+// One transport contract for every authenticated account. Cloudflare neither
+// grants trades nor owns a second Demo/Real permission table; the existing
+// Rust executor checks the account's actual capabilities before any mutation.
+// Unauthenticated/unrecognized sessions remain fail-closed.
 export function executionProfilePermitsOperation(profile: string | undefined, operationType: unknown): boolean {
   if (!isExecutionMutation(operationType)) return true;
-  // Profile comes from the authenticated single-owner Windows Hello, not
-  // from user args or OAuth identity. Unverified always fails closed.
-  if (profile === "demo_acceptance") return true;
-  return profile === "production" && PRODUCTION_NATIVE_ACTIONS.has(String(operationType));
+  return profile === "demo_acceptance" || profile === "production";
 }
 
 /** Return exactly one whitelisted native Rust AgentOperation, never arbitrary operation JSON. */
