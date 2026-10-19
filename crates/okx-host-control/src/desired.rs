@@ -337,15 +337,6 @@ impl DesiredStateStore {
         self.persist_full(&state)
     }
 
-    /// Retained only to fail closed for callers still using the obsolete v1
-    /// positive CONTROL command; no local policy can enable Real trading.
-    pub fn configure_production_policy(
-        &self,
-        _policy: ProductionTradingPolicy,
-    ) -> HostControlResult<()> {
-        Err(HostControlError::InvalidExecutionPath)
-    }
-
     /// Operator status is observational; only the authenticated v2 governance
     /// and the native executor can determine whether a trade is permitted.
     pub fn production_policy_status(&self) -> HostControlResult<Value> {
