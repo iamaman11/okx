@@ -177,6 +177,7 @@ pub struct ObservationQueryContext<'a> {
     operator_policy: Option<&'a CentralAccountPolicy>,
     operator_governance: Option<&'a okx_protocol::account_governance::CentralGovernanceSnapshotV2>,
     transport_generation: u64,
+    verified_governance_challenge: bool,
     risk_client: Option<&'a crate::risk_bridge::NativeRiskClient>,
 }
 
@@ -195,6 +196,7 @@ impl<'a> ObservationQueryContext<'a> {
             operator_policy: None,
             operator_governance: None,
             transport_generation: 0,
+            verified_governance_challenge: false,
             risk_client: None,
         }
     }
@@ -224,6 +226,7 @@ impl<'a> ObservationQueryContext<'a> {
             operator_policy: None,
             operator_governance: None,
             transport_generation: 0,
+            verified_governance_challenge: false,
             risk_client: None,
         }
     }
@@ -324,6 +327,7 @@ impl<'a> ObservationQueryContext<'a> {
             operator_policy: None,
             operator_governance: None,
             transport_generation: 0,
+            verified_governance_challenge: false,
             risk_client: None,
         }
     }
@@ -349,6 +353,13 @@ impl<'a> ObservationQueryContext<'a> {
         self
     }
 
+    /// Set only by the authenticated native transport AFTER consuming the
+    /// exact one-time Worker ping, with a bounded monotonic age.
+    pub const fn with_verified_governance_challenge(mut self, verified: bool) -> Self {
+        self.verified_governance_challenge = verified;
+        self
+    }
+
     /// Bound only for the direct authenticated WS session. Mailbox and
     /// standalone paths never receive access to the native risk owner.
     pub const fn with_risk_client(
@@ -370,6 +381,7 @@ impl<'a> ObservationQueryContext<'a> {
             .map(|scope| crate::execution_runtime::CentralGovernanceBinding {
                 scope,
                 session_generation: self.transport_generation,
+                delivery_challenge_verified: self.verified_governance_challenge,
             })
     }
 
@@ -416,8 +428,8 @@ impl<'a> ObservationQueryContext<'a> {
             (None, Some(governance)) => {
                 governance.valid()
                     && governance.session_generation == self.transport_generation
-                    && governance.issued_at_ms <= now_ms
-                    && now_ms.saturating_sub(governance.issued_at_ms) <= 15_000
+                    && self.verified_governance_challenge
+                    && governance.delivery_challenge.is_some()
                     && governance.state.revision > 0
                     && governance.state.trading_requested
                     && governance.state.operator_authorization.status
@@ -435,8 +447,13 @@ impl<'a> ObservationQueryContext<'a> {
     }
 
     pub fn central_uid_admitted(&self, uid: &str, now_ms: u64) -> bool {
-        self.operator_governance
-            .is_some_and(|scope| scope.authorizes_delivery(uid, now_ms, self.transport_generation))
+        self.operator_governance.is_some_and(|scope| {
+            scope.authorizes_challenge_bound_delivery(
+                uid,
+                self.transport_generation,
+                self.verified_governance_challenge,
+            )
+        })
             || self
                 .operator_policy
                 .is_some_and(|policy| policy.authorizes_uid(uid, now_ms, self.transport_generation))
@@ -1247,6 +1264,7 @@ mod tests {
                 operator_policy: None,
                 operator_governance: None,
                 transport_generation: 0,
+                verified_governance_challenge: false,
                 risk_client: None,
             },
             "2026-09-27T00:00:01.000Z",
@@ -1292,6 +1310,7 @@ mod tests {
                 operator_policy: None,
                 operator_governance: None,
                 transport_generation: 0,
+                verified_governance_challenge: false,
                 risk_client: None,
             },
             "2026-09-27T00:00:01.000Z",
@@ -1338,6 +1357,7 @@ mod tests {
                 operator_policy: None,
                 operator_governance: None,
                 transport_generation: 0,
+                verified_governance_challenge: false,
                 risk_client: None,
             },
             "2026-09-27T00:00:01.000Z",
@@ -1439,13 +1459,19 @@ mod tests {
             },
             issued_at_ms: 10_000,
             session_generation: 11,
+            delivery_challenge: Some("ping_governance_test_probe".to_owned()),
         };
         assert!(governance.valid());
         let context = ObservationQueryContext::unavailable()
             .with_operator_policy(None, 11)
-            .with_operator_governance(Some(&governance));
+            .with_operator_governance(Some(&governance))
+            .with_verified_governance_challenge(true);
         assert!(context.central_trading_delivery_fresh(20_000));
-        assert!(!context.central_trading_delivery_fresh(26_000));
+        assert!(context.central_trading_delivery_fresh(26_000));
+        assert!(!ObservationQueryContext::unavailable()
+            .with_operator_policy(None, 11)
+            .with_operator_governance(Some(&governance))
+            .central_trading_delivery_fresh(20_000));
         assert!(
             !ObservationQueryContext::unavailable()
                 .with_operator_policy(None, 12)
