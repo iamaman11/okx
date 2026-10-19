@@ -1224,9 +1224,10 @@ impl ExecutionRuntime {
         // Only an acknowledged atomic POST fence from the ONE central v2
         // RiskBook can authorize increased Real exposure. A v1 delivery grant
         // or one-account observer flag never substitutes for that receipt.
-        let expected_reservation_key = executor.ledger().capital_reservation().map(|run| {
-            native_risk_reservation_key(native_uid, &run.allocation_id, intent_id)
-        });
+        let expected_reservation_key = executor
+            .ledger()
+            .capital_reservation()
+            .map(|run| native_risk_reservation_key(native_uid, &run.allocation_id, intent_id));
         let post_fenced = matches!(authorization, Some(CentralAuthorizationBinding::Governance(scope))
         if risk_post.is_some_and(|proof| {
             proof.valid()
