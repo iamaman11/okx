@@ -234,19 +234,23 @@ fn central_executor_policy(
             && a.enabled
             && a.uid_fingerprint == run.account_uid_fingerprint
     })?;
-    if !account.limits.allowed_instruments.iter().any(|allowed| allowed == instrument)
-        || !account.strategies.iter().any(|strategy| {
-            strategy.enabled && strategy.id == run.mandate_version
-        })
+    if !account
+        .limits
+        .allowed_instruments
+        .iter()
+        .any(|allowed| allowed == instrument)
+        || !account
+            .strategies
+            .iter()
+            .any(|strategy| strategy.enabled && strategy.id == run.mandate_version)
     {
         return None;
     }
-    let global = rust_decimal::Decimal::from_str(
-        &scope.scope.state.max_total_modelled_loss_usdt
-    ).ok()?;
-    let ceiling = rust_decimal::Decimal::from_str(
-        &scope.scope.state.operator_authorization.ceiling_usdt
-    ).ok()?;
+    let global =
+        rust_decimal::Decimal::from_str(&scope.scope.state.max_total_modelled_loss_usdt).ok()?;
+    let ceiling =
+        rust_decimal::Decimal::from_str(&scope.scope.state.operator_authorization.ceiling_usdt)
+            .ok()?;
     if global <= rust_decimal::Decimal::ZERO || global > ceiling {
         return None;
     }
@@ -275,18 +279,12 @@ fn lifecycle_negative_gate_does_not_depend_on_legacy_positive_policy() {
         transition: None,
         switch_hold: None,
     };
-    assert!(require_native_production_lifecycle_from(
-        &encode_host_state(&state).unwrap()
-    ).is_ok());
+    assert!(require_native_production_lifecycle_from(&encode_host_state(&state).unwrap()).is_ok());
     state.read_only = true;
-    assert!(require_native_production_lifecycle_from(
-        &encode_host_state(&state).unwrap()
-    ).is_err());
+    assert!(require_native_production_lifecycle_from(&encode_host_state(&state).unwrap()).is_err());
     state.read_only = false;
     state.selected_environment = 2;
-    assert!(require_native_production_lifecycle_from(
-        &encode_host_state(&state).unwrap()
-    ).is_err());
+    assert!(require_native_production_lifecycle_from(&encode_host_state(&state).unwrap()).is_err());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -660,9 +658,7 @@ impl ExecutionRuntime {
         let ledger = executor.ledger();
         let run = ledger.capital_reservation()?.clone();
         // Financial NAV evidence is not positive trade authorization.
-        if self.production_trading_requested()
-            && require_native_production_lifecycle().is_err()
-        {
+        if self.production_trading_requested() && require_native_production_lifecycle().is_err() {
             return None;
         }
         let binding = plan.risk_binding.as_ref()?;
@@ -1052,9 +1048,10 @@ impl ExecutionRuntime {
                 && account.enabled
                 && account.identity_verified
                 && account.uid_fingerprint == preflight.account_uid_fingerprint
-                && account.strategies.iter().any(|strategy| {
-                    strategy.enabled && strategy.id == reservation.mandate_version
-                })
+                && account
+                    .strategies
+                    .iter()
+                    .any(|strategy| strategy.enabled && strategy.id == reservation.mandate_version)
         });
         if !matched {
             return Ok(None);
@@ -1101,8 +1098,7 @@ impl ExecutionRuntime {
         // but cannot create new exchange exposure or bypass CONTROL lifecycle.
         require_native_production_lifecycle().is_ok()
             && ledger.capital_reservation().is_some_and(|run| {
-                run.account_uid_fingerprint == observed_uid
-                    && run.allocation_id == expected_run_id
+                run.account_uid_fingerprint == observed_uid && run.allocation_id == expected_run_id
             })
     }
 
@@ -1243,9 +1239,9 @@ impl ExecutionRuntime {
         {
             return Ok(None);
         }
-        let Some(policy) = central_executor_policy(
-            scope, run, &entry.record.plan.instrument_id, fresh_now
-        ) else {
+        let Some(policy) =
+            central_executor_policy(scope, run, &entry.record.plan.instrument_id, fresh_now)
+        else {
             return Ok(None);
         };
         let plan = &entry.record.plan;
