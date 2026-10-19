@@ -39,6 +39,29 @@ use crate::{
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
 pub const LEVERAGE_CHANGE_PROOF_SCHEMA_V1: &str = "okx.leverage-change-proof/v1";
 
+/// Financial FLAT source attests zero funding as Some("0"). An unsent
+/// PREPARED intent instead yields an INCOMPLETE period with no funding fact.
+/// Confusing the two blocks the first Real OPEN despite verified flat NAV.
+fn first_open_funding_proven(funding_usdt: Option<&str>, same_unsent_prepared: bool) -> bool {
+    if same_unsent_prepared {
+        funding_usdt.is_none()
+    } else {
+        funding_usdt == Some("0")
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn first_open_requires_exact_funding_semantics_for_each_period_state() {
+    assert!(first_open_funding_proven(Some("0"), false));
+    assert!(!first_open_funding_proven(None, false));
+    assert!(!first_open_funding_proven(Some("1"), false));
+    assert!(!first_open_funding_proven(Some("-0.01"), false));
+    assert!(first_open_funding_proven(None, true));
+    assert!(!first_open_funding_proven(Some("0"), true));
+}
+
+
 /// The final native venue witnesses are captured by one query owner before
 /// the single Rust executor evaluates and submits a Production intent.
 pub struct ProductionSubmitSources<'a> {
@@ -755,7 +778,10 @@ impl ExecutionRuntime {
             || !projection.positions.is_empty()
             || projection.realized_usdt != "0"
             || projection.fees_usdt != "0"
-            || projection.funding_usdt.is_some()
+            || !first_open_funding_proven(
+                projection.funding_usdt.as_deref(),
+                same_unsent_prepared,
+            )
         {
             return None;
         }
