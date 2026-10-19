@@ -906,7 +906,7 @@ mod tests {
     fn production_governance_v2_delivery_reports_exact_blocker() {
         use okx_protocol::account_governance::{
             AccountControlV2, AccountEnvironmentV2, AccountGovernanceV2, AccountLimitsV2,
-            OperatorAuthorizationV2, StrategyLimitsV2, GOVERNANCE_SCHEMA_V2,
+            GOVERNANCE_SCHEMA_V2, OperatorAuthorizationV2, StrategyLimitsV2,
         };
         let submit = AgentOperation::SubmitPreparedExecution {
             intent_id: "intent_governance_delivery_20261019".to_owned(),
