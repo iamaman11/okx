@@ -209,7 +209,7 @@ fn check_native_production_lifecycle_from(bytes: &[u8], for_mutation: bool) -> A
         .ok_or(AgentError::ProductionPolicyUnavailable)?;
     if state.desired_agent != 1
         || state.selected_environment != 1
-        || for_mutation && state.read_only
+        || for_mutation && (state.read_only || !state.explicit_trade_rearm)
         || state.transition.is_some()
         || state.switch_hold.is_some()
     {
@@ -299,7 +299,12 @@ fn lifecycle_negative_gate_does_not_depend_on_legacy_positive_policy() {
         legacy_production_policy: None,
         transition: None,
         switch_hold: None,
+        explicit_trade_rearm: false,
     };
+    // Older journals contained a false read_only default but never carried
+    // explicit post-migration mutation rearm authority.
+    assert!(require_native_production_lifecycle_from(&encode_host_state(&state).unwrap()).is_err());
+    state.explicit_trade_rearm = true;
     assert!(require_native_production_lifecycle_from(&encode_host_state(&state).unwrap()).is_ok());
     state.read_only = true;
     let persisted = encode_host_state(&state).unwrap();
