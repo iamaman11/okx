@@ -621,6 +621,7 @@ async fn run_session(
                                 let query_context = query_context
                                     .with_operator_policy(operator_policy.as_ref(), frame_generation)
                                     .with_operator_governance(operator_governance.as_ref())
+                                    .with_verified_governance_challenge(governance_challenge_fresh)
                                     .with_risk_client(Some(&risk_client));
                                 let result =
                                     dispatch(&request, query_context, &generated_at).await;
