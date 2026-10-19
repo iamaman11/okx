@@ -734,6 +734,48 @@ mod tests {
     }
 
     #[test]
+    fn risk_market_uses_strict_price_and_bounded_derivative_context() {
+        let reference = reference();
+        let mut state =
+            MarketStreamState::new("DOGE-USDT-SWAP", 7, reference.generation().as_str());
+        complete(&mut state, 7, 1_000);
+        // The confirmed websocket book, ticker and pricing are current while
+        // funding/OI have not pushed a new value for 89s.
+        state.apply_ticker(7, 80_000, ticker()).unwrap();
+        state.apply_mark_price(7, 80_000, mark()).unwrap();
+        state.apply_index_ticker(7, 80_000, index()).unwrap();
+        state.apply_book_snapshot(7, 80_000, book()).unwrap();
+        let ready = state.risk_readiness(&reference, 90_000, 60_000, 180_000, true, true);
+        assert_eq!(ready.quality, MarketReadiness::Fresh);
+        assert_eq!(
+            state.readiness(&reference, 90_000, 60_000, true, true, false).reason,
+            "WS_DEPENDENCY_STALE"
+        );
+        // An actual slow-source timeout still fails closed by exact name.
+        state.apply_ticker(7, 181_000, ticker()).unwrap();
+        state.apply_mark_price(7, 181_000, mark()).unwrap();
+        state.apply_index_ticker(7, 181_000, index()).unwrap();
+        state.apply_book_snapshot(7, 181_000, book()).unwrap();
+        let stale = state.risk_readiness(&reference, 182_001, 60_000, 180_000, true, true);
+        assert_eq!(stale.quality, MarketReadiness::Stale);
+        assert!(stale.reason.contains("open_interest"));
+        assert!(stale.reason.contains("budget_ms=180000"));
+        assert_eq!(
+            state
+                .risk_readiness(&reference, 182_001, 60_000, 180_000, true, false)
+                .reason,
+            "WS_SUBSCRIPTIONS_INCOMPLETE"
+        );
+        // New slow-source updates never authorize stale pricing.
+        state.apply_open_interest(7, 182_001, oi()).unwrap();
+        state.apply_funding_rate(7, 182_001, funding()).unwrap();
+        let stale_price = state.risk_readiness(&reference, 250_001, 60_000, 180_000, true, true);
+        assert_eq!(stale_price.quality, MarketReadiness::Stale);
+        assert!(stale_price.reason.contains("ticker"));
+        assert!(stale_price.reason.contains("budget_ms=60000"));
+    }
+
+    #[test]
     fn aged_required_dependency_is_stale() {
         let reference = reference();
         let mut state =
