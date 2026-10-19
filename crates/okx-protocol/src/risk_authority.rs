@@ -340,6 +340,55 @@ mod tests {
         assert!(!ready.valid());
     }
     #[test]
+    fn terminal_release_requires_complete_bound_census_and_exact_ledger() {
+        let uid = "a".repeat(64);
+        let census = NativeRiskCensus {
+            account_keys: vec![format!("okx:real:{uid}")],
+            occupied: vec![RiskAccountOccupancy {
+                account_key: format!("okx:real:{uid}"),
+                occupied_usdt: "0".to_owned(),
+            }],
+            generated_at_ms: 2,
+            source_digest: "b".repeat(64),
+            content_digest: "c".repeat(64),
+            source_read_floor_ms: 2,
+            complete: true,
+            native_account_evidence_complete: true,
+            native_order_evidence_complete: true,
+            native_ledger_evidence_complete: true,
+        };
+        let mut release = RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
+            command_id: "release_0001".to_owned(),
+            action: RiskCommandAction::Resolve {
+                reservation_key: "reservation_identity".to_owned(),
+                plan_sha256: "d".repeat(64),
+                expected_risk_book_sequence: 3,
+                next_state: RiskResolution::Released,
+                source_proof_sha256: "e".repeat(64),
+                terminal_census: None,
+                terminal_ledger: None,
+            },
+        };
+        assert!(!release.valid());
+        if let RiskCommandAction::Resolve { terminal_census, terminal_ledger, .. } = &mut release.action {
+            *terminal_census = Some(census);
+            *terminal_ledger = Some(TerminalRiskLedgerProof {
+                account_uid: uid,
+                run_id: "run_accepted_001".to_owned(),
+                intent_id: "intent_accepted_001".to_owned(),
+                state: "FILLED".to_owned(),
+                record_digest: "f".repeat(64),
+            });
+        }
+        assert!(release.valid());
+        if let RiskCommandAction::Resolve { terminal_ledger, .. } = &mut release.action {
+            terminal_ledger.as_mut().unwrap().state = "UNKNOWN".to_owned();
+        }
+        assert!(!release.valid());
+    }
+
+    #[test]
     fn denied_decision_cannot_count_as_post_authorization() {
         let mut result = RiskResult {
             schema: RISK_RESULT_SCHEMA_V1.to_owned(),

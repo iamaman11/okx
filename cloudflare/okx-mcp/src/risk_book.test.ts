@@ -139,10 +139,19 @@ check((await reserve(sa,policy,census,reqA)).status==="DENIED",
  "POSTED cannot recover HELD");
 check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).status==="DENIED",
  "same reservation cannot POST twice");
-const transition=async(to:Parameters<typeof transitionRisk>[3],proof:string)=>{
+const terminalCensus={...postCensus,source_digest:d,
+ generated_at_ms:now+2,source_read_floor_ms:now+2};
+const terminal={
+ now_ms:now+2,source_proof:{...native,source_digest:d},census:terminalCensus,
+ ledger:{account_uid:a,run_id:reqA.run_id,intent_id:reqA.intent_id,
+  state:"FILLED" as const,record_digest:d}
+};
+const transition=async(to:Parameters<typeof transitionRisk>[3],proof:string,
+ releaseProof:typeof terminal|undefined=to==="RELEASED"?terminal:undefined)=>{
  const current=await readRiskBook(sa);
  return transitionRisk(sa,entry.key,p,to,proof,{
-  connection_generation:77,expected_book_sequence:current!.sequence
+  connection_generation:77,expected_book_sequence:current!.sequence,
+  terminal:releaseProof
  });
 };
 check((await transition("UNKNOWN",d)).status==="UPDATED",
@@ -152,7 +161,19 @@ check((await reserve(sa,policy,census,reqA)).status==="DENIED",
 check((await reserve(sa,policy,census,reqB)).status==="DENIED","UNKNOWN consumes risk");
 check((await transition("HELD",d)).status==="DENIED","no backward mutation");
 check((await transition("RELEASED","invalid")).status==="DENIED","proof required");
-check((await transition("RELEASED",d)).status==="UPDATED","terminal reconcile release");
+check((await transition("RELEASED",d,undefined)).status==="DENIED",
+ "digest without a separate native terminal proof cannot release risk");
+check((await transition("RELEASED",d,{...terminal,
+ ledger:{...terminal.ledger,intent_id:"intent_wrong"}})).status==="DENIED",
+ "terminal intent must exactly match reserved intent");
+check((await transition("RELEASED",d,{...terminal,
+ census:{...terminalCensus,occupied:[{...census.occupied[0],occupied_usdt:"1"},census.occupied[1]]}})).status==="DENIED",
+ "non-flat native cohort cannot release reservation");
+check((await transition("RELEASED",d,{...terminal,
+ census:{...terminalCensus,source_read_floor_ms:now+1}})).status==="DENIED",
+ "terminal census must be newer than posted risk");
+check((await transition("RELEASED",d)).status==="UPDATED",
+ "full fresh flat cohort and exact terminal intent allow one release");
 check((await reserve(sa,policy,census,reqA)).status==="DENIED","released intent tombstone never reused");
 check((await reserve(sa,policy,census,reqB)).status==="HELD","risk freed after proof");
 const v=await readRiskBook(sa);
