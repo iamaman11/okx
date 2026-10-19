@@ -1827,7 +1827,12 @@ async fn complete_native_risk_census(
         )
         .await
         .map_err(|_| "RISK_NATIVE_FLAT_PROOF_FAILED")?;
-    crate::risk_census::PortfolioRiskSources::from_governance(scope, vec![single], now_ms)
+    crate::risk_census::PortfolioRiskSources::from_governance(
+        scope,
+        vec![single],
+        now_ms,
+        context.verified_governance_challenge,
+    )
         .and_then(|sources| sources.census())
         .map_err(|_| "RISK_FULL_REAL_UID_COHORT_NOT_PROVEN")
 }
