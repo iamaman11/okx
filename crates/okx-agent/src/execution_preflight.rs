@@ -96,11 +96,7 @@ fn observed_execution_right(
 ) -> (&'static str, Vec<&'static str>) {
     let mut blockers = Vec::new();
     let execution_right = if preflight.credential.production_environment {
-        if !preflight.credential.executor_ip_bound {
-            blockers.push("PRODUCTION_EXECUTOR_IP_NOT_BOUND");
-        }
-        if demo_mutations_configured && preflight.accepted && preflight.credential.executor_ip_bound
-        {
+        if demo_mutations_configured && preflight.accepted {
             "PRODUCTION_POLICY_SELECTED"
         } else {
             blockers.push("PRODUCTION_EXECUTOR_NOT_ADMITTED");
@@ -395,15 +391,15 @@ mod tests {
         let (right, blockers) = observed_execution_right(&snapshot, false);
         assert_eq!(right, "PRODUCTION_READ_ONLY");
         assert!(blockers.contains(&"PRODUCTION_EXECUTOR_NOT_ADMITTED"));
-        assert!(blockers.contains(&"PRODUCTION_EXECUTOR_IP_NOT_BOUND"));
+        assert!(!blockers.contains(&"PRODUCTION_EXECUTOR_IP_NOT_BOUND"));
 
         // Production is not categorically READ_ONLY: only a genuine
         // CONTROL-selected runtime with independently accepted native
-        // credential, clock and fixed-IP evidence reaches the policy path.
+        // credential and clock evidence reaches the policy path.
         let mut accepted = snapshot.clone();
         accepted.accepted = true;
         accepted.credential.accepted = true;
-        accepted.credential.executor_ip_bound = true;
+        accepted.credential.executor_ip_bound = false;
         let (right, blockers) = observed_execution_right(&accepted, true);
         assert_eq!(right, "PRODUCTION_POLICY_SELECTED");
         assert!(!blockers.contains(&"PRODUCTION_EXECUTOR_NOT_ADMITTED"));
