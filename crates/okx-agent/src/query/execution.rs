@@ -3540,14 +3540,12 @@ async fn pre_mutation_admission(
         None
     };
 
-    // The only positive NAV path is the existing executor's persisted
-    // opening-run evidence. This same admission is invoked at prepare AND
-    // pre-submit, with the private WS and reference fences still enforced.
-    // All later ADD/HEDGE/second OPEN risk remains denied until durable
-    // run-specific high-water and day loss become independently provable.
-    let initial_strategy_nav = if plan.action.is_risk_increasing() {
+    // The ONE native ledger continuously attests run NAV, peak, daily
+    // loss and exact fee/fill history for each flat-cycle risk increase.
+    // Both prepare and pre-POST still require independent WS/RiskBook fences.
+    let strategy_nav = if plan.action.is_risk_increasing() {
         execution
-            .initial_strategy_nav_for_risk(
+            .strategy_nav_for_new_risk(
                 &risk_facts,
                 &plan,
                 true,
@@ -3565,7 +3563,7 @@ async fn pre_mutation_admission(
         risk_binding.policy.clone(),
         risk_candidate,
         true,
-        initial_strategy_nav.as_ref(),
+        strategy_nav.as_ref(),
     ) {
         Ok(value) => value,
         Err(error) => {

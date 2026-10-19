@@ -1447,6 +1447,69 @@ impl DurableExecutionLedger {
         })
     }
 
+    /// An unsent risk-increasing candidate is a planned operation, not a
+    /// fill, fee, order or active protective algo. Reject every other shape.
+    fn inert_candidate_for_financial_projection(
+        record: &ExecutionRecord,
+        plan: &ExecutionPlan,
+        run_id: &str,
+    ) -> bool {
+        record.plan == *plan
+            && record.state == ExecutionState::Prepared
+            && record.strategy_run_id.as_deref() == Some(run_id)
+            && record.order_id.is_none()
+            && record.exchange_state.is_none()
+            && record.submission_timing.is_none()
+            && record.rejection_code.is_none()
+            && record.mutations.is_empty()
+            && record.reverse.is_none()
+            && record.protection.as_ref().is_some_and(|p| {
+                p.status == ProtectiveOrderStatus::Pending
+                    && p.algo_order_id.is_none()
+                    && p.covered_size.is_none()
+                    && p.failure_code.is_none()
+                    && p.cleanup.is_none()
+                    && p.size_amend.is_none()
+            })
+    }
+
+    /// Native new-risk accounting over the complete run history. Only the
+    /// selected, still-unsent PREPARED candidate is excluded from the
+    /// financial projection: it can have no exchange fill or fee, but its
+    /// durable parent remains present for every other ledger/risk check.
+    /// All other intents, trades, bills, UNKNOWN and funding stay included.
+    pub fn financial_period_for_new_risk(
+        &self,
+        facts: &AccountLedgerFacts,
+        coherent: bool,
+        plan: &ExecutionPlan,
+    ) -> Option<StrategyFinancialPeriod> {
+        let run = self.capital_reservation.as_ref()?;
+        let mut entries = Vec::with_capacity(self.entries.len());
+        for entry in self.entries.values() {
+            if entry.record.plan.intent_id == plan.intent_id {
+                let record = &entry.record;
+                if !Self::inert_candidate_for_financial_projection(record, plan, &run.allocation_id)
+                {
+                    return None;
+                }
+                continue;
+            }
+            entries.push(entry.clone());
+        }
+        Some(
+            crate::assess_persisted_financial_period_with_verified_source(
+                run,
+                self.exchange_evidence.as_ref(),
+                &entries,
+                facts,
+                coherent,
+                &BTreeMap::new(),
+                true,
+            ),
+        )
+    }
+
     /// The caller's current REST/WS source was just checked and captured
     /// under the same ledger lock; quiet cursors may have been coalesced.
     pub fn financial_period_with_verified_source(
@@ -3549,6 +3612,50 @@ fn strategy_nav_stop_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_risk_excludes_only_exact_unsent_protected_candidate() {
+        let run = "real_run_continuous_20261019";
+        let plan = protected_plan("real_continuous_candidate_20261019");
+        let mut value = ExecutionRecord::new(plan.clone());
+        value.strategy_run_id = Some(run.to_owned());
+        let allowed = |v: &ExecutionRecord| {
+            DurableExecutionLedger::inert_candidate_for_financial_projection(v, &plan, run)
+        };
+        assert!(allowed(&value));
+        assert!(
+            !DurableExecutionLedger::inert_candidate_for_financial_projection(
+                &value,
+                &protected_plan("another_candidate_20261019"),
+                run
+            )
+        );
+        assert!(
+            !DurableExecutionLedger::inert_candidate_for_financial_projection(
+                &value,
+                &plan,
+                "foreign_run"
+            )
+        );
+        value.order_id = Some("venue_order".to_owned());
+        assert!(!allowed(&value));
+        value.order_id = None;
+        value.state = ExecutionState::UnknownSubmission;
+        assert!(!allowed(&value));
+        value.state = ExecutionState::Prepared;
+        value.protection.as_mut().unwrap().algo_order_id = Some("algo_venue".to_owned());
+        assert!(!allowed(&value));
+        value.protection.as_mut().unwrap().algo_order_id = None;
+        value.protection.as_mut().unwrap().status = ProtectiveOrderStatus::Active;
+        assert!(!allowed(&value));
+        value.protection.as_mut().unwrap().status = ProtectiveOrderStatus::Pending;
+        value.submission_timing = Some(crate::ExecutionSubmissionTimingEvidence {
+            request_exchange_time_ms: 1_790_000_000_000,
+            okx_in_time_us: None,
+            okx_out_time_us: None,
+        });
+        assert!(!allowed(&value));
+    }
 
     #[test]
     fn daily_strategy_loss_counts_fifo_attributed_exit_bills_and_rejects_partial_source() {

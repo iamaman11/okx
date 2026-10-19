@@ -230,11 +230,9 @@ mod tests {
 
     #[test]
     fn post_expiry_is_renewed_from_monotonic_exchange_clock_after_slow_risk_io() {
-        let early = MutationTiming::from_exchange_time_ms(
-            1_607_428_137_715,
-            MUTATION_REQUEST_TTL_MS,
-        )
-        .expect("verified exchange sample");
+        let early =
+            MutationTiming::from_exchange_time_ms(1_607_428_137_715, MUTATION_REQUEST_TTL_MS)
+                .expect("verified exchange sample");
         // Two signed native REST/WS censuses and a durable RiskBook POST
         // grant take 30s; the original exchange expTime is already expired.
         let current = early
@@ -244,7 +242,10 @@ mod tests {
         assert_eq!(current.request_time_ms(), 1_607_428_167_715);
         assert_eq!(current.request_timestamp(), "2020-12-08T11:49:27.715Z");
         assert_eq!(current.exp_time_ms(), 1_607_428_172_715);
-        assert_eq!(current.exp_time_ms() - current.request_time_ms(), MUTATION_REQUEST_TTL_MS);
+        assert_eq!(
+            current.exp_time_ms() - current.request_time_ms(),
+            MUTATION_REQUEST_TTL_MS
+        );
         assert!(early.refreshed_after_elapsed_ms(u64::MAX).is_err());
         let immediate = early.refreshed_for_send().expect("monotonic local elapsed");
         assert!(immediate.exp_time_ms() > immediate.request_time_ms());
