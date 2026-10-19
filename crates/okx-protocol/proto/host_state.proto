@@ -11,6 +11,7 @@ message HostState {
   LegacyProductionPolicy legacy_production_policy = 5; // migration only; no new authority
   Transition transition = 6;
   SourceDrainHold switch_hold = 7;
+  bool explicit_trade_rearm = 8; // false for every pre-migration journal
 }
 message LegacyProductionPolicy {
   string schema = 1;
