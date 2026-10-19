@@ -123,13 +123,15 @@ impl HostExecutor {
             HostControlOperation::RegisterReadOnlyAccount { entry } => {
                 AccountCatalogStore::canonical().register(entry)
             }
-            HostControlOperation::ConfigureProductionTrading { policy } => {
-                self.desired_store.configure_production_policy(policy)?;
+            HostControlOperation::ConfigureProductionTrading { .. } => {
+                Err(HostControlError::InvalidExecutionPath)
+            }
+            HostControlOperation::StopProductionTrading { .. } => {
+                self.desired_store.set_production_read_only(true)?;
                 self.desired_store.production_policy_status()
             }
-            HostControlOperation::StopProductionTrading { expected_revision } => {
-                self.desired_store
-                    .stop_production_policy(expected_revision)?;
+            HostControlOperation::SetProductionReadOnly { read_only } => {
+                self.desired_store.set_production_read_only(read_only)?;
                 self.desired_store.production_policy_status()
             }
             HostControlOperation::Sync => self.sync(),
