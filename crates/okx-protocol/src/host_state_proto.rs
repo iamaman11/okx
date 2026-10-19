@@ -22,6 +22,8 @@ pub struct HostStateWire {
     pub transition: Option<TransitionWire>,
     #[prost(message, optional, tag = "7")]
     pub switch_hold: Option<SourceDrainHoldWire>,
+    #[prost(bool, tag = "8")]
+    pub explicit_trade_rearm: bool,
 }
 #[derive(Clone, PartialEq, Message)]
 pub struct LegacyProductionPolicyWire {
@@ -136,6 +138,7 @@ mod tests {
             legacy_production_policy: None,
             transition: None,
             switch_hold: None,
+            explicit_trade_rearm: false,
         };
         let wire = encode_host_state(&state).unwrap();
         assert_eq!(decode_host_state(&wire), Some(state));
