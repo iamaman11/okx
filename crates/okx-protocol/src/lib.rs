@@ -1976,17 +1976,12 @@ pub const ACCOUNT_CATALOG_ENTRY_SCHEMA_V1: &str = "okx.account-catalog-entry/v1"
 /// Exchange identity is separate from account environment (Demo/Real).
 /// A venue is selectable only after its native adapter has been installed;
 /// recognizing the identifier never grants an exchange credential or POST.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradingVenue {
+    #[default]
     Okx,
     Bybit,
-}
-
-impl Default for TradingVenue {
-    fn default() -> Self {
-        Self::Okx
-    }
 }
 
 impl TradingVenue {
