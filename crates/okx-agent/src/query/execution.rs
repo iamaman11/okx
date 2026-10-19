@@ -1833,8 +1833,8 @@ async fn complete_native_risk_census(
         now_ms,
         context.verified_governance_challenge,
     )
-        .and_then(|sources| sources.census())
-        .map_err(|_| "RISK_FULL_REAL_UID_COHORT_NOT_PROVEN")
+    .and_then(|sources| sources.census())
+    .map_err(|_| "RISK_FULL_REAL_UID_COHORT_NOT_PROVEN")
 }
 
 /// Prepare an exact plan-bound atomic grant. Neither RESERVE nor BEGIN_POST
