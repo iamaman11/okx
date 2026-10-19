@@ -1803,14 +1803,14 @@ async fn complete_native_risk_census(
     if assembled.quality != DataQuality::Fresh {
         return Err("RISK_SNAPSHOT_NOT_FRESH");
     }
-    let facts = observer
-        .ledger_facts(&assembled.snapshot)
-        .await
-        .map_err(|_| "RISK_FINANCIAL_HISTORY_UNAVAILABLE")?;
-    let algos = observer
-        .pending_derivative_risk_algos()
-        .await
-        .map_err(|_| "RISK_DERIVATIVE_ALGOS_UNAVAILABLE")?;
+    // Independent signed reads share the same WS convergence cursor.
+    // Do not serially age the first source while traversing all algo scopes.
+    let (facts, algos) = tokio::join!(
+        observer.ledger_facts(&assembled.snapshot),
+        observer.pending_derivative_risk_algos()
+    );
+    let facts = facts.map_err(|_| "RISK_FINANCIAL_HISTORY_UNAVAILABLE")?;
+    let algos = algos.map_err(|_| "RISK_DERIVATIVE_ALGOS_UNAVAILABLE")?;
     let window = ws
         .convergence_window(cursor)
         .await
