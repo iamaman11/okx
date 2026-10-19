@@ -364,8 +364,7 @@ impl DesiredStateStore {
         if state.profile != profile || state.transition.is_some() || state.switch_hold.is_some() {
             return Err(HostControlError::ProfileTransitionPending);
         }
-        Ok(state.read_only
-            || (profile == AgentProfile::Production && !state.explicit_trade_rearm))
+        Ok(state.read_only || (profile == AgentProfile::Production && !state.explicit_trade_rearm))
     }
 
     /// Nontrading source exit is permitted only for a previously verified
