@@ -52,6 +52,28 @@ pub struct ProductionSubmitAuthorization<'a> {
     pub risk_post: Option<&'a okx_protocol::risk_authority::RiskResult>,
 }
 
+/// RiskBook's canonical length-delimited reservation identity. Verifying it
+/// under the existing executor lock prevents reusing another intent's receipt.
+fn native_risk_reservation_key(uid: &str, run_id: &str, intent_id: &str) -> String {
+    ["okx", "real", uid, run_id, intent_id]
+        .iter()
+        .map(|part| format!("{}:{part}", part.len()))
+        .collect()
+}
+
+#[cfg(test)]
+#[test]
+fn native_risk_receipt_identity_matches_riskbook_key() {
+    assert_eq!(
+        native_risk_reservation_key(&"a".repeat(64), "run_001", "intent_001"),
+        format!("3:okx4:real64:{}7:run_00110:intent_001", "a".repeat(64))
+    );
+    assert_ne!(
+        native_risk_reservation_key(&"a".repeat(64), "run_001", "intent_001"),
+        native_risk_reservation_key(&"a".repeat(64), "run_001", "intent_002")
+    );
+}
+
 /// One immutable, Worker-sourced policy for exactly this authenticated
 /// transport generation and one native execution request. Never persisted.
 #[derive(Clone, Copy)]
@@ -1202,13 +1224,16 @@ impl ExecutionRuntime {
         // Only an acknowledged atomic POST fence from the ONE central v2
         // RiskBook can authorize increased Real exposure. A v1 delivery grant
         // or one-account observer flag never substitutes for that receipt.
+        let expected_reservation_key = executor.ledger().capital_reservation().map(|run| {
+            native_risk_reservation_key(native_uid, &run.allocation_id, intent_id)
+        });
         let post_fenced = matches!(authorization, Some(CentralAuthorizationBinding::Governance(scope))
         if risk_post.is_some_and(|proof| {
             proof.valid()
                 && proof.status
                     == okx_protocol::risk_authority::RiskDecisionStatus::PostAuthorized
                 && proof.policy_revision == Some(scope.scope.state.revision)
-                && proof.reservation_key.as_deref().is_some_and(|key| !key.is_empty())
+                && proof.reservation_key.as_deref() == expected_reservation_key.as_deref()
         }));
         if new_risk && !post_fenced {
             return Ok(None);
