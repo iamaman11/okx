@@ -1148,6 +1148,35 @@ async fn prepare_generic_execution(
     }
 }
 
+/// This is a local PREPARED-only contract check. It must never mint an exchange
+/// POST or RiskBook permit; submit_prepared independently performs the full
+/// fresh source/strategy NAV/risk/venue/clock admission before BEGIN_POST.
+/// Keep that slow network census out of a durable *unsent* plan creation.
+fn local_prepare_risk_binding(plan: &okx_execution::ExecutionPlan) -> Result<(), &'static str> {
+    let Some(binding) = plan.risk_binding.as_ref() else {
+        return Err("immutable strategy mandate and hard-risk policy are required");
+    };
+    if binding.mandate.schema != TRADING_MANDATE_SCHEMA_V1
+        || binding.policy.schema != HARD_RISK_POLICY_SCHEMA_V1
+    {
+        return Err("unsupported immutable mandate or hard-risk policy schema");
+    }
+    if !binding
+        .mandate
+        .allowed_instruments
+        .iter()
+        .any(|instrument| instrument == &plan.instrument_id)
+        || !binding
+            .policy
+            .allowed_instruments
+            .iter()
+            .any(|instrument| instrument == &plan.instrument_id)
+    {
+        return Err("instrument not allowed by immutable mandate and hard-risk policy");
+    }
+    Ok(())
+}
+
 async fn prepare_risk_increasing(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
@@ -1258,21 +1287,24 @@ async fn prepare_risk_increasing(
     let lineage = common
         .lineage
         .map(|value| execution_lineage_binding(value, &rules));
-    // The same immutable risk/venue policy must reject new exposure before
-    // PREPARED persistence; SUBMIT independently repeats this admission.
-    match pre_mutation_admission(
-        request,
-        context,
-        generated_at,
-        execution,
-        plan.clone(),
-        None,
-    )
-    .await?
-    {
-        PreMutationAdmissionResult::Ready(_) => {}
-        PreMutationAdmissionResult::Response(response) => return Ok(*response),
+    // PREPARED is a durable UNSENT plan, never a trade authorization. Do not
+    // rerun the entire account history, position oracle, venue/clock REST and
+    // financial NAV census merely to save it: these reads are authoritative
+    // only when immediately followed by the actual POST admission anyway.
+    // Missing/malformed policy is still rejected before any local write.
+    if let Err(reason) = local_prepare_risk_binding(&plan) {
+        return Ok(failure_response(
+            request,
+            generated_at,
+            AgentResponseStatus::Rejected,
+            EXECUTION_RISK_POLICY_REQUIRED_CODE,
+            reason.to_owned(),
+            false,
+        ));
     }
+    // submit_prepared MUST continue to call pre_mutation_admission and then
+    // atomically reserve/BEGIN_POST with a fresh authenticated risk census.
+    // No API client may interpret a PREPARED result as a GO/POST permit.
     commit_prepared(request, generated_at, execution, plan, lineage, target).await
 }
 
@@ -4552,6 +4584,57 @@ mod tests {
     use okx_protocol::AGENT_REQUEST_SCHEMA_V1;
 
     const GENERATED_AT: &str = "2026-09-29T00:00:00.000Z";
+
+    #[test]
+    fn local_prepare_requires_immutable_policy_and_allows_no_venue_mutation() {
+        let mut plan = entry().record.plan;
+        assert_eq!(
+            local_prepare_risk_binding(&plan),
+            Err("immutable strategy mandate and hard-risk policy are required")
+        );
+        let binding: ExecutionRiskBinding = serde_json::from_value(serde_json::json!({
+            "mandate": {
+                "schema": TRADING_MANDATE_SCHEMA_V1,
+                "version": "manual_v1",
+                "capital_base_usd": "100",
+                "decision_horizon_hours": 1,
+                "allowed_instruments": ["DOGE-USDT-SWAP"],
+                "max_drawdown_ratio": "0.1",
+                "leverage_ceiling": "3",
+                "minimum_liquidity_notional_usd": "1",
+                "max_turnover_ratio": "2"
+            },
+            "policy": {
+                "schema": HARD_RISK_POLICY_SCHEMA_V1,
+                "version": "manual_policy_v1",
+                "max_account_gross_notional_usd": "200",
+                "max_instrument_gross_notional_usd": "200",
+                "max_margin_utilization_ratio": "0.1",
+                "max_loss_per_trade_usd": "1",
+                "max_daily_realized_loss_usd": "10",
+                "max_drawdown_ratio": "0.1",
+                "max_leverage": "3",
+                "allowed_instruments": ["DOGE-USDT-SWAP"],
+                "minimum_quality": "fresh",
+                "degraded_mode": "reject",
+                "correlated_clusters": []
+            }
+        }))
+        .expect("typed strategy policy");
+        plan.risk_binding = Some(binding);
+        assert_eq!(local_prepare_risk_binding(&plan), Ok(()));
+        plan.instrument_id = "BTC-USDT-SWAP".to_owned();
+        assert_eq!(
+            local_prepare_risk_binding(&plan),
+            Err("instrument not allowed by immutable mandate and hard-risk policy")
+        );
+        plan.instrument_id = "DOGE-USDT-SWAP".to_owned();
+        plan.risk_binding.as_mut().unwrap().policy.schema = "unrecognized".to_owned();
+        assert_eq!(
+            local_prepare_risk_binding(&plan),
+            Err("unsupported immutable mandate or hard-risk policy schema")
+        );
+    }
 
     #[test]
     fn protective_readback_rejects_expired_or_reversed_clock_after_venue_reads() {
