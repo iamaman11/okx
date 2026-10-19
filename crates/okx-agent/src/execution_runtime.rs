@@ -1146,7 +1146,10 @@ impl ExecutionRuntime {
         grant: ProductionSubmitAuthorization<'_>,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
         let ProductionSubmitSources { facts, protection } = sources;
-        let ProductionSubmitAuthorization { central: authorization, risk_post } = grant;
+        let ProductionSubmitAuthorization {
+            central: authorization,
+            risk_post,
+        } = grant;
         let native_uid = &preflight.credential.account_uid_fingerprint;
         let fresh_now = Utc::now().timestamp_millis().max(1) as u64;
         if !authorization.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now)) {
