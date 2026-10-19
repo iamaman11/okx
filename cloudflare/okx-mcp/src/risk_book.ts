@@ -352,7 +352,7 @@ export async function beginRiskPost(
     connection_generation:number;expected_book_sequence:number;
     census:CompleteRiskCensus;source_proof:NativeSessionRiskProof;now_ms:number;
   }|null,
-):Promise<{status:"POST_AUTHORIZED"|"DENIED";reason?:string;book_sequence?:number}>{
+):Promise<{status:"POST_AUTHORIZED"|"DENIED";reason?:string;book_sequence?:number;existing_modelled_loss_usdt?:string}>{
   if(!native||!HEX.test(plan_hash)||!HEX.test(proof_digest)||
     !Number.isSafeInteger(native.connection_generation)||native.connection_generation<1||
     !Number.isSafeInteger(native.expected_book_sequence)||native.expected_book_sequence<1||
@@ -425,7 +425,10 @@ export async function beginRiskPost(
     const entries=[...stored.entries];
     entries[index]={...entry,state:"POSTED" as const,transition_proof:proof_digest};
     await tx.put(KEY,{schema:RISK_BOOK_SCHEMA,sequence:stored.sequence+1,entries});
-    return {status:"POST_AUTHORIZED" as const,book_sequence:stored.sequence+1};
+    // Occupancy already includes the just-fenced reservation.
+    // Executor will add its requested loss, so exclude only that candidate.
+    return {status:"POST_AUTHORIZED" as const,book_sequence:stored.sequence+1,
+      existing_modelled_loss_usdt:amount(total-units(entry.loss_usdt)!)};
   });
 }
 

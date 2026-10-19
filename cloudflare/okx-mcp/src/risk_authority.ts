@@ -11,6 +11,7 @@ interface Result {
   schema:typeof RESULT_SCHEMA;command_id:string;status:ResultStatus;
   reason:string|null;reservation_key:string|null;
   risk_book_sequence:number|null;policy_revision:number|null;
+  existing_modelled_loss_usdt:string|null;
 }
 interface Session {
   connection_generation:number;
@@ -19,7 +20,8 @@ interface Session {
 }
 function deny(id:string,reason:string):Result {
   return {schema:RESULT_SCHEMA,command_id:id,status:"DENIED",reason,
-    reservation_key:null,risk_book_sequence:null,policy_revision:null};
+    reservation_key:null,risk_book_sequence:null,policy_revision:null,
+    existing_modelled_loss_usdt:null};
 }
 function isObject(v:unknown):v is Record<string,unknown> {
   return v!==null&&typeof v==="object"&&!Array.isArray(v);
@@ -90,7 +92,7 @@ export async function handleNativeRiskCommand(
     return decision.status==="HELD"
       ?{schema:RESULT_SCHEMA,command_id:id,status:"HELD",reason:null,
         reservation_key:decision.entry.key,risk_book_sequence:decision.book_sequence,
-        policy_revision:decision.entry.policy_revision}
+        policy_revision:decision.entry.policy_revision,existing_modelled_loss_usdt:null}
       :deny(id,decision.reason);
   }
   if(a.action==="BEGIN_POST"){
@@ -118,7 +120,8 @@ export async function handleNativeRiskCommand(
     return result.status==="POST_AUTHORIZED"
       ?{schema:RESULT_SCHEMA,command_id:id,status:"POST_AUTHORIZED",reason:null,
         reservation_key:a.reservation_key,risk_book_sequence:result.book_sequence!,
-        policy_revision:a.policy_revision as number}
+        policy_revision:a.policy_revision as number,
+        existing_modelled_loss_usdt:result.existing_modelled_loss_usdt!}
       :deny(id,result.reason??"POST_FENCE_DENIED");
   }
   if(a.action==="RESOLVE"){
@@ -142,7 +145,7 @@ export async function handleNativeRiskCommand(
     return entry&&book
       ?{schema:RESULT_SCHEMA,command_id:id,status:"UPDATED",reason:null,
         reservation_key:entry.key,risk_book_sequence:book.sequence,
-        policy_revision:entry.policy_revision}
+        policy_revision:entry.policy_revision,existing_modelled_loss_usdt:null}
       :deny(id,"RISK_BOOK_READBACK_FAILED");
   }
   return deny(id,"UNSUPPORTED_RISK_COMMAND");

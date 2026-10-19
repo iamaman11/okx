@@ -132,8 +132,9 @@ check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).reason===
  "POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN",
  "legacy HELD without the initial native source digest cannot POST");
 await sa.put("risk_book_v1",beforePost!);
-check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).status==="POST_AUTHORIZED",
- "one native POST granted after fresh full-account census");
+const granted=await beginRiskPost(sa,entry.key,p,1,d,postProof);
+check(granted.status==="POST_AUTHORIZED" && granted.existing_modelled_loss_usdt==="0",
+ "one native POST reports exact occupied risk excluding its own reservation");
 check((await reserve(sa,policy,census,reqA)).status==="DENIED",
  "POSTED cannot recover HELD");
 check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).status==="DENIED",
@@ -163,6 +164,23 @@ check((await reserve(sa,policy,census,{...base,uid:b,
   intent_id:"intent_20261018_disabled",loss_usdt:"1"})).status==="DENIED",
  "disabled account cannot open new risk");
 await sa.put("account_governance_v2",governance);
+// A second UID's independently observed risk must never be replaced by zero.
+const weighted=new Storage();
+await weighted.put("account_governance_v2",governance);
+await weighted.put("generation",77);
+const weightedCensus={...census,occupied:[census.occupied[0],
+ {...census.occupied[1],occupied_usdt:"2"}]};
+const weightedHeld=await reserve(weighted,policy,weightedCensus,
+ {...base,uid:a,intent_id:"intent_20261019_weighted",loss_usdt:"4"});
+check(weightedHeld.status==="HELD","weighted reserve accepted");
+if(weightedHeld.status==="HELD"){
+ const decision=await beginRiskPost(weighted,weightedHeld.entry.key,p,1,d,{
+  ...postProof,expected_book_sequence:weightedHeld.book_sequence,
+  census:{...weightedCensus,source_digest:p,generated_at_ms:now+1,source_read_floor_ms:now+1}
+ });
+ check(decision.status==="POST_AUTHORIZED" && decision.existing_modelled_loss_usdt==="2",
+  "receipt preserves other-account exposure without double counting candidate");
+}
 await sa.put("risk_book_v1",{fake:true});
 check((await reserve(sa,policy,census,{...reqB,intent_id:"intent_20261018_cccc"})).status==="DENIED",
   "corrupt owner fails closed");

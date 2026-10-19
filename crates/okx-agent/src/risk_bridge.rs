@@ -163,6 +163,11 @@ mod tests {
             reservation_key: Some("reservation_identity".to_owned()),
             risk_book_sequence: Some(seq),
             policy_revision: Some(1),
+            existing_modelled_loss_usdt: if status == RiskDecisionStatus::PostAuthorized {
+                Some("0".to_owned())
+            } else {
+                None
+            },
         }
     }
     fn post(held: &RiskResult) -> RiskCommand {

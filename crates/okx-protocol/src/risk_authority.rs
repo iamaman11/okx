@@ -235,6 +235,9 @@ pub struct RiskResult {
     pub reservation_key: Option<String>,
     pub risk_book_sequence: Option<u64>,
     pub policy_revision: Option<u64>,
+    /// DO occupancy excluding the just-fenced candidate; exact nine-decimal USD risk.
+    #[serde(default)]
+    pub existing_modelled_loss_usdt: Option<String>,
 }
 impl RiskResult {
     pub fn valid(&self) -> bool {
@@ -244,6 +247,13 @@ impl RiskResult {
                 || self.reservation_key.is_some()
                     && self.risk_book_sequence.is_some_and(|s| s > 0)
                     && self.policy_revision.is_some_and(|r| r > 0))
+            && match self.status {
+                RiskDecisionStatus::PostAuthorized => self
+                    .existing_modelled_loss_usdt
+                    .as_deref()
+                    .is_some_and(|v| v == "0" || positive(v)),
+                _ => self.existing_modelled_loss_usdt.is_none(),
+            }
             && self
                 .reason
                 .as_ref()
@@ -314,9 +324,18 @@ mod tests {
             reservation_key: None,
             risk_book_sequence: None,
             policy_revision: None,
+            existing_modelled_loss_usdt: None,
         };
         assert!(result.valid());
         result.status = RiskDecisionStatus::PostAuthorized;
+        assert!(!result.valid());
+        result.reservation_key = Some("owned_reservation".to_owned());
+        result.risk_book_sequence = Some(2);
+        result.policy_revision = Some(1);
+        assert!(!result.valid(), "POST without occupied-risk evidence cannot authorize");
+        result.existing_modelled_loss_usdt = Some("1.000000001".to_owned());
+        assert!(result.valid());
+        result.existing_modelled_loss_usdt = Some("not-a-risk".to_owned());
         assert!(!result.valid());
     }
 }

@@ -1239,6 +1239,20 @@ impl ExecutionRuntime {
         if new_risk && !post_fenced {
             return Ok(None);
         }
+        // The atomic RiskBook receipt includes all-account occupied loss and
+        // outstanding reservations; only this candidate is subtracted there.
+        // Never synthesize zero from a selected-account FLAT observation.
+        let occupied_before_candidate = if post_fenced {
+            risk_post
+                .and_then(|receipt| receipt.existing_modelled_loss_usdt.as_deref())
+                .and_then(|value| rust_decimal::Decimal::from_str(value).ok())
+                .filter(|value| *value >= rust_decimal::Decimal::ZERO)
+        } else {
+            None
+        };
+        if new_risk && occupied_before_candidate.is_none() {
+            return Ok(None);
+        }
         let flat = facts.summary.open_positions == 0
             && facts.summary.pending_orders == 0
             && facts.authoritative_positions.iter().all(|position| {
@@ -1321,11 +1335,8 @@ impl ExecutionRuntime {
             // The executor independently scans durable parent/mutation/OCO
             // UNKNOWN states; this cannot override native state.
             unknown_mutations_reconciled: true,
-            // The only positive path is a post-fenced, source-proven FULLY
-            // FLAT cohort. The caller sampled every registered Real UID via
-            // PortfolioRiskSources, and the DO counted all other reservations.
-            // Never synthesize zero from an unaudited account snapshot.
-            existing_modelled_loss_usdt: post_fenced.then_some(rust_decimal::Decimal::ZERO),
+            // Occupancy comes only from the exact DO POST receipt.
+            existing_modelled_loss_usdt: occupied_before_candidate,
             exact_owned_reduce_only_close: close_owned_exact,
         };
         // Final central revision/UID/expiry fence immediately before the
