@@ -1848,11 +1848,7 @@ async fn reserve_native_risk_for_submit(
         .operator_governance
         .ok_or("RISK_GOVERNANCE_V2_REQUIRED")?;
     let plan = &entry.record.plan;
-    if !scope.authorizes_delivery(
-        &plan.account_uid_fingerprint,
-        utc_now_ms(),
-        context.transport_generation,
-    ) {
+    if !context.central_uid_admitted(&plan.account_uid_fingerprint, utc_now_ms()) {
         return Err("RISK_CENTRAL_UID_NOT_AUTHORIZED");
     }
     let run = execution
