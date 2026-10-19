@@ -1055,7 +1055,10 @@ mod tests {
         let mut pending = HashMap::new();
         let nonce = "ping_verified_once_012345";
         pending.insert(nonce.to_owned(), Instant::now());
-        assert!(!consume_fresh_delivery_challenge(&mut pending, Some("ping_different")));
+        assert!(!consume_fresh_delivery_challenge(
+            &mut pending,
+            Some("ping_different")
+        ));
         assert!(consume_fresh_delivery_challenge(&mut pending, Some(nonce)));
         assert!(!consume_fresh_delivery_challenge(&mut pending, Some(nonce)));
         assert!(!consume_fresh_delivery_challenge(&mut pending, None));
