@@ -1055,7 +1055,6 @@ impl ExecutionRuntime {
         if !self.production_trading_requested()
             || !preflight.accepted
             || !preflight.production_environment
-            || !preflight.executor_ip_bound
             || !preflight.executor_trade_permission
             || preflight.executor_withdraw_permission
         {
@@ -1241,7 +1240,6 @@ impl ExecutionRuntime {
             || !preflight.accepted
             || !preflight.credential.accepted
             || !preflight.credential.production_environment
-            || !preflight.credential.executor_ip_bound
             || !preflight.credential.executor_trade_permission
             || preflight.credential.executor_withdraw_permission
             || facts.summary.authority.account_uid_fingerprint
