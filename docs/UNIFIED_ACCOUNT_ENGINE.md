@@ -1,5 +1,7 @@
 # One venue/account trading surface
 
+> **Normative architecture:** [Architecture Contract v1](ARCHITECTURE_CONTRACT_V1.md). This file documents the first partial implementation; it is not a second architecture or proof of multi-account concurrency.
+
 This is the canonical operator model for the existing OKX application.
 
 ```

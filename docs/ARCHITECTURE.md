@@ -1,5 +1,7 @@
 # Architecture
 
+> **Canonical future architecture (2026-10-20):** [Architecture Contract v1](ARCHITECTURE_CONTRACT_V1.md). This is the accepted target modularity/extension boundary, **not** proof that simultaneous accounts/venues or live trading are already deployed. Dated checklists and states below are historical unless independently reverified.
+
 > **Current binding architecture/acceptance (2026-10-15):** [Single-agent account profiles and Stage 5C-2 acceptance](ACCOUNT_PROFILES_AND_RELEASE_ACCEPTANCE.md). There is NO separate "Demo agent": only one binary and sole owned process. Demo and Production are account venues, not implementations. The ordinary CONTROL install from PR #339 is currently BLOCKED on a GitHub JSON-body decode error (not yet proven to be caused by any particular HTTP step). Live trading remains OFF. Older baseline paragraphs below are historical.
 
 ## Principles

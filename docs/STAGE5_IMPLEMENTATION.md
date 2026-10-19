@@ -1,5 +1,7 @@
 # Stage 5 implementation checklist and live-admission contract
 
+> **Canonical future architecture (2026-10-20):** [Architecture Contract v1](ARCHITECTURE_CONTRACT_V1.md). This is the accepted target modularity/extension boundary, **not** proof that simultaneous accounts/venues or live trading are already deployed. Dated checklists and states below are historical unless independently reverified.
+
 > **ACTIVE ORDER (2026-10-17; canonical #160):** The [canonical issue #160](https://github.com/iamaman11/okx/issues/160) is the only executable plan. **NOW: 5B financial attribution/source completeness** → 5A full native NAV/high-water/drawdown/STOP acceptance → 5C compact operator UX/transport and safe existing Demo ↔ Production ReadOnly handoff → final separately approved Live gate. This is *one unfinished numbered Stage 5*, not a sixth MVP stage. The old 5C-2/ZIP-decoding 'current' cursor below predates physically accepted native CONTROL deployment and is historical. Keep prior lineage and persistent STOP intact; no Production order, new transport, agent or unaccepted account selection.
 
 
