@@ -61,7 +61,7 @@ fn direct_operation_allowed(
 
 /// Delivery admission only. Native Rust will independently check UID,
 /// Trade credential, financial continuity and shared risk before any POST.
-fn central_production_delivery_admitted(
+fn central_production_delivery_admission(
     profile: DirectRuntimeProfile,
     mode: Option<ExecutionRuntimeMode>,
     operation: &AgentOperation,
@@ -69,33 +69,63 @@ fn central_production_delivery_admitted(
     governance: Option<&CentralGovernanceSnapshotV2>,
     generation: u64,
     now_ms: u64,
-) -> bool {
-    profile == DirectRuntimeProfile::Production
-        && mode == Some(ExecutionRuntimeMode::Production)
-        && matches!(
-            operation,
-            AgentOperation::BeginStrategyRun { .. }
-                | AgentOperation::PrepareExecution { .. }
-                | AgentOperation::SubmitPreparedExecution { .. }
-                | AgentOperation::FinalizeStrategyRun { .. }
-                | AgentOperation::QuarantineUnverifiedStrategyRun { .. }
-        )
-        && (policy.is_some_and(|p| {
-            p.valid()
-                && p.trading_requested
-                && p.revision > 0
-                && p.session_generation == generation
-                && p.issued_at_ms <= now_ms
-                && now_ms.saturating_sub(p.issued_at_ms)
-                    <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
-        }) || governance.is_some_and(|g| {
-            g.valid()
-                && g.session_generation == generation
-                && g.issued_at_ms <= now_ms
-                && now_ms.saturating_sub(g.issued_at_ms) <= 15_000
-                && g.state.trading_requested
-                && g.state.operator_authorization.status == AuthorizationStatus::Active
-        }))
+) -> Result<(), &'static str> {
+    if profile != DirectRuntimeProfile::Production {
+        return Err("PRODUCTION_PROFILE_REQUIRED");
+    }
+    if mode != Some(ExecutionRuntimeMode::Production) {
+        return Err("NATIVE_PRODUCTION_EXECUTOR_NOT_ACTIVE");
+    }
+    if !matches!(
+        operation,
+        AgentOperation::BeginStrategyRun { .. }
+            | AgentOperation::PrepareExecution { .. }
+            | AgentOperation::SubmitPreparedExecution { .. }
+            | AgentOperation::FinalizeStrategyRun { .. }
+            | AgentOperation::QuarantineUnverifiedStrategyRun { .. }
+    ) {
+        return Err("PRODUCTION_OPERATION_UNSUPPORTED");
+    }
+    // One source of admission truth, with a stable, nonsecret reason on
+    // rejection. Positive trade rights remain with native Rust/RiskBook.
+    if let Some(scope) = governance {
+        if !scope.valid() {
+            return Err("CENTRAL_GOVERNANCE_V2_INVALID");
+        }
+        if scope.session_generation != generation {
+            return Err("CENTRAL_GOVERNANCE_V2_GENERATION_MISMATCH");
+        }
+        if scope.issued_at_ms > now_ms || now_ms.saturating_sub(scope.issued_at_ms) > 15_000 {
+            return Err("CENTRAL_GOVERNANCE_V2_NOT_FRESH");
+        }
+        if !scope.state.trading_requested
+            || scope.state.operator_authorization.status != AuthorizationStatus::Active
+        {
+            return Err("CENTRAL_GOVERNANCE_V2_STOPPED");
+        }
+        return Ok(());
+    }
+    // Historical v1 delivery schema is retained for older sessions only;
+    // it still cannot replace the native v2 RiskBook permit for a Real POST.
+    if let Some(scope) = policy {
+        if !scope.valid() {
+            return Err("CENTRAL_POLICY_V1_INVALID");
+        }
+        if !scope.trading_requested || scope.revision == 0 {
+            return Err("CENTRAL_POLICY_V1_STOPPED");
+        }
+        if scope.session_generation != generation {
+            return Err("CENTRAL_POLICY_V1_GENERATION_MISMATCH");
+        }
+        if scope.issued_at_ms > now_ms
+            || now_ms.saturating_sub(scope.issued_at_ms)
+                > okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
+        {
+            return Err("CENTRAL_POLICY_V1_NOT_FRESH");
+        }
+        return Ok(());
+    }
+    Err("CENTRAL_PRODUCTION_SCOPE_NOT_DELIVERED")
 }
 
 pub struct CloudflareTransportConfig {
@@ -465,11 +495,7 @@ async fn run_session(
                         // Production is denied even if Worker/OAuth sends a write
                         // through this otherwise authenticated read transport.
                         let mutating = !request.operation.direct_transport_read_only();
-                        let allowed = direct_operation_allowed(
-                            config.runtime_profile,
-                            context.execution.map(ExecutionRuntime::mode),
-                            &request.operation,
-                        ) || central_production_delivery_admitted(
+                        let delivery = central_production_delivery_admission(
                             config.runtime_profile,
                             context.execution.map(ExecutionRuntime::mode),
                             &request.operation,
@@ -478,11 +504,24 @@ async fn run_session(
                             frame_generation,
                             Utc::now().timestamp_millis().max(1) as u64,
                         );
+                        let allowed = direct_operation_allowed(
+                            config.runtime_profile,
+                            context.execution.map(ExecutionRuntime::mode),
+                            &request.operation,
+                        ) || delivery.is_ok();
                         if !allowed {
+                            // A specific typed native reason avoids repeated
+                            // permission/configuration changes on an unknown gate.
+                            let reason = if config.runtime_profile == DirectRuntimeProfile::DemoAcceptance {
+                                "DEMO_MUTATION_ADMISSION_NOT_ACTIVE"
+                            } else {
+                                delivery.err().unwrap_or("NATIVE_MUTATION_ADMISSION_DENIED")
+                            };
+                            eprintln!("direct mutation delivery denied: {reason}");
                             let response = direct_rejection(
                                 &request.request_id,
                                 DIRECT_TRANSPORT_MUTATION_REJECTED,
-                                "mutation requires Demo admission or a current central Production policy bound to this authenticated Worker session; Rust still owns final trade permission",
+                                reason,
                                 false,
                             );
                             send_frame(
@@ -812,9 +851,10 @@ mod tests {
             session_generation: 7,
         };
         let admit = |policy: Option<&CentralAccountPolicy>, profile, mode, generation, now| {
-            central_production_delivery_admitted(
+            central_production_delivery_admission(
                 profile, mode, &submit, policy, None, generation, now,
             )
+            .is_ok()
         };
         assert!(admit(
             Some(&p),
@@ -860,6 +900,100 @@ mod tests {
             7,
             1_001
         ));
+    }
+
+    #[test]
+    fn production_governance_v2_delivery_reports_exact_blocker() {
+        use okx_protocol::account_governance::{
+            AccountControlV2, AccountEnvironmentV2, AccountGovernanceV2, AccountLimitsV2,
+            GOVERNANCE_SCHEMA_V2, OperatorAuthorizationV2, StrategyLimitsV2,
+        };
+        let submit = AgentOperation::SubmitPreparedExecution {
+            intent_id: "intent_governance_delivery_20261019".to_owned(),
+        };
+        let mut scope = CentralGovernanceSnapshotV2 {
+            state: AccountGovernanceV2 {
+                schema: GOVERNANCE_SCHEMA_V2.to_owned(),
+                revision: 3,
+                trading_requested: true,
+                operator_authorization: OperatorAuthorizationV2 {
+                    id: format!("sha256:{}", "a".repeat(64)),
+                    status: AuthorizationStatus::Active,
+                    ceiling_usdt: "10".to_owned(),
+                },
+                max_total_modelled_loss_usdt: "10".to_owned(),
+                accounts: vec![AccountControlV2 {
+                    id: "okx_real_1beb3c684155".to_owned(),
+                    label: "OKX Real".to_owned(),
+                    venue: "okx".to_owned(),
+                    environment: AccountEnvironmentV2::Real,
+                    uid_fingerprint: "b".repeat(64),
+                    identity_verified: true,
+                    enabled: true,
+                    limits: AccountLimitsV2 {
+                        max_modelled_loss_usdt: "10".to_owned(),
+                        max_order_loss_usdt: "10".to_owned(),
+                        max_notional_usdt: Some("200".to_owned()),
+                        max_leverage: Some("3".to_owned()),
+                        max_daily_realized_loss_usdt: Some("10".to_owned()),
+                        max_drawdown_ratio: Some("0.1".to_owned()),
+                        allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
+                    },
+                    strategies: vec![StrategyLimitsV2 {
+                        id: "real_manual_v1".to_owned(),
+                        enabled: true,
+                        allocated_capital_usdt: "100".to_owned(),
+                        max_modelled_loss_usdt: "10".to_owned(),
+                        max_daily_realized_loss_usdt: Some("10".to_owned()),
+                        max_drawdown_ratio: Some("0.1".to_owned()),
+                    }],
+                }],
+            },
+            issued_at_ms: 1_000,
+            session_generation: 514,
+        };
+        assert!(scope.valid());
+        let admitted = |value: Option<&CentralGovernanceSnapshotV2>, generation, now| {
+            central_production_delivery_admission(
+                DirectRuntimeProfile::Production,
+                Some(ExecutionRuntimeMode::Production),
+                &submit,
+                None,
+                value,
+                generation,
+                now,
+            )
+        };
+        assert_eq!(admitted(Some(&scope), 514, 1_001), Ok(()));
+        assert_eq!(
+            admitted(None, 514, 1_001),
+            Err("CENTRAL_PRODUCTION_SCOPE_NOT_DELIVERED")
+        );
+        assert_eq!(
+            admitted(Some(&scope), 515, 1_001),
+            Err("CENTRAL_GOVERNANCE_V2_GENERATION_MISMATCH")
+        );
+        assert_eq!(
+            admitted(Some(&scope), 514, 16_001),
+            Err("CENTRAL_GOVERNANCE_V2_NOT_FRESH")
+        );
+        scope.state.trading_requested = false;
+        assert_eq!(
+            admitted(Some(&scope), 514, 1_001),
+            Err("CENTRAL_GOVERNANCE_V2_STOPPED")
+        );
+        assert_eq!(
+            central_production_delivery_admission(
+                DirectRuntimeProfile::Production,
+                Some(ExecutionRuntimeMode::ReadOnly),
+                &submit,
+                None,
+                Some(&scope),
+                514,
+                1_001,
+            ),
+            Err("NATIVE_PRODUCTION_EXECUTOR_NOT_ACTIVE")
+        );
     }
 
     #[test]
