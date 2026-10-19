@@ -73,6 +73,13 @@ fn consume_fresh_delivery_challenge(
         .is_some_and(|seen_at| seen_at.elapsed() <= DELIVERY_CHALLENGE_MAX_AGE)
 }
 
+/// Only the existing legacy v1 scope uses an absolute wall time.
+#[derive(Clone, Copy)]
+struct DeliveryFreshness {
+    now_ms: u64,
+    challenge_verified: bool,
+}
+
 /// Delivery admission only. Native Rust will independently check UID,
 /// Trade credential, financial continuity and shared risk before any POST.
 fn central_production_delivery_admission(
@@ -82,8 +89,7 @@ fn central_production_delivery_admission(
     policy: Option<&CentralAccountPolicy>,
     governance: Option<&CentralGovernanceSnapshotV2>,
     generation: u64,
-    now_ms: u64,
-    governance_challenge_fresh: bool,
+    freshness: DeliveryFreshness,
 ) -> Result<(), &'static str> {
     if profile != DirectRuntimeProfile::Production {
         return Err("PRODUCTION_PROFILE_REQUIRED");
@@ -113,7 +119,7 @@ fn central_production_delivery_admission(
         // Challenge was issued for THIS request by the authenticated Worker
         // after a successful ping/pong. A nonce is consumed only once on the
         // native WebSocket, and its lifetime uses Instant (not wall clocks).
-        if !governance_challenge_fresh {
+        if !freshness.challenge_verified {
             return Err("CENTRAL_GOVERNANCE_V2_CHALLENGE_NOT_FRESH");
         }
         if !scope.state.trading_requested
@@ -135,8 +141,8 @@ fn central_production_delivery_admission(
         if scope.session_generation != generation {
             return Err("CENTRAL_POLICY_V1_GENERATION_MISMATCH");
         }
-        if scope.issued_at_ms > now_ms
-            || now_ms.saturating_sub(scope.issued_at_ms)
+        if scope.issued_at_ms > freshness.now_ms
+            || freshness.now_ms.saturating_sub(scope.issued_at_ms)
                 > okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
         {
             return Err("CENTRAL_POLICY_V1_NOT_FRESH");
@@ -540,8 +546,10 @@ async fn run_session(
                             operator_policy.as_ref(),
                             operator_governance.as_ref(),
                             frame_generation,
-                            Utc::now().timestamp_millis().max(1) as u64,
-                            governance_challenge_fresh,
+                            DeliveryFreshness {
+                                now_ms: Utc::now().timestamp_millis().max(1) as u64,
+                                challenge_verified: governance_challenge_fresh,
+                            },
                         );
                         let allowed = direct_operation_allowed(
                             config.runtime_profile,
@@ -892,7 +900,16 @@ mod tests {
         };
         let admit = |policy: Option<&CentralAccountPolicy>, profile, mode, generation, now| {
             central_production_delivery_admission(
-                profile, mode, &submit, policy, None, generation, now, false,
+                profile,
+                mode,
+                &submit,
+                policy,
+                None,
+                generation,
+                DeliveryFreshness {
+                    now_ms: now,
+                    challenge_verified: false,
+                },
             )
             .is_ok()
         };
@@ -1002,8 +1019,10 @@ mod tests {
                 None,
                 value,
                 generation,
-                now,
-                true,
+                DeliveryFreshness {
+                    now_ms: now,
+                    challenge_verified: true,
+                },
             )
         };
         assert_eq!(admitted(Some(&scope), 514, 1_001), Ok(()));
@@ -1026,8 +1045,10 @@ mod tests {
                 None,
                 Some(&scope),
                 514,
-                1_001,
-                false,
+                DeliveryFreshness {
+                    now_ms: 1_001,
+                    challenge_verified: false,
+                },
             ),
             Err("CENTRAL_GOVERNANCE_V2_CHALLENGE_NOT_FRESH")
         );
@@ -1044,8 +1065,10 @@ mod tests {
                 None,
                 Some(&scope),
                 514,
-                1_001,
-                true,
+                DeliveryFreshness {
+                    now_ms: 1_001,
+                    challenge_verified: true,
+                },
             ),
             Err("NATIVE_PRODUCTION_EXECUTOR_NOT_ACTIVE")
         );
