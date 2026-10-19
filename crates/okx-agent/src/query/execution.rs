@@ -1477,6 +1477,26 @@ async fn commit_prepared(
     };
     match result {
         Ok(outcome) => prepare_outcome_response(request, generated_at, outcome),
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::NewRiskStopped)) => {
+            Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_POLICY_REJECTED_CODE,
+                "the durable strategy/account STOP prohibits new risk".to_owned(),
+                false,
+            ))
+        }
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::StrategyRunFinalized)) => {
+            Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_RISK_POLICY_REJECTED_CODE,
+                "the strategy run is already finalized; a new verified run is required".to_owned(),
+                false,
+            ))
+        }
         Err(OrderExecutorError::Ledger(ExecutionLedgerError::CapitalReservationScopeMismatch)) => {
             Ok(failure_response(
                 request,
