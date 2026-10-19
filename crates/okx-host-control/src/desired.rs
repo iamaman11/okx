@@ -5,7 +5,7 @@ use std::{
 };
 
 use okx_protocol::{
-    ProductionPermission, ProductionTradingPolicy,
+    ProductionTradingPolicy,
     host_state_proto::{
         self, HOST_STATE_VERSION, HostStateWire, LegacyProductionPolicyWire, SourceDrainHoldWire,
         SourceWitnessWire, TransitionWire,
@@ -142,7 +142,7 @@ impl DesiredFileV3 {
             schema: DESIRED_STATE_SCHEMA_V3.to_owned(),
             agent: state.agent,
             profile: state.profile,
-            read_only: false,
+            read_only: state.profile == AgentProfile::Production,
             production_policy: None,
             transition: None,
             switch_hold: None,
@@ -317,92 +317,45 @@ impl DesiredStateStore {
         self.persist_full(&next)
     }
 
-    /// Single CONTROL owner: one bounded operator authorization, persisted
-    /// atomically in the existing desired.json, never in another credentials
-    /// or intent ledger. The agent remains READ_ONLY until native execution
-    /// preflight explicitly proves this exact revision and scope.
+    /// CONTROL persists a negative lifecycle veto only. The single positive
+    /// permission authority is governance/v2 plus the atomic central RiskBook.
+    /// READ_ONLY can be cleared only while the Production child is stopped;
+    /// STOP can be asserted while running and is re-read before every POST.
+    pub fn set_production_read_only(&self, read_only: bool) -> HostControlResult<()> {
+        let mut state = self.load_full()?;
+        if state.profile != AgentProfile::Production
+            || state.transition.is_some()
+            || state.switch_hold.is_some()
+            || (!read_only && state.agent != AgentDesired::Stopped)
+        {
+            return Err(HostControlError::ProfileTransitionPending);
+        }
+        state.read_only = read_only;
+        // Retire stale positive CONTROL policy. Decoding its historical Protobuf
+        // field remains supported, but it is never execution authority.
+        state.production_policy = None;
+        self.persist_full(&state)
+    }
+
+    /// Retained only to fail closed for callers still using the obsolete v1
+    /// positive CONTROL command; no local policy can enable Real trading.
     pub fn configure_production_policy(
         &self,
-        policy: ProductionTradingPolicy,
+        _policy: ProductionTradingPolicy,
     ) -> HostControlResult<()> {
-        policy.validate()?;
-        let mut state = self.load_full()?;
-        if state.profile != AgentProfile::Production
-            || state.agent != AgentDesired::Stopped
-            || state.transition.is_some()
-            || state.switch_hold.is_some()
-        {
-            return Err(HostControlError::ProfileTransitionPending);
-        }
-        if let Some(prior) = &state.production_policy {
-            if *prior == policy {
-                return Ok(());
-            }
-            if policy.revision <= prior.revision {
-                return Err(HostControlError::ProfileTransitionReplay);
-            }
-        }
-        // A verified ReadOnly profile handoff intentionally latches this
-        // legacy flag. An explicit, revision-fenced Production authorization
-        // while STOPPED is the ONE native way to leave that state: save the
-        // policy and the execution right atomically under the same owner.
-        // Neither restarts nor profile switches can silently clear it.
-        state.read_only = !matches!(
-            policy.permission,
-            ProductionPermission::Enabled | ProductionPermission::Stopped
-        );
-        state.production_policy = Some(policy);
-        self.persist_full(&state)
+        Err(HostControlError::InvalidExecutionPath)
     }
 
-    /// Revocation is allowed even with a running agent. A separate mutation
-    /// path must re-read this owner before every exchange POST; a stale
-    /// ENABLED value is never standalone authority.
-    pub fn stop_production_policy(&self, expected_revision: u64) -> HostControlResult<()> {
-        let mut state = self.load_full()?;
-        if state.profile != AgentProfile::Production
-            || state.transition.is_some()
-            || state.switch_hold.is_some()
-        {
-            return Err(HostControlError::ProfileTransitionPending);
-        }
-        let mut policy = state
-            .production_policy
-            .take()
-            .ok_or(HostControlError::ProfileTransitionInvalid)?;
-        if policy.revision != expected_revision {
-            return Err(HostControlError::ProfileTransitionReplay);
-        }
-        if policy.permission != ProductionPermission::Stopped {
-            policy.revision = policy
-                .revision
-                .checked_add(1)
-                .ok_or(HostControlError::ProfileTransitionReplay)?;
-            policy.permission = ProductionPermission::Stopped;
-        }
-        state.production_policy = Some(policy);
-        self.persist_full(&state)
-    }
-
-    /// Read-only redacted source of truth for the operator and host status.
+    /// Operator status is observational; only the authenticated v2 governance
+    /// and the native executor can determine whether a trade is permitted.
     pub fn production_policy_status(&self) -> HostControlResult<Value> {
         let state = self.load_full()?;
-        Ok(match state.production_policy.as_ref() {
-            Some(policy) => json!({
-                "configured": true,
-                "permission": policy.permission,
-                "revision": policy.revision,
-                "effective_trading": false,
-                "authority": "NATIVE_EXECUTOR_PER_ORDER_GATE",
-                "configured_for_admission": !state.read_only
-                    && matches!(policy.permission, ProductionPermission::Enabled)
-            }),
-            None => json!({
-                "configured": false,
-                "permission": "OFF",
-                "effective_trading": false
-            }),
-        })
+        Ok(json!({
+            "authority": "CENTRAL_GOVERNANCE_V2",
+            "host_read_only": state.read_only,
+            "legacy_policy_ignored": state.production_policy.is_some(),
+            "effective_trading": false
+        }))
     }
 
     /// Read the persisted execution right before EVERY ordinary child launch.
@@ -411,15 +364,6 @@ impl DesiredStateStore {
         let state = self.load_full()?;
         if state.profile != profile || state.transition.is_some() || state.switch_hold.is_some() {
             return Err(HostControlError::ProfileTransitionPending);
-        }
-        if profile == AgentProfile::Production {
-            return Ok(state.read_only
-                || !state.production_policy.as_ref().is_some_and(|policy| {
-                    matches!(
-                        policy.permission,
-                        ProductionPermission::Enabled | ProductionPermission::Stopped
-                    )
-                }));
         }
         Ok(state.read_only)
     }
@@ -635,82 +579,34 @@ mod tests {
     }
 
     #[test]
-    fn durable_production_policy_is_one_owner_revocable_and_never_crosses_profiles() {
-        let root = test_root("prod-policy");
+    fn production_lifecycle_veto_is_durable_without_second_positive_policy() {
+        let root = test_root("central-governance-lifecycle");
         let _ = fs::remove_dir_all(&root);
         let store = DesiredStateStore::at(root.join("desired.json"));
-        let mut policy = ProductionTradingPolicy {
-            schema: okx_protocol::PRODUCTION_TRADING_POLICY_SCHEMA_V1.to_owned(),
-            revision: 1,
-            permission: ProductionPermission::Enabled,
-            account_uid_fingerprint: "a".repeat(64),
-            strategy_run_id: "production-run".to_owned(),
-            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
-            allowed_instruments: vec!["BTC-USDT-SWAP".to_owned()],
-            max_total_modelled_loss_usdt: "10".to_owned(),
-        };
         store.save(AgentDesiredState::stopped()).unwrap();
-        // Simulate a previously proven ReadOnly profile handoff. This must
-        // remain until explicit STOPPED CONTROL authorization, never until
-        // a profile-name switch or agent restart.
-        let mut prior = store.load_full().unwrap();
-        prior.read_only = true;
-        store.persist_full(&prior).unwrap();
         assert!(store.read_only_for(AgentProfile::Production).unwrap());
-        store.configure_production_policy(policy.clone()).unwrap();
+        assert_eq!(
+            store.production_policy_status().unwrap()["authority"],
+            "CENTRAL_GOVERNANCE_V2"
+        );
+        store.set_production_read_only(false).unwrap();
         assert!(!store.read_only_for(AgentProfile::Production).unwrap());
-        assert_eq!(
-            store.production_policy_status().unwrap()["configured_for_admission"],
-            true
-        );
-        store.configure_production_policy(policy.clone()).unwrap();
-        assert_eq!(store.production_policy_status().unwrap()["revision"], 1);
-        store.stop_production_policy(1).unwrap();
-        // Native durable STOP never re-enables new risk; it leaves the
-        // existing owner alive only for strictly verified reduce-only CLOSE.
-        assert!(!store.read_only_for(AgentProfile::Production).unwrap());
-        assert_eq!(
-            store.production_policy_status().unwrap()["configured_for_admission"],
-            false
-        );
-        assert_eq!(
-            store.production_policy_status().unwrap()["permission"],
-            "STOPPED"
-        );
-        assert_eq!(
-            store.production_policy_status().unwrap()["effective_trading"],
-            false
-        );
-        assert!(store.stop_production_policy(1).is_err());
-        policy.revision = 2;
-        assert!(
-            store.configure_production_policy(policy.clone()).is_err(),
-            "revocation revision is not reusable"
-        );
+        store.save(AgentDesiredState::production_running()).unwrap();
+        assert!(store.set_production_read_only(false).is_err());
+        store.set_production_read_only(true).unwrap();
+        assert!(store.read_only_for(AgentProfile::Production).unwrap());
         let reopened = DesiredStateStore::at(root.join("desired.json"));
-        assert_eq!(
-            reopened.production_policy_status().unwrap()["permission"],
-            "STOPPED"
-        );
-        // A NEW explicit CONTROL authorization, not a restart, may rearm.
-        policy.revision = 3;
-        reopened.configure_production_policy(policy).unwrap();
-        assert_eq!(
-            reopened.production_policy_status().unwrap()["permission"],
-            "ENABLED"
-        );
+        assert!(reopened.read_only_for(AgentProfile::Production).unwrap());
         reopened.save(AgentDesiredState::stopped()).unwrap();
+        reopened.set_production_read_only(false).unwrap();
         assert_eq!(
-            reopened.production_policy_status().unwrap()["permission"],
-            "ENABLED"
+            reopened.status_value()["execution_right"],
+            "PRODUCTION_GOVERNANCE_REQUIRED"
         );
-        reopened
-            .save(AgentDesiredState::demo_acceptance_running())
-            .unwrap();
-        assert_eq!(
-            reopened.production_policy_status().unwrap()["permission"],
-            "OFF"
-        );
+        reopened.save(AgentDesiredState::production_running()).unwrap();
+        assert!(!reopened.read_only_for(AgentProfile::Production).unwrap());
+        reopened.save(AgentDesiredState::demo_acceptance_running()).unwrap();
+        assert!(reopened.set_production_read_only(false).is_err());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1191,11 +1087,7 @@ impl DesiredStateStore {
                     "execution_right": if complete.read_only {
                         "READ_ONLY"
                     } else if complete.profile == AgentProfile::Production {
-                        match complete.production_policy.as_ref().map(|p| p.permission) {
-                            Some(ProductionPermission::Enabled) => "PRODUCTION_POLICY_CONFIGURED",
-                            Some(ProductionPermission::Stopped) => "PRODUCTION_NEW_RISK_STOPPED",
-                            _ => "READ_ONLY",
-                        }
+                        "PRODUCTION_GOVERNANCE_REQUIRED"
                     } else {
                         "DEMO_MUTATIONS_CONFIGURED"
                     },
