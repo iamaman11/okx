@@ -2163,6 +2163,94 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_financial_admission_works_after_many_completed_filled_cycles() {
+        let run = StrategyCapitalReservation {
+            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "strategy_run_multiple_flat_cycles_20261019".to_owned(),
+            account_uid_fingerprint: "a".repeat(64),
+            origin_schema: "okx.manual/v1".to_owned(),
+            origin_version: "2026-10-19.3".to_owned(),
+            mandate_version: "real_manual_v1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "126".to_owned(),
+            account_generation: "generation".to_owned(),
+            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
+            started_at_ms: 1_792_436_000_000,
+        };
+        let time = 1_792_437_000_000u64;
+        let mut period = StrategyFinancialPeriod {
+            schema: okx_execution::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+            run_id: run.allocation_id.clone(),
+            state: "FLAT_RECONCILED",
+            evidence_sha256: "c".repeat(64),
+            allocation_usdt: "100".to_owned(),
+            linked_fills: 2,
+            linked_bills: 2,
+            realized_usdt: "-0.04".to_owned(),
+            fees_usdt: "-0.02".to_owned(),
+            funding_usdt: Some("0".to_owned()),
+            unrealized_usdt: Some("0".to_owned()),
+            nav_usdt: Some("99.94".to_owned()),
+            positions: Vec::new(),
+            usable_for_new_risk: false,
+            reasons: Vec::new(),
+        };
+        let mut point = StrategyNavPoint {
+            schema: "okx.strategy-nav-point/v1".to_owned(),
+            run_id: run.allocation_id.clone(),
+            observed_at_ms: time,
+            account_as_of_ms: time,
+            evidence_sha256: period.evidence_sha256.clone(),
+            source_cursor_key: "order:current".to_owned(),
+            source_cursor_sha256: "d".repeat(64),
+            nav_usdt: "99.94".to_owned(),
+            high_water_usdt: "100".to_owned(),
+            daily_gross_loss_usdt: "0.06".to_owned(),
+            utc_day_start_ms: time / 86_400_000 * 86_400_000,
+            previous_sha256: String::new(),
+            checksum_sha256: String::new(),
+        };
+        point.checksum_sha256 = point.hash().unwrap();
+        let accepted = attested_flat_nav_for_new_risk(&run, &period, &point, "125.94", time)
+            .expect("complete fill/fee and verified NAV permit next independent trade");
+        assert_eq!(accepted.nav_usdt, "99.94");
+        assert_eq!(accepted.high_water_usdt, "100");
+        assert_eq!(accepted.daily_realized_loss_usdt, "0.06");
+
+        // Another fully closed trade in the same run preserves prior peak
+        // and accumulates net strategy losses instead of resetting to 100.
+        period.linked_fills = 4;
+        period.linked_bills = 4;
+        period.realized_usdt = "-0.07".to_owned();
+        period.fees_usdt = "-0.05".to_owned();
+        period.nav_usdt = Some("99.88".to_owned());
+        period.evidence_sha256 = "e".repeat(64);
+        point.evidence_sha256 = period.evidence_sha256.clone();
+        point.nav_usdt = "99.88".to_owned();
+        point.daily_gross_loss_usdt = "0.12".to_owned();
+        point.checksum_sha256 = point.hash().unwrap();
+        assert_eq!(
+            attested_flat_nav_for_new_risk(&run, &period, &point, "125.88", time)
+                .unwrap()
+                .nav_usdt,
+            "99.88"
+        );
+
+        assert!(attested_flat_nav_for_new_risk(&run, &period, &point, "126", time).is_none());
+        period.funding_usdt = None;
+        assert!(attested_flat_nav_for_new_risk(&run, &period, &point, "125.88", time).is_none());
+        period.funding_usdt = Some("0".to_owned());
+        point.evidence_sha256 = "f".repeat(64);
+        point.checksum_sha256 = point.hash().unwrap();
+        assert!(attested_flat_nav_for_new_risk(&run, &period, &point, "125.88", time).is_none());
+        point.evidence_sha256 = period.evidence_sha256.clone();
+        point.checksum_sha256 = point.hash().unwrap();
+        point.account_as_of_ms -= 1;
+        point.checksum_sha256 = point.hash().unwrap();
+        assert!(attested_flat_nav_for_new_risk(&run, &period, &point, "125.88", time).is_none());
+    }
+
+    #[test]
     fn only_exact_known_empty_rejection_can_precede_next_first_open() {
         let uid = "a".repeat(64);
         let run_id = "real_manual_run_20261019c";
