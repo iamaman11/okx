@@ -2031,7 +2031,10 @@ impl AccountCatalogEntry {
                 .iter()
                 .all(|&byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
             || id.last() == Some(&b'-')
-            || matches!(self.account_id.as_str(), "real" | "demo" | "production" | "demo_acceptance")
+            || matches!(
+                self.account_id.as_str(),
+                "real" | "demo" | "production" | "demo_acceptance"
+            )
             || self.label.is_empty()
             || self.label.len() > 48
             || self.label.trim() != self.label
@@ -4621,10 +4624,9 @@ mod native_drain_source_tests {
 
     #[test]
     fn venue_scoped_selectors_are_typed_and_do_not_grant_venue_support() {
-        let old: HostControlOperation = serde_json::from_str(
-            r#"{"type":"select_account","account_id":"real"}"#,
-        )
-        .expect("legacy selector");
+        let old: HostControlOperation =
+            serde_json::from_str(r#"{"type":"select_account","account_id":"real"}"#)
+                .expect("legacy selector");
         assert_eq!(
             old,
             HostControlOperation::SelectAccount {
@@ -4637,13 +4639,17 @@ mod native_drain_source_tests {
             account_id: "desk-a".to_owned(),
         };
         assert!(bybit.validate().is_ok());
-        assert!(serde_json::to_string(&bybit)
-            .expect("typed selector")
-            .contains(r#""venue":"bybit""#));
-        assert!(serde_json::from_str::<HostControlOperation>(
-            r#"{"type":"select_account","venue":"unknown","account_id":"real"}"#,
-        )
-        .is_err());
+        assert!(
+            serde_json::to_string(&bybit)
+                .expect("typed selector")
+                .contains(r#""venue":"bybit""#)
+        );
+        assert!(
+            serde_json::from_str::<HostControlOperation>(
+                r#"{"type":"select_account","venue":"unknown","account_id":"real"}"#,
+            )
+            .is_err()
+        );
     }
 
     #[test]
