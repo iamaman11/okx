@@ -2353,7 +2353,7 @@ mod tests {
         host.desired_profile = AgentProfile::DemoAcceptance;
         assert!(matches!(
             host.execute(HostControlOperation::RestoreProductionAgent),
-            Err(HostControlError::ProfileHandoffProofRequired)
+            Err(HostControlError::InvalidExecutionPath)
         ));
         assert_eq!(host.desired_profile, AgentProfile::DemoAcceptance);
         assert_eq!(host.desired_agent, AgentDesired::Running);
