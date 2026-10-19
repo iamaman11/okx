@@ -52,7 +52,10 @@ fn inert_terminal_rejection(
         && record.plan.action == ExecutionAction::Open
         && record.plan.account_uid_fingerprint == uid
         && record.strategy_run_id.as_deref() == Some(run_id)
-        && record.rejection_code.as_deref().is_some_and(|v| !v.is_empty())
+        && record
+            .rejection_code
+            .as_deref()
+            .is_some_and(|v| !v.is_empty())
         && record.order_id.is_none()
         && record.exchange_state.is_none()
         && record.mutations.is_empty()
@@ -2205,8 +2208,7 @@ mod tests {
         prior.order_id = Some("venue-order-id".to_owned());
         assert!(!inert_terminal_rejection(&prior, &uid, run_id));
         prior.order_id = None;
-        prior.protection.as_mut().unwrap().status =
-            okx_execution::ProtectiveOrderStatus::Active;
+        prior.protection.as_mut().unwrap().status = okx_execution::ProtectiveOrderStatus::Active;
         assert!(!inert_terminal_rejection(&prior, &uid, run_id));
         prior.protection.as_mut().unwrap().status =
             okx_execution::ProtectiveOrderStatus::NotActivated;
