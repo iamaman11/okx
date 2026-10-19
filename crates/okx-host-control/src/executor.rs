@@ -167,7 +167,7 @@ impl HostExecutor {
             }
             HostControlOperation::SelectAccount { venue, account_id } => {
                 self.select_account(venue, &account_id)
-            },
+            }
             HostControlOperation::SelectReadOnlyAccount {
                 target_profile,
                 expected_source_uid_fingerprint,

@@ -4639,7 +4639,7 @@ mod native_drain_source_tests {
         assert!(bybit.validate().is_ok());
         assert!(serde_json::to_string(&bybit)
             .expect("typed selector")
-            .contains("\\"venue\\":\\"bybit\\""));
+            .contains(r#""venue":"bybit""#));
         assert!(serde_json::from_str::<HostControlOperation>(
             r#"{"type":"select_account","venue":"unknown","account_id":"real"}"#,
         )

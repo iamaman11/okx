@@ -143,7 +143,11 @@ impl AccountCatalogStore {
 
     /// The single native account router. A metadata-only named account (or an
     /// unimplemented venue adapter) is never promoted to a running profile.
-    pub fn resolve(&self, venue: TradingVenue, account_id: &str) -> HostControlResult<AccountRoute> {
+    pub fn resolve(
+        &self,
+        venue: TradingVenue,
+        account_id: &str,
+    ) -> HostControlResult<AccountRoute> {
         let catalog = self.load()?;
         if catalog
             .entries
