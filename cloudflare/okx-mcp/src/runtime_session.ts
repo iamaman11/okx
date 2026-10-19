@@ -276,7 +276,7 @@ export class RuntimeSession {
     return selected;
   }
 
-  private async proveFresh(active: { ws: any; attachment: SocketAttachment }): Promise<void> {
+  private async proveFresh(active: { ws: any; attachment: SocketAttachment }): Promise<string> {
     const nonce = `ping_${crypto.randomUUID()}`;
     const wait = this.waitFor(
       `pong:${nonce}`,
@@ -291,6 +291,7 @@ export class RuntimeSession {
       nonce,
     }));
     await wait;
+    return nonce;
   }
 
   private async dispatch(request: any): Promise<Json> {
@@ -312,7 +313,7 @@ export class RuntimeSession {
 
     this.inflight += 1;
     try {
-      await this.proveFresh(active);
+      const deliveryChallenge = await this.proveFresh(active);
 
       const ack = this.waitFor(
         `ack:${request.request_id}`,
@@ -341,7 +342,10 @@ export class RuntimeSession {
           // permit; the native executor still needs an exact DO reservation.
           operator_governance={
             state:current,issued_at_ms:Date.now(),
-            session_generation:active.attachment.generation
+            session_generation:active.attachment.generation,
+            // Native Agent consumed this exact ping just before delivery.
+            // No inter-machine wall clock dependency for a risk-controlled write.
+            delivery_challenge:deliveryChallenge
           };
         }else{
           const stored: unknown = await this.state.storage.get("account_policy_v1");

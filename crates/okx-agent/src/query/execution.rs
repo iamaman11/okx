@@ -1827,9 +1827,14 @@ async fn complete_native_risk_census(
         )
         .await
         .map_err(|_| "RISK_NATIVE_FLAT_PROOF_FAILED")?;
-    crate::risk_census::PortfolioRiskSources::from_governance(scope, vec![single], now_ms)
-        .and_then(|sources| sources.census())
-        .map_err(|_| "RISK_FULL_REAL_UID_COHORT_NOT_PROVEN")
+    crate::risk_census::PortfolioRiskSources::from_governance(
+        scope,
+        vec![single],
+        now_ms,
+        context.verified_governance_challenge,
+    )
+    .and_then(|sources| sources.census())
+    .map_err(|_| "RISK_FULL_REAL_UID_COHORT_NOT_PROVEN")
 }
 
 /// Prepare an exact plan-bound atomic grant. Neither RESERVE nor BEGIN_POST
@@ -1848,11 +1853,7 @@ async fn reserve_native_risk_for_submit(
         .operator_governance
         .ok_or("RISK_GOVERNANCE_V2_REQUIRED")?;
     let plan = &entry.record.plan;
-    if !scope.authorizes_delivery(
-        &plan.account_uid_fingerprint,
-        utc_now_ms(),
-        context.transport_generation,
-    ) {
+    if !context.central_uid_admitted(&plan.account_uid_fingerprint, utc_now_ms()) {
         return Err("RISK_CENTRAL_UID_NOT_AUTHORIZED");
     }
     let run = execution

@@ -102,11 +102,15 @@ impl CentralPolicyBinding<'_> {
 pub struct CentralGovernanceBinding<'a> {
     pub scope: &'a okx_protocol::account_governance::CentralGovernanceSnapshotV2,
     pub session_generation: u64,
+    pub delivery_challenge_verified: bool,
 }
 impl CentralGovernanceBinding<'_> {
-    pub fn authorizes_uid(self, uid: &str, now_ms: u64) -> bool {
-        self.scope
-            .authorizes_delivery(uid, now_ms, self.session_generation)
+    pub fn authorizes_uid(self, uid: &str, _now_ms: u64) -> bool {
+        self.scope.authorizes_challenge_bound_delivery(
+            uid,
+            self.session_generation,
+            self.delivery_challenge_verified,
+        )
     }
 }
 /// One central delivery binding per intent. V1 is rolling-upgrade only;
