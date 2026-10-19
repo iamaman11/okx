@@ -480,14 +480,21 @@ impl MarketStreamState {
         let mut times = vec![
             ("ticker", self.current_received_at(&self.ticker)?),
             ("mark_price", self.current_received_at(&self.mark_price)?),
-            ("index_ticker", self.current_received_at(&self.index_ticker)?),
-            ("open_interest", self.current_received_at(&self.open_interest)?),
+            (
+                "index_ticker",
+                self.current_received_at(&self.index_ticker)?,
+            ),
+            (
+                "open_interest",
+                self.current_received_at(&self.open_interest)?,
+            ),
             ("order_book", self.order_book_received_at_ms?),
         ];
         match funding_requirement {
-            FundingRequirement::Required => {
-                times.push(("funding_rate", self.current_received_at(&self.funding_rate)?))
-            }
+            FundingRequirement::Required => times.push((
+                "funding_rate",
+                self.current_received_at(&self.funding_rate)?,
+            )),
             FundingRequirement::NotApplicable => {}
             FundingRequirement::Unknown => return None,
         }
@@ -748,7 +755,9 @@ mod tests {
         let ready = state.risk_readiness(&reference, 90_000, 60_000, 180_000, true, true);
         assert_eq!(ready.quality, MarketReadiness::Fresh);
         assert_eq!(
-            state.readiness(&reference, 90_000, 60_000, true, true, false).reason,
+            state
+                .readiness(&reference, 90_000, 60_000, true, true, false)
+                .reason,
             "WS_DEPENDENCY_STALE"
         );
         // An actual slow-source timeout still fails closed by exact name.
