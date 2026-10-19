@@ -147,11 +147,11 @@ const terminal={
   state:"FILLED" as const,record_digest:d}
 };
 const transition=async(to:Parameters<typeof transitionRisk>[3],proof:string,
- releaseProof:typeof terminal|undefined=to==="RELEASED"?terminal:undefined)=>{
+ releaseProof:typeof terminal|null=to==="RELEASED"?terminal:null)=>{
  const current=await readRiskBook(sa);
  return transitionRisk(sa,entry.key,p,to,proof,{
   connection_generation:77,expected_book_sequence:current!.sequence,
-  terminal:releaseProof
+  terminal:releaseProof??undefined
  });
 };
 check((await transition("UNKNOWN",d)).status==="UPDATED",
@@ -161,7 +161,7 @@ check((await reserve(sa,policy,census,reqA)).status==="DENIED",
 check((await reserve(sa,policy,census,reqB)).status==="DENIED","UNKNOWN consumes risk");
 check((await transition("HELD",d)).status==="DENIED","no backward mutation");
 check((await transition("RELEASED","invalid")).status==="DENIED","proof required");
-check((await transition("RELEASED",d,undefined)).status==="DENIED",
+check((await transition("RELEASED",d,null)).status==="DENIED",
  "digest without a separate native terminal proof cannot release risk");
 check((await transition("RELEASED",d,{...terminal,
  ledger:{...terminal.ledger,intent_id:"intent_wrong"}})).status==="DENIED",

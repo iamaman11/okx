@@ -228,14 +228,21 @@ impl RiskCommand {
                     && *expected_risk_book_sequence > 0
                     && hash(source_proof_sha256)
                     && match next_state {
-                        RiskResolution::Released => terminal_census.as_ref().is_some_and(NativeRiskCensus::valid)
-                            && terminal_ledger.as_ref().is_some_and(|proof| {
-                                hash(&proof.account_uid)
-                                    && token(&proof.run_id)
-                                    && token(&proof.intent_id)
-                                    && hash(&proof.record_digest)
-                                    && matches!(proof.state.as_str(), "FILLED" | "CANCELED" | "REJECTED")
-                            }),
+                        RiskResolution::Released => {
+                            terminal_census
+                                .as_ref()
+                                .is_some_and(NativeRiskCensus::valid)
+                                && terminal_ledger.as_ref().is_some_and(|proof| {
+                                    hash(&proof.account_uid)
+                                        && token(&proof.run_id)
+                                        && token(&proof.intent_id)
+                                        && hash(&proof.record_digest)
+                                        && matches!(
+                                            proof.state.as_str(),
+                                            "FILLED" | "CANCELED" | "REJECTED"
+                                        )
+                                })
+                        }
                         _ => terminal_census.is_none() && terminal_ledger.is_none(),
                     }
             }
@@ -371,7 +378,12 @@ mod tests {
             },
         };
         assert!(!release.valid());
-        if let RiskCommandAction::Resolve { terminal_census, terminal_ledger, .. } = &mut release.action {
+        if let RiskCommandAction::Resolve {
+            terminal_census,
+            terminal_ledger,
+            ..
+        } = &mut release.action
+        {
             *terminal_census = Some(census);
             *terminal_ledger = Some(TerminalRiskLedgerProof {
                 account_uid: uid,
@@ -382,7 +394,10 @@ mod tests {
             });
         }
         assert!(release.valid());
-        if let RiskCommandAction::Resolve { terminal_ledger, .. } = &mut release.action {
+        if let RiskCommandAction::Resolve {
+            terminal_ledger, ..
+        } = &mut release.action
+        {
             terminal_ledger.as_mut().unwrap().state = "UNKNOWN".to_owned();
         }
         assert!(!release.valid());
