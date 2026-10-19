@@ -453,10 +453,9 @@ impl<'a> ObservationQueryContext<'a> {
                 self.transport_generation,
                 self.verified_governance_challenge,
             )
-        })
-            || self
-                .operator_policy
-                .is_some_and(|policy| policy.authorizes_uid(uid, now_ms, self.transport_generation))
+        }) || self
+            .operator_policy
+            .is_some_and(|policy| policy.authorizes_uid(uid, now_ms, self.transport_generation))
     }
 }
 
@@ -1474,10 +1473,12 @@ mod tests {
             .central_governance_binding()
             .expect("governance binding")
             .authorizes_uid(&"a".repeat(64), 26_000));
-        assert!(!ObservationQueryContext::unavailable()
-            .with_operator_policy(None, 11)
-            .with_operator_governance(Some(&governance))
-            .central_trading_delivery_fresh(20_000));
+        assert!(
+            !ObservationQueryContext::unavailable()
+                .with_operator_policy(None, 11)
+                .with_operator_governance(Some(&governance))
+                .central_trading_delivery_fresh(20_000)
+        );
         assert!(
             !ObservationQueryContext::unavailable()
                 .with_operator_policy(None, 12)
