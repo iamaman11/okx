@@ -204,10 +204,7 @@ const NATIVE_CONTROL_STATE: &str = r"C:\okx-control\host-state.pb";
 
 /// The native owner must remain available for read-only recovery, even if
 /// STOP or an operator-selected READ_ONLY forbids every exchange mutation.
-fn check_native_production_lifecycle_from(
-    bytes: &[u8],
-    for_mutation: bool,
-) -> AgentResult<()> {
+fn check_native_production_lifecycle_from(bytes: &[u8], for_mutation: bool) -> AgentResult<()> {
     let state = okx_protocol::host_state_proto::decode_host_state(bytes)
         .ok_or(AgentError::ProductionPolicyUnavailable)?;
     if state.desired_agent != 1
