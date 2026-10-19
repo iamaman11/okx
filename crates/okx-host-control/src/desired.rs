@@ -5,7 +5,7 @@ use std::{
 };
 
 use okx_protocol::{
-    ProductionTradingPolicy,
+    ProductionPermission, ProductionTradingPolicy,
     host_state_proto::{
         self, HOST_STATE_VERSION, HostStateWire, LegacyProductionPolicyWire, SourceDrainHoldWire,
         SourceWitnessWire, TransitionWire,
