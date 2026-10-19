@@ -114,6 +114,15 @@ pub enum RiskResolution {
     Open,
     Released,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RiskReservationState {
+    Held,
+    Posted,
+    Unknown,
+    Open,
+    Released,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "action",
@@ -121,6 +130,10 @@ pub enum RiskResolution {
     deny_unknown_fields
 )]
 pub enum RiskCommandAction {
+    Inspect {
+        reservation_key: String,
+        plan_sha256: String,
+    },
     Reserve {
         venue: String,
         account_uid: String,
@@ -164,6 +177,9 @@ impl RiskCommand {
             return false;
         }
         match &self.action {
+            RiskCommandAction::Inspect { reservation_key, plan_sha256 } => {
+                !reservation_key.is_empty() && reservation_key.len() <= 512 && hash(plan_sha256)
+            }
             RiskCommandAction::Reserve {
                 venue,
                 account_uid,
@@ -256,6 +272,7 @@ pub enum RiskDecisionStatus {
     Held,
     PostAuthorized,
     Updated,
+    Observed,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -270,6 +287,8 @@ pub struct RiskResult {
     /// DO occupancy excluding the just-fenced candidate; exact nine-decimal USD risk.
     #[serde(default)]
     pub existing_modelled_loss_usdt: Option<String>,
+    #[serde(default)]
+    pub reservation_state: Option<RiskReservationState>,
 }
 impl RiskResult {
     pub fn valid(&self) -> bool {
@@ -286,6 +305,10 @@ impl RiskResult {
                     .is_some_and(|v| v == "0" || positive(v)),
                 _ => self.existing_modelled_loss_usdt.is_none(),
             }
+            && (self.status == RiskDecisionStatus::Observed
+                && self.reservation_state.is_some()
+                || self.status != RiskDecisionStatus::Observed
+                    && self.reservation_state.is_none())
             && self
                 .reason
                 .as_ref()
@@ -414,6 +437,7 @@ mod tests {
             risk_book_sequence: None,
             policy_revision: None,
             existing_modelled_loss_usdt: None,
+            reservation_state: None,
         };
         assert!(result.valid());
         result.status = RiskDecisionStatus::PostAuthorized;

@@ -168,6 +168,7 @@ mod tests {
             } else {
                 None
             },
+            reservation_state: None,
         }
     }
     fn post(held: &RiskResult) -> RiskCommand {

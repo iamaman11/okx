@@ -7,12 +7,13 @@ const COMMAND_SCHEMA="okx.risk-command/v1";
 const RESULT_SCHEMA="okx.risk-result/v1";
 const TOKEN=/^[A-Za-z0-9_-]{8,128}$/;
 const SHA=/^[0-9a-f]{64}$/;
-type ResultStatus="DENIED"|"HELD"|"POST_AUTHORIZED"|"UPDATED";
+type ResultStatus="DENIED"|"HELD"|"POST_AUTHORIZED"|"UPDATED"|"OBSERVED";
 interface Result {
   schema:typeof RESULT_SCHEMA;command_id:string;status:ResultStatus;
   reason:string|null;reservation_key:string|null;
   risk_book_sequence:number|null;policy_revision:number|null;
   existing_modelled_loss_usdt:string|null;
+  reservation_state:"HELD"|"POSTED"|"UNKNOWN"|"OPEN"|"RELEASED"|null;
 }
 interface Session {
   connection_generation:number;
@@ -22,7 +23,7 @@ interface Session {
 function deny(id:string,reason:string):Result {
   return {schema:RESULT_SCHEMA,command_id:id,status:"DENIED",reason,
     reservation_key:null,risk_book_sequence:null,policy_revision:null,
-    existing_modelled_loss_usdt:null};
+    existing_modelled_loss_usdt:null,reservation_state:null};
 }
 function isObject(v:unknown):v is Record<string,unknown> {
   return v!==null&&typeof v==="object"&&!Array.isArray(v);
@@ -59,6 +60,21 @@ export async function handleNativeRiskCommand(
     ||!isObject(raw.action)||!Number.isSafeInteger(now_ms)||now_ms<=0)
     return deny(id,"INVALID_TYPED_RISK_COMMAND");
   const a=raw.action;
+  if(a.action==="INSPECT"){
+    if(typeof a.reservation_key!=="string"||typeof a.plan_sha256!=="string"
+      ||!SHA.test(a.plan_sha256)||a.reservation_key.length>512)
+      return deny(id,"INVALID_INSPECTION_IDENTITY");
+    const generation=await storage.get("generation");
+    if(generation!==session.connection_generation)
+      return deny(id,"STALE_NATIVE_INSPECTION_SESSION");
+    const book=await readRiskBook(storage);
+    const found=book?.entries.find(e=>e.key===a.reservation_key&&e.plan_hash===a.plan_sha256);
+    if(!found||!book)return deny(id,"RISK_RESERVATION_NOT_FOUND");
+    return {schema:RESULT_SCHEMA,command_id:id,status:"OBSERVED",reason:null,
+      reservation_key:found.key,risk_book_sequence:book.sequence,
+      policy_revision:found.policy_revision,existing_modelled_loss_usdt:null,
+      reservation_state:found.state};
+  }
   if(a.action==="RESERVE"){
     const proof=nativeEvidence(a.census,session.connection_generation);
     if(!proof||!isObject(a.census)||!Array.isArray(a.census.account_keys)||
@@ -93,7 +109,8 @@ export async function handleNativeRiskCommand(
     return decision.status==="HELD"
       ?{schema:RESULT_SCHEMA,command_id:id,status:"HELD",reason:null,
         reservation_key:decision.entry.key,risk_book_sequence:decision.book_sequence,
-        policy_revision:decision.entry.policy_revision,existing_modelled_loss_usdt:null}
+        policy_revision:decision.entry.policy_revision,existing_modelled_loss_usdt:null,
+        reservation_state:null}
       :deny(id,decision.reason);
   }
   if(a.action==="BEGIN_POST"){
@@ -122,7 +139,7 @@ export async function handleNativeRiskCommand(
       ?{schema:RESULT_SCHEMA,command_id:id,status:"POST_AUTHORIZED",reason:null,
         reservation_key:a.reservation_key,risk_book_sequence:result.book_sequence!,
         policy_revision:a.policy_revision as number,
-        existing_modelled_loss_usdt:result.existing_modelled_loss_usdt!}
+        existing_modelled_loss_usdt:result.existing_modelled_loss_usdt!,reservation_state:null}
       :deny(id,result.reason??"POST_FENCE_DENIED");
   }
   if(a.action==="RESOLVE"){
@@ -167,7 +184,8 @@ export async function handleNativeRiskCommand(
     return entry&&book
       ?{schema:RESULT_SCHEMA,command_id:id,status:"UPDATED",reason:null,
         reservation_key:entry.key,risk_book_sequence:book.sequence,
-        policy_revision:entry.policy_revision,existing_modelled_loss_usdt:null}
+        policy_revision:entry.policy_revision,existing_modelled_loss_usdt:null,
+        reservation_state:null}
       :deny(id,"RISK_BOOK_READBACK_FAILED");
   }
   return deny(id,"UNSUPPORTED_RISK_COMMAND");
