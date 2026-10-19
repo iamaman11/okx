@@ -39,6 +39,36 @@ use crate::{
 pub const EXECUTION_PREPARED_SCHEMA_V1: &str = "okx.execution-prepared/v1";
 pub const LEVERAGE_CHANGE_PROOF_SCHEMA_V1: &str = "okx.leverage-change-proof/v1";
 
+/// A known venue REJECTED without any order ID, fill, amendment or live
+/// protection is financially inert only within its exact persisted run.
+/// The full authenticated financial source is STILL required to prove zero
+/// order/fill/bill events; terminal status alone never authorizes new risk.
+fn inert_terminal_rejection(
+    record: &okx_execution::ExecutionRecord,
+    uid: &str,
+    run_id: &str,
+) -> bool {
+    record.state == ExecutionState::Rejected
+        && record.plan.action == ExecutionAction::Open
+        && record.plan.account_uid_fingerprint == uid
+        && record.strategy_run_id.as_deref() == Some(run_id)
+        && record
+            .rejection_code
+            .as_deref()
+            .is_some_and(|v| !v.is_empty())
+        && record.order_id.is_none()
+        && record.exchange_state.is_none()
+        && record.mutations.is_empty()
+        && record.reverse.is_none()
+        && record.protection.as_ref().is_some_and(|link| {
+            link.status == okx_execution::ProtectiveOrderStatus::NotActivated
+                && link.algo_order_id.is_none()
+                && link.covered_size.is_none()
+                && link.cleanup.is_none()
+                && link.size_amend.is_none()
+        })
+}
+
 /// Financial FLAT source attests zero funding as Some("0"). An unsent
 /// PREPARED intent instead yields an INCOMPLETE period with no funding fact.
 /// Confusing the two blocks the first Real OPEN despite verified flat NAV.
@@ -732,6 +762,11 @@ impl ExecutionRuntime {
             || run.allocated_usdt != binding.mandate.capital_base_usd
             || ledger.entries().any(|e| {
                 e.created_at_ms >= run.started_at_ms
+                    && !inert_terminal_rejection(
+                        &e.record,
+                        &run.account_uid_fingerprint,
+                        &run.allocation_id,
+                    )
                     && (e.record.plan.intent_id != plan.intent_id
                         || e.record.plan != *plan
                         || e.record.state != ExecutionState::Prepared)
@@ -1402,6 +1437,11 @@ impl ExecutionRuntime {
                         })
                         && ledger.entries().all(|owned| {
                             owned.created_at_ms < run.started_at_ms
+                                || inert_terminal_rejection(
+                                    &owned.record,
+                                    &run.account_uid_fingerprint,
+                                    &run.allocation_id,
+                                )
                                 || owned.record.plan.intent_id == intent_id
                                     && owned.record.state == ExecutionState::Prepared
                         })
@@ -2125,6 +2165,59 @@ mod tests {
     use okx_api::Region;
 
     use super::*;
+
+    #[test]
+    fn only_exact_known_empty_rejection_can_precede_next_first_open() {
+        let uid = "a".repeat(64);
+        let run_id = "real_manual_run_20261019c";
+        let mut prior = okx_execution::ExecutionRecord::new(ExecutionPlan {
+            schema: okx_execution::EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+            intent_id: "real_prior_rejected_20261019".to_owned(),
+            client_order_id: "okxdeadbeef1234567890".to_owned(),
+            reference_generation: "ref".to_owned(),
+            account_generation: "account".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            trade_mode: okx_execution::TradeMode::Cross,
+            side: okx_execution::OrderSide::Buy,
+            position_side: okx_execution::PositionSide::Long,
+            action: ExecutionAction::Open,
+            order_type: okx_execution::OrderType::Fok,
+            size: "0.01".to_owned(),
+            price: "81930.1".to_owned(),
+            open_risk: None,
+            risk_binding: None,
+        });
+        prior.strategy_run_id = Some(run_id.to_owned());
+        prior.state = ExecutionState::Rejected;
+        prior.rejection_code = Some("51008".to_owned());
+        prior.protection = Some(okx_execution::ProtectiveOrderLink {
+            policy_version: okx_execution::PROTECTIVE_ORDER_POLICY_V1.to_owned(),
+            algo_client_order_id: "prx01234567890123456789".to_owned(),
+            trigger_price_basis: okx_execution::ProtectiveTriggerPriceBasis::Mark,
+            status: okx_execution::ProtectiveOrderStatus::NotActivated,
+            algo_order_id: None,
+            covered_size: None,
+            failure_code: None,
+            cleanup: None,
+            size_amend: None,
+        });
+        assert!(inert_terminal_rejection(&prior, &uid, run_id));
+        assert!(!inert_terminal_rejection(&prior, &"b".repeat(64), run_id));
+        assert!(!inert_terminal_rejection(&prior, &uid, "different_run"));
+        prior.order_id = Some("venue-order-id".to_owned());
+        assert!(!inert_terminal_rejection(&prior, &uid, run_id));
+        prior.order_id = None;
+        prior.protection.as_mut().unwrap().status = okx_execution::ProtectiveOrderStatus::Active;
+        assert!(!inert_terminal_rejection(&prior, &uid, run_id));
+        prior.protection.as_mut().unwrap().status =
+            okx_execution::ProtectiveOrderStatus::NotActivated;
+        prior.state = ExecutionState::UnknownSubmission;
+        assert!(!inert_terminal_rejection(&prior, &uid, run_id));
+        prior.state = ExecutionState::Rejected;
+        prior.rejection_code = None;
+        assert!(!inert_terminal_rejection(&prior, &uid, run_id));
+    }
 
     fn credentials() -> Credentials {
         Credentials::new(
