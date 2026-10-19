@@ -655,7 +655,7 @@ mod tests {
         c.observed[1].private_stream_continuous = false;
         assert_eq!(c.census().unwrap_err(), CensusFailure::PrivateStreamGap);
         c = cohort();
-        c.now_ms = 6_001;
+        c.now_ms = 21_001;
         assert_eq!(c.census().unwrap_err(), CensusFailure::StaleSource);
         c = cohort();
         c.registry_verified = false;
