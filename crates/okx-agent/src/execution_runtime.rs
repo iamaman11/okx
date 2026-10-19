@@ -189,63 +189,104 @@ fn quiet_source_capture_due(
             >= QUIET_SOURCE_COVERAGE_REFRESH_MS
 }
 
-/// The native CONTROL owns a typed crash-safe host-state journal.
-/// A legacy local Production permission is NOT created by account selection
-/// and is refused when the journal has an active switch or ReadOnly latch.
-/// The centralized operator policy is independent of this OS journal.
+/// CONTROL owns process lifecycle and negative safety latches only.
+/// It cannot grant trading rights, account risk, or positive budgets.
 const NATIVE_CONTROL_STATE: &str = r"C:\okx-control\host-state.pb";
 
-fn parse_native_production_policy(
-    bytes: &[u8],
-) -> AgentResult<okx_execution::ProductionTradingPolicy> {
-    let owner = okx_protocol::host_state_proto::decode_host_state(bytes)
+fn require_native_production_lifecycle_from(bytes: &[u8]) -> AgentResult<()> {
+    let state = okx_protocol::host_state_proto::decode_host_state(bytes)
         .ok_or(AgentError::ProductionPolicyUnavailable)?;
-    if owner.desired_agent != 1
-        || owner.selected_environment != 1
-        || owner.read_only
-        || owner.transition.is_some()
-        || owner.switch_hold.is_some()
+    if state.desired_agent != 1
+        || state.selected_environment != 1
+        || state.read_only
+        || state.transition.is_some()
+        || state.switch_hold.is_some()
     {
         return Err(AgentError::ProductionPolicyUnavailable);
     }
-    let policy = owner
-        .legacy_production_policy
-        .ok_or(AgentError::ProductionPolicyUnavailable)?;
-    let permission = match policy.permission {
-        2 => okx_execution::ProductionPermission::Enabled,
-        3 => okx_execution::ProductionPermission::Stopped,
-        _ => return Err(AgentError::ProductionPolicyUnavailable),
-    };
-    let validated = okx_protocol::ProductionTradingPolicy {
-        schema: policy.schema,
-        revision: policy.revision,
-        permission: if policy.permission == 2 {
-            okx_protocol::ProductionPermission::Enabled
-        } else {
-            okx_protocol::ProductionPermission::Stopped
-        },
-        account_uid_fingerprint: policy.account_uid_fingerprint,
-        strategy_run_id: policy.strategy_run_id,
-        operator_authority_id: policy.operator_authority_id,
-        allowed_instruments: policy.allowed_instruments,
-        max_total_modelled_loss_usdt: policy.max_total_modelled_loss_usdt,
-    };
-    validated.validate()?;
-    Ok(okx_execution::ProductionTradingPolicy {
-        schema: validated.schema,
-        revision: validated.revision,
-        permission,
-        account_uid_fingerprint: validated.account_uid_fingerprint,
-        strategy_run_id: validated.strategy_run_id,
-        operator_authority_id: validated.operator_authority_id,
-        allowed_instruments: validated.allowed_instruments,
-        max_total_modelled_loss_usdt: validated.max_total_modelled_loss_usdt,
+    // Ignore legacy_production_policy: only v2 central governance authorizes.
+    Ok(())
+}
+
+fn require_native_production_lifecycle() -> AgentResult<()> {
+    let bytes = std::fs::read(NATIVE_CONTROL_STATE)?;
+    require_native_production_lifecycle_from(&bytes)
+}
+
+/// Temporary executor-v1 arithmetic projection from ONE verified central v2
+/// governance snapshot, not a separate mutable policy or risk authority.
+fn central_executor_policy(
+    scope: CentralGovernanceBinding<'_>,
+    run: &StrategyCapitalReservation,
+    instrument: &str,
+    now_ms: u64,
+) -> Option<okx_execution::ProductionTradingPolicy> {
+    use okx_protocol::account_governance::AccountEnvironmentV2;
+    if !scope.authorizes_uid(&run.account_uid_fingerprint, now_ms)
+        || run.operator_authority_id != scope.scope.state.operator_authorization.id
+    {
+        return None;
+    }
+    let account = scope.scope.state.accounts.iter().find(|a| {
+        a.venue == "okx"
+            && a.environment == AccountEnvironmentV2::Real
+            && a.identity_verified
+            && a.enabled
+            && a.uid_fingerprint == run.account_uid_fingerprint
+    })?;
+    if !account.limits.allowed_instruments.iter().any(|allowed| allowed == instrument)
+        || !account.strategies.iter().any(|strategy| {
+            strategy.enabled && strategy.id == run.mandate_version
+        })
+    {
+        return None;
+    }
+    let global = rust_decimal::Decimal::from_str(
+        &scope.scope.state.max_total_modelled_loss_usdt
+    ).ok()?;
+    let ceiling = rust_decimal::Decimal::from_str(
+        &scope.scope.state.operator_authorization.ceiling_usdt
+    ).ok()?;
+    if global <= rust_decimal::Decimal::ZERO || global > ceiling {
+        return None;
+    }
+    Some(okx_execution::ProductionTradingPolicy {
+        schema: okx_execution::PRODUCTION_TRADING_POLICY_SCHEMA_V1.to_owned(),
+        revision: scope.scope.state.revision,
+        permission: okx_execution::ProductionPermission::Enabled,
+        account_uid_fingerprint: run.account_uid_fingerprint.clone(),
+        strategy_run_id: run.allocation_id.clone(),
+        operator_authority_id: run.operator_authority_id.clone(),
+        allowed_instruments: account.limits.allowed_instruments.clone(),
+        max_total_modelled_loss_usdt: global.normalize().to_string(),
     })
 }
 
-fn read_native_production_policy() -> AgentResult<okx_execution::ProductionTradingPolicy> {
-    let bytes = std::fs::read(NATIVE_CONTROL_STATE)?;
-    parse_native_production_policy(&bytes)
+#[cfg(test)]
+#[test]
+fn lifecycle_negative_gate_does_not_depend_on_legacy_positive_policy() {
+    use okx_protocol::host_state_proto::{HostStateWire, encode_host_state};
+    let mut state = HostStateWire {
+        version: 1,
+        desired_agent: 1,
+        selected_environment: 1,
+        read_only: false,
+        legacy_production_policy: None,
+        transition: None,
+        switch_hold: None,
+    };
+    assert!(require_native_production_lifecycle_from(
+        &encode_host_state(&state).unwrap()
+    ).is_ok());
+    state.read_only = true;
+    assert!(require_native_production_lifecycle_from(
+        &encode_host_state(&state).unwrap()
+    ).is_err());
+    state.read_only = false;
+    state.selected_environment = 2;
+    assert!(require_native_production_lifecycle_from(
+        &encode_host_state(&state).unwrap()
+    ).is_err());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,7 +389,7 @@ impl ExecutionRuntime {
         if environment.demo {
             return Err(AgentError::ProductionPolicyUnavailable);
         }
-        read_native_production_policy()?;
+        require_native_production_lifecycle()?;
         Self::new_with_mode(
             root,
             environment,
@@ -618,16 +659,11 @@ impl ExecutionRuntime {
         let mut executor = self.executor.lock().await;
         let ledger = executor.ledger();
         let run = ledger.capital_reservation()?.clone();
-        if self.production_trading_requested() {
-            let policy = read_native_production_policy().ok()?;
-            if policy.permission != okx_execution::ProductionPermission::Enabled
-                || policy.account_uid_fingerprint != run.account_uid_fingerprint
-                || policy.strategy_run_id != run.allocation_id
-                || policy.operator_authority_id != run.operator_authority_id
-                || !policy.allowed_instruments.contains(&plan.instrument_id)
-            {
-                return None;
-            }
+        // Financial NAV evidence is not positive trade authorization.
+        if self.production_trading_requested()
+            && require_native_production_lifecycle().is_err()
+        {
+            return None;
         }
         let binding = plan.risk_binding.as_ref()?;
         // Trading equity must remain equal to the source-authenticated
@@ -984,17 +1020,13 @@ impl ExecutionRuntime {
         rearm: Option<&okx_execution::StrategyStopRearmRequest>,
         central: Option<CentralAuthorizationBinding<'_>>,
     ) -> AgentResult<Option<Result<StrategyCapitalReservation, OrderExecutorError>>> {
-        if !central.is_some_and(|p| {
-            p.authorizes_uid(
-                &preflight.account_uid_fingerprint,
-                Utc::now().timestamp_millis().max(1) as u64,
-            ) && match p {
-                CentralAuthorizationBinding::Legacy(_) => true,
-                CentralAuthorizationBinding::Governance(scope) => {
-                    scope.scope.state.operator_authorization.id == reservation.operator_authority_id
-                }
-            }
-        }) {
+        let Some(CentralAuthorizationBinding::Governance(scope)) = central else {
+            return Ok(None);
+        };
+        if !scope.authorizes_uid(
+            &preflight.account_uid_fingerprint,
+            Utc::now().timestamp_millis().max(1) as u64,
+        ) {
             return Ok(None);
         }
         if !self.production_trading_requested()
@@ -1006,13 +1038,25 @@ impl ExecutionRuntime {
         {
             return Ok(None);
         }
-        let policy = read_native_production_policy()?;
-        if policy.permission != okx_execution::ProductionPermission::Enabled
-            || policy.account_uid_fingerprint != preflight.account_uid_fingerprint
-            || policy.account_uid_fingerprint != opening.account_uid_fingerprint
-            || policy.strategy_run_id != reservation.allocation_id
-            || policy.operator_authority_id != reservation.operator_authority_id
+        require_native_production_lifecycle()?;
+        if reservation.account_uid_fingerprint != preflight.account_uid_fingerprint
+            || opening.account_uid_fingerprint != preflight.account_uid_fingerprint
+            || reservation.operator_authority_id != scope.scope.state.operator_authorization.id
         {
+            return Ok(None);
+        }
+        let matched = scope.scope.state.accounts.iter().any(|account| {
+            account.venue == "okx"
+                && account.environment
+                    == okx_protocol::account_governance::AccountEnvironmentV2::Real
+                && account.enabled
+                && account.identity_verified
+                && account.uid_fingerprint == preflight.account_uid_fingerprint
+                && account.strategies.iter().any(|strategy| {
+                    strategy.enabled && strategy.id == reservation.mandate_version
+                })
+        });
+        if !matched {
             return Ok(None);
         }
         let mut executor = self.executor.lock().await;
@@ -1053,20 +1097,13 @@ impl ExecutionRuntime {
         if !self.production_trading_requested() || !preflight.production_environment {
             return false;
         }
-        // CONTROL owns the authorization, the exchange preflight owns UID.
-        // A STOPPED Production policy can still finalize source-exact
-        // finances; OFF/READ_ONLY cannot mutate the financial archive.
-        read_native_production_policy().is_ok_and(|policy| {
-            matches!(
-                policy.permission,
-                okx_execution::ProductionPermission::Enabled
-                    | okx_execution::ProductionPermission::Stopped
-            ) && ledger.capital_reservation().is_some_and(|run| {
-                policy.account_uid_fingerprint == run.account_uid_fingerprint
-                    && policy.strategy_run_id == run.allocation_id
-                    && policy.operator_authority_id == run.operator_authority_id
+        // Finance reconciliation may finalize a known run after central STOP,
+        // but cannot create new exchange exposure or bypass CONTROL lifecycle.
+        require_native_production_lifecycle().is_ok()
+            && ledger.capital_reservation().is_some_and(|run| {
+                run.account_uid_fingerprint == observed_uid
+                    && run.allocation_id == expected_run_id
             })
-        })
     }
 
     /// The single executor captures the coherent source before the
@@ -1190,33 +1227,25 @@ impl ExecutionRuntime {
         {
             return Ok(None);
         }
-        // Serialize policy reading with all other execution submissions:
-        // revocation cannot be hidden behind a prior wait on the ledger lock.
+        require_native_production_lifecycle()?;
+        let Some(CentralAuthorizationBinding::Governance(scope)) = authorization else {
+            return Ok(None);
+        };
         let mut executor = self.executor.lock().await;
-        let mut policy = read_native_production_policy()?;
-        if policy.account_uid_fingerprint != preflight.credential.account_uid_fingerprint {
-            return Ok(None);
-        }
-        // The existing local policy may only further restrict the ONE
-        // centrally selected operator budget, never enlarge it. Parse exact
-        // decimal values, never f64. No permission is created by this bound.
-        let Some(central_budget) = authorization.and_then(CentralAuthorizationBinding::budget)
-        else {
+        let Some(entry) = executor.ledger().get(intent_id) else {
             return Ok(None);
         };
-        let Some(native_budget) =
-            rust_decimal::Decimal::from_str(&policy.max_total_modelled_loss_usdt).ok()
-        else {
+        let Some(run) = executor.ledger().capital_reservation() else {
             return Ok(None);
         };
-        if central_budget <= rust_decimal::Decimal::ZERO
-            || native_budget <= rust_decimal::Decimal::ZERO
+        if run.account_uid_fingerprint != *native_uid
+            || entry.record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
         {
             return Ok(None);
         }
-        policy.max_total_modelled_loss_usdt =
-            central_budget.min(native_budget).normalize().to_string();
-        let Some(entry) = executor.ledger().get(intent_id) else {
+        let Some(policy) = central_executor_policy(
+            scope, run, &entry.record.plan.instrument_id, fresh_now
+        ) else {
             return Ok(None);
         };
         let plan = &entry.record.plan;
