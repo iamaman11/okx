@@ -202,19 +202,34 @@ fn quiet_source_capture_due(
 /// It cannot grant trading rights, account risk, or positive budgets.
 const NATIVE_CONTROL_STATE: &str = r"C:\okx-control\host-state.pb";
 
-fn require_native_production_lifecycle_from(bytes: &[u8]) -> AgentResult<()> {
+/// The native owner must remain available for read-only recovery, even if
+/// STOP or an operator-selected READ_ONLY forbids every exchange mutation.
+fn check_native_production_lifecycle_from(
+    bytes: &[u8],
+    for_mutation: bool,
+) -> AgentResult<()> {
     let state = okx_protocol::host_state_proto::decode_host_state(bytes)
         .ok_or(AgentError::ProductionPolicyUnavailable)?;
     if state.desired_agent != 1
         || state.selected_environment != 1
-        || state.read_only
+        || for_mutation && state.read_only
         || state.transition.is_some()
         || state.switch_hold.is_some()
     {
         return Err(AgentError::ProductionPolicyUnavailable);
     }
-    // Ignore legacy_production_policy: only v2 central governance authorizes.
+    // Legacy positive policy never grants trading. v2 governance and the
+    // atomic post fence remain necessary at the final Executor admission.
     Ok(())
+}
+
+fn require_native_production_lifecycle_from(bytes: &[u8]) -> AgentResult<()> {
+    check_native_production_lifecycle_from(bytes, true)
+}
+
+fn require_native_production_owner() -> AgentResult<()> {
+    let bytes = std::fs::read(NATIVE_CONTROL_STATE)?;
+    check_native_production_lifecycle_from(&bytes, false)
 }
 
 fn require_native_production_lifecycle() -> AgentResult<()> {
@@ -290,7 +305,10 @@ fn lifecycle_negative_gate_does_not_depend_on_legacy_positive_policy() {
     };
     assert!(require_native_production_lifecycle_from(&encode_host_state(&state).unwrap()).is_ok());
     state.read_only = true;
-    assert!(require_native_production_lifecycle_from(&encode_host_state(&state).unwrap()).is_err());
+    let persisted = encode_host_state(&state).unwrap();
+    assert!(require_native_production_lifecycle_from(&persisted).is_err());
+    // Boot and observation must survive persisted READ_ONLY; only POST is vetoed.
+    assert!(check_native_production_lifecycle_from(&persisted, false).is_ok());
     state.read_only = false;
     state.selected_environment = 2;
     assert!(require_native_production_lifecycle_from(&encode_host_state(&state).unwrap()).is_err());
@@ -396,7 +414,10 @@ impl ExecutionRuntime {
         if environment.demo {
             return Err(AgentError::ProductionPolicyUnavailable);
         }
-        require_native_production_lifecycle()?;
+        // Boot the SAME read-only observation/ledger owner under native
+        // CONTROL even while new risk is explicitly OFF. Mutating paths
+        // independently require !read_only immediately before venue POST.
+        require_native_production_owner()?;
         Self::new_with_mode(
             root,
             environment,
