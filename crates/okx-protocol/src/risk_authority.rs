@@ -332,7 +332,10 @@ mod tests {
         result.reservation_key = Some("owned_reservation".to_owned());
         result.risk_book_sequence = Some(2);
         result.policy_revision = Some(1);
-        assert!(!result.valid(), "POST without occupied-risk evidence cannot authorize");
+        assert!(
+            !result.valid(),
+            "POST without occupied-risk evidence cannot authorize"
+        );
         result.existing_modelled_loss_usdt = Some("1.000000001".to_owned());
         assert!(result.valid());
         result.existing_modelled_loss_usdt = Some("not-a-risk".to_owned());
