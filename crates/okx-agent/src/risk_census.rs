@@ -190,14 +190,15 @@ impl PortfolioRiskSources {
         scope: &CentralGovernanceSnapshotV2,
         observed: Vec<AccountRiskEvidence>,
         now_ms: u64,
+        delivery_challenge_verified: bool,
     ) -> Result<Self, CensusFailure> {
         // Source observation is valid independently of positive trading
         // permission. STOP/revocation must still allow proof of terminal FLAT
         // and release of existing risk; only RESERVE/BEGIN_POST require GO.
         if !scope.valid()
             || scope.state.revision == 0
-            || scope.issued_at_ms > now_ms
-            || now_ms.saturating_sub(scope.issued_at_ms) > 15_000
+            || scope.delivery_challenge.is_none()
+            || !delivery_challenge_verified
         {
             return Err(CensusFailure::RegistryUnverified);
         }
@@ -392,13 +393,14 @@ mod tests {
             },
             issued_at_ms: 1_000,
             session_generation: 77,
+            delivery_challenge: Some("ping_risk_census_012345".to_owned()),
         }
     }
 
     #[test]
     fn central_scope_cannot_drop_disabled_or_unverified_real_accounts() {
         let g = governance();
-        let source = PortfolioRiskSources::from_governance(&g, vec![row('a'), row('b')], 1_000)
+        let source = PortfolioRiskSources::from_governance(&g, vec![row('a'), row('b')], 1_000, true)
             .expect("native cohort");
         assert_eq!(
             source.census().unwrap().account_keys,
@@ -408,10 +410,10 @@ mod tests {
         stopped.state.trading_requested = false;
         stopped.state.operator_authorization.status = AuthorizationStatus::Revoked;
         let read_only =
-            PortfolioRiskSources::from_governance(&stopped, vec![row('a'), row('b')], 1_000)
+            PortfolioRiskSources::from_governance(&stopped, vec![row('a'), row('b')], 1_000, true)
                 .expect("revoked new trade never blocks native read for release");
         assert_eq!(read_only.census().unwrap().account_keys.len(), 2);
-        let incomplete = PortfolioRiskSources::from_governance(&g, vec![row('a')], 1_000).unwrap();
+        let incomplete = PortfolioRiskSources::from_governance(&g, vec![row('a')], 1_000, true).unwrap();
         assert_eq!(
             incomplete.census().unwrap_err(),
             CensusFailure::MissingOrDuplicateAccount
@@ -420,19 +422,19 @@ mod tests {
         let mut bad = governance();
         bad.state.accounts[1].identity_verified = false;
         assert_eq!(
-            PortfolioRiskSources::from_governance(&bad, vec![row('a'), row('b')], 1_000)
+            PortfolioRiskSources::from_governance(&bad, vec![row('a'), row('b')], 1_000, true)
                 .unwrap_err(),
             CensusFailure::RegistryUnverified
         );
         let mut other_venue = governance();
         other_venue.state.accounts[1].venue = "other".into();
         assert_eq!(
-            PortfolioRiskSources::from_governance(&other_venue, vec![row('a'), row('b')], 1_000)
+            PortfolioRiskSources::from_governance(&other_venue, vec![row('a'), row('b')], 1_000, true)
                 .unwrap_err(),
             CensusFailure::RegistryUnverified
         );
         assert_eq!(
-            PortfolioRiskSources::from_governance(&g, vec![row('a'), row('b')], 16_001)
+            PortfolioRiskSources::from_governance(&g, vec![row('a'), row('b')], 16_001, false)
                 .unwrap_err(),
             CensusFailure::RegistryUnverified
         );
