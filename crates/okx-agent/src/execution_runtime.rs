@@ -61,7 +61,6 @@ fn first_open_requires_exact_funding_semantics_for_each_period_state() {
     assert!(!first_open_funding_proven(Some("0"), true));
 }
 
-
 /// The final native venue witnesses are captured by one query owner before
 /// the single Rust executor evaluates and submits a Production intent.
 pub struct ProductionSubmitSources<'a> {
@@ -778,10 +777,7 @@ impl ExecutionRuntime {
             || !projection.positions.is_empty()
             || projection.realized_usdt != "0"
             || projection.fees_usdt != "0"
-            || !first_open_funding_proven(
-                projection.funding_usdt.as_deref(),
-                same_unsent_prepared,
-            )
+            || !first_open_funding_proven(projection.funding_usdt.as_deref(), same_unsent_prepared)
         {
             return None;
         }
