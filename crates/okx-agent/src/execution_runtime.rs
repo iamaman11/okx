@@ -91,7 +91,7 @@ fn attested_flat_nav_for_new_risk(
         || point.run_id != run.allocation_id
         || point.evidence_sha256 != period.evidence_sha256
         || point.account_as_of_ms != account_asof_ms
-        || !point.validate().is_ok()
+        || point.validate().is_err()
     {
         return None;
     }
@@ -795,11 +795,7 @@ impl ExecutionRuntime {
             || run.allocated_usdt != binding.mandate.capital_base_usd
             || ledger.entries().any(|e| {
                 e.created_at_ms >= run.started_at_ms
-                    && !inert_terminal_rejection(
-                        &e.record,
-                        &run.account_uid_fingerprint,
-                        &run.allocation_id,
-                    )
+                    && !e.record.state.is_terminal()
                     && (e.record.plan.intent_id != plan.intent_id
                         || e.record.plan != *plan
                         || e.record.state != ExecutionState::Prepared)
