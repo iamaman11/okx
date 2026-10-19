@@ -953,13 +953,19 @@ impl ExecutionRuntime {
         opening: &StrategyAllocationOpening,
         now_ms: u64,
         rearm: Option<&okx_execution::StrategyStopRearmRequest>,
-        central: Option<CentralPolicyBinding<'_>>,
+        central: Option<CentralAuthorizationBinding<'_>>,
     ) -> AgentResult<Option<Result<StrategyCapitalReservation, OrderExecutorError>>> {
         if !central.is_some_and(|p| {
             p.authorizes_uid(
                 &preflight.account_uid_fingerprint,
                 Utc::now().timestamp_millis().max(1) as u64,
-            )
+            ) && match p {
+                CentralAuthorizationBinding::Legacy(_) => true,
+                CentralAuthorizationBinding::Governance(scope) => {
+                    scope.scope.state.operator_authorization.id
+                        == reservation.operator_authority_id
+                }
+            }
         }) {
             return Ok(None);
         }

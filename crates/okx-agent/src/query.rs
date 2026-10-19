@@ -398,6 +398,42 @@ impl<'a> ObservationQueryContext<'a> {
             })
     }
 
+    /// Delivery-only check for the two supported central rollout formats.
+    /// Never treats a Worker envelope as authority to send an exchange POST:
+    /// the native executor and the single durable RiskBook still have to agree.
+    /// Mixed v1/v2 envelopes fail closed rather than select a convenient grant.
+    pub fn central_trading_delivery_fresh(&self, now_ms: u64) -> bool {
+        match (self.operator_policy, self.operator_governance) {
+            (Some(policy), None) => {
+                policy.valid()
+                    && policy.trading_requested
+                    && policy.revision > 0
+                    && policy.session_generation == self.transport_generation
+                    && policy.issued_at_ms <= now_ms
+                    && now_ms.saturating_sub(policy.issued_at_ms)
+                        <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
+            }
+            (None, Some(governance)) => {
+                governance.valid()
+                    && governance.session_generation == self.transport_generation
+                    && governance.issued_at_ms <= now_ms
+                    && now_ms.saturating_sub(governance.issued_at_ms) <= 15_000
+                    && governance.state.revision > 0
+                    && governance.state.trading_requested
+                    && governance.state.operator_authorization.status
+                        == okx_protocol::account_governance::AuthorizationStatus::Active
+                    && governance.state.accounts.iter().any(|account| {
+                        account.venue == "okx"
+                            && account.environment
+                                == okx_protocol::account_governance::AccountEnvironmentV2::Real
+                            && account.enabled
+                            && account.identity_verified
+                    })
+            }
+            _ => false,
+        }
+    }
+
     pub fn central_uid_admitted(&self, uid: &str, now_ms: u64) -> bool {
         self.operator_governance
             .is_some_and(|scope| scope.authorizes_delivery(uid, now_ms, self.transport_generation))
@@ -1356,4 +1392,72 @@ mod tests {
             upcoming_parameter_changes: Vec::new(),
         }
     }
+    #[test]
+    fn production_governance_delivery_is_typed_and_fails_closed() {
+        use okx_protocol::account_governance::{
+            AccountControlV2, AccountEnvironmentV2, AccountGovernanceV2, AccountLimitsV2,
+            AuthorizationStatus, CentralGovernanceSnapshotV2, OperatorAuthorizationV2,
+            StrategyLimitsV2, GOVERNANCE_SCHEMA_V2,
+        };
+        let governance = CentralGovernanceSnapshotV2 {
+            state: AccountGovernanceV2 {
+                schema: GOVERNANCE_SCHEMA_V2.to_owned(),
+                revision: 3,
+                trading_requested: true,
+                operator_authorization: OperatorAuthorizationV2 {
+                    id: format!("sha256:{}", "b".repeat(64)),
+                    status: AuthorizationStatus::Active,
+                    ceiling_usdt: "10".to_owned(),
+                },
+                max_total_modelled_loss_usdt: "5".to_owned(),
+                accounts: vec![AccountControlV2 {
+                    id: "account_test_001".to_owned(),
+                    label: "real".to_owned(),
+                    venue: "okx".to_owned(),
+                    environment: AccountEnvironmentV2::Real,
+                    uid_fingerprint: "a".repeat(64),
+                    identity_verified: true,
+                    enabled: true,
+                    limits: AccountLimitsV2 {
+                        max_modelled_loss_usdt: "5".to_owned(),
+                        max_order_loss_usdt: "1".to_owned(),
+                        max_notional_usdt: Some("100".to_owned()),
+                        max_leverage: Some("2".to_owned()),
+                        max_daily_realized_loss_usdt: Some("2".to_owned()),
+                        max_drawdown_ratio: Some("0.2".to_owned()),
+                        allowed_instruments: vec!["BTC-USDT-SWAP".to_owned()],
+                    },
+                    strategies: vec![StrategyLimitsV2 {
+                        id: "strategy_test_001".to_owned(),
+                        enabled: true,
+                        allocated_capital_usdt: "10".to_owned(),
+                        max_modelled_loss_usdt: "1".to_owned(),
+                        max_daily_realized_loss_usdt: Some("1".to_owned()),
+                        max_drawdown_ratio: Some("0.1".to_owned()),
+                    }],
+                }],
+            },
+            issued_at_ms: 10_000,
+            session_generation: 11,
+        };
+        assert!(governance.valid());
+        let context = ObservationQueryContext::unavailable()
+            .with_operator_policy(None, 11)
+            .with_operator_governance(Some(&governance));
+        assert!(context.central_trading_delivery_fresh(20_000));
+        assert!(!context.central_trading_delivery_fresh(26_000));
+        assert!(!ObservationQueryContext::unavailable()
+            .with_operator_policy(None, 12)
+            .with_operator_governance(Some(&governance))
+            .central_trading_delivery_fresh(20_000));
+        let mut revoked = governance.clone();
+        revoked.state.operator_authorization.status = AuthorizationStatus::Revoked;
+        assert!(!ObservationQueryContext::unavailable()
+            .with_operator_policy(None, 11)
+            .with_operator_governance(Some(&revoked))
+            .central_trading_delivery_fresh(20_000));
+        assert!(!ObservationQueryContext::unavailable()
+            .central_trading_delivery_fresh(20_000));
+    }
+
 }

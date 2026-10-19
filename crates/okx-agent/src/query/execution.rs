@@ -151,14 +151,7 @@ pub(super) async fn dispatch(
         .execution
         .is_some_and(|owner| owner.production_trading_requested())
         && !request.operation.direct_transport_read_only()
-        && !context.operator_policy.is_some_and(|policy| {
-            policy.valid()
-                && policy.trading_requested
-                && policy.session_generation == context.transport_generation
-                && policy.issued_at_ms <= utc_now_ms()
-                && utc_now_ms().saturating_sub(policy.issued_at_ms)
-                    <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
-        })
+        && !context.central_trading_delivery_fresh(utc_now_ms())
     {
         return Ok(failure_response(
             request,
@@ -609,7 +602,7 @@ async fn begin_strategy_run(
                 &opening,
                 observed_at_ms,
                 rearm.as_ref(),
-                context.central_policy_binding(),
+                context.central_authorization_binding(),
             )
             .await?
     } else {
