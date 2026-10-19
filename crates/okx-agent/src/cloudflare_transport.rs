@@ -61,6 +61,21 @@ fn direct_operation_allowed(
             && operation.direct_transport_demo_execution())
 }
 
+/// The one precise terminal-status read can finalize a source-proven
+/// RiskBook RELEASE (never RESERVE, BEGIN_POST, or exchange POST). Do not
+/// elevate normal read queries to risk-mutation ownership.
+fn terminal_risk_status_owner(
+    profile: DirectRuntimeProfile,
+    operation: &AgentOperation,
+    governance_present: bool,
+    nonce_verified: bool,
+) -> bool {
+    profile == DirectRuntimeProfile::Production
+        && matches!(operation, AgentOperation::ExecutionStatus { .. })
+        && governance_present
+        && nonce_verified
+}
+
 /// Consume the exact ping/pong challenge delivered by the authenticated Worker.
 /// Only a native monotonic clock measures freshness; Cloudflare's Date.now()
 /// advances on I/O and cannot be used as a cross-runtime admission clock.
@@ -529,7 +544,9 @@ async fn run_session(
                         // Production is denied even if Worker/OAuth sends a write
                         // through this otherwise authenticated read transport.
                         let mutating = !request.operation.direct_transport_read_only();
-                        let governance_challenge_fresh = if mutating {
+                        let terminal_status = config.runtime_profile == DirectRuntimeProfile::Production
+                            && matches!(&request.operation, AgentOperation::ExecutionStatus { .. });
+                        let governance_challenge_fresh = if mutating || terminal_status {
                             consume_fresh_delivery_challenge(
                                 &mut pending_delivery_challenges,
                                 operator_governance
@@ -539,6 +556,12 @@ async fn run_session(
                         } else {
                             false
                         };
+                        let terminal_risk_owner = terminal_risk_status_owner(
+                            config.runtime_profile,
+                            &request.operation,
+                            operator_governance.is_some(),
+                            governance_challenge_fresh,
+                        );
                         let delivery = central_production_delivery_admission(
                             config.runtime_profile,
                             context.execution.map(ExecutionRuntime::mode),
@@ -585,7 +608,7 @@ async fn run_session(
                         }
 
                         if in_flight.len() >= MAX_INFLIGHT_READ_QUERIES
-                            || (mutating && active_mutation.is_some())
+                            || ((mutating || terminal_risk_owner) && active_mutation.is_some())
                         {
                             let response = direct_rejection(
                                 &request.request_id,
@@ -620,7 +643,7 @@ async fn run_session(
                         let generated_at =
                             Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
                         let response_request_id = request.request_id.clone();
-                        if mutating {
+                        if mutating || terminal_risk_owner {
                             active_mutation = Some(response_request_id.clone());
                         }
                         let risk_client = risk_client.clone();
@@ -1091,6 +1114,43 @@ mod tests {
             Instant::now() - DELIVERY_CHALLENGE_MAX_AGE - Duration::from_millis(1),
         );
         assert!(!consume_fresh_delivery_challenge(&mut pending, Some(nonce)));
+    }
+
+    #[test]
+    fn exact_terminal_read_may_own_only_fenced_native_risk_release() {
+        let status = AgentOperation::ExecutionStatus {
+            intent_id: "real_terminal_exact_intent_20261019".to_owned(),
+        };
+        assert!(terminal_risk_status_owner(
+            DirectRuntimeProfile::Production,
+            &status,
+            true,
+            true
+        ));
+        assert!(!terminal_risk_status_owner(
+            DirectRuntimeProfile::Production,
+            &status,
+            false,
+            true
+        ));
+        assert!(!terminal_risk_status_owner(
+            DirectRuntimeProfile::Production,
+            &status,
+            true,
+            false
+        ));
+        assert!(!terminal_risk_status_owner(
+            DirectRuntimeProfile::DemoAcceptance,
+            &status,
+            true,
+            true
+        ));
+        assert!(!terminal_risk_status_owner(
+            DirectRuntimeProfile::Production,
+            &AgentOperation::AccountSummary,
+            true,
+            true
+        ));
     }
 
     #[test]
