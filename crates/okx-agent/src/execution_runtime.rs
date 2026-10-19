@@ -1722,40 +1722,46 @@ impl ExecutionRuntime {
         let Some(run) = ledger.capital_reservation() else {
             return Vec::new();
         };
-        ledger.entries().filter_map(|entry| {
-            let record = &entry.record;
-            if !record.plan.action.is_risk_increasing()
-                || record.plan.account_uid_fingerprint != run.account_uid_fingerprint
-                || record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
-            {
-                return None;
-            }
-            let state = match record.state {
-                ExecutionState::Filled => "FILLED",
-                ExecutionState::Canceled => "CANCELED",
-                ExecutionState::Rejected => "REJECTED",
-                _ => return None,
-            };
-            let plan_sha256 = format!(
-                "{:x}", Sha256::digest(serde_json::to_vec(&record.plan).ok()?)
-            );
-            let record_digest = format!(
-                "{:x}", Sha256::digest(serde_json::to_vec(record).ok()?)
-            );
-            Some(NativeTerminalRiskCandidate {
-                reservation_key: native_risk_reservation_key(
-                    &run.account_uid_fingerprint, &run.allocation_id, &record.plan.intent_id,
-                ),
-                plan_sha256,
-                ledger: okx_protocol::risk_authority::TerminalRiskLedgerProof {
-                    account_uid: run.account_uid_fingerprint.clone(),
-                    run_id: run.allocation_id.clone(),
-                    intent_id: record.plan.intent_id.clone(),
-                    state: state.to_owned(),
-                    record_digest,
-                },
+        ledger
+            .entries()
+            .filter_map(|entry| {
+                let record = &entry.record;
+                if !record.plan.action.is_risk_increasing()
+                    || record.plan.account_uid_fingerprint != run.account_uid_fingerprint
+                    || record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
+                {
+                    return None;
+                }
+                let state = match record.state {
+                    ExecutionState::Filled => "FILLED",
+                    ExecutionState::Canceled => "CANCELED",
+                    ExecutionState::Rejected => "REJECTED",
+                    _ => return None,
+                };
+                let plan_sha256 = format!(
+                    "{:x}",
+                    Sha256::digest(serde_json::to_vec(&record.plan).ok()?)
+                );
+                let record_digest =
+                    format!("{:x}", Sha256::digest(serde_json::to_vec(record).ok()?));
+                Some(NativeTerminalRiskCandidate {
+                    reservation_key: native_risk_reservation_key(
+                        &run.account_uid_fingerprint,
+                        &run.allocation_id,
+                        &record.plan.intent_id,
+                    ),
+                    plan_sha256,
+                    ledger: okx_protocol::risk_authority::TerminalRiskLedgerProof {
+                        account_uid: run.account_uid_fingerprint.clone(),
+                        run_id: run.allocation_id.clone(),
+                        intent_id: record.plan.intent_id.clone(),
+                        state: state.to_owned(),
+                        record_digest,
+                    },
+                })
             })
-        }).take(32).collect()
+            .take(32)
+            .collect()
     }
 
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {

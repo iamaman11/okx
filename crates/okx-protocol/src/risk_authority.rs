@@ -177,9 +177,10 @@ impl RiskCommand {
             return false;
         }
         match &self.action {
-            RiskCommandAction::Inspect { reservation_key, plan_sha256 } => {
-                !reservation_key.is_empty() && reservation_key.len() <= 512 && hash(plan_sha256)
-            }
+            RiskCommandAction::Inspect {
+                reservation_key,
+                plan_sha256,
+            } => !reservation_key.is_empty() && reservation_key.len() <= 512 && hash(plan_sha256),
             RiskCommandAction::Reserve {
                 venue,
                 account_uid,
@@ -305,10 +306,8 @@ impl RiskResult {
                     .is_some_and(|v| v == "0" || positive(v)),
                 _ => self.existing_modelled_loss_usdt.is_none(),
             }
-            && (self.status == RiskDecisionStatus::Observed
-                && self.reservation_state.is_some()
-                || self.status != RiskDecisionStatus::Observed
-                    && self.reservation_state.is_none())
+            && (self.status == RiskDecisionStatus::Observed && self.reservation_state.is_some()
+                || self.status != RiskDecisionStatus::Observed && self.reservation_state.is_none())
             && self
                 .reason
                 .as_ref()
