@@ -2125,6 +2125,11 @@ pub enum HostControlOperation {
     StopProductionTrading {
         expected_revision: u64,
     },
+    /// Native negative lifecycle switch only. Governance/v2 is the sole
+    /// positive Real authorization and remains required for every POST.
+    SetProductionReadOnly {
+        read_only: bool,
+    },
     Sync,
     BuildAgent,
     DeployAgent {
