@@ -290,6 +290,31 @@ impl CentralGovernanceSnapshotV2 {
     pub fn valid(&self) -> bool {
         self.state.valid() && self.issued_at_ms > 0 && self.session_generation > 0
     }
+    /// UID delivery checked after native transport consumed the exact,
+    /// non-replayable Worker ping nonce within its own monotonic TTL.
+    /// This scope remains only a delivery grant; risk reservation is separate.
+    pub fn authorizes_challenge_bound_delivery(
+        &self,
+        uid: &str,
+        generation: u64,
+        challenge_verified: bool,
+    ) -> bool {
+        challenge_verified
+            && self.valid()
+            && self.delivery_challenge.is_some()
+            && self.session_generation == generation
+            && self.state.revision > 0
+            && self.state.trading_requested
+            && self.state.operator_authorization.status == AuthorizationStatus::Active
+            && self.state.accounts.iter().any(|a| {
+                a.venue == "okx"
+                    && a.environment == AccountEnvironmentV2::Real
+                    && a.enabled
+                    && a.identity_verified
+                    && a.uid_fingerprint == uid
+            })
+    }
+
     pub fn authorizes_delivery(&self, uid: &str, now_ms: u64, generation: u64) -> bool {
         self.valid()
             && self.session_generation == generation
