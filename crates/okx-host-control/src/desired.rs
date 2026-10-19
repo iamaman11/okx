@@ -111,7 +111,11 @@ struct DesiredFileV3 {
     /// persists ReadOnly until an independently authorized explicit rearm.
     #[serde(default)]
     read_only: bool,
-    /// Existing CONTROL desired.json is the only owner of Production policy.
+    /// An explicit native operator rearm, missing in every old Protobuf journal.
+    /// Migration cannot silently reinterpret a legacy false as trade permission.
+    #[serde(default)]
+    explicit_trade_rearm: bool,
+    /// Historical v1 Production policy is decoded only for migration.
     /// Older desired/v3 files default to no trading authorization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     production_policy: Option<ProductionTradingPolicy>,
@@ -143,6 +147,7 @@ impl DesiredFileV3 {
             agent: state.agent,
             profile: state.profile,
             read_only: state.profile == AgentProfile::Production,
+            explicit_trade_rearm: false,
             production_policy: None,
             transition: None,
             switch_hold: None,
@@ -312,6 +317,7 @@ impl DesiredStateStore {
         // acceptance after a verified ReadOnly selection.
         if prior.profile == state.profile {
             next.read_only = prior.read_only;
+            next.explicit_trade_rearm = prior.explicit_trade_rearm;
             next.production_policy = prior.production_policy;
         }
         self.persist_full(&next)
@@ -331,6 +337,7 @@ impl DesiredStateStore {
             return Err(HostControlError::ProfileTransitionPending);
         }
         state.read_only = read_only;
+        state.explicit_trade_rearm = !read_only;
         // Retire stale positive CONTROL policy. Decoding its historical Protobuf
         // field remains supported, but it is never execution authority.
         state.production_policy = None;
@@ -343,7 +350,8 @@ impl DesiredStateStore {
         let state = self.load_full()?;
         Ok(json!({
             "authority": "CENTRAL_GOVERNANCE_V2",
-            "host_read_only": state.read_only,
+            "host_read_only": state.read_only || !state.explicit_trade_rearm,
+            "explicit_trade_rearm": state.explicit_trade_rearm,
             "legacy_policy_ignored": state.production_policy.is_some(),
             "effective_trading": false
         }))
@@ -356,7 +364,8 @@ impl DesiredStateStore {
         if state.profile != profile || state.transition.is_some() || state.switch_hold.is_some() {
             return Err(HostControlError::ProfileTransitionPending);
         }
-        Ok(state.read_only)
+        Ok(state.read_only
+            || (profile == AgentProfile::Production && !state.explicit_trade_rearm))
     }
 
     /// Nontrading source exit is permitted only for a previously verified
@@ -466,6 +475,7 @@ mod tests {
             agent: AgentDesired::Running,
             profile: AgentProfile::Production,
             read_only: true,
+            explicit_trade_rearm: false,
             production_policy: None,
             transition: Some(record.clone()),
             switch_hold: None,
@@ -566,6 +576,25 @@ mod tests {
             AgentDesiredState::production_running()
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_unrearmed_false_never_enables_trade_after_upgrade() {
+        let root = test_root("legacy-no-auto-trade");
+        let _ = fs::remove_dir_all(&root);
+        let store = DesiredStateStore::at(root.join("host-state.pb"));
+        let mut legacy = DesiredFileV3::initial(AgentDesiredState::production_running());
+        legacy.read_only = false; // historically defaulted to false without a positive policy
+        legacy.explicit_trade_rearm = false; // absent from all older on-disk wire
+        store.persist_full(&legacy).unwrap();
+        assert!(store.read_only_for(AgentProfile::Production).unwrap());
+        assert_eq!(store.status_value()["execution_right"], "READ_ONLY");
+        store.save(AgentDesiredState::stopped()).unwrap();
+        store.set_production_read_only(false).unwrap();
+        assert!(!store.read_only_for(AgentProfile::Production).unwrap());
+        store.set_production_read_only(true).unwrap();
+        assert!(store.read_only_for(AgentProfile::Production).unwrap());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1079,7 +1108,8 @@ impl DesiredStateStore {
                     "state": if complete.agent == AgentDesired::Running { "RUNNING" } else { "STOPPED" },
                     "phase": "NONE",
                     "handoff_admission": "DENIED_NO_CONTROL_BOUND_ONE_TIME_FENCE",
-                    "execution_right": if complete.read_only {
+                    "execution_right": if complete.read_only ||
+                        (complete.profile == AgentProfile::Production && !complete.explicit_trade_rearm) {
                         "READ_ONLY"
                     } else if complete.profile == AgentProfile::Production {
                         "PRODUCTION_GOVERNANCE_REQUIRED"
@@ -1087,6 +1117,7 @@ impl DesiredStateStore {
                         "DEMO_MUTATIONS_CONFIGURED"
                     },
                     "read_only_persisted": complete.read_only,
+                    "explicit_trade_rearm": complete.explicit_trade_rearm,
                     "production_policy_revision": complete.production_policy.as_ref().map(|p| p.revision),
                     "production_policy_permission": complete.production_policy.as_ref().map(|p| p.permission),
                     "durable_owner": "host-state.pb"
@@ -1651,6 +1682,7 @@ fn desired_to_wire(state: &DesiredFileV3) -> HostStateWire {
         desired_agent: wire_agent(state.agent),
         selected_environment: wire_profile(state.profile),
         read_only: state.read_only,
+        explicit_trade_rearm: state.explicit_trade_rearm,
         legacy_production_policy: state.production_policy.as_ref().map(|policy| {
             LegacyProductionPolicyWire {
                 schema: policy.schema.clone(),
@@ -1702,6 +1734,7 @@ fn desired_from_wire(wire: HostStateWire) -> HostControlResult<DesiredFileV3> {
         agent: from_wire_agent(wire.desired_agent)?,
         profile: from_wire_profile(wire.selected_environment)?,
         read_only: wire.read_only,
+        explicit_trade_rearm: wire.explicit_trade_rearm,
         production_policy,
         transition: if let Some(t) = wire.transition {
             Some(TransitionRecord {
