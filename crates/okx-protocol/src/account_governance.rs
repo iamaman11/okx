@@ -280,6 +280,11 @@ pub struct CentralGovernanceSnapshotV2 {
     pub state: AccountGovernanceV2,
     pub issued_at_ms: u64,
     pub session_generation: u64,
+    /// Worker request-scoped ping challenge; validated and consumed by the
+    /// authenticated native transport using its own monotonic clock.
+    /// Optional only for decoding older read-only snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_challenge: Option<String>,
 }
 impl CentralGovernanceSnapshotV2 {
     pub fn valid(&self) -> bool {
@@ -338,6 +343,7 @@ mod tests {
             state: altered,
             issued_at_ms: 1000,
             session_generation: 42,
+            delivery_challenge: None,
         };
         assert!(!scope.authorizes_delivery(&"a".repeat(64), 2000, 42));
         assert!(!scope.authorizes_delivery(&"a".repeat(64), 20_000, 42));
