@@ -1975,6 +1975,17 @@ fn classify_place_response(
     response: TradeResponse<OrderOperationAck>,
 ) -> PlaceResponse {
     if !response.top_level_success() {
+        // OKX top-level code=1 reports a failed batch/operation, NOT the
+        // individual order rejection. The one exact clOrdId row carries
+        // sCode (e.g. 51008) and is necessary for actionable Real diagnosis.
+        // No top-level failure can ever become a successful ACK.
+        if let [item] = response.data.as_slice()
+            && item.client_order_id == plan.client_order_id
+            && !item.status_code.trim().is_empty()
+            && item.status_code != "0"
+        {
+            return PlaceResponse::Rejected(item.status_code.clone());
+        }
         return if response.code.trim().is_empty() {
             PlaceResponse::Ambiguous
         } else {
@@ -3042,6 +3053,41 @@ mod tests {
             in_time_us: "1790000000000000".to_owned(),
             out_time_us: "1790000000001000".to_owned(),
         }
+    }
+
+    #[test]
+    fn okx_top_level_code_one_preserves_exact_per_order_rejection_code() {
+        let plan = plan();
+        let rejected = TradeResponse {
+            code: "1".to_owned(),
+            message: String::new(),
+            data: vec![OrderOperationAck {
+                order_id: String::new(),
+                client_order_id: plan.client_order_id.clone(),
+                request_id: String::new(),
+                timestamp_ms: "1790000000000".to_owned(),
+                status_code: "51008".to_owned(),
+                status_message: "insufficient balance".to_owned(),
+            }],
+            in_time_us: String::new(),
+            out_time_us: String::new(),
+        };
+        assert!(matches!(
+            classify_place_response(&plan, rejected.clone()),
+            PlaceResponse::Rejected(code) if code == "51008"
+        ));
+        let mut missing_detail = rejected.clone();
+        missing_detail.data[0].status_code.clear();
+        assert!(matches!(
+            classify_place_response(&plan, missing_detail),
+            PlaceResponse::Rejected(code) if code == "1"
+        ));
+        let mut other_order = rejected;
+        other_order.data[0].client_order_id = "foreign_order_id".to_owned();
+        assert!(matches!(
+            classify_place_response(&plan, other_order),
+            PlaceResponse::Rejected(code) if code == "1"
+        ));
     }
 
     fn mutation_ack(plan: &ExecutionPlan, request_id: &str) -> TradeResponse<OrderOperationAck> {
