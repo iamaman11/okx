@@ -106,6 +106,9 @@ pub struct MutationTiming {
     request_time_ms: u64,
     request_timestamp: String,
     exp_time_ms: u64,
+    /// The accepted exchange-clock estimate is advanced monotonically after
+    /// slow native RiskBook/ledger I/O; do not reuse its already-aged expTime.
+    issued_at: Instant,
 }
 
 impl MutationTiming {
@@ -125,7 +128,26 @@ impl MutationTiming {
             request_time_ms,
             request_timestamp,
             exp_time_ms,
+            issued_at: Instant::now(),
         })
+    }
+
+    /// No additional REST call, local wall clock, scheduler or retry.
+    /// Retain the SAME accepted exchange-clock anchor and original TTL,
+    /// shifted by monotonic elapsed time just before the one exchange POST.
+    pub fn refreshed_for_send(&self) -> Result<Self, OkxError> {
+        let elapsed_ms = u64::try_from(self.issued_at.elapsed().as_millis())
+            .map_err(|_| OkxError::Clock("mutation monotonic age overflowed u64".to_owned()))?;
+        self.refreshed_after_elapsed_ms(elapsed_ms)
+    }
+
+    fn refreshed_after_elapsed_ms(&self, elapsed_ms: u64) -> Result<Self, OkxError> {
+        let fresh_server_now_ms = self
+            .request_time_ms
+            .checked_add(elapsed_ms)
+            .ok_or_else(|| OkxError::Clock("mutation monotonic clock overflowed".to_owned()))?;
+        let original_ttl_ms = self.exp_time_ms - self.request_time_ms;
+        Self::from_exchange_time_ms(fresh_server_now_ms, original_ttl_ms)
     }
 
     pub const fn request_time_ms(&self) -> u64 {
@@ -204,6 +226,29 @@ mod tests {
             stale.mutation_timing(MUTATION_REQUEST_TTL_MS),
             Err(OkxError::Clock(_))
         ));
+    }
+
+    #[test]
+    fn post_expiry_is_renewed_from_monotonic_exchange_clock_after_slow_risk_io() {
+        let early =
+            MutationTiming::from_exchange_time_ms(1_607_428_137_715, MUTATION_REQUEST_TTL_MS)
+                .expect("verified exchange sample");
+        // Two signed native REST/WS censuses and a durable RiskBook POST
+        // grant take 30s; the original exchange expTime is already expired.
+        let current = early
+            .refreshed_after_elapsed_ms(30_000)
+            .expect("fresh monotonic request");
+        assert!(early.exp_time_ms() < current.request_time_ms());
+        assert_eq!(current.request_time_ms(), 1_607_428_167_715);
+        assert_eq!(current.request_timestamp(), "2020-12-08T11:49:27.715Z");
+        assert_eq!(current.exp_time_ms(), 1_607_428_172_715);
+        assert_eq!(
+            current.exp_time_ms() - current.request_time_ms(),
+            MUTATION_REQUEST_TTL_MS
+        );
+        assert!(early.refreshed_after_elapsed_ms(u64::MAX).is_err());
+        let immediate = early.refreshed_for_send().expect("monotonic local elapsed");
+        assert!(immediate.exp_time_ms() > immediate.request_time_ms());
     }
 
     #[test]

@@ -1644,6 +1644,14 @@ where
             Err(error) => return Err(OrderExecutorError::PreSubmit(error)),
         };
 
+        // Two complete native risk censuses and the central POST fence can
+        // take longer than the original 5s expTime. Renew the SAME accepted
+        // exchange-clock estimate monotonically only at the one actual send.
+        // The durable SUBMITTING transition records this exact renewed time;
+        // an uncertain gateway response is still never replayed.
+        let timing = timing
+            .refreshed_for_send()
+            .map_err(OrderExecutorError::PreSubmit)?;
         self.ledger.begin_submission_with_timing(
             intent_id,
             Some(timing.request_time_ms()),
