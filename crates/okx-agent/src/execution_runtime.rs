@@ -15,8 +15,8 @@ use okx_execution::{
     MutationAuthority, MutationPrepareDisposition, MutationSubmitDisposition, OrderExecutor,
     OrderExecutorError, PositionSide, PrepareOutcome, ProductionMarkEvidence,
     StrategyAllocationOpening, StrategyCapitalReservation, StrategyFinalization,
-    StrategyUnverifiedClosure, SubmitDisposition, execution_status_with_ledger,
-    managed_execution_inventory, reconcile_account_ledger,
+    StrategyFinancialPeriod, StrategyNavPoint, StrategyUnverifiedClosure, SubmitDisposition,
+    execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -69,26 +69,60 @@ fn inert_terminal_rejection(
         })
 }
 
-/// Financial FLAT source attests zero funding as Some("0"). An unsent
-/// PREPARED intent instead yields an INCOMPLETE period with no funding fact.
-/// Confusing the two blocks the first Real OPEN despite verified flat NAV.
-fn first_open_funding_proven(funding_usdt: Option<&str>, same_unsent_prepared: bool) -> bool {
-    if same_unsent_prepared {
-        funding_usdt.is_none()
-    } else {
-        funding_usdt == Some("0")
+/// A native, hash-linked NAV checkpoint is reusable across any number
+/// of COMPLETED flat trading cycles in its exact strategy run. The check
+/// includes every run-owned fill, fee and realized PnL. Missing funding,
+/// unexplained account cash movements, unpriced positions, stale sources
+/// or a different run do not produce risk authority.
+fn attested_flat_nav_for_new_risk(
+    run: &StrategyCapitalReservation,
+    period: &StrategyFinancialPeriod,
+    point: &StrategyNavPoint,
+    current_usdt_equity: &str,
+    account_asof_ms: u64,
+) -> Option<StrategyNavRiskEvidence> {
+    if period.run_id != run.allocation_id
+        || period.state != "FLAT_RECONCILED"
+        || !period.reasons.is_empty()
+        || period.funding_usdt.as_deref() != Some("0")
+        || period.unrealized_usdt.as_deref() != Some("0")
+        || !period.positions.is_empty()
+        || point.run_id != run.allocation_id
+        || point.evidence_sha256 != period.evidence_sha256
+        || point.account_as_of_ms != account_asof_ms
+        || point.validate().is_err()
+    {
+        return None;
     }
-}
-
-#[cfg(test)]
-#[test]
-fn first_open_requires_exact_funding_semantics_for_each_period_state() {
-    assert!(first_open_funding_proven(Some("0"), false));
-    assert!(!first_open_funding_proven(None, false));
-    assert!(!first_open_funding_proven(Some("1"), false));
-    assert!(!first_open_funding_proven(Some("-0.01"), false));
-    assert!(first_open_funding_proven(None, true));
-    assert!(!first_open_funding_proven(Some("0"), true));
+    let nav = rust_decimal::Decimal::from_str(period.nav_usdt.as_deref()?).ok()?;
+    let allocation = rust_decimal::Decimal::from_str(&run.allocated_usdt).ok()?;
+    let opening_equity = rust_decimal::Decimal::from_str(&run.opening_account_usdt_equity).ok()?;
+    let observed_equity = rust_decimal::Decimal::from_str(current_usdt_equity).ok()?;
+    let recorded_nav = rust_decimal::Decimal::from_str(&point.nav_usdt).ok()?;
+    let high_water = rust_decimal::Decimal::from_str(&point.high_water_usdt).ok()?;
+    let daily_loss = rust_decimal::Decimal::from_str(&point.daily_gross_loss_usdt).ok()?;
+    let realized = rust_decimal::Decimal::from_str(&period.realized_usdt).ok()?;
+    let fees = rust_decimal::Decimal::from_str(&period.fees_usdt).ok()?;
+    // Account cashflows remain distinct from strategy PnL. This equality
+    // is checked against authenticated USDT equity, never USD conversions.
+    if allocation <= rust_decimal::Decimal::ZERO
+        || nav <= rust_decimal::Decimal::ZERO
+        || high_water < nav
+        || daily_loss < rust_decimal::Decimal::ZERO
+        || nav != allocation + realized + fees
+        || nav != recorded_nav
+        || observed_equity != opening_equity + nav - allocation
+    {
+        return None;
+    }
+    Some(StrategyNavRiskEvidence {
+        run_id: run.allocation_id.clone(),
+        mandate_version: run.mandate_version.clone(),
+        allocation_usdt: run.allocated_usdt.clone(),
+        nav_usdt: nav.normalize().to_string(),
+        high_water_usdt: high_water.normalize().to_string(),
+        daily_realized_loss_usdt: daily_loss.normalize().to_string(),
+    })
 }
 
 /// The final native venue witnesses are captured by one query owner before
@@ -714,12 +748,10 @@ impl ExecutionRuntime {
         Ok((reconciliation, inventory))
     }
 
-    /// Conservative FIRST-OPEN-only NAV admission. The full strategy NAV
-    /// high-water/day-loss time series is not yet attested; after the first
-    /// managed execution, further risk increases stay fail-closed.
-    /// This proof is built by the one executor from immutable run and source
-    /// evidence; no operator/transport-supplied NAV is accepted.
-    pub async fn initial_strategy_nav_for_risk(
+    /// Continuous, fully source-attested strategy risk admission. Reuses
+    /// persisted run PnL/NAV/peak/day-loss across any number of flat
+    /// OPEN -> CLOSE cycles. Never grants a synthetic first-trade NAV.
+    pub async fn strategy_nav_for_new_risk(
         &self,
         facts: &AccountLedgerFacts,
         plan: &ExecutionPlan,
@@ -754,7 +786,6 @@ impl ExecutionRuntime {
         // opening reserve. External cash transfers are not strategy PnL.
         let current_equity = facts.trading_usdt_equity.as_deref()?;
         if ledger.finalized_run().is_some()
-            || current_equity != run.opening_account_usdt_equity.as_str()
             || ledger.risk_stop().is_some()
             || run.account_uid_fingerprint != facts.summary.authority.account_uid_fingerprint
             || run.account_uid_fingerprint != plan.account_uid_fingerprint
@@ -762,14 +793,16 @@ impl ExecutionRuntime {
             || run.allocated_usdt != binding.mandate.capital_base_usd
             || ledger.entries().any(|e| {
                 e.created_at_ms >= run.started_at_ms
-                    && !inert_terminal_rejection(
-                        &e.record,
-                        &run.account_uid_fingerprint,
-                        &run.allocation_id,
-                    )
-                    && (e.record.plan.intent_id != plan.intent_id
-                        || e.record.plan != *plan
-                        || e.record.state != ExecutionState::Prepared)
+                    && ((e.record.state == ExecutionState::Rejected
+                        && !inert_terminal_rejection(
+                            &e.record,
+                            &run.account_uid_fingerprint,
+                            &run.allocation_id,
+                        ))
+                        || (!e.record.state.is_terminal()
+                            && (e.record.plan.intent_id != plan.intent_id
+                                || e.record.plan != *plan
+                                || e.record.state != ExecutionState::Prepared)))
             })
             || !reconcile_account_ledger(ledger, facts).ok()?.consistent
         {
@@ -781,49 +814,33 @@ impl ExecutionRuntime {
             .capture_exchange_evidence_fresh_cursor(facts)
             .ok()?;
         let source = executor.ledger().exchange_evidence_summary()?;
-        if source.events != 0 || !source.latest_source_complete || source.source_gap_over_two_hours
+        if source.run_id != run.allocation_id
+            || !source.latest_source_complete
+            || source.source_gap_over_two_hours
         {
             return None;
         }
-        let projection = executor.ledger().financial_period(facts, coherent)?;
-        // The same unsent PREPARED intent is deliberately INCOMPLETE for
-        // financial finalization, but it has no exchange fills or positions.
-        // Allow exactly that single reason during its independent pre-POST
-        // revalidation; all other missing evidence remains a hard rejection.
-        let same_unsent_prepared = executor.ledger().entries().any(|e| {
-            e.created_at_ms >= run.started_at_ms
-                && e.record.plan.intent_id == plan.intent_id
-                && e.record.plan == *plan
-                && e.record.state == ExecutionState::Prepared
-        });
-        let clean_projection = if same_unsent_prepared {
-            projection.state == "INCOMPLETE"
-                && projection.reasons == vec!["unresolved_managed_execution"]
-                && projection.nav_usdt.is_none()
-        } else {
-            projection.state == "FLAT_RECONCILED"
-                && projection.reasons.is_empty()
-                && projection.nav_usdt.as_deref() == Some(run.allocated_usdt.as_str())
-                && projection.unrealized_usdt.as_deref() == Some("0")
-        };
-        if !clean_projection
-            || projection.linked_fills != 0
-            || projection.linked_bills != 0
-            || !projection.positions.is_empty()
-            || projection.realized_usdt != "0"
-            || projection.fees_usdt != "0"
-            || !first_open_funding_proven(projection.funding_usdt.as_deref(), same_unsent_prepared)
-        {
+        let projection = executor
+            .ledger()
+            .financial_period_for_new_risk(facts, coherent, plan)?;
+        let asof = facts
+            .summary
+            .current_account_as_of_ms
+            .as_deref()?
+            .parse::<u64>()
+            .ok()?;
+        // The one durable Ledger is also the NAV/high-water/day-loss writer.
+        // Any breach latches STOP before the candidate can receive a permit.
+        let now = u64::try_from(Utc::now().timestamp_millis()).ok()?;
+        executor
+            .observe_strategy_nav(&projection, facts, now)
+            .ok()?;
+        let ledger = executor.ledger();
+        if ledger.risk_stop().is_some() {
             return None;
         }
-        Some(StrategyNavRiskEvidence {
-            run_id: run.allocation_id,
-            mandate_version: run.mandate_version,
-            allocation_usdt: run.allocated_usdt.clone(),
-            nav_usdt: run.allocated_usdt.clone(),
-            high_water_usdt: run.allocated_usdt,
-            daily_realized_loss_usdt: "0".to_owned(),
-        })
+        let point = ledger.strategy_nav_watermark()?;
+        attested_flat_nav_for_new_risk(&run, &projection, point, current_equity, asof)
     }
 
     pub async fn preflight(
@@ -1413,41 +1430,38 @@ impl ExecutionRuntime {
         };
         let finance_complete = if new_risk {
             let ledger = executor.ledger();
-            ledger.financial_period(facts, true).is_some_and(|period| {
-                let closed_complete = period.state == "FLAT_RECONCILED"
-                    && period.nav_usdt.is_some()
-                    && period.funding_usdt.is_some()
-                    && period.reasons.is_empty();
-                // The one unsent PREPARED OPEN has no fill or financial
-                // consequence, but must not fabricate a complete period.
-                let first_prepared = ledger.capital_reservation().is_some_and(|run| {
-                    period.state == "INCOMPLETE"
-                        && period.reasons == vec!["unresolved_managed_execution"]
-                        && period.linked_fills == 0
-                        && period.linked_bills == 0
-                        && period.realized_usdt == "0"
-                        && period.fees_usdt == "0"
-                        && facts.trading_usdt_equity.as_deref()
-                            == Some(run.opening_account_usdt_equity.as_str())
-                        && ledger.exchange_evidence_summary().is_some_and(|source| {
-                            source.run_id == run.allocation_id
-                                && source.events == 0
-                                && source.latest_source_complete
-                                && !source.source_gap_over_two_hours
-                        })
-                        && ledger.entries().all(|owned| {
-                            owned.created_at_ms < run.started_at_ms
-                                || inert_terminal_rejection(
-                                    &owned.record,
-                                    &run.account_uid_fingerprint,
-                                    &run.allocation_id,
-                                )
-                                || owned.record.plan.intent_id == intent_id
-                                    && owned.record.state == ExecutionState::Prepared
-                        })
-                });
-                closed_complete || first_prepared
-            })
+            let historical_rejections_safe = ledger.capital_reservation().is_some_and(|run| {
+                ledger.entries().all(|entry| {
+                    entry.created_at_ms < run.started_at_ms
+                        || entry.record.state != ExecutionState::Rejected
+                        || inert_terminal_rejection(
+                            &entry.record,
+                            &run.account_uid_fingerprint,
+                            &run.allocation_id,
+                        )
+                })
+            });
+            historical_rejections_safe
+                && ledger
+                    .capital_reservation()
+                    .zip(ledger.financial_period_for_new_risk(facts, true, plan))
+                    .zip(ledger.strategy_nav_watermark())
+                    .and_then(|((run, period), point)| {
+                        let asof = facts
+                            .summary
+                            .current_account_as_of_ms
+                            .as_deref()?
+                            .parse::<u64>()
+                            .ok()?;
+                        attested_flat_nav_for_new_risk(
+                            run,
+                            &period,
+                            point,
+                            facts.trading_usdt_equity.as_deref()?,
+                            asof,
+                        )
+                    })
+                    .is_some()
         } else {
             false
         };
@@ -2165,6 +2179,94 @@ mod tests {
     use okx_api::Region;
 
     use super::*;
+
+    #[test]
+    fn native_financial_admission_works_after_many_completed_filled_cycles() {
+        let run = StrategyCapitalReservation {
+            schema: okx_execution::STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "strategy_run_multiple_flat_cycles_20261019".to_owned(),
+            account_uid_fingerprint: "a".repeat(64),
+            origin_schema: "okx.manual/v1".to_owned(),
+            origin_version: "2026-10-19.3".to_owned(),
+            mandate_version: "real_manual_v1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "126".to_owned(),
+            account_generation: "generation".to_owned(),
+            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
+            started_at_ms: 1_792_436_000_000,
+        };
+        let time = 1_792_437_000_000u64;
+        let mut period = StrategyFinancialPeriod {
+            schema: okx_execution::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+            run_id: run.allocation_id.clone(),
+            state: "FLAT_RECONCILED",
+            evidence_sha256: "c".repeat(64),
+            allocation_usdt: "100".to_owned(),
+            linked_fills: 2,
+            linked_bills: 2,
+            realized_usdt: "-0.04".to_owned(),
+            fees_usdt: "-0.02".to_owned(),
+            funding_usdt: Some("0".to_owned()),
+            unrealized_usdt: Some("0".to_owned()),
+            nav_usdt: Some("99.94".to_owned()),
+            positions: Vec::new(),
+            usable_for_new_risk: false,
+            reasons: Vec::new(),
+        };
+        let mut point = StrategyNavPoint {
+            schema: "okx.strategy-nav-point/v1".to_owned(),
+            run_id: run.allocation_id.clone(),
+            observed_at_ms: time,
+            account_as_of_ms: time,
+            evidence_sha256: period.evidence_sha256.clone(),
+            source_cursor_key: "order:current".to_owned(),
+            source_cursor_sha256: "d".repeat(64),
+            nav_usdt: "99.94".to_owned(),
+            high_water_usdt: "100".to_owned(),
+            daily_gross_loss_usdt: "0.06".to_owned(),
+            utc_day_start_ms: time / 86_400_000 * 86_400_000,
+            previous_sha256: String::new(),
+            checksum_sha256: String::new(),
+        };
+        point.checksum_sha256 = point.hash().unwrap();
+        let accepted = attested_flat_nav_for_new_risk(&run, &period, &point, "125.94", time)
+            .expect("complete fill/fee and verified NAV permit next independent trade");
+        assert_eq!(accepted.nav_usdt, "99.94");
+        assert_eq!(accepted.high_water_usdt, "100");
+        assert_eq!(accepted.daily_realized_loss_usdt, "0.06");
+
+        // Another fully closed trade in the same run preserves prior peak
+        // and accumulates net strategy losses instead of resetting to 100.
+        period.linked_fills = 4;
+        period.linked_bills = 4;
+        period.realized_usdt = "-0.07".to_owned();
+        period.fees_usdt = "-0.05".to_owned();
+        period.nav_usdt = Some("99.88".to_owned());
+        period.evidence_sha256 = "e".repeat(64);
+        point.evidence_sha256 = period.evidence_sha256.clone();
+        point.nav_usdt = "99.88".to_owned();
+        point.daily_gross_loss_usdt = "0.12".to_owned();
+        point.checksum_sha256 = point.hash().unwrap();
+        assert_eq!(
+            attested_flat_nav_for_new_risk(&run, &period, &point, "125.88", time)
+                .unwrap()
+                .nav_usdt,
+            "99.88"
+        );
+
+        assert!(attested_flat_nav_for_new_risk(&run, &period, &point, "126", time).is_none());
+        period.funding_usdt = None;
+        assert!(attested_flat_nav_for_new_risk(&run, &period, &point, "125.88", time).is_none());
+        period.funding_usdt = Some("0".to_owned());
+        point.evidence_sha256 = "f".repeat(64);
+        point.checksum_sha256 = point.hash().unwrap();
+        assert!(attested_flat_nav_for_new_risk(&run, &period, &point, "125.88", time).is_none());
+        point.evidence_sha256 = period.evidence_sha256.clone();
+        point.checksum_sha256 = point.hash().unwrap();
+        point.account_as_of_ms -= 1;
+        point.checksum_sha256 = point.hash().unwrap();
+        assert!(attested_flat_nav_for_new_risk(&run, &period, &point, "125.88", time).is_none());
+    }
 
     #[test]
     fn only_exact_known_empty_rejection_can_precede_next_first_open() {
