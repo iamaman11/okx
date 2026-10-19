@@ -1193,13 +1193,13 @@ impl ExecutionRuntime {
         // RiskBook can authorize increased Real exposure. A v1 delivery grant
         // or one-account observer flag never substitutes for that receipt.
         let post_fenced = matches!(authorization, Some(CentralAuthorizationBinding::Governance(scope))
-            if risk_post.is_some_and(|proof| {
-                proof.valid()
-                    && proof.status
-                        == okx_protocol::risk_authority::RiskDecisionStatus::PostAuthorized
-                    && proof.policy_revision == Some(scope.scope.state.revision)
-                    && proof.reservation_key.as_deref().is_some_and(|key| !key.is_empty())
-            }));
+        if risk_post.is_some_and(|proof| {
+            proof.valid()
+                && proof.status
+                    == okx_protocol::risk_authority::RiskDecisionStatus::PostAuthorized
+                && proof.policy_revision == Some(scope.scope.state.revision)
+                && proof.reservation_key.as_deref().is_some_and(|key| !key.is_empty())
+        }));
         if new_risk && !post_fenced {
             return Ok(None);
         }

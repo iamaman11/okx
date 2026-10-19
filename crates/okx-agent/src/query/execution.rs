@@ -6,10 +6,6 @@ use okx_analysis::{
     analyze_portfolio_risk_with_strategy_nav, conservative_account_with_position_oracle,
 };
 use okx_api::{InstrumentType, MUTATION_REQUEST_TTL_MS, MarginMode, MutationTiming};
-use okx_protocol::risk_authority::{
-    NativeRiskCensus, RiskCommand, RiskCommandAction, RiskResult, RISK_COMMAND_SCHEMA_V1,
-};
-use sha2::{Digest, Sha256};
 use okx_execution::{
     EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_STATUS_SCHEMA_V3, ExecutionAction,
     ExecutionDecisionReference, ExecutionIntent, ExecutionLedgerEntry, ExecutionLedgerError,
@@ -22,12 +18,16 @@ use okx_execution::{
     revalidate_amend_execution_plan, revalidate_execution_plan, revalidate_hard_risk_policy,
     revalidate_venue_execution,
 };
+use okx_protocol::risk_authority::{
+    NativeRiskCensus, RISK_COMMAND_SCHEMA_V1, RiskCommand, RiskCommandAction, RiskResult,
+};
 use okx_protocol::{
     ExecutionEntryRequest, ExecutionLineageRequest, ExecutionMutationRequest, ExecutionOrderType,
     ExecutionPrepareSpec, ExecutionReferencePriceBasis, ExecutionRiskBindingRequest,
     ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
     PositionSide as ProtocolPositionSide,
 };
+use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::execution_runtime::{
@@ -1775,7 +1775,6 @@ async fn executor_preflight(
     ))
 }
 
-
 /// One native REST/WS/ledger census for the entire registered Real cohort.
 /// The current Windows owner has one authenticated Real observer. This code
 /// deliberately refuses additional registered UIDs until their own native
@@ -1786,27 +1785,49 @@ async fn complete_native_risk_census(
     execution: &crate::execution_runtime::ExecutionRuntime,
     intent_id: &str,
 ) -> Result<NativeRiskCensus, &'static str> {
-    let scope = context.operator_governance.ok_or("RISK_GOVERNANCE_V2_REQUIRED")?;
-    let observer = context.account_fallback.ok_or("RISK_OBSERVER_UNAVAILABLE")?;
+    let scope = context
+        .operator_governance
+        .ok_or("RISK_GOVERNANCE_V2_REQUIRED")?;
+    let observer = context
+        .account_fallback
+        .ok_or("RISK_OBSERVER_UNAVAILABLE")?;
     let ws = context.private_ws.ok_or("RISK_PRIVATE_WS_UNAVAILABLE")?;
-    let cursor = ws.convergence_cursor().await.map_err(|_| "RISK_WS_CURSOR_UNAVAILABLE")?;
-    let assembled = assemble_account_snapshot(context).await.map_err(|_| "RISK_SNAPSHOT_UNAVAILABLE")?;
+    let cursor = ws
+        .convergence_cursor()
+        .await
+        .map_err(|_| "RISK_WS_CURSOR_UNAVAILABLE")?;
+    let assembled = assemble_account_snapshot(context)
+        .await
+        .map_err(|_| "RISK_SNAPSHOT_UNAVAILABLE")?;
     if assembled.quality != DataQuality::Fresh {
         return Err("RISK_SNAPSHOT_NOT_FRESH");
     }
-    let facts = observer.ledger_facts(&assembled.snapshot).await
+    let facts = observer
+        .ledger_facts(&assembled.snapshot)
+        .await
         .map_err(|_| "RISK_FINANCIAL_HISTORY_UNAVAILABLE")?;
-    let algos = observer.pending_derivative_risk_algos().await
+    let algos = observer
+        .pending_derivative_risk_algos()
+        .await
         .map_err(|_| "RISK_DERIVATIVE_ALGOS_UNAVAILABLE")?;
-    let window = ws.convergence_window(cursor).await
+    let window = ws
+        .convergence_window(cursor)
+        .await
         .map_err(|_| "RISK_PRIVATE_WS_CHANGED")?;
     let now_ms = utc_now_ms();
-    let single = execution.native_flat_risk_evidence(
-        &assembled.snapshot, &facts, &algos, &window, intent_id, now_ms,
-    ).await.map_err(|_| "RISK_NATIVE_FLAT_PROOF_FAILED")?;
-    crate::risk_census::PortfolioRiskSources::from_governance(
-        scope, vec![single], now_ms,
-    ).and_then(|sources| sources.census())
+    let single = execution
+        .native_flat_risk_evidence(
+            &assembled.snapshot,
+            &facts,
+            &algos,
+            &window,
+            intent_id,
+            now_ms,
+        )
+        .await
+        .map_err(|_| "RISK_NATIVE_FLAT_PROOF_FAILED")?;
+    crate::risk_census::PortfolioRiskSources::from_governance(scope, vec![single], now_ms)
+        .and_then(|sources| sources.census())
         .map_err(|_| "RISK_FULL_REAL_UID_COHORT_NOT_PROVEN")
 }
 
@@ -1819,36 +1840,55 @@ async fn reserve_native_risk_for_submit(
     entry: &ExecutionLedgerEntry,
     intent_id: &str,
 ) -> Result<RiskResult, &'static str> {
-    let client = context.native_risk_client().ok_or("RISK_AUTHORITY_TRANSPORT_UNAVAILABLE")?;
-    let scope = context.operator_governance.ok_or("RISK_GOVERNANCE_V2_REQUIRED")?;
+    let client = context
+        .native_risk_client()
+        .ok_or("RISK_AUTHORITY_TRANSPORT_UNAVAILABLE")?;
+    let scope = context
+        .operator_governance
+        .ok_or("RISK_GOVERNANCE_V2_REQUIRED")?;
     let plan = &entry.record.plan;
     if !scope.authorizes_delivery(
-        &plan.account_uid_fingerprint, utc_now_ms(), context.transport_generation,
+        &plan.account_uid_fingerprint,
+        utc_now_ms(),
+        context.transport_generation,
     ) {
         return Err("RISK_CENTRAL_UID_NOT_AUTHORIZED");
     }
-    let run = execution.risk_run_for_prepared(intent_id).await
+    let run = execution
+        .risk_run_for_prepared(intent_id)
+        .await
         .ok_or("RISK_PREPARED_RUN_NOT_ATTESTED")?;
     if run.account_uid_fingerprint != plan.account_uid_fingerprint
         || run.operator_authority_id != scope.state.operator_authorization.id
     {
         return Err("RISK_RUN_SCOPE_MISMATCH");
     }
-    let account = scope.state.accounts.iter().find(|a| {
-        a.venue == "okx"
-            && a.environment == okx_protocol::account_governance::AccountEnvironmentV2::Real
-            && a.enabled
-            && a.uid_fingerprint == plan.account_uid_fingerprint
-    }).ok_or("RISK_ACCOUNT_NOT_REGISTERED")?;
+    let account = scope
+        .state
+        .accounts
+        .iter()
+        .find(|a| {
+            a.venue == "okx"
+                && a.environment == okx_protocol::account_governance::AccountEnvironmentV2::Real
+                && a.enabled
+                && a.uid_fingerprint == plan.account_uid_fingerprint
+        })
+        .ok_or("RISK_ACCOUNT_NOT_REGISTERED")?;
     // Strategy identity is the persisted run mandate, not a name chosen by
     // ChatGPT for this reservation. Unmapped mandates cannot mint a grant.
-    if !account.strategies.iter().any(|strategy| {
-        strategy.enabled && strategy.id == run.mandate_version
-    }) {
+    if !account
+        .strategies
+        .iter()
+        .any(|strategy| strategy.enabled && strategy.id == run.mandate_version)
+    {
         return Err("RISK_STRATEGY_NOT_REGISTERED");
     }
-    let requested = plan.open_risk.as_ref().ok_or("RISK_PLAN_LOSS_UNAVAILABLE")?
-        .requested_max_loss_settle.clone();
+    let requested = plan
+        .open_risk
+        .as_ref()
+        .ok_or("RISK_PLAN_LOSS_UNAVAILABLE")?
+        .requested_max_loss_settle
+        .clone();
     let raw = serde_json::to_vec(plan).map_err(|_| "RISK_PLAN_ENCODING_FAILED")?;
     let plan_sha256 = format!("{:x}", Sha256::digest(&raw));
     let reserve_census = complete_native_risk_census(context, execution, intent_id).await?;
@@ -1868,33 +1908,41 @@ async fn reserve_native_risk_for_submit(
             census: reserve_census,
         },
     };
-    client.reserve_then_fence(reserve, |held| {
-        let key = held.reservation_key.clone();
-        let sequence = held.risk_book_sequence;
-        async move {
-            let fresh = complete_native_risk_census(context, execution, intent_id).await?;
-            let reservation_key = key.ok_or("RISK_HELD_RESERVATION_MISSING")?;
-            let expected_risk_book_sequence = sequence.ok_or("RISK_HELD_SEQUENCE_MISSING")?;
-            let proof = format!("{:x}", Sha256::digest(
-                serde_json::to_vec(&(
-                    "okx.post-source/v1", &plan_sha256,
-                    &reservation_key, &fresh.source_digest,
-                )).map_err(|_| "RISK_POST_PROOF_ENCODING_FAILED")?
-            ));
-            Ok(RiskCommand {
-                schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
-                command_id: format!("risk_post_{}", &plan_sha256[..24]),
-                action: RiskCommandAction::BeginPost {
-                    reservation_key,
-                    plan_sha256,
-                    policy_revision: scope.state.revision,
-                    expected_risk_book_sequence,
-                    source_proof_sha256: proof,
-                    census: fresh,
-                },
-            })
-        }
-    }).await
+    client
+        .reserve_then_fence(reserve, |held| {
+            let key = held.reservation_key.clone();
+            let sequence = held.risk_book_sequence;
+            async move {
+                let fresh = complete_native_risk_census(context, execution, intent_id).await?;
+                let reservation_key = key.ok_or("RISK_HELD_RESERVATION_MISSING")?;
+                let expected_risk_book_sequence = sequence.ok_or("RISK_HELD_SEQUENCE_MISSING")?;
+                let proof = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        serde_json::to_vec(&(
+                            "okx.post-source/v1",
+                            &plan_sha256,
+                            &reservation_key,
+                            &fresh.source_digest,
+                        ))
+                        .map_err(|_| "RISK_POST_PROOF_ENCODING_FAILED")?
+                    )
+                );
+                Ok(RiskCommand {
+                    schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
+                    command_id: format!("risk_post_{}", &plan_sha256[..24]),
+                    action: RiskCommandAction::BeginPost {
+                        reservation_key,
+                        plan_sha256,
+                        policy_revision: scope.state.revision,
+                        expected_risk_book_sequence,
+                        source_proof_sha256: proof,
+                        census: fresh,
+                    },
+                })
+            }
+        })
+        .await
 }
 
 async fn submit_prepared(
