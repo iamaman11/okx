@@ -106,6 +106,9 @@ pub struct MutationTiming {
     request_time_ms: u64,
     request_timestamp: String,
     exp_time_ms: u64,
+    /// The accepted exchange-clock estimate is advanced monotonically after
+    /// slow native RiskBook/ledger I/O; do not reuse its already-aged expTime.
+    issued_at: Instant,
 }
 
 impl MutationTiming {
@@ -125,7 +128,26 @@ impl MutationTiming {
             request_time_ms,
             request_timestamp,
             exp_time_ms,
+            issued_at: Instant::now(),
         })
+    }
+
+    /// No additional REST call, local wall clock, scheduler or retry.
+    /// Retain the SAME accepted exchange-clock anchor and original TTL,
+    /// shifted by monotonic elapsed time just before the one exchange POST.
+    pub fn refreshed_for_send(&self) -> Result<Self, OkxError> {
+        let elapsed_ms = u64::try_from(self.issued_at.elapsed().as_millis())
+            .map_err(|_| OkxError::Clock("mutation monotonic age overflowed u64".to_owned()))?;
+        self.refreshed_after_elapsed_ms(elapsed_ms)
+    }
+
+    fn refreshed_after_elapsed_ms(&self, elapsed_ms: u64) -> Result<Self, OkxError> {
+        let fresh_server_now_ms = self
+            .request_time_ms
+            .checked_add(elapsed_ms)
+            .ok_or_else(|| OkxError::Clock("mutation monotonic clock overflowed".to_owned()))?;
+        let original_ttl_ms = self.exp_time_ms - self.request_time_ms;
+        Self::from_exchange_time_ms(fresh_server_now_ms, original_ttl_ms)
     }
 
     pub const fn request_time_ms(&self) -> u64 {
