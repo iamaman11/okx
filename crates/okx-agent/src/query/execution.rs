@@ -2056,8 +2056,10 @@ async fn submit_prepared(
                     facts,
                     protection: &protection,
                 },
-                context.central_authorization_binding(),
-                risk_post.as_ref(),
+                crate::execution_runtime::ProductionSubmitAuthorization {
+                    central: context.central_authorization_binding(),
+                    risk_post: risk_post.as_ref(),
+                },
             )
             .await?
         {

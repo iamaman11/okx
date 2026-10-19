@@ -45,6 +45,13 @@ pub struct ProductionSubmitSources<'a> {
     pub protection: &'a PendingProtectiveAlgoInventory,
 }
 
+/// One typed bundle of the central delivery grant and the independently
+/// acknowledged RiskBook POST fence. Neither item alone authorizes an order.
+pub struct ProductionSubmitAuthorization<'a> {
+    pub central: Option<CentralAuthorizationBinding<'a>>,
+    pub risk_post: Option<&'a okx_protocol::risk_authority::RiskResult>,
+}
+
 /// One immutable, Worker-sourced policy for exactly this authenticated
 /// transport generation and one native execution request. Never persisted.
 #[derive(Clone, Copy)]
@@ -1136,10 +1143,10 @@ impl ExecutionRuntime {
         timing: MutationTiming,
         observed_at_ms: u64,
         sources: ProductionSubmitSources<'_>,
-        authorization: Option<CentralAuthorizationBinding<'_>>,
-        risk_post: Option<&okx_protocol::risk_authority::RiskResult>,
+        grant: ProductionSubmitAuthorization<'_>,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
         let ProductionSubmitSources { facts, protection } = sources;
+        let ProductionSubmitAuthorization { central: authorization, risk_post } = grant;
         let native_uid = &preflight.credential.account_uid_fingerprint;
         let fresh_now = Utc::now().timestamp_millis().max(1) as u64;
         if !authorization.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now)) {
