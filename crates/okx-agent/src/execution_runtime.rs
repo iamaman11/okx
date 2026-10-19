@@ -1137,6 +1137,7 @@ impl ExecutionRuntime {
         observed_at_ms: u64,
         sources: ProductionSubmitSources<'_>,
         authorization: Option<CentralAuthorizationBinding<'_>>,
+        risk_post: Option<&okx_protocol::risk_authority::RiskResult>,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
         let ProductionSubmitSources { facts, protection } = sources;
         let native_uid = &preflight.credential.account_uid_fingerprint;
@@ -1188,12 +1189,18 @@ impl ExecutionRuntime {
         };
         let plan = &entry.record.plan;
         let new_risk = plan.action.is_risk_increasing();
-        // One selected account being flat is NOT a complete central risk
-        // cohort. Fail closed even if a future code change accidentally
-        // supplies a synthetic zero in ProductionRiskWitness.
-        if new_risk
-            && crate::risk_census::PortfolioRiskSources::selected_account_is_insufficient(facts)
-        {
+        // Only an acknowledged atomic POST fence from the ONE central v2
+        // RiskBook can authorize increased Real exposure. A v1 delivery grant
+        // or one-account observer flag never substitutes for that receipt.
+        let post_fenced = matches!(authorization, Some(CentralAuthorizationBinding::Governance(scope))
+            if risk_post.is_some_and(|proof| {
+                proof.valid()
+                    && proof.status
+                        == okx_protocol::risk_authority::RiskDecisionStatus::PostAuthorized
+                    && proof.policy_revision == Some(scope.scope.state.revision)
+                    && proof.reservation_key.as_deref().is_some_and(|key| !key.is_empty())
+            }));
+        if new_risk && !post_fenced {
             return Ok(None);
         }
         let flat = facts.summary.open_positions == 0
@@ -1278,10 +1285,11 @@ impl ExecutionRuntime {
             // The executor independently scans durable parent/mutation/OCO
             // UNKNOWN states; this cannot override native state.
             unknown_mutations_reconciled: true,
-            // No atomic all-account reservation proof has been delivered by
-            // the single global owner. Unknown occupied risk is NOT zero.
-            // Keep Real OPEN closed until exact reservation integration.
-            existing_modelled_loss_usdt: None,
+            // The only positive path is a post-fenced, source-proven FULLY
+            // FLAT cohort. The caller sampled every registered Real UID via
+            // PortfolioRiskSources, and the DO counted all other reservations.
+            // Never synthesize zero from an unaudited account snapshot.
+            existing_modelled_loss_usdt: post_fenced.then_some(rust_decimal::Decimal::ZERO),
             exact_owned_reduce_only_close: close_owned_exact,
         };
         // Final central revision/UID/expiry fence immediately before the
@@ -1579,6 +1587,50 @@ impl ExecutionRuntime {
             return Err(AgentError::ProductionPolicyUnavailable);
         }
         Ok(changed)
+    }
+
+    /// The existing ledger, not a request field, owns the strategy identity.
+    /// A PREPARED candidate may reserve risk only for its exact live run.
+    pub async fn risk_run_for_prepared(
+        &self,
+        intent_id: &str,
+    ) -> Option<StrategyCapitalReservation> {
+        let owner = self.executor.lock().await;
+        let entry = owner.ledger().get(intent_id)?;
+        let run = owner.ledger().capital_reservation()?;
+        (entry.record.state == ExecutionState::Prepared
+            && entry.record.plan.action.is_risk_increasing()
+            && entry.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
+            && entry
+                .record
+                .plan
+                .risk_binding
+                .as_ref()
+                .is_some_and(|binding| binding.mandate.version == run.mandate_version))
+        .then(|| run.clone())
+    }
+
+    /// Reuse the ONE durable ledger owner for source/UNKNOWN attestation.
+    /// Never create a second ledger or infer another UID's risk from it.
+    pub async fn native_flat_risk_evidence(
+        &self,
+        snapshot: &AccountSnapshot,
+        facts: &AccountLedgerFacts,
+        algos: &okx_api::PendingDerivativeAlgoRiskInventory,
+        window: &okx_runtime::PrivateConvergenceWindow,
+        intent_id: &str,
+        now_ms: u64,
+    ) -> Result<crate::risk_census::AccountRiskEvidence, crate::risk_census::CensusFailure> {
+        let owner = self.executor.lock().await;
+        crate::risk_census::AccountRiskEvidence::from_native_flat_read(
+            snapshot,
+            facts,
+            algos,
+            window,
+            owner.ledger(),
+            Some(intent_id),
+            now_ms,
+        )
     }
 
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {
