@@ -4222,9 +4222,10 @@ async fn execution_status_response(
         ));
     };
 
-    // The normal CLOSE/status path can now finish central risk accounting
-    // without a separate process, operator ceremony or replay of the order.
-    if execution.production_trading_requested()
+    // The normal CLOSE/status path finishes only terminal risk RELEASE,
+    // including after new-risk STOP or operator revocation, with source proof.
+    // No separate process, operator ceremony or replay of the order.
+    if context.operator_governance.is_some()
         && entry.record.state.is_terminal()
         && (entry.record.plan.action.is_risk_reducing()
             || matches!(

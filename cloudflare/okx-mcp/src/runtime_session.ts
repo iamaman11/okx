@@ -325,18 +325,21 @@ export class RuntimeSession {
         active.attachment.generation,
         RESPONSE_DEADLINE_MS,
       );
-      // Read the authoritative policy for EVERY Production write. Never
-      // cache it across calls or accept caller-supplied policy fields.
-      // Native Rust still owns credential/UID/STOP/risk and exchange POST.
+      // Production writes and exact-intent terminal status both need the
+      // current native governance cohort. The latter is ONLY for a proven
+      // terminal RELEASE, not permission to introduce new exposure.
+      const tradeMutation = isExecutionMutation(request.operation?.type);
+      const terminalStatus = request.operation?.type === "execution_status";
       let operator_policy: Record<string, unknown> | undefined;
       let operator_governance: Record<string, unknown> | undefined;
-      if (isExecutionMutation(request.operation?.type) &&
+      if ((tradeMutation || terminalStatus) &&
           active.attachment.runtimeProfile === "production") {
         const current:unknown=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);
         if(current!==undefined){
           if(!validGovernance(current))
             return transportFailure("CENTRAL_GOVERNANCE_CORRUPT",false);
-          if(!current.trading_requested||current.operator_authorization.status!=="ACTIVE")
+          if(tradeMutation &&
+             (!current.trading_requested||current.operator_authorization.status!=="ACTIVE"))
             return transportFailure("CENTRAL_NEW_RISK_STOPPED",false);
           // Typed fresh request-scoped delivery proof. This is NOT the POST
           // permit; the native executor still needs an exact DO reservation.
@@ -347,7 +350,7 @@ export class RuntimeSession {
             // No inter-machine wall clock dependency for a risk-controlled write.
             delivery_challenge:deliveryChallenge
           };
-        }else{
+        }else if(tradeMutation){
           const stored: unknown = await this.state.storage.get("account_policy_v1");
           if (stored !== undefined && !validAccountPolicy(stored)) {
             return transportFailure("CENTRAL_POLICY_CORRUPT", false);
