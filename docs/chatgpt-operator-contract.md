@@ -1,5 +1,7 @@
 # ChatGPT operator contract
 
+> **Canonical future architecture (2026-10-20):** [Architecture Contract v1](ARCHITECTURE_CONTRACT_V1.md). This is the accepted target modularity/extension boundary, **not** proof that simultaneous accounts/venues or live trading are already deployed. Dated checklists and states below are historical unless independently reverified.
+
 This document defines the normal operating discipline for ChatGPT over the accepted Cloudflare-primary / GitHub read-only-diagnostic architecture.
 
 The goal is to keep queries attributable, context-efficient and fail-closed while allowing broad analytical question coverage without turning every natural-language question into a new backend endpoint.

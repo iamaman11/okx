@@ -384,6 +384,12 @@ export class RuntimeSession {
       // even when this HTTP/WS envelope loses ACK or response. Returning a
       // retryable failure would tempt blind duplicate sends. Require an exact
       // read-only intent/ledger reconciliation, never auto-retry the mutation.
+      if (request.operation?.type === "prepare_execution") {
+        // A lost delivery/response may leave local PREPARED state, but this
+        // action never sends a venue order. It must be checked by intent ID,
+        // not retried and not reported as an unknown exchange fill.
+        return transportFailure("EXECUTION_PREPARE_OUTCOME_UNKNOWN_READ_EXACT_INTENT", false);
+      }
       if (isExecutionMutation(request.operation?.type)) {
         return transportFailure("MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT", false);
       }

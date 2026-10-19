@@ -46,6 +46,34 @@ const DIRECT_TRANSPORT_QUERY_FAILED: &str = "DIRECT_TRANSPORT_QUERY_FAILED";
 const DIRECT_TRANSPORT_INPUT_REJECTED: &str = "DIRECT_TRANSPORT_INPUT_REJECTED";
 const DIRECT_TRANSPORT_MUTATION_OUTCOME_UNKNOWN: &str =
     "EXECUTION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT";
+/// Prepare can durably create a local PREPARED record but never executes an
+/// exchange POST. Unknown delivery/response still requires exact intent
+/// readback before any new request; it is NOT an unknown exchange fill.
+const DIRECT_TRANSPORT_PREPARE_OUTCOME_UNKNOWN: &str =
+    "EXECUTION_PREPARE_OUTCOME_UNKNOWN_READ_EXACT_INTENT";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectRequestKind {
+    ReadOnly,
+    LocalPrepare,
+    ExchangeMutation,
+}
+
+impl DirectRequestKind {
+    fn from_operation(operation: &AgentOperation) -> Self {
+        if matches!(operation, AgentOperation::PrepareExecution { .. }) {
+            Self::LocalPrepare
+        } else if operation.direct_transport_read_only() {
+            Self::ReadOnly
+        } else {
+            Self::ExchangeMutation
+        }
+    }
+
+    fn is_mutating(self) -> bool {
+        self != Self::ReadOnly
+    }
+}
 
 fn direct_operation_allowed(
     profile: DirectRuntimeProfile,
@@ -328,8 +356,9 @@ async fn run_session(
     let mut heartbeat_nonce: Option<String> = None;
     let heartbeat_deadline = sleep(Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
     tokio::pin!(heartbeat_deadline);
-    let mut in_flight: FuturesUnordered<BoxFuture<'_, (String, bool, AgentResult<AgentResponse>)>> =
-        FuturesUnordered::new();
+    let mut in_flight: FuturesUnordered<
+        BoxFuture<'_, (String, DirectRequestKind, AgentResult<AgentResponse>)>,
+    > = FuturesUnordered::new();
     // No two exchange-affecting commands may be outstanding on the same
     // transport generation. Read/status requests remain independently bounded.
     let mut active_mutation: Option<String> = None;
@@ -411,13 +440,13 @@ async fn run_session(
                 }
             }
             completed = in_flight.next(), if !in_flight.is_empty() => {
-                let Some((request_id, mutating, result)) = completed else {
+                let Some((request_id, kind, result)) = completed else {
                     continue;
                 };
                 if active_mutation.as_deref() == Some(request_id.as_str()) {
                     active_mutation = None;
                 }
-                let response = completed_direct_response(&request_id, mutating, result);
+                let response = completed_direct_response(&request_id, kind, result);
                 response.validate()?;
                 send_frame(
                     &mut sink,
@@ -543,7 +572,8 @@ async fn run_session(
                         // immutable Rust prepare/submit/mutate executor and policy.
                         // Production is denied even if Worker/OAuth sends a write
                         // through this otherwise authenticated read transport.
-                        let mutating = !request.operation.direct_transport_read_only();
+                        let request_kind = DirectRequestKind::from_operation(&request.operation);
+                        let mutating = request_kind.is_mutating();
                         let terminal_status = config.runtime_profile == DirectRuntimeProfile::Production
                             && matches!(&request.operation, AgentOperation::ExecutionStatus { .. });
                         let governance_challenge_fresh = if mutating || terminal_status {
@@ -656,7 +686,7 @@ async fn run_session(
                                     .with_risk_client(Some(&risk_client));
                                 let result =
                                     dispatch(&request, query_context, &generated_at).await;
-                                (response_request_id, mutating, result)
+                                (response_request_id, request_kind, result)
                             }
                             .boxed(),
                         );
@@ -697,15 +727,33 @@ async fn run_session(
 
 fn completed_direct_response(
     request_id: &str,
-    mutating: bool,
+    kind: DirectRequestKind,
     result: AgentResult<AgentResponse>,
 ) -> AgentResponse {
     match result {
         Ok(response) => response,
         Err(error) => {
-            eprintln!(
-                "direct transport request {request_id} failed (mutation={mutating}): {error}"
-            );
+            // A local PREPARE may have persisted PREPARED, but by contract
+            // cannot execute an exchange POST. Do not disguise this as an
+            // uncertain exchange fill, and never infer that persistence failed.
+            eprintln!("direct transport request {request_id} failed (kind={kind:?}): {error}");
+            let (code, message, retryable) = match kind {
+                DirectRequestKind::ReadOnly => (
+                    DIRECT_TRANSPORT_QUERY_FAILED,
+                    "direct transport read query failed",
+                    true,
+                ),
+                DirectRequestKind::LocalPrepare => (
+                    DIRECT_TRANSPORT_PREPARE_OUTCOME_UNKNOWN,
+                    "local prepare result is unconfirmed; read the exact intent before any new preparation; no exchange POST was requested",
+                    false,
+                ),
+                DirectRequestKind::ExchangeMutation => (
+                    DIRECT_TRANSPORT_MUTATION_OUTCOME_UNKNOWN,
+                    "trade result is unconfirmed; reconcile the exact intent, never replay POST",
+                    false,
+                ),
+            };
             AgentResponse {
                 schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
                 request_id: request_id.to_owned(),
@@ -715,19 +763,9 @@ fn completed_direct_response(
                 result_schema: None,
                 result: None,
                 failure: Some(AgentFailure {
-                    code: if mutating {
-                        DIRECT_TRANSPORT_MUTATION_OUTCOME_UNKNOWN
-                    } else {
-                        DIRECT_TRANSPORT_QUERY_FAILED
-                    }
-                    .to_owned(),
-                    message: if mutating {
-                        "trade result is unconfirmed; reconcile the exact intent, never replay POST"
-                    } else {
-                        "direct transport read query failed"
-                    }
-                    .to_owned(),
-                    retryable: !mutating,
+                    code: code.to_owned(),
+                    message: message.to_owned(),
+                    retryable,
                 }),
                 warnings: Vec::new(),
             }
@@ -1164,7 +1202,7 @@ mod tests {
     fn post_mutation_internal_error_requires_exact_intent_readback_without_retry() {
         let response = completed_direct_response(
             "req_direct_submit_unsafe_0001",
-            true,
+            DirectRequestKind::ExchangeMutation,
             Err(AgentError::CloudflareTransport(
                 "private exchange detail".to_owned(),
             )),
@@ -1178,10 +1216,28 @@ mod tests {
     }
 
     #[test]
+    fn local_prepare_error_requires_exact_readback_but_is_not_unknown_exchange_post() {
+        let response = completed_direct_response(
+            "req_direct_prepare_unsafe_0001",
+            DirectRequestKind::LocalPrepare,
+            Err(AgentError::CloudflareTransport(
+                "private ledger write detail".to_owned(),
+            )),
+        );
+        assert_eq!(response.status, AgentResponseStatus::Failed);
+        let failure = response.failure.expect("typed local uncertainty");
+        assert_eq!(failure.code, DIRECT_TRANSPORT_PREPARE_OUTCOME_UNKNOWN);
+        assert!(!failure.retryable);
+        assert!(failure.message.contains("exact intent"));
+        assert!(failure.message.contains("no exchange POST"));
+        assert!(!failure.message.contains("private ledger"));
+    }
+
+    #[test]
     fn request_local_read_error_becomes_typed_failure() {
         let response = completed_direct_response(
             "req_direct_query_failure_0001",
-            false,
+            DirectRequestKind::ReadOnly,
             Err(AgentError::CloudflareTransport(
                 "internal detail must stay local".to_owned(),
             )),

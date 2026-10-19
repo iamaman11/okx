@@ -1973,6 +1973,26 @@ impl HostControlRequest {
 
 pub const ACCOUNT_CATALOG_ENTRY_SCHEMA_V1: &str = "okx.account-catalog-entry/v1";
 
+/// Exchange identity is separate from account environment (Demo/Real).
+/// A venue is selectable only after its native adapter has been installed;
+/// recognizing the identifier never grants an exchange credential or POST.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradingVenue {
+    #[default]
+    Okx,
+    Bybit,
+}
+
+impl TradingVenue {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Okx => "okx",
+            Self::Bybit => "bybit",
+        }
+    }
+}
+
 /// Metadata only. Registration never provisions an API key, probes a UID,
 /// changes the selected account or grants execution privileges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1986,6 +2006,9 @@ pub enum AccountCatalogEnvironment {
 #[serde(deny_unknown_fields)]
 pub struct AccountCatalogEntry {
     pub schema: String,
+    /// Defaults to OKX when reading earlier metadata-only catalog files.
+    #[serde(default)]
+    pub venue: TradingVenue,
     pub account_id: String,
     pub label: String,
     pub environment: AccountCatalogEnvironment,
@@ -2003,8 +2026,10 @@ impl AccountCatalogEntry {
                 .iter()
                 .all(|&byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
             || id.last() == Some(&b'-')
-            || self.account_id == "production"
-            || self.account_id == "demo_acceptance"
+            || matches!(
+                self.account_id.as_str(),
+                "real" | "demo" | "production" | "demo_acceptance"
+            )
             || self.label.is_empty()
             || self.label.len() > 48
             || self.label.trim() != self.label
@@ -2165,9 +2190,12 @@ pub enum HostControlOperation {
     StartAgent,
     StartDemoAcceptance,
     RestoreProductionAgent,
-    /// One account name, no operator UID/profile; native child derives both UIDs.
-    /// Selection never enables trading.
+    /// One canonical venue+account selector. The native account registry owns
+    /// credential readiness and the exclusive source/UID handoff.
+    /// Older OKX-only requests default to the OKX venue.
     SelectAccount {
+        #[serde(default)]
+        venue: TradingVenue,
         account_id: String,
     },
     /// Legacy technical operation: same native agent, ALWAYS target ReadOnly.
@@ -2191,11 +2219,20 @@ pub enum HostControlOperation {
 impl HostControlOperation {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
-            Self::SelectAccount { account_id } => {
-                if matches!(account_id.as_str(), "real" | "demo") {
-                    Ok(())
-                } else {
+            Self::SelectAccount { account_id, .. } => {
+                let id = account_id.as_bytes();
+                if id.is_empty()
+                    || id.len() > 32
+                    || !id[0].is_ascii_lowercase()
+                    || !id
+                        .iter()
+                        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                    || id.last() == Some(&b'-')
+                    || matches!(account_id.as_str(), "production" | "demo_acceptance")
+                {
                     Err(ProtocolError::InvalidRequestId)
+                } else {
+                    Ok(())
                 }
             }
             Self::RegisterReadOnlyAccount { entry } => entry.validate(),
@@ -3573,6 +3610,7 @@ mod tests {
             schema: ACCOUNT_CATALOG_ENTRY_SCHEMA_V1.to_owned(),
             account_id: "sub-1".to_owned(),
             label: "Read only account".to_owned(),
+            venue: TradingVenue::Okx,
             environment: AccountCatalogEnvironment::Production,
             expected_uid_fingerprint: "a".repeat(64),
         };
@@ -4555,6 +4593,7 @@ mod native_drain_source_tests {
         assert!(!req.valid());
         assert!(
             HostControlOperation::SelectAccount {
+                venue: TradingVenue::Okx,
                 account_id: "real".to_owned()
             }
             .validate()
@@ -4562,6 +4601,7 @@ mod native_drain_source_tests {
         );
         assert!(
             HostControlOperation::SelectAccount {
+                venue: TradingVenue::Okx,
                 account_id: "demo".to_owned()
             }
             .validate()
@@ -4569,9 +4609,40 @@ mod native_drain_source_tests {
         );
         assert!(
             HostControlOperation::SelectAccount {
+                venue: TradingVenue::Okx,
                 account_id: "demo_acceptance".to_owned()
             }
             .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn venue_scoped_selectors_are_typed_and_do_not_grant_venue_support() {
+        let old: HostControlOperation =
+            serde_json::from_str(r#"{"type":"select_account","account_id":"real"}"#)
+                .expect("legacy selector");
+        assert_eq!(
+            old,
+            HostControlOperation::SelectAccount {
+                venue: TradingVenue::Okx,
+                account_id: "real".to_owned(),
+            }
+        );
+        let bybit = HostControlOperation::SelectAccount {
+            venue: TradingVenue::Bybit,
+            account_id: "desk-a".to_owned(),
+        };
+        assert!(bybit.validate().is_ok());
+        assert!(
+            serde_json::to_string(&bybit)
+                .expect("typed selector")
+                .contains(r#""venue":"bybit""#)
+        );
+        assert!(
+            serde_json::from_str::<HostControlOperation>(
+                r#"{"type":"select_account","venue":"unknown","account_id":"real"}"#,
+            )
             .is_err()
         );
     }
