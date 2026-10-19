@@ -793,10 +793,16 @@ impl ExecutionRuntime {
             || run.allocated_usdt != binding.mandate.capital_base_usd
             || ledger.entries().any(|e| {
                 e.created_at_ms >= run.started_at_ms
-                    && !e.record.state.is_terminal()
-                    && (e.record.plan.intent_id != plan.intent_id
-                        || e.record.plan != *plan
-                        || e.record.state != ExecutionState::Prepared)
+                    && ((e.record.state == ExecutionState::Rejected
+                        && !inert_terminal_rejection(
+                            &e.record,
+                            &run.account_uid_fingerprint,
+                            &run.allocation_id,
+                        ))
+                        || (!e.record.state.is_terminal()
+                            && (e.record.plan.intent_id != plan.intent_id
+                                || e.record.plan != *plan
+                                || e.record.state != ExecutionState::Prepared)))
             })
             || !reconcile_account_ledger(ledger, facts).ok()?.consistent
         {
@@ -1424,7 +1430,18 @@ impl ExecutionRuntime {
         };
         let finance_complete = if new_risk {
             let ledger = executor.ledger();
-            ledger
+            let historical_rejections_safe = ledger.capital_reservation().is_some_and(|run| {
+                ledger.entries().all(|entry| {
+                    entry.created_at_ms < run.started_at_ms
+                        || entry.record.state != ExecutionState::Rejected
+                        || inert_terminal_rejection(
+                            &entry.record,
+                            &run.account_uid_fingerprint,
+                            &run.allocation_id,
+                        )
+                })
+            });
+            historical_rejections_safe && ledger
                 .capital_reservation()
                 .zip(ledger.financial_period_for_new_risk(facts, true, plan))
                 .zip(ledger.strategy_nav_watermark())
