@@ -962,8 +962,7 @@ impl ExecutionRuntime {
             ) && match p {
                 CentralAuthorizationBinding::Legacy(_) => true,
                 CentralAuthorizationBinding::Governance(scope) => {
-                    scope.scope.state.operator_authorization.id
-                        == reservation.operator_authority_id
+                    scope.scope.state.operator_authorization.id == reservation.operator_authority_id
                 }
             }
         }) {

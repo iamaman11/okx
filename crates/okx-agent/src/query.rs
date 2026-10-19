@@ -1396,8 +1396,8 @@ mod tests {
     fn production_governance_delivery_is_typed_and_fails_closed() {
         use okx_protocol::account_governance::{
             AccountControlV2, AccountEnvironmentV2, AccountGovernanceV2, AccountLimitsV2,
-            AuthorizationStatus, CentralGovernanceSnapshotV2, OperatorAuthorizationV2,
-            StrategyLimitsV2, GOVERNANCE_SCHEMA_V2,
+            AuthorizationStatus, CentralGovernanceSnapshotV2, GOVERNANCE_SCHEMA_V2,
+            OperatorAuthorizationV2, StrategyLimitsV2,
         };
         let governance = CentralGovernanceSnapshotV2 {
             state: AccountGovernanceV2 {
@@ -1446,18 +1446,20 @@ mod tests {
             .with_operator_governance(Some(&governance));
         assert!(context.central_trading_delivery_fresh(20_000));
         assert!(!context.central_trading_delivery_fresh(26_000));
-        assert!(!ObservationQueryContext::unavailable()
-            .with_operator_policy(None, 12)
-            .with_operator_governance(Some(&governance))
-            .central_trading_delivery_fresh(20_000));
+        assert!(
+            !ObservationQueryContext::unavailable()
+                .with_operator_policy(None, 12)
+                .with_operator_governance(Some(&governance))
+                .central_trading_delivery_fresh(20_000)
+        );
         let mut revoked = governance.clone();
         revoked.state.operator_authorization.status = AuthorizationStatus::Revoked;
-        assert!(!ObservationQueryContext::unavailable()
-            .with_operator_policy(None, 11)
-            .with_operator_governance(Some(&revoked))
-            .central_trading_delivery_fresh(20_000));
-        assert!(!ObservationQueryContext::unavailable()
-            .central_trading_delivery_fresh(20_000));
+        assert!(
+            !ObservationQueryContext::unavailable()
+                .with_operator_policy(None, 11)
+                .with_operator_governance(Some(&revoked))
+                .central_trading_delivery_fresh(20_000)
+        );
+        assert!(!ObservationQueryContext::unavailable().central_trading_delivery_fresh(20_000));
     }
-
 }
