@@ -246,6 +246,55 @@ impl MarketStreamState {
         subscriptions_complete: bool,
         rest_fallback_available: bool,
     ) -> MarketReadinessReport {
+        self.readiness_with_budgets(
+            reference,
+            now_ms,
+            max_age_ms,
+            max_age_ms,
+            connection_active,
+            subscriptions_complete,
+            rest_fallback_available,
+            false,
+        )
+    }
+
+    /// The new-risk gate requires fast price/book evidence separately from
+    /// slower funding/OI context. Both must belong to the same verified WS
+    /// generation; neither may be missing, future-dated, or outside its TTL.
+    /// This is NOT a fallback: no REST source is admitted for an exchange POST.
+    pub fn risk_readiness(
+        &self,
+        reference: &ReferenceRegistry,
+        now_ms: u64,
+        price_max_age_ms: u64,
+        context_max_age_ms: u64,
+        connection_active: bool,
+        subscriptions_complete: bool,
+    ) -> MarketReadinessReport {
+        self.readiness_with_budgets(
+            reference,
+            now_ms,
+            price_max_age_ms,
+            context_max_age_ms,
+            connection_active,
+            subscriptions_complete,
+            false,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn readiness_with_budgets(
+        &self,
+        reference: &ReferenceRegistry,
+        now_ms: u64,
+        price_max_age_ms: u64,
+        context_max_age_ms: u64,
+        connection_active: bool,
+        subscriptions_complete: bool,
+        rest_fallback_available: bool,
+        identify_source: bool,
+    ) -> MarketReadinessReport {
         let fallback_quality = || {
             if rest_fallback_available {
                 MarketReadiness::Degraded
@@ -282,12 +331,27 @@ impl MarketStreamState {
             return self.report(fallback_quality(), "ORDER_BOOK_NOT_CONTIGUOUS", None);
         }
 
-        let oldest = received_times.into_iter().min();
+        let oldest = received_times.iter().map(|(_, at)| *at).min();
         let Some(oldest) = oldest else {
             return self.report(fallback_quality(), "WS_DEPENDENCIES_INCOMPLETE", None);
         };
-        if now_ms.saturating_sub(oldest) > max_age_ms {
-            return self.report(MarketReadiness::Stale, "WS_DEPENDENCY_STALE", Some(oldest));
+        for (name, received_at_ms) in received_times {
+            let budget_ms = if matches!(name, "funding_rate" | "open_interest") {
+                context_max_age_ms
+            } else {
+                price_max_age_ms
+            };
+            if received_at_ms > now_ms || now_ms.saturating_sub(received_at_ms) > budget_ms {
+                let reason = if identify_source {
+                    format!(
+                        "WS_DEPENDENCY_STALE:{name}:age_ms={}:budget_ms={budget_ms}",
+                        now_ms.saturating_sub(received_at_ms)
+                    )
+                } else {
+                    "WS_DEPENDENCY_STALE".to_owned()
+                };
+                return self.report(MarketReadiness::Stale, &reason, Some(oldest));
+            }
         }
 
         if self
@@ -409,18 +473,28 @@ impl MarketStreamState {
             .map(|observed| &observed.value)
     }
 
-    fn required_receive_times(&self, funding_requirement: FundingRequirement) -> Option<Vec<u64>> {
+    fn required_receive_times(
+        &self,
+        funding_requirement: FundingRequirement,
+    ) -> Option<Vec<(&'static str, u64)>> {
         let mut times = vec![
-            self.current_received_at(&self.ticker)?,
-            self.current_received_at(&self.mark_price)?,
-            self.current_received_at(&self.index_ticker)?,
-            self.current_received_at(&self.open_interest)?,
-            self.order_book_received_at_ms?,
+            ("ticker", self.current_received_at(&self.ticker)?),
+            ("mark_price", self.current_received_at(&self.mark_price)?),
+            (
+                "index_ticker",
+                self.current_received_at(&self.index_ticker)?,
+            ),
+            (
+                "open_interest",
+                self.current_received_at(&self.open_interest)?,
+            ),
+            ("order_book", self.order_book_received_at_ms?),
         ];
         match funding_requirement {
-            FundingRequirement::Required => {
-                times.push(self.current_received_at(&self.funding_rate)?)
-            }
+            FundingRequirement::Required => times.push((
+                "funding_rate",
+                self.current_received_at(&self.funding_rate)?,
+            )),
             FundingRequirement::NotApplicable => {}
             FundingRequirement::Unknown => return None,
         }
@@ -664,6 +738,50 @@ mod tests {
             MarketReadiness::Degraded
         );
         assert!(state.publish(&reference, "now").is_err());
+    }
+
+    #[test]
+    fn risk_market_uses_strict_price_and_bounded_derivative_context() {
+        let reference = reference();
+        let mut state =
+            MarketStreamState::new("DOGE-USDT-SWAP", 7, reference.generation().as_str());
+        complete(&mut state, 7, 1_000);
+        // The confirmed websocket book, ticker and pricing are current while
+        // funding/OI have not pushed a new value for 89s.
+        state.apply_ticker(7, 80_000, ticker()).unwrap();
+        state.apply_mark_price(7, 80_000, mark()).unwrap();
+        state.apply_index_ticker(7, 80_000, index()).unwrap();
+        state.apply_book_snapshot(7, 80_000, book()).unwrap();
+        let ready = state.risk_readiness(&reference, 90_000, 60_000, 180_000, true, true);
+        assert_eq!(ready.quality, MarketReadiness::Fresh);
+        assert_eq!(
+            state
+                .readiness(&reference, 90_000, 60_000, true, true, false)
+                .reason,
+            "WS_DEPENDENCY_STALE"
+        );
+        // An actual slow-source timeout still fails closed by exact name.
+        state.apply_ticker(7, 181_000, ticker()).unwrap();
+        state.apply_mark_price(7, 181_000, mark()).unwrap();
+        state.apply_index_ticker(7, 181_000, index()).unwrap();
+        state.apply_book_snapshot(7, 181_000, book()).unwrap();
+        let stale = state.risk_readiness(&reference, 182_001, 60_000, 180_000, true, true);
+        assert_eq!(stale.quality, MarketReadiness::Stale);
+        assert!(stale.reason.contains("open_interest"));
+        assert!(stale.reason.contains("budget_ms=180000"));
+        assert_eq!(
+            state
+                .risk_readiness(&reference, 182_001, 60_000, 180_000, true, false)
+                .reason,
+            "WS_SUBSCRIPTIONS_INCOMPLETE"
+        );
+        // New slow-source updates never authorize stale pricing.
+        state.apply_open_interest(7, 182_001, oi()).unwrap();
+        state.apply_funding_rate(7, 182_001, funding()).unwrap();
+        let stale_price = state.risk_readiness(&reference, 250_001, 60_000, 180_000, true, true);
+        assert_eq!(stale_price.quality, MarketReadiness::Stale);
+        assert!(stale_price.reason.contains("ticker"));
+        assert!(stale_price.reason.contains("budget_ms=60000"));
     }
 
     #[test]

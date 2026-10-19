@@ -196,7 +196,39 @@ impl PublicRuntimeState {
         })?;
         let readiness =
             self.readiness(instrument_id, now_ms, max_age_ms, rest_fallback_available)?;
-        Ok(PublicQualitySnapshot {
+        Ok(self.quality_from_readiness(instrument_id, market, readiness))
+    }
+
+    /// Central new-risk market gate: no source fallback, one live generation.
+    /// Fast price/book and slower derivative-context TTLs are independent.
+    pub fn risk_quality_snapshot(
+        &self,
+        instrument_id: &str,
+        now_ms: u64,
+        price_max_age_ms: u64,
+        context_max_age_ms: u64,
+    ) -> Result<PublicQualitySnapshot, PublicRuntimeError> {
+        let market = self.markets.get(instrument_id).ok_or_else(|| {
+            PublicRuntimeError::MarketStateNotInitialized(instrument_id.to_owned())
+        })?;
+        let readiness = market.risk_readiness(
+            &self.reference,
+            now_ms,
+            price_max_age_ms,
+            context_max_age_ms,
+            self.connection_state == PublicConnectionState::Connected,
+            self.subscriptions_complete(instrument_id),
+        );
+        Ok(self.quality_from_readiness(instrument_id, market, readiness))
+    }
+
+    fn quality_from_readiness(
+        &self,
+        instrument_id: &str,
+        market: &MarketStreamState,
+        readiness: MarketReadinessReport,
+    ) -> PublicQualitySnapshot {
+        PublicQualitySnapshot {
             schema: PUBLIC_SNAPSHOT_QUALITY_SCHEMA_V2.to_owned(),
             instrument_id: instrument_id.to_owned(),
             quality: readiness.quality,
@@ -216,7 +248,7 @@ impl PublicRuntimeState {
             oldest_required_receive_ms: readiness.oldest_required_receive_ms,
             reason: readiness.reason,
             last_error: self.last_error.clone(),
-        })
+        }
     }
 
     pub fn fresh_snapshot(
