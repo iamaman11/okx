@@ -38,6 +38,8 @@ const HEARTBEAT_INTERVAL_SECONDS: u64 = 15;
 const HEARTBEAT_DEADLINE_SECONDS: u64 = 5;
 const HEARTBEAT_IDLE_RESET_SECONDS: u64 = 24 * 60 * 60;
 const MAX_INFLIGHT_READ_QUERIES: usize = 8;
+const MAX_PENDING_DELIVERY_CHALLENGES: usize = 64;
+const DELIVERY_CHALLENGE_MAX_AGE: Duration = Duration::from_secs(15);
 const DIRECT_TRANSPORT_MUTATION_REJECTED: &str = "DIRECT_TRANSPORT_MUTATION_REJECTED";
 const DIRECT_TRANSPORT_BUSY: &str = "DIRECT_TRANSPORT_BUSY";
 const DIRECT_TRANSPORT_QUERY_FAILED: &str = "DIRECT_TRANSPORT_QUERY_FAILED";
@@ -59,6 +61,18 @@ fn direct_operation_allowed(
             && operation.direct_transport_demo_execution())
 }
 
+/// Consume the exact ping/pong challenge delivered by the authenticated Worker.
+/// Only a native monotonic clock measures freshness; Cloudflare's Date.now()
+/// advances on I/O and cannot be used as a cross-runtime admission clock.
+fn consume_fresh_delivery_challenge(
+    pending: &mut HashMap<String, Instant>,
+    nonce: Option<&str>,
+) -> bool {
+    nonce
+        .and_then(|nonce| pending.remove(nonce))
+        .is_some_and(|seen_at| seen_at.elapsed() <= DELIVERY_CHALLENGE_MAX_AGE)
+}
+
 /// Delivery admission only. Native Rust will independently check UID,
 /// Trade credential, financial continuity and shared risk before any POST.
 fn central_production_delivery_admission(
@@ -69,6 +83,7 @@ fn central_production_delivery_admission(
     governance: Option<&CentralGovernanceSnapshotV2>,
     generation: u64,
     now_ms: u64,
+    governance_challenge_fresh: bool,
 ) -> Result<(), &'static str> {
     if profile != DirectRuntimeProfile::Production {
         return Err("PRODUCTION_PROFILE_REQUIRED");
@@ -95,8 +110,11 @@ fn central_production_delivery_admission(
         if scope.session_generation != generation {
             return Err("CENTRAL_GOVERNANCE_V2_GENERATION_MISMATCH");
         }
-        if scope.issued_at_ms > now_ms || now_ms.saturating_sub(scope.issued_at_ms) > 15_000 {
-            return Err("CENTRAL_GOVERNANCE_V2_NOT_FRESH");
+        // Challenge was issued for THIS request by the authenticated Worker
+        // after a successful ping/pong. A nonce is consumed only once on the
+        // native WebSocket, and its lifetime uses Instant (not wall clocks).
+        if !governance_challenge_fresh {
+            return Err("CENTRAL_GOVERNANCE_V2_CHALLENGE_NOT_FRESH");
         }
         if !scope.state.trading_requested
             || scope.state.operator_authorization.status != AuthorizationStatus::Active
@@ -294,6 +312,8 @@ async fn run_session(
     // No two exchange-affecting commands may be outstanding on the same
     // transport generation. Read/status requests remain independently bounded.
     let mut active_mutation: Option<String> = None;
+    // Request-scoped Worker ping challenges. No scheduler or second owner.
+    let mut pending_delivery_challenges: HashMap<String, Instant> = HashMap::new();
     // One existing transport and exactly one outbound mutation owner.
     let (risk_tx, mut risk_rx) = mpsc::channel::<OutboundRiskCommand>(4);
     let risk_client = NativeRiskClient::new(risk_tx);
@@ -404,6 +424,14 @@ async fn run_session(
                             &frame_session,
                             frame_generation,
                         )?;
+                        pending_delivery_challenges.retain(|_, seen_at| {
+                            seen_at.elapsed() <= DELIVERY_CHALLENGE_MAX_AGE
+                        });
+                        if nonce.starts_with("ping_")
+                            && pending_delivery_challenges.len() < MAX_PENDING_DELIVERY_CHALLENGES
+                        {
+                            pending_delivery_challenges.insert(nonce.clone(), Instant::now());
+                        }
                         send_frame(
                             &mut sink,
                             &DirectTransportFrame::Pong {
@@ -495,6 +523,16 @@ async fn run_session(
                         // Production is denied even if Worker/OAuth sends a write
                         // through this otherwise authenticated read transport.
                         let mutating = !request.operation.direct_transport_read_only();
+                        let governance_challenge_fresh = if mutating {
+                            consume_fresh_delivery_challenge(
+                                &mut pending_delivery_challenges,
+                                operator_governance
+                                    .as_ref()
+                                    .and_then(|scope| scope.delivery_challenge.as_deref()),
+                            )
+                        } else {
+                            false
+                        };
                         let delivery = central_production_delivery_admission(
                             config.runtime_profile,
                             context.execution.map(ExecutionRuntime::mode),
@@ -503,6 +541,7 @@ async fn run_session(
                             operator_governance.as_ref(),
                             frame_generation,
                             Utc::now().timestamp_millis().max(1) as u64,
+                            governance_challenge_fresh,
                         );
                         let allowed = direct_operation_allowed(
                             config.runtime_profile,
@@ -852,7 +891,7 @@ mod tests {
         };
         let admit = |policy: Option<&CentralAccountPolicy>, profile, mode, generation, now| {
             central_production_delivery_admission(
-                profile, mode, &submit, policy, None, generation, now,
+                profile, mode, &submit, policy, None, generation, now, false,
             )
             .is_ok()
         };
@@ -951,6 +990,7 @@ mod tests {
             },
             issued_at_ms: 1_000,
             session_generation: 514,
+            delivery_challenge: Some("ping_valid_governance_probe".to_owned()),
         };
         assert!(scope.valid());
         let admitted = |value: Option<&CentralGovernanceSnapshotV2>, generation, now| {
@@ -962,6 +1002,7 @@ mod tests {
                 value,
                 generation,
                 now,
+                true,
             )
         };
         assert_eq!(admitted(Some(&scope), 514, 1_001), Ok(()));
@@ -973,9 +1014,21 @@ mod tests {
             admitted(Some(&scope), 515, 1_001),
             Err("CENTRAL_GOVERNANCE_V2_GENERATION_MISMATCH")
         );
+        // No cross-machine clock agreement is required when the exact
+        // request-scoped challenge passed the native monotonic freshness gate.
+        assert_eq!(admitted(Some(&scope), 514, 16_001), Ok(()));
         assert_eq!(
-            admitted(Some(&scope), 514, 16_001),
-            Err("CENTRAL_GOVERNANCE_V2_NOT_FRESH")
+            central_production_delivery_admission(
+                DirectRuntimeProfile::Production,
+                Some(ExecutionRuntimeMode::Production),
+                &submit,
+                None,
+                Some(&scope),
+                514,
+                1_001,
+                false,
+            ),
+            Err("CENTRAL_GOVERNANCE_V2_CHALLENGE_NOT_FRESH")
         );
         scope.state.trading_requested = false;
         assert_eq!(
@@ -991,9 +1044,26 @@ mod tests {
                 Some(&scope),
                 514,
                 1_001,
+                true,
             ),
             Err("NATIVE_PRODUCTION_EXECUTOR_NOT_ACTIVE")
         );
+    }
+
+    #[test]
+    fn delivery_challenge_is_single_use_bounded_and_monotonic() {
+        let mut pending = HashMap::new();
+        let nonce = "ping_verified_once_012345";
+        pending.insert(nonce.to_owned(), Instant::now());
+        assert!(!consume_fresh_delivery_challenge(&mut pending, Some("ping_different")));
+        assert!(consume_fresh_delivery_challenge(&mut pending, Some(nonce)));
+        assert!(!consume_fresh_delivery_challenge(&mut pending, Some(nonce)));
+        assert!(!consume_fresh_delivery_challenge(&mut pending, None));
+        pending.insert(
+            nonce.to_owned(),
+            Instant::now() - DELIVERY_CHALLENGE_MAX_AGE - Duration::from_millis(1),
+        );
+        assert!(!consume_fresh_delivery_challenge(&mut pending, Some(nonce)));
     }
 
     #[test]
