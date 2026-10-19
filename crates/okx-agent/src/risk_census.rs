@@ -407,11 +407,9 @@ mod tests {
         let mut stopped = governance();
         stopped.state.trading_requested = false;
         stopped.state.operator_authorization.status = AuthorizationStatus::Revoked;
-        let read_only = PortfolioRiskSources::from_governance(
-            &stopped,
-            vec![row('a'), row('b')],
-            1_000,
-        ).expect("revoked new trade never blocks native read for release");
+        let read_only =
+            PortfolioRiskSources::from_governance(&stopped, vec![row('a'), row('b')], 1_000)
+                .expect("revoked new trade never blocks native read for release");
         assert_eq!(read_only.census().unwrap().account_keys.len(), 2);
         let incomplete = PortfolioRiskSources::from_governance(&g, vec![row('a')], 1_000).unwrap();
         assert_eq!(
