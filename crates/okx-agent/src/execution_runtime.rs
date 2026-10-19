@@ -1441,26 +1441,27 @@ impl ExecutionRuntime {
                         )
                 })
             });
-            historical_rejections_safe && ledger
-                .capital_reservation()
-                .zip(ledger.financial_period_for_new_risk(facts, true, plan))
-                .zip(ledger.strategy_nav_watermark())
-                .and_then(|((run, period), point)| {
-                    let asof = facts
-                        .summary
-                        .current_account_as_of_ms
-                        .as_deref()?
-                        .parse::<u64>()
-                        .ok()?;
-                    attested_flat_nav_for_new_risk(
-                        run,
-                        &period,
-                        point,
-                        facts.trading_usdt_equity.as_deref()?,
-                        asof,
-                    )
-                })
-                .is_some()
+            historical_rejections_safe
+                && ledger
+                    .capital_reservation()
+                    .zip(ledger.financial_period_for_new_risk(facts, true, plan))
+                    .zip(ledger.strategy_nav_watermark())
+                    .and_then(|((run, period), point)| {
+                        let asof = facts
+                            .summary
+                            .current_account_as_of_ms
+                            .as_deref()?
+                            .parse::<u64>()
+                            .ok()?;
+                        attested_flat_nav_for_new_risk(
+                            run,
+                            &period,
+                            point,
+                            facts.trading_usdt_equity.as_deref()?,
+                            asof,
+                        )
+                    })
+                    .is_some()
         } else {
             false
         };
