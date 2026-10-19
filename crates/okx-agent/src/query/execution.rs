@@ -4226,10 +4226,9 @@ async fn execution_status_response(
                 entry.record.state,
                 ExecutionState::Canceled | ExecutionState::Rejected
             ))
+        && let Err(reason) = release_source_proven_terminal_risk(context, execution).await
     {
-        if let Err(reason) = release_source_proven_terminal_risk(context, execution).await {
-            warnings.push(format!("central terminal risk remains reserved: {reason}"));
-        }
+        warnings.push(format!("central terminal risk remains reserved: {reason}"));
     }
     let (tca, tca_warnings) = execution_tca_status(context, &entry).await;
     warnings.extend(tca_warnings);

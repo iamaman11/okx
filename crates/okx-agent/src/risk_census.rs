@@ -4,9 +4,9 @@ use chrono::DateTime;
 use okx_api::PendingDerivativeAlgoRiskInventory;
 use okx_execution::{DurableExecutionLedger, ExecutionState};
 use okx_observation::{AccountLedgerFacts, AccountSnapshot};
-use okx_protocol::account_governance::{
-    AccountEnvironmentV2, AuthorizationStatus, CentralGovernanceSnapshotV2,
-};
+use okx_protocol::account_governance::{AccountEnvironmentV2, CentralGovernanceSnapshotV2};
+#[cfg(test)]
+use okx_protocol::account_governance::AuthorizationStatus;
 use okx_protocol::risk_authority::{NativeRiskCensus, RiskAccountOccupancy};
 use okx_runtime::{PrivateConnectionState, PrivateConvergenceWindow};
 use rust_decimal::Decimal;
