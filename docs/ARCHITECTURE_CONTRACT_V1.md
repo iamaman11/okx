@@ -30,6 +30,11 @@ acceptance are tracked separately.
   market quality, protection and STOP immediately before sending.
 - On a lost/uncertain POST result: persist UNKNOWN, reconcile exact native
   order/fills/bills and protections, **never blindly replay the mutation**.
+  A failed/lost `prepare_execution` response is separately classified as
+  `EXECUTION_PREPARE_OUTCOME_UNKNOWN_READ_EXACT_INTENT`: it can leave a
+  durable local PREPARED record but cannot have submitted an exchange order;
+  check the exact intent before any next attempt. One ambiguous local
+  preparation is not a reason to investigate phantom exchange fills.
 - Store prices/quantities/money as checked decimal quantities in canonical
   native domains; timestamps are exchange-reconciled and provenance-bound.
   ChatGPT is not the risk or PnL calculator.
