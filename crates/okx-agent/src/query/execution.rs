@@ -1477,6 +1477,16 @@ async fn commit_prepared(
     };
     match result {
         Ok(outcome) => prepare_outcome_response(request, generated_at, outcome),
+        Err(OrderExecutorError::Ledger(ExecutionLedgerError::CapitalReservationScopeMismatch)) => {
+            Ok(failure_response(
+                request,
+                generated_at,
+                AgentResponseStatus::Rejected,
+                EXECUTION_INPUT_INCONSISTENT_CODE,
+                "prepared intent is not bound to the active strategy run, account UID, immutable mandate and matching origin schema/version".to_owned(),
+                false,
+            ))
+        }
         Err(OrderExecutorError::Ledger(ExecutionLedgerError::ReverseNotReady)) => {
             Ok(failure_response(
                 request,
