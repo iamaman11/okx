@@ -1489,26 +1489,25 @@ impl DurableExecutionLedger {
         for entry in self.entries.values() {
             if entry.record.plan.intent_id == plan.intent_id {
                 let record = &entry.record;
-                if !Self::inert_candidate_for_financial_projection(
-                    record,
-                    plan,
-                    &run.allocation_id,
-                ) {
+                if !Self::inert_candidate_for_financial_projection(record, plan, &run.allocation_id)
+                {
                     return None;
                 }
                 continue;
             }
             entries.push(entry.clone());
         }
-        Some(crate::assess_persisted_financial_period_with_verified_source(
-            run,
-            self.exchange_evidence.as_ref(),
-            &entries,
-            facts,
-            coherent,
-            &BTreeMap::new(),
-            true,
-        ))
+        Some(
+            crate::assess_persisted_financial_period_with_verified_source(
+                run,
+                self.exchange_evidence.as_ref(),
+                &entries,
+                facts,
+                coherent,
+                &BTreeMap::new(),
+                true,
+            ),
+        )
     }
 
     /// The caller's current REST/WS source was just checked and captured
@@ -3624,14 +3623,20 @@ mod tests {
             DurableExecutionLedger::inert_candidate_for_financial_projection(v, &plan, run)
         };
         assert!(allowed(&value));
-        assert!(!DurableExecutionLedger::inert_candidate_for_financial_projection(
-            &value,
-            &protected_plan("another_candidate_20261019"),
-            run
-        ));
-        assert!(!DurableExecutionLedger::inert_candidate_for_financial_projection(
-            &value, &plan, "foreign_run"
-        ));
+        assert!(
+            !DurableExecutionLedger::inert_candidate_for_financial_projection(
+                &value,
+                &protected_plan("another_candidate_20261019"),
+                run
+            )
+        );
+        assert!(
+            !DurableExecutionLedger::inert_candidate_for_financial_projection(
+                &value,
+                &plan,
+                "foreign_run"
+            )
+        );
         value.order_id = Some("venue_order".to_owned());
         assert!(!allowed(&value));
         value.order_id = None;
