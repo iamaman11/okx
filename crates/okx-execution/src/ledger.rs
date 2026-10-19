@@ -1447,6 +1447,57 @@ impl DurableExecutionLedger {
         })
     }
 
+    /// Native new-risk accounting over the complete run history. Only the
+    /// selected, still-unsent PREPARED candidate is excluded from the
+    /// financial projection: it can have no exchange fill or fee, but its
+    /// durable parent remains present for every other ledger/risk check.
+    /// All other intents, trades, bills, UNKNOWN and funding stay included.
+    pub fn financial_period_for_new_risk(
+        &self,
+        facts: &AccountLedgerFacts,
+        coherent: bool,
+        plan: &ExecutionPlan,
+    ) -> Option<StrategyFinancialPeriod> {
+        let run = self.capital_reservation.as_ref()?;
+        let mut entries = Vec::with_capacity(self.entries.len());
+        for entry in self.entries.values() {
+            if entry.record.plan.intent_id == plan.intent_id {
+                let record = &entry.record;
+                if record.plan != *plan
+                    || record.state != ExecutionState::Prepared
+                    || record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
+                    || record.order_id.is_some()
+                    || record.exchange_state.is_some()
+                    || record.submission_timing.is_some()
+                    || record.rejection_code.is_some()
+                    || !record.mutations.is_empty()
+                    || record.reverse.is_some()
+                    || record.protection.as_ref().is_none_or(|p| {
+                        p.status != ProtectiveOrderStatus::Pending
+                            || p.algo_order_id.is_some()
+                            || p.covered_size.is_some()
+                            || p.failure_code.is_some()
+                            || p.cleanup.is_some()
+                            || p.size_amend.is_some()
+                    })
+                {
+                    return None;
+                }
+                continue;
+            }
+            entries.push(entry.clone());
+        }
+        Some(crate::assess_persisted_financial_period_with_verified_source(
+            run,
+            self.exchange_evidence.as_ref(),
+            &entries,
+            facts,
+            coherent,
+            &BTreeMap::new(),
+            true,
+        ))
+    }
+
     /// The caller's current REST/WS source was just checked and captured
     /// under the same ledger lock; quiet cursors may have been coalesced.
     pub fn financial_period_with_verified_source(
@@ -3549,6 +3600,33 @@ fn strategy_nav_stop_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_risk_ignores_only_exact_inert_prepared_parent() {
+        let run = "real_run_continuous_20261019";
+        let mut value = ExecutionRecord::new(plan("real_continuous_candidate_20261019"));
+        value.strategy_run_id = Some(run.to_owned());
+        assert!(value.protection.is_some());
+        let exact = |v: &ExecutionRecord| {
+            v.state == ExecutionState::Prepared
+                && v.strategy_run_id.as_deref() == Some(run)
+                && v.order_id.is_none()
+                && v.submission_timing.is_none()
+                && v.protection.as_ref().is_some_and(|p| {
+                    p.status == ProtectiveOrderStatus::Pending
+                        && p.algo_order_id.is_none()
+                })
+        };
+        assert!(exact(&value));
+        value.order_id = Some("venue_order".to_owned());
+        assert!(!exact(&value));
+        value.order_id = None;
+        value.state = ExecutionState::UnknownSubmission;
+        assert!(!exact(&value));
+        value.state = ExecutionState::Prepared;
+        value.protection.as_mut().unwrap().algo_order_id = Some("algo_venue".to_owned());
+        assert!(!exact(&value));
+    }
 
     #[test]
     fn daily_strategy_loss_counts_fifo_attributed_exit_bills_and_rejects_partial_source() {
