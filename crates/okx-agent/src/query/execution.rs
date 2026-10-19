@@ -19,7 +19,8 @@ use okx_execution::{
     revalidate_venue_execution,
 };
 use okx_protocol::risk_authority::{
-    NativeRiskCensus, RISK_COMMAND_SCHEMA_V1, RiskCommand, RiskCommandAction, RiskResult,
+    NativeRiskCensus, RISK_COMMAND_SCHEMA_V1, RiskCommand, RiskCommandAction, RiskDecisionStatus,
+    RiskReservationState, RiskResolution, RiskResult,
 };
 use okx_protocol::{
     ExecutionEntryRequest, ExecutionLineageRequest, ExecutionMutationRequest, ExecutionOrderType,
@@ -1783,7 +1784,7 @@ async fn executor_preflight(
 async fn complete_native_risk_census(
     context: ObservationQueryContext<'_>,
     execution: &crate::execution_runtime::ExecutionRuntime,
-    intent_id: &str,
+    prepared_intent: Option<&str>,
 ) -> Result<NativeRiskCensus, &'static str> {
     let scope = context
         .operator_governance
@@ -1821,7 +1822,7 @@ async fn complete_native_risk_census(
             &facts,
             &algos,
             &window,
-            intent_id,
+            prepared_intent,
             now_ms,
         )
         .await
@@ -1891,7 +1892,7 @@ async fn reserve_native_risk_for_submit(
         .clone();
     let raw = serde_json::to_vec(plan).map_err(|_| "RISK_PLAN_ENCODING_FAILED")?;
     let plan_sha256 = format!("{:x}", Sha256::digest(&raw));
-    let reserve_census = complete_native_risk_census(context, execution, intent_id).await?;
+    let reserve_census = complete_native_risk_census(context, execution, Some(intent_id)).await?;
     let reserve = RiskCommand {
         schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
         command_id: format!("risk_reserve_{}", &plan_sha256[..24]),
@@ -1913,7 +1914,7 @@ async fn reserve_native_risk_for_submit(
             let key = held.reservation_key.clone();
             let sequence = held.risk_book_sequence;
             async move {
-                let fresh = complete_native_risk_census(context, execution, intent_id).await?;
+                let fresh = complete_native_risk_census(context, execution, Some(intent_id)).await?;
                 let reservation_key = key.ok_or("RISK_HELD_RESERVATION_MISSING")?;
                 let expected_risk_book_sequence = sequence.ok_or("RISK_HELD_SEQUENCE_MISSING")?;
                 let proof = format!(
@@ -1943,6 +1944,72 @@ async fn reserve_native_risk_for_submit(
             }
         })
         .await
+}
+
+/// One native status/recovery action. Exact terminal ledger and all-account
+/// FLAT source are checked before releasing the DO reservation. INSPECT is
+/// read-only and survives restart; RESOLVE is CAS-fenced and never sends POST.
+async fn release_source_proven_terminal_risk(
+    context: ObservationQueryContext<'_>,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+) -> Result<usize, &'static str> {
+    let candidates = execution.terminal_risk_candidates().await;
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    let client = context.native_risk_client()
+        .ok_or("RISK_AUTHORITY_TRANSPORT_UNAVAILABLE")?;
+    let census = complete_native_risk_census(context, execution, None).await?;
+    let mut released = 0;
+    for candidate in candidates.into_iter().take(4) {
+        let inspect = client.request(RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
+            command_id: format!("risk_inspect_{}", &candidate.plan_sha256[..24]),
+            action: RiskCommandAction::Inspect {
+                reservation_key: candidate.reservation_key.clone(),
+                plan_sha256: candidate.plan_sha256.clone(),
+            },
+        }).await?;
+        if inspect.status != RiskDecisionStatus::Observed {
+            continue;
+        }
+        if inspect.reservation_state == Some(RiskReservationState::Released) {
+            continue;
+        }
+        if !matches!(inspect.reservation_state,
+            Some(RiskReservationState::Posted | RiskReservationState::Unknown | RiskReservationState::Open))
+        {
+            continue;
+        }
+        let book_sequence = inspect.risk_book_sequence
+            .ok_or("RISK_INSPECTION_SEQUENCE_MISSING")?;
+        let source_proof_sha256 = format!("{:x}", Sha256::digest(
+            serde_json::to_vec(&(
+                "okx.terminal-flat/v1", &candidate.reservation_key,
+                &candidate.plan_sha256, &candidate.ledger.record_digest,
+                &census.source_digest,
+            )).map_err(|_| "RISK_TERMINAL_PROOF_ENCODING_FAILED")?
+        ));
+        let command = RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
+            command_id: format!("risk_release_{}", &candidate.plan_sha256[..24]),
+            action: RiskCommandAction::Resolve {
+                reservation_key: candidate.reservation_key,
+                plan_sha256: candidate.plan_sha256,
+                expected_risk_book_sequence: book_sequence,
+                next_state: RiskResolution::Released,
+                source_proof_sha256,
+                terminal_census: Some(census.clone()),
+                terminal_ledger: Some(candidate.ledger),
+            },
+        };
+        let outcome = client.request(command).await?;
+        if outcome.status != RiskDecisionStatus::Updated {
+            return Err("RISK_TERMINAL_RELEASE_DENIED");
+        }
+        released += 1;
+    }
+    Ok(released)
 }
 
 async fn submit_prepared(
@@ -4134,6 +4201,17 @@ async fn execution_status_response(
         ));
     };
 
+    // The normal CLOSE/status path can now finish central risk accounting
+    // without a separate process, operator ceremony or replay of the order.
+    if execution.production_trading_requested()
+        && entry.record.state.is_terminal()
+        && (entry.record.plan.action.is_risk_reducing()
+            || matches!(entry.record.state, ExecutionState::Canceled | ExecutionState::Rejected))
+    {
+        if let Err(reason) = release_source_proven_terminal_risk(context, execution).await {
+            warnings.push(format!("central terminal risk remains reserved: {reason}"));
+        }
+    }
     let (tca, tca_warnings) = execution_tca_status(context, &entry).await;
     warnings.extend(tca_warnings);
     let result = ExecutionStatusResult {

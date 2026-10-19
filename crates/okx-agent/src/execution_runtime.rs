@@ -23,6 +23,7 @@ use okx_observation::{
 };
 use okx_protocol::CentralAccountPolicy;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use tokio::time::timeout;
 
@@ -50,6 +51,14 @@ pub struct ProductionSubmitSources<'a> {
 pub struct ProductionSubmitAuthorization<'a> {
     pub central: Option<CentralAuthorizationBinding<'a>>,
     pub risk_post: Option<&'a okx_protocol::risk_authority::RiskResult>,
+}
+
+/// A source-exact terminal intent already persisted by the ONE executor.
+/// It is a candidate for release, not an exchange-side FLAT assertion.
+pub struct NativeTerminalRiskCandidate {
+    pub reservation_key: String,
+    pub plan_sha256: String,
+    pub ledger: okx_protocol::risk_authority::TerminalRiskLedgerProof,
 }
 
 /// RiskBook's canonical length-delimited reservation identity. Verifying it
@@ -1690,7 +1699,7 @@ impl ExecutionRuntime {
         facts: &AccountLedgerFacts,
         algos: &okx_api::PendingDerivativeAlgoRiskInventory,
         window: &okx_runtime::PrivateConvergenceWindow,
-        intent_id: &str,
+        prepared_intent: Option<&str>,
         now_ms: u64,
     ) -> Result<crate::risk_census::AccountRiskEvidence, crate::risk_census::CensusFailure> {
         let owner = self.executor.lock().await;
@@ -1700,9 +1709,53 @@ impl ExecutionRuntime {
             algos,
             window,
             owner.ledger(),
-            Some(intent_id),
+            prepared_intent,
             now_ms,
         )
+    }
+
+    /// Recoverable native release candidates from the persisted run and
+    /// exact terminal intent. No independent shadow ledger or sent-order replay.
+    pub async fn terminal_risk_candidates(&self) -> Vec<NativeTerminalRiskCandidate> {
+        let owner = self.executor.lock().await;
+        let ledger = owner.ledger();
+        let Some(run) = ledger.capital_reservation() else {
+            return Vec::new();
+        };
+        ledger.entries().filter_map(|entry| {
+            let record = &entry.record;
+            if !record.plan.action.is_risk_increasing()
+                || record.plan.account_uid_fingerprint != run.account_uid_fingerprint
+                || record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
+            {
+                return None;
+            }
+            let state = match record.state {
+                ExecutionState::Filled => "FILLED",
+                ExecutionState::Canceled => "CANCELED",
+                ExecutionState::Rejected => "REJECTED",
+                _ => return None,
+            };
+            let plan_sha256 = format!(
+                "{:x}", Sha256::digest(serde_json::to_vec(&record.plan).ok()?)
+            );
+            let record_digest = format!(
+                "{:x}", Sha256::digest(serde_json::to_vec(record).ok()?)
+            );
+            Some(NativeTerminalRiskCandidate {
+                reservation_key: native_risk_reservation_key(
+                    &run.account_uid_fingerprint, &run.allocation_id, &record.plan.intent_id,
+                ),
+                plan_sha256,
+                ledger: okx_protocol::risk_authority::TerminalRiskLedgerProof {
+                    account_uid: run.account_uid_fingerprint.clone(),
+                    run_id: run.allocation_id.clone(),
+                    intent_id: record.plan.intent_id.clone(),
+                    state: state.to_owned(),
+                    record_digest,
+                },
+            })
+        }).take(32).collect()
     }
 
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {
