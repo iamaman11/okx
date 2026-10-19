@@ -2,7 +2,10 @@
 //! from only the selected account. Only Rust/venue may construct evidence.
 use chrono::DateTime;
 use okx_api::PendingDerivativeAlgoRiskInventory;
-use okx_execution::{DurableExecutionLedger, ExecutionState};
+use okx_execution::{
+    DurableExecutionLedger, ExecutionRecord, ExecutionState, ProfileHandoffLedgerAssessment,
+    ProtectiveOrderLink, ProtectiveOrderStatus,
+};
 use okx_observation::{AccountLedgerFacts, AccountSnapshot};
 #[cfg(test)]
 use okx_protocol::account_governance::AuthorizationStatus;
@@ -25,6 +28,63 @@ pub enum CensusFailure {
     UnknownMutation,
     UnpricedExposure,
     InconsistentAuthenticatedIdentity,
+}
+
+impl CensusFailure {
+    /// Preserve exact fail-closed cause in the native trade rejection rather
+    /// than turning source, WS, history and ledger failures into one generic code.
+    pub const fn native_reason(self) -> &'static str {
+        match self {
+            Self::RegistryUnverified => "RISK_NATIVE_REGISTRY_UNVERIFIED",
+            Self::MissingOrDuplicateAccount => "RISK_NATIVE_UID_COHORT_INCOMPLETE",
+            Self::StaleSource => "RISK_NATIVE_SOURCE_STALE",
+            Self::IncompleteHistory => "RISK_NATIVE_HISTORY_INCOMPLETE",
+            Self::PrivateStreamGap => "RISK_NATIVE_PRIVATE_STREAM_GAP",
+            Self::UnknownMutation => "RISK_NATIVE_UNKNOWN_MUTATION",
+            Self::UnpricedExposure => "RISK_NATIVE_EXPOSURE_UNPRICED",
+            Self::InconsistentAuthenticatedIdentity => "RISK_NATIVE_IDENTITY_MISMATCH",
+        }
+    }
+}
+
+/// A protective link is inert only before its FIRST venue POST. Merely seeing
+/// PENDING is insufficient: it also describes ambiguous exchange outcomes.
+fn unsent_protection(link: &ProtectiveOrderLink) -> bool {
+    link.status == ProtectiveOrderStatus::Pending
+        && link.algo_order_id.is_none()
+        && link.covered_size.is_none()
+        && link.failure_code.is_none()
+        && link.cleanup.is_none()
+        && link.size_amend.is_none()
+}
+
+fn exact_local_unsent_prepared(record: &ExecutionRecord, uid: &str) -> bool {
+    record.state == ExecutionState::Prepared
+        && record.plan.account_uid_fingerprint == uid
+        && record.plan.action.is_risk_increasing()
+        && record.plan.open_risk.is_some()
+        && record.strategy_run_id.is_some()
+        && record.order_id.is_none()
+        && record.exchange_state.is_none()
+        && record.submission_timing.is_none()
+        && record.rejection_code.is_none()
+        && record.mutations.is_empty()
+        && record.reverse.is_none()
+        && record.protection.as_ref().is_some_and(unsent_protection)
+}
+
+fn ledger_flat_except_exact_prepared(
+    native: &ProfileHandoffLedgerAssessment,
+    exact_prepared: bool,
+    stop_present: bool,
+) -> bool {
+    native.account_uid_mismatches == 0
+        && native.unresolved_order_mutations == 0
+        // profile-handoff correctly counts the unsent protective PENDING.
+        // Risk reservation may exclude exactly its OWN unsent candidate only.
+        && native.unresolved_protective_lifecycle == usize::from(exact_prepared)
+        && native.nonterminal_intents == usize::from(exact_prepared)
+        && !stop_present
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,16 +212,9 @@ impl AccountRiskEvidence {
             .map_err(|_| E::UnknownMutation)?;
         let prepared = prepared_intent
             .and_then(|id| ledger.get(id))
-            .is_some_and(|record| {
-                record.record.state == ExecutionState::Prepared
-                    && record.record.plan.account_uid_fingerprint == *uid
-            });
-        if native.account_uid_mismatches != 0
-            || native.unresolved_order_mutations != 0
-            || native.unresolved_protective_lifecycle != 0
-            || native.nonterminal_intents != usize::from(prepared)
-            || prepared_intent.is_some() && !prepared
-            || ledger.risk_stop().is_some()
+            .is_some_and(|entry| exact_local_unsent_prepared(&entry.record, uid));
+        if (prepared_intent.is_some() && !prepared)
+            || !ledger_flat_except_exact_prepared(&native, prepared, ledger.risk_stop().is_some())
         {
             return Err(E::UnknownMutation);
         }
@@ -338,6 +391,72 @@ impl PortfolioRiskSources {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_one_exact_unsent_prepared_protection_is_inert_for_risk() {
+        let mut pending = ProtectiveOrderLink {
+            policy_version: "okx.protective-order/mark-market-v1".into(),
+            algo_client_order_id: "prx01234567890123456789".into(),
+            trigger_price_basis: okx_execution::ProtectiveTriggerPriceBasis::Mark,
+            status: ProtectiveOrderStatus::Pending,
+            algo_order_id: None,
+            covered_size: None,
+            failure_code: None,
+            cleanup: None,
+            size_amend: None,
+        };
+        assert!(unsent_protection(&pending));
+        pending.algo_order_id = Some("venue_123".into());
+        assert!(!unsent_protection(&pending));
+        pending.algo_order_id = None;
+        pending.status = ProtectiveOrderStatus::Active;
+        assert!(!unsent_protection(&pending));
+        pending.status = ProtectiveOrderStatus::Failed;
+        assert!(!unsent_protection(&pending));
+    }
+
+    #[test]
+    fn native_risk_excludes_one_inert_prepared_but_never_other_unknowns() {
+        let mut audit = ProfileHandoffLedgerAssessment {
+            schema: "okx.profile-handoff-ledger-assessment/v1",
+            managed_intents_total: 1,
+            nonterminal_intents: 1,
+            unresolved_order_mutations: 0,
+            unresolved_protective_lifecycle: 1,
+            account_uid_mismatches: 0,
+            source_ledger_manifest_sha256: "a".repeat(64),
+            source_ledger_format: "okx.execution-ledger/v14".into(),
+            immutable_stop_reason: None,
+            finalized_run_checksum_sha256: None,
+        };
+        assert!(ledger_flat_except_exact_prepared(&audit, true, false));
+        assert!(!ledger_flat_except_exact_prepared(&audit, false, false));
+        assert!(!ledger_flat_except_exact_prepared(&audit, true, true));
+        audit.unresolved_protective_lifecycle = 2;
+        assert!(!ledger_flat_except_exact_prepared(&audit, true, false));
+        audit.unresolved_protective_lifecycle = 1;
+        audit.nonterminal_intents = 2;
+        assert!(!ledger_flat_except_exact_prepared(&audit, true, false));
+        audit.nonterminal_intents = 1;
+        audit.unresolved_order_mutations = 1;
+        assert!(!ledger_flat_except_exact_prepared(&audit, true, false));
+        audit.unresolved_order_mutations = 0;
+        audit.account_uid_mismatches = 1;
+        assert!(!ledger_flat_except_exact_prepared(&audit, true, false));
+    }
+
+    #[test]
+    fn exact_census_failure_codes_remain_distinct() {
+        assert_ne!(
+            CensusFailure::StaleSource.native_reason(),
+            CensusFailure::UnknownMutation.native_reason()
+        );
+        assert_ne!(
+            CensusFailure::PrivateStreamGap.native_reason(),
+            CensusFailure::IncompleteHistory.native_reason()
+        );
+    }
+
     fn key(v: char) -> String {
         format!("okx:real:{}", v.to_string().repeat(64))
     }

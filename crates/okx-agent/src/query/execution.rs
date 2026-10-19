@@ -1826,7 +1826,7 @@ async fn complete_native_risk_census(
             now_ms,
         )
         .await
-        .map_err(|_| "RISK_NATIVE_FLAT_PROOF_FAILED")?;
+        .map_err(crate::risk_census::CensusFailure::native_reason)?;
     crate::risk_census::PortfolioRiskSources::from_governance(
         scope,
         vec![single],
@@ -1834,7 +1834,7 @@ async fn complete_native_risk_census(
         context.verified_governance_challenge,
     )
     .and_then(|sources| sources.census())
-    .map_err(|_| "RISK_FULL_REAL_UID_COHORT_NOT_PROVEN")
+    .map_err(crate::risk_census::CensusFailure::native_reason)
 }
 
 /// Prepare an exact plan-bound atomic grant. Neither RESERVE nor BEGIN_POST
