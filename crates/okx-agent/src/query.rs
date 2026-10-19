@@ -1469,10 +1469,12 @@ mod tests {
         assert!(context.central_trading_delivery_fresh(26_000));
         assert!(context.central_uid_admitted(&"a".repeat(64), 26_000));
         assert!(!context.central_uid_admitted(&"c".repeat(64), 26_000));
-        assert!(context
-            .central_governance_binding()
-            .expect("governance binding")
-            .authorizes_uid(&"a".repeat(64), 26_000));
+        assert!(
+            context
+                .central_governance_binding()
+                .expect("governance binding")
+                .authorizes_uid(&"a".repeat(64), 26_000)
+        );
         assert!(
             !ObservationQueryContext::unavailable()
                 .with_operator_policy(None, 11)
