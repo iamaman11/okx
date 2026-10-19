@@ -18,12 +18,17 @@ use okx_execution::{
     revalidate_amend_execution_plan, revalidate_execution_plan, revalidate_hard_risk_policy,
     revalidate_venue_execution,
 };
+use okx_protocol::risk_authority::{
+    NativeRiskCensus, RISK_COMMAND_SCHEMA_V1, RiskCommand, RiskCommandAction, RiskDecisionStatus,
+    RiskReservationState, RiskResolution, RiskResult,
+};
 use okx_protocol::{
     ExecutionEntryRequest, ExecutionLineageRequest, ExecutionMutationRequest, ExecutionOrderType,
     ExecutionPrepareSpec, ExecutionReferencePriceBasis, ExecutionRiskBindingRequest,
     ExecutionTradeMode, LiquidityRole as ProtocolLiquidityRole,
     PositionSide as ProtocolPositionSide,
 };
+use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::execution_runtime::{
@@ -151,14 +156,7 @@ pub(super) async fn dispatch(
         .execution
         .is_some_and(|owner| owner.production_trading_requested())
         && !request.operation.direct_transport_read_only()
-        && !context.operator_policy.is_some_and(|policy| {
-            policy.valid()
-                && policy.trading_requested
-                && policy.session_generation == context.transport_generation
-                && policy.issued_at_ms <= utc_now_ms()
-                && utc_now_ms().saturating_sub(policy.issued_at_ms)
-                    <= okx_protocol::CENTRAL_ACCOUNT_POLICY_MAX_AGE_MS
-        })
+        && !context.central_trading_delivery_fresh(utc_now_ms())
     {
         return Ok(failure_response(
             request,
@@ -609,7 +607,7 @@ async fn begin_strategy_run(
                 &opening,
                 observed_at_ms,
                 rearm.as_ref(),
-                context.central_policy_binding(),
+                context.central_authorization_binding(),
             )
             .await?
     } else {
@@ -1702,7 +1700,7 @@ async fn executor_preflight_check(
                 AgentResponseStatus::Failed,
                 EXECUTION_PREFLIGHT_UNAVAILABLE_CODE,
                 error.to_string(),
-                true,
+                !matches!(error, okx_api::OkxError::AuthenticationRejected { .. }),
             ),
         ))),
         Err(error) => Err(error),
@@ -1778,6 +1776,258 @@ async fn executor_preflight(
     ))
 }
 
+/// One native REST/WS/ledger census for the entire registered Real cohort.
+/// The current Windows owner has one authenticated Real observer. This code
+/// deliberately refuses additional registered UIDs until their own native
+/// readers and credential bindings exist; it never calls an account FLAT
+/// on the basis of the selected UID alone.
+async fn complete_native_risk_census(
+    context: ObservationQueryContext<'_>,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+    prepared_intent: Option<&str>,
+) -> Result<NativeRiskCensus, &'static str> {
+    let scope = context
+        .operator_governance
+        .ok_or("RISK_GOVERNANCE_V2_REQUIRED")?;
+    let observer = context
+        .account_fallback
+        .ok_or("RISK_OBSERVER_UNAVAILABLE")?;
+    let ws = context.private_ws.ok_or("RISK_PRIVATE_WS_UNAVAILABLE")?;
+    let cursor = ws
+        .convergence_cursor()
+        .await
+        .map_err(|_| "RISK_WS_CURSOR_UNAVAILABLE")?;
+    let assembled = assemble_account_snapshot(context)
+        .await
+        .map_err(|_| "RISK_SNAPSHOT_UNAVAILABLE")?;
+    if assembled.quality != DataQuality::Fresh {
+        return Err("RISK_SNAPSHOT_NOT_FRESH");
+    }
+    let facts = observer
+        .ledger_facts(&assembled.snapshot)
+        .await
+        .map_err(|_| "RISK_FINANCIAL_HISTORY_UNAVAILABLE")?;
+    let algos = observer
+        .pending_derivative_risk_algos()
+        .await
+        .map_err(|_| "RISK_DERIVATIVE_ALGOS_UNAVAILABLE")?;
+    let window = ws
+        .convergence_window(cursor)
+        .await
+        .map_err(|_| "RISK_PRIVATE_WS_CHANGED")?;
+    let now_ms = utc_now_ms();
+    let single = execution
+        .native_flat_risk_evidence(
+            &assembled.snapshot,
+            &facts,
+            &algos,
+            &window,
+            prepared_intent,
+            now_ms,
+        )
+        .await
+        .map_err(|_| "RISK_NATIVE_FLAT_PROOF_FAILED")?;
+    crate::risk_census::PortfolioRiskSources::from_governance(scope, vec![single], now_ms)
+        .and_then(|sources| sources.census())
+        .map_err(|_| "RISK_FULL_REAL_UID_COHORT_NOT_PROVEN")
+}
+
+/// Prepare an exact plan-bound atomic grant. Neither RESERVE nor BEGIN_POST
+/// retries after lost ACK; previously reserved intent remains unavailable to
+/// new orders until source-proven reconciliation.
+async fn reserve_native_risk_for_submit(
+    context: ObservationQueryContext<'_>,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+    entry: &ExecutionLedgerEntry,
+    intent_id: &str,
+) -> Result<RiskResult, &'static str> {
+    let client = context
+        .native_risk_client()
+        .ok_or("RISK_AUTHORITY_TRANSPORT_UNAVAILABLE")?;
+    let scope = context
+        .operator_governance
+        .ok_or("RISK_GOVERNANCE_V2_REQUIRED")?;
+    let plan = &entry.record.plan;
+    if !scope.authorizes_delivery(
+        &plan.account_uid_fingerprint,
+        utc_now_ms(),
+        context.transport_generation,
+    ) {
+        return Err("RISK_CENTRAL_UID_NOT_AUTHORIZED");
+    }
+    let run = execution
+        .risk_run_for_prepared(intent_id)
+        .await
+        .ok_or("RISK_PREPARED_RUN_NOT_ATTESTED")?;
+    if run.account_uid_fingerprint != plan.account_uid_fingerprint
+        || run.operator_authority_id != scope.state.operator_authorization.id
+    {
+        return Err("RISK_RUN_SCOPE_MISMATCH");
+    }
+    let account = scope
+        .state
+        .accounts
+        .iter()
+        .find(|a| {
+            a.venue == "okx"
+                && a.environment == okx_protocol::account_governance::AccountEnvironmentV2::Real
+                && a.enabled
+                && a.uid_fingerprint == plan.account_uid_fingerprint
+        })
+        .ok_or("RISK_ACCOUNT_NOT_REGISTERED")?;
+    // Strategy identity is the persisted run mandate, not a name chosen by
+    // ChatGPT for this reservation. Unmapped mandates cannot mint a grant.
+    if !account
+        .strategies
+        .iter()
+        .any(|strategy| strategy.enabled && strategy.id == run.mandate_version)
+    {
+        return Err("RISK_STRATEGY_NOT_REGISTERED");
+    }
+    let requested = plan
+        .open_risk
+        .as_ref()
+        .ok_or("RISK_PLAN_LOSS_UNAVAILABLE")?
+        .requested_max_loss_settle
+        .clone();
+    let raw = serde_json::to_vec(plan).map_err(|_| "RISK_PLAN_ENCODING_FAILED")?;
+    let plan_sha256 = format!("{:x}", Sha256::digest(&raw));
+    let reserve_census = complete_native_risk_census(context, execution, Some(intent_id)).await?;
+    let reserve = RiskCommand {
+        schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
+        command_id: format!("risk_reserve_{}", &plan_sha256[..24]),
+        action: RiskCommandAction::Reserve {
+            venue: "okx".to_owned(),
+            account_uid: plan.account_uid_fingerprint.clone(),
+            run_id: run.allocation_id.clone(),
+            intent_id: intent_id.to_owned(),
+            strategy_id: run.mandate_version.clone(),
+            instrument_id: plan.instrument_id.clone(),
+            plan_sha256: plan_sha256.clone(),
+            requested_loss_usdt: requested,
+            policy_revision: scope.state.revision,
+            census: reserve_census,
+        },
+    };
+    client
+        .reserve_then_fence(reserve, |held| {
+            let key = held.reservation_key.clone();
+            let sequence = held.risk_book_sequence;
+            async move {
+                let fresh =
+                    complete_native_risk_census(context, execution, Some(intent_id)).await?;
+                let reservation_key = key.ok_or("RISK_HELD_RESERVATION_MISSING")?;
+                let expected_risk_book_sequence = sequence.ok_or("RISK_HELD_SEQUENCE_MISSING")?;
+                let proof = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        serde_json::to_vec(&(
+                            "okx.post-source/v1",
+                            &plan_sha256,
+                            &reservation_key,
+                            &fresh.source_digest,
+                        ))
+                        .map_err(|_| "RISK_POST_PROOF_ENCODING_FAILED")?
+                    )
+                );
+                Ok(RiskCommand {
+                    schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
+                    command_id: format!("risk_post_{}", &plan_sha256[..24]),
+                    action: RiskCommandAction::BeginPost {
+                        reservation_key,
+                        plan_sha256,
+                        policy_revision: scope.state.revision,
+                        expected_risk_book_sequence,
+                        source_proof_sha256: proof,
+                        census: fresh,
+                    },
+                })
+            }
+        })
+        .await
+}
+
+/// One native status/recovery action. Exact terminal ledger and all-account
+/// FLAT source are checked before releasing the DO reservation. INSPECT is
+/// read-only and survives restart; RESOLVE is CAS-fenced and never sends POST.
+async fn release_source_proven_terminal_risk(
+    context: ObservationQueryContext<'_>,
+    execution: &crate::execution_runtime::ExecutionRuntime,
+) -> Result<usize, &'static str> {
+    let candidates = execution.terminal_risk_candidates().await;
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    let client = context
+        .native_risk_client()
+        .ok_or("RISK_AUTHORITY_TRANSPORT_UNAVAILABLE")?;
+    let census = complete_native_risk_census(context, execution, None).await?;
+    let mut released = 0;
+    for candidate in candidates.into_iter().take(4) {
+        let inspect = client
+            .request(RiskCommand {
+                schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
+                command_id: format!("risk_inspect_{}", &candidate.plan_sha256[..24]),
+                action: RiskCommandAction::Inspect {
+                    reservation_key: candidate.reservation_key.clone(),
+                    plan_sha256: candidate.plan_sha256.clone(),
+                },
+            })
+            .await?;
+        if inspect.status != RiskDecisionStatus::Observed {
+            continue;
+        }
+        if inspect.reservation_state == Some(RiskReservationState::Released) {
+            continue;
+        }
+        if !matches!(
+            inspect.reservation_state,
+            Some(
+                RiskReservationState::Posted
+                    | RiskReservationState::Unknown
+                    | RiskReservationState::Open
+            )
+        ) {
+            continue;
+        }
+        let book_sequence = inspect
+            .risk_book_sequence
+            .ok_or("RISK_INSPECTION_SEQUENCE_MISSING")?;
+        let source_proof_sha256 = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    "okx.terminal-flat/v1",
+                    &candidate.reservation_key,
+                    &candidate.plan_sha256,
+                    &candidate.ledger.record_digest,
+                    &census.source_digest,
+                ))
+                .map_err(|_| "RISK_TERMINAL_PROOF_ENCODING_FAILED")?
+            )
+        );
+        let command = RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
+            command_id: format!("risk_release_{}", &candidate.plan_sha256[..24]),
+            action: RiskCommandAction::Resolve {
+                reservation_key: candidate.reservation_key,
+                plan_sha256: candidate.plan_sha256,
+                expected_risk_book_sequence: book_sequence,
+                next_state: RiskResolution::Released,
+                source_proof_sha256,
+                terminal_census: Some(census.clone()),
+                terminal_ledger: Some(candidate.ledger),
+            },
+        };
+        let outcome = client.request(command).await?;
+        if outcome.status != RiskDecisionStatus::Updated {
+            return Err("RISK_TERMINAL_RELEASE_DENIED");
+        }
+        released += 1;
+    }
+    Ok(released)
+}
+
 async fn submit_prepared(
     request: &AgentRequest,
     context: ObservationQueryContext<'_>,
@@ -1798,7 +2048,7 @@ async fn submit_prepared(
         ));
     };
 
-    let plan = entry.record.plan;
+    let plan = entry.record.plan.clone();
     let action = plan.action;
     // Existing prepared intents also fail closed. A previously installed
     // binary may have persisted PREPARED before this venue decision; no
@@ -1859,6 +2109,26 @@ async fn submit_prepared(
             Ok(window) if window.events.is_empty() => {}
             _ => return Ok(account_not_fresh(request, generated_at)),
         }
+        // A Real OPEN must first reserve shared risk in the one Durable
+        // RiskBook, then prove an independent all-account read after HELD.
+        // Missing UID readers, unpriced exposure or UNKNOWN all fail closed.
+        let risk_post = if action.is_risk_increasing() {
+            match reserve_native_risk_for_submit(context, execution, &entry, intent_id).await {
+                Ok(receipt) => Some(receipt),
+                Err(reason) => {
+                    return Ok(failure_response(
+                        request,
+                        generated_at,
+                        AgentResponseStatus::Rejected,
+                        EXECUTION_RISK_EVIDENCE_UNAVAILABLE_CODE,
+                        reason.to_owned(),
+                        false,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
         match execution
             .submit_prepared_production_authorized(
                 &preflight,
@@ -1869,7 +2139,10 @@ async fn submit_prepared(
                     facts,
                     protection: &protection,
                 },
-                context.central_policy_binding(),
+                crate::execution_runtime::ProductionSubmitAuthorization {
+                    central: context.central_authorization_binding(),
+                    risk_post: risk_post.as_ref(),
+                },
             )
             .await?
         {
@@ -3944,6 +4217,19 @@ async fn execution_status_response(
         ));
     };
 
+    // The normal CLOSE/status path can now finish central risk accounting
+    // without a separate process, operator ceremony or replay of the order.
+    if execution.production_trading_requested()
+        && entry.record.state.is_terminal()
+        && (entry.record.plan.action.is_risk_reducing()
+            || matches!(
+                entry.record.state,
+                ExecutionState::Canceled | ExecutionState::Rejected
+            ))
+        && let Err(reason) = release_source_proven_terminal_risk(context, execution).await
+    {
+        warnings.push(format!("central terminal risk remains reserved: {reason}"));
+    }
     let (tca, tca_warnings) = execution_tca_status(context, &entry).await;
     warnings.extend(tca_warnings);
     let result = ExecutionStatusResult {

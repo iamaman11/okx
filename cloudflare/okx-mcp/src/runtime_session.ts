@@ -1,6 +1,9 @@
 import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
 import { defaultAccountPolicy, validAccountPolicy } from "./account_policy.js";
 import { accountPolicyRequest } from "./account_policy.js";
+import { governanceRequest, enrollObservedAccount, stopNewRealRisk, activateExistingOperatorGrant, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
+import {validGovernance} from "./account_governance.js";
+import { handleNativeRiskCommand } from "./risk_authority.js";
 import {
   ACK_DEADLINE_MS,
   type Env,
@@ -38,6 +41,58 @@ export class RuntimeSession {
     }
     if (url.pathname === "/status") {
       return Response.json(await this.status(url.searchParams.get("probe") === "1"));
+    }
+    if(url.pathname==="/account-governance/stop"&&request.method==="POST"){
+      await governanceRequest(this.state.storage,"GET");
+      const value=await stopNewRealRisk(this.state.storage);
+      return Response.json(value.body,{status:value.status,headers:{"cache-control":"no-store"}});
+    }
+    if(url.pathname==="/account-governance/authorize"&&request.method==="POST"){
+      const body=await request.text();
+      if(body.length>512)return Response.json({status:"FAILED",reason:"AUTHORIZATION_TOO_LARGE"},{status:413});
+      let value:unknown;
+      try{value=JSON.parse(body);}catch{
+        return Response.json({status:"FAILED",reason:"INVALID_AUTHORIZATION"},{status:400});
+      }
+      const args=value as Record<string,unknown>;
+      if(!args||!Number.isSafeInteger(args.expected_revision)||
+        typeof args.approval_id!=="string")
+        return Response.json({status:"FAILED",reason:"INVALID_AUTHORIZATION"},{status:400});
+      const result=await activateExistingOperatorGrant(this.state.storage,
+        args.expected_revision as number,args.approval_id);
+      return Response.json(result.body,{status:result.status,headers:{"cache-control":"no-store"}});
+    }
+    if(url.pathname==="/account-governance/enroll"&&request.method==="POST"){
+      // Internal DO endpoint; Worker alone constructs the observation from
+      // an authenticated native trader_snapshot. It is never an MCP UID field.
+      const body=await request.text();
+      if(body.length>1024)return Response.json({status:"FAILED",reason:"ENROLLMENT_TOO_LARGE"},{status:413});
+      let raw:unknown;
+      try{raw=JSON.parse(body);}catch{
+        return Response.json({status:"FAILED",reason:"INVALID_ENROLLMENT"},{status:400});
+      }
+      const r=raw as Record<string,unknown>;
+      if(!r||typeof r.uid_fingerprint!=="string"||r.venue!=="okx"
+        ||!["real","demo"].includes(String(r.environment))
+        ||typeof r.label!=="string")
+        return Response.json({status:"FAILED",reason:"INVALID_ENROLLMENT"},{status:400});
+      const out=await enrollObservedAccount(this.state.storage,{
+        uid_fingerprint:r.uid_fingerprint,venue:"okx",
+        environment:r.environment as "real"|"demo",label:r.label,
+      });
+      return Response.json(out.body,{status:out.status,headers:{"cache-control":"no-store"}});
+    }
+    if (url.pathname === "/account-governance") {
+      // Same RuntimeSession owner, no additional DO instance or service.
+      let update:unknown;
+      if(request.method==="POST"){
+        const body=await request.text();
+        if(body.length>32768)return Response.json({status:"FAILED",reason:"GOVERNANCE_TOO_LARGE"},{status:413});
+        try{update=JSON.parse(body);}
+        catch{return Response.json({status:"FAILED",reason:"INVALID_GOVERNANCE_REQUEST"},{status:400});}
+      }
+      const answer=await governanceRequest(this.state.storage,request.method,update);
+      return Response.json(answer.body,{status:answer.status,headers:{"cache-control":"no-store"}});
     }
     if (url.pathname === "/account-policy") {
       // Internal Durable Object endpoint, reachable from authenticated OAuth
@@ -168,6 +223,20 @@ export class RuntimeSession {
       this.resolvePending(`pong:${frame.nonce}`, attachment.generation, frame);
       return;
     }
+    if(frame.type==="risk_control") {
+      const result=await handleNativeRiskCommand(this.state.storage,{
+        connection_generation:attachment.generation,
+        runtime_profile:attachment.runtimeProfile??"unverified",
+        hello:attachment.hello
+      },frame.command,Date.now());
+      ws.send(JSON.stringify({
+        type:"risk_control_result",schema:FRAME_SCHEMA,
+        session_id:attachment.sessionId,
+        connection_generation:attachment.generation,
+        result
+      }));
+      return;
+    }
     if (frame.type === "delivery_ack" && typeof frame.request_id === "string") {
       this.resolvePending(`ack:${frame.request_id}`, attachment.generation, frame);
       return;
@@ -259,25 +328,38 @@ export class RuntimeSession {
       // cache it across calls or accept caller-supplied policy fields.
       // Native Rust still owns credential/UID/STOP/risk and exchange POST.
       let operator_policy: Record<string, unknown> | undefined;
+      let operator_governance: Record<string, unknown> | undefined;
       if (isExecutionMutation(request.operation?.type) &&
           active.attachment.runtimeProfile === "production") {
-        const stored: unknown = await this.state.storage.get("account_policy_v1");
-        if (stored !== undefined && !validAccountPolicy(stored)) {
-          return transportFailure("CENTRAL_POLICY_CORRUPT", false);
+        const current:unknown=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);
+        if(current!==undefined){
+          if(!validGovernance(current))
+            return transportFailure("CENTRAL_GOVERNANCE_CORRUPT",false);
+          if(!current.trading_requested||current.operator_authorization.status!=="ACTIVE")
+            return transportFailure("CENTRAL_NEW_RISK_STOPPED",false);
+          // Typed fresh request-scoped delivery proof. This is NOT the POST
+          // permit; the native executor still needs an exact DO reservation.
+          operator_governance={
+            state:current,issued_at_ms:Date.now(),
+            session_generation:active.attachment.generation
+          };
+        }else{
+          const stored: unknown = await this.state.storage.get("account_policy_v1");
+          if (stored !== undefined && !validAccountPolicy(stored)) {
+            return transportFailure("CENTRAL_POLICY_CORRUPT", false);
+          }
+          const policy = stored ?? defaultAccountPolicy();
+          if (!validAccountPolicy(policy))
+            return transportFailure("CENTRAL_POLICY_UNAVAILABLE", false);
+          operator_policy = {
+            schema: policy.schema,revision:policy.revision,
+            trading_requested:policy.trading_requested,
+            allowed_account_uids:policy.allowed_account_uids,
+            max_total_modelled_loss_usdt:policy.max_total_modelled_loss_usdt,
+            issued_at_ms:Date.now(),
+            session_generation:active.attachment.generation,
+          };
         }
-        const policy = stored ?? defaultAccountPolicy();
-        if (!validAccountPolicy(policy)) {
-          return transportFailure("CENTRAL_POLICY_UNAVAILABLE", false);
-        }
-        operator_policy = {
-          schema: policy.schema,
-          revision: policy.revision,
-          trading_requested: policy.trading_requested,
-          allowed_account_uids: policy.allowed_account_uids,
-          max_total_modelled_loss_usdt: policy.max_total_modelled_loss_usdt,
-          issued_at_ms: Date.now(),
-          session_generation: active.attachment.generation,
-        };
       }
       active.ws.send(JSON.stringify({
         type: "request",
@@ -286,6 +368,7 @@ export class RuntimeSession {
         connection_generation: active.attachment.generation,
         request,
         ...(operator_policy === undefined ? {} : { operator_policy }),
+        ...(operator_governance === undefined ? {} : { operator_governance }),
       }));
       await ack;
       return await response as Json;

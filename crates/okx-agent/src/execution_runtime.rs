@@ -23,6 +23,7 @@ use okx_observation::{
 };
 use okx_protocol::CentralAccountPolicy;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use tokio::time::timeout;
 
@@ -45,6 +46,43 @@ pub struct ProductionSubmitSources<'a> {
     pub protection: &'a PendingProtectiveAlgoInventory,
 }
 
+/// One typed bundle of the central delivery grant and the independently
+/// acknowledged RiskBook POST fence. Neither item alone authorizes an order.
+pub struct ProductionSubmitAuthorization<'a> {
+    pub central: Option<CentralAuthorizationBinding<'a>>,
+    pub risk_post: Option<&'a okx_protocol::risk_authority::RiskResult>,
+}
+
+/// A source-exact terminal intent already persisted by the ONE executor.
+/// It is a candidate for release, not an exchange-side FLAT assertion.
+pub struct NativeTerminalRiskCandidate {
+    pub reservation_key: String,
+    pub plan_sha256: String,
+    pub ledger: okx_protocol::risk_authority::TerminalRiskLedgerProof,
+}
+
+/// RiskBook's canonical length-delimited reservation identity. Verifying it
+/// under the existing executor lock prevents reusing another intent's receipt.
+fn native_risk_reservation_key(uid: &str, run_id: &str, intent_id: &str) -> String {
+    ["okx", "real", uid, run_id, intent_id]
+        .iter()
+        .map(|part| format!("{}:{part}", part.len()))
+        .collect()
+}
+
+#[cfg(test)]
+#[test]
+fn native_risk_receipt_identity_matches_riskbook_key() {
+    assert_eq!(
+        native_risk_reservation_key(&"a".repeat(64), "run_001", "intent_001"),
+        format!("3:okx4:real64:{}7:run_00110:intent_001", "a".repeat(64))
+    );
+    assert_ne!(
+        native_risk_reservation_key(&"a".repeat(64), "run_001", "intent_001"),
+        native_risk_reservation_key(&"a".repeat(64), "run_001", "intent_002")
+    );
+}
+
 /// One immutable, Worker-sourced policy for exactly this authenticated
 /// transport generation and one native execution request. Never persisted.
 #[derive(Clone, Copy)]
@@ -57,6 +95,41 @@ impl CentralPolicyBinding<'_> {
     pub fn authorizes_uid(self, uid: &str, now_ms: u64) -> bool {
         self.policy
             .authorizes_uid(uid, now_ms, self.session_generation)
+    }
+}
+/// Typed central delivery scope; a DO risk receipt remains mandatory for POST.
+#[derive(Clone, Copy)]
+pub struct CentralGovernanceBinding<'a> {
+    pub scope: &'a okx_protocol::account_governance::CentralGovernanceSnapshotV2,
+    pub session_generation: u64,
+}
+impl CentralGovernanceBinding<'_> {
+    pub fn authorizes_uid(self, uid: &str, now_ms: u64) -> bool {
+        self.scope
+            .authorizes_delivery(uid, now_ms, self.session_generation)
+    }
+}
+/// One central delivery binding per intent. V1 is rolling-upgrade only;
+/// both forms still require a separate transactional risk POST fence.
+#[derive(Clone, Copy)]
+pub enum CentralAuthorizationBinding<'a> {
+    Legacy(CentralPolicyBinding<'a>),
+    Governance(CentralGovernanceBinding<'a>),
+}
+impl CentralAuthorizationBinding<'_> {
+    pub fn authorizes_uid(self, uid: &str, now_ms: u64) -> bool {
+        match self {
+            Self::Legacy(v) => v.authorizes_uid(uid, now_ms),
+            Self::Governance(v) => v.authorizes_uid(uid, now_ms),
+        }
+    }
+
+    pub fn budget(self) -> Option<rust_decimal::Decimal> {
+        let text = match self {
+            Self::Legacy(v) => &v.policy.max_total_modelled_loss_usdt,
+            Self::Governance(v) => &v.scope.state.max_total_modelled_loss_usdt,
+        };
+        rust_decimal::Decimal::from_str(text).ok()
     }
 }
 
@@ -125,63 +198,117 @@ fn quiet_source_capture_due(
             >= QUIET_SOURCE_COVERAGE_REFRESH_MS
 }
 
-/// The native CONTROL owns a typed crash-safe host-state journal.
-/// A legacy local Production permission is NOT created by account selection
-/// and is refused when the journal has an active switch or ReadOnly latch.
-/// The centralized operator policy is independent of this OS journal.
+/// CONTROL owns process lifecycle and negative safety latches only.
+/// It cannot grant trading rights, account risk, or positive budgets.
 const NATIVE_CONTROL_STATE: &str = r"C:\okx-control\host-state.pb";
 
-fn parse_native_production_policy(
-    bytes: &[u8],
-) -> AgentResult<okx_execution::ProductionTradingPolicy> {
-    let owner = okx_protocol::host_state_proto::decode_host_state(bytes)
+/// The native owner must remain available for read-only recovery, even if
+/// STOP or an operator-selected READ_ONLY forbids every exchange mutation.
+fn check_native_production_lifecycle_from(bytes: &[u8], for_mutation: bool) -> AgentResult<()> {
+    let state = okx_protocol::host_state_proto::decode_host_state(bytes)
         .ok_or(AgentError::ProductionPolicyUnavailable)?;
-    if owner.desired_agent != 1
-        || owner.selected_environment != 1
-        || owner.read_only
-        || owner.transition.is_some()
-        || owner.switch_hold.is_some()
+    if state.desired_agent != 1
+        || state.selected_environment != 1
+        || for_mutation && state.read_only
+        || state.transition.is_some()
+        || state.switch_hold.is_some()
     {
         return Err(AgentError::ProductionPolicyUnavailable);
     }
-    let policy = owner
-        .legacy_production_policy
-        .ok_or(AgentError::ProductionPolicyUnavailable)?;
-    let permission = match policy.permission {
-        2 => okx_execution::ProductionPermission::Enabled,
-        3 => okx_execution::ProductionPermission::Stopped,
-        _ => return Err(AgentError::ProductionPolicyUnavailable),
-    };
-    let validated = okx_protocol::ProductionTradingPolicy {
-        schema: policy.schema,
-        revision: policy.revision,
-        permission: if policy.permission == 2 {
-            okx_protocol::ProductionPermission::Enabled
-        } else {
-            okx_protocol::ProductionPermission::Stopped
-        },
-        account_uid_fingerprint: policy.account_uid_fingerprint,
-        strategy_run_id: policy.strategy_run_id,
-        operator_authority_id: policy.operator_authority_id,
-        allowed_instruments: policy.allowed_instruments,
-        max_total_modelled_loss_usdt: policy.max_total_modelled_loss_usdt,
-    };
-    validated.validate()?;
-    Ok(okx_execution::ProductionTradingPolicy {
-        schema: validated.schema,
-        revision: validated.revision,
-        permission,
-        account_uid_fingerprint: validated.account_uid_fingerprint,
-        strategy_run_id: validated.strategy_run_id,
-        operator_authority_id: validated.operator_authority_id,
-        allowed_instruments: validated.allowed_instruments,
-        max_total_modelled_loss_usdt: validated.max_total_modelled_loss_usdt,
+    // Legacy positive policy never grants trading. v2 governance and the
+    // atomic post fence remain necessary at the final Executor admission.
+    Ok(())
+}
+
+fn require_native_production_lifecycle_from(bytes: &[u8]) -> AgentResult<()> {
+    check_native_production_lifecycle_from(bytes, true)
+}
+
+fn require_native_production_owner() -> AgentResult<()> {
+    let bytes = std::fs::read(NATIVE_CONTROL_STATE)?;
+    check_native_production_lifecycle_from(&bytes, false)
+}
+
+fn require_native_production_lifecycle() -> AgentResult<()> {
+    let bytes = std::fs::read(NATIVE_CONTROL_STATE)?;
+    require_native_production_lifecycle_from(&bytes)
+}
+
+/// Temporary executor-v1 arithmetic projection from ONE verified central v2
+/// governance snapshot, not a separate mutable policy or risk authority.
+fn central_executor_policy(
+    scope: CentralGovernanceBinding<'_>,
+    run: &StrategyCapitalReservation,
+    instrument: &str,
+    now_ms: u64,
+) -> Option<okx_execution::ProductionTradingPolicy> {
+    use okx_protocol::account_governance::AccountEnvironmentV2;
+    if !scope.authorizes_uid(&run.account_uid_fingerprint, now_ms)
+        || run.operator_authority_id != scope.scope.state.operator_authorization.id
+    {
+        return None;
+    }
+    let account = scope.scope.state.accounts.iter().find(|a| {
+        a.venue == "okx"
+            && a.environment == AccountEnvironmentV2::Real
+            && a.identity_verified
+            && a.enabled
+            && a.uid_fingerprint == run.account_uid_fingerprint
+    })?;
+    if !account
+        .limits
+        .allowed_instruments
+        .iter()
+        .any(|allowed| allowed == instrument)
+        || !account
+            .strategies
+            .iter()
+            .any(|strategy| strategy.enabled && strategy.id == run.mandate_version)
+    {
+        return None;
+    }
+    let global =
+        rust_decimal::Decimal::from_str(&scope.scope.state.max_total_modelled_loss_usdt).ok()?;
+    let ceiling =
+        rust_decimal::Decimal::from_str(&scope.scope.state.operator_authorization.ceiling_usdt)
+            .ok()?;
+    if global <= rust_decimal::Decimal::ZERO || global > ceiling {
+        return None;
+    }
+    Some(okx_execution::ProductionTradingPolicy {
+        schema: okx_execution::PRODUCTION_TRADING_POLICY_SCHEMA_V1.to_owned(),
+        revision: scope.scope.state.revision,
+        permission: okx_execution::ProductionPermission::Enabled,
+        account_uid_fingerprint: run.account_uid_fingerprint.clone(),
+        strategy_run_id: run.allocation_id.clone(),
+        operator_authority_id: run.operator_authority_id.clone(),
+        allowed_instruments: account.limits.allowed_instruments.clone(),
+        max_total_modelled_loss_usdt: global.normalize().to_string(),
     })
 }
 
-fn read_native_production_policy() -> AgentResult<okx_execution::ProductionTradingPolicy> {
-    let bytes = std::fs::read(NATIVE_CONTROL_STATE)?;
-    parse_native_production_policy(&bytes)
+#[cfg(test)]
+#[test]
+fn lifecycle_negative_gate_does_not_depend_on_legacy_positive_policy() {
+    use okx_protocol::host_state_proto::{HostStateWire, encode_host_state};
+    let mut state = HostStateWire {
+        version: 1,
+        desired_agent: 1,
+        selected_environment: 1,
+        read_only: false,
+        legacy_production_policy: None,
+        transition: None,
+        switch_hold: None,
+    };
+    assert!(require_native_production_lifecycle_from(&encode_host_state(&state).unwrap()).is_ok());
+    state.read_only = true;
+    let persisted = encode_host_state(&state).unwrap();
+    assert!(require_native_production_lifecycle_from(&persisted).is_err());
+    // Boot and observation must survive persisted READ_ONLY; only POST is vetoed.
+    assert!(check_native_production_lifecycle_from(&persisted, false).is_ok());
+    state.read_only = false;
+    state.selected_environment = 2;
+    assert!(require_native_production_lifecycle_from(&encode_host_state(&state).unwrap()).is_err());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,7 +411,10 @@ impl ExecutionRuntime {
         if environment.demo {
             return Err(AgentError::ProductionPolicyUnavailable);
         }
-        read_native_production_policy()?;
+        // Boot the SAME read-only observation/ledger owner under native
+        // CONTROL even while new risk is explicitly OFF. Mutating paths
+        // independently require !read_only immediately before venue POST.
+        require_native_production_owner()?;
         Self::new_with_mode(
             root,
             environment,
@@ -554,16 +684,9 @@ impl ExecutionRuntime {
         let mut executor = self.executor.lock().await;
         let ledger = executor.ledger();
         let run = ledger.capital_reservation()?.clone();
-        if self.production_trading_requested() {
-            let policy = read_native_production_policy().ok()?;
-            if policy.permission != okx_execution::ProductionPermission::Enabled
-                || policy.account_uid_fingerprint != run.account_uid_fingerprint
-                || policy.strategy_run_id != run.allocation_id
-                || policy.operator_authority_id != run.operator_authority_id
-                || !policy.allowed_instruments.contains(&plan.instrument_id)
-            {
-                return None;
-            }
+        // Financial NAV evidence is not positive trade authorization.
+        if self.production_trading_requested() && require_native_production_lifecycle().is_err() {
+            return None;
         }
         let binding = plan.risk_binding.as_ref()?;
         // Trading equity must remain equal to the source-authenticated
@@ -918,14 +1041,15 @@ impl ExecutionRuntime {
         opening: &StrategyAllocationOpening,
         now_ms: u64,
         rearm: Option<&okx_execution::StrategyStopRearmRequest>,
-        central: Option<CentralPolicyBinding<'_>>,
+        central: Option<CentralAuthorizationBinding<'_>>,
     ) -> AgentResult<Option<Result<StrategyCapitalReservation, OrderExecutorError>>> {
-        if !central.is_some_and(|p| {
-            p.authorizes_uid(
-                &preflight.account_uid_fingerprint,
-                Utc::now().timestamp_millis().max(1) as u64,
-            )
-        }) {
+        let Some(CentralAuthorizationBinding::Governance(scope)) = central else {
+            return Ok(None);
+        };
+        if !scope.authorizes_uid(
+            &preflight.account_uid_fingerprint,
+            Utc::now().timestamp_millis().max(1) as u64,
+        ) {
             return Ok(None);
         }
         if !self.production_trading_requested()
@@ -937,13 +1061,26 @@ impl ExecutionRuntime {
         {
             return Ok(None);
         }
-        let policy = read_native_production_policy()?;
-        if policy.permission != okx_execution::ProductionPermission::Enabled
-            || policy.account_uid_fingerprint != preflight.account_uid_fingerprint
-            || policy.account_uid_fingerprint != opening.account_uid_fingerprint
-            || policy.strategy_run_id != reservation.allocation_id
-            || policy.operator_authority_id != reservation.operator_authority_id
+        require_native_production_lifecycle()?;
+        if reservation.account_uid_fingerprint != preflight.account_uid_fingerprint
+            || opening.account_uid_fingerprint != preflight.account_uid_fingerprint
+            || reservation.operator_authority_id != scope.scope.state.operator_authorization.id
         {
+            return Ok(None);
+        }
+        let matched = scope.scope.state.accounts.iter().any(|account| {
+            account.venue == "okx"
+                && account.environment
+                    == okx_protocol::account_governance::AccountEnvironmentV2::Real
+                && account.enabled
+                && account.identity_verified
+                && account.uid_fingerprint == preflight.account_uid_fingerprint
+                && account
+                    .strategies
+                    .iter()
+                    .any(|strategy| strategy.enabled && strategy.id == reservation.mandate_version)
+        });
+        if !matched {
             return Ok(None);
         }
         let mut executor = self.executor.lock().await;
@@ -984,20 +1121,12 @@ impl ExecutionRuntime {
         if !self.production_trading_requested() || !preflight.production_environment {
             return false;
         }
-        // CONTROL owns the authorization, the exchange preflight owns UID.
-        // A STOPPED Production policy can still finalize source-exact
-        // finances; OFF/READ_ONLY cannot mutate the financial archive.
-        read_native_production_policy().is_ok_and(|policy| {
-            matches!(
-                policy.permission,
-                okx_execution::ProductionPermission::Enabled
-                    | okx_execution::ProductionPermission::Stopped
-            ) && ledger.capital_reservation().is_some_and(|run| {
-                policy.account_uid_fingerprint == run.account_uid_fingerprint
-                    && policy.strategy_run_id == run.allocation_id
-                    && policy.operator_authority_id == run.operator_authority_id
+        // Finance reconciliation may finalize a known run after central STOP,
+        // but cannot create new exchange exposure or bypass CONTROL lifecycle.
+        require_native_production_lifecycle().is_ok()
+            && ledger.capital_reservation().is_some_and(|run| {
+                run.account_uid_fingerprint == observed_uid && run.allocation_id == expected_run_id
             })
-        })
     }
 
     /// The single executor captures the coherent source before the
@@ -1096,15 +1225,16 @@ impl ExecutionRuntime {
         timing: MutationTiming,
         observed_at_ms: u64,
         sources: ProductionSubmitSources<'_>,
-        central: Option<CentralPolicyBinding<'_>>,
+        grant: ProductionSubmitAuthorization<'_>,
     ) -> AgentResult<Option<Result<SubmitDisposition, OrderExecutorError>>> {
         let ProductionSubmitSources { facts, protection } = sources;
-        if !central.is_some_and(|p| {
-            p.authorizes_uid(
-                &preflight.credential.account_uid_fingerprint,
-                Utc::now().timestamp_millis().max(1) as u64,
-            )
-        }) {
+        let ProductionSubmitAuthorization {
+            central: authorization,
+            risk_post,
+        } = grant;
+        let native_uid = &preflight.credential.account_uid_fingerprint;
+        let fresh_now = Utc::now().timestamp_millis().max(1) as u64;
+        if !authorization.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now)) {
             return Ok(None);
         }
         if !self.production_trading_requested()
@@ -1120,38 +1250,61 @@ impl ExecutionRuntime {
         {
             return Ok(None);
         }
-        // Serialize policy reading with all other execution submissions:
-        // revocation cannot be hidden behind a prior wait on the ledger lock.
+        require_native_production_lifecycle()?;
+        let Some(CentralAuthorizationBinding::Governance(scope)) = authorization else {
+            return Ok(None);
+        };
         let mut executor = self.executor.lock().await;
-        let mut policy = read_native_production_policy()?;
-        if policy.account_uid_fingerprint != preflight.credential.account_uid_fingerprint {
-            return Ok(None);
-        }
-        // The existing local policy may only further restrict the ONE
-        // centrally selected operator budget, never enlarge it. Parse exact
-        // decimal values, never f64. No permission is created by this bound.
-        let Some(central_budget) = central.and_then(|binding| {
-            rust_decimal::Decimal::from_str(&binding.policy.max_total_modelled_loss_usdt).ok()
-        }) else {
+        let Some(entry) = executor.ledger().get(intent_id) else {
             return Ok(None);
         };
-        let Some(native_budget) =
-            rust_decimal::Decimal::from_str(&policy.max_total_modelled_loss_usdt).ok()
-        else {
+        let Some(run) = executor.ledger().capital_reservation() else {
             return Ok(None);
         };
-        if central_budget <= rust_decimal::Decimal::ZERO
-            || native_budget <= rust_decimal::Decimal::ZERO
+        if run.account_uid_fingerprint != *native_uid
+            || entry.record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
         {
             return Ok(None);
         }
-        policy.max_total_modelled_loss_usdt =
-            central_budget.min(native_budget).normalize().to_string();
-        let Some(entry) = executor.ledger().get(intent_id) else {
+        let Some(policy) =
+            central_executor_policy(scope, run, &entry.record.plan.instrument_id, fresh_now)
+        else {
             return Ok(None);
         };
         let plan = &entry.record.plan;
         let new_risk = plan.action.is_risk_increasing();
+        // Only an acknowledged atomic POST fence from the ONE central v2
+        // RiskBook can authorize increased Real exposure. A v1 delivery grant
+        // or one-account observer flag never substitutes for that receipt.
+        let expected_reservation_key = executor
+            .ledger()
+            .capital_reservation()
+            .map(|run| native_risk_reservation_key(native_uid, &run.allocation_id, intent_id));
+        let post_fenced = matches!(authorization, Some(CentralAuthorizationBinding::Governance(scope))
+        if risk_post.is_some_and(|proof| {
+            proof.valid()
+                && proof.status
+                    == okx_protocol::risk_authority::RiskDecisionStatus::PostAuthorized
+                && proof.policy_revision == Some(scope.scope.state.revision)
+                && proof.reservation_key.as_deref() == expected_reservation_key.as_deref()
+        }));
+        if new_risk && !post_fenced {
+            return Ok(None);
+        }
+        // The atomic RiskBook receipt includes all-account occupied loss and
+        // outstanding reservations; only this candidate is subtracted there.
+        // Never synthesize zero from a selected-account FLAT observation.
+        let occupied_before_candidate = if post_fenced {
+            risk_post
+                .and_then(|receipt| receipt.existing_modelled_loss_usdt.as_deref())
+                .and_then(|value| rust_decimal::Decimal::from_str(value).ok())
+                .filter(|value| *value >= rust_decimal::Decimal::ZERO)
+        } else {
+            None
+        };
+        if new_risk && occupied_before_candidate.is_none() {
+            return Ok(None);
+        }
         let flat = facts.summary.open_positions == 0
             && facts.summary.pending_orders == 0
             && facts.authoritative_positions.iter().all(|position| {
@@ -1234,20 +1387,14 @@ impl ExecutionRuntime {
             // The executor independently scans durable parent/mutation/OCO
             // UNKNOWN states; this cannot override native state.
             unknown_mutations_reconciled: true,
-            // No atomic all-account reservation proof has been delivered by
-            // the single global owner. Unknown occupied risk is NOT zero.
-            // Keep Real OPEN closed until exact reservation integration.
-            existing_modelled_loss_usdt: None,
+            // Occupancy comes only from the exact DO POST receipt.
+            existing_modelled_loss_usdt: occupied_before_candidate,
             exact_owned_reduce_only_close: close_owned_exact,
         };
         // Final central revision/UID/expiry fence immediately before the
         // native gateway owner enters its durable SUBMITTING and single POST.
-        if !central.is_some_and(|p| {
-            p.authorizes_uid(
-                &preflight.credential.account_uid_fingerprint,
-                Utc::now().timestamp_millis().max(1) as u64,
-            )
-        }) {
+        let fresh_now = Utc::now().timestamp_millis().max(1) as u64;
+        if !authorization.is_some_and(|p| p.authorizes_uid(native_uid, fresh_now)) {
             return Ok(None);
         }
         Ok(Some(
@@ -1539,6 +1686,100 @@ impl ExecutionRuntime {
             return Err(AgentError::ProductionPolicyUnavailable);
         }
         Ok(changed)
+    }
+
+    /// The existing ledger, not a request field, owns the strategy identity.
+    /// A PREPARED candidate may reserve risk only for its exact live run.
+    pub async fn risk_run_for_prepared(
+        &self,
+        intent_id: &str,
+    ) -> Option<StrategyCapitalReservation> {
+        let owner = self.executor.lock().await;
+        let entry = owner.ledger().get(intent_id)?;
+        let run = owner.ledger().capital_reservation()?;
+        (entry.record.state == ExecutionState::Prepared
+            && entry.record.plan.action.is_risk_increasing()
+            && entry.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
+            && entry
+                .record
+                .plan
+                .risk_binding
+                .as_ref()
+                .is_some_and(|binding| binding.mandate.version == run.mandate_version))
+        .then(|| run.clone())
+    }
+
+    /// Reuse the ONE durable ledger owner for source/UNKNOWN attestation.
+    /// Never create a second ledger or infer another UID's risk from it.
+    pub async fn native_flat_risk_evidence(
+        &self,
+        snapshot: &AccountSnapshot,
+        facts: &AccountLedgerFacts,
+        algos: &okx_api::PendingDerivativeAlgoRiskInventory,
+        window: &okx_runtime::PrivateConvergenceWindow,
+        prepared_intent: Option<&str>,
+        now_ms: u64,
+    ) -> Result<crate::risk_census::AccountRiskEvidence, crate::risk_census::CensusFailure> {
+        let owner = self.executor.lock().await;
+        crate::risk_census::AccountRiskEvidence::from_native_flat_read(
+            snapshot,
+            facts,
+            algos,
+            window,
+            owner.ledger(),
+            prepared_intent,
+            now_ms,
+        )
+    }
+
+    /// Recoverable native release candidates from the persisted run and
+    /// exact terminal intent. No independent shadow ledger or sent-order replay.
+    pub async fn terminal_risk_candidates(&self) -> Vec<NativeTerminalRiskCandidate> {
+        let owner = self.executor.lock().await;
+        let ledger = owner.ledger();
+        let Some(run) = ledger.capital_reservation() else {
+            return Vec::new();
+        };
+        ledger
+            .entries()
+            .filter_map(|entry| {
+                let record = &entry.record;
+                if !record.plan.action.is_risk_increasing()
+                    || record.plan.account_uid_fingerprint != run.account_uid_fingerprint
+                    || record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
+                {
+                    return None;
+                }
+                let state = match record.state {
+                    ExecutionState::Filled => "FILLED",
+                    ExecutionState::Canceled => "CANCELED",
+                    ExecutionState::Rejected => "REJECTED",
+                    _ => return None,
+                };
+                let plan_sha256 = format!(
+                    "{:x}",
+                    Sha256::digest(serde_json::to_vec(&record.plan).ok()?)
+                );
+                let record_digest =
+                    format!("{:x}", Sha256::digest(serde_json::to_vec(record).ok()?));
+                Some(NativeTerminalRiskCandidate {
+                    reservation_key: native_risk_reservation_key(
+                        &run.account_uid_fingerprint,
+                        &run.allocation_id,
+                        &record.plan.intent_id,
+                    ),
+                    plan_sha256,
+                    ledger: okx_protocol::risk_authority::TerminalRiskLedgerProof {
+                        account_uid: run.account_uid_fingerprint.clone(),
+                        run_id: run.allocation_id.clone(),
+                        intent_id: record.plan.intent_id.clone(),
+                        state: state.to_owned(),
+                        record_digest,
+                    },
+                })
+            })
+            .take(32)
+            .collect()
     }
 
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {

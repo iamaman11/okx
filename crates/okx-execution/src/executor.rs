@@ -379,7 +379,6 @@ impl ProductionTradingPolicy {
                 .iter()
                 .any(|item| !item.ends_with("-USDT-SWAP") || item.len() > 64)
             || max_loss <= Decimal::ZERO
-            || max_loss > Decimal::from(10)
         {
             return Err(Rejection::InvalidPolicy);
         }
@@ -4630,7 +4629,7 @@ mod tests {
     }
 
     #[test]
-    fn production_policy_is_revocable_and_has_one_shared_ten_usdt_budget() {
+    fn production_policy_is_revocable_and_checks_configured_decimal_budget() {
         let uid = "a".repeat(64);
         let authority = format!("sha256:{}", "b".repeat(64));
         let run = crate::StrategyCapitalReservation {
@@ -4692,11 +4691,16 @@ mod tests {
             Err(ProductionPolicyRejection::SourceUnattested)
         );
         witness.unknown_mutations_reconciled = true;
+        // Central governance determines the business ceiling; this
+        // deterministic library must not hardcode today's 10 USDT operator grant.
         policy.max_total_modelled_loss_usdt = "10.01".to_owned();
+        assert_eq!(policy.evaluate(&run, &plan, &witness), Ok(()));
+        witness.existing_modelled_loss_usdt = Some(Decimal::from_str("9.010000001").unwrap());
         assert_eq!(
             policy.evaluate(&run, &plan, &witness),
-            Err(ProductionPolicyRejection::InvalidPolicy)
+            Err(ProductionPolicyRejection::RiskBudgetExceeded)
         );
+        witness.existing_modelled_loss_usdt = Some(Decimal::ZERO);
         policy.max_total_modelled_loss_usdt = "10".to_owned();
         policy.permission = ProductionPermission::ReadOnly;
         assert_eq!(

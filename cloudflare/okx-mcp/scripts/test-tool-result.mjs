@@ -32,7 +32,7 @@ try {
     [tsc, "--rootDir", "src", "--outDir", output, "--noEmit", "false"],
     { stdio: "inherit" },
   );
-  for (const file of ["shared.test.js", "execution_tools.test.js", "account_policy.test.js"]) {
+  for (const file of ["shared.test.js", "execution_tools.test.js", "account_policy.test.js", "risk_book.test.js", "account_governance.test.js", "account_governance_store.test.js", "risk_authority.test.js"]) {
     execFileSync(process.execPath, [join(output, file)], {
       stdio: "inherit",
     });

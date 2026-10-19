@@ -13,6 +13,7 @@ import {
   normalizeInstrument,
   requestId,
   runtimeFetch,
+  sha256Hex,
   TOOL_CONTRACT_VERSION,
   toolResult,
   transportFailure,
@@ -160,20 +161,48 @@ export const mcpApi = {
           },
           {
             name: "account_control",
-            description: "Read or configure ONE central account trading request with a per-revision aggregate modelled-loss budget, account UID allowlist and CAS. Current operator-authorized maximum is 10 USDT; a configured budget is NOT trade admission without native credentials, finance, STOP and atomically reserved cross-account risk.",
+            description: "One central account-control surface: status, enroll a native-verified account, atomically configure limits, explicitly approve the existing operator ceiling, or STOP new Real risk. Enrollment and authorization never create an exchange POST permit; STOP keeps outstanding UNKNOWN/OPEN risk.",
             inputSchema: {
               type: "object",
               properties: {
-                action: { type: "string", enum: ["status", "configure"] },
+                action: { type: "string", enum: ["status", "configure", "enroll", "authorize", "stop"] },
+                label: {type:"string",minLength:2,maxLength:80,description:"Account display label. UID comes ONLY from authenticated native observation."},
                 expected_revision: { type: "integer", minimum: 0 },
                 trading_requested: { type: "boolean" },
                 max_total_modelled_loss_usdt: {
                   type: "string", pattern: "^(?:0|[1-9][0-9]?)(?:\\.[0-9]{1,9})?$",
                   description: "Optional exact USDT operator budget. Current maximum authorization is 10; positive values only.",
                 },
-                allowed_account_uids: {
-                  type: "array", minItems: 0, maxItems: 16, uniqueItems: true,
-                  items: { type: "string", pattern: "^[0-9a-f]{64}$" },
+                accounts: {
+                  type:"array",minItems:0,maxItems:32,
+                  description:"Full replacement of registered account settings; IDs and UID bindings immutable. No account enrollment via configure.",
+                  items:{type:"object",additionalProperties:false,
+                    properties:{
+                      id:{type:"string"},label:{type:"string"},enabled:{type:"boolean"},
+                      limits:{type:"object",additionalProperties:false,
+                        properties:{
+                          max_modelled_loss_usdt:{type:"string",pattern:DECIMAL_PATTERN},
+                          max_order_loss_usdt:{type:"string",pattern:DECIMAL_PATTERN},
+                          max_notional_usdt:{type:["string","null"]},
+                          max_leverage:{type:["string","null"]},
+                          max_daily_realized_loss_usdt:{type:["string","null"]},
+                          max_drawdown_ratio:{type:["string","null"]},
+                          allowed_instruments:{type:"array",items:{type:"string"},maxItems:32}
+                        },
+                        required:["max_modelled_loss_usdt","max_order_loss_usdt","max_notional_usdt",
+                          "max_leverage","max_daily_realized_loss_usdt","max_drawdown_ratio","allowed_instruments"]},
+                      strategies:{type:"array",maxItems:32,items:{type:"object",additionalProperties:false,
+                        properties:{
+                          id:{type:"string"},enabled:{type:"boolean"},
+                          allocated_capital_usdt:{type:"string"},
+                          max_modelled_loss_usdt:{type:"string"},
+                          max_daily_realized_loss_usdt:{type:["string","null"]},
+                          max_drawdown_ratio:{type:["string","null"]}
+                        },
+                        required:["id","enabled","allocated_capital_usdt","max_modelled_loss_usdt",
+                          "max_daily_realized_loss_usdt","max_drawdown_ratio"]}}
+                    },
+                    required:["id","label","enabled","limits","strategies"]}
                 },
               },
               required: ["action"],
@@ -580,23 +609,60 @@ export const mcpApi = {
         return jsonRpc(id, toolResult(contractStatus(await runtimeFetch(env, "/status?probe=1"))));
       }
       if (name === "account_control") {
+        if(args.action==="stop"&&hasOnlyKeys(args,["action"])){
+          return jsonRpc(id,toolResult(await runtimeFetch(env,"/account-governance/stop",{
+            method:"POST"
+          })));
+        }
+        if(args.action==="authorize"&&hasOnlyKeys(args,["action","expected_revision"])
+          &&Number.isSafeInteger(args.expected_revision)&&(args.expected_revision as number)>=0){
+          const approval_id="sha256:"+await sha256Hex(
+            "okx-operator-authorization/v1:"+requestId()+":"+crypto.randomUUID()
+          );
+          return jsonRpc(id,toolResult(await runtimeFetch(env,"/account-governance/authorize",{
+            method:"POST",headers:{"content-type":"application/json"},
+            body:JSON.stringify({expected_revision:args.expected_revision,approval_id})
+          })));
+        }
+        if(args.action==="enroll"&&hasOnlyKeys(args,["action","label"])&&
+          typeof args.label==="string"&&args.label.trim().length>=2&&args.label.length<=80){
+          const session=await runtimeFetch(env,"/status?probe=1");
+          if(!isObject(session)||session.status!=="PASS"||session.session_fresh!==true||
+            (session.runtime_profile!=="production"&&session.runtime_profile!=="demo_acceptance"))
+            return jsonRpc(id,toolResult({status:"FAILED",reason:"NATIVE_ACCOUNT_SESSION_UNVERIFIED"}));
+          const snapshot=await dispatchRuntime(env,{
+            schema:"okx.agent.request/v1",request_id:requestId(),
+            operation:{type:"trader_snapshot"},
+          });
+          if(!isObject(snapshot)||snapshot.status!=="completed"||snapshot.quality!=="FRESH"
+            ||!isObject(snapshot.result)||!isObject(snapshot.result.account)
+            ||snapshot.result.account.scope!=="AUTHENTICATED_ACCOUNT_ONLY"
+            ||!isObject(snapshot.result.evidence)||snapshot.result.evidence.quality!=="FRESH"
+            ||typeof snapshot.result.account.uid_fingerprint!=="string"
+            ||!/^[0-9a-f]{64}$/.test(snapshot.result.account.uid_fingerprint))
+            return jsonRpc(id,toolResult({status:"FAILED",reason:"AUTHENTICATED_NATIVE_UID_PROOF_UNAVAILABLE"}));
+          const enrollment=await runtimeFetch(env,"/account-governance/enroll",{
+            method:"POST",headers:{"content-type":"application/json"},
+            body:JSON.stringify({
+              venue:"okx",environment:session.runtime_profile==="production"?"real":"demo",
+              uid_fingerprint:snapshot.result.account.uid_fingerprint,
+              label:args.label.trim()
+            }),
+          });
+          return jsonRpc(id,toolResult(enrollment));
+        }
         if (args.action === "status" && hasOnlyKeys(args, ["action"])) {
-          return jsonRpc(id, toolResult(await runtimeFetch(env, "/account-policy")));
+          return jsonRpc(id, toolResult(await runtimeFetch(env, "/account-governance")));
         }
         if (args.action === "configure" && hasOnlyKeys(args, [
-          "action","expected_revision","trading_requested","allowed_account_uids",
+          "action","expected_revision","trading_requested","accounts",
           "max_total_modelled_loss_usdt",
-        ]) && (Object.keys(args).length === 4 || Object.keys(args).length === 5)) {
-          return jsonRpc(id, toolResult(await runtimeFetch(env, "/account-policy", {
-            method: "POST",
-            headers: {"content-type":"application/json"},
-            body: JSON.stringify({
-              expected_revision: args.expected_revision,
-              trading_requested: args.trading_requested,
-              allowed_account_uids: args.allowed_account_uids,
-              ...(args.max_total_modelled_loss_usdt === undefined ? {} : {
-                max_total_modelled_loss_usdt: args.max_total_modelled_loss_usdt,
-              }),
+        ]) && Object.keys(args).length === 5) {
+          return jsonRpc(id, toolResult(await runtimeFetch(env, "/account-governance", {
+            method:"POST",headers:{"content-type":"application/json"},
+            body:JSON.stringify({
+              expected_revision:args.expected_revision,trading_requested:args.trading_requested,
+              accounts:args.accounts,max_total_modelled_loss_usdt:args.max_total_modelled_loss_usdt
             }),
           })));
         }

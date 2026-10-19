@@ -1,8 +1,8 @@
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
     AccountApi, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate, InstrumentType,
-    LeverageInfo, MarginMode, OkxError, OkxRestClient, PendingProtectiveAlgoInventory,
-    PositionBuilderRequest, PositionBuilderSnapshot, TradeApi,
+    LeverageInfo, MarginMode, OkxError, OkxRestClient, PendingDerivativeAlgoRiskInventory,
+    PendingProtectiveAlgoInventory, PositionBuilderRequest, PositionBuilderSnapshot, TradeApi,
 };
 use okx_observation::{
     AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, ExecutionFillEvidence,
@@ -281,6 +281,18 @@ impl AccountBootstrapper {
         strict_read_only_permissions(&config.perm)
             .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
         Ok(self.trade.pending_protective_algos().await?)
+    }
+
+    /// Complete bounded derivatives algo enumeration for central Risk Census.
+    /// It uses the same authenticated observer client and Read permission.
+    /// A full page is marked incomplete; no retry, guessed zero or fallback.
+    pub async fn pending_derivative_risk_algos(
+        &self,
+    ) -> Result<PendingDerivativeAlgoRiskInventory, AccountLedgerBootstrapError> {
+        let config = self.api.config().await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
+        Ok(self.trade.pending_derivative_risk_algos().await?)
     }
 
     pub async fn ledger_facts(

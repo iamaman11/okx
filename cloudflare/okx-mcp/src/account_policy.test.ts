@@ -59,9 +59,9 @@ assert(!validAccountPolicy({...on, max_total_modelled_loss_usdt: "11"}), "cannot
 assert(!validAccountPolicy({...on, revision: 0.5}), "revision must be integer");
 
 class InMemoryStorage {
-  private value: unknown;
-  async get(_key: string): Promise<unknown> { return this.value; }
-  async put(_key: string, value: unknown): Promise<void> { this.value = value; }
+  private values = new Map<string,unknown>();
+  async get(key: string): Promise<unknown> { return this.values.get(key); }
+  async put(key: string, value: unknown): Promise<void> { this.values.set(key,value); }
   async transaction<T>(fn: (tx: InMemoryStorage) => Promise<T>): Promise<T> { return fn(this); }
 }
 const store = new InMemoryStorage();
@@ -92,3 +92,9 @@ assert((await accountPolicyRequest(store, "GET")).body.max_total_modelled_loss_u
   "failed budget update leaves durable source unchanged");
 await store.put("account_policy_v1", {fake:true});
 assert((await accountPolicyRequest(store, "GET")).status === 503, "corrupt authority never becomes OFF silently");
+
+await store.put("account_governance_v2", {schema:"okx.governance/v2"});
+assert((await accountPolicyRequest(store,"POST",update)).status===409,
+  "legacy writes stay retired after v2 migration");
+assert((await accountPolicyRequest(store,"GET")).status===409,
+  "old policy cannot masquerade as current authority");

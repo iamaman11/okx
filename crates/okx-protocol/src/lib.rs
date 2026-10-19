@@ -1,5 +1,7 @@
+pub mod account_governance;
 pub mod crypto;
 pub mod host_state_proto;
+pub mod risk_authority;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1764,6 +1766,20 @@ pub enum DirectTransportFrame {
         request: AgentRequest,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operator_policy: Option<CentralAccountPolicy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_governance: Option<account_governance::CentralGovernanceSnapshotV2>,
+    },
+    RiskControl {
+        schema: String,
+        session_id: String,
+        connection_generation: u64,
+        command: risk_authority::RiskCommand,
+    },
+    RiskControlResult {
+        schema: String,
+        session_id: String,
+        connection_generation: u64,
+        result: risk_authority::RiskResult,
     },
     DeliveryAck {
         schema: String,
@@ -1792,6 +1808,7 @@ impl DirectTransportFrame {
                 connection_generation,
                 request,
                 operator_policy: _,
+                operator_governance: _,
             } => {
                 validate_direct_schema(schema)?;
                 validate_direct_token(session_id, 16, 128)?;
@@ -1849,6 +1866,7 @@ impl DirectTransportFrame {
                 connection_generation,
                 request,
                 operator_policy,
+                operator_governance,
             } => {
                 validate_direct_schema(schema)?;
                 validate_direct_token(session_id, 16, 128)?;
@@ -1856,10 +1874,44 @@ impl DirectTransportFrame {
                 if operator_policy
                     .as_ref()
                     .is_some_and(|p| !p.valid() || p.session_generation != *connection_generation)
+                    || operator_governance.as_ref().is_some_and(|p| {
+                        !p.valid() || p.session_generation != *connection_generation
+                    })
+                    || (operator_policy.is_some() && operator_governance.is_some())
                 {
                     return Err(ProtocolError::InvalidProductionTradingPolicy);
                 }
                 request.validate()
+            }
+            Self::RiskControl {
+                schema,
+                session_id,
+                connection_generation,
+                command,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(session_id, 16, 128)?;
+                validate_connection_generation(*connection_generation)?;
+                if command.valid() {
+                    Ok(())
+                } else {
+                    Err(ProtocolError::InvalidProductionTradingPolicy)
+                }
+            }
+            Self::RiskControlResult {
+                schema,
+                session_id,
+                connection_generation,
+                result,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(session_id, 16, 128)?;
+                validate_connection_generation(*connection_generation)?;
+                if result.valid() {
+                    Ok(())
+                } else {
+                    Err(ProtocolError::InvalidProductionTradingPolicy)
+                }
             }
             Self::DeliveryAck {
                 schema,
@@ -1893,6 +1945,8 @@ impl DirectTransportFrame {
             | Self::Ping { schema, .. }
             | Self::Pong { schema, .. }
             | Self::Request { schema, .. }
+            | Self::RiskControl { schema, .. }
+            | Self::RiskControlResult { schema, .. }
             | Self::DeliveryAck { schema, .. }
             | Self::Response { schema, .. } => schema,
         }
@@ -4210,6 +4264,7 @@ mod direct_transport_tests {
             connection_generation: 7,
             request: request(),
             operator_policy: None,
+            operator_governance: None,
         };
         frame.validate().expect("valid frame");
         let encoded = serde_json::to_string(&frame).expect("encode");
@@ -4259,6 +4314,7 @@ mod direct_transport_tests {
             connection_generation: 7,
             request,
             operator_policy: None,
+            operator_governance: None,
         };
         assert!(frame.validate_incoming_envelope().is_ok());
         assert!(frame.validate().is_err());
@@ -4405,6 +4461,7 @@ mod direct_transport_tests {
             connection_generation: 0,
             request: request(),
             operator_policy: None,
+            operator_governance: None,
         };
         assert_eq!(
             bad_generation.validate(),

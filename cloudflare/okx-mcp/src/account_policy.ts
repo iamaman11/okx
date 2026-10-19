@@ -119,6 +119,8 @@ export async function accountPolicyRequest(
   input?: unknown,
 ): Promise<{ body: Record<string, unknown>; status: number }> {
   if (method === "GET") {
+    if (await storage.get("account_governance_v2") !== undefined)
+      return {status:409,body:{status:"FAILED",reason:"POLICY_V1_RETIRED_USE_ACCOUNT_GOVERNANCE"}};
     const stored = await storage.get(KEY) as unknown;
     if (stored !== undefined && !validAccountPolicy(stored)) {
       return { status: 503, body: { status: "FAILED", reason: "POLICY_CORRUPT" } };
@@ -128,9 +130,14 @@ export async function accountPolicyRequest(
   if (method !== "POST") {
     return { status: 405, body: { status: "FAILED", reason: "METHOD_NOT_ALLOWED" } };
   }
+  // Once v2 is initialized, old v1 configuration cannot become an alternate
+  // positive authority. Migration is monotonic and fails closed.
   const update = parseAccountPolicyUpdate(input);
   if (!update) return { status: 400, body: { status: "FAILED", reason: "INVALID_POLICY_UPDATE" } };
   return storage.transaction(async (tx: any) => {
+    // The v1 retirement fence MUST be in the same DO transaction as the write.
+    if (await tx.get("account_governance_v2") !== undefined)
+      return {status:409,body:{status:"FAILED",reason:"POLICY_V1_RETIRED_USE_ACCOUNT_GOVERNANCE"}};
     const stored = await tx.get(KEY) as unknown;
     if (stored !== undefined && !validAccountPolicy(stored)) {
       return { status: 503, body: { status: "FAILED", reason: "POLICY_CORRUPT" } };
