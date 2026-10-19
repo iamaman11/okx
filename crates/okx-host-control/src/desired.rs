@@ -594,9 +594,13 @@ mod tests {
             reopened.status_value()["execution_right"],
             "PRODUCTION_GOVERNANCE_REQUIRED"
         );
-        reopened.save(AgentDesiredState::production_running()).unwrap();
+        reopened
+            .save(AgentDesiredState::production_running())
+            .unwrap();
         assert!(!reopened.read_only_for(AgentProfile::Production).unwrap());
-        reopened.save(AgentDesiredState::demo_acceptance_running()).unwrap();
+        reopened
+            .save(AgentDesiredState::demo_acceptance_running())
+            .unwrap();
         assert!(reopened.set_production_read_only(false).is_err());
         let _ = fs::remove_dir_all(root);
     }
