@@ -356,8 +356,9 @@ async fn run_session(
     let mut heartbeat_nonce: Option<String> = None;
     let heartbeat_deadline = sleep(Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
     tokio::pin!(heartbeat_deadline);
-    let mut in_flight: FuturesUnordered<BoxFuture<'_, (String, DirectRequestKind, AgentResult<AgentResponse>)>> =
-        FuturesUnordered::new();
+    let mut in_flight: FuturesUnordered<
+        BoxFuture<'_, (String, DirectRequestKind, AgentResult<AgentResponse>)>,
+    > = FuturesUnordered::new();
     // No two exchange-affecting commands may be outstanding on the same
     // transport generation. Read/status requests remain independently bounded.
     let mut active_mutation: Option<String> = None;
@@ -735,9 +736,7 @@ fn completed_direct_response(
             // A local PREPARE may have persisted PREPARED, but by contract
             // cannot execute an exchange POST. Do not disguise this as an
             // uncertain exchange fill, and never infer that persistence failed.
-            eprintln!(
-                "direct transport request {request_id} failed (kind={kind:?}): {error}"
-            );
+            eprintln!("direct transport request {request_id} failed (kind={kind:?}): {error}");
             let (code, message, retryable) = match kind {
                 DirectRequestKind::ReadOnly => (
                     DIRECT_TRANSPORT_QUERY_FAILED,
