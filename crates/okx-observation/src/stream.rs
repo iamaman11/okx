@@ -246,6 +246,55 @@ impl MarketStreamState {
         subscriptions_complete: bool,
         rest_fallback_available: bool,
     ) -> MarketReadinessReport {
+        self.readiness_with_budgets(
+            reference,
+            now_ms,
+            max_age_ms,
+            max_age_ms,
+            connection_active,
+            subscriptions_complete,
+            rest_fallback_available,
+            false,
+        )
+    }
+
+    /// The new-risk gate requires fast price/book evidence separately from
+    /// slower funding/OI context. Both must belong to the same verified WS
+    /// generation; neither may be missing, future-dated, or outside its TTL.
+    /// This is NOT a fallback: no REST source is admitted for an exchange POST.
+    pub fn risk_readiness(
+        &self,
+        reference: &ReferenceRegistry,
+        now_ms: u64,
+        price_max_age_ms: u64,
+        context_max_age_ms: u64,
+        connection_active: bool,
+        subscriptions_complete: bool,
+    ) -> MarketReadinessReport {
+        self.readiness_with_budgets(
+            reference,
+            now_ms,
+            price_max_age_ms,
+            context_max_age_ms,
+            connection_active,
+            subscriptions_complete,
+            false,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn readiness_with_budgets(
+        &self,
+        reference: &ReferenceRegistry,
+        now_ms: u64,
+        price_max_age_ms: u64,
+        context_max_age_ms: u64,
+        connection_active: bool,
+        subscriptions_complete: bool,
+        rest_fallback_available: bool,
+        identify_source: bool,
+    ) -> MarketReadinessReport {
         let fallback_quality = || {
             if rest_fallback_available {
                 MarketReadiness::Degraded
@@ -282,12 +331,27 @@ impl MarketStreamState {
             return self.report(fallback_quality(), "ORDER_BOOK_NOT_CONTIGUOUS", None);
         }
 
-        let oldest = received_times.into_iter().min();
+        let oldest = received_times.iter().map(|(_, at)| *at).min();
         let Some(oldest) = oldest else {
             return self.report(fallback_quality(), "WS_DEPENDENCIES_INCOMPLETE", None);
         };
-        if now_ms.saturating_sub(oldest) > max_age_ms {
-            return self.report(MarketReadiness::Stale, "WS_DEPENDENCY_STALE", Some(oldest));
+        for (name, received_at_ms) in received_times {
+            let budget_ms = if matches!(name, "funding_rate" | "open_interest") {
+                context_max_age_ms
+            } else {
+                price_max_age_ms
+            };
+            if received_at_ms > now_ms || now_ms.saturating_sub(received_at_ms) > budget_ms {
+                let reason = if identify_source {
+                    format!(
+                        "WS_DEPENDENCY_STALE:{name}:age_ms={}:budget_ms={budget_ms}",
+                        now_ms.saturating_sub(received_at_ms)
+                    )
+                } else {
+                    "WS_DEPENDENCY_STALE".to_owned()
+                };
+                return self.report(MarketReadiness::Stale, &reason, Some(oldest));
+            }
         }
 
         if self
@@ -409,17 +473,20 @@ impl MarketStreamState {
             .map(|observed| &observed.value)
     }
 
-    fn required_receive_times(&self, funding_requirement: FundingRequirement) -> Option<Vec<u64>> {
+    fn required_receive_times(
+        &self,
+        funding_requirement: FundingRequirement,
+    ) -> Option<Vec<(&'static str, u64)>> {
         let mut times = vec![
-            self.current_received_at(&self.ticker)?,
-            self.current_received_at(&self.mark_price)?,
-            self.current_received_at(&self.index_ticker)?,
-            self.current_received_at(&self.open_interest)?,
-            self.order_book_received_at_ms?,
+            ("ticker", self.current_received_at(&self.ticker)?),
+            ("mark_price", self.current_received_at(&self.mark_price)?),
+            ("index_ticker", self.current_received_at(&self.index_ticker)?),
+            ("open_interest", self.current_received_at(&self.open_interest)?),
+            ("order_book", self.order_book_received_at_ms?),
         ];
         match funding_requirement {
             FundingRequirement::Required => {
-                times.push(self.current_received_at(&self.funding_rate)?)
+                times.push(("funding_rate", self.current_received_at(&self.funding_rate)?))
             }
             FundingRequirement::NotApplicable => {}
             FundingRequirement::Unknown => return None,
