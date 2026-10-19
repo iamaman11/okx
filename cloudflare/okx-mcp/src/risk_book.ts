@@ -27,6 +27,8 @@ export interface RiskEntry {
    */
   reserve_source_digest?: string;
   reserve_source_read_floor_ms?: number;
+  /** Durable BEGIN_POST timestamp. Older entries remain charged but cannot be auto-released. */
+  posted_at_ms?: number;
   transition_proof: string | null;
 }
 export interface RiskBook {
@@ -117,6 +119,8 @@ function validEntry(entry: RiskEntry): boolean {
     && (entry.reserve_source_digest === undefined || HEX.test(entry.reserve_source_digest))
     && (entry.reserve_source_read_floor_ms === undefined ||
         Number.isSafeInteger(entry.reserve_source_read_floor_ms) && entry.reserve_source_read_floor_ms > 0)
+    && (entry.posted_at_ms === undefined || Number.isSafeInteger(entry.posted_at_ms)
+      && entry.posted_at_ms > entry.created_at_ms)
     && units(entry.loss_usdt) !== null && units(entry.loss_usdt)! > 0n
     && ["HELD","POSTED","UNKNOWN","OPEN","RELEASED"].includes(entry.state)
     && (entry.transition_proof === null || HEX.test(entry.transition_proof))
@@ -300,13 +304,23 @@ export async function reserveRisk(
 /** Never release because of a timeout. Native source/ledger exact reconciliation
  * must provide the proof hash; all transition origins remain private to DO.
  */
+export interface TerminalRiskLedgerProof {
+  account_uid:string;run_id:string;intent_id:string;
+  state:"FILLED"|"CANCELED"|"REJECTED";record_digest:string;
+}
+export interface TerminalRiskReleaseProof {
+  census:CompleteRiskCensus;source_proof:NativeSessionRiskProof;
+  ledger:TerminalRiskLedgerProof;now_ms:number;
+}
+
 export async function transitionRisk(
   storage: any,
   key: string,
   plan_hash: string,
   to: RiskEntryState,
   exact_native_proof_digest: string,
-  native: {connection_generation:number;expected_book_sequence:number}|null = null,
+  native: {connection_generation:number;expected_book_sequence:number;
+    terminal?:TerminalRiskReleaseProof}|null = null,
 ): Promise<{status:"UPDATED"|"DENIED";reason?:string}> {
   if (!HEX.test(plan_hash) || !HEX.test(exact_native_proof_digest) ||
       !native || !Number.isSafeInteger(native.connection_generation) ||
@@ -331,8 +345,31 @@ export async function transitionRisk(
     const index = book.entries.findIndex(e=>e.key===key && e.plan_hash===plan_hash);
     if (index<0 || !transitions[book.entries[index].state].includes(to))
       return {status:"DENIED" as const,reason:"INVALID_RISK_TRANSITION"};
+    const entry=book.entries[index];
+    if(to==="RELEASED"){
+      const proof=native.terminal;
+      if(!proof||!entry.posted_at_ms||!Number.isSafeInteger(proof.now_ms)
+        ||proof.now_ms<=entry.posted_at_ms
+        ||proof.ledger.account_uid!==entry.uid
+        ||proof.ledger.run_id!==entry.run_id
+        ||proof.ledger.intent_id!==entry.intent_id
+        ||!["FILLED","CANCELED","REJECTED"].includes(proof.ledger.state)
+        ||!HEX.test(proof.ledger.record_digest)
+        ||proof.source_proof.connection_generation!==native.connection_generation
+        ||proof.source_proof.source_digest!==proof.census.source_digest
+        ||!proof.source_proof.native_account_evidence_complete
+        ||!proof.source_proof.native_order_evidence_complete
+        ||!proof.source_proof.native_ledger_evidence_complete
+        ||proof.census.source_read_floor_ms<=entry.posted_at_ms)
+        return {status:"DENIED" as const,reason:"TERMINAL_NATIVE_PROOF_UNAVAILABLE"};
+      const governance:unknown=await tx.get("account_governance_v2");
+      const policy=validGovernance(governance)?projectRiskPolicy(governance):null;
+      const occupied=policy?censusRisk(proof.census,policy,proof.now_ms):null;
+      if(!occupied||[...occupied.values()].some(value=>value!==0n))
+        return {status:"DENIED" as const,reason:"TERMINAL_FULL_COHORT_NOT_FLAT"};
+    }
     const entries = [...book.entries];
-    entries[index] = {...entries[index],state:to,transition_proof:exact_native_proof_digest};
+    entries[index] = {...entry,state:to,transition_proof:exact_native_proof_digest};
     await tx.put(KEY,{schema:RISK_BOOK_SCHEMA,sequence:book.sequence+1,entries});
     return {status:"UPDATED" as const};
   });
@@ -423,7 +460,8 @@ export async function beginRiskPost(
     if(global===null||total>global)
       return {status:"DENIED" as const,reason:"POST_PORTFOLIO_RISK_EXCEEDED"};
     const entries=[...stored.entries];
-    entries[index]={...entry,state:"POSTED" as const,transition_proof:proof_digest};
+    entries[index]={...entry,state:"POSTED" as const,posted_at_ms:native.now_ms,
+      transition_proof:proof_digest};
     await tx.put(KEY,{schema:RISK_BOOK_SCHEMA,sequence:stored.sequence+1,entries});
     // Occupancy already includes the just-fenced reservation.
     // Executor will add its requested loss, so exclude only that candidate.

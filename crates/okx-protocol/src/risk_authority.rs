@@ -35,6 +35,16 @@ fn positive(value: &str) -> bool {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct TerminalRiskLedgerProof {
+    pub account_uid: String,
+    pub run_id: String,
+    pub intent_id: String,
+    pub state: String,
+    pub record_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskAccountOccupancy {
     pub account_key: String,
     pub occupied_usdt: String,
@@ -137,6 +147,8 @@ pub enum RiskCommandAction {
         expected_risk_book_sequence: u64,
         next_state: RiskResolution,
         source_proof_sha256: String,
+        terminal_census: Option<NativeRiskCensus>,
+        terminal_ledger: Option<TerminalRiskLedgerProof>,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,14 +217,27 @@ impl RiskCommand {
                 reservation_key,
                 plan_sha256,
                 expected_risk_book_sequence,
-                next_state: _,
+                next_state,
                 source_proof_sha256,
+                terminal_census,
+                terminal_ledger,
             } => {
                 !reservation_key.is_empty()
                     && reservation_key.len() <= 512
                     && hash(plan_sha256)
                     && *expected_risk_book_sequence > 0
                     && hash(source_proof_sha256)
+                    && match next_state {
+                        RiskResolution::Released => terminal_census.as_ref().is_some_and(NativeRiskCensus::valid)
+                            && terminal_ledger.as_ref().is_some_and(|proof| {
+                                hash(&proof.account_uid)
+                                    && token(&proof.run_id)
+                                    && token(&proof.intent_id)
+                                    && hash(&proof.record_digest)
+                                    && matches!(proof.state.as_str(), "FILLED" | "CANCELED" | "REJECTED")
+                            }),
+                        _ => terminal_census.is_none() && terminal_ledger.is_none(),
+                    }
             }
         }
     }

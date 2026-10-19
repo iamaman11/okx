@@ -1,6 +1,7 @@
 import {validGovernance,projectRiskPolicy} from "./account_governance.js";
 import {beginRiskPost,readRiskBook,reserveRisk,transitionRisk,
-  type CompleteRiskCensus,type NativeSessionRiskProof,type RiskReservation} from "./risk_book.js";
+  type CompleteRiskCensus,type NativeSessionRiskProof,type RiskReservation,
+  type TerminalRiskReleaseProof} from "./risk_book.js";
 
 const COMMAND_SCHEMA="okx.risk-command/v1";
 const RESULT_SCHEMA="okx.risk-result/v1";
@@ -129,16 +130,37 @@ export async function handleNativeRiskCommand(
       ||!Number.isSafeInteger(a.expected_risk_book_sequence)||
       typeof a.source_proof_sha256!=="string")
       return deny(id,"INVALID_RESOLUTION_INPUT");
-    // A digest is not sufficient evidence of a terminal FLAT reconciliation:
-    // do not release exchange risk without independently source-proven close.
-    if(a.next_state==="RELEASED")
-      return deny(id,"SOURCE_PROVEN_TERMINAL_RELEASE_NOT_INSTALLED");
-    if(a.next_state!=="UNKNOWN"&&a.next_state!=="OPEN")
+    if(a.next_state!=="UNKNOWN"&&a.next_state!=="OPEN"&&a.next_state!=="RELEASED")
       return deny(id,"INVALID_RESOLUTION_STATE");
+    let terminal:TerminalRiskReleaseProof|undefined;
+    if(a.next_state==="RELEASED"){
+      const provenance=nativeEvidence(a.terminal_census,session.connection_generation);
+      if(!provenance||!isObject(a.terminal_census)||!isObject(a.terminal_ledger)
+        ||!Array.isArray(a.terminal_census.account_keys)
+        ||!Array.isArray(a.terminal_census.occupied)
+        ||typeof a.terminal_ledger.account_uid!=="string"
+        ||typeof a.terminal_ledger.run_id!=="string"
+        ||typeof a.terminal_ledger.intent_id!=="string"
+        ||typeof a.terminal_ledger.record_digest!=="string"
+        ||!["FILLED","CANCELED","REJECTED"].includes(a.terminal_ledger.state as string))
+        return deny(id,"TERMINAL_NATIVE_PROOF_UNAVAILABLE");
+      terminal={census:{complete:true,
+        source_digest:a.terminal_census.source_digest as string,
+        content_digest:a.terminal_census.content_digest as string,
+        generated_at_ms:a.terminal_census.generated_at_ms as number,
+        source_read_floor_ms:a.terminal_census.source_read_floor_ms as number,
+        account_keys:a.terminal_census.account_keys as string[],
+        occupied:a.terminal_census.occupied as CompleteRiskCensus["occupied"]},
+        source_proof:provenance,
+        ledger:a.terminal_ledger as unknown as TerminalRiskReleaseProof["ledger"],
+        now_ms};
+    } else if(a.terminal_census!==undefined||a.terminal_ledger!==undefined){
+      return deny(id,"UNEXPECTED_TERMINAL_RELEASE_PROOF");
+    }
     const status=await transitionRisk(storage,a.reservation_key,a.plan_sha256,
       a.next_state,a.source_proof_sha256,
       {connection_generation:session.connection_generation,
-       expected_book_sequence:a.expected_risk_book_sequence as number});
+       expected_book_sequence:a.expected_risk_book_sequence as number,terminal});
     if(status.status!=="UPDATED")return deny(id,status.reason??"RISK_RESOLUTION_DENIED");
     const book=await readRiskBook(storage);
     const entry=book?.entries.find(e=>e.key===a.reservation_key&&e.plan_hash===a.plan_sha256);
