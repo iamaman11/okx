@@ -18,6 +18,17 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
+/// A bounded multi-source signed REST census includes all 16 protective-algo
+/// scopes plus account history. The entire read is bracketed by the private
+/// WS convergence cursor; each source still needs to be recent.
+const NATIVE_RISK_CENSUS_MAX_SOURCE_AGE_MS: u64 = 20_000;
+
+fn native_source_recent(received_at_ms: u64, now_ms: u64) -> bool {
+    received_at_ms > 0
+        && received_at_ms <= now_ms
+        && now_ms - received_at_ms <= NATIVE_RISK_CENSUS_MAX_SOURCE_AGE_MS
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CensusFailure {
     RegistryUnverified,
@@ -154,7 +165,7 @@ impl AccountRiskEvidence {
         let snapshot_at = received(&snapshot.source_received_at).ok_or(E::StaleSource)?;
         let history_at = received(&facts.summary.source_received_at).ok_or(E::StaleSource)?;
         let received_at_ms = snapshot_at.min(history_at).min(algos.received_at_ms);
-        if received_at_ms == 0 || received_at_ms > now_ms || now_ms - received_at_ms > 5_000 {
+        if !native_source_recent(received_at_ms, now_ms) {
             return Err(E::StaleSource);
         }
         let uid = &snapshot.account_uid_fingerprint;
@@ -306,10 +317,7 @@ impl PortfolioRiskSources {
             {
                 return Err(E::MissingOrDuplicateAccount);
             }
-            if source.received_at_ms == 0
-                || source.received_at_ms > self.now_ms
-                || self.now_ms - source.received_at_ms > 5_000
-            {
+            if !native_source_recent(source.received_at_ms, self.now_ms) {
                 return Err(E::StaleSource);
             }
             if !source.account_inventory_complete
@@ -391,6 +399,20 @@ impl PortfolioRiskSources {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_multi_source_census_never_admits_outdated_or_future_evidence() {
+        assert!(native_source_recent(1, 1));
+        assert!(native_source_recent(1_000, 21_000));
+        assert!(!native_source_recent(1_000, 21_001));
+        assert!(!native_source_recent(20_001, 20_000));
+        assert!(!native_source_recent(0, 10_000));
+        let mut current = cohort();
+        current.now_ms = 21_000;
+        assert!(current.census().is_ok());
+        current.now_ms = 21_001;
+        assert_eq!(current.census().unwrap_err(), CensusFailure::StaleSource);
+    }
 
     #[test]
     fn only_one_exact_unsent_prepared_protection_is_inert_for_risk() {
