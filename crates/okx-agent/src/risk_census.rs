@@ -400,8 +400,9 @@ mod tests {
     #[test]
     fn central_scope_cannot_drop_disabled_or_unverified_real_accounts() {
         let g = governance();
-        let source = PortfolioRiskSources::from_governance(&g, vec![row('a'), row('b')], 1_000, true)
-            .expect("native cohort");
+        let source =
+            PortfolioRiskSources::from_governance(&g, vec![row('a'), row('b')], 1_000, true)
+                .expect("native cohort");
         assert_eq!(
             source.census().unwrap().account_keys,
             vec![key('a'), key('b')]
@@ -413,7 +414,8 @@ mod tests {
             PortfolioRiskSources::from_governance(&stopped, vec![row('a'), row('b')], 1_000, true)
                 .expect("revoked new trade never blocks native read for release");
         assert_eq!(read_only.census().unwrap().account_keys.len(), 2);
-        let incomplete = PortfolioRiskSources::from_governance(&g, vec![row('a')], 1_000, true).unwrap();
+        let incomplete =
+            PortfolioRiskSources::from_governance(&g, vec![row('a')], 1_000, true).unwrap();
         assert_eq!(
             incomplete.census().unwrap_err(),
             CensusFailure::MissingOrDuplicateAccount
@@ -429,8 +431,13 @@ mod tests {
         let mut other_venue = governance();
         other_venue.state.accounts[1].venue = "other".into();
         assert_eq!(
-            PortfolioRiskSources::from_governance(&other_venue, vec![row('a'), row('b')], 1_000, true)
-                .unwrap_err(),
+            PortfolioRiskSources::from_governance(
+                &other_venue,
+                vec![row('a'), row('b')],
+                1_000,
+                true
+            )
+            .unwrap_err(),
             CensusFailure::RegistryUnverified
         );
         assert_eq!(
