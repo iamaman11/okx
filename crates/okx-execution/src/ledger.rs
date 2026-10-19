@@ -1447,6 +1447,32 @@ impl DurableExecutionLedger {
         })
     }
 
+    /// An unsent risk-increasing candidate is a planned operation, not a
+    /// fill, fee, order or active protective algo. Reject every other shape.
+    fn inert_candidate_for_financial_projection(
+        record: &ExecutionRecord,
+        plan: &ExecutionPlan,
+        run_id: &str,
+    ) -> bool {
+        record.plan == *plan
+            && record.state == ExecutionState::Prepared
+            && record.strategy_run_id.as_deref() == Some(run_id)
+            && record.order_id.is_none()
+            && record.exchange_state.is_none()
+            && record.submission_timing.is_none()
+            && record.rejection_code.is_none()
+            && record.mutations.is_empty()
+            && record.reverse.is_none()
+            && record.protection.as_ref().is_some_and(|p| {
+                p.status == ProtectiveOrderStatus::Pending
+                    && p.algo_order_id.is_none()
+                    && p.covered_size.is_none()
+                    && p.failure_code.is_none()
+                    && p.cleanup.is_none()
+                    && p.size_amend.is_none()
+            })
+    }
+
     /// Native new-risk accounting over the complete run history. Only the
     /// selected, still-unsent PREPARED candidate is excluded from the
     /// financial projection: it can have no exchange fill or fee, but its
@@ -1463,24 +1489,11 @@ impl DurableExecutionLedger {
         for entry in self.entries.values() {
             if entry.record.plan.intent_id == plan.intent_id {
                 let record = &entry.record;
-                if record.plan != *plan
-                    || record.state != ExecutionState::Prepared
-                    || record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
-                    || record.order_id.is_some()
-                    || record.exchange_state.is_some()
-                    || record.submission_timing.is_some()
-                    || record.rejection_code.is_some()
-                    || !record.mutations.is_empty()
-                    || record.reverse.is_some()
-                    || record.protection.as_ref().is_none_or(|p| {
-                        p.status != ProtectiveOrderStatus::Pending
-                            || p.algo_order_id.is_some()
-                            || p.covered_size.is_some()
-                            || p.failure_code.is_some()
-                            || p.cleanup.is_some()
-                            || p.size_amend.is_some()
-                    })
-                {
+                if !Self::inert_candidate_for_financial_projection(
+                    record,
+                    plan,
+                    &run.allocation_id,
+                ) {
                     return None;
                 }
                 continue;
@@ -3602,30 +3615,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn next_risk_ignores_only_exact_inert_prepared_parent() {
+    fn next_risk_excludes_only_exact_unsent_protected_candidate() {
         let run = "real_run_continuous_20261019";
-        let mut value = ExecutionRecord::new(plan("real_continuous_candidate_20261019"));
+        let plan = protected_plan("real_continuous_candidate_20261019");
+        let mut value = ExecutionRecord::new(plan.clone());
         value.strategy_run_id = Some(run.to_owned());
-        assert!(value.protection.is_some());
-        let exact = |v: &ExecutionRecord| {
-            v.state == ExecutionState::Prepared
-                && v.strategy_run_id.as_deref() == Some(run)
-                && v.order_id.is_none()
-                && v.submission_timing.is_none()
-                && v.protection.as_ref().is_some_and(|p| {
-                    p.status == ProtectiveOrderStatus::Pending
-                        && p.algo_order_id.is_none()
-                })
+        let allowed = |v: &ExecutionRecord| {
+            DurableExecutionLedger::inert_candidate_for_financial_projection(v, &plan, run)
         };
-        assert!(exact(&value));
+        assert!(allowed(&value));
+        assert!(!DurableExecutionLedger::inert_candidate_for_financial_projection(
+            &value,
+            &protected_plan("another_candidate_20261019"),
+            run
+        ));
+        assert!(!DurableExecutionLedger::inert_candidate_for_financial_projection(
+            &value, &plan, "foreign_run"
+        ));
         value.order_id = Some("venue_order".to_owned());
-        assert!(!exact(&value));
+        assert!(!allowed(&value));
         value.order_id = None;
         value.state = ExecutionState::UnknownSubmission;
-        assert!(!exact(&value));
+        assert!(!allowed(&value));
         value.state = ExecutionState::Prepared;
         value.protection.as_mut().unwrap().algo_order_id = Some("algo_venue".to_owned());
-        assert!(!exact(&value));
+        assert!(!allowed(&value));
+        value.protection.as_mut().unwrap().algo_order_id = None;
+        value.protection.as_mut().unwrap().status = ProtectiveOrderStatus::Active;
+        assert!(!allowed(&value));
+        value.protection.as_mut().unwrap().status = ProtectiveOrderStatus::Pending;
+        value.submission_timing = Some(crate::ExecutionSubmissionTimingEvidence {
+            request_exchange_time_ms: 1_790_000_000_000,
+            okx_in_time_us: None,
+            okx_out_time_us: None,
+        });
+        assert!(!allowed(&value));
     }
 
     #[test]
