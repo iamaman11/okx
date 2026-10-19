@@ -16,8 +16,7 @@ use okx_execution::{
     OrderExecutorError, PositionSide, PrepareOutcome, ProductionMarkEvidence,
     StrategyAllocationOpening, StrategyCapitalReservation, StrategyFinalization,
     StrategyFinancialPeriod, StrategyNavPoint, StrategyUnverifiedClosure, SubmitDisposition,
-    execution_status_with_ledger,
-    managed_execution_inventory, reconcile_account_ledger,
+    execution_status_with_ledger, managed_execution_inventory, reconcile_account_ledger,
 };
 use okx_observation::{
     AccountLedgerFacts, AccountSnapshot, InstrumentRulesSnapshot, VenueExecutionEvidence,
@@ -97,8 +96,7 @@ fn attested_flat_nav_for_new_risk(
     }
     let nav = rust_decimal::Decimal::from_str(period.nav_usdt.as_deref()?).ok()?;
     let allocation = rust_decimal::Decimal::from_str(&run.allocated_usdt).ok()?;
-    let opening_equity =
-        rust_decimal::Decimal::from_str(&run.opening_account_usdt_equity).ok()?;
+    let opening_equity = rust_decimal::Decimal::from_str(&run.opening_account_usdt_equity).ok()?;
     let observed_equity = rust_decimal::Decimal::from_str(current_usdt_equity).ok()?;
     let recorded_nav = rust_decimal::Decimal::from_str(&point.nav_usdt).ok()?;
     let high_water = rust_decimal::Decimal::from_str(&point.high_water_usdt).ok()?;
@@ -828,7 +826,9 @@ impl ExecutionRuntime {
         // The one durable Ledger is also the NAV/high-water/day-loss writer.
         // Any breach latches STOP before the candidate can receive a permit.
         let now = u64::try_from(Utc::now().timestamp_millis()).ok()?;
-        executor.observe_strategy_nav(&projection, facts, now).ok()?;
+        executor
+            .observe_strategy_nav(&projection, facts, now)
+            .ok()?;
         let ledger = executor.ledger();
         if ledger.risk_stop().is_some() {
             return None;
