@@ -324,30 +324,11 @@ pub(super) fn finance_window(
             "invalid account finance window",
         ));
     }
-    // Read-only opening cannot create or initialize a missing account.
-    let mut connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(io)?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(io)?;
+    // Same validated SQLite connection as indexed intent reads, with one
+    // consistent WAL snapshot covering account identity and every fact.
+    let mut connection = super::sqlite_store::open_finance_read(path)?;
     let snapshot = begin_finance_snapshot(&mut connection)?;
-    let version: i64 = snapshot
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(io)?;
-    if version != 1 {
-        return Err(ExecutionLedgerError::Corrupt(
-            "finance SQLite schema mismatch",
-        ));
-    }
-    let account_uid: String = snapshot
-        .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |row| {
-            row.get(0)
-        })
-        .map_err(io)?;
-    if account_uid != expected_uid {
-        return Err(ExecutionLedgerError::AccountScopeMismatch);
-    }
+    super::sqlite_store::require_finance_read_scope(&snapshot, expected_uid)?;
     let first = i64::try_from(from_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
     let end = i64::try_from(through_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
     let mut accum = BTreeMap::<(String, String), (u64, Decimal)>::new();

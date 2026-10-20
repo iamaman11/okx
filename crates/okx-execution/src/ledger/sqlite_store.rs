@@ -145,20 +145,27 @@ fn connect_with_integrity(
     Ok(connection)
 }
 
-/// Validate the existing immutable owner and small state checksum once
-/// for an indexed read. No attempt to manufacture or repair account storage.
-fn require_indexed_scope(c: &Connection, expected_uid: &str) -> Result<(), ExecutionLedgerError> {
-    if expected_uid.len() != 64
-        || !expected_uid
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+/// Every finance/indexed read checks the SAME durable account-state
+/// digest and permanent UID identity. Staging reports may precede native
+/// binding; live indexed intent reads always require that binding.
+fn require_account_read_scope(
+    c: &Connection,
+    expected_uid: &str,
+    bound_required: bool,
+) -> Result<(), ExecutionLedgerError> {
+    if expected_uid.is_empty()
+        || (bound_required
+            && (expected_uid.len() != 64
+                || !expected_uid
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))))
     {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
-    let row: Option<(String, String, Vec<u8>, String)> = c
+    let row: Option<(String, String, Vec<u8>, Option<String>)> = c
         .query_row(
             "SELECT s.uid,s.digest,s.bytes,i.uid_fingerprint
-             FROM ledger_state s JOIN account_identity i ON i.singleton=1
+             FROM ledger_state s LEFT JOIN account_identity i ON i.singleton=1
              WHERE s.key=1",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
@@ -168,10 +175,35 @@ fn require_indexed_scope(c: &Connection, expected_uid: &str) -> Result<(), Execu
     let Some((state_uid, digest, bytes, identity_uid)) = row else {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     };
-    if state_uid != expected_uid || identity_uid != expected_uid || checksum(&bytes) != digest {
+    if state_uid != expected_uid
+        || checksum(&bytes) != digest
+        || identity_uid
+            .as_deref()
+            .is_some_and(|bound| bound != expected_uid)
+        || (bound_required && identity_uid.is_none())
+    {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     Ok(())
+}
+
+fn require_indexed_scope(c: &Connection, expected_uid: &str) -> Result<(), ExecutionLedgerError> {
+    require_account_read_scope(c, expected_uid, true)
+}
+
+/// Finance diagnostics are allowed for unbound historical staging, but a
+/// published account binding must NEVER be bypassed or cross-read.
+pub(super) fn require_finance_read_scope(
+    c: &Connection,
+    expected_uid: &str,
+) -> Result<(), ExecutionLedgerError> {
+    require_account_read_scope(c, expected_uid, false)
+}
+
+/// Use the same read-only WAL/schema/foreign-key validation for financial
+/// reporting as for indexed intent queries. No blank-ledger creation.
+pub(super) fn open_finance_read(path: &Path) -> Result<Connection, ExecutionLedgerError> {
+    connect_indexed_read(path)
 }
 
 /// One exact persisted entry is checked against its BLOB digest, immutable
@@ -2013,6 +2045,15 @@ mod tests {
             .is_err()
         );
         assert_eq!(load(&p, 10).unwrap().3, Some(original));
+        // Financial reports must not accept a forged ledger-state digest,
+        // even when the account UID and individual bill rows still look valid.
+        let c = Connection::open(&p).unwrap();
+        c.execute("UPDATE ledger_state SET digest='forged' WHERE key=1", [])
+            .unwrap();
+        drop(c);
+        assert!(
+            super::sqlite_finance::finance_window(&p, "uid-test-one", 1, 100_000).is_err()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
