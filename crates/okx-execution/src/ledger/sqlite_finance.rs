@@ -4,7 +4,7 @@
 use super::sqlite_store::{checksum, encode, io};
 use super::*;
 use crate::exchange_evidence::StoredExchangeEvent;
-use rusqlite::{Transaction, params};
+use rusqlite::{Transaction, TransactionBehavior, params};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use std::str::FromStr;
@@ -299,6 +299,17 @@ pub struct AccountFinanceWindow {
     pub financial_completeness: &'static str,
 }
 
+/// Pin every cashflow, fill, gap and source-receipt query to one SQLite WAL
+/// read snapshot. Separate autocommit SELECTs can otherwise observe different
+/// commits and report internally inconsistent financial facts.
+fn begin_finance_snapshot(
+    connection: &mut rusqlite::Connection,
+) -> Result<Transaction<'_>, ExecutionLedgerError> {
+    connection
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(io)
+}
+
 /// One read-only, bounded-by-request financial view. Returns observed money
 /// movement and explicit uncertainty; it never authorizes an exchange POST.
 /// The caller supplies the natively verified UID, not a user-facing selector.
@@ -314,13 +325,14 @@ pub(super) fn finance_window(
         ));
     }
     // Read-only opening cannot create or initialize a missing account.
-    let connection =
+    let mut connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(io)?;
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(io)?;
-    let version: i64 = connection
+    let snapshot = begin_finance_snapshot(&mut connection)?;
+    let version: i64 = snapshot
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(io)?;
     if version != 1 {
@@ -328,7 +340,7 @@ pub(super) fn finance_window(
             "finance SQLite schema mismatch",
         ));
     }
-    let account_uid: String = connection
+    let account_uid: String = snapshot
         .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |row| {
             row.get(0)
         })
@@ -340,7 +352,7 @@ pub(super) fn finance_window(
     let end = i64::try_from(through_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
     let mut accum = BTreeMap::<(String, String), (u64, Decimal)>::new();
     {
-        let mut stmt = connection
+        let mut stmt = snapshot
             .prepare(
                 "SELECT bill_id,currency,bill_kind,delta_decimal FROM bills
              WHERE exchange_time_ms>=?1 AND exchange_time_ms<?2
@@ -392,7 +404,7 @@ pub(super) fn finance_window(
                 ));
             }
         };
-        let n: i64 = connection
+        let n: i64 = snapshot
             .query_row(query, params![first, end], |r| r.get(0))
             .map_err(io)?;
         u64::try_from(n).map_err(|_| ExecutionLedgerError::Corrupt("negative finance count"))
@@ -400,7 +412,7 @@ pub(super) fn finance_window(
     let fill_rows = count("fills")?;
     let bill_rows = count("bills")?;
     let gap_count = |materiality: &str| -> Result<u64, ExecutionLedgerError> {
-        let n: i64 = connection
+        let n: i64 = snapshot
             .query_row(
                 "SELECT COUNT(*) FROM source_gaps
              WHERE materiality=?1 AND from_ms<?2 AND through_ms>?3
@@ -417,7 +429,7 @@ pub(super) fn finance_window(
     let receipt_count = |stream: &str| -> Result<u64, ExecutionLedgerError> {
         // A source receipt is proof of ONE authenticated observation, not
         // necessarily of continuous historical coverage across the window.
-        let n: i64 = connection
+        let n: i64 = snapshot
             .query_row(
                 "SELECT COUNT(*) FROM source_receipts
              WHERE stream_kind=?1 AND scope_key=?2
@@ -439,7 +451,7 @@ pub(super) fn finance_window(
         // of detected gaps is NOT evidence of complete strategy finance.
         "UNVERIFIED_WITHOUT_CONTIGUOUS_SOURCE_PROOF"
     };
-    Ok(AccountFinanceWindow {
+    let window = AccountFinanceWindow {
         schema: "okx.account-finance-window/v1",
         account_uid_fingerprint: expected_uid.to_owned(),
         from_ms,
@@ -455,7 +467,9 @@ pub(super) fn finance_window(
         fill_source_receipts,
         order_source_receipts,
         financial_completeness: completeness,
-    })
+    };
+    snapshot.commit().map_err(io)?;
+    Ok(window)
 }
 
 /// Separate source coverage facts per stream. Every inserted interval is a
@@ -527,4 +541,60 @@ pub(super) fn persist_source_receipt(
         .map_err(io)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    /// The same deferred read transaction used by finance_window must pin
+    /// all constituent counts to one point, even when another owner commits
+    /// a new bill after the first SELECT.
+    #[test]
+    fn finance_read_snapshot_does_not_mix_concurrent_commits() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-finance-snapshot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("account.sqlite");
+        let mut reader = rusqlite::Connection::open(&path).unwrap();
+        reader
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        reader
+            .execute_batch("CREATE TABLE financial_facts (id INTEGER PRIMARY KEY);
+                INSERT INTO financial_facts VALUES (1);")
+            .unwrap();
+        let writer = rusqlite::Connection::open(&path).unwrap();
+
+        let snapshot = begin_finance_snapshot(&mut reader).unwrap();
+        let before: i64 = snapshot
+            .query_row("SELECT COUNT(*) FROM financial_facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, 1);
+
+        // A WAL writer must not wait for the report reader, and the report
+        // must not silently adopt this newer committed generation.
+        writer
+            .execute("INSERT INTO financial_facts VALUES (2)", [])
+            .unwrap();
+        let pinned: i64 = snapshot
+            .query_row("SELECT COUNT(*) FROM financial_facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pinned, before);
+        snapshot.commit().unwrap();
+
+        let latest: i64 = reader
+            .query_row("SELECT COUNT(*) FROM financial_facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(latest, 2);
+        drop(writer);
+        drop(reader);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
