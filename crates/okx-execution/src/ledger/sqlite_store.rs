@@ -390,6 +390,37 @@ pub(super) fn save_one(
     )
 }
 
+/// Persist only the intents whose crash-recovery states actually changed.
+/// All transitions and POST fences commit in a SINGLE SQLite WAL transaction;
+/// never rewrite source/capital/archives merely because an Agent restarted.
+pub(super) fn save_recovered(
+    path: &Path,
+    changed: &BTreeMap<String, ExecutionLedgerEntry>,
+    stop: Option<&ExecutionRiskStop>,
+    reservation: Option<&StrategyCapitalReservation>,
+    source: Option<&DurableExchangeEvidence>,
+    periods: &StrategyPeriodHistory,
+    leverage: &[LeverageChangeAttempt],
+) -> Result<(), ExecutionLedgerError> {
+    if changed.is_empty() || !path.exists() {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native recovery requires existing account and changed intents",
+        ));
+    }
+    save_snapshot(
+        path,
+        changed,
+        SqliteWriteState {
+            stop,
+            reservation,
+            source,
+            periods,
+            leverage,
+        },
+        false,
+    )
+}
+
 fn save_snapshot(
     path: &Path,
     entries: &BTreeMap<String, ExecutionLedgerEntry>,
@@ -1457,6 +1488,156 @@ mod tests {
                 .path(),
             sqlite.path()
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_cutover_preflight_never_stages_or_disables_v14() {
+        let root = test_root("source-preflight");
+        let legacy = ExecutionLedgerStore::at(root.join("execution-ledger.json"));
+        let uid = "e".repeat(64);
+        let capital = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "preflight_strategy_run_000001".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            origin_schema: "test/v1".to_owned(),
+            origin_version: "v1".to_owned(),
+            mandate_version: "1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "127".to_owned(),
+            account_generation: "g1".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1,
+        };
+        legacy
+            .save(
+                &BTreeMap::new(),
+                None,
+                Some(&capital),
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
+            )
+            .unwrap();
+        let digest = checksum(&std::fs::read(legacy.path()).unwrap());
+        assert!(
+            ExecutionLedgerStore::migrate_to_sqlite_offline(
+                &root,
+                &"f".repeat(64),
+                &digest
+            )
+            .is_err()
+        );
+        assert!(
+            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &"0".repeat(64))
+                .is_err()
+        );
+        assert!(!root.join("execution-ledger.sqlite").exists());
+        assert!(!root.join("execution-ledger.owner").exists());
+        assert!(!root.join("execution-ledger.v14.sealed").exists());
+        assert_eq!(
+            ExecutionLedgerStore::select_published_owner(&root)
+                .unwrap()
+                .path(),
+            legacy.path()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn altered_cutover_watermark_never_authorizes_sqlite_owner() {
+        let root = test_root("cutover-marker-corrupt");
+        let lock = root.join("execution-ledger.writer-lock");
+        let valid = b"okx.sqlite-cutover/v1\n";
+        // Same length as a legitimate watermark, but different content.
+        std::fs::write(&lock, b"okx.sqlite-cutover/v2\n").unwrap();
+        assert_eq!(std::fs::metadata(&lock).unwrap().len(), valid.len() as u64);
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        assert!(ExecutionLedgerStore::migrate_to_sqlite_offline(
+            &root,
+            &"a".repeat(64),
+            &"b".repeat(64)
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_updates_only_changed_intents_without_rewriting_history() {
+        let root = test_root("recovery-delta");
+        let path = root.join("execution-ledger.sqlite");
+        let make = |id: &str| {
+            let plan = ExecutionPlan {
+                schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+                intent_id: id.to_owned(),
+                client_order_id: derive_client_order_id(id),
+                reference_generation: "sha256:reference".to_owned(),
+                account_generation: "sha256:account".to_owned(),
+                account_uid_fingerprint: "account-uid-test".to_owned(),
+                instrument_id: "DOGE-USDT-SWAP".to_owned(),
+                trade_mode: crate::TradeMode::Cross,
+                side: crate::OrderSide::Buy,
+                position_side: PositionSide::Long,
+                action: ExecutionAction::Open,
+                order_type: crate::OrderType::Limit,
+                size: "1".to_owned(),
+                price: "0.1".to_owned(),
+                open_risk: None,
+                risk_binding: None,
+            };
+            ExecutionLedgerEntry {
+                record: ExecutionRecord::new(plan),
+                created_at_ms: 1000,
+                updated_at_ms: 1000,
+            }
+        };
+        let historic_id = "old_historical_intent_00001";
+        let inflight_id = "inflight_post_intent_00001";
+        let historic = make(historic_id);
+        let mut inflight = make(inflight_id);
+        let periods = StrategyPeriodHistory::default();
+        let entries = BTreeMap::from([
+            (historic_id.to_owned(), historic.clone()),
+            (inflight_id.to_owned(), inflight.clone()),
+        ]);
+        save(&path, &entries, None, None, None, &periods, &[]).unwrap();
+        inflight.record.begin_submission_with_timing(None).unwrap();
+        inflight.updated_at_ms = 1001;
+        save_one(&path, &inflight, None, None, None, &periods, &[]).unwrap();
+        let prior = Connection::open(&path).unwrap();
+        let before: (String, String) = prior
+            .query_row(
+                "SELECT digest,hex(bytes) FROM ledger_entries WHERE intent_id=?1",
+                params![historic_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let before_events: i64 = prior
+            .query_row("SELECT COUNT(*) FROM domain_events", [], |r| r.get(0))
+            .unwrap();
+        drop(prior);
+        let opened = DurableExecutionLedger::open(ExecutionLedgerStore::sqlite_at(&path), 1002)
+            .unwrap();
+        assert_eq!(opened.get(inflight_id).unwrap().record.state, ExecutionState::UnknownSubmission);
+        assert_eq!(opened.get(historic_id), Some(&historic));
+        let after = Connection::open(&path).unwrap();
+        let same: (String, String) = after
+            .query_row(
+                "SELECT digest,hex(bytes) FROM ledger_entries WHERE intent_id=?1",
+                params![historic_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(before, same);
+        let after_events: i64 = after
+            .query_row("SELECT COUNT(*) FROM domain_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after_events, before_events + 1);
+        let post_count: i64 = after
+            .query_row("SELECT COUNT(*) FROM post_attempts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(post_count, 1);
+        drop(after);
         std::fs::remove_dir_all(root).unwrap();
     }
 

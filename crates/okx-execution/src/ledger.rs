@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::Write,
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -444,11 +444,7 @@ impl ExecutionLedgerStore {
         // The same permanent file that fences concurrent writers also keeps
         // an irreversible cutover watermark. Even loss of both SQLite and its
         // owner receipt must not resurrect a blank pre-cutover JSON writer.
-        let marked = match fs::metadata(root.join("execution-ledger.writer-lock")) {
-            Ok(metadata) => metadata.len() != 0,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error.into()),
-        };
+        let marked = Self::has_sqlite_cutover_watermark(root)?;
         if !receipt.try_exists()? {
             if marked || native.try_exists()? || sealed.try_exists()? {
                 return Err(ExecutionLedgerError::Corrupt(
@@ -650,14 +646,44 @@ impl ExecutionLedgerStore {
         Ok(lease)
     }
 
+    const SQLITE_CUTOVER_WATERMARK: &'static [u8] = b"okx.sqlite-cutover/v1\n";
+
+    fn has_sqlite_cutover_watermark(root: &Path) -> Result<bool, ExecutionLedgerError> {
+        let path = root.join("execution-ledger.writer-lock");
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if bytes.is_empty() {
+            return Ok(false);
+        }
+        if bytes != Self::SQLITE_CUTOVER_WATERMARK {
+            return Err(ExecutionLedgerError::Corrupt(
+                "invalid persistent SQLite cutover watermark",
+            ));
+        }
+        Ok(true)
+    }
+
     fn mark_sqlite_cutover(lease: &mut File) -> Result<(), ExecutionLedgerError> {
-        const MARK: &[u8] = b"okx.sqlite-cutover/v1\n";
+        let mark = Self::SQLITE_CUTOVER_WATERMARK;
         match lease.metadata()?.len() {
             0 => {
-                lease.write_all(MARK)?;
+                lease.rewind()?;
+                lease.write_all(mark)?;
                 lease.sync_all()?;
             }
-            n if n == MARK.len() as u64 => {}
+            n if n == mark.len() as u64 => {
+                lease.rewind()?;
+                let mut bytes = vec![0u8; mark.len()];
+                lease.read_exact(&mut bytes)?;
+                if bytes != mark {
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "invalid persistent SQLite cutover watermark",
+                    ));
+                }
+            }
             _ => {
                 return Err(ExecutionLedgerError::Corrupt(
                     "invalid persistent SQLite cutover watermark",
@@ -696,6 +722,31 @@ impl ExecutionLedgerStore {
         } else {
             &original
         });
+        // Validate the exact source identity BEFORE staging can create a
+        // canonical SQLite candidate. A typo or stale CONTROL proof must
+        // leave the existing v14 writer usable, not strand the account.
+        let attestation = source.attest_storage()?;
+        if attestation.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V14
+            || attestation.manifest_sha256 != expected_v14_sha256
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite cutover preflight source hash mismatch",
+            ));
+        }
+        let (entries, _, reservation, evidence, _, _) = source.load()?;
+        if reservation
+            .as_ref()
+            .is_some_and(|r| r.account_uid_fingerprint != expected_uid)
+            || evidence
+                .as_ref()
+                .is_some_and(|e| e.account_uid != expected_uid)
+            || entries
+                .values()
+                .any(|e| e.record.plan.account_uid_fingerprint != expected_uid)
+            || (reservation.is_none() && evidence.is_none() && entries.is_empty())
+        {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
         if !native.try_exists()? {
             // Once v14 has been sealed, a missing SQLite might contain
             // already-executed trades. Never rebuild an empty historical
@@ -1355,6 +1406,39 @@ impl ExecutionLedgerStore {
         )
     }
 
+    /// Cold startup recovery of SUBMITTING/UNKNOWN and inflight changes.
+    /// Native SQLite updates only the affected intent rows in one transaction;
+    /// the immutable full history and financial snapshot are left untouched.
+    fn save_recovered_intents(
+        &self,
+        changed: &BTreeMap<String, ExecutionLedgerEntry>,
+        all: &BTreeMap<String, ExecutionLedgerEntry>,
+        stop: Option<&ExecutionRiskStop>,
+        reservation: Option<&StrategyCapitalReservation>,
+        source: Option<&DurableExchangeEvidence>,
+        periods: &StrategyPeriodHistory,
+        leverage: &[LeverageChangeAttempt],
+    ) -> Result<(), ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return self.save(all, stop, reservation, source, periods, leverage);
+        }
+        if changed.is_empty() || changed.iter().any(|(id, e)| all.get(id) != Some(e)) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "invalid recovered SQLite intent batch",
+            ));
+        }
+        for entry in changed.values() {
+            validate_entry(entry)?;
+            validate_strategy_run_binding(
+                entry,
+                reservation,
+                &periods.archived_runs,
+                &periods.unverified_runs,
+            )?;
+        }
+        sqlite_store::save_recovered(&self.path, changed, stop, reservation, source, periods, leverage)
+    }
+
     fn save(
         &self,
         entries: &BTreeMap<String, ExecutionLedgerEntry>,
@@ -1773,22 +1857,27 @@ impl DurableExecutionLedger {
             strategy_periods,
             leverage_attempts,
         ) = store.load()?;
-        let mut recovered = false;
+        let mut recovered = BTreeMap::new();
 
-        for entry in entries.values_mut() {
+        for (id, entry) in &mut entries {
+            let mut changed = false;
             if entry.record.state == ExecutionState::Submitting {
                 entry.record.mark_unknown_submission()?;
                 entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
-                recovered = true;
+                changed = true;
             }
             if entry.record.recover_inflight_mutation() {
                 entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
-                recovered = true;
+                changed = true;
+            }
+            if changed {
+                recovered.insert(id.clone(), entry.clone());
             }
         }
 
-        if recovered {
-            store.save(
+        if !recovered.is_empty() {
+            store.save_recovered_intents(
+                &recovered,
                 &entries,
                 risk_stop.as_ref(),
                 capital_reservation.as_ref(),
