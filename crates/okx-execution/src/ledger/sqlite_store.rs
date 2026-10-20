@@ -160,12 +160,19 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
         if s.version != 1 {
             return Err(ExecutionLedgerError::Corrupt("SQLite data version"));
         }
-        let expected_uid = known_uid.as_deref()
-            .or_else(|| s.reservation.as_ref().map(|r| r.account_uid_fingerprint.as_str()))
+        let expected_uid = known_uid
+            .as_deref()
+            .or_else(|| {
+                s.reservation
+                    .as_ref()
+                    .map(|r| r.account_uid_fingerprint.as_str())
+            })
             .or_else(|| s.source.as_ref().map(|e| e.account_uid.as_str()))
             .unwrap_or("");
         if uid != expected_uid {
-            return Err(ExecutionLedgerError::Corrupt("SQLite state account UID mismatch"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite state account UID mismatch",
+            ));
         }
         s
     } else if !entries.is_empty() {
@@ -287,13 +294,18 @@ pub(super) fn save(
             )
             .map_err(io)?;
         for (id, e) in entries {
-            let existing: Option<(String, String)> = tx.query_row(
-                "SELECT client_order_id,uid FROM ledger_entries WHERE intent_id=?1",
-                params![id], |row| Ok((row.get(0)?,row.get(1)?)),
-            ).optional().map_err(io)?;
-            if existing.as_ref().is_some_and(|(client,uid)|
+            let existing: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT client_order_id,uid FROM ledger_entries WHERE intent_id=?1",
+                    params![id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(io)?;
+            if existing.as_ref().is_some_and(|(client, uid)| {
                 client != &e.record.plan.client_order_id
-                || uid != &e.record.plan.account_uid_fingerprint) {
+                    || uid != &e.record.plan.account_uid_fingerprint
+            }) {
                 return Err(ExecutionLedgerError::IntentConflict);
             }
             let bytes = encode(e)?;
