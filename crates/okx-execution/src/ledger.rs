@@ -3229,7 +3229,11 @@ impl DurableExecutionLedger {
             // Preserve JSON-v14 atomic snapshot/rename semantics until the
             // exact source account is explicitly cut over to native SQLite.
             let mut next = self.entries.clone();
-            next.extend(changed.iter().map(|(id, entry)| (id.clone(), entry.clone())));
+            next.extend(
+                changed
+                    .iter()
+                    .map(|(id, entry)| (id.clone(), entry.clone())),
+            );
             self.store.save(
                 &next,
                 self.risk_stop.as_ref(),
@@ -5757,8 +5761,16 @@ mod tests {
         let mut ledger = DurableExecutionLedger::open(store.clone(), 210).unwrap();
         let before = store.load().unwrap().0;
         assert_eq!(before, originals);
-        assert!(ledger.abandon_prepared_batch(&uid, &ids[0..1], 300).is_err());
-        assert!(ledger.abandon_prepared_batch(&"f".repeat(64), &ids, 300).is_err());
+        assert!(
+            ledger
+                .abandon_prepared_batch(&uid, &ids[0..1], 300)
+                .is_err()
+        );
+        assert!(
+            ledger
+                .abandon_prepared_batch(&"f".repeat(64), &ids, 300)
+                .is_err()
+        );
         assert_eq!(store.load().unwrap().0, before);
 
         // Force the second row to fail after the first has been processed:
