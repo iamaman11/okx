@@ -269,7 +269,6 @@ pub(super) fn persist_event(
     Ok(())
 }
 
-
 /// Authenticated snapshot of observed account CASH movements, never strategy NAV/PnL.
 /// A bill's balance delta may represent a transfer, fee, funding, or trade; it
 /// MUST NOT be interpreted as strategy return without independent attribution.
@@ -304,95 +303,136 @@ pub struct AccountFinanceWindow {
 /// movement and explicit uncertainty; it never authorizes an exchange POST.
 /// The caller supplies the natively verified UID, not a user-facing selector.
 pub(super) fn finance_window(
-    path: &Path, expected_uid: &str, from_ms: u64, through_ms: u64,
+    path: &Path,
+    expected_uid: &str,
+    from_ms: u64,
+    through_ms: u64,
 ) -> Result<AccountFinanceWindow, ExecutionLedgerError> {
     if expected_uid.is_empty() || from_ms == 0 || through_ms <= from_ms {
-        return Err(ExecutionLedgerError::Corrupt("invalid account finance window"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "invalid account finance window",
+        ));
     }
     // Read-only opening cannot create or initialize a missing account.
-    let connection = rusqlite::Connection::open_with_flags(
-        path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ).map_err(io)?;
-    connection.busy_timeout(std::time::Duration::from_secs(5)).map_err(io)?;
-    let version: i64 = connection.query_row(
-        "PRAGMA user_version", [], |row| row.get(0)
-    ).map_err(io)?;
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(io)?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(io)?;
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(io)?;
     if version != 1 {
-        return Err(ExecutionLedgerError::Corrupt("finance SQLite schema mismatch"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "finance SQLite schema mismatch",
+        ));
     }
-    let account_uid: String = connection.query_row(
-        "SELECT uid FROM ledger_state WHERE key=1", [], |row|row.get(0)
-    ).map_err(io)?;
+    let account_uid: String = connection
+        .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |row| {
+            row.get(0)
+        })
+        .map_err(io)?;
     if account_uid != expected_uid {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
-    let first = i64::try_from(from_ms).map_err(|_|ExecutionLedgerError::InvalidTimestamp)?;
-    let end = i64::try_from(through_ms).map_err(|_|ExecutionLedgerError::InvalidTimestamp)?;
-    let mut accum = BTreeMap::<(String,String),(u64,Decimal)>::new();
+    let first = i64::try_from(from_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    let end = i64::try_from(through_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    let mut accum = BTreeMap::<(String, String), (u64, Decimal)>::new();
     {
-        let mut stmt = connection.prepare(
-            "SELECT bill_id,currency,bill_kind,delta_decimal FROM bills
+        let mut stmt = connection
+            .prepare(
+                "SELECT bill_id,currency,bill_kind,delta_decimal FROM bills
              WHERE exchange_time_ms>=?1 AND exchange_time_ms<?2
-             ORDER BY currency,bill_kind,bill_id"
-        ).map_err(io)?;
-        let mut rows = stmt.query(params![first,end]).map_err(io)?;
+             ORDER BY currency,bill_kind,bill_id",
+            )
+            .map_err(io)?;
+        let mut rows = stmt.query(params![first, end]).map_err(io)?;
         while let Some(row) = rows.next().map_err(io)? {
             let ccy: String = row.get(1).map_err(io)?;
             let kind: String = row.get(2).map_err(io)?;
             let decimal: String = row.get(3).map_err(io)?;
             let value = Decimal::from_str(&decimal).map_err(io)?;
-            let entry=accum.entry((ccy,kind)).or_insert((0,Decimal::ZERO));
-            entry.0=entry.0.checked_add(1).ok_or(
-                ExecutionLedgerError::Corrupt("bill count overflow"))?;
-            entry.1=entry.1.checked_add(value).ok_or(
-                ExecutionLedgerError::Corrupt("account cashflow decimal overflow"))?;
+            let entry = accum.entry((ccy, kind)).or_insert((0, Decimal::ZERO));
+            entry.0 = entry
+                .0
+                .checked_add(1)
+                .ok_or(ExecutionLedgerError::Corrupt("bill count overflow"))?;
+            entry.1 = entry
+                .1
+                .checked_add(value)
+                .ok_or(ExecutionLedgerError::Corrupt(
+                    "account cashflow decimal overflow",
+                ))?;
         }
     }
-    let buckets = accum.into_iter().map(|((currency,bill_kind),(rows,value))|
-        AccountCashflowBucket {
-            currency,bill_kind,rows,exact_balance_delta:value.to_string()
-        }
-    ).collect::<Vec<_>>();
-    let count = |table: &'static str| -> Result<u64,ExecutionLedgerError> {
+    let buckets = accum
+        .into_iter()
+        .map(
+            |((currency, bill_kind), (rows, value))| AccountCashflowBucket {
+                currency,
+                bill_kind,
+                rows,
+                exact_balance_delta: value.to_string(),
+            },
+        )
+        .collect::<Vec<_>>();
+    let count = |table: &'static str| -> Result<u64, ExecutionLedgerError> {
         // SQL constants only, not interpolated user input.
-        let query=match table {
-            "fills"=>"SELECT COUNT(*) FROM fills WHERE exchange_time_ms>=?1 AND exchange_time_ms<?2",
-            "bills"=>"SELECT COUNT(*) FROM bills WHERE exchange_time_ms>=?1 AND exchange_time_ms<?2",
-            _ => return Err(ExecutionLedgerError::Corrupt("unknown account finance table")),
+        let query = match table {
+            "fills" => {
+                "SELECT COUNT(*) FROM fills WHERE exchange_time_ms>=?1 AND exchange_time_ms<?2"
+            }
+            "bills" => {
+                "SELECT COUNT(*) FROM bills WHERE exchange_time_ms>=?1 AND exchange_time_ms<?2"
+            }
+            _ => {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "unknown account finance table",
+                ));
+            }
         };
-        let n:i64=connection.query_row(query,params![first,end],|r|r.get(0)).map_err(io)?;
-        u64::try_from(n).map_err(|_|ExecutionLedgerError::Corrupt("negative finance count"))
+        let n: i64 = connection
+            .query_row(query, params![first, end], |r| r.get(0))
+            .map_err(io)?;
+        u64::try_from(n).map_err(|_| ExecutionLedgerError::Corrupt("negative finance count"))
     };
     let fill_rows = count("fills")?;
     let bill_rows = count("bills")?;
-    let gap_count = |materiality:&str| -> Result<u64,ExecutionLedgerError> {
-        let n:i64=connection.query_row(
-            "SELECT COUNT(*) FROM source_gaps
+    let gap_count = |materiality: &str| -> Result<u64, ExecutionLedgerError> {
+        let n: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_gaps
              WHERE materiality=?1 AND from_ms<?2 AND through_ms>?3
                AND resolution_evidence_sha256 IS NULL",
-            params![materiality,end,first], |r|r.get(0)
-        ).map_err(io)?;
-        u64::try_from(n).map_err(|_|ExecutionLedgerError::Corrupt("negative financial gap count"))
+                params![materiality, end, first],
+                |r| r.get(0),
+            )
+            .map_err(io)?;
+        u64::try_from(n).map_err(|_| ExecutionLedgerError::Corrupt("negative financial gap count"))
     };
-    let financial_gaps=gap_count("FINANCIAL")?;
-    let execution_gaps=gap_count("EXECUTION_ONLY")?;
-    let unclassified_gaps=gap_count("UNKNOWN")? + gap_count("EXPOSURE")?;
-    let receipt_count=|stream:&str|->Result<u64,ExecutionLedgerError>{
+    let financial_gaps = gap_count("FINANCIAL")?;
+    let execution_gaps = gap_count("EXECUTION_ONLY")?;
+    let unclassified_gaps = gap_count("UNKNOWN")? + gap_count("EXPOSURE")?;
+    let receipt_count = |stream: &str| -> Result<u64, ExecutionLedgerError> {
         // A source receipt is proof of ONE authenticated observation, not
         // necessarily of continuous historical coverage across the window.
-        let n:i64=connection.query_row(
-            "SELECT COUNT(*) FROM source_receipts
+        let n: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_receipts
              WHERE stream_kind=?1 AND scope_key=?2
                AND received_at_ms>=?3 AND received_at_ms<?4
                AND completeness='COMPLETE'",
-            params![stream,expected_uid,first,end],|r|r.get(0)
-        ).map_err(io)?;
-        u64::try_from(n).map_err(|_|ExecutionLedgerError::Corrupt("negative receipt count"))
+                params![stream, expected_uid, first, end],
+                |r| r.get(0),
+            )
+            .map_err(io)?;
+        u64::try_from(n).map_err(|_| ExecutionLedgerError::Corrupt("negative receipt count"))
     };
-    let bill_source_receipts=receipt_count("BILLS")?;
-    let fill_source_receipts=receipt_count("FILLS")?;
-    let order_source_receipts=receipt_count("ORDERS")?;
-    let completeness=if financial_gaps>0 || unclassified_gaps>0 {
+    let bill_source_receipts = receipt_count("BILLS")?;
+    let fill_source_receipts = receipt_count("FILLS")?;
+    let order_source_receipts = receipt_count("ORDERS")?;
+    let completeness = if financial_gaps > 0 || unclassified_gaps > 0 {
         "INCOMPLETE"
     } else {
         // No closed interval proof is encoded by the point receipts; absence
@@ -402,38 +442,59 @@ pub(super) fn finance_window(
     Ok(AccountFinanceWindow {
         schema: "okx.account-finance-window/v1",
         account_uid_fingerprint: expected_uid.to_owned(),
-        from_ms,through_ms,
-        scope:"ACCOUNT_OBSERVED_CASH_MOVEMENTS_NOT_STRATEGY_PNL",
-        buckets,fill_rows,bill_rows,financial_gaps,execution_gaps,
-        unclassified_gaps,bill_source_receipts,fill_source_receipts,
-        order_source_receipts,financial_completeness:completeness,
+        from_ms,
+        through_ms,
+        scope: "ACCOUNT_OBSERVED_CASH_MOVEMENTS_NOT_STRATEGY_PNL",
+        buckets,
+        fill_rows,
+        bill_rows,
+        financial_gaps,
+        execution_gaps,
+        unclassified_gaps,
+        bill_source_receipts,
+        fill_source_receipts,
+        order_source_receipts,
+        financial_completeness: completeness,
     })
 }
 
 /// Separate source coverage facts per stream. Every inserted interval is a
 /// POINT observation; it never fabricates continuity across missing history.
 pub(super) fn persist_source_receipt(
-    tx: &Transaction<'_>, account_uid: &str,
+    tx: &Transaction<'_>,
+    account_uid: &str,
     cursor: &crate::exchange_evidence::ExchangeCoverageCursor,
-) -> Result<(),ExecutionLedgerError> {
+) -> Result<(), ExecutionLedgerError> {
     let at = crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
-        .and_then(|n|i64::try_from(n).ok())
-        .ok_or(ExecutionLedgerError::Corrupt("invalid source receipt timestamp"))?;
-    if account_uid.is_empty() { return Err(ExecutionLedgerError::AccountScopeMismatch); }
-    let body=encode(cursor)?;
-    for (kind,complete) in [
-        ("ORDERS",cursor.order_complete), ("FILLS",cursor.fill_complete),
-        ("BILLS",cursor.bill_complete),
+        .and_then(|n| i64::try_from(n).ok())
+        .ok_or(ExecutionLedgerError::Corrupt(
+            "invalid source receipt timestamp",
+        ))?;
+    if account_uid.is_empty() {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let body = encode(cursor)?;
+    for (kind, complete) in [
+        ("ORDERS", cursor.order_complete),
+        ("FILLS", cursor.fill_complete),
+        ("BILLS", cursor.bill_complete),
     ] {
-        let key=checksum(&encode(&("okx.source-point/v1",kind,account_uid,&body))?);
+        let key = checksum(&encode(&("okx.source-point/v1", kind, account_uid, &body))?);
         tx.execute(
             "INSERT INTO source_receipts
              (receipt_sha256,stream_kind,scope_key,interval_start_ms,interval_end_ms,
               received_at_ms,completeness,evidence_sha256)
              VALUES(?1,?2,?3,?4,?4,?4,?5,NULL)
              ON CONFLICT(receipt_sha256) DO NOTHING",
-            params![key,kind,account_uid,at,if complete {"COMPLETE"} else {"PARTIAL"}],
-        ).map_err(io)?;
+            params![
+                key,
+                kind,
+                account_uid,
+                at,
+                if complete { "COMPLETE" } else { "PARTIAL" }
+            ],
+        )
+        .map_err(io)?;
     }
     Ok(())
 }

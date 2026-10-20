@@ -438,7 +438,9 @@ impl ExecutionLedgerStore {
         through_ms: u64,
     ) -> Result<sqlite_finance::AccountFinanceWindow, ExecutionLedgerError> {
         if !self.sqlite_native {
-            return Err(ExecutionLedgerError::Corrupt("SQLite finance storage not active"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite finance storage not active",
+            ));
         }
         sqlite_finance::finance_window(&self.path, expected_uid, from_ms, through_ms)
     }
