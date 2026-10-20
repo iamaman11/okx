@@ -1320,7 +1320,7 @@ mod tests {
         .unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
         std::fs::rename(&v14, root.join("execution-ledger.v14.sealed")).unwrap();
-        assert_eq!
+        assert_eq!(
             ExecutionLedgerStore::select_published_owner(&root)
                 .unwrap()
                 .path(),
