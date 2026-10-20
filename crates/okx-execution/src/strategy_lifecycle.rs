@@ -877,6 +877,7 @@ mod tests {
         let mut gap = complete.clone();
         let mut next_cursor = gap.cursors.values().next().unwrap().clone();
         next_cursor.account_as_of_ms = 7_400_000;
+        next_cursor.source_received_at = "2026-10-14T03:00:00Z".to_owned();
         gap.cursors
             .insert("source:after-unobserved-gap".to_owned(), next_cursor);
         seal_source_for_test(&mut gap);

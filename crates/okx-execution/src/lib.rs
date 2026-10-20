@@ -20,6 +20,7 @@ pub use contract::{
 };
 pub use exchange_evidence::{
     DurableExchangeEvidence, EXCHANGE_EVIDENCE_SCHEMA_V1, ExchangeEvidenceSummary,
+    source_receipt_ms,
 };
 pub use executor::{
     ExecutionGateway, FencedProtectiveShrinkRequest, MutationAuthority, MutationSubmitDisposition,

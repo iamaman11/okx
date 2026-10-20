@@ -4,9 +4,9 @@ use chrono::{SecondsFormat, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_protocol::account_governance::{AuthorizationStatus, CentralGovernanceSnapshotV2};
 use okx_protocol::{
-    AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentResponse, AgentResponseStatus,
-    CentralAccountPolicy, DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES,
-    DataQuality, DirectRuntimeProfile, DirectTransportFrame,
+    AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
+    AgentResponse, AgentResponseStatus, CentralAccountPolicy, DIRECT_TRANSPORT_FRAME_SCHEMA_V1,
+    DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DataQuality, DirectRuntimeProfile, DirectTransportFrame,
 };
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
 use tokio::{
@@ -37,6 +37,14 @@ const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
 const HEARTBEAT_INTERVAL_SECONDS: u64 = 15;
 const HEARTBEAT_DEADLINE_SECONDS: u64 = 5;
 const HEARTBEAT_IDLE_RESET_SECONDS: u64 = 24 * 60 * 60;
+/// OKX canceled orders may vanish from the bounded REST history in two hours.
+/// Reuse the EXISTING transport heartbeat to trigger one read-only, source-exact
+/// checkpoint each hour. No second process, scheduler, trading channel or POST.
+const SOURCE_PROOF_PERIOD_SECONDS: u64 = 60 * 60;
+const SOURCE_PROOF_FIRST_SECONDS: u64 = 5 * 60;
+const SOURCE_PROOF_RETRY_SECONDS: u64 = 15 * 60;
+const SOURCE_PROOF_BUDGET_SECONDS: u64 = 45;
+const _: () = assert!(SOURCE_PROOF_PERIOD_SECONDS + SOURCE_PROOF_BUDGET_SECONDS < 2 * 60 * 60);
 const MAX_INFLIGHT_READ_QUERIES: usize = 8;
 const MAX_PENDING_DELIVERY_CHALLENGES: usize = 64;
 const DELIVERY_CHALLENGE_MAX_AGE: Duration = Duration::from_secs(15);
@@ -73,6 +81,45 @@ impl DirectRequestKind {
     fn is_mutating(self) -> bool {
         self != Self::ReadOnly
     }
+}
+
+/// A FRESH account packet is not proof that the ONE ledger owner appended a
+/// durable source cursor: ingestion may be deferred during drain or the
+/// financial source can be incomplete. Compare the observed native receipt
+/// against the actual persisted cursor; never infer coverage from quality.
+fn native_source_checkpoint_persisted(response: &AgentResponse) -> bool {
+    if response.status != AgentResponseStatus::Completed {
+        return false;
+    }
+    let Some(result) = response.result.as_ref() else {
+        return false;
+    };
+    let receipt = result
+        .pointer("/coherence/history_source_received_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .and_then(|date| u64::try_from(date.timestamp_millis()).ok());
+    let persisted = result
+        .pointer("/reconciliation/exchange_evidence/latest_source_received_at_ms")
+        .and_then(serde_json::Value::as_u64);
+    result
+        .pointer("/coherence/coherent")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && result
+            .pointer("/reconciliation/consistent")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && result
+            .pointer("/reconciliation/source_checkpoint_deferred")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        && result
+            .pointer("/reconciliation/exchange_evidence/latest_source_complete")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && receipt.is_some()
+        && receipt == persisted
 }
 
 fn direct_operation_allowed(
@@ -359,6 +406,11 @@ async fn run_session(
     let mut in_flight: FuturesUnordered<
         BoxFuture<'_, (String, DirectRequestKind, AgentResult<AgentResponse>)>,
     > = FuturesUnordered::new();
+    // One bounded proof read owned by this SAME runtime/ledger owner. It only
+    // runs when the existing heartbeat fires; no additional polling loop.
+    let mut source_proof_flight: FuturesUnordered<BoxFuture<'_, AgentResult<AgentResponse>>> =
+        FuturesUnordered::new();
+    let mut next_source_proof_at = Instant::now() + Duration::from_secs(SOURCE_PROOF_FIRST_SECONDS);
     // No two exchange-affecting commands may be outstanding on the same
     // transport generation. Read/status requests remain independently bounded.
     let mut active_mutation: Option<String> = None;
@@ -405,6 +457,70 @@ async fn run_session(
                 heartbeat_deadline
                     .as_mut()
                     .reset(Instant::now() + Duration::from_secs(HEARTBEAT_DEADLINE_SECONDS));
+
+                // Durable finance coverage has a bounded exchange retention
+                // window even when NO orders occur. Only authenticated native
+                // AccountSummary owns the REST/WS proof and ledger checkpoint.
+                // Never invent missing historical coverage after reconnect.
+                let proof_due = if context.account.is_some()
+                    && active_mutation.is_none()
+                    && source_proof_flight.is_empty()
+                    && Instant::now() >= next_source_proof_at
+                {
+                    if let Some(execution) = context.execution {
+                        execution
+                            .strategy_quiet_source_capture_due(
+                                u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default(),
+                            )
+                            .await
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if proof_due {
+                    let query_context =
+                        ObservationQueryContext::live_with_execution_research_and_session(
+                            context.public_ws,
+                            context.market,
+                            None,
+                            context.account,
+                            context.private_ws,
+                            context.execution,
+                            Some(context.research_root),
+                            Some(context.research_session),
+                        );
+                    let request = AgentRequest {
+                        schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+                        request_id: format!(
+                            "native_source_checkpoint_{}",
+                            Utc::now().timestamp_millis()
+                        ),
+                        operation: AgentOperation::AccountSummary,
+                    };
+                    let generated_at =
+                        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+                    source_proof_flight.push(
+                        async move {
+                            tokio::time::timeout(
+                                Duration::from_secs(SOURCE_PROOF_BUDGET_SECONDS),
+                                dispatch(&request, query_context, &generated_at),
+                            )
+                            .await
+                            .map_err(|_| {
+                                AgentError::CloudflareTransport(
+                                    "bounded native source checkpoint timed out".to_owned(),
+                                )
+                            })?
+                        }
+                        .boxed(),
+                    );
+                    // On failure this is a bounded retry, NOT an assumption
+                    // that the missed source checkpoint was completed.
+                    next_source_proof_at =
+                        Instant::now() + Duration::from_secs(SOURCE_PROOF_RETRY_SECONDS);
+                }
             }
             _ = &mut heartbeat_deadline => {
                 if heartbeat_nonce.is_some() {
@@ -437,6 +553,27 @@ async fn run_session(
                             command: outbound.command,
                         },
                     ).await?;
+                }
+            }
+            source_result = source_proof_flight.next(), if !source_proof_flight.is_empty() => {
+                if let Some(result) = source_result {
+                    match result {
+                        Ok(response) if native_source_checkpoint_persisted(&response) => {
+                            next_source_proof_at =
+                                Instant::now() + Duration::from_secs(SOURCE_PROOF_PERIOD_SECONDS);
+                        }
+                        Ok(response) => {
+                            eprintln!(
+                                "native source checkpoint incomplete: status={:?}, quality={:?}; no historical coverage inferred",
+                                response.status, response.quality
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "native source checkpoint unavailable: {error}; financial admission remains fail-closed"
+                            );
+                        }
+                    }
                 }
             }
             completed = in_flight.next(), if !in_flight.is_empty() => {
@@ -900,6 +1037,60 @@ fn random_token(prefix: &str) -> AgentResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_checkpoint_requires_exact_durable_receipt_not_merely_fresh_packet() {
+        let mut response = AgentResponse {
+            schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+            request_id: "proof_read_20261020_0001".to_owned(),
+            status: AgentResponseStatus::Completed,
+            generated_at: "2026-10-20T09:40:00Z".to_owned(),
+            quality: DataQuality::Fresh,
+            result_schema: Some("okx.account.summary/v1".to_owned()),
+            result: Some(serde_json::json!({
+                "coherence": {
+                    "coherent": true,
+                    "history_source_received_at": "2026-10-20T09:40:00.000Z"
+                },
+                "reconciliation": {
+                    "consistent": true,
+                    "source_checkpoint_deferred": false,
+                    "exchange_evidence": {
+                        "latest_source_complete": true,
+                        "latest_source_received_at_ms": 1792489200000_u64
+                    }
+                }
+            })),
+            failure: None,
+            warnings: Vec::new(),
+        };
+        assert!(native_source_checkpoint_persisted(&response));
+        response.result.as_mut().unwrap()["reconciliation"]["source_checkpoint_deferred"] =
+            serde_json::json!(true);
+        assert!(!native_source_checkpoint_persisted(&response));
+        response.result.as_mut().unwrap()["reconciliation"]["source_checkpoint_deferred"] =
+            serde_json::json!(false);
+        response.result.as_mut().unwrap()["reconciliation"]["exchange_evidence"]["latest_source_received_at_ms"] =
+            serde_json::json!(1792489199000_u64);
+        assert!(!native_source_checkpoint_persisted(&response));
+        response.result = None;
+        assert!(!native_source_checkpoint_persisted(&response));
+    }
+
+    #[test]
+    fn internal_source_checkpoint_cannot_mint_exchange_authority() {
+        let request = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: "native_source_checkpoint_1792489000000".to_owned(),
+            operation: AgentOperation::AccountSummary,
+        };
+        assert!(request.validate().is_ok());
+        assert!(request.operation.direct_transport_read_only());
+        assert_eq!(
+            DirectRequestKind::from_operation(&request.operation),
+            DirectRequestKind::ReadOnly
+        );
+    }
 
     #[test]
     fn cloudflare_endpoint_is_wss_only_and_bounded() {

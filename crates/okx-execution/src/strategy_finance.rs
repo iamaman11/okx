@@ -467,12 +467,15 @@ pub fn assess_persisted_financial_period_with_verified_source(
     if e.cursors.is_empty() {
         reasons.insert("source_coverage_missing");
     }
-    let current_as_of = facts
-        .summary
-        .current_account_as_of_ms
-        .as_deref()
-        .and_then(|s| s.parse::<u64>().ok());
-    let newest = e.cursors.values().map(|c| c.account_as_of_ms).max();
+    // Source coverage is measured by authenticated receipt times, NOT the
+    // venue balance/position last-change uTime (which can be days old).
+    let current_as_of =
+        crate::exchange_evidence::source_receipt_ms(&facts.summary.source_received_at);
+    let newest = e
+        .cursors
+        .values()
+        .filter_map(|c| crate::exchange_evidence::source_receipt_ms(&c.source_received_at))
+        .max();
     let coalesced_source_attested = current_source_captured
         && coherent
         && DurableExchangeEvidence::complete_source_checkpoint(facts);
@@ -483,16 +486,21 @@ pub fn assess_persisted_financial_period_with_verified_source(
     {
         reasons.insert("financial_source_asof_not_current");
     }
-    let mut cursor_times = e
+    // Preserve all sealed cursor bytes. If ANY legacy receipt is malformed,
+    // coverage stays unproven; no last-change-time fallback is permitted.
+    let cursor_receipts = e
         .cursors
         .values()
-        .map(|c| c.account_as_of_ms)
-        .collect::<Vec<_>>();
+        .map(|c| crate::exchange_evidence::source_receipt_ms(&c.source_received_at))
+        .collect::<Option<Vec<_>>>();
+    let mut cursor_times = cursor_receipts.clone().unwrap_or_default();
     cursor_times.sort_unstable();
     cursor_times.dedup();
     // Canceled unfilled exchange orders may vanish after 2 hours. Gaps cannot
     // be silently bridged by a later historical query or an empty response.
-    if !source_continuity_attested(&cursor_times, run.started_at_ms, current_as_of) {
+    if cursor_receipts.is_none()
+        || !source_continuity_attested(&cursor_times, run.started_at_ms, current_as_of)
+    {
         reasons.insert("source_continuity_not_proven");
     }
     if e.cursors
@@ -930,6 +938,41 @@ mod tests {
             Some(Decimal::new(836368, 1))
         );
         assert_eq!(attested_production_mark(&composed_stale, 130_001), None);
+    }
+
+    #[test]
+    fn real_receipts_bound_the_run_even_when_account_last_change_is_old() {
+        let hour = 3_600_000_u64;
+        let run_start = 1_000_000_u64;
+        // Immutable source receipts are hourly and pass financial continuity.
+        // The account last-change timestamp is intentionally irrelevant here:
+        // it may predate the strategy run by a whole day.
+        let unchanged_account_last_change = run_start - 900_000_u64;
+        let receipts = [
+            run_start + hour / 2,
+            run_start + hour + hour / 2,
+            run_start + 2 * hour + hour / 2,
+            run_start + 3 * hour + hour / 2,
+        ];
+        assert!(unchanged_account_last_change < run_start);
+        assert!(source_continuity_attested(
+            &receipts,
+            run_start,
+            Some(receipts[3] + hour),
+        ));
+        // An actual >2h missing receipt is NOT bridged by a later complete
+        // read, even if that read itself is fresh.
+        let missed = [receipts[0], receipts[0] + 2 * hour + 1];
+        assert!(!source_continuity_attested(
+            &missed,
+            run_start,
+            Some(missed[1]),
+        ));
+        assert!(!source_continuity_attested(
+            &receipts,
+            run_start,
+            Some(receipts[3] + 2 * hour + 1),
+        ));
     }
 
     #[test]
