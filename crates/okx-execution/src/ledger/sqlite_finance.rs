@@ -483,16 +483,25 @@ pub(super) fn persist_source_receipt(
          (evidence_sha256,evidence_kind,codec,relative_path,size_bytes,native_source_time_ms)
          VALUES(?1,'AUTHENTICATED_SOURCE_RECEIPT','sqlite-msgpack',?2,?3,?4)
          ON CONFLICT(evidence_sha256) DO NOTHING",
-        params![&digest,&locator,body.len() as i64,at],
-    ).map_err(io)?;
-    let (kind,codec,len,observed):(String,String,i64,Option<i64>)=tx.query_row(
-        "SELECT evidence_kind,codec,size_bytes,native_source_time_ms
+        params![&digest, &locator, body.len() as i64, at],
+    )
+    .map_err(io)?;
+    let (kind, codec, len, observed): (String, String, i64, Option<i64>) = tx
+        .query_row(
+            "SELECT evidence_kind,codec,size_bytes,native_source_time_ms
          FROM evidence_objects WHERE evidence_sha256=?1",
-        params![&digest],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
-    ).map_err(io)?;
-    if kind!="AUTHENTICATED_SOURCE_RECEIPT" || codec!="sqlite-msgpack"
-       || len!=body.len() as i64 || observed!=Some(at) {
-        return Err(ExecutionLedgerError::Corrupt("source receipt evidence collision"));
+            params![&digest],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(io)?;
+    if kind != "AUTHENTICATED_SOURCE_RECEIPT"
+        || codec != "sqlite-msgpack"
+        || len != body.len() as i64
+        || observed != Some(at)
+    {
+        return Err(ExecutionLedgerError::Corrupt(
+            "source receipt evidence collision",
+        ));
     }
     for (kind, complete) in [
         ("ORDERS", cursor.order_complete),

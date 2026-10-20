@@ -134,7 +134,11 @@ pub(super) fn persist(
             )
             .map_err(io)?;
             super::sqlite_finance::persist_source_receipt(
-                tx, &source.account_uid, &source.run_id, key, cursor,
+                tx,
+                &source.account_uid,
+                &source.run_id,
+                key,
+                cursor,
             )?;
         } else if old_cursors.get(key) != Some(&checksum(&encode(cursor)?)) {
             return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
