@@ -562,10 +562,11 @@ mod tests {
                 format!("read_{hour}"),
                 ExchangeCoverageCursor {
                     source: "OKX_REST_ACCOUNT_HISTORY".into(),
-                    source_received_at:
-                        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(read_at as i64)
-                            .unwrap()
-                            .to_rfc3339(),
+                    source_received_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+                        read_at as i64,
+                    )
+                    .unwrap()
+                    .to_rfc3339(),
                     generation: format!("generation_{hour}"),
                     account_as_of_ms: base - 86_400_000, // unchanged for 24h
                     order_complete: true,
@@ -580,7 +581,10 @@ mod tests {
         let summary = evidence.summary();
         assert_eq!(summary.oldest_source_asof_ms, Some(base - 86_400_000));
         assert_eq!(summary.latest_source_asof_ms, Some(base - 86_400_000));
-        assert_eq!(summary.latest_source_received_at_ms, Some(base + 3 * 3_600_000));
+        assert_eq!(
+            summary.latest_source_received_at_ms,
+            Some(base + 3 * 3_600_000)
+        );
         assert_eq!(summary.largest_persisted_gap_ms, Some(3_600_000));
         assert!(!summary.source_gap_over_two_hours);
         assert!(summary.latest_source_complete);
