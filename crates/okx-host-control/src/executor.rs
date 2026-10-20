@@ -78,9 +78,11 @@ fn bounded_storage_cutover_output(
             return Err(HostControlError::ControlResponseBudgetInvariant);
         }
         let mut nonce = [0u8; 16];
-        getrandom::fill(&mut nonce)
-            .map_err(|error| HostControlError::Random(error.to_string()))?;
-        let token = nonce.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        getrandom::fill(&mut nonce).map_err(|error| HostControlError::Random(error.to_string()))?;
+        let token = nonce
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         let output_path = std::env::temp_dir().join(format!(
             "okx-native-storage-cutover-{}-{token}.receipt",
             std::process::id()
@@ -2914,9 +2916,7 @@ mod tests {
     #[test]
     fn timed_out_native_cutover_is_typed_unknown_not_replayed() {
         let mut command = Command::new("cmd");
-        command
-            .arg("/C")
-            .arg("ping -n 30 127.0.0.1 >nul");
+        command.arg("/C").arg("ping -n 30 127.0.0.1 >nul");
         let error = bounded_storage_cutover_output(&mut command, Duration::from_millis(30))
             .expect_err("the child must be terminated and its outcome uncertain");
         assert_eq!(error.code(), "STORAGE_CUTOVER_OUTCOME_UNKNOWN");

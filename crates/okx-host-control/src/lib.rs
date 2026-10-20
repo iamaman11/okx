@@ -155,7 +155,9 @@ pub enum HostControlError {
     #[error("CONTROL result budget invariant failed")]
     ControlResponseBudgetInvariant,
 
-    #[error("offline storage cutover outcome is uncertain; inspect the durable owner, never replay blindly")]
+    #[error(
+        "offline storage cutover outcome is uncertain; inspect the durable owner, never replay blindly"
+    )]
     StorageCutoverOutcomeUnknown,
 
     #[error("secure random source failed: {0}")]
