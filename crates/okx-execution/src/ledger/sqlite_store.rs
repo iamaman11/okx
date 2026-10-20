@@ -427,40 +427,32 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
     {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
-    let mut statement=c.prepare(
-        "SELECT intent_id,client_order_id,uid,digest,bytes FROM ledger_entries ORDER BY intent_id"
-    ).map_err(io)?;
+    // One indexed streaming join verifies the authoritative BLOB and its
+    // relational projection in the SAME row. Avoid N extra SQLite queries
+    // on every restart (the in-memory engine still keeps full history until
+    // risk/finance lookups are migrated to indexed reads).
+    let sql = format!("{INDEXED_INTENT_COLUMNS} ORDER BY e.intent_id");
+    let mut statement = c.prepare(&sql).map_err(io)?;
     let mut rows = statement.query([]).map_err(io)?;
     let mut entries = BTreeMap::new();
     let mut known_uid: Option<String> = None;
     while let Some(row) = rows.next().map_err(io)? {
-        let id: String = row.get(0).map_err(io)?;
-        let client: String = row.get(1).map_err(io)?;
         let uid: String = row.get(2).map_err(io)?;
-        let sha: String = row.get(3).map_err(io)?;
-        let bytes: Vec<u8> = row.get(4).map_err(io)?;
         if entries.len() >= max
-            || checksum(&bytes) != sha
             || known_uid.as_ref().is_some_and(|v| v != &uid)
         {
-            return Err(ExecutionLedgerError::Corrupt(
-                "SQLite entry integrity/scope",
-            ));
+            return Err(ExecutionLedgerError::Corrupt("SQLite entry integrity/scope"));
         }
-        let entry: ExecutionLedgerEntry = decode(&bytes)?;
-        if entry.record.plan.intent_id != id
-            || entry.record.plan.client_order_id != client
-            || entry.record.plan.account_uid_fingerprint != uid
-        {
-            return Err(ExecutionLedgerError::Corrupt("SQLite entry identity"));
-        }
-        validate_entry(&entry)?;
+        let entry = verified_indexed_entry(row, &uid)?;
+        let id = entry.record.plan.intent_id.clone();
         known_uid = Some(uid);
-        entries.insert(id, entry);
+        if entries.insert(id, entry).is_some() {
+            return Err(ExecutionLedgerError::Corrupt("SQLite duplicate intent"));
+        }
     }
 
-    // A cold read proves that the indexed SQL projection is not stale or
-    // silently incomplete relative to the authoritatively stored intents.
+    // A cold read proves the projection has no extra orphan rows. The join
+    // above already proved that every authoritative row has its projection.
     let count: i64 = c
         .query_row("SELECT COUNT(*) FROM intents", [], |row| row.get(0))
         .map_err(io)?;
@@ -468,35 +460,6 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
         return Err(ExecutionLedgerError::Corrupt(
             "SQLite intent projection count mismatch",
         ));
-    }
-    for (intent_id, entry) in &entries {
-        let projected: (String, String, String, String, i64) = c
-            .query_row(
-                "SELECT instrument_id,requested_action,plan_sha256,current_state,created_at_ms
-             FROM intents WHERE intent_id=?1",
-                params![intent_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .map_err(io)?;
-        let expected_plan_hash = checksum(&encode(&entry.record.plan)?);
-        if projected.0 != entry.record.plan.instrument_id
-            || projected.1 != format!("{:?}", entry.record.plan.action)
-            || projected.2 != expected_plan_hash
-            || projected.3 != format!("{:?}", entry.record.state)
-            || i64::try_from(entry.created_at_ms).ok() != Some(projected.4)
-        {
-            return Err(ExecutionLedgerError::Corrupt(
-                "SQLite intent projection mismatch",
-            ));
-        }
     }
     // Reconcile all native POST fences against the immutable event chain.
     // There may be legacy imported submissions with no native BEGIN_POST;
