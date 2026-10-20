@@ -1548,6 +1548,7 @@ mod tests {
     #[test]
     fn altered_cutover_watermark_never_authorizes_sqlite_owner() {
         let root = test_root("cutover-marker-corrupt");
+        std::fs::create_dir_all(&root).unwrap();
         let lock = root.join("execution-ledger.writer-lock");
         let valid = b"okx.sqlite-cutover/v1\n";
         // Same length as a legitimate watermark, but different content.
