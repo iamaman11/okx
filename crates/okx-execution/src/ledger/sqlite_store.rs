@@ -1521,16 +1521,11 @@ mod tests {
             .unwrap();
         let digest = checksum(&std::fs::read(legacy.path()).unwrap());
         assert!(
-            ExecutionLedgerStore::migrate_to_sqlite_offline(
-                &root,
-                &"f".repeat(64),
-                &digest
-            )
-            .is_err()
+            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &"f".repeat(64), &digest)
+                .is_err()
         );
         assert!(
-            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &"0".repeat(64))
-                .is_err()
+            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &"0".repeat(64)).is_err()
         );
         assert!(!root.join("execution-ledger.sqlite").exists());
         assert!(!root.join("execution-ledger.owner").exists());
@@ -1553,12 +1548,14 @@ mod tests {
         std::fs::write(&lock, b"okx.sqlite-cutover/v2\n").unwrap();
         assert_eq!(std::fs::metadata(&lock).unwrap().len(), valid.len() as u64);
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        assert!(ExecutionLedgerStore::migrate_to_sqlite_offline(
-            &root,
-            &"a".repeat(64),
-            &"b".repeat(64)
-        )
-        .is_err());
+        assert!(
+            ExecutionLedgerStore::migrate_to_sqlite_offline(
+                &root,
+                &"a".repeat(64),
+                &"b".repeat(64)
+            )
+            .is_err()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1616,9 +1613,12 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM domain_events", [], |r| r.get(0))
             .unwrap();
         drop(prior);
-        let opened = DurableExecutionLedger::open(ExecutionLedgerStore::sqlite_at(&path), 1002)
-            .unwrap();
-        assert_eq!(opened.get(inflight_id).unwrap().record.state, ExecutionState::UnknownSubmission);
+        let opened =
+            DurableExecutionLedger::open(ExecutionLedgerStore::sqlite_at(&path), 1002).unwrap();
+        assert_eq!(
+            opened.get(inflight_id).unwrap().record.state,
+            ExecutionState::UnknownSubmission
+        );
         assert_eq!(opened.get(historic_id), Some(&historic));
         let after = Connection::open(&path).unwrap();
         let same: (String, String) = after

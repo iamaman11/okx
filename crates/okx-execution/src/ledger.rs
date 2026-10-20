@@ -1436,7 +1436,15 @@ impl ExecutionLedgerStore {
                 &periods.unverified_runs,
             )?;
         }
-        sqlite_store::save_recovered(&self.path, changed, stop, reservation, source, periods, leverage)
+        sqlite_store::save_recovered(
+            &self.path,
+            changed,
+            stop,
+            reservation,
+            source,
+            periods,
+            leverage,
+        )
     }
 
     fn save(
