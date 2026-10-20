@@ -846,9 +846,7 @@ pub(super) fn save_metadata(
     } else {
         false
     };
-    if (uid != expected && !first_uid)
-        || bound.as_deref().is_some_and(|v| v != uid)
-    {
+    if (uid != expected && !first_uid) || bound.as_deref().is_some_and(|v| v != uid) {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     let bytes = encode(&StoredState {
@@ -2183,7 +2181,16 @@ mod tests {
             updated_at_ms: 1000,
         };
         let entries = BTreeMap::from([(id.to_owned(), entry)]);
-        save(&db, &entries, None, None, None, &StrategyPeriodHistory::default(), &[]).unwrap();
+        save(
+            &db,
+            &entries,
+            None,
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
         let original = Connection::open(&db).unwrap();
         let (intent_bytes, guard_digest): (Vec<u8>, String) = original
             .query_row(
@@ -2228,7 +2235,10 @@ mod tests {
         let after_events: i64 = c
             .query_row("SELECT COUNT(*) FROM domain_events", [], |row| row.get(0))
             .unwrap();
-        assert_eq!((actual, guard, after_events), (intent_bytes, guard_digest, event_count));
+        assert_eq!(
+            (actual, guard, after_events),
+            (intent_bytes, guard_digest, event_count)
+        );
         drop(c);
         assert!(
             save_metadata(
