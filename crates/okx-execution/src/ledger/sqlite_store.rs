@@ -324,6 +324,14 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
     ))
 }
 
+struct SqliteWriteState<'a> {
+    stop: Option<&'a ExecutionRiskStop>,
+    reservation: Option<&'a StrategyCapitalReservation>,
+    source: Option<&'a DurableExchangeEvidence>,
+    periods: &'a StrategyPeriodHistory,
+    leverage: &'a [LeverageChangeAttempt],
+}
+
 pub(super) fn save(
     path: &Path,
     entries: &BTreeMap<String, ExecutionLedgerEntry>,
@@ -333,16 +341,9 @@ pub(super) fn save(
     periods: &StrategyPeriodHistory,
     leverage: &[LeverageChangeAttempt],
 ) -> Result<(), ExecutionLedgerError> {
-    save_snapshot(
-        path,
-        entries,
-        stop,
-        reservation,
-        source,
-        periods,
-        leverage,
-        true,
-    )
+    save_snapshot(path, entries, SqliteWriteState {
+        stop, reservation, source, periods, leverage,
+    }, true)
 }
 
 /// A single-intent mutation persists only this record and its projections.
@@ -359,28 +360,20 @@ pub(super) fn save_one(
 ) -> Result<(), ExecutionLedgerError> {
     let id = entry.record.plan.intent_id.clone();
     let changed = BTreeMap::from([(id, entry.clone())]);
-    save_snapshot(
-        path,
-        &changed,
-        stop,
-        reservation,
-        source,
-        periods,
-        leverage,
-        false,
-    )
+    save_snapshot(path, &changed, SqliteWriteState {
+        stop, reservation, source, periods, leverage,
+    }, false)
 }
 
 fn save_snapshot(
     path: &Path,
     entries: &BTreeMap<String, ExecutionLedgerEntry>,
-    stop: Option<&ExecutionRiskStop>,
-    reservation: Option<&StrategyCapitalReservation>,
-    source: Option<&DurableExchangeEvidence>,
-    periods: &StrategyPeriodHistory,
-    leverage: &[LeverageChangeAttempt],
+    state: SqliteWriteState<'_>,
     complete_snapshot: bool,
 ) -> Result<(), ExecutionLedgerError> {
+    let SqliteWriteState {
+        stop, reservation, source, periods, leverage,
+    } = state;
     let mut c = connect(path, true)?;
     let tx = c
         .transaction_with_behavior(TransactionBehavior::Immediate)

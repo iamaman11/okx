@@ -1056,13 +1056,17 @@ impl ExecutionLedgerStore {
     fn save_changed_intent(
         &self,
         changed: &ExecutionLedgerEntry,
-        all_entries: &BTreeMap<String, ExecutionLedgerEntry>,
-        risk_stop: Option<&ExecutionRiskStop>,
-        capital_reservation: Option<&StrategyCapitalReservation>,
-        exchange_evidence: Option<&DurableExchangeEvidence>,
-        history: &StrategyPeriodHistory,
-        leverage_attempts: &[LeverageChangeAttempt],
+        ledger: &DurableExecutionLedger,
     ) -> Result<(), ExecutionLedgerError> {
+        let DurableExecutionLedger {
+            entries: all_entries,
+            risk_stop,
+            capital_reservation,
+            exchange_evidence,
+            strategy_periods: history,
+            leverage_attempts,
+            ..
+        } = ledger;
         if !self.sqlite_native {
             return self.save(
                 all_entries,
@@ -3205,15 +3209,7 @@ impl DurableExecutionLedger {
         entry: ExecutionLedgerEntry,
     ) -> Result<(), ExecutionLedgerError> {
         self.entries.insert(intent_id.clone(), entry.clone());
-        if let Err(error) = self.store.save_changed_intent(
-            &entry,
-            &self.entries,
-            self.risk_stop.as_ref(),
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-            &self.strategy_periods,
-            &self.leverage_attempts,
-        ) {
+        if let Err(error) = self.store.save_changed_intent(&entry, self) {
             self.entries.remove(&intent_id);
             return Err(error);
         }
@@ -3252,15 +3248,7 @@ impl DurableExecutionLedger {
             .get(intent_id)
             .expect("mutated entry exists")
             .clone();
-        if let Err(error) = self.store.save_changed_intent(
-            &changed,
-            &self.entries,
-            self.risk_stop.as_ref(),
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-            &self.strategy_periods,
-            &self.leverage_attempts,
-        ) {
+        if let Err(error) = self.store.save_changed_intent(&changed, self) {
             self.entries.insert(intent_id.to_owned(), original);
             return Err(error);
         }
