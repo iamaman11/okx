@@ -458,6 +458,10 @@ impl ExecutionLedgerStore {
         {
             return Err(ExecutionLedgerError::Corrupt("ledger owner receipt invalid"));
         }
+        let legacy_proof=Self::at(&legacy).attest_storage()?;
+        if legacy_proof.on_disk_schema!=EXECUTION_LEDGER_SCHEMA_V14 {
+            return Err(ExecutionLedgerError::Corrupt("legacy source not v14"));
+        }
         let original=fs::read(&legacy)?;
         if format!("{:x}",Sha256::digest(&original))!=parts[3] {
             return Err(ExecutionLedgerError::Corrupt("legacy source changed after cutover"));

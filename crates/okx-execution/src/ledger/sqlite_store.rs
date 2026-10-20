@@ -1066,4 +1066,60 @@ mod tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn owner_receipt_requires_sealed_source_and_never_falls_back_after_failure() {
+        let root=test_root("owner-proof");
+        let v14=root.join("execution-ledger.json");
+        let sqlite=root.join("execution-ledger.sqlite");
+        let legacy=ExecutionLedgerStore::at(&v14);
+        legacy.save(&BTreeMap::new(),None,None,None,
+            &StrategyPeriodHistory::default(),&[]).unwrap();
+        let witness_sha=checksum(&std::fs::read(&v14).unwrap());
+        assert_eq!(
+            ExecutionLedgerStore::select_published_owner(&root).unwrap().path(),
+            v14.as_path()
+        );
+        let capital=StrategyCapitalReservation {
+            schema:STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id:"sqlite_owner_test_000001".to_owned(),
+            account_uid_fingerprint:"uid-test-one".to_owned(),
+            origin_schema:"test/v1".to_owned(),
+            origin_version:"v1".to_owned(),
+            mandate_version:"1".to_owned(),
+            allocated_usdt:"100".to_owned(),
+            opening_account_usdt_equity:"127".to_owned(),
+            account_generation:"g1".to_owned(),
+            operator_authority_id:format!("sha256:{}", "a".repeat(64)),
+            started_at_ms:1,
+        };
+        save(&sqlite,&BTreeMap::new(),None,Some(&capital),None,
+            &StrategyPeriodHistory::default(),&[]).unwrap();
+        seal_staging_origin(&sqlite,"uid-test-one",&witness_sha).unwrap();
+        assert_eq!(
+            ExecutionLedgerStore::select_published_owner(&root).unwrap().path(),
+            v14.as_path()
+        );
+        // The published receipt is owned by CONTROL; tests simulate it only
+        // after source and target are independently materialized.
+        let receipt=root.join("execution-ledger.owner");
+        std::fs::write(&receipt,format!(
+            "okx.ledger-owner/v1\nSQLITE\n{}\n{}\n",
+            "0".repeat(64),witness_sha
+        )).unwrap();
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        std::fs::write(&receipt,format!(
+            "okx.ledger-owner/v1\nSQLITE\nuid-test-one\n{}\n",
+            witness_sha
+        )).unwrap();
+        assert_eq!(
+            ExecutionLedgerStore::select_published_owner(&root).unwrap().path(),
+            sqlite.as_path()
+        );
+        // Even if the SQLite target disappears after receipt publication,
+        // boot must fail and never reopen an independent v14 writer.
+        std::fs::remove_file(&sqlite).unwrap();
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
