@@ -255,7 +255,10 @@ pub(super) fn save(
         let mut statement = tx
             .prepare("SELECT intent_id FROM ledger_entries")
             .map_err(io)?;
-        for item in statement.query_map([], |r| r.get::<_, String>(0)).map_err(io)? {
+        for item in statement
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(io)?
+        {
             prior.push(item.map_err(io)?);
         }
     }
