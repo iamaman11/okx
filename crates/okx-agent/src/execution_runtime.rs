@@ -823,12 +823,9 @@ impl ExecutionRuntime {
         let projection = executor
             .ledger()
             .financial_period_for_new_risk(facts, coherent, plan)?;
-        let asof = facts
-            .summary
-            .current_account_as_of_ms
-            .as_deref()?
-            .parse::<u64>()
-            .ok()?;
+        // The NAV point belongs to the current authenticated source read,
+        // not the exchange's potentially stale last account-change uTime.
+        let asof = okx_execution::source_receipt_ms(&facts.summary.source_received_at)?;
         // The one durable Ledger is also the NAV/high-water/day-loss writer.
         // Any breach latches STOP before the candidate can receive a permit.
         let now = u64::try_from(Utc::now().timestamp_millis()).ok()?;
