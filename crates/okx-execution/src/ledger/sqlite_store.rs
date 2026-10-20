@@ -31,6 +31,24 @@ pub(super) fn checksum(b: &[u8]) -> String {
 }
 
 fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError> {
+    connect_with_integrity(path, create, true)
+}
+
+/// Indexed hot-path reads validate the selected rows and pinned account
+/// identity. Full PRAGMA integrity_check remains mandatory at cold owner
+/// attestation, not on each paginated UI/history query.
+fn connect_indexed_read(path: &Path) -> Result<Connection, ExecutionLedgerError> {
+    if !path.exists() {
+        return Err(ExecutionLedgerError::Corrupt("SQLite account ledger missing"));
+    }
+    connect_with_integrity(path, false, false)
+}
+
+fn connect_with_integrity(
+    path: &Path,
+    create: bool,
+    verify_all_pages: bool,
+) -> Result<Connection, ExecutionLedgerError> {
     let mut connection = if create {
         fs::create_dir_all(
             path.parent()
@@ -113,8 +131,8 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
                 "SQLite synchronous FULL unavailable",
             ));
         }
-    } else {
-        // Cold read only, not the hot mutation path.
+    } else if verify_all_pages {
+        // Cold read only; per-intent indexed reads do not scan all DB pages.
         let ok: String = connection
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
             .map_err(io)?;
@@ -123,6 +141,135 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
         }
     }
     Ok(connection)
+}
+
+/// Validate the existing immutable owner and small state checksum once
+/// for an indexed read. No attempt to manufacture or repair account storage.
+fn require_indexed_scope(
+    c: &Connection,
+    expected_uid: &str,
+) -> Result<(), ExecutionLedgerError> {
+    if expected_uid.len() != 64
+        || !expected_uid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let row: Option<(String, String, Vec<u8>, String)> = c
+        .query_row(
+            "SELECT s.uid,s.digest,s.bytes,i.uid_fingerprint
+             FROM ledger_state s JOIN account_identity i ON i.singleton=1
+             WHERE s.key=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(io)?;
+    let Some((state_uid, digest, bytes, identity_uid)) = row else {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    };
+    if state_uid != expected_uid || identity_uid != expected_uid || checksum(&bytes) != digest {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    Ok(())
+}
+
+/// One exact persisted entry is checked against its BLOB digest, immutable
+/// plan, and indexed relational projection. The left join exposes missing
+/// projections as corruption rather than silently returning incomplete rows.
+fn verified_indexed_entry(
+    row: &rusqlite::Row<'_>,
+    expected_uid: &str,
+) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
+    let intent_id: String = row.get(0).map_err(io)?;
+    let client_order_id: String = row.get(1).map_err(io)?;
+    let uid: String = row.get(2).map_err(io)?;
+    let digest: String = row.get(3).map_err(io)?;
+    let payload: Vec<u8> = row.get(4).map_err(io)?;
+    let instrument_id: Option<String> = row.get(5).map_err(io)?;
+    let requested_action: Option<String> = row.get(6).map_err(io)?;
+    let plan_sha256: Option<String> = row.get(7).map_err(io)?;
+    let current_state: Option<String> = row.get(8).map_err(io)?;
+    let created_at_ms: Option<i64> = row.get(9).map_err(io)?;
+    if uid != expected_uid || checksum(&payload) != digest {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let entry: ExecutionLedgerEntry = decode(&payload)?;
+    validate_entry(&entry)?;
+    if entry.record.plan.intent_id != intent_id
+        || entry.record.plan.client_order_id != client_order_id
+        || entry.record.plan.account_uid_fingerprint != uid
+        || instrument_id.as_deref() != Some(entry.record.plan.instrument_id.as_str())
+        || requested_action.as_deref() != Some(format!("{:?}", entry.record.plan.action).as_str())
+        || plan_sha256.as_deref() != Some(checksum(&encode(&entry.record.plan)?).as_str())
+        || current_state.as_deref() != Some(format!("{:?}", entry.record.state).as_str())
+        || created_at_ms != i64::try_from(entry.created_at_ms).ok()
+    {
+        return Err(ExecutionLedgerError::Corrupt(
+            "indexed intent projection mismatch",
+        ));
+    }
+    Ok(entry)
+}
+
+const INDEXED_INTENT_COLUMNS: &str = "
+ SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
+        i.instrument_id,i.requested_action,i.plan_sha256,i.current_state,i.created_at_ms
+ FROM ledger_entries e LEFT JOIN intents i ON i.intent_id=e.intent_id";
+
+pub(super) fn indexed_intent(
+    path: &Path,
+    expected_uid: &str,
+    intent_id: &str,
+) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+    if intent_id.is_empty() || intent_id.len() > 128 {
+        return Err(ExecutionLedgerError::Corrupt("invalid indexed intent ID"));
+    }
+    let c = connect_indexed_read(path)?;
+    require_indexed_scope(&c, expected_uid)?;
+    let sql = format!("{INDEXED_INTENT_COLUMNS} WHERE e.intent_id=?1");
+    let mut stmt = c.prepare(&sql).map_err(io)?;
+    let mut rows = stmt.query(params![intent_id]).map_err(io)?;
+    let entry = rows
+        .next()
+        .map_err(io)?
+        .map(|row| verified_indexed_entry(row, expected_uid))
+        .transpose()?;
+    if rows.next().map_err(io)?.is_some() {
+        return Err(ExecutionLedgerError::Corrupt("indexed intent duplicate"));
+    }
+    Ok(entry)
+}
+
+pub(super) fn indexed_intent_page(
+    path: &Path,
+    expected_uid: &str,
+    after_intent_id: Option<&str>,
+    limit: usize,
+) -> Result<SqliteIntentPage, ExecutionLedgerError> {
+    if !(1..=256).contains(&limit)
+        || after_intent_id.is_some_and(|s| s.is_empty() || s.len() > 128)
+    {
+        return Err(ExecutionLedgerError::Corrupt("invalid indexed intent page"));
+    }
+    let c = connect_indexed_read(path)?;
+    require_indexed_scope(&c, expected_uid)?;
+    let sql = format!(
+        "{INDEXED_INTENT_COLUMNS} WHERE e.intent_id>?1 ORDER BY e.intent_id LIMIT ?2"
+    );
+    let mut stmt = c.prepare(&sql).map_err(io)?;
+    let mut rows = stmt.query(params![after_intent_id.unwrap_or(""), (limit + 1) as i64]).map_err(io)?;
+    let mut entries = Vec::with_capacity(limit + 1);
+    while let Some(row) = rows.next().map_err(io)? {
+        entries.push(verified_indexed_entry(row, expected_uid)?);
+    }
+    let has_more = entries.len() > limit;
+    entries.truncate(limit);
+    let next_after = if has_more {
+        entries.last().map(|e| e.record.plan.intent_id.clone())
+    } else {
+        None
+    };
+    Ok(SqliteIntentPage { entries, next_after })
 }
 
 /// A binding is created only by an authenticated native owner for an
@@ -1067,6 +1214,120 @@ mod tests {
             store.bound_native_account_identity().unwrap(),
             Some(identity)
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Historical pages are keyset indexed, fixed-size and UID-bound.
+    /// Two DBs have independent native writer leases without a shared
+    /// account-global lock or another controller/transport.
+    #[test]
+    fn bounded_indexed_history_across_independent_native_accounts() {
+        let root = test_root("indexed-account-roots");
+        for (name, c) in [("real", 'a'), ("demo", 'b')] {
+            let account_root = root.join(name);
+            let db = account_root.join("execution-ledger.sqlite");
+            let uid = c.to_string().repeat(64);
+            let mut entries = BTreeMap::new();
+            for index in 0..131_u64 {
+                let id = format!("indexed_{name}_intent_{index:04}");
+                let plan = ExecutionPlan {
+                    schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+                    intent_id: id.clone(),
+                    client_order_id: derive_client_order_id(&id),
+                    reference_generation: "sha256:reference".to_owned(),
+                    account_generation: "sha256:account".to_owned(),
+                    account_uid_fingerprint: uid.clone(),
+                    instrument_id: "BTC-USDT-SWAP".to_owned(),
+                    trade_mode: crate::TradeMode::Cross,
+                    side: crate::OrderSide::Buy,
+                    position_side: PositionSide::Long,
+                    action: ExecutionAction::Open,
+                    order_type: crate::OrderType::Limit,
+                    size: "1".to_owned(),
+                    price: "0.1".to_owned(),
+                    open_risk: None,
+                    risk_binding: None,
+                };
+                entries.insert(
+                    id,
+                    ExecutionLedgerEntry {
+                        record: ExecutionRecord::new(plan),
+                        created_at_ms: 1000 + index,
+                        updated_at_ms: 1000 + index,
+                    },
+                );
+            }
+            let store = ExecutionLedgerStore::sqlite_at(&db);
+            store
+                .save(
+                    &entries,
+                    None,
+                    None,
+                    None,
+                    &StrategyPeriodHistory::default(),
+                    &[],
+                )
+                .unwrap();
+            let scope = SqliteAccountIdentity {
+                venue: LedgerVenue::Okx,
+                environment: if name == "demo" {
+                    LedgerEnvironment::Demo
+                } else {
+                    LedgerEnvironment::Production
+                },
+                account_id: name.to_owned(),
+                uid_fingerprint: uid.clone(),
+                bound_at_ms: 1111,
+            };
+            store.bind_native_account_identity(&scope).unwrap();
+            assert_eq!(
+                store.indexed_intent(&uid, "not_present").unwrap(),
+                None
+            );
+            assert!(store.indexed_intent(&"f".repeat(64), "not_present").is_err());
+            assert!(store.indexed_intent_page(&uid, None, 0).is_err());
+            assert!(store.indexed_intent_page(&uid, None, 257).is_err());
+            let mut cursor: Option<String> = None;
+            let mut all = Vec::new();
+            for expected_len in [64, 64, 3] {
+                let page = store
+                    .indexed_intent_page(&uid, cursor.as_deref(), 64)
+                    .unwrap();
+                assert_eq!(page.entries.len(), expected_len);
+                for entry in &page.entries {
+                    let id = &entry.record.plan.intent_id;
+                    assert_eq!(
+                        store.indexed_intent(&uid, id).unwrap().as_ref(),
+                        Some(entry)
+                    );
+                    all.push(id.clone());
+                }
+                cursor = page.next_after;
+            }
+            assert_eq!(all, entries.keys().cloned().collect::<Vec<_>>());
+            assert!(cursor.is_none());
+        }
+        let real_root = root.join("real");
+        let demo_root = root.join("demo");
+        let first = ExecutionLedgerStore::acquire_writer_lease(&real_root).unwrap();
+        let second = ExecutionLedgerStore::acquire_writer_lease(&demo_root).unwrap();
+        assert!(ExecutionLedgerStore::acquire_writer_lease(&real_root).is_err());
+        assert!(ExecutionLedgerStore::acquire_writer_lease(&demo_root).is_err());
+        drop(first);
+        drop(second);
+        // Even a relational-index corruption must never fabricate a valid
+        // historical result (and does not authorize an exchange POST).
+        let db = real_root.join("execution-ledger.sqlite");
+        let sql = Connection::open(&db).unwrap();
+        sql.execute(
+            "UPDATE intents SET current_state='FORGED' WHERE intent_id='indexed_real_intent_0000'",
+            [],
+        )
+        .unwrap();
+        drop(sql);
+        assert!(ExecutionLedgerStore::sqlite_at(&db)
+            .indexed_intent(&"a".repeat(64), "indexed_real_intent_0000")
+            .is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 

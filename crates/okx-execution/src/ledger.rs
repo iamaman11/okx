@@ -466,6 +466,15 @@ impl SqliteAccountIdentity {
     }
 }
 
+/// Bounded historical page from the immutable SQLite intent index.
+/// The cursor is the last returned intent ID (keyset pagination), never an
+/// offset into an ever-growing ledger or an execution/replay capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteIntentPage {
+    pub entries: Vec<ExecutionLedgerEntry>,
+    pub next_after: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecutionLedgerStore {
     path: PathBuf,
@@ -1009,6 +1018,43 @@ impl ExecutionLedgerStore {
             max_records,
             sqlite_native: false,
         }
+    }
+
+    /// Read historical account intents without materializing the whole
+    /// ledger. This read-only API is explicitly independent of the hot
+    /// in-memory execution state machine. It never grants POST authority.
+    pub fn indexed_intent_page(
+        &self,
+        expected_uid: &str,
+        after_intent_id: Option<&str>,
+        limit: usize,
+    ) -> Result<SqliteIntentPage, ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt(
+                "indexed history requires native SQLite owner",
+            ));
+        }
+        sqlite_store::indexed_intent_page(
+            &self.path,
+            expected_uid,
+            after_intent_id,
+            limit,
+        )
+    }
+
+    /// Exact ID read with indexed lookup and per-row digest + projection
+    /// validation. A missing ID returns None, never an empty new account.
+    pub fn indexed_intent(
+        &self,
+        expected_uid: &str,
+        intent_id: &str,
+    ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt(
+                "indexed history requires native SQLite owner",
+            ));
+        }
+        sqlite_store::indexed_intent(&self.path, expected_uid, intent_id)
     }
 
     /// Bind a native-authenticated account once to an existing SQLite
