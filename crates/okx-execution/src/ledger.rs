@@ -1564,14 +1564,14 @@ impl DurableExecutionLedger {
         else {
             return Ok(None);
         };
-        let as_of = facts
-            .summary
-            .current_account_as_of_ms
-            .as_deref()
-            .and_then(|v| v.parse::<u64>().ok())
-            .ok_or(ExecutionLedgerError::Corrupt(
-                "missing NAV account source time",
-            ))?;
+        // NAV observation time is the authenticated REST receipt, not the
+        // exchange balance uTime (which may stay unchanged on a quiet account).
+        let as_of = crate::exchange_evidence::source_receipt_ms(
+            &facts.summary.source_received_at,
+        )
+        .ok_or(ExecutionLedgerError::Corrupt(
+            "missing NAV source receipt",
+        ))?;
         if now.saturating_add(2_000) < as_of || now.abs_diff(as_of) > 30_000 {
             return Ok(None);
         }
@@ -1581,13 +1581,17 @@ impl DurableExecutionLedger {
             .exchange_evidence
             .as_ref()
             .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        let (source_cursor_key, source_cursor) = evidence
+        let (source_cursor_key, source_cursor, source_receipt_ms) = evidence
             .cursors
             .iter()
-            .filter(|(_, cursor)| cursor.account_as_of_ms <= as_of)
-            .max_by_key(|(_, cursor)| cursor.account_as_of_ms)
+            .filter_map(|(key, cursor)| {
+                let received =
+                    crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)?;
+                (received <= as_of).then_some((key, cursor, received))
+            })
+            .max_by_key(|(_, _, received)| *received)
             .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if as_of - source_cursor.account_as_of_ms
+        if as_of - source_receipt_ms
             > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
         {
             return Ok(None);
