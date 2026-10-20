@@ -319,6 +319,23 @@ The proposed version-1 relational schema is
 the existing architecture CI job using Python's built-in sqlite3 solely as a
 test, not as an application runtime/database owner.
 
+### Native account finance window: acceptance boundary
+
+The Rust opt-in SQLite implementation exposes `ExecutionLedgerStore::observed_finance_window`
+with a **natively verified account UID** and a bounded local time range. It
+returns indexed exact-decimal balance changes grouped by bill kind and currency,
+fill/bill counts, per-source receipt counts and materiality-specific unresolved
+gaps. A receipt is a **point observation**, never a fictitious continuously
+covered interval. Absence of a detected gap cannot imply financial closure.
+This query is **READ ONLY** and **NOT** account risk admission, strategy NAV,
+period finalization, or a permit to submit an order.
+
+Database source facts are written by the single owner, not by this query. The
+Production Agent still reads v14 JSON; this opt-in SQLite API becomes usable
+only after the explicit, verified, one-owner migration. Tests check that
+account identity cannot be rebound, a missing bill balance cannot become
+a zero, and no account summary is incorrectly promoted to strategy PnL.
+
 ### Acceptance before SQLite becomes execution authority
 
 - Exact original v14 source, 100% inventory/byte hash and archived histories

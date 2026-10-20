@@ -32,6 +32,7 @@ use crate::{
 
 mod sqlite_finance;
 mod sqlite_source;
+pub use sqlite_finance::{AccountCashflowBucket, AccountFinanceWindow};
 mod sqlite_store;
 
 pub const EXECUTION_LEDGER_SCHEMA_V1: &str = "okx.execution-ledger/v1";
@@ -436,7 +437,7 @@ impl ExecutionLedgerStore {
         expected_uid: &str,
         from_ms: u64,
         through_ms: u64,
-    ) -> Result<sqlite_finance::AccountFinanceWindow, ExecutionLedgerError> {
+    ) -> Result<AccountFinanceWindow, ExecutionLedgerError> {
         if !self.sqlite_native {
             return Err(ExecutionLedgerError::Corrupt(
                 "SQLite finance storage not active",
