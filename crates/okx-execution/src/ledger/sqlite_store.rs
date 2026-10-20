@@ -815,6 +815,15 @@ fn save_snapshot(
                     ));
                 }
                 let old: ExecutionLedgerEntry = decode(&prior_bytes)?;
+                // BEGIN_POST and every later transition retain the EXACT
+                // immutable prepared plan, including risk mandate and
+                // instrument. A matching client-order-id alone is not a
+                // legitimate plan identity: never relabel old venue risk.
+                if old.record.plan != e.record.plan
+                    || old.created_at_ms != e.created_at_ms
+                {
+                    return Err(ExecutionLedgerError::IntentConflict);
+                }
                 Some(old.record.state)
             } else {
                 None
@@ -861,7 +870,11 @@ fn save_snapshot(
                 "INSERT INTO intents
                    (intent_id,epoch_id,decision_id,instrument_id,requested_action,plan_sha256,current_state,created_at_ms)
                  VALUES (?1,NULL,NULL,?2,?3,?4,?5,?6)
-                 ON CONFLICT(intent_id) DO UPDATE SET current_state=excluded.current_state",
+                 ON CONFLICT(intent_id) DO UPDATE SET current_state=excluded.current_state
+                 WHERE intents.instrument_id=excluded.instrument_id
+                   AND intents.requested_action=excluded.requested_action
+                   AND intents.plan_sha256=excluded.plan_sha256
+                   AND intents.created_at_ms=excluded.created_at_ms",
                 params![id, &e.record.plan.instrument_id, action, plan_hash, stage, e.created_at_ms],
             ).map_err(io)?;
             if projection != 1 {
@@ -1093,6 +1106,108 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("okx-sqlite-{label}-{}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn sqlite_intent_plan_is_immutable_after_first_persist() {
+        let root = test_root("plan-immutable");
+        let db = root.join("account.sqlite");
+        let uid = "a".repeat(64);
+        let id = "intent_sqlite_plan_immutability_0123";
+        let plan = ExecutionPlan {
+            schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+            intent_id: id.to_owned(),
+            client_order_id: derive_client_order_id(id),
+            reference_generation: "sha256:reference".to_owned(),
+            account_generation: "sha256:account".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            trade_mode: crate::TradeMode::Cross,
+            side: crate::OrderSide::Buy,
+            position_side: PositionSide::Long,
+            action: ExecutionAction::Open,
+            order_type: crate::OrderType::Limit,
+            size: "1".to_owned(),
+            price: "0.1".to_owned(),
+            open_risk: None,
+            risk_binding: None,
+        };
+        let original = ExecutionLedgerEntry {
+            record: ExecutionRecord::new(plan),
+            created_at_ms: 1000,
+            updated_at_ms: 1000,
+        };
+        save(
+            &db,
+            &BTreeMap::from([(id.to_owned(), original.clone())]),
+            None,
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
+        let store = ExecutionLedgerStore::sqlite_at(&db);
+        store
+            .bind_native_account_identity(&SqliteAccountIdentity {
+                venue: LedgerVenue::Okx,
+                environment: LedgerEnvironment::Demo,
+                account_id: "demo".to_owned(),
+                uid_fingerprint: uid.clone(),
+                bound_at_ms: 1001,
+            })
+            .unwrap();
+        let mut changed = original.clone();
+        changed.record.plan.instrument_id = "ETH-USDT-SWAP".to_owned();
+        changed.updated_at_ms += 2;
+        assert!(matches!(
+            save_one(
+                &db, &changed, None, None, None,
+                &StrategyPeriodHistory::default(), &[],
+            ),
+            Err(ExecutionLedgerError::IntentConflict)
+        ));
+        assert_eq!(store.indexed_intent(&uid, id).unwrap(), Some(original.clone()));
+
+        changed = original.clone();
+        changed.created_at_ms += 1;
+        changed.updated_at_ms += 2;
+        assert!(matches!(
+            save_one(
+                &db, &changed, None, None, None,
+                &StrategyPeriodHistory::default(), &[],
+            ),
+            Err(ExecutionLedgerError::IntentConflict)
+        ));
+        assert_eq!(store.indexed_intent(&uid, id).unwrap(), Some(original.clone()));
+
+        // A forged projection is rejected in the SAME transaction that
+        // attempts to advance an otherwise valid authoritative intent.
+        let c = Connection::open(&db).unwrap();
+        c.execute(
+            "UPDATE intents SET plan_sha256=?1 WHERE intent_id=?2",
+            params!["f".repeat(64), id],
+        )
+        .unwrap();
+        drop(c);
+        changed = original.clone();
+        changed.updated_at_ms += 2;
+        assert!(save_one(
+            &db, &changed, None, None, None,
+            &StrategyPeriodHistory::default(), &[],
+        ).is_err());
+        let c = Connection::open(&db).unwrap();
+        let old_time: i64 = c
+            .query_row(
+                "SELECT updated_at_ms FROM ledger_entries WHERE intent_id=?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_time, 1000);
+        drop(c);
+        assert!(store.indexed_intent(&uid, id).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
