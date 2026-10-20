@@ -2,6 +2,7 @@
 """Standard-library schema conformance, no DB server or external packages."""
 import pathlib
 import sqlite3
+from decimal import Decimal
 import tempfile
 
 DDL = pathlib.Path(__file__).resolve().parents[1] / "crates/okx-execution/schema/account-ledger-v1.sql"
@@ -52,7 +53,7 @@ def main():
                 ('bill-a','BTC-USDT-SWAP','trade-a',7,'USDT','FEE',
                 '-0.1','sha-source')""")
             a.execute("""INSERT INTO bill_attribution VALUES
-                ('bill-a','epoch-a','sha-source')""")
+                ('bill-a','epoch-a','-0.04','sha-source')""")
             assert b.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
             assert a.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
             assert a.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -67,12 +68,25 @@ def main():
             must_reject("""INSERT INTO post_attempts VALUES
                 ('intent-a','client-b','post-a',7,'POSTED')""")
             must_reject("""INSERT INTO bill_attribution VALUES
-                ('bill-a','epoch-a','sha-source')""")
+                ('bill-a','epoch-a','-0.04','sha-source')""")
             must_reject("""INSERT INTO intents VALUES
                 ('broken','nonexistent',NULL,'BTC','OPEN','sha','PREPARED',5)""")
-            must_reject("""INSERT INTO capital_epochs VALUES
+            a.execute("""INSERT INTO capital_epochs VALUES
                 ('epoch-b','strategy-a','manual','okx.manual/v1','1',5,
                  'receipt-a','USDT','100','ACTIVE',NULL,NULL)""")
+            a.execute("""INSERT INTO bill_attribution VALUES
+                ('bill-a','epoch-b','-0.06','sha-source')""")
+            portions = [Decimal(r[0]) for r in a.execute(
+                "SELECT allocated_decimal FROM bill_attribution WHERE bill_id='bill-a'")]
+            assert sum(portions) == Decimal('-0.1')
+            assert a.execute(
+                "SELECT COUNT(*) FROM capital_epochs WHERE strategy_id='strategy-a'").fetchone()[0] == 2
+            must_reject("""UPDATE fills SET price_decimal='999' WHERE trade_id='trade-a'""")
+            must_reject("""UPDATE bills SET delta_decimal='0' WHERE bill_id='bill-a'""")
+            must_reject("""INSERT INTO domain_events
+                (event_id,event_type,event_version,subject_kind,subject_id,
+                 effective_at_ms,recorded_at_ms,event_sha256)
+                VALUES ('bad-chain','OBSERVE',1,'ACCOUNT','account-a',8,9,'hash-bad')""")
             a.execute("""INSERT INTO source_gaps VALUES
                 ('gap-a','orders','SWAP',7,30000000,'EXECUTION_ONLY','HISTORY_WINDOW',NULL,NULL)""")
             assert a.execute("SELECT materiality FROM source_gaps").fetchone()[0] == "EXECUTION_ONLY"
@@ -82,8 +96,8 @@ def main():
             a.execute("BEGIN IMMEDIATE")
             a.execute("""INSERT INTO domain_events
                 (event_id,event_type,event_version,subject_kind,subject_id,
-                 effective_at_ms,recorded_at_ms,event_sha256)
-                VALUES ('post-b','OBSERVE',1,'ACCOUNT','account-a',8,9,'hash-b')""")
+                 effective_at_ms,recorded_at_ms,previous_event_sha256,event_sha256)
+                VALUES ('post-b','OBSERVE',1,'ACCOUNT','account-a',8,9,'hash-a','hash-b')""")
             a.execute("COMMIT")
             b.execute("ROLLBACK")
             assert b.execute("SELECT COUNT(*) FROM domain_events").fetchone()[0] == 2

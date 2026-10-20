@@ -241,7 +241,9 @@ Ledger remains the only production execution authority until verified cutover.
   native writer per account, independent writers for distinct accounts.
   A UI selector never changes a write's immutable account destination.
   Multiple strategies/runs share that account's execution facts, not separate
-  exchange ledgers. Global Cloudflare Durable Object governance/RiskBook stays
+  exchange ledgers. Several independently funded epochs of one strategy may
+  overlap, and shared funding bills can be split between epochs only with
+  exact proof that all native decimal shares reconcile. Global Cloudflare Durable Object governance/RiskBook stays
   one CAS authority; SQLite risk receipts are evidence only, NOT competing
   reservations.
 - Append-only typed **domain events** and source-exact fills/bills are the

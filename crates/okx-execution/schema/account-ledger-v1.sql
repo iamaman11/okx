@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS domain_events (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_events_subject ON domain_events
     (subject_kind, subject_id, seq);
+CREATE TRIGGER IF NOT EXISTS require_previous_event_hash BEFORE INSERT ON domain_events
+WHEN (SELECT event_sha256 FROM domain_events ORDER BY seq DESC LIMIT 1)
+     IS NOT NEW.previous_event_sha256
+BEGIN SELECT RAISE(ABORT, 'BROKEN_EVENT_CHAIN'); END;
 CREATE TRIGGER IF NOT EXISTS prevent_event_update
 BEFORE UPDATE ON domain_events BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_EVENT'); END;
 CREATE TRIGGER IF NOT EXISTS prevent_event_delete
@@ -99,8 +103,7 @@ CREATE TABLE IF NOT EXISTS capital_epochs (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_epochs_strategy ON capital_epochs
     (strategy_id, opening_at_ms);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_epoch_per_strategy
-    ON capital_epochs(strategy_id) WHERE state='ACTIVE';
+-- Concurrent independently funded epochs for one strategy are allowed.
 
 CREATE TABLE IF NOT EXISTS decisions (
     decision_id TEXT PRIMARY KEY,
@@ -139,6 +142,18 @@ CREATE TABLE IF NOT EXISTS post_attempts (
     begin_post_at_ms INTEGER NOT NULL CHECK(begin_post_at_ms > 0),
     delivery_outcome TEXT NOT NULL
 ) STRICT;
+
+-- Exact IDs for amendments, cancellations, protection and other venue writes.
+CREATE TABLE IF NOT EXISTS exchange_mutations (
+    mutation_id TEXT PRIMARY KEY,
+    intent_id TEXT NOT NULL REFERENCES intents(intent_id),
+    mutation_kind TEXT NOT NULL,
+    begin_event_id TEXT NOT NULL UNIQUE REFERENCES domain_events(event_id),
+    created_at_ms INTEGER NOT NULL,
+    delivery_outcome TEXT NOT NULL,
+    native_request_key TEXT NOT NULL UNIQUE
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_mutations_intent ON exchange_mutations(intent_id, created_at_ms);
 
 CREATE TABLE IF NOT EXISTS exchange_orders (
     venue_order_id TEXT PRIMARY KEY,
@@ -182,10 +197,13 @@ CREATE INDEX IF NOT EXISTS idx_bills_time ON bills(exchange_time_ms);
 -- Claims link exact exchange cash flows to a strategy epoch.
 -- Unclaimed bills remain account-level and MUST NOT silently enter strategy PnL.
 CREATE TABLE IF NOT EXISTS bill_attribution (
-    bill_id TEXT PRIMARY KEY REFERENCES bills(bill_id),
+    bill_id TEXT NOT NULL REFERENCES bills(bill_id),
     epoch_id TEXT NOT NULL REFERENCES capital_epochs(epoch_id),
-    attribution_evidence_sha256 TEXT NOT NULL REFERENCES evidence_objects(evidence_sha256)
+    allocated_decimal TEXT NOT NULL,
+    attribution_evidence_sha256 TEXT NOT NULL REFERENCES evidence_objects(evidence_sha256),
+    PRIMARY KEY(bill_id, epoch_id)
 ) STRICT;
+-- The native same-transaction Rust decimal validator must prove claimed sums.
 
 CREATE TABLE IF NOT EXISTS capital_flows (
     flow_id TEXT PRIMARY KEY,
@@ -221,6 +239,12 @@ CREATE TABLE IF NOT EXISTS nav_points (
 ) STRICT;
 
 -- Daily risk cannot be reset by closing/reopening a strategy epoch.
+CREATE TABLE IF NOT EXISTS account_daily_risk (
+    utc_day TEXT PRIMARY KEY,
+    gross_loss_decimal TEXT NOT NULL,
+    stop_latched INTEGER NOT NULL CHECK(stop_latched IN (0,1)),
+    last_event_id TEXT NOT NULL REFERENCES domain_events(event_id)
+) STRICT;
 CREATE TABLE IF NOT EXISTS strategy_daily_risk (
     strategy_id TEXT NOT NULL,
     utc_day TEXT NOT NULL,
@@ -230,6 +254,20 @@ CREATE TABLE IF NOT EXISTS strategy_daily_risk (
     PRIMARY KEY(strategy_id, utc_day)
 ) STRICT;
 
+-- Index only; immutable binary/columnar research datasets remain external.
+CREATE TABLE IF NOT EXISTS research_artifact_index (
+    artifact_sha256 TEXT PRIMARY KEY REFERENCES evidence_objects(evidence_sha256),
+    dataset_id TEXT NOT NULL,
+    artifact_kind TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    instrument_id TEXT,
+    min_exchange_time_ms INTEGER,
+    max_exchange_time_ms INTEGER,
+    source_receipt_sha256 TEXT REFERENCES source_receipts(receipt_sha256),
+    CHECK(min_exchange_time_ms IS NULL OR max_exchange_time_ms >= min_exchange_time_ms)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_research_dataset ON research_artifact_index
+    (dataset_id, instrument_id, min_exchange_time_ms);
 -- External Cloudflare Durable Object remains the ONLY global CAS RiskBook.
 -- These are locally durable receipts, never an independent reserve authority.
 CREATE TABLE IF NOT EXISTS risk_receipts (
@@ -240,4 +278,13 @@ CREATE TABLE IF NOT EXISTS risk_receipts (
     state TEXT NOT NULL,
     event_id TEXT NOT NULL REFERENCES domain_events(event_id)
 ) STRICT;
+-- Sealed source facts and attributed bills cannot be rewritten.
+CREATE TRIGGER IF NOT EXISTS immutable_fills_update BEFORE UPDATE ON fills BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_FILL'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_fills_delete BEFORE DELETE ON fills BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_FILL'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_bills_update BEFORE UPDATE ON bills BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_BILL'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_bills_delete BEFORE DELETE ON bills BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_BILL'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_source_update BEFORE UPDATE ON source_receipts BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SOURCE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_source_delete BEFORE DELETE ON source_receipts BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SOURCE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_bill_claim_update BEFORE UPDATE ON bill_attribution BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_ATTRIBUTION'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_bill_claim_delete BEFORE DELETE ON bill_attribution BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_ATTRIBUTION'); END;
 PRAGMA user_version=1;
