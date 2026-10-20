@@ -1034,12 +1034,7 @@ impl ExecutionLedgerStore {
                 "indexed history requires native SQLite owner",
             ));
         }
-        sqlite_store::indexed_intent_page(
-            &self.path,
-            expected_uid,
-            after_intent_id,
-            limit,
-        )
+        sqlite_store::indexed_intent_page(&self.path, expected_uid, after_intent_id, limit)
     }
 
     /// Exact ID read with indexed lookup and per-row digest + projection

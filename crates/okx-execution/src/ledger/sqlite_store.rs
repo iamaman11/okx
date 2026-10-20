@@ -39,7 +39,9 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
 /// attestation, not on each paginated UI/history query.
 fn connect_indexed_read(path: &Path) -> Result<Connection, ExecutionLedgerError> {
     if !path.exists() {
-        return Err(ExecutionLedgerError::Corrupt("SQLite account ledger missing"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "SQLite account ledger missing",
+        ));
     }
     connect_with_integrity(path, false, false)
 }
@@ -145,12 +147,11 @@ fn connect_with_integrity(
 
 /// Validate the existing immutable owner and small state checksum once
 /// for an indexed read. No attempt to manufacture or repair account storage.
-fn require_indexed_scope(
-    c: &Connection,
-    expected_uid: &str,
-) -> Result<(), ExecutionLedgerError> {
+fn require_indexed_scope(c: &Connection, expected_uid: &str) -> Result<(), ExecutionLedgerError> {
     if expected_uid.len() != 64
-        || !expected_uid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || !expected_uid
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
@@ -246,18 +247,18 @@ pub(super) fn indexed_intent_page(
     after_intent_id: Option<&str>,
     limit: usize,
 ) -> Result<SqliteIntentPage, ExecutionLedgerError> {
-    if !(1..=256).contains(&limit)
-        || after_intent_id.is_some_and(|s| s.is_empty() || s.len() > 128)
+    if !(1..=256).contains(&limit) || after_intent_id.is_some_and(|s| s.is_empty() || s.len() > 128)
     {
         return Err(ExecutionLedgerError::Corrupt("invalid indexed intent page"));
     }
     let c = connect_indexed_read(path)?;
     require_indexed_scope(&c, expected_uid)?;
-    let sql = format!(
-        "{INDEXED_INTENT_COLUMNS} WHERE e.intent_id>?1 ORDER BY e.intent_id LIMIT ?2"
-    );
+    let sql =
+        format!("{INDEXED_INTENT_COLUMNS} WHERE e.intent_id>?1 ORDER BY e.intent_id LIMIT ?2");
     let mut stmt = c.prepare(&sql).map_err(io)?;
-    let mut rows = stmt.query(params![after_intent_id.unwrap_or(""), (limit + 1) as i64]).map_err(io)?;
+    let mut rows = stmt
+        .query(params![after_intent_id.unwrap_or(""), (limit + 1) as i64])
+        .map_err(io)?;
     let mut entries = Vec::with_capacity(limit + 1);
     while let Some(row) = rows.next().map_err(io)? {
         entries.push(verified_indexed_entry(row, expected_uid)?);
@@ -269,7 +270,10 @@ pub(super) fn indexed_intent_page(
     } else {
         None
     };
-    Ok(SqliteIntentPage { entries, next_after })
+    Ok(SqliteIntentPage {
+        entries,
+        next_after,
+    })
 }
 
 /// A binding is created only by an authenticated native owner for an
@@ -1280,11 +1284,12 @@ mod tests {
                 bound_at_ms: 1111,
             };
             store.bind_native_account_identity(&scope).unwrap();
-            assert_eq!(
-                store.indexed_intent(&uid, "not_present").unwrap(),
-                None
+            assert_eq!(store.indexed_intent(&uid, "not_present").unwrap(), None);
+            assert!(
+                store
+                    .indexed_intent(&"f".repeat(64), "not_present")
+                    .is_err()
             );
-            assert!(store.indexed_intent(&"f".repeat(64), "not_present").is_err());
             assert!(store.indexed_intent_page(&uid, None, 0).is_err());
             assert!(store.indexed_intent_page(&uid, None, 257).is_err());
             let mut cursor: Option<String> = None;
@@ -1325,9 +1330,11 @@ mod tests {
         )
         .unwrap();
         drop(sql);
-        assert!(ExecutionLedgerStore::sqlite_at(&db)
-            .indexed_intent(&"a".repeat(64), "indexed_real_intent_0000")
-            .is_err());
+        assert!(
+            ExecutionLedgerStore::sqlite_at(&db)
+                .indexed_intent(&"a".repeat(64), "indexed_real_intent_0000")
+                .is_err()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -41,7 +41,8 @@ pub use ledger::{
     MAX_EXECUTION_LEDGER_RECORDS, MutationPrepareDisposition,
     PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1, PrepareDisposition,
     ProfileHandoffLedgerAssessment, STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1, SqliteAccountIdentity,
-    SqliteIntentPage, StrategyAllocationOpening, StrategyCapitalReservation, StrategyStopRearmRequest,
+    SqliteIntentPage, StrategyAllocationOpening, StrategyCapitalReservation,
+    StrategyStopRearmRequest,
 };
 pub use model::{
     EXECUTION_LINEAGE_SCHEMA_V1, EXECUTION_LINEAGE_SCHEMA_V2, EXECUTION_PLAN_SCHEMA_V1,
