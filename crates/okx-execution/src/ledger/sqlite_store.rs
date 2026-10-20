@@ -1991,6 +1991,36 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(load(&db, usize::MAX).unwrap().0, entries);
+        // Exercise the actual native prepare path, not just the SQL reader.
+        // The old completed BTC history is ignored, but the one pending BTC
+        // intent blocks a second BTC submission under the same Rust rule.
+        let mut engine = DurableExecutionLedger::open(store.clone(), 3000).unwrap();
+        let mut blocked = entries
+            .get("guarded_intent_000063")
+            .unwrap()
+            .record
+            .plan
+            .clone();
+        blocked.intent_id = "guarded_intent_new_000064".to_owned();
+        blocked.client_order_id = derive_client_order_id(&blocked.intent_id);
+        assert!(matches!(
+            engine.prepare(blocked, 4000),
+            Err(ExecutionLedgerError::InstrumentBusy)
+        ));
+        let mut independent = entries
+            .get("guarded_intent_000063")
+            .unwrap()
+            .record
+            .plan
+            .clone();
+        independent.intent_id = "guarded_intent_eth_000065".to_owned();
+        independent.client_order_id = derive_client_order_id(&independent.intent_id);
+        independent.instrument_id = "ETH-USDT-SWAP".to_owned();
+        assert!(matches!(
+            engine.prepare(independent, 4001),
+            Ok(PrepareDisposition::Created(_))
+        ));
+        drop(engine);
         let c = Connection::open(&db).unwrap();
         c.execute(
             "DELETE FROM native_guarded_intents WHERE intent_id='guarded_intent_000063'",
