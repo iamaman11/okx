@@ -97,6 +97,7 @@ pub(super) fn persist(
                 params![source.run_id, key, checksum(&body), body],
             )
             .map_err(io)?;
+            super::sqlite_finance::persist_event(tx, &source.run_id, key, event)?;
         } else if old_events.get(key) != Some(&checksum(&encode(event)?)) {
             return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
         }
