@@ -83,6 +83,45 @@ impl DirectRequestKind {
     }
 }
 
+/// A FRESH account packet is not proof that the ONE ledger owner appended a
+/// durable source cursor: ingestion may be deferred during drain or the
+/// financial source can be incomplete. Compare the observed native receipt
+/// against the actual persisted cursor; never infer coverage from quality.
+fn native_source_checkpoint_persisted(response: &AgentResponse) -> bool {
+    if response.status != AgentResponseStatus::Completed {
+        return false;
+    }
+    let Some(result) = response.result.as_ref() else {
+        return false;
+    };
+    let receipt = result
+        .pointer("/coherence/history_source_received_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .and_then(|date| u64::try_from(date.timestamp_millis()).ok());
+    let persisted = result
+        .pointer("/reconciliation/exchange_evidence/latest_source_received_at_ms")
+        .and_then(serde_json::Value::as_u64);
+    result
+        .pointer("/coherence/coherent")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && result
+            .pointer("/reconciliation/consistent")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && result
+            .pointer("/reconciliation/source_checkpoint_deferred")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        && result
+            .pointer("/reconciliation/exchange_evidence/latest_source_complete")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && receipt.is_some()
+        && receipt == persisted
+}
+
 fn direct_operation_allowed(
     profile: DirectRuntimeProfile,
     runtime_mode: Option<ExecutionRuntimeMode>,
@@ -423,12 +462,24 @@ async fn run_session(
                 // window even when NO orders occur. Only authenticated native
                 // AccountSummary owns the REST/WS proof and ledger checkpoint.
                 // Never invent missing historical coverage after reconnect.
-                if context.account.is_some()
-                    && context.execution.is_some()
+                let proof_due = if context.account.is_some()
                     && active_mutation.is_none()
                     && source_proof_flight.is_empty()
                     && Instant::now() >= next_source_proof_at
                 {
+                    if let Some(execution) = context.execution {
+                        execution
+                            .strategy_quiet_source_capture_due(
+                                u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default(),
+                            )
+                            .await
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if proof_due {
                     let query_context =
                         ObservationQueryContext::live_with_execution_research_and_session(
                             context.public_ws,
@@ -507,10 +558,7 @@ async fn run_session(
             source_result = source_proof_flight.next(), if !source_proof_flight.is_empty() => {
                 if let Some(result) = source_result {
                     match result {
-                        Ok(response)
-                            if response.status == AgentResponseStatus::Completed
-                                && response.quality == DataQuality::Fresh =>
-                        {
+                        Ok(response) if native_source_checkpoint_persisted(&response) => {
                             next_source_proof_at =
                                 Instant::now() + Duration::from_secs(SOURCE_PROOF_PERIOD_SECONDS);
                         }
@@ -989,6 +1037,45 @@ fn random_token(prefix: &str) -> AgentResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_checkpoint_requires_exact_durable_receipt_not_merely_fresh_packet() {
+        let mut response = AgentResponse {
+            schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
+            request_id: "proof_read_20261020_0001".to_owned(),
+            status: AgentResponseStatus::Completed,
+            generated_at: "2026-10-20T09:40:00Z".to_owned(),
+            quality: DataQuality::Fresh,
+            result_schema: Some("okx.account.summary/v1".to_owned()),
+            result: Some(serde_json::json!({
+                "coherence": {
+                    "coherent": true,
+                    "history_source_received_at": "2026-10-20T09:40:00.000Z"
+                },
+                "reconciliation": {
+                    "consistent": true,
+                    "source_checkpoint_deferred": false,
+                    "exchange_evidence": {
+                        "latest_source_complete": true,
+                        "latest_source_received_at_ms": 1792489200000_u64
+                    }
+                }
+            })),
+            failure: None,
+            warnings: Vec::new(),
+        };
+        assert!(native_source_checkpoint_persisted(&response));
+        response.result.as_mut().unwrap()["reconciliation"]["source_checkpoint_deferred"] =
+            serde_json::json!(true);
+        assert!(!native_source_checkpoint_persisted(&response));
+        response.result.as_mut().unwrap()["reconciliation"]["source_checkpoint_deferred"] =
+            serde_json::json!(false);
+        response.result.as_mut().unwrap()["reconciliation"]["exchange_evidence"]
+            ["latest_source_received_at_ms"] = serde_json::json!(1792489199000_u64);
+        assert!(!native_source_checkpoint_persisted(&response));
+        response.result = None;
+        assert!(!native_source_checkpoint_persisted(&response));
+    }
 
     #[test]
     fn internal_source_checkpoint_cannot_mint_exchange_authority() {
