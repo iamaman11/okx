@@ -105,7 +105,14 @@ fn connect_with_integrity(
                 digest TEXT NOT NULL, bytes BLOB NOT NULL
              ) STRICT;
              CREATE INDEX IF NOT EXISTS idx_ledger_entries_uid
-                ON ledger_entries(uid, updated_at_ms);",
+                ON ledger_entries(uid, updated_at_ms);
+             CREATE TABLE IF NOT EXISTS native_guarded_intents (
+                intent_id TEXT PRIMARY KEY REFERENCES ledger_entries(intent_id),
+                instrument_id TEXT NOT NULL,
+                entry_digest TEXT NOT NULL
+             ) STRICT;
+             CREATE INDEX IF NOT EXISTS idx_native_guard_instrument
+                ON native_guarded_intents(instrument_id, intent_id);",
         )
         .map_err(io)?;
         tx.commit().map_err(io)?;
@@ -204,6 +211,88 @@ pub(super) fn require_finance_read_scope(
 /// reporting as for indexed intent queries. No blank-ledger creation.
 pub(super) fn open_finance_read(path: &Path) -> Result<Connection, ExecutionLedgerError> {
     connect_indexed_read(path)
+}
+
+/// A live guard is a derived projection, never a second reservation
+/// authority. Its membership is defined entirely by the native state
+/// machine. Historical terminal intents without blocking protection or
+/// unfinished reverse continuation are excluded from trading hot reads.
+fn needs_instrument_guard(entry: &ExecutionLedgerEntry) -> bool {
+    let record = &entry.record;
+    !record.state.is_terminal()
+        || record.protection_blocks_new_managed_intent()
+        || record.reverse.as_ref().is_some_and(|link| {
+            link.leg == ReverseLeg::Close
+                && link.continuation == ReverseContinuation::Required
+                && record.state == ExecutionState::Filled
+        })
+}
+
+/// Read only material instrument guards, validating every row against the
+/// authoritative immutable plan + transition record. The guard projection
+/// is also fully verified on cold load before any exchange admission.
+pub(super) fn indexed_instrument_guards(
+    path: &Path,
+    expected_uid: &str,
+    instrument_id: &str,
+) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
+    if instrument_id.is_empty() {
+        return Err(ExecutionLedgerError::Corrupt("missing guard instrument"));
+    }
+    let c = connect_indexed_read(path)?;
+    require_indexed_scope(&c, expected_uid)?;
+    let sql = format!(
+        "SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
+                i.instrument_id,i.requested_action,i.plan_sha256,i.current_state,i.created_at_ms,
+                g.entry_digest
+         FROM native_guarded_intents g
+         JOIN ledger_entries e ON e.intent_id=g.intent_id
+         LEFT JOIN intents i ON i.intent_id=e.intent_id
+         WHERE g.instrument_id=?1 ORDER BY g.intent_id"
+    );
+    let mut stmt = c.prepare(&sql).map_err(io)?;
+    let mut rows = stmt.query(params![instrument_id]).map_err(io)?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().map_err(io)? {
+        let digest: String = row.get(3).map_err(io)?;
+        let guard_digest: String = row.get(10).map_err(io)?;
+        if digest != guard_digest {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native instrument guard digest mismatch",
+            ));
+        }
+        let entry = verified_indexed_entry(row, expected_uid)?;
+        if entry.record.plan.instrument_id != instrument_id || !needs_instrument_guard(&entry) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native instrument guard projection mismatch",
+            ));
+        }
+        result.push(entry);
+    }
+    Ok(result)
+}
+
+/// The authoritative ledger_entries UNIQUE index checks client IDs without
+/// searching all historical intents. The caller retains its account lease.
+pub(super) fn client_order_id_exists(
+    path: &Path,
+    expected_uid: &str,
+    client_order_id: &str,
+) -> Result<bool, ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    require_indexed_scope(&c, expected_uid)?;
+    let prior_uid: Option<String> = c
+        .query_row(
+            "SELECT uid FROM ledger_entries WHERE client_order_id=?1",
+            params![client_order_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(io)?;
+    if prior_uid.as_deref().is_some_and(|uid| uid != expected_uid) {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    Ok(prior_uid.is_some())
 }
 
 /// One exact persisted entry is checked against its BLOB digest, immutable
@@ -492,6 +581,43 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
         return Err(ExecutionLedgerError::Corrupt(
             "SQLite intent projection count mismatch",
         ));
+    }
+    // A live guard must never disappear from the SQL projection after a
+    // crash or tampering: absence could incorrectly admit another intent.
+    // Cold verification walks all authoritative rows once, while hot
+    // admission reads only the small indexed material guard set.
+    {
+        let mut stmt = c
+            .prepare(
+                "SELECT intent_id,instrument_id,entry_digest
+                 FROM native_guarded_intents ORDER BY intent_id",
+            )
+            .map_err(io)?;
+        let mut rows = stmt.query([]).map_err(io)?;
+        let mut expected_guards = entries.iter().filter(|(_, e)| needs_instrument_guard(e));
+        while let Some(row) = rows.next().map_err(io)? {
+            let id: String = row.get(0).map_err(io)?;
+            let instrument: String = row.get(1).map_err(io)?;
+            let digest: String = row.get(2).map_err(io)?;
+            let Some((expected_id, entry)) = expected_guards.next() else {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "extra native instrument guard",
+                ));
+            };
+            if id != *expected_id
+                || instrument != entry.record.plan.instrument_id
+                || digest != checksum(&encode(entry)?)
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "native instrument guard inventory mismatch",
+                ));
+            }
+        }
+        if expected_guards.next().is_some() {
+            return Err(ExecutionLedgerError::Corrupt(
+                "missing native instrument guard",
+            ));
+        }
     }
     // Reconcile all native POST fences against the immutable event chain.
     // There may be legacy imported submissions with no native BEGIN_POST;
@@ -911,6 +1037,26 @@ fn save_snapshot(
                 return Err(ExecutionLedgerError::Corrupt(
                     "SQLite intent projection lost",
                 ));
+            }
+            // Same WAL transaction as the authoritative intent and its
+            // relational plan projection. A terminal historical intent
+            // immediately leaves this active-only indexed inventory.
+            if needs_instrument_guard(e) {
+                tx.execute(
+                    "INSERT INTO native_guarded_intents
+                     (intent_id,instrument_id,entry_digest) VALUES(?1,?2,?3)
+                     ON CONFLICT(intent_id) DO UPDATE SET
+                         instrument_id=excluded.instrument_id,
+                         entry_digest=excluded.entry_digest",
+                    params![id, &e.record.plan.instrument_id, &entry_digest],
+                )
+                .map_err(io)?;
+            } else {
+                tx.execute(
+                    "DELETE FROM native_guarded_intents WHERE intent_id=?1",
+                    params![id],
+                )
+                .map_err(io)?;
             }
             let last: Option<(i64, String)> = tx
                 .query_row(

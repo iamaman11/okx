@@ -3276,9 +3276,11 @@ impl DurableExecutionLedger {
         self.validate_capital_intent(&record, observed_at_ms)?;
         // One ledger is owned by exactly one authenticated exchange UID,
         // even after FLAT or when the previous managed intents are terminal.
-        if self.entries.values().any(|entry| {
-            entry.record.plan.account_uid_fingerprint != record.plan.account_uid_fingerprint
-        }) {
+        if !self.store.sqlite_native
+            && self.entries.values().any(|entry| {
+                entry.record.plan.account_uid_fingerprint != record.plan.account_uid_fingerprint
+            })
+        {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
 
@@ -3296,7 +3298,25 @@ impl DurableExecutionLedger {
             ));
         }
 
-        let busy = if confirmed_coverage {
+        let busy = if self.store.sqlite_native {
+            // Read only current material guards, not decades of completed
+            // intents. The same Rust predicate remains the sole risk rule.
+            sqlite_store::indexed_instrument_guards(
+                &self.store.path,
+                &record.plan.account_uid_fingerprint,
+                &record.plan.instrument_id,
+            )?
+            .iter()
+            .any(|entry| {
+                self.entry_blocks_instrument(
+                    entry,
+                    &record.plan.intent_id,
+                    record.plan.action,
+                    reverse_root_bypass,
+                    confirmed_coverage,
+                )
+            })
+        } else if confirmed_coverage {
             self.instrument_reserved_with_confirmed_coverage(
                 &record.plan.instrument_id,
                 &record.plan.intent_id,
@@ -3316,11 +3336,18 @@ impl DurableExecutionLedger {
             return Err(ExecutionLedgerError::InstrumentBusy);
         }
 
-        if self
-            .entries
-            .values()
-            .any(|entry| entry.record.plan.client_order_id == record.plan.client_order_id)
-        {
+        let duplicate_client_id = if self.store.sqlite_native {
+            sqlite_store::client_order_id_exists(
+                &self.store.path,
+                &record.plan.account_uid_fingerprint,
+                &record.plan.client_order_id,
+            )?
+        } else {
+            self.entries
+                .values()
+                .any(|entry| entry.record.plan.client_order_id == record.plan.client_order_id)
+        };
+        if duplicate_client_id {
             return Err(ExecutionLedgerError::ClientOrderIdCollision);
         }
 
@@ -3360,50 +3387,65 @@ impl DurableExecutionLedger {
         confirmed_coverage: bool,
     ) -> bool {
         self.entries.values().any(|entry| {
-            if entry.record.plan.instrument_id != instrument_id {
-                return false;
-            }
-            if !entry.record.state.is_terminal() {
+            entry.record.plan.instrument_id == instrument_id
+                && self.entry_blocks_instrument(
+                    entry,
+                    incoming_intent_id,
+                    incoming_action,
+                    reverse_root_bypass,
+                    confirmed_coverage,
+                )
+        })
+    }
+
+    fn entry_blocks_instrument(
+        &self,
+        entry: &ExecutionLedgerEntry,
+        incoming_intent_id: &str,
+        incoming_action: ExecutionAction,
+        reverse_root_bypass: Option<&str>,
+        confirmed_coverage: bool,
+    ) -> bool {
+        if !entry.record.state.is_terminal() {
+            return true;
+        }
+        // The ONLY newly permitted reservation is a terminal, fully
+        // filled, actively protected old lot proved under the same
+        // executor lock by exact venue GET + complete OCO inventory +
+        // per-Hedge-side aggregate quantities + final private WS fence.
+        // UNKNOWN, failed, canceled, pending amend/cleanup and reverse
+        // linkage can never borrow that permission.
+        if entry.record.protection_blocks_new_managed_intent()
+            && (incoming_action.is_risk_increasing()
+                || incoming_action == ExecutionAction::Reduce)
+        {
+            let proven_old_lot = confirmed_coverage
+                && matches!(
+                    incoming_action,
+                    ExecutionAction::Add | ExecutionAction::Hedge
+                )
+                && entry.record.state == ExecutionState::Filled
+                && entry.record.active_mutation().is_none()
+                && entry.record.protection.as_ref().is_some_and(|protection| {
+                    protection.status == ProtectiveOrderStatus::Active
+                        && protection.cleanup.is_none()
+                        && protection.size_amend.as_ref().is_none_or(|amend| {
+                            amend.state == ProtectiveSizeAmendState::Confirmed
+                        })
+                });
+            if !proven_old_lot {
                 return true;
             }
-            // The ONLY newly permitted reservation is a terminal, fully
-            // filled, actively protected old lot proved under the same
-            // executor lock by exact venue GET + complete OCO inventory +
-            // per-Hedge-side aggregate quantities + final private WS fence.
-            // UNKNOWN, failed, canceled, pending amend/cleanup and reverse
-            // linkage can never borrow that permission.
-            if entry.record.protection_blocks_new_managed_intent()
-                && (incoming_action.is_risk_increasing()
-                    || incoming_action == ExecutionAction::Reduce)
-            {
-                let proven_old_lot = confirmed_coverage
-                    && matches!(
-                        incoming_action,
-                        ExecutionAction::Add | ExecutionAction::Hedge
-                    )
-                    && entry.record.state == ExecutionState::Filled
-                    && entry.record.active_mutation().is_none()
-                    && entry.record.protection.as_ref().is_some_and(|protection| {
-                        protection.status == ProtectiveOrderStatus::Active
-                            && protection.cleanup.is_none()
-                            && protection.size_amend.as_ref().is_none_or(|amend| {
-                                amend.state == ProtectiveSizeAmendState::Confirmed
-                            })
-                    });
-                if !proven_old_lot {
-                    return true;
-                }
-            }
-            let Some(reverse) = entry.record.reverse.as_ref() else {
-                return false;
-            };
-            reverse.leg == ReverseLeg::Close
-                && reverse.continuation == ReverseContinuation::Required
-                && entry.record.state == ExecutionState::Filled
-                && !self.entries.contains_key(&reverse.open_intent_id)
-                && !(reverse_root_bypass == Some(reverse.root_intent_id.as_str())
-                    && incoming_intent_id == reverse.open_intent_id)
-        })
+        }
+        let Some(reverse) = entry.record.reverse.as_ref() else {
+            return false;
+        };
+        reverse.leg == ReverseLeg::Close
+            && reverse.continuation == ReverseContinuation::Required
+            && entry.record.state == ExecutionState::Filled
+            && !self.entries.contains_key(&reverse.open_intent_id)
+            && !(reverse_root_bypass == Some(reverse.root_intent_id.as_str())
+                && incoming_intent_id == reverse.open_intent_id)
     }
 
     pub fn begin_submission(
