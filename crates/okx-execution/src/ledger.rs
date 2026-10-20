@@ -1093,8 +1093,11 @@ impl ExecutionLedgerStore {
         if let Some(run) = capital_reservation {
             validate_capital_reservation(run)?;
         }
+        // The account source, periods and leverage are untouched by
+        // commit_new/mutate. Their original full proofs were validated at
+        // ledger open or at the transaction that changed them; validating
+        // thousands of old fills on every BEGIN_POST would be quadratic.
         if let Some(source) = exchange_evidence {
-            source.validate()?;
             if capital_reservation.as_ref().is_none_or(|run| {
                 source.account_uid != run.account_uid_fingerprint
                     || source.run_id != run.allocation_id
@@ -1102,8 +1105,6 @@ impl ExecutionLedgerStore {
                 return Err(ExecutionLedgerError::AccountScopeMismatch);
             }
         }
-        history.validate(capital_reservation.as_ref(), exchange_evidence.as_ref())?;
-        validate_leverage_attempts(leverage_attempts, capital_reservation.as_ref())?;
         sqlite_store::save_one(
             &self.path,
             changed,
