@@ -467,16 +467,14 @@ pub fn assess_persisted_financial_period_with_verified_source(
     if e.cursors.is_empty() {
         reasons.insert("source_coverage_missing");
     }
-// Source coverage is measured by authenticated receipt times, NOT the
+    // Source coverage is measured by authenticated receipt times, NOT the
     // venue balance/position last-change uTime (which can be days old).
     let current_as_of =
         crate::exchange_evidence::source_receipt_ms(&facts.summary.source_received_at);
     let newest = e
         .cursors
         .values()
-        .filter_map(|c| {
-            crate::exchange_evidence::source_receipt_ms(&c.source_received_at)
-        })
+        .filter_map(|c| crate::exchange_evidence::source_receipt_ms(&c.source_received_at))
         .max();
     let coalesced_source_attested = current_source_captured
         && coherent
@@ -488,7 +486,7 @@ pub fn assess_persisted_financial_period_with_verified_source(
     {
         reasons.insert("financial_source_asof_not_current");
     }
-// Preserve all sealed cursor bytes. If ANY legacy receipt is malformed,
+    // Preserve all sealed cursor bytes. If ANY legacy receipt is malformed,
     // coverage stays unproven; no last-change-time fallback is permitted.
     let cursor_receipts = e
         .cursors
