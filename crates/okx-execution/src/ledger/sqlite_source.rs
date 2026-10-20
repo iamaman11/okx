@@ -56,10 +56,12 @@ fn new_source_keys<'a, T: serde::Serialize>(
     current: &'a BTreeMap<String, T>,
 ) -> Result<Vec<&'a str>, ExecutionLedgerError> {
     let query = match kind {
-        IndexedSourceKind::Events =>
-            "SELECT event_key,payload_digest FROM native_source_events WHERE run_id=?1 ORDER BY event_key",
-        IndexedSourceKind::Cursors =>
-            "SELECT cursor_key,payload_digest FROM native_source_cursors WHERE run_id=?1 ORDER BY cursor_key",
+        IndexedSourceKind::Events => {
+            "SELECT event_key,payload_digest FROM native_source_events WHERE run_id=?1 ORDER BY event_key"
+        }
+        IndexedSourceKind::Cursors => {
+            "SELECT cursor_key,payload_digest FROM native_source_cursors WHERE run_id=?1 ORDER BY cursor_key"
+        }
     };
     let mut stmt = tx.prepare(query).map_err(io)?;
     let mut rows = stmt.query(params![run_id]).map_err(io)?;
