@@ -3416,8 +3416,7 @@ impl DurableExecutionLedger {
         // UNKNOWN, failed, canceled, pending amend/cleanup and reverse
         // linkage can never borrow that permission.
         if entry.record.protection_blocks_new_managed_intent()
-            && (incoming_action.is_risk_increasing()
-                || incoming_action == ExecutionAction::Reduce)
+            && (incoming_action.is_risk_increasing() || incoming_action == ExecutionAction::Reduce)
         {
             let proven_old_lot = confirmed_coverage
                 && matches!(
@@ -3429,9 +3428,10 @@ impl DurableExecutionLedger {
                 && entry.record.protection.as_ref().is_some_and(|protection| {
                     protection.status == ProtectiveOrderStatus::Active
                         && protection.cleanup.is_none()
-                        && protection.size_amend.as_ref().is_none_or(|amend| {
-                            amend.state == ProtectiveSizeAmendState::Confirmed
-                        })
+                        && protection
+                            .size_amend
+                            .as_ref()
+                            .is_none_or(|amend| amend.state == ProtectiveSizeAmendState::Confirmed)
                 });
             if !proven_old_lot {
                 return true;

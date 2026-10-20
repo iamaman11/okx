@@ -241,16 +241,14 @@ pub(super) fn indexed_instrument_guards(
     }
     let c = connect_indexed_read(path)?;
     require_indexed_scope(&c, expected_uid)?;
-    let sql = format!(
-        "SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
+    let sql = "SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
                 i.instrument_id,i.requested_action,i.plan_sha256,i.current_state,i.created_at_ms,
                 g.entry_digest
          FROM native_guarded_intents g
          JOIN ledger_entries e ON e.intent_id=g.intent_id
          LEFT JOIN intents i ON i.intent_id=e.intent_id
-         WHERE g.instrument_id=?1 ORDER BY g.intent_id"
-    );
-    let mut stmt = c.prepare(&sql).map_err(io)?;
+         WHERE g.instrument_id=?1 ORDER BY g.intent_id";
+    let mut stmt = c.prepare(sql).map_err(io)?;
     let mut rows = stmt.query(params![instrument_id]).map_err(io)?;
     let mut result = Vec::new();
     while let Some(row) = rows.next().map_err(io)? {
@@ -1920,6 +1918,89 @@ mod tests {
                 .indexed_intent(&"a".repeat(64), "indexed_real_intent_0000")
                 .is_err()
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_guard_index_keeps_only_material_intents_and_cannot_lose_one() {
+        let root = test_root("active-guard-inventory");
+        let db = root.join("account.sqlite");
+        let uid = "a".repeat(64);
+        let mut entries = BTreeMap::new();
+        for index in 0..64_u64 {
+            let id = format!("guarded_intent_{index:06}");
+            let plan = ExecutionPlan {
+                schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+                intent_id: id.clone(),
+                client_order_id: derive_client_order_id(&id),
+                reference_generation: "sha256:reference".to_owned(),
+                account_generation: "sha256:account".to_owned(),
+                account_uid_fingerprint: uid.clone(),
+                instrument_id: "BTC-USDT-SWAP".to_owned(),
+                trade_mode: crate::TradeMode::Cross,
+                side: crate::OrderSide::Buy,
+                position_side: PositionSide::Long,
+                action: ExecutionAction::Open,
+                order_type: crate::OrderType::Limit,
+                size: "1".to_owned(),
+                price: "0.1".to_owned(),
+                open_risk: None,
+                risk_binding: None,
+            };
+            let mut record = ExecutionRecord::new(plan);
+            if index < 63 {
+                record.abandon_prepared().unwrap();
+            }
+            entries.insert(
+                id,
+                ExecutionLedgerEntry {
+                    record,
+                    created_at_ms: index + 1000,
+                    updated_at_ms: index + 1100,
+                },
+            );
+        }
+        save(
+            &db,
+            &entries,
+            None,
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
+        let store = ExecutionLedgerStore::sqlite_at(&db);
+        let identity = SqliteAccountIdentity {
+            venue: LedgerVenue::Okx,
+            environment: LedgerEnvironment::Demo,
+            account_id: "demo".to_owned(),
+            uid_fingerprint: uid.clone(),
+            bound_at_ms: 2000,
+        };
+        store.bind_native_account_identity(&identity).unwrap();
+        let guards = indexed_instrument_guards(&db, &uid, "BTC-USDT-SWAP").unwrap();
+        assert_eq!(guards.len(), 1);
+        assert_eq!(guards[0].record.plan.intent_id, "guarded_intent_000063");
+        assert!(
+            client_order_id_exists(&db, &uid, &derive_client_order_id("guarded_intent_000001"))
+                .unwrap()
+        );
+        assert!(
+            !client_order_id_exists(&db, &uid, &derive_client_order_id("guarded_intent_new"))
+                .unwrap()
+        );
+        assert_eq!(load(&db, usize::MAX).unwrap().0, entries);
+        let c = Connection::open(&db).unwrap();
+        c.execute(
+            "DELETE FROM native_guarded_intents WHERE intent_id='guarded_intent_000063'",
+            [],
+        )
+        .unwrap();
+        drop(c);
+        // Missing an active guard can otherwise cause a duplicate order.
+        // Cold ownership checks MUST fail rather than trust an empty index.
+        assert!(load(&db, usize::MAX).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
