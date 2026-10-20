@@ -62,6 +62,17 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
         if mode != "wal" || sync != 2 {
             return Err(ExecutionLedgerError::Corrupt("SQLite WAL/FULL unavailable"));
         }
+        let current_version: i64 = connection
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(io)?;
+        if current_version != 0 && current_version != 1 {
+            return Err(ExecutionLedgerError::Corrupt("unsupported future SQLite schema"));
+        }
+        if current_version == 0 {
+            connection
+                .execute_batch(include_str!("../../schema/account-ledger-v1.sql"))
+                .map_err(io)?;
+        }
         connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS ledger_state (
@@ -75,8 +86,7 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
                 digest TEXT NOT NULL, bytes BLOB NOT NULL
              ) STRICT;
              CREATE INDEX IF NOT EXISTS idx_ledger_entries_uid
-                ON ledger_entries(uid, updated_at_ms);
-             PRAGMA user_version=1;",
+                ON ledger_entries(uid, updated_at_ms);",
             )
             .map_err(io)?;
     }
@@ -100,15 +110,10 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
 }
 
 pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
+    // Only explicit staging creation may introduce an empty SQLite file.
+    // A missing live account ledger can never silently reopen as an empty one.
     if !path.exists() {
-        return Ok((
-            BTreeMap::new(),
-            None,
-            None,
-            None,
-            StrategyPeriodHistory::default(),
-            Vec::new(),
-        ));
+        return Err(ExecutionLedgerError::Corrupt("SQLite account ledger missing"));
     }
     let c = connect(path, false)?;
     let meta: Option<(String, String, Vec<u8>)> = c
@@ -150,6 +155,28 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
         known_uid = Some(uid);
         entries.insert(id, entry);
     }
+
+    // A cold read proves that the indexed SQL projection is not stale or
+    // silently incomplete relative to the authoritatively stored intents.
+    let count: i64 = c.query_row("SELECT COUNT(*) FROM intents",[],|row|row.get(0)).map_err(io)?;
+    if count != entries.len() as i64 {
+        return Err(ExecutionLedgerError::Corrupt("SQLite intent projection count mismatch"));
+    }
+    for (intent_id, entry) in &entries {
+        let projected: (String,String,String,String,i64) = c.query_row(
+            "SELECT instrument_id,requested_action,plan_sha256,current_state,created_at_ms
+             FROM intents WHERE intent_id=?1", params![intent_id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))
+        ).map_err(io)?;
+        let expected_plan_hash = checksum(&encode(&entry.record.plan)?);
+        if projected.0 != entry.record.plan.instrument_id
+            || projected.1 != format!("{:?}",entry.record.plan.action)
+            || projected.2 != expected_plan_hash
+            || projected.3 != format!("{:?}",entry.record.state)
+            || i64::try_from(entry.created_at_ms).ok() != Some(projected.4) {
+            return Err(ExecutionLedgerError::Corrupt("SQLite intent projection mismatch"));
+        }
+    }
     let state = if let Some((uid, sha, bytes)) = meta {
         if checksum(&bytes) != sha || known_uid.as_deref().is_some_and(|v| v != uid) {
             return Err(ExecutionLedgerError::Corrupt(
@@ -178,14 +205,7 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
     } else if !entries.is_empty() {
         return Err(ExecutionLedgerError::Corrupt("SQLite orphaned entries"));
     } else {
-        StoredState {
-            version: 1,
-            stop: None,
-            reservation: None,
-            source: None,
-            periods: StrategyPeriodHistory::default(),
-            leverage: Vec::new(),
-        }
+        return Err(ExecutionLedgerError::Corrupt("SQLite account state missing"));
     };
     if let Some(s) = &state.stop {
         validate_risk_stop(s)?;
@@ -242,6 +262,14 @@ pub(super) fn save(
         .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |r| r.get(0))
         .optional()
         .map_err(io)?;
+    if uid.is_empty() && (!entries.is_empty() || reservation.is_some() || source.is_some()) {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    if entries.values().any(|e|e.record.plan.account_uid_fingerprint != uid)
+        || reservation.is_some_and(|r|r.account_uid_fingerprint != uid)
+        || source.is_some_and(|e|e.account_uid != uid) {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
     if old_uid
         .as_deref()
         .is_some_and(|u| !u.is_empty() && u != uid)
@@ -294,30 +322,72 @@ pub(super) fn save(
             )
             .map_err(io)?;
         for (id, e) in entries {
-            let existing: Option<(String, String)> = tx
+            let existing: Option<(String, String, String, i64)> = tx
                 .query_row(
-                    "SELECT client_order_id,uid FROM ledger_entries WHERE intent_id=?1",
+                    "SELECT client_order_id,uid,digest,updated_at_ms FROM ledger_entries WHERE intent_id=?1",
                     params![id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()
                 .map_err(io)?;
-            if existing.as_ref().is_some_and(|(client, uid)| {
+            if existing.as_ref().is_some_and(|(client, existing_uid, _, _)| {
                 client != &e.record.plan.client_order_id
-                    || uid != &e.record.plan.account_uid_fingerprint
+                    || existing_uid != &e.record.plan.account_uid_fingerprint
             }) {
                 return Err(ExecutionLedgerError::IntentConflict);
             }
             let bytes = encode(e)?;
-            q.execute(params![
+            let entry_digest = checksum(&bytes);
+            if existing.as_ref().is_some_and(|(_, _, prior_digest, _)| prior_digest == &entry_digest) {
+                continue;
+            }
+            if existing.as_ref().is_some_and(|(_, _, _, prior_time)| {
+                i64::try_from(e.updated_at_ms).ok().is_none_or(|t| t <= *prior_time)
+            }) {
+                return Err(ExecutionLedgerError::InvalidTimestamp);
+            }
+            let written = q.execute(params![
                 id,
                 &e.record.plan.client_order_id,
                 &e.record.plan.account_uid_fingerprint,
                 e.updated_at_ms,
-                checksum(&bytes),
+                &entry_digest,
                 bytes
-            ])
-            .map_err(io)?;
+            ]).map_err(io)?;
+            if written != 1 {
+                return Err(ExecutionLedgerError::Corrupt("SQLite intent transition lost"));
+            }
+            let plan_hash = checksum(&encode(&e.record.plan)?);
+            let stage = format!("{:?}", e.record.state);
+            let action = format!("{:?}", e.record.plan.action);
+            let projection = tx.execute(
+                "INSERT INTO intents
+                   (intent_id,epoch_id,decision_id,instrument_id,requested_action,plan_sha256,current_state,created_at_ms)
+                 VALUES (?1,NULL,NULL,?2,?3,?4,?5,?6)
+                 ON CONFLICT(intent_id) DO UPDATE SET current_state=excluded.current_state",
+                params![id, &e.record.plan.instrument_id, action, plan_hash, stage, e.created_at_ms],
+            ).map_err(io)?;
+            if projection != 1 {
+                return Err(ExecutionLedgerError::Corrupt("SQLite intent projection lost"));
+            }
+            let last: Option<(i64,String)> = tx.query_row(
+                "SELECT seq,event_sha256 FROM domain_events ORDER BY seq DESC LIMIT 1",
+                [], |row| Ok((row.get(0)?, row.get(1)?))
+            ).optional().map_err(io)?;
+            let event_sequence = last.as_ref().map_or(1, |(seq, _)| seq + 1);
+            let event_id = format!("sqlite-intent-{event_sequence}");
+            let prev_hash = last.as_ref().map(|(_,hash)| hash.as_str());
+            let event_hash = checksum(&encode(&(
+                "okx.sqlite.intent-transition/v1",prev_hash.as_ref(),&event_id,id,
+                &entry_digest,e.updated_at_ms
+            ))?);
+            tx.execute(
+                "INSERT INTO domain_events
+                 (event_id,event_type,event_version,subject_kind,subject_id,
+                  effective_at_ms,recorded_at_ms,previous_event_sha256,event_sha256)
+                 VALUES (?1,'INTENT_TRANSITION',1,'INTENT',?2,?3,?3,?4,?5)",
+                params![event_id,id,e.updated_at_ms,prev_hash,event_hash]
+            ).map_err(io)?;
         }
     }
     tx.commit().map_err(io)?;
