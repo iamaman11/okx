@@ -333,6 +333,36 @@ pub(super) fn save(
     periods: &StrategyPeriodHistory,
     leverage: &[LeverageChangeAttempt],
 ) -> Result<(), ExecutionLedgerError> {
+    save_snapshot(path, entries, stop, reservation, source, periods, leverage, true)
+}
+
+/// A single-intent mutation persists only this record and its projections.
+/// Other account intents remain immutable in this transaction. Exact identity,
+/// durable POST fencing, and all stop/source proof are still enforced.
+pub(super) fn save_one(
+    path: &Path,
+    entry: &ExecutionLedgerEntry,
+    stop: Option<&ExecutionRiskStop>,
+    reservation: Option<&StrategyCapitalReservation>,
+    source: Option<&DurableExchangeEvidence>,
+    periods: &StrategyPeriodHistory,
+    leverage: &[LeverageChangeAttempt],
+) -> Result<(), ExecutionLedgerError> {
+    let id=entry.record.plan.intent_id.clone();
+    let changed=BTreeMap::from([(id, entry.clone())]);
+    save_snapshot(path, &changed, stop, reservation, source, periods, leverage, false)
+}
+
+fn save_snapshot(
+    path: &Path,
+    entries: &BTreeMap<String, ExecutionLedgerEntry>,
+    stop: Option<&ExecutionRiskStop>,
+    reservation: Option<&StrategyCapitalReservation>,
+    source: Option<&DurableExchangeEvidence>,
+    periods: &StrategyPeriodHistory,
+    leverage: &[LeverageChangeAttempt],
+    complete_snapshot: bool,
+) -> Result<(), ExecutionLedgerError> {
     let mut c = connect(path, true)?;
     let tx = c
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -562,7 +592,7 @@ pub(super) fn save(
     let persisted: i64 = tx
         .query_row("SELECT COUNT(*) FROM ledger_entries", [], |row| row.get(0))
         .map_err(io)?;
-    if usize::try_from(persisted).ok() != Some(entries.len()) {
+    if complete_snapshot && usize::try_from(persisted).ok() != Some(entries.len()) {
         return Err(ExecutionLedgerError::Corrupt(
             "SQLite historical intent deletion",
         ));

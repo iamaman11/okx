@@ -1050,6 +1050,45 @@ impl ExecutionLedgerStore {
         ))
     }
 
+    /// Fast native path for an individual intent. The current in-memory
+    /// ledger still owns the state machine and rollback; SQLite commits only
+    /// one changed record. JSON v14 continues through the full legacy save.
+    fn save_changed_intent(
+        &self,
+        changed: &ExecutionLedgerEntry,
+        all_entries: &BTreeMap<String, ExecutionLedgerEntry>,
+        risk_stop: Option<&ExecutionRiskStop>,
+        capital_reservation: Option<&StrategyCapitalReservation>,
+        exchange_evidence: Option<&DurableExchangeEvidence>,
+        history: &StrategyPeriodHistory,
+        leverage_attempts: &[LeverageChangeAttempt],
+    ) -> Result<(), ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return self.save(all_entries, risk_stop, capital_reservation,
+                exchange_evidence, history, leverage_attempts);
+        }
+        if all_entries.get(&changed.record.plan.intent_id) != Some(changed) {
+            return Err(ExecutionLedgerError::IntentConflict);
+        }
+        validate_entry(changed)?;
+        validate_strategy_run_binding(changed, capital_reservation,
+            &history.archived_runs, &history.unverified_runs)?;
+        if let Some(stop)=risk_stop { validate_risk_stop(stop)?; }
+        if let Some(run)=capital_reservation { validate_capital_reservation(run)?; }
+        if let Some(source)=exchange_evidence {
+            source.validate()?;
+            if capital_reservation.is_none_or(|run|
+                source.account_uid != run.account_uid_fingerprint
+                || source.run_id != run.allocation_id) {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+        }
+        history.validate(capital_reservation,exchange_evidence)?;
+        validate_leverage_attempts(leverage_attempts,capital_reservation)?;
+        sqlite_store::save_one(&self.path, changed, risk_stop,capital_reservation,
+            exchange_evidence,history,leverage_attempts)
+    }
+
     fn save(
         &self,
         entries: &BTreeMap<String, ExecutionLedgerEntry>,
@@ -3143,8 +3182,9 @@ impl DurableExecutionLedger {
         intent_id: String,
         entry: ExecutionLedgerEntry,
     ) -> Result<(), ExecutionLedgerError> {
-        self.entries.insert(intent_id.clone(), entry);
-        if let Err(error) = self.store.save(
+        self.entries.insert(intent_id.clone(), entry.clone());
+        if let Err(error) = self.store.save_changed_intent(
+            &entry,
             &self.entries,
             self.risk_stop.as_ref(),
             self.capital_reservation.as_ref(),
@@ -3185,7 +3225,9 @@ impl DurableExecutionLedger {
             validate_entry(entry)?;
         }
 
-        if let Err(error) = self.store.save(
+        let changed = self.entries.get(intent_id).expect("mutated entry exists").clone();
+        if let Err(error) = self.store.save_changed_intent(
+            &changed,
             &self.entries,
             self.risk_stop.as_ref(),
             self.capital_reservation.as_ref(),
