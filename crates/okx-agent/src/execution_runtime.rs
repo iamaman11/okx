@@ -684,7 +684,7 @@ impl ExecutionRuntime {
             run.started_at_ms,
             ledger
                 .exchange_evidence_summary()
-                .and_then(|source| source.latest_source_asof_ms),
+                .and_then(|source| source.latest_source_received_at_ms),
             now_ms,
         )
     }
