@@ -12,21 +12,21 @@ struct StoredState {
     version: u32,
     stop: Option<ExecutionRiskStop>,
     reservation: Option<StrategyCapitalReservation>,
-    source: Option<DurableExchangeEvidence>,
+    source_run_id: Option<String>,
     periods: StrategyPeriodHistory,
     leverage: Vec<LeverageChangeAttempt>,
 }
 
-fn io(e: impl std::error::Error + Send + Sync + 'static) -> ExecutionLedgerError {
+pub(super) fn io(e: impl std::error::Error + Send + Sync + 'static) -> ExecutionLedgerError {
     ExecutionLedgerError::Io(std::io::Error::other(e))
 }
-fn encode<T: Serialize>(x: &T) -> Result<Vec<u8>, ExecutionLedgerError> {
+pub(super) fn encode<T: Serialize>(x: &T) -> Result<Vec<u8>, ExecutionLedgerError> {
     rmp_serde::to_vec_named(x).map_err(io)
 }
-fn decode<T: DeserializeOwned>(b: &[u8]) -> Result<T, ExecutionLedgerError> {
+pub(super) fn decode<T: DeserializeOwned>(b: &[u8]) -> Result<T, ExecutionLedgerError> {
     rmp_serde::from_slice(b).map_err(io)
 }
-fn checksum(b: &[u8]) -> String {
+pub(super) fn checksum(b: &[u8]) -> String {
     format!("{:x}", Sha256::digest(b))
 }
 
@@ -75,6 +75,9 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
                 .execute_batch(include_str!("../../schema/account-ledger-v1.sql"))
                 .map_err(io)?;
         }
+        connection
+            .execute_batch(super::sqlite_source::TABLES)
+            .map_err(io)?;
         connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS ledger_state (
@@ -216,7 +219,6 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
                     .as_ref()
                     .map(|r| r.account_uid_fingerprint.as_str())
             })
-            .or_else(|| s.source.as_ref().map(|e| e.account_uid.as_str()))
             .unwrap_or("");
         if uid != expected_uid {
             return Err(ExecutionLedgerError::Corrupt(
@@ -237,12 +239,14 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
     if let Some(r) = &state.reservation {
         validate_capital_reservation(r)?;
     }
-    if let Some(e) = &state.source {
-        e.validate()?;
-    }
+    let source = state.source_run_id.as_deref().map(|run_id|
+        super::sqlite_source::read(&c, run_id, known_uid.as_deref()
+            .or_else(|| state.reservation.as_ref().map(|r|r.account_uid_fingerprint.as_str()))
+            .unwrap_or(""))
+    ).transpose()?;
     state
         .periods
-        .validate(state.reservation.as_ref(), state.source.as_ref())?;
+        .validate(state.reservation.as_ref(), source.as_ref())?;
     validate_leverage_attempts(&state.leverage, state.reservation.as_ref())?;
     for e in entries.values() {
         validate_strategy_run_binding(
@@ -256,7 +260,7 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
         entries,
         state.stop,
         state.reservation,
-        state.source,
+        source,
         state.periods,
         state.leverage,
     ))
@@ -307,10 +311,13 @@ pub(super) fn save(
         version: 1,
         stop: stop.cloned(),
         reservation: reservation.cloned(),
-        source: source.cloned(),
+        source_run_id: source.map(|s|s.run_id.clone()),
         periods: periods.clone(),
         leverage: leverage.to_vec(),
     })?;
+    if let Some(evidence) = source {
+        super::sqlite_source::persist(&tx,evidence)?;
+    }
     tx.execute(
         "INSERT INTO ledger_state VALUES(1,1,?1,?2,?3)
          ON CONFLICT(key) DO UPDATE SET uid=excluded.uid,
@@ -451,7 +458,7 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
             r.get(0)
         })
         .map_err(io)?;
-    let (records, stop, _capital, _source, periods, _leverage) =
+    let (records, stop, _capital, source, periods, _leverage) =
         load(path, MAX_EXECUTION_LEDGER_RECORDS)?;
     let n: i64 = c
         .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
@@ -464,6 +471,9 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
     let mut owner_digest = Sha256::new();
     owner_digest.update(b"okx.sqlite.ledger/v1");
     owner_digest.update(digest.as_bytes());
+    if let Some(source) = &source {
+        owner_digest.update(source.checksum_sha256.as_bytes());
+    }
     for (id, entry) in &records {
         let payload = encode(entry)?;
         owner_digest.update((id.len() as u64).to_le_bytes());

@@ -30,6 +30,7 @@ use crate::{
     model::{valid_intent_id, valid_mutation_id},
 };
 
+mod sqlite_source;
 mod sqlite_store;
 
 pub const EXECUTION_LEDGER_SCHEMA_V1: &str = "okx.execution-ledger/v1";
