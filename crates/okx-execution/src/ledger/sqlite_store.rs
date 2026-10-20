@@ -2051,9 +2051,7 @@ mod tests {
         c.execute("UPDATE ledger_state SET digest='forged' WHERE key=1", [])
             .unwrap();
         drop(c);
-        assert!(
-            super::sqlite_finance::finance_window(&p, "uid-test-one", 1, 100_000).is_err()
-        );
+        assert!(super::sqlite_finance::finance_window(&p, "uid-test-one", 1, 100_000).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
