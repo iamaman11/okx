@@ -1614,6 +1614,7 @@ mod tests {
             latest_source_complete: true,
             oldest_source_asof_ms: Some(100),
             latest_source_asof_ms: Some(200),
+            latest_source_received_at_ms: Some(200),
             largest_persisted_gap_ms: Some(100),
             source_gap_over_two_hours: false,
             remaining_source_cursors: 100,
