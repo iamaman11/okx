@@ -704,9 +704,9 @@ impl ExecutionLedgerStore {
             source.prepare_sqlite_staging(&native)?;
         }
         let (uid, origin) = sqlite_store::read_staging_origin(&native)?;
-        if uid != expected_uid || origin != expected_v14_sha256
-            || format!("{:x}", Sha256::digest(fs::read(source.path())?))
-                != expected_v14_sha256
+        if uid != expected_uid
+            || origin != expected_v14_sha256
+            || format!("{:x}", Sha256::digest(fs::read(source.path())?)) != expected_v14_sha256
         {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }

@@ -1226,12 +1226,10 @@ mod tests {
                 .is_err()
         );
         assert!(
-            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &"0".repeat(64))
-                .is_err()
+            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &"0".repeat(64)).is_err()
         );
         assert!(!root.join("execution-ledger.owner").exists());
-        let chosen =
-            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).unwrap();
+        let chosen = ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).unwrap();
         assert_eq!(chosen.path(), sqlite.as_path());
         assert_eq!(
             chosen.attest_storage().unwrap().integrity,
