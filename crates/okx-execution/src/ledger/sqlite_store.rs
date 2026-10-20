@@ -1173,8 +1173,12 @@ mod tests {
         let sealed = ExecutionLedgerStore::at(root.join("execution-ledger.v14.sealed"));
         let name = "archived_run_integrity_000001";
         assert_eq!(
-            active.archive_path(ArchivedRunKind::Finalized, name).unwrap(),
-            sealed.archive_path(ArchivedRunKind::Finalized, name).unwrap()
+            active
+                .archive_path(ArchivedRunKind::Finalized, name)
+                .unwrap(),
+            sealed
+                .archive_path(ArchivedRunKind::Finalized, name)
+                .unwrap()
         );
     }
 
@@ -1368,14 +1372,16 @@ mod tests {
             started_at_ms: 1,
         };
         let legacy = ExecutionLedgerStore::at(&v14);
-        legacy.save(
-            &BTreeMap::new(),
-            None,
-            Some(&capital),
-            None,
-            &StrategyPeriodHistory::default(),
-            &[],
-        ).unwrap();
+        legacy
+            .save(
+                &BTreeMap::new(),
+                None,
+                Some(&capital),
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
+            )
+            .unwrap();
         let digest = checksum(&std::fs::read(&v14).unwrap());
         legacy.prepare_sqlite_staging(&sqlite).unwrap();
         // Crash after retiring the old writer but before receipt publication.
@@ -1387,13 +1393,25 @@ mod tests {
         assert!(sealed.exists());
         assert_eq!(
             ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest)
-                .unwrap().path(),
+                .unwrap()
+                .path(),
             sqlite.as_path()
         );
         // A resurrected legacy writer is never accepted.
         std::fs::copy(&sealed, &v14).unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
         assert!(ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_writer_lease_excludes_concurrent_process_owners() {
+        let root = test_root("writer-lease");
+        let first = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
+        assert!(ExecutionLedgerStore::acquire_writer_lease(&root).is_err());
+        drop(first);
+        let second = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
+        drop(second);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -474,6 +474,9 @@ pub struct ExecutionRuntime {
     executor_account: AccountApi,
     public_data: PublicDataApi,
     executor: Mutex<OrderExecutor<TradeApi>>,
+    // Held for the full lifetime, including read-only source checkpoints.
+    // CONTROL offline migration acquires the same cross-process file lock.
+    _writer_lease: std::fs::File,
 }
 
 impl ExecutionRuntime {
@@ -558,6 +561,7 @@ impl ExecutionRuntime {
         let executor_clock = rest.clone();
         let executor_account = AccountApi::new(rest.clone());
         let trade = TradeApi::new(rest);
+        let writer_lease = ExecutionLedgerStore::acquire_writer_lease(root)?;
         let ledger = DurableExecutionLedger::open(
             // The existing Windows owner already supplies disjoint roots:
             // Demo C:\okx-runtime\demo and Production C:\okx-runtime.
@@ -573,6 +577,7 @@ impl ExecutionRuntime {
             executor_account,
             public_data,
             executor: Mutex::new(OrderExecutor::new(ledger, trade)),
+            _writer_lease: writer_lease,
         })
     }
 

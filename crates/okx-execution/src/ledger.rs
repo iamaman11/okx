@@ -511,7 +511,7 @@ impl ExecutionLedgerStore {
     /// moving it to a sealed proof before publishing the SQLite owner.
     /// Any crash between those steps blocks Agent boot until exact recovery.
     /// This is a storage transition, never a trading permission.
-    pub fn publish_verified_sqlite_owner(
+    fn publish_verified_sqlite_owner(
         root: &Path,
         expected_uid: &str,
         expected_v14_sha256: &str,
@@ -621,6 +621,20 @@ impl ExecutionLedgerStore {
         Self::select_published_owner(root)
     }
 
+    /// Exclusive filesystem lease shared by the live runtime and the native
+    /// offline cutover. Unlike in-process mutexes this excludes a second
+    /// process even if it starts outside the current Windows Job.
+    pub fn acquire_writer_lease(root: &Path) -> Result<File, ExecutionLedgerError> {
+        fs::create_dir_all(root)?;
+        let lease = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(root.join("execution-ledger.writer-lock"))?;
+        lease.try_lock()?;
+        Ok(lease)
+    }
+
     /// Complete an offline cutover or resume an interrupted exact cutover.
     /// This method must only be called by the stopped-Job CONTROL owner.
     /// No old database is overwritten, no exchange mutation is performed.
@@ -629,13 +643,10 @@ impl ExecutionLedgerStore {
         expected_uid: &str,
         expected_v14_sha256: &str,
     ) -> Result<Self, ExecutionLedgerError> {
+        let _writer_lease = Self::acquire_writer_lease(root)?;
         let receipt = root.join("execution-ledger.owner");
         if receipt.try_exists()? {
-            return Self::publish_verified_sqlite_owner(
-                root,
-                expected_uid,
-                expected_v14_sha256,
-            );
+            return Self::publish_verified_sqlite_owner(root, expected_uid, expected_v14_sha256);
         }
         let original = root.join("execution-ledger.json");
         let sealed = root.join("execution-ledger.v14.sealed");
