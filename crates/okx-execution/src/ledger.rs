@@ -2451,6 +2451,10 @@ impl DurableExecutionLedger {
         require_timestamp(observed_at_ms)?;
         validate_plan_identity(&record.plan)?;
         validate_reverse_link(&record)?;
+        // PREPARED is local and unsent, but an active durable STOP or a
+        // finalized strategy period still forbids introducing new risk.
+        // Source-expensive pre-POST verification is a separate submit gate.
+        self.require_new_risk_allowed(record.plan.action)?;
         // Bind from the single trusted ledger owner, never from ChatGPT/plan.
         // A CLOSE has no proven lot owner yet and MUST remain unattributed.
         if record.plan.action.is_risk_increasing()
