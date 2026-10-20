@@ -1076,6 +1076,7 @@ mod tests {
         legacy.save(&BTreeMap::new(),None,None,None,
             &StrategyPeriodHistory::default(),&[]).unwrap();
         let witness_sha=checksum(&std::fs::read(&v14).unwrap());
+        let uid="a".repeat(64);
         assert_eq!(
             ExecutionLedgerStore::select_published_owner(&root).unwrap().path(),
             v14.as_path()
@@ -1083,7 +1084,7 @@ mod tests {
         let capital=StrategyCapitalReservation {
             schema:STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
             allocation_id:"sqlite_owner_test_000001".to_owned(),
-            account_uid_fingerprint:"uid-test-one".to_owned(),
+            account_uid_fingerprint:uid.clone(),
             origin_schema:"test/v1".to_owned(),
             origin_version:"v1".to_owned(),
             mandate_version:"1".to_owned(),
@@ -1095,7 +1096,7 @@ mod tests {
         };
         save(&sqlite,&BTreeMap::new(),None,Some(&capital),None,
             &StrategyPeriodHistory::default(),&[]).unwrap();
-        seal_staging_origin(&sqlite,"uid-test-one",&witness_sha).unwrap();
+        seal_staging_origin(&sqlite,&uid,&witness_sha).unwrap();
         assert_eq!(
             ExecutionLedgerStore::select_published_owner(&root).unwrap().path(),
             v14.as_path()
@@ -1109,8 +1110,8 @@ mod tests {
         )).unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
         std::fs::write(&receipt,format!(
-            "okx.ledger-owner/v1\nSQLITE\nuid-test-one\n{}\n",
-            witness_sha
+            "okx.ledger-owner/v1\nSQLITE\n{}\n{}\n",
+            uid,witness_sha
         )).unwrap();
         assert_eq!(
             ExecutionLedgerStore::select_published_owner(&root).unwrap().path(),
