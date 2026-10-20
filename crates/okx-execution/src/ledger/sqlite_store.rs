@@ -1224,11 +1224,10 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
             "SQLite historical intent projection inventory",
         ));
     }
-    if count == 0 && state.reservation.is_none() {
-        return Err(ExecutionLedgerError::Corrupt(
-            "SQLite account scope has no authoritative entries",
-        ));
-    }
+    // An empty database is legal only as an explicitly created staging
+    // snapshot. The *published owner* transition independently requires
+    // a source-proven UID and nonempty v14 evidence; attestation itself is
+    // a read-only integrity check, never trading admission.
     // Every native BEGIN_POST fence must remain linked to an exact intent,
     // original client ID and append-only event, including after crashes.
     // One streaming SQL join replaces a historical in-memory index.
