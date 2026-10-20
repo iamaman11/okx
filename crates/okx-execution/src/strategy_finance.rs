@@ -467,12 +467,17 @@ pub fn assess_persisted_financial_period_with_verified_source(
     if e.cursors.is_empty() {
         reasons.insert("source_coverage_missing");
     }
-    let current_as_of = facts
-        .summary
-        .current_account_as_of_ms
-        .as_deref()
-        .and_then(|s| s.parse::<u64>().ok());
-    let newest = e.cursors.values().map(|c| c.account_as_of_ms).max();
+// Source coverage is measured by authenticated receipt times, NOT the
+    // venue balance/position last-change uTime (which can be days old).
+    let current_as_of =
+        crate::exchange_evidence::source_receipt_ms(&facts.summary.source_received_at);
+    let newest = e
+        .cursors
+        .values()
+        .filter_map(|c| {
+            crate::exchange_evidence::source_receipt_ms(&c.source_received_at)
+        })
+        .max();
     let coalesced_source_attested = current_source_captured
         && coherent
         && DurableExchangeEvidence::complete_source_checkpoint(facts);
@@ -483,16 +488,21 @@ pub fn assess_persisted_financial_period_with_verified_source(
     {
         reasons.insert("financial_source_asof_not_current");
     }
-    let mut cursor_times = e
+// Preserve all sealed cursor bytes. If ANY legacy receipt is malformed,
+    // coverage stays unproven; no last-change-time fallback is permitted.
+    let cursor_receipts = e
         .cursors
         .values()
-        .map(|c| c.account_as_of_ms)
-        .collect::<Vec<_>>();
+        .map(|c| crate::exchange_evidence::source_receipt_ms(&c.source_received_at))
+        .collect::<Option<Vec<_>>>();
+    let mut cursor_times = cursor_receipts.clone().unwrap_or_default();
     cursor_times.sort_unstable();
     cursor_times.dedup();
     // Canceled unfilled exchange orders may vanish after 2 hours. Gaps cannot
     // be silently bridged by a later historical query or an empty response.
-    if !source_continuity_attested(&cursor_times, run.started_at_ms, current_as_of) {
+    if cursor_receipts.is_none()
+        || !source_continuity_attested(&cursor_times, run.started_at_ms, current_as_of)
+    {
         reasons.insert("source_continuity_not_proven");
     }
     if e.cursors
