@@ -561,12 +561,16 @@ impl ExecutionRuntime {
         let executor_clock = rest.clone();
         let executor_account = AccountApi::new(rest.clone());
         let trade = TradeApi::new(rest);
-        let writer_lease = ExecutionLedgerStore::acquire_writer_lease(root)?;
+        let mut writer_lease = ExecutionLedgerStore::acquire_writer_lease(root)?;
         let ledger = DurableExecutionLedger::open(
             // The existing Windows owner already supplies disjoint roots:
             // Demo C:\okx-runtime\demo and Production C:\okx-runtime.
             // Never silently strand either profile's durable history.
-            ExecutionLedgerStore::select_published_owner(root)?,
+            // Read the cutover marker via our own locked handle on Windows.
+            ExecutionLedgerStore::select_published_owner_under_writer_lease(
+                root,
+                &mut writer_lease,
+            )?,
             observed_at_ms,
         )?;
         Ok(Self {

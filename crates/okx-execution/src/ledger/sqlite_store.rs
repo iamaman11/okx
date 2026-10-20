@@ -1651,7 +1651,16 @@ mod tests {
     #[test]
     fn native_writer_lease_excludes_concurrent_process_owners() {
         let root = test_root("writer-lease");
-        let first = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
+        let mut first = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
+        // The existing owner must read the marker from its locked handle.
+        // This is especially important on Windows, where a second open of
+        // the same locked file fails even from the same process.
+        assert_eq!(
+            ExecutionLedgerStore::select_published_owner_under_writer_lease(&root, &mut first)
+                .unwrap()
+                .path(),
+            root.join("execution-ledger.json").as_path()
+        );
         assert!(ExecutionLedgerStore::acquire_writer_lease(&root).is_err());
         drop(first);
         let second = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
