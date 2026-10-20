@@ -441,8 +441,16 @@ impl ExecutionLedgerStore {
         let sealed = root.join("execution-ledger.v14.sealed");
         let receipt = root.join("execution-ledger.owner");
         let native = root.join("execution-ledger.sqlite");
+        // The same permanent file that fences concurrent writers also keeps
+        // an irreversible cutover watermark. Even loss of both SQLite and its
+        // owner receipt must not resurrect a blank pre-cutover JSON writer.
+        let marked = match fs::metadata(root.join("execution-ledger.writer-lock")) {
+            Ok(metadata) => metadata.len() != 0,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
         if !receipt.try_exists()? {
-            if native.try_exists()? || sealed.try_exists()? {
+            if marked || native.try_exists()? || sealed.try_exists()? {
                 return Err(ExecutionLedgerError::Corrupt(
                     "SQLite cutover pending without owner receipt",
                 ));
@@ -630,11 +638,29 @@ impl ExecutionLedgerStore {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(root.join("execution-ledger.writer-lock"))?;
         lease
             .try_lock()
             .map_err(|_| ExecutionLedgerError::Corrupt("ledger writer lease unavailable"))?;
         Ok(lease)
+    }
+
+    fn mark_sqlite_cutover(lease: &mut File) -> Result<(), ExecutionLedgerError> {
+        const MARK: &[u8] = b"okx.sqlite-cutover/v1\n";
+        match lease.metadata()?.len() {
+            0 => {
+                lease.write_all(MARK)?;
+                lease.sync_all()?;
+            }
+            n if n == MARK.len() as u64 => {}
+            _ => {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "invalid persistent SQLite cutover watermark",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Complete an offline cutover or resume an interrupted exact cutover.
@@ -645,10 +671,13 @@ impl ExecutionLedgerStore {
         expected_uid: &str,
         expected_v14_sha256: &str,
     ) -> Result<Self, ExecutionLedgerError> {
-        let _writer_lease = Self::acquire_writer_lease(root)?;
+        let mut writer_lease = Self::acquire_writer_lease(root)?;
         let receipt = root.join("execution-ledger.owner");
         if receipt.try_exists()? {
-            return Self::publish_verified_sqlite_owner(root, expected_uid, expected_v14_sha256);
+            let chosen =
+                Self::publish_verified_sqlite_owner(root, expected_uid, expected_v14_sha256)?;
+            Self::mark_sqlite_cutover(&mut writer_lease)?;
+            return Ok(chosen);
         }
         let original = root.join("execution-ledger.json");
         let sealed = root.join("execution-ledger.v14.sealed");
@@ -674,6 +703,16 @@ impl ExecutionLedgerStore {
             }
             source.prepare_sqlite_staging(&native)?;
         }
+        let (uid, origin) = sqlite_store::read_staging_origin(&native)?;
+        if uid != expected_uid || origin != expected_v14_sha256
+            || format!("{:x}", Sha256::digest(fs::read(source.path())?))
+                != expected_v14_sha256
+        {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        // The cutover watermark is persisted BEFORE the old writer is
+        // retired. An interrupted publication can only resume offline.
+        Self::mark_sqlite_cutover(&mut writer_lease)?;
         Self::publish_verified_sqlite_owner(root, expected_uid, expected_v14_sha256)
     }
 

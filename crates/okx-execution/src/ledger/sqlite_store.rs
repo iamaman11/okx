@@ -1222,23 +1222,23 @@ mod tests {
         source.prepare_sqlite_staging(&sqlite).unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
         assert!(
-            ExecutionLedgerStore::publish_verified_sqlite_owner(&root, &"f".repeat(64), &digest)
+            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &"f".repeat(64), &digest)
                 .is_err()
         );
         assert!(
-            ExecutionLedgerStore::publish_verified_sqlite_owner(&root, &uid, &"0".repeat(64))
+            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &"0".repeat(64))
                 .is_err()
         );
         assert!(!root.join("execution-ledger.owner").exists());
         let chosen =
-            ExecutionLedgerStore::publish_verified_sqlite_owner(&root, &uid, &digest).unwrap();
+            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).unwrap();
         assert_eq!(chosen.path(), sqlite.as_path());
         assert_eq!(
             chosen.attest_storage().unwrap().integrity,
             "VALIDATED_COLD_READ"
         );
         let duplicate =
-            ExecutionLedgerStore::publish_verified_sqlite_owner(&root, &uid, &digest).unwrap();
+            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).unwrap();
         assert_eq!(duplicate.path(), sqlite.as_path());
         let sealed = root.join("execution-ledger.v14.sealed");
         assert!(!v14.exists());
@@ -1250,6 +1250,10 @@ mod tests {
         // A sealed legacy source must never recreate a possibly newer
         // missing SQLite file (and thereby lose legitimate recent trades).
         assert!(ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).is_err());
+        // Even the total loss of archived body, receipt and SQLite does
+        // not turn this proven cutover account into a fresh JSON ledger.
+        std::fs::remove_file(&sealed).unwrap();
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
