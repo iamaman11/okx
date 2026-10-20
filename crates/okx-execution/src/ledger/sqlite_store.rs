@@ -1042,6 +1042,88 @@ pub(super) fn read_staging_origin(path: &Path) -> Result<(String, String), Execu
     Ok((uid, source))
 }
 
+/// A source-complete native handoff assessment is independent of the
+/// in-memory executor history: one verified SQL stream, bounded RAM, and
+/// the same physical manifest already attested by the caller.
+pub(super) fn assess_profile(
+    path: &Path,
+    account_uid: &str,
+    physical: LedgerStorageAttestation,
+) -> Result<ProfileHandoffLedgerAssessment, ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
+    require_indexed_scope(&c, account_uid)?;
+    let sql = format!("{INDEXED_INTENT_COLUMNS} ORDER BY e.intent_id");
+    let mut stmt = c.prepare(&sql).map_err(io)?;
+    let mut rows = stmt.query([]).map_err(io)?;
+    let mut total = 0usize;
+    let mut nonterminal = 0usize;
+    let mut unresolved_mutations = 0usize;
+    let mut unresolved_protection = 0usize;
+    while let Some(row) = rows.next().map_err(io)? {
+        let entry = verified_indexed_entry(row, account_uid)?;
+        total = total.checked_add(1).ok_or(ExecutionLedgerError::Corrupt(
+            "account intent inventory overflow",
+        ))?;
+        if !entry.record.state.is_terminal() {
+            nonterminal += 1;
+        }
+        unresolved_mutations += entry
+            .record
+            .mutations
+            .iter()
+            .filter(|change| !change.state.is_terminal())
+            .count();
+        if let Some(protective) = entry.record.protection.as_ref()
+            && (!matches!(
+                protective.status,
+                ProtectiveOrderStatus::CleanedUp | ProtectiveOrderStatus::NotActivated
+            ) || protective
+                .cleanup
+                .as_ref()
+                .is_some_and(|c| c.state != ProtectiveCleanupState::ConfirmedAbsent)
+                || protective.size_amend.as_ref().is_some_and(|amend| {
+                    !matches!(
+                        amend.state,
+                        ProtectiveSizeAmendState::Confirmed
+                            | ProtectiveSizeAmendState::RetiredAbsent
+                    )
+                }))
+        {
+            unresolved_protection += 1;
+        }
+    }
+    drop(rows);
+    drop(stmt);
+    let (n_entries, n_proj): (i64, i64) = c
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM ledger_entries),
+                    (SELECT COUNT(*) FROM intents)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(io)?;
+    if usize::try_from(n_entries).ok() != Some(total)
+        || usize::try_from(n_proj).ok() != Some(total)
+    {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native account profile inventory mismatch",
+        ));
+    }
+    Ok(ProfileHandoffLedgerAssessment {
+        schema: PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1,
+        managed_intents_total: total,
+        nonterminal_intents: nonterminal,
+        unresolved_order_mutations: unresolved_mutations,
+        unresolved_protective_lifecycle: unresolved_protection,
+        account_uid_mismatches: 0,
+        source_ledger_manifest_sha256: physical.manifest_sha256,
+        source_ledger_format: physical.on_disk_schema,
+        immutable_stop_reason: physical.active_risk_stop_reason,
+        finalized_run_checksum_sha256: physical.finalized_run_checksum_sha256,
+    })
+}
+
 /// Exhaustive read-only attestation without a second full historical
 /// BTreeMap. Every intent is validated once and streamed through the same
 /// legacy-compatible manifest digest; source/periods/POST remain checked.
@@ -1296,6 +1378,18 @@ mod tests {
         assert_eq!(full.manifest_sha256, format!("{:x}", expected.finalize()));
         assert_eq!(store.load().unwrap().0, entries);
         assert_eq!(store.attest_storage().unwrap().manifest_sha256, full.manifest_sha256);
+        // Account handoff also streams the same verified SQL rows rather than
+        // counting the Engine's historical BTreeMap.
+        let ledger = DurableExecutionLedger::open(store.clone(), 3000).unwrap();
+        let report = ledger.profile_handoff_ledger_assessment(&uid).unwrap();
+        assert_eq!(report.managed_intents_total, 384);
+        assert_eq!(report.nonterminal_intents, 384);
+        assert_eq!(report.unresolved_order_mutations, 0);
+        assert_eq!(report.unresolved_protective_lifecycle, 0);
+        assert_eq!(report.account_uid_mismatches, 0);
+        assert_eq!(report.source_ledger_manifest_sha256, full.manifest_sha256);
+        assert!(ledger.profile_handoff_ledger_assessment(&"b".repeat(64)).is_err());
+        drop(ledger);
 
         // A forged index cannot be papered over by hashing only the
         // authoritative BLOB or only a subset of historical rows.

@@ -1876,6 +1876,9 @@ impl DurableExecutionLedger {
         account_uid: &str,
     ) -> Result<ProfileHandoffLedgerAssessment, ExecutionLedgerError> {
         let physical = self.store.attest_storage()?;
+        if self.store.sqlite_native {
+            return sqlite_store::assess_profile(&self.store.path, account_uid, physical);
+        }
         let mut nonterminal_intents = 0usize;
         let mut unresolved_order_mutations = 0usize;
         let mut unresolved_protective_lifecycle = 0usize;
