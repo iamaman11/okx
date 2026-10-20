@@ -30,6 +30,8 @@ use crate::{
     model::{valid_intent_id, valid_mutation_id},
 };
 
+mod sqlite_store;
+
 pub const EXECUTION_LEDGER_SCHEMA_V1: &str = "okx.execution-ledger/v1";
 pub const EXECUTION_LEDGER_SCHEMA_V2: &str = "okx.execution-ledger/v2";
 pub const EXECUTION_LEDGER_SCHEMA_V3: &str = "okx.execution-ledger/v3";
@@ -395,6 +397,7 @@ pub struct LedgerStorageAttestation {
 pub struct ExecutionLedgerStore {
     path: PathBuf,
     max_records: usize,
+    sqlite_native: bool,
 }
 
 impl ExecutionLedgerStore {
@@ -402,6 +405,7 @@ impl ExecutionLedgerStore {
         Self {
             path: PathBuf::from(DEFAULT_EXECUTION_LEDGER_PATH),
             max_records: MAX_EXECUTION_LEDGER_RECORDS,
+            sqlite_native: false,
         }
     }
 
@@ -409,7 +413,40 @@ impl ExecutionLedgerStore {
         Self {
             path: path.into(),
             max_records: MAX_EXECUTION_LEDGER_RECORDS,
+            sqlite_native: false,
         }
+    }
+
+    /// New embedded native storage. Production remains on v14 until a
+    /// fully verified native cutover explicitly selects this store.
+    pub fn sqlite_at(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            max_records: MAX_EXECUTION_LEDGER_RECORDS,
+            sqlite_native: true,
+        }
+    }
+
+    /// Read-only verified import into a NEW SQLite staging path. It never
+    /// changes the original ledger, the active owner, or trading permissions.
+    pub fn prepare_sqlite_staging(
+        &self,
+        path: impl Into<PathBuf>,
+    ) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
+        let path=path.into();
+        if self.sqlite_native || !self.path.exists() || path.exists() {
+            return Err(ExecutionLedgerError::Corrupt("unsafe SQLite staging source/target"));
+        }
+        let (entries,stop,reservation,source,periods,leverage)=self.load()?;
+        let staged=Self::sqlite_at(path);
+        staged.save(&entries,stop.as_ref(),reservation.as_ref(),source.as_ref(),
+            &periods,&leverage)?;
+        let (e,s,r,x,p,l)=staged.load()?;
+        if entries!=e || stop!=s || reservation!=r || source!=x
+            || periods!=p || leverage!=l {
+            return Err(ExecutionLedgerError::Corrupt("SQLite staging roundtrip mismatch"));
+        }
+        staged.attest_storage()
     }
 
     #[cfg(test)]
@@ -417,6 +454,7 @@ impl ExecutionLedgerStore {
         Self {
             path: path.into(),
             max_records,
+            sqlite_native: false,
         }
     }
 
@@ -429,6 +467,9 @@ impl ExecutionLedgerStore {
     /// It verifies all v14 sealed records through the normal fail-closed
     /// decoder and reports the installed on-disk format without assuming v14.
     pub fn attest_storage(&self) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
+        if self.sqlite_native {
+            return sqlite_store::attest(&self.path);
+        }
         if !self.path.exists() {
             return Err(ExecutionLedgerError::Corrupt("ledger not initialized"));
         }
@@ -674,6 +715,9 @@ impl ExecutionLedgerStore {
     }
 
     fn load(&self) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
+        if self.sqlite_native {
+            return sqlite_store::load(&self.path, self.max_records);
+        }
         if !self.path.exists() {
             return Ok((
                 BTreeMap::new(),
@@ -936,6 +980,10 @@ impl ExecutionLedgerStore {
         }
         history.validate(capital_reservation, exchange_evidence)?;
         validate_leverage_attempts(leverage_attempts, capital_reservation)?;
+        if self.sqlite_native {
+            return sqlite_store::save(&self.path, entries, risk_stop, capital_reservation,
+                exchange_evidence, history, leverage_attempts);
+        }
         let parent = self
             .path
             .parent()
