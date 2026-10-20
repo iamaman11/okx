@@ -576,6 +576,70 @@ pub(super) fn save(
     Ok(())
 }
 
+/// Immutable, source-bound origin proof for one staged JSON-v14 -> SQLite
+/// transfer. It does NOT authorize or perform a production owner cutover.
+pub(super) fn seal_staging_origin(
+    path: &Path,
+    expected_uid: &str,
+    source_sha256: &str,
+) -> Result<(), ExecutionLedgerError> {
+    if expected_uid.is_empty() || source_sha256.len() != 64
+        || !source_sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(ExecutionLedgerError::Corrupt("invalid staging origin identity"));
+    }
+    let mut c = connect(path, true)?;
+    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate).map_err(io)?;
+    let (uid,digest,bytes):(String,String,Vec<u8>) = tx.query_row(
+        "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",[],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+    ).map_err(io)?;
+    if uid != expected_uid || checksum(&bytes) != digest {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS native_migration_origin(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            uid TEXT NOT NULL,
+            original_v14_sha256 TEXT NOT NULL
+         ) STRICT;
+         CREATE TRIGGER IF NOT EXISTS immutable_native_origin_update
+         BEFORE UPDATE ON native_migration_origin BEGIN
+           SELECT RAISE(ABORT,'IMMUTABLE_ORIGIN'); END;
+         CREATE TRIGGER IF NOT EXISTS immutable_native_origin_delete
+         BEFORE DELETE ON native_migration_origin BEGIN
+           SELECT RAISE(ABORT,'IMMUTABLE_ORIGIN'); END;"
+    ).map_err(io)?;
+    tx.execute(
+        "INSERT INTO native_migration_origin VALUES(1,?1,?2)
+         ON CONFLICT(singleton) DO NOTHING",
+        params![expected_uid,source_sha256]
+    ).map_err(io)?;
+    let (recorded_uid,recorded_hash):(String,String)=tx.query_row(
+        "SELECT uid,original_v14_sha256 FROM native_migration_origin WHERE singleton=1",
+        [],|r|Ok((r.get(0)?,r.get(1)?))
+    ).map_err(io)?;
+    if recorded_uid!=expected_uid || recorded_hash!=source_sha256 {
+        return Err(ExecutionLedgerError::Corrupt("migration origin conflict"));
+    }
+    tx.commit().map_err(io)?;
+    Ok(())
+}
+
+/// The immutable source hash survives subsequent writes to the same SQLite
+/// Ledger; unlike a live manifest digest it remains stable after OPEN/CLOSE.
+pub(super) fn read_staging_origin(path: &Path) -> Result<(String,String), ExecutionLedgerError> {
+    let c=connect(path,false)?;
+    let (uid,source):(String,String)=c.query_row(
+        "SELECT uid,original_v14_sha256 FROM native_migration_origin WHERE singleton=1",
+        [],|r|Ok((r.get(0)?,r.get(1)?))
+    ).map_err(io)?;
+    if uid.is_empty() || source.len()!=64 {
+        return Err(ExecutionLedgerError::Corrupt("missing staging origin proof"));
+    }
+    Ok((uid,source))
+}
+
 pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
     let c = connect(path, false)?;
     let digest: String = c
