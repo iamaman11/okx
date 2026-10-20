@@ -425,7 +425,10 @@ impl ExecutionLedgerStore {
     pub fn sqlite_at(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
-            max_records: MAX_EXECUTION_LEDGER_RECORDS,
+            // The fixed v14 manifest cap is not a SQLite database limit.
+            // Indexes and query bounds, not artificial lifetime ceilings,
+            // limit the native store. Hot-path delta APIs follow separately.
+            max_records: usize::MAX,
             sqlite_native: true,
         }
     }
