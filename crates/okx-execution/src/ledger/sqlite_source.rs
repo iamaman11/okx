@@ -45,16 +45,23 @@ pub(super) fn persist(
     source: &DurableExchangeEvidence,
 ) -> Result<(), ExecutionLedgerError> {
     source.validate()?;
-    let previous: Option<(String, String)> = tx
+    let previous: Option<(String, String, String)> = tx
         .query_row(
-            "SELECT uid,source_schema FROM native_source_runs WHERE run_id=?1",
+            "SELECT uid,source_schema,proof_digest FROM native_source_runs WHERE run_id=?1",
             params![source.run_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(io)?;
-    if previous.is_some_and(|(uid, schema)| uid != source.account_uid || schema != source.schema) {
-        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    if let Some((uid, schema, proof_digest)) = previous {
+        if uid != source.account_uid || schema != source.schema {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        // Durable source checksum validates all original events/cursors.
+        // If identical, no source rows, indices or history scans are touched.
+        if proof_digest == source.checksum_sha256 {
+            return Ok(());
+        }
     }
     tx.execute(
         "INSERT INTO native_source_runs VALUES(?1,?2,?3,?4)
