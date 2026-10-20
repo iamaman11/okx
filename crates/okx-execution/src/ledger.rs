@@ -439,6 +439,10 @@ impl ExecutionLedgerStore {
                 "unsafe SQLite staging source/target",
             ));
         }
+        let original_attestation = self.attest_storage()?;
+        if original_attestation.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V14 {
+            return Err(ExecutionLedgerError::Corrupt("only attested v14 can stage SQLite"));
+        }
         let (entries, stop, reservation, source, periods, leverage) = self.load()?;
         let staged = Self::sqlite_at(path);
         staged.save(
@@ -461,7 +465,12 @@ impl ExecutionLedgerStore {
                 "SQLite staging roundtrip mismatch",
             ));
         }
-        staged.attest_storage()
+        let attestation = staged.attest_storage()?;
+        let after_attestation = self.attest_storage()?;
+        if original_attestation.manifest_sha256 != after_attestation.manifest_sha256 {
+            return Err(ExecutionLedgerError::Corrupt("v14 changed during SQLite staging"));
+        }
+        Ok(attestation)
     }
 
     #[cfg(test)]

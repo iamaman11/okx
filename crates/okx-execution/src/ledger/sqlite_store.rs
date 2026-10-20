@@ -160,6 +160,13 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
         if s.version != 1 {
             return Err(ExecutionLedgerError::Corrupt("SQLite data version"));
         }
+        let expected_uid = known_uid.as_deref()
+            .or_else(|| s.reservation.as_ref().map(|r| r.account_uid_fingerprint.as_str()))
+            .or_else(|| s.source.as_ref().map(|e| e.account_uid.as_str()))
+            .unwrap_or("");
+        if uid != expected_uid {
+            return Err(ExecutionLedgerError::Corrupt("SQLite state account UID mismatch"));
+        }
         s
     } else if !entries.is_empty() {
         return Err(ExecutionLedgerError::Corrupt("SQLite orphaned entries"));
@@ -280,6 +287,15 @@ pub(super) fn save(
             )
             .map_err(io)?;
         for (id, e) in entries {
+            let existing: Option<(String, String)> = tx.query_row(
+                "SELECT client_order_id,uid FROM ledger_entries WHERE intent_id=?1",
+                params![id], |row| Ok((row.get(0)?,row.get(1)?)),
+            ).optional().map_err(io)?;
+            if existing.as_ref().is_some_and(|(client,uid)|
+                client != &e.record.plan.client_order_id
+                || uid != &e.record.plan.account_uid_fingerprint) {
+                return Err(ExecutionLedgerError::IntentConflict);
+            }
             let bytes = encode(e)?;
             q.execute(params![
                 id,
@@ -311,12 +327,25 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
     if n != records.len() as i64 {
         return Err(ExecutionLedgerError::Corrupt("SQLite inventory"));
     }
+    // The attestation hashes all ledger records in a stable key order and the
+    // state manifest. Hashing the state row alone would miss amended intents.
+    let mut owner_digest = Sha256::new();
+    owner_digest.update(b"okx.sqlite.ledger/v1");
+    owner_digest.update(digest.as_bytes());
+    for (id, entry) in &records {
+        let payload = encode(entry)?;
+        owner_digest.update((id.len() as u64).to_le_bytes());
+        owner_digest.update(id.as_bytes());
+        owner_digest.update((payload.len() as u64).to_le_bytes());
+        owner_digest.update(&payload);
+    }
+    let full_manifest = format!("{:x}", owner_digest.finalize());
     Ok(LedgerStorageAttestation {
         schema: LEDGER_STORAGE_ATTESTATION_SCHEMA_V1,
         on_disk_schema: SCHEMA.to_owned(),
         integrity: "VALIDATED_COLD_READ",
         migration: "SQLITE_NATIVE_OWNER",
-        manifest_sha256: digest,
+        manifest_sha256: full_manifest,
         manifest_bytes: fs::metadata(path)?.len(),
         sealed_finalized_runs: periods.archived_runs.len(),
         sealed_unverified_runs: periods.unverified_runs.len(),
