@@ -1627,6 +1627,38 @@ impl ExecutionLedgerStore {
         )
     }
 
+    /// Native state-only WAL update. Legacy v14 keeps its original complete
+    /// manifest/atomic rename path until independently verified cutover.
+    fn save_metadata(
+        &self,
+        entries: &BTreeMap<String, ExecutionLedgerEntry>,
+        risk_stop: Option<&ExecutionRiskStop>,
+        capital_reservation: Option<&StrategyCapitalReservation>,
+        exchange_evidence: Option<&DurableExchangeEvidence>,
+        history: &StrategyPeriodHistory,
+        leverage_attempts: &[LeverageChangeAttempt],
+    ) -> Result<(), ExecutionLedgerError> {
+        if self.sqlite_native {
+            sqlite_store::save_metadata(
+                &self.path,
+                risk_stop,
+                capital_reservation,
+                exchange_evidence,
+                history,
+                leverage_attempts,
+            )
+        } else {
+            self.save(
+                entries,
+                risk_stop,
+                capital_reservation,
+                exchange_evidence,
+                history,
+                leverage_attempts,
+            )
+        }
+    }
+
     fn save(
         &self,
         entries: &BTreeMap<String, ExecutionLedgerEntry>,
@@ -2129,7 +2161,7 @@ impl DurableExecutionLedger {
             stopped_at_ms: observed_at_ms,
             reason,
         };
-        self.store.save(
+        self.store.save_metadata(
             &self.entries,
             Some(&stop),
             self.capital_reservation.as_ref(),
@@ -2187,7 +2219,7 @@ impl DurableExecutionLedger {
             require_fresh_cursor,
         )?;
         if self.exchange_evidence.as_ref() != Some(&next) {
-            self.store.save(
+            self.store.save_metadata(
                 &self.entries,
                 self.risk_stop.as_ref(),
                 self.capital_reservation.as_ref(),
@@ -2467,7 +2499,7 @@ impl DurableExecutionLedger {
         } else {
             None
         };
-        self.store.save(
+        self.store.save_metadata(
             &self.entries,
             new_stop.as_ref().or(self.risk_stop.as_ref()),
             self.capital_reservation.as_ref(),
@@ -2569,7 +2601,7 @@ impl DurableExecutionLedger {
             self.capital_reservation.as_ref(),
             self.exchange_evidence.as_ref(),
         )?;
-        self.store.save(
+        self.store.save_metadata(
             &self.entries,
             self.risk_stop.as_ref(),
             self.capital_reservation.as_ref(),
@@ -2659,7 +2691,7 @@ impl DurableExecutionLedger {
         let closed = StrategyFinalization::new(reservation, evidence, &result, observed_at_ms)?;
         let mut next = self.strategy_periods.clone();
         next.finalized_run = Some(closed.clone());
-        self.store.save(
+        self.store.save_metadata(
             &self.entries,
             self.risk_stop.as_ref(),
             self.capital_reservation.as_ref(),
@@ -2737,7 +2769,7 @@ impl DurableExecutionLedger {
         };
         let mut next = self.leverage_attempts.clone();
         next.push(attempt.clone());
-        self.store.save(
+        self.store.save_metadata(
             &self.entries,
             self.risk_stop.as_ref(),
             self.capital_reservation.as_ref(),
@@ -2762,7 +2794,7 @@ impl DurableExecutionLedger {
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(mutation_id.to_owned()))?;
         entry.state = LeverageAttemptState::Verified;
         let result = entry.clone();
-        self.store.save(
+        self.store.save_metadata(
             &self.entries,
             self.risk_stop.as_ref(),
             self.capital_reservation.as_ref(),
@@ -2920,7 +2952,7 @@ impl DurableExecutionLedger {
             next.stop_rearms.push(proof);
         }
         next.validate(Some(&reservation), None)?;
-        self.store.save(
+        self.store.save_metadata(
             &self.entries,
             if rearm.is_some() {
                 None

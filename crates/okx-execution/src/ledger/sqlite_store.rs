@@ -759,6 +759,107 @@ pub(super) fn save(
     )
 }
 
+/// Update STOP, capital, financial source and epoch state in ONE local
+/// SQLite WAL commit without rewriting historical intent or POST rows.
+pub(super) fn save_metadata(
+    path: &Path,
+    stop: Option<&ExecutionRiskStop>,
+    reservation: Option<&StrategyCapitalReservation>,
+    source: Option<&DurableExchangeEvidence>,
+    periods: &StrategyPeriodHistory,
+    leverage: &[LeverageChangeAttempt],
+) -> Result<(), ExecutionLedgerError> {
+    if !path.exists() {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native metadata mutation has no account DB",
+        ));
+    }
+    if let Some(value) = stop {
+        validate_risk_stop(value)?;
+    }
+    if let Some(value) = reservation {
+        validate_capital_reservation(value)?;
+    }
+    if let Some(value) = source {
+        value.validate()?;
+        if reservation.is_none_or(|run| {
+            value.account_uid != run.account_uid_fingerprint
+                || value.run_id != run.allocation_id
+        }) {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+    }
+    periods.validate(reservation, source)?;
+    validate_leverage_attempts(leverage, reservation)?;
+    let mut c = connect(path, true)?;
+    let tx = c
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io)?;
+    let (uid, digest, old_bytes): (String, String, Vec<u8>) = tx
+        .query_row(
+            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(io)?;
+    if checksum(&old_bytes) != digest {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native metadata checksum mismatch",
+        ));
+    }
+    let old: StoredState = decode(&old_bytes)?;
+    if old.version != 1 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native metadata schema mismatch",
+        ));
+    }
+    // Account identity never changes when rotating a strategy epoch or
+    // temporarily having no current source/capital reservation.
+    let expected = reservation
+        .map(|r| r.account_uid_fingerprint.as_str())
+        .or_else(|| source.map(|s| s.account_uid.as_str()))
+        .or_else(|| old.reservation.as_ref().map(|r| r.account_uid_fingerprint.as_str()))
+        .unwrap_or(uid.as_str());
+    let bound: Option<String> = tx
+        .query_row(
+            "SELECT uid_fingerprint FROM account_identity WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(io)?;
+    if uid != expected || bound.as_deref().is_some_and(|v| v != uid) {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let bytes = encode(&StoredState {
+        version: 1,
+        stop: stop.cloned(),
+        reservation: reservation.cloned(),
+        source_run_id: source.map(|s| s.run_id.clone()),
+        periods: periods.clone(),
+        leverage: leverage.to_vec(),
+    })?;
+    let changed = tx
+        .execute(
+            "UPDATE ledger_state SET digest=?1,bytes=?2
+             WHERE key=1 AND uid=?3 AND digest=?4",
+            params![checksum(&bytes), bytes, uid, digest],
+        )
+        .map_err(io)?;
+    if changed != 1 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native metadata CAS lost",
+        ));
+    }
+    // Source observations and derived immutable financial rows are
+    // committed with their state pointer, never as a competing write owner.
+    if let Some(evidence) = source {
+        super::sqlite_source::persist(&tx, evidence)?;
+    }
+    tx.commit().map_err(io)?;
+    Ok(())
+}
+
 /// A single-intent mutation persists only this record and its projections.
 /// Other account intents remain immutable in this transaction. Exact identity,
 /// durable POST fencing, and all stop/source proof are still enforced.
