@@ -239,11 +239,25 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
     if let Some(r) = &state.reservation {
         validate_capital_reservation(r)?;
     }
-    let source = state.source_run_id.as_deref().map(|run_id|
-        super::sqlite_source::read(&c, run_id, known_uid.as_deref()
-            .or_else(|| state.reservation.as_ref().map(|r|r.account_uid_fingerprint.as_str()))
-            .unwrap_or(""))
-    ).transpose()?;
+    let source = state
+        .source_run_id
+        .as_deref()
+        .map(|run_id| {
+            super::sqlite_source::read(
+                &c,
+                run_id,
+                known_uid
+                    .as_deref()
+                    .or_else(|| {
+                        state
+                            .reservation
+                            .as_ref()
+                            .map(|r| r.account_uid_fingerprint.as_str())
+                    })
+                    .unwrap_or(""),
+            )
+        })
+        .transpose()?;
     state
         .periods
         .validate(state.reservation.as_ref(), source.as_ref())?;
@@ -311,12 +325,12 @@ pub(super) fn save(
         version: 1,
         stop: stop.cloned(),
         reservation: reservation.cloned(),
-        source_run_id: source.map(|s|s.run_id.clone()),
+        source_run_id: source.map(|s| s.run_id.clone()),
         periods: periods.clone(),
         leverage: leverage.to_vec(),
     })?;
     if let Some(evidence) = source {
-        super::sqlite_source::persist(&tx,evidence)?;
+        super::sqlite_source::persist(&tx, evidence)?;
     }
     tx.execute(
         "INSERT INTO ledger_state VALUES(1,1,?1,?2,?3)
@@ -572,6 +586,79 @@ mod tests {
         std::fs::write(&p, b"not a sqlite database").unwrap();
         assert!(load(&p, 10).is_err());
         assert!(attest(&p).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+
+    #[test]
+    fn sealed_exchange_sources_roundtrip_with_no_mutation_or_replay() {
+        let root = test_root("exchange-evidence");
+        let p = root.join("account.sqlite");
+        let run = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "sqlite_test_run_000001".to_owned(),
+            account_uid_fingerprint: "uid-test-one".to_owned(),
+            origin_schema: "okx.manual-research/v1".to_owned(),
+            origin_version: "1".to_owned(),
+            mandate_version: "1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "127".to_owned(),
+            account_generation: "g1".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1,
+        };
+        let mut source = DurableExchangeEvidence::new(&run).unwrap();
+        source.events.insert(
+            "event-1".to_owned(),
+            crate::exchange_evidence::StoredExchangeEvent {
+                payload: serde_json::json!({"source":"OKX_REST_BILL","billId":"bill-1"}),
+                source_intent_id: None,
+                strategy_run_id: None,
+                allocation: "UNALLOCATED".to_owned(),
+            },
+        );
+        source.cursors.insert(
+            "receipt-1".to_owned(),
+            crate::exchange_evidence::ExchangeCoverageCursor {
+                source: "OKX_REST".to_owned(),
+                source_received_at: "2026-10-20T12:00:00Z".to_owned(),
+                generation: "g1".to_owned(),
+                account_as_of_ms: 1000,
+                order_complete: true,
+                fill_complete: true,
+                bill_complete: true,
+                covered_ranges: serde_json::json!({}),
+            },
+        );
+        source.checksum_sha256 = checksum(
+            &serde_json::to_vec(&(
+                &source.schema, &source.account_uid, &source.run_id,
+                &source.events, &source.cursors,
+            )).unwrap(),
+        );
+        source.validate().unwrap();
+        let history = StrategyPeriodHistory::default();
+        save(&p, &BTreeMap::new(), None, Some(&run), Some(&source), &history, &[]).unwrap();
+        let first = load(&p, 10).unwrap();
+        assert_eq!(first.3.as_ref(), Some(&source));
+        assert_eq!(first.2.as_ref(), Some(&run));
+        save(&p, &BTreeMap::new(), None, Some(&run), Some(&source), &history, &[]).unwrap();
+        let c = Connection::open(&p).unwrap();
+        let count: i64 = c.query_row("SELECT COUNT(*) FROM native_source_events",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,1);
+        drop(c);
+
+        let original = source.clone();
+        source.events.get_mut("event-1").unwrap().payload =
+            serde_json::json!({"source":"OKX_REST_BILL","billId":"forged"});
+        source.checksum_sha256 = checksum(
+            &serde_json::to_vec(&(
+                &source.schema, &source.account_uid, &source.run_id,
+                &source.events, &source.cursors,
+            )).unwrap(),
+        );
+        assert!(save(&p, &BTreeMap::new(), None, Some(&run), Some(&source), &history, &[]).is_err());
+        assert_eq!(load(&p,10).unwrap().3,Some(original));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
