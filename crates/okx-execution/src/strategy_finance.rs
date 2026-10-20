@@ -941,6 +941,41 @@ mod tests {
     }
 
     #[test]
+    fn real_receipts_bound_the_run_even_when_account_last_change_is_old() {
+        let hour = 3_600_000_u64;
+        let run_start = 1_000_000_u64;
+        // Immutable source receipts are hourly and pass financial continuity.
+        // The account last-change timestamp is intentionally irrelevant here:
+        // it may predate the strategy run by a whole day.
+        let unchanged_account_last_change = run_start - 900_000_u64;
+        let receipts = [
+            run_start + hour / 2,
+            run_start + hour + hour / 2,
+            run_start + 2 * hour + hour / 2,
+            run_start + 3 * hour + hour / 2,
+        ];
+        assert!(unchanged_account_last_change < run_start);
+        assert!(source_continuity_attested(
+            &receipts,
+            run_start,
+            Some(receipts[3] + hour),
+        ));
+        // An actual >2h missing receipt is NOT bridged by a later complete
+        // read, even if that read itself is fresh.
+        let missed = [receipts[0], receipts[0] + 2 * hour + 1];
+        assert!(!source_continuity_attested(
+            &missed,
+            run_start,
+            Some(missed[1]),
+        ));
+        assert!(!source_continuity_attested(
+            &receipts,
+            run_start,
+            Some(receipts[3] + 2 * hour + 1),
+        ));
+    }
+
+    #[test]
     fn missing_two_hour_venue_window_stays_incomplete_after_restart() {
         let hour = 3_600_000_u64;
         let start = 1_000_000_u64;
