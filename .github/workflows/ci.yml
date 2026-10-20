@@ -116,18 +116,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Format exact SQLite native source for commit
-        run: |
-          cargo fmt --all
-          python3 - <<'PY'
-          import pathlib,base64
-          for name in ["crates/okx-execution/src/ledger/sqlite_store.rs", "crates/okx-execution/src/ledger.rs"]:
-              value=base64.b64encode(pathlib.Path(name).read_bytes()).decode("ascii")
-              prefix="OKX_FMT_MODULE" if name.endswith("sqlite_store.rs") else "OKX_FMT_LEDGER"
-              for i in range(0,len(value),2500):
-                  print(f"{prefix}_{i//2500:04d}:{value[i:i+2500]}")
-          PY
-
       - name: Format
         run: cargo fmt --all -- --check
 

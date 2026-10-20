@@ -433,18 +433,33 @@ impl ExecutionLedgerStore {
         &self,
         path: impl Into<PathBuf>,
     ) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
-        let path=path.into();
+        let path = path.into();
         if self.sqlite_native || !self.path.exists() || path.exists() {
-            return Err(ExecutionLedgerError::Corrupt("unsafe SQLite staging source/target"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "unsafe SQLite staging source/target",
+            ));
         }
-        let (entries,stop,reservation,source,periods,leverage)=self.load()?;
-        let staged=Self::sqlite_at(path);
-        staged.save(&entries,stop.as_ref(),reservation.as_ref(),source.as_ref(),
-            &periods,&leverage)?;
-        let (e,s,r,x,p,l)=staged.load()?;
-        if entries!=e || stop!=s || reservation!=r || source!=x
-            || periods!=p || leverage!=l {
-            return Err(ExecutionLedgerError::Corrupt("SQLite staging roundtrip mismatch"));
+        let (entries, stop, reservation, source, periods, leverage) = self.load()?;
+        let staged = Self::sqlite_at(path);
+        staged.save(
+            &entries,
+            stop.as_ref(),
+            reservation.as_ref(),
+            source.as_ref(),
+            &periods,
+            &leverage,
+        )?;
+        let (e, s, r, x, p, l) = staged.load()?;
+        if entries != e
+            || stop != s
+            || reservation != r
+            || source != x
+            || periods != p
+            || leverage != l
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite staging roundtrip mismatch",
+            ));
         }
         staged.attest_storage()
     }
@@ -981,8 +996,15 @@ impl ExecutionLedgerStore {
         history.validate(capital_reservation, exchange_evidence)?;
         validate_leverage_attempts(leverage_attempts, capital_reservation)?;
         if self.sqlite_native {
-            return sqlite_store::save(&self.path, entries, risk_stop, capital_reservation,
-                exchange_evidence, history, leverage_attempts);
+            return sqlite_store::save(
+                &self.path,
+                entries,
+                risk_stop,
+                capital_reservation,
+                exchange_evidence,
+                history,
+                leverage_attempts,
+            );
         }
         let parent = self
             .path
