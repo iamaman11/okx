@@ -563,12 +563,12 @@ mod snapshot_tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("account.sqlite");
         let mut reader = rusqlite::Connection::open(&path).unwrap();
+        reader.pragma_update(None, "journal_mode", "WAL").unwrap();
         reader
-            .pragma_update(None, "journal_mode", "WAL")
-            .unwrap();
-        reader
-            .execute_batch("CREATE TABLE financial_facts (id INTEGER PRIMARY KEY);
-                INSERT INTO financial_facts VALUES (1);")
+            .execute_batch(
+                "CREATE TABLE financial_facts (id INTEGER PRIMARY KEY);
+                INSERT INTO financial_facts VALUES (1);",
+            )
             .unwrap();
         let writer = rusqlite::Connection::open(&path).unwrap();
 
