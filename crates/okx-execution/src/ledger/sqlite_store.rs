@@ -865,4 +865,83 @@ mod tests {
         assert_eq!(load(&p, 10).unwrap().3, Some(original));
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn native_begin_post_is_one_durable_fence_and_unknown_is_not_replayable() {
+        let root=test_root("post-fence");
+        let db=root.join("one-owner.sqlite");
+        let id="native_begin_post_test_000001";
+        let plan=ExecutionPlan {
+            schema:EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+            intent_id:id.to_owned(),
+            client_order_id:derive_client_order_id(id),
+            reference_generation:"sha256:reference".to_owned(),
+            account_generation:"sha256:account".to_owned(),
+            account_uid_fingerprint:"uid-fingerprint".to_owned(),
+            instrument_id:"DOGE-USDT-SWAP".to_owned(),
+            trade_mode:crate::TradeMode::Cross,
+            side:crate::OrderSide::Buy,
+            position_side:PositionSide::Long,
+            action:ExecutionAction::Open,
+            order_type:crate::OrderType::Limit,
+            size:"1".to_owned(),
+            price:"0.1".to_owned(),
+            open_risk:None,
+            risk_binding:None,
+        };
+        let mut entries=BTreeMap::new();
+        let mut entry=ExecutionLedgerEntry {
+            record:ExecutionRecord::new(plan),
+            created_at_ms:1000,
+            updated_at_ms:1000,
+        };
+        entries.insert(id.to_owned(),entry.clone());
+        let periods=StrategyPeriodHistory::default();
+        save(&db,&entries,None,None,None,&periods,&[]).unwrap();
+        let conn=Connection::open(&db).unwrap();
+        let count:i64=conn.query_row(
+            "SELECT COUNT(*) FROM post_attempts",[],|r|r.get(0)
+        ).unwrap();
+        assert_eq!(count,0);
+        drop(conn);
+
+        entry.record.begin_submission_with_timing(None).unwrap();
+        entry.updated_at_ms=1001;
+        entries.insert(id.to_owned(),entry.clone());
+        save(&db,&entries,None,None,None,&periods,&[]).unwrap();
+        let conn=Connection::open(&db).unwrap();
+        let (count,correct): (i64,i64)=(
+            conn.query_row("SELECT COUNT(*) FROM post_attempts",[],|r|r.get(0)).unwrap(),
+            conn.query_row(
+                "SELECT COUNT(*) FROM post_attempts p
+                 JOIN domain_events e ON e.event_id=p.begin_post_event_id
+                 WHERE p.intent_id=?1 AND p.client_order_id=?2
+                   AND e.event_type='BEGIN_POST' AND e.subject_id=?1
+                   AND p.delivery_outcome='BEGIN_POST_UNRESOLVED'",
+                params![id,entry.record.plan.client_order_id],|r|r.get(0)
+            ).unwrap(),
+        );
+        assert_eq!((count,correct),(1,1));
+        drop(conn);
+
+        entry.record.mark_unknown_submission().unwrap();
+        entry.updated_at_ms=1002;
+        entries.insert(id.to_owned(),entry.clone());
+        save(&db,&entries,None,None,None,&periods,&[]).unwrap();
+        save(&db,&entries,None,None,None,&periods,&[]).unwrap();
+        assert_eq!(load(&db,10).unwrap().0.get(id),Some(&entry));
+
+        let conn=Connection::open(&db).unwrap();
+        let post_count:i64=conn.query_row("SELECT COUNT(*) FROM post_attempts",[],|r|r.get(0)).unwrap();
+        assert_eq!(post_count,1);
+        drop(conn);
+
+        let mut forged=entry.clone();
+        forged.record.state=ExecutionState::Prepared;
+        forged.updated_at_ms=1003;
+        entries.insert(id.to_owned(),forged);
+        assert!(save(&db,&entries,None,None,None,&periods,&[]).is_err());
+        assert_eq!(load(&db,10).unwrap().0.get(id),Some(&entry));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
