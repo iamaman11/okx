@@ -431,25 +431,27 @@ fn save_snapshot(
     // A delta is legal only after a fully persisted, account-bound snapshot
     // already exists. Otherwise it could silently open a new empty account.
     if !complete_snapshot && old_uid.as_deref() != Some(uid) {
-        return Err(ExecutionLedgerError::Corrupt("native delta requires existing owner state"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "native delta requires existing owner state",
+        ));
     }
     if complete_snapshot {
-    let payload = encode(&StoredState {
-        version: 1,
-        stop: stop.cloned(),
-        reservation: reservation.cloned(),
-        source_run_id: source.map(|s| s.run_id.clone()),
-        periods: periods.clone(),
-        leverage: leverage.to_vec(),
-    })?;
-    tx.execute(
-        "INSERT INTO ledger_state VALUES(1,1,?1,?2,?3)
+        let payload = encode(&StoredState {
+            version: 1,
+            stop: stop.cloned(),
+            reservation: reservation.cloned(),
+            source_run_id: source.map(|s| s.run_id.clone()),
+            periods: periods.clone(),
+            leverage: leverage.to_vec(),
+        })?;
+        tx.execute(
+            "INSERT INTO ledger_state VALUES(1,1,?1,?2,?3)
          ON CONFLICT(key) DO UPDATE SET uid=excluded.uid,
            digest=excluded.digest,bytes=excluded.bytes
          WHERE ledger_state.digest<>excluded.digest",
-        params![uid, checksum(&payload), payload],
-    )
-    .map_err(io)?;
+            params![uid, checksum(&payload), payload],
+        )
+        .map_err(io)?;
     }
     {
         let mut q = tx
