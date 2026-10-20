@@ -31,7 +31,7 @@ pub(super) fn checksum(b: &[u8]) -> String {
 }
 
 fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError> {
-    let connection = if create {
+    let mut connection = if create {
         fs::create_dir_all(
             path.parent()
                 .ok_or(ExecutionLedgerError::Corrupt("SQLite parent missing"))?,
@@ -48,39 +48,34 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
         .map_err(io)?;
     if create {
         connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(io)?;
-        connection
             .pragma_update(None, "synchronous", "FULL")
             .map_err(io)?;
-        let mode: String = connection
-            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-            .map_err(io)?;
-        let sync: i64 = connection
-            .query_row("PRAGMA synchronous", [], |r| r.get(0))
-            .map_err(io)?;
-        if mode != "wal" || sync != 2 {
-            return Err(ExecutionLedgerError::Corrupt("SQLite WAL/FULL unavailable"));
-        }
-        let current_version: i64 = connection
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .map_err(io)?;
-        if current_version != 0 && current_version != 1 {
-            return Err(ExecutionLedgerError::Corrupt(
-                "unsupported future SQLite schema",
-            ));
-        }
-        if current_version == 0 {
-            connection
-                .execute_batch(include_str!("../../schema/account-ledger-v1.sql"))
-                .map_err(io)?;
-        }
+    }
+    let current_version: i64 = connection
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(io)?;
+    if current_version != 0 && current_version != 1 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "unsupported SQLite account ledger schema",
+        ));
+    }
+    if create && current_version == 0 {
+        // A missing DB is initialized ONLY in the explicit native SAVE path.
+        // No production read ever manufactures a blank trading ledger.
+        // The accepted relational schema and native projections are published
+        // as one transaction; a crash cannot leave a user_version=1 half DB.
         connection
-            .execute_batch(super::sqlite_source::TABLES)
+            .pragma_update(None, "journal_mode", "WAL")
             .map_err(io)?;
-        connection
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS ledger_state (
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io)?;
+        tx.execute_batch(include_str!("../../schema/account-ledger-v1.sql"))
+            .map_err(io)?;
+        tx.execute_batch(super::sqlite_source::TABLES)
+            .map_err(io)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ledger_state (
                 key INTEGER PRIMARY KEY CHECK(key=1), format INTEGER NOT NULL,
                 uid TEXT NOT NULL, digest TEXT NOT NULL, bytes BLOB NOT NULL
              ) STRICT;
@@ -92,18 +87,31 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
              ) STRICT;
              CREATE INDEX IF NOT EXISTS idx_ledger_entries_uid
                 ON ledger_entries(uid, updated_at_ms);",
-            )
-            .map_err(io)?;
+        )
+        .map_err(io)?;
+        tx.commit().map_err(io)?;
     }
     let ver: i64 = connection
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(io)?;
-    if ver != 1 {
-        return Err(ExecutionLedgerError::Corrupt(
-            "SQLite schema version mismatch",
-        ));
+    let journal: String = connection
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .map_err(io)?;
+    let foreign_keys: i64 = connection
+        .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+        .map_err(io)?;
+    if ver != 1 || journal != "wal" || foreign_keys != 1 {
+        return Err(ExecutionLedgerError::Corrupt("SQLite schema/WAL/FK mismatch"));
     }
-    if !create {
+    if create {
+        let sync: i64 = connection
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .map_err(io)?;
+        if sync != 2 {
+            return Err(ExecutionLedgerError::Corrupt("SQLite synchronous FULL unavailable"));
+        }
+    } else {
+        // Cold read only, not the hot mutation path.
         let ok: String = connection
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
             .map_err(io)?;
