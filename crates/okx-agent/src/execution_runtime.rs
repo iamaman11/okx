@@ -562,17 +562,31 @@ impl ExecutionRuntime {
         let executor_account = AccountApi::new(rest.clone());
         let trade = TradeApi::new(rest);
         let mut writer_lease = ExecutionLedgerStore::acquire_writer_lease(root)?;
-        let ledger = DurableExecutionLedger::open(
-            // The existing Windows owner already supplies disjoint roots:
-            // Demo C:\okx-runtime\demo and Production C:\okx-runtime.
-            // Never silently strand either profile's durable history.
-            // Read the cutover marker via our own locked handle on Windows.
-            ExecutionLedgerStore::select_published_owner_under_writer_lease(
-                root,
-                &mut writer_lease,
-            )?,
-            observed_at_ms,
+        // Exact existing native CONTROL-selected root. A SQLite database
+        // cannot be silently reused under the other environment/account;
+        // check its immutable binding before opening any executor.
+        let store = ExecutionLedgerStore::select_published_owner_under_writer_lease(
+            root,
+            &mut writer_lease,
         )?;
+        if store.is_sqlite_native() {
+            let bound = store
+                .bound_native_account_identity()?
+                .ok_or(okx_execution::ExecutionLedgerError::AccountScopeMismatch)?;
+            let expected_environment = if environment.demo {
+                okx_protocol::AccountCatalogEnvironment::Demo
+            } else {
+                okx_protocol::AccountCatalogEnvironment::Production
+            };
+            let expected_account = if environment.demo { "demo" } else { "real" };
+            if bound.venue != okx_protocol::TradingVenue::Okx
+                || bound.environment != expected_environment
+                || bound.account_id != expected_account
+            {
+                return Err(okx_execution::ExecutionLedgerError::AccountScopeMismatch.into());
+            }
+        }
+        let ledger = DurableExecutionLedger::open(store, observed_at_ms)?;
         Ok(Self {
             mutation_ingress: MutationIngress::new(),
             environment,

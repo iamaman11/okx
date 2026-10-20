@@ -1098,13 +1098,22 @@ impl HostExecutor {
             .current_dir(&self.repo_root);
         let stdout = bounded_storage_cutover_output(&mut command, STORAGE_CUTOVER_TIMEOUT)?;
         let reply: Value = serde_json::from_slice(&stdout)?;
+        let (expected_account_id, expected_environment) = match self.desired_profile {
+            AgentProfile::Production => ("real", "production"),
+            AgentProfile::DemoAcceptance => ("demo", "demo"),
+        };
         if reply["schema"] != "okx.native-storage-cutover/v1"
             || reply["owner"] != "SQLITE"
             || reply["integrity"] != "VALIDATED_COLD_READ"
             || reply["trading_authorized"] != false
+            || reply["account_binding"]["venue"] != "okx"
+            || reply["account_binding"]["environment"] != expected_environment
+            || reply["account_binding"]["account_id"] != expected_account_id
+            || reply["account_binding"]["uid_fingerprint"] != expected_uid
+            || reply["account_binding"]["immutable"] != true
         {
             return Err(HostControlError::ArtifactVerification(
-                "native SQLite ownership receipt invalid",
+                "native SQLite account identity/ownership receipt invalid",
             ));
         }
         // No implicit restart, read-only switch, account change or grant.

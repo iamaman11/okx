@@ -32,8 +32,8 @@ use okx_agent::{
     runtime::{MailboxRuntimeContext, run_mailbox_until_shutdown, run_until_shutdown},
 };
 use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, RateBudget, Region};
-use okx_execution::ExecutionLedgerStore;
-use okx_protocol::{DirectRuntimeProfile, MailboxEnvelope};
+use okx_execution::{ExecutionLedgerStore, SqliteAccountIdentity};
+use okx_protocol::{AccountCatalogEnvironment, DirectRuntimeProfile, MailboxEnvelope, TradingVenue};
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator};
 use zeroize::Zeroize;
 
@@ -240,12 +240,38 @@ async fn run(cli: Cli) -> AgentResult<()> {
             expected_uid_fingerprint,
             expected_v14_sha256,
         } => {
-            let chosen = ExecutionLedgerStore::migrate_to_sqlite_offline(
+            // Existing CONTROL has already selected this exact native
+            // Production/Demo root and verified the v14 UID and hash.
+            // Bind the immutable account identity to SQLite BEFORE the owner
+            // receipt is published; never infer the account from a UI toggle.
+            let account_identity = SqliteAccountIdentity {
+                venue: TradingVenue::Okx,
+                environment: if environment.demo {
+                    AccountCatalogEnvironment::Demo
+                } else {
+                    AccountCatalogEnvironment::Production
+                },
+                account_id: if environment.demo { "demo" } else { "real" }.to_owned(),
+                uid_fingerprint: expected_uid_fingerprint.clone(),
+                bound_at_ms: u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default(),
+            };
+            let chosen = ExecutionLedgerStore::migrate_to_sqlite_offline_for_account(
                 &config.root,
                 &expected_uid_fingerprint,
                 &expected_v14_sha256,
+                &account_identity,
             )?;
             let proof = chosen.attest_storage()?;
+            let bound = chosen
+                .bound_native_account_identity()?
+                .ok_or(okx_execution::ExecutionLedgerError::AccountScopeMismatch)?;
+            if bound.venue != account_identity.venue
+                || bound.environment != account_identity.environment
+                || bound.account_id != account_identity.account_id
+                || bound.uid_fingerprint != account_identity.uid_fingerprint
+            {
+                return Err(okx_execution::ExecutionLedgerError::AccountScopeMismatch.into());
+            }
             println!(
                 "{}",
                 serde_json::json!({
@@ -254,6 +280,13 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     "format": proof.on_disk_schema,
                     "integrity": proof.integrity,
                     "manifest_sha256": proof.manifest_sha256,
+                    "account_binding": {
+                        "venue": bound.venue.as_str(),
+                        "environment": if environment.demo { "demo" } else { "production" },
+                        "account_id": bound.account_id,
+                        "uid_fingerprint": bound.uid_fingerprint,
+                        "immutable": true
+                    },
                     "trading_authorized": false
                 })
             );

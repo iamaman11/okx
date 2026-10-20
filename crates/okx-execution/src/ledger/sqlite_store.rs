@@ -261,6 +261,20 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
         )
         .optional()
         .map_err(io)?;
+    let bound_uid: Option<String> = c
+        .query_row(
+            "SELECT uid_fingerprint FROM account_identity WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(io)?;
+    if bound_uid
+        .as_deref()
+        .is_some_and(|bound| meta.as_ref().is_none_or(|(uid, _, _)| uid != bound))
+    {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
     let mut statement=c.prepare(
         "SELECT intent_id,client_order_id,uid,digest,bytes FROM ledger_entries ORDER BY intent_id"
     ).map_err(io)?;
@@ -1468,15 +1482,29 @@ mod tests {
             ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &"0".repeat(64)).is_err()
         );
         assert!(!root.join("execution-ledger.owner").exists());
-        let chosen = ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).unwrap();
+        let scope = SqliteAccountIdentity {
+            venue: TradingVenue::Okx,
+            environment: AccountCatalogEnvironment::Production,
+            account_id: "real".to_owned(),
+            uid_fingerprint: uid.clone(),
+            bound_at_ms: 101,
+        };
+        let chosen = ExecutionLedgerStore::migrate_to_sqlite_offline_for_account(
+            &root, &uid, &digest, &scope,
+        )
+        .unwrap();
+        assert_eq!(chosen.bound_native_account_identity().unwrap(), Some(scope.clone()));
         assert_eq!(chosen.path(), sqlite.as_path());
         assert_eq!(
             chosen.attest_storage().unwrap().integrity,
             "VALIDATED_COLD_READ"
         );
-        let duplicate =
-            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).unwrap();
+        let duplicate = ExecutionLedgerStore::migrate_to_sqlite_offline_for_account(
+            &root, &uid, &digest, &scope,
+        )
+        .unwrap();
         assert_eq!(duplicate.path(), sqlite.as_path());
+        assert_eq!(duplicate.bound_native_account_identity().unwrap(), Some(scope));
         let sealed = root.join("execution-ledger.v14.sealed");
         assert!(!v14.exists());
         assert_eq!(std::fs::read(&sealed).unwrap(), original);

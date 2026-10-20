@@ -424,6 +424,7 @@ impl SqliteAccountIdentity {
                 .iter()
                 .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
             || self.bound_at_ms == 0
+            || i64::try_from(self.bound_at_ms).is_err()
         {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
@@ -777,15 +778,57 @@ impl ExecutionLedgerStore {
         expected_uid: &str,
         expected_v14_sha256: &str,
     ) -> Result<Self, ExecutionLedgerError> {
+        Self::migrate_to_sqlite_offline_with_account(
+            root,
+            expected_uid,
+            expected_v14_sha256,
+            None,
+        )
+    }
+
+    /// CONTROL-selected, UID-attested account identity is bound in the
+    /// offline staging transaction BEFORE the irreversible owner cutover.
+    /// Historical test imports can still stage without account registration;
+    /// Production's typed CONTROL path must use this bound entry point.
+    pub fn migrate_to_sqlite_offline_for_account(
+        root: &Path,
+        expected_uid: &str,
+        expected_v14_sha256: &str,
+        identity: &SqliteAccountIdentity,
+    ) -> Result<Self, ExecutionLedgerError> {
+        Self::migrate_to_sqlite_offline_with_account(
+            root,
+            expected_uid,
+            expected_v14_sha256,
+            Some(identity),
+        )
+    }
+
+    fn migrate_to_sqlite_offline_with_account(
+        root: &Path,
+        expected_uid: &str,
+        expected_v14_sha256: &str,
+        identity: Option<&SqliteAccountIdentity>,
+    ) -> Result<Self, ExecutionLedgerError> {
+        if let Some(scope) = identity {
+            scope.validate()?;
+            if scope.uid_fingerprint != expected_uid {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+        }
         let mut writer_lease = Self::acquire_writer_lease(root)?;
         let receipt = root.join("execution-ledger.owner");
         if receipt.try_exists()? {
-            return Self::publish_verified_sqlite_owner(
+            let chosen = Self::publish_verified_sqlite_owner(
                 root,
                 expected_uid,
                 expected_v14_sha256,
                 &mut writer_lease,
-            );
+            )?;
+            if let Some(scope) = identity {
+                chosen.bind_native_account_identity(scope)?;
+            }
+            return Ok(chosen);
         }
         let original = root.join("execution-ledger.json");
         let sealed = root.join("execution-ledger.v14.sealed");
@@ -842,6 +885,11 @@ impl ExecutionLedgerStore {
             || format!("{:x}", Sha256::digest(fs::read(source.path())?)) != expected_v14_sha256
         {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        // Bind the selected account's typed identity before retiring v14.
+        // A foreign profile or UID cannot become the new owner after commit.
+        if let Some(scope) = identity {
+            Self::sqlite_at(&native).bind_native_account_identity(scope)?;
         }
         // The cutover watermark is persisted BEFORE the old writer is
         // retired. An interrupted publication can only resume offline.
@@ -970,6 +1018,10 @@ impl ExecutionLedgerStore {
             ));
         }
         sqlite_store::bound_account_identity(&self.path)
+    }
+
+    pub fn is_sqlite_native(&self) -> bool {
+        self.sqlite_native
     }
 
     pub fn path(&self) -> &Path {
