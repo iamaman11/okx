@@ -727,6 +727,20 @@ mod tests {
         assert_eq!((fill_count, bill_count, gap_count), (1, 1, 1));
         assert_eq!(delta, "-0.12");
         drop(c);
+        let snapshot = super::sqlite_finance::finance_window(
+            &p,"uid-test-one",1,100_000
+        ).unwrap();
+        assert_eq!(snapshot.bill_rows, 1);
+        assert_eq!(snapshot.fill_rows, 1);
+        assert_eq!(snapshot.financial_gaps, 1);
+        assert_eq!(snapshot.financial_completeness, "INCOMPLETE");
+        assert!(snapshot.buckets.iter().any(|v|
+            v.currency=="USDT" && v.exact_balance_delta=="-0.12"
+        ));
+        let read_as_wrong_account=super::sqlite_finance::finance_window(
+            &p,"uid-other",1,100_000
+        );
+        assert!(matches!(read_as_wrong_account,Err(ExecutionLedgerError::AccountScopeMismatch)));
 
         let original = source.clone();
         source.events.get_mut("event-1").unwrap().payload =

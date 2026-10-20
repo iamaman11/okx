@@ -429,6 +429,20 @@ impl ExecutionLedgerStore {
         }
     }
 
+    /// Account-level, read-only observed financial movements from immutable
+    /// native bills. Never an independent NAV, strategy attribution, or permit.
+    pub fn observed_finance_window(
+        &self,
+        expected_uid: &str,
+        from_ms: u64,
+        through_ms: u64,
+    ) -> Result<sqlite_finance::AccountFinanceWindow, ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt("SQLite finance storage not active"));
+        }
+        sqlite_finance::finance_window(&self.path, expected_uid, from_ms, through_ms)
+    }
+
     /// Read-only verified import into a NEW SQLite staging path. It never
     /// changes the original ledger, the active owner, or trading permissions.
     pub fn prepare_sqlite_staging(
