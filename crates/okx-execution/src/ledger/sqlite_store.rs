@@ -72,8 +72,7 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
             .map_err(io)?;
         tx.execute_batch(include_str!("../../schema/account-ledger-v1.sql"))
             .map_err(io)?;
-        tx.execute_batch(super::sqlite_source::TABLES)
-            .map_err(io)?;
+        tx.execute_batch(super::sqlite_source::TABLES).map_err(io)?;
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS ledger_state (
                 key INTEGER PRIMARY KEY CHECK(key=1), format INTEGER NOT NULL,
@@ -101,14 +100,18 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
         .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
         .map_err(io)?;
     if ver != 1 || journal != "wal" || foreign_keys != 1 {
-        return Err(ExecutionLedgerError::Corrupt("SQLite schema/WAL/FK mismatch"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "SQLite schema/WAL/FK mismatch",
+        ));
     }
     if create {
         let sync: i64 = connection
             .query_row("PRAGMA synchronous", [], |r| r.get(0))
             .map_err(io)?;
         if sync != 2 {
-            return Err(ExecutionLedgerError::Corrupt("SQLite synchronous FULL unavailable"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite synchronous FULL unavailable",
+            ));
         }
     } else {
         // Cold read only, not the hot mutation path.
