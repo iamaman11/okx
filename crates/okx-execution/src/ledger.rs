@@ -1064,29 +1064,51 @@ impl ExecutionLedgerStore {
         leverage_attempts: &[LeverageChangeAttempt],
     ) -> Result<(), ExecutionLedgerError> {
         if !self.sqlite_native {
-            return self.save(all_entries, risk_stop, capital_reservation,
-                exchange_evidence, history, leverage_attempts);
+            return self.save(
+                all_entries,
+                risk_stop,
+                capital_reservation,
+                exchange_evidence,
+                history,
+                leverage_attempts,
+            );
         }
         if all_entries.get(&changed.record.plan.intent_id) != Some(changed) {
             return Err(ExecutionLedgerError::IntentConflict);
         }
         validate_entry(changed)?;
-        validate_strategy_run_binding(changed, capital_reservation,
-            &history.archived_runs, &history.unverified_runs)?;
-        if let Some(stop)=risk_stop { validate_risk_stop(stop)?; }
-        if let Some(run)=capital_reservation { validate_capital_reservation(run)?; }
-        if let Some(source)=exchange_evidence {
+        validate_strategy_run_binding(
+            changed,
+            capital_reservation,
+            &history.archived_runs,
+            &history.unverified_runs,
+        )?;
+        if let Some(stop) = risk_stop {
+            validate_risk_stop(stop)?;
+        }
+        if let Some(run) = capital_reservation {
+            validate_capital_reservation(run)?;
+        }
+        if let Some(source) = exchange_evidence {
             source.validate()?;
-            if capital_reservation.is_none_or(|run|
+            if capital_reservation.is_none_or(|run| {
                 source.account_uid != run.account_uid_fingerprint
-                || source.run_id != run.allocation_id) {
+                    || source.run_id != run.allocation_id
+            }) {
                 return Err(ExecutionLedgerError::AccountScopeMismatch);
             }
         }
-        history.validate(capital_reservation,exchange_evidence)?;
-        validate_leverage_attempts(leverage_attempts,capital_reservation)?;
-        sqlite_store::save_one(&self.path, changed, risk_stop,capital_reservation,
-            exchange_evidence,history,leverage_attempts)
+        history.validate(capital_reservation, exchange_evidence)?;
+        validate_leverage_attempts(leverage_attempts, capital_reservation)?;
+        sqlite_store::save_one(
+            &self.path,
+            changed,
+            risk_stop,
+            capital_reservation,
+            exchange_evidence,
+            history,
+            leverage_attempts,
+        )
     }
 
     fn save(
@@ -3225,7 +3247,11 @@ impl DurableExecutionLedger {
             validate_entry(entry)?;
         }
 
-        let changed = self.entries.get(intent_id).expect("mutated entry exists").clone();
+        let changed = self
+            .entries
+            .get(intent_id)
+            .expect("mutated entry exists")
+            .clone();
         if let Err(error) = self.store.save_changed_intent(
             &changed,
             &self.entries,
