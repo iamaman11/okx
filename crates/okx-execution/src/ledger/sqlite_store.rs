@@ -819,9 +819,7 @@ fn save_snapshot(
                 // immutable prepared plan, including risk mandate and
                 // instrument. A matching client-order-id alone is not a
                 // legitimate plan identity: never relabel old venue risk.
-                if old.record.plan != e.record.plan
-                    || old.created_at_ms != e.created_at_ms
-                {
+                if old.record.plan != e.record.plan || old.created_at_ms != e.created_at_ms {
                     return Err(ExecutionLedgerError::IntentConflict);
                 }
                 Some(old.record.state)
@@ -1162,24 +1160,40 @@ mod tests {
         changed.updated_at_ms += 2;
         assert!(matches!(
             save_one(
-                &db, &changed, None, None, None,
-                &StrategyPeriodHistory::default(), &[],
+                &db,
+                &changed,
+                None,
+                None,
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
             ),
             Err(ExecutionLedgerError::IntentConflict)
         ));
-        assert_eq!(store.indexed_intent(&uid, id).unwrap(), Some(original.clone()));
+        assert_eq!(
+            store.indexed_intent(&uid, id).unwrap(),
+            Some(original.clone())
+        );
 
         changed = original.clone();
         changed.created_at_ms += 1;
         changed.updated_at_ms += 2;
         assert!(matches!(
             save_one(
-                &db, &changed, None, None, None,
-                &StrategyPeriodHistory::default(), &[],
+                &db,
+                &changed,
+                None,
+                None,
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
             ),
             Err(ExecutionLedgerError::IntentConflict)
         ));
-        assert_eq!(store.indexed_intent(&uid, id).unwrap(), Some(original.clone()));
+        assert_eq!(
+            store.indexed_intent(&uid, id).unwrap(),
+            Some(original.clone())
+        );
 
         // A forged projection is rejected in the SAME transaction that
         // attempts to advance an otherwise valid authoritative intent.
@@ -1192,10 +1206,18 @@ mod tests {
         drop(c);
         changed = original.clone();
         changed.updated_at_ms += 2;
-        assert!(save_one(
-            &db, &changed, None, None, None,
-            &StrategyPeriodHistory::default(), &[],
-        ).is_err());
+        assert!(
+            save_one(
+                &db,
+                &changed,
+                None,
+                None,
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
+            )
+            .is_err()
+        );
         let c = Connection::open(&db).unwrap();
         let old_time: i64 = c
             .query_row(
