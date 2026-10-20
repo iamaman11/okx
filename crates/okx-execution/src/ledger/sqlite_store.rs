@@ -431,13 +431,17 @@ pub(super) fn save(
                 return Err(ExecutionLedgerError::InvalidTimestamp);
             }
             let prior_state = if let Some((_, _, prior_digest, _)) = &existing {
-                let prior_bytes: Vec<u8> = tx.query_row(
-                    "SELECT bytes FROM ledger_entries WHERE intent_id=?1",
-                    params![id],
-                    |row| row.get(0),
-                ).map_err(io)?;
+                let prior_bytes: Vec<u8> = tx
+                    .query_row(
+                        "SELECT bytes FROM ledger_entries WHERE intent_id=?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .map_err(io)?;
                 if checksum(&prior_bytes) != *prior_digest {
-                    return Err(ExecutionLedgerError::Corrupt("prior intent digest mismatch"));
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "prior intent digest mismatch",
+                    ));
                 }
                 let old: ExecutionLedgerEntry = decode(&prior_bytes)?;
                 Some(old.record.state)
@@ -448,13 +452,17 @@ pub(super) fn save(
                 && e.record.state == ExecutionState::Submitting;
             // Existing post records are durable fences: PREPARED cannot
             // re-enter after BEGIN_POST, even through an erroneous caller.
-            let posted: Option<String> = tx.query_row(
-                "SELECT client_order_id FROM post_attempts WHERE intent_id=?1",
-                params![id],
-                |row| row.get(0),
-            ).optional().map_err(io)?;
-            if posted.as_deref().is_some_and(|client|
-                client != e.record.plan.client_order_id)
+            let posted: Option<String> = tx
+                .query_row(
+                    "SELECT client_order_id FROM post_attempts WHERE intent_id=?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(io)?;
+            if posted
+                .as_deref()
+                .is_some_and(|client| client != e.record.plan.client_order_id)
                 || posted.is_some() && e.record.state == ExecutionState::Prepared
                 || posted.is_some() && is_begin_post
             {
@@ -551,13 +559,13 @@ pub(super) fn save(
     // An old intent may not disappear: a count alone is sufficient here
     // because the upsert loop proved every input intent has one SQL row.
     // Unexpected historical rows increase the count and roll back all writes.
-    let persisted: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM ledger_entries",
-        [],
-        |row| row.get(0),
-    ).map_err(io)?;
+    let persisted: i64 = tx
+        .query_row("SELECT COUNT(*) FROM ledger_entries", [], |row| row.get(0))
+        .map_err(io)?;
     if usize::try_from(persisted).ok() != Some(entries.len()) {
-        return Err(ExecutionLedgerError::Corrupt("SQLite historical intent deletion"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "SQLite historical intent deletion",
+        ));
     }
     // Existing intents are inserted before projecting fill attribution, so a
     // foreign-key-bound source_intent_id is proved in this same transaction.
@@ -575,8 +583,7 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
             r.get(0)
         })
         .map_err(io)?;
-    let (records, stop, _capital, source, periods, _leverage) =
-        load(path, usize::MAX)?;
+    let (records, stop, _capital, source, periods, _leverage) = load(path, usize::MAX)?;
     let n: i64 = c
         .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
         .map_err(io)?;
