@@ -212,8 +212,9 @@ impl DurableExchangeEvidence {
             .as_deref()
             .and_then(|v| v.parse::<u64>().ok())
             .ok_or(ExecutionLedgerError::Corrupt("missing exchange as-of"))?;
-        let now = source_receipt_ms(&facts.summary.source_received_at)
-            .ok_or(ExecutionLedgerError::Corrupt("invalid native REST history receipt"))?;
+        let now = source_receipt_ms(&facts.summary.source_received_at).ok_or(
+            ExecutionLedgerError::Corrupt("invalid native REST history receipt"),
+        )?;
         if now < run.started_at_ms {
             return Err(ExecutionLedgerError::Corrupt(
                 "native source receipt before strategy run",
@@ -426,9 +427,7 @@ impl DurableExchangeEvidence {
             cursors: self.cursors.len(),
             checksum_sha256: self.checksum_sha256.clone(),
             latest_source_complete: receipts.is_some()
-                && latest.is_some_and(|v| {
-                    v.order_complete && v.fill_complete && v.bill_complete
-                }),
+                && latest.is_some_and(|v| v.order_complete && v.fill_complete && v.bill_complete),
             oldest_source_asof_ms: venue_epochs.first().copied(),
             latest_source_asof_ms: venue_epochs.last().copied(),
             latest_source_received_at_ms: epochs.last().copied(),
@@ -512,9 +511,11 @@ mod tests {
                 key.into(),
                 ExchangeCoverageCursor {
                     source: "OKX_REST_ACCOUNT_HISTORY".into(),
-                    source_received_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(time as i64)
-                        .expect("test timestamp")
-                        .to_rfc3339(),
+                    source_received_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+                        time as i64,
+                    )
+                    .expect("test timestamp")
+                    .to_rfc3339(),
                     generation: "one".into(),
                     account_as_of_ms: time,
                     order_complete: true,
