@@ -1103,8 +1103,7 @@ pub(super) fn assess_profile(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(io)?;
-    if usize::try_from(n_entries).ok() != Some(total)
-        || usize::try_from(n_proj).ok() != Some(total)
+    if usize::try_from(n_entries).ok() != Some(total) || usize::try_from(n_proj).ok() != Some(total)
     {
         return Err(ExecutionLedgerError::Corrupt(
             "native account profile inventory mismatch",
@@ -1140,7 +1139,9 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
         )
         .map_err(io)?;
     if checksum(&bytes) != digest {
-        return Err(ExecutionLedgerError::Corrupt("SQLite state digest mismatch"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "SQLite state digest mismatch",
+        ));
     }
     let state: StoredState = decode(&bytes)?;
     if state.version != 1 {
@@ -1163,7 +1164,11 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
     if let Some(reservation) = &state.reservation {
         validate_capital_reservation(reservation)?;
     }
-    if state.reservation.as_ref().is_some_and(|r| r.account_uid_fingerprint != uid) {
+    if state
+        .reservation
+        .as_ref()
+        .is_some_and(|r| r.account_uid_fingerprint != uid)
+    {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     let source = state
@@ -1361,7 +1366,9 @@ mod tests {
         store.bind_native_account_identity(&scope).unwrap();
         let state = Connection::open(&path).unwrap();
         let state_digest: String = state
-            .query_row("SELECT digest FROM ledger_state WHERE key=1", [], |r| r.get(0))
+            .query_row("SELECT digest FROM ledger_state WHERE key=1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         drop(state);
         let mut expected = Sha256::new();
@@ -1377,7 +1384,10 @@ mod tests {
         let full = store.attest_storage().unwrap();
         assert_eq!(full.manifest_sha256, format!("{:x}", expected.finalize()));
         assert_eq!(store.load().unwrap().0, entries);
-        assert_eq!(store.attest_storage().unwrap().manifest_sha256, full.manifest_sha256);
+        assert_eq!(
+            store.attest_storage().unwrap().manifest_sha256,
+            full.manifest_sha256
+        );
         // Account handoff also streams the same verified SQL rows rather than
         // counting the Engine's historical BTreeMap.
         let ledger = DurableExecutionLedger::open(store.clone(), 3000).unwrap();
@@ -1388,7 +1398,11 @@ mod tests {
         assert_eq!(report.unresolved_protective_lifecycle, 0);
         assert_eq!(report.account_uid_mismatches, 0);
         assert_eq!(report.source_ledger_manifest_sha256, full.manifest_sha256);
-        assert!(ledger.profile_handoff_ledger_assessment(&"b".repeat(64)).is_err());
+        assert!(
+            ledger
+                .profile_handoff_ledger_assessment(&"b".repeat(64))
+                .is_err()
+        );
         drop(ledger);
 
         // A forged index cannot be papered over by hashing only the
