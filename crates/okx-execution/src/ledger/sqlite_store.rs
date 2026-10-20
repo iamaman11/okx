@@ -1042,34 +1042,149 @@ pub(super) fn read_staging_origin(path: &Path) -> Result<(String, String), Execu
     Ok((uid, source))
 }
 
+/// Exhaustive read-only attestation without a second full historical
+/// BTreeMap. Every intent is validated once and streamed through the same
+/// legacy-compatible manifest digest; source/periods/POST remain checked.
+/// No source mutations, account registration or exchange commands occur.
 pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
-    let c = connect(path, false)?;
-    let digest: String = c
-        .query_row("SELECT digest FROM ledger_state WHERE key=1", [], |r| {
-            r.get(0)
-        })
+    let c = connect(path, false)?; // FULL integrity_check at cold boundary
+    // Hold one consistent WAL snapshot through manifest, source and fences.
+    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
+    let (uid, digest, bytes): (String, String, Vec<u8>) = c
+        .query_row(
+            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .map_err(io)?;
-    let (records, stop, _capital, source, periods, _leverage) = load(path, usize::MAX)?;
-    let n: i64 = c
-        .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
-        .map_err(io)?;
-    if n != records.len() as i64 {
-        return Err(ExecutionLedgerError::Corrupt("SQLite inventory"));
+    if checksum(&bytes) != digest {
+        return Err(ExecutionLedgerError::Corrupt("SQLite state digest mismatch"));
     }
-    // The attestation hashes all ledger records in a stable key order and the
-    // state manifest. Hashing the state row alone would miss amended intents.
+    let state: StoredState = decode(&bytes)?;
+    if state.version != 1 {
+        return Err(ExecutionLedgerError::Corrupt("SQLite data version"));
+    }
+    let bound: Option<String> = c
+        .query_row(
+            "SELECT uid_fingerprint FROM account_identity WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(io)?;
+    if bound.as_deref().is_some_and(|value| value != uid) {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    if let Some(stop) = &state.stop {
+        validate_risk_stop(stop)?;
+    }
+    if let Some(reservation) = &state.reservation {
+        validate_capital_reservation(reservation)?;
+    }
+    if state.reservation.as_ref().is_some_and(|r| r.account_uid_fingerprint != uid) {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let source = state
+        .source_run_id
+        .as_deref()
+        .map(|run_id| super::sqlite_source::read(&c, run_id, &uid))
+        .transpose()?;
+    state
+        .periods
+        .validate(state.reservation.as_ref(), source.as_ref())?;
+    validate_leverage_attempts(&state.leverage, state.reservation.as_ref())?;
+
     let mut owner_digest = Sha256::new();
     owner_digest.update(b"okx.sqlite.ledger/v1");
     owner_digest.update(digest.as_bytes());
     if let Some(source) = &source {
         owner_digest.update(source.checksum_sha256.as_bytes());
     }
-    for (id, entry) in &records {
-        let payload = encode(entry)?;
+    let sql = format!("{INDEXED_INTENT_COLUMNS} ORDER BY e.intent_id");
+    let mut statement = c.prepare(&sql).map_err(io)?;
+    let mut rows = statement.query([]).map_err(io)?;
+    let mut count: i64 = 0;
+    while let Some(row) = rows.next().map_err(io)? {
+        let entry = verified_indexed_entry(row, &uid)?;
+        validate_strategy_run_binding(
+            &entry,
+            state.reservation.as_ref(),
+            &state.periods.archived_runs,
+            &state.periods.unverified_runs,
+        )?;
+        let id = &entry.record.plan.intent_id;
+        let payload = encode(&entry)?;
         owner_digest.update((id.len() as u64).to_le_bytes());
         owner_digest.update(id.as_bytes());
         owner_digest.update((payload.len() as u64).to_le_bytes());
         owner_digest.update(&payload);
+        count = count
+            .checked_add(1)
+            .ok_or(ExecutionLedgerError::Corrupt("SQLite inventory overflow"))?;
+    }
+    drop(rows);
+    drop(statement);
+    let (indexed_count, entry_count): (i64, i64) = c
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM intents),
+                    (SELECT COUNT(*) FROM ledger_entries)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(io)?;
+    if count != entry_count || count != indexed_count {
+        return Err(ExecutionLedgerError::Corrupt(
+            "SQLite historical intent projection inventory",
+        ));
+    }
+    if count == 0 && state.reservation.is_none() {
+        return Err(ExecutionLedgerError::Corrupt(
+            "SQLite account scope has no authoritative entries",
+        ));
+    }
+    // Every native BEGIN_POST fence must remain linked to an exact intent,
+    // original client ID and append-only event, including after crashes.
+    // One streaming SQL join replaces a historical in-memory index.
+    let mut fence_stmt = c
+        .prepare(
+            "SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
+                    i.instrument_id,i.requested_action,i.plan_sha256,i.current_state,i.created_at_ms,
+                    p.client_order_id,p.begin_post_at_ms,
+                    d.event_type,d.subject_id,d.effective_at_ms
+             FROM post_attempts p
+             JOIN domain_events d ON d.event_id=p.begin_post_event_id
+             JOIN ledger_entries e ON e.intent_id=p.intent_id
+             LEFT JOIN intents i ON i.intent_id=e.intent_id",
+        )
+        .map_err(io)?;
+    let mut fence_rows = fence_stmt.query([]).map_err(io)?;
+    let mut fence_count: i64 = 0;
+    while let Some(row) = fence_rows.next().map_err(io)? {
+        let entry = verified_indexed_entry(row, &uid)?;
+        let client: String = row.get(10).map_err(io)?;
+        let at: i64 = row.get(11).map_err(io)?;
+        let kind: String = row.get(12).map_err(io)?;
+        let subject: String = row.get(13).map_err(io)?;
+        let effective: i64 = row.get(14).map_err(io)?;
+        if client != entry.record.plan.client_order_id
+            || kind != "BEGIN_POST"
+            || subject != entry.record.plan.intent_id
+            || at != effective
+            || entry.record.state == ExecutionState::Prepared
+        {
+            return Err(ExecutionLedgerError::Corrupt("native post fence mismatch"));
+        }
+        fence_count += 1;
+    }
+    drop(fence_rows);
+    drop(fence_stmt);
+    let all_fences: i64 = c
+        .query_row("SELECT COUNT(*) FROM post_attempts", [], |r| r.get(0))
+        .map_err(io)?;
+    if fence_count != all_fences {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native post fence has missing source",
+        ));
     }
     let full_manifest = format!("{:x}", owner_digest.finalize());
     Ok(LedgerStorageAttestation {
@@ -1079,13 +1194,15 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
         migration: "SQLITE_NATIVE_OWNER",
         manifest_sha256: full_manifest,
         manifest_bytes: fs::metadata(path)?.len(),
-        sealed_finalized_runs: periods.archived_runs.len(),
-        sealed_unverified_runs: periods.unverified_runs.len(),
-        verified_archive_bodies: periods.archived_runs.len() + periods.unverified_runs.len(),
+        sealed_finalized_runs: state.periods.archived_runs.len(),
+        sealed_unverified_runs: state.periods.unverified_runs.len(),
+        verified_archive_bodies: state.periods.archived_runs.len()
+            + state.periods.unverified_runs.len(),
         original_snapshot: "SQLITE_NO_LEGACY_FALLBACK",
         original_snapshot_sha256: None,
-        active_risk_stop_reason: stop.as_ref().map(|v| v.reason.clone()),
-        finalized_run_checksum_sha256: periods
+        active_risk_stop_reason: state.stop.as_ref().map(|v| v.reason.clone()),
+        finalized_run_checksum_sha256: state
+            .periods
             .finalized_run
             .as_ref()
             .map(|f| f.checksum_sha256.clone()),
@@ -1104,6 +1221,93 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("okx-sqlite-{label}-{}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn streaming_attestation_matches_canonical_full_history_manifest() {
+        let root = test_root("streaming-attestation");
+        let path = root.join("account.sqlite");
+        let uid = "a".repeat(64);
+        let mut entries = BTreeMap::new();
+        for index in 0..384_u64 {
+            let id = format!("historical_attestation_intent_{index:06}");
+            let plan = ExecutionPlan {
+                schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+                intent_id: id.clone(),
+                client_order_id: derive_client_order_id(&id),
+                reference_generation: "sha256:reference".to_owned(),
+                account_generation: "sha256:account".to_owned(),
+                account_uid_fingerprint: uid.clone(),
+                instrument_id: "BTC-USDT-SWAP".to_owned(),
+                trade_mode: crate::TradeMode::Cross,
+                side: crate::OrderSide::Buy,
+                position_side: PositionSide::Long,
+                action: ExecutionAction::Open,
+                order_type: crate::OrderType::Limit,
+                size: "1".to_owned(),
+                price: "0.1".to_owned(),
+                open_risk: None,
+                risk_binding: None,
+            };
+            entries.insert(
+                id,
+                ExecutionLedgerEntry {
+                    record: ExecutionRecord::new(plan),
+                    created_at_ms: index + 1000,
+                    updated_at_ms: index + 1000,
+                },
+            );
+        }
+        save(
+            &path,
+            &entries,
+            None,
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
+        let store = ExecutionLedgerStore::sqlite_at(&path);
+        let scope = SqliteAccountIdentity {
+            venue: LedgerVenue::Okx,
+            environment: LedgerEnvironment::Demo,
+            account_id: "demo".to_owned(),
+            uid_fingerprint: uid.clone(),
+            bound_at_ms: 2000,
+        };
+        store.bind_native_account_identity(&scope).unwrap();
+        let state = Connection::open(&path).unwrap();
+        let state_digest: String = state
+            .query_row("SELECT digest FROM ledger_state WHERE key=1", [], |r| r.get(0))
+            .unwrap();
+        drop(state);
+        let mut expected = Sha256::new();
+        expected.update(b"okx.sqlite.ledger/v1");
+        expected.update(state_digest.as_bytes());
+        for (id, entry) in &entries {
+            let payload = encode(entry).unwrap();
+            expected.update((id.len() as u64).to_le_bytes());
+            expected.update(id.as_bytes());
+            expected.update((payload.len() as u64).to_le_bytes());
+            expected.update(&payload);
+        }
+        let full = store.attest_storage().unwrap();
+        assert_eq!(full.manifest_sha256, format!("{:x}", expected.finalize()));
+        assert_eq!(store.load().unwrap().0, entries);
+        assert_eq!(store.attest_storage().unwrap().manifest_sha256, full.manifest_sha256);
+
+        // A forged index cannot be papered over by hashing only the
+        // authoritative BLOB or only a subset of historical rows.
+        let c = Connection::open(&path).unwrap();
+        c.execute(
+            "UPDATE intents SET current_state='FAKE' WHERE intent_id=?1",
+            params!["historical_attestation_intent_000211"],
+        )
+        .unwrap();
+        drop(c);
+        assert!(store.attest_storage().is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
