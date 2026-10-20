@@ -1224,9 +1224,16 @@ mod tests {
         let duplicate =
             ExecutionLedgerStore::publish_verified_sqlite_owner(&root, &uid, &digest).unwrap();
         assert_eq!(duplicate.path(), sqlite.as_path());
-        assert_eq!(std::fs::read(&v14).unwrap(), original);
+        let sealed = root.join("execution-ledger.v14.sealed");
+        assert!(!v14.exists());
+        assert_eq!(std::fs::read(&sealed).unwrap(), original);
         std::fs::remove_file(root.join("execution-ledger.owner")).unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        std::fs::remove_file(&sqlite).unwrap();
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        // A sealed legacy source must never recreate a possibly newer
+        // missing SQLite file (and thereby lose legitimate recent trades).
+        assert!(ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1299,7 +1306,9 @@ mod tests {
             format!("okx.ledger-owner/v1\nSQLITE\n{}\n{}\n", uid, witness_sha),
         )
         .unwrap();
-        assert_eq!(
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        std::fs::rename(&v14, root.join("execution-ledger.v14.sealed")).unwrap();
+        assert_eq!
             ExecutionLedgerStore::select_published_owner(&root)
                 .unwrap()
                 .path(),
@@ -1323,6 +1332,56 @@ mod tests {
         // boot must fail and never reopen an independent v14 writer.
         std::fs::remove_file(&sqlite).unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_v14_retirement_resumes_without_unsealing_or_replaying() {
+        let root = test_root("interrupted-retirement");
+        let v14 = root.join("execution-ledger.json");
+        let sqlite = root.join("execution-ledger.sqlite");
+        let sealed = root.join("execution-ledger.v14.sealed");
+        let uid = "c".repeat(64);
+        let capital = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "native_cutover_resume_000001".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            origin_schema: "test/v1".to_owned(),
+            origin_version: "v1".to_owned(),
+            mandate_version: "1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "127".to_owned(),
+            account_generation: "g1".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1,
+        };
+        let legacy = ExecutionLedgerStore::at(&v14);
+        legacy.save(
+            &BTreeMap::new(),
+            None,
+            Some(&capital),
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        ).unwrap();
+        let digest = checksum(&std::fs::read(&v14).unwrap());
+        legacy.prepare_sqlite_staging(&sqlite).unwrap();
+        // Crash after retiring the old writer but before receipt publication.
+        std::fs::rename(&v14, &sealed).unwrap();
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        let chosen = ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).unwrap();
+        assert_eq!(chosen.path(), sqlite.as_path());
+        assert!(!v14.exists());
+        assert!(sealed.exists());
+        assert_eq!(
+            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest)
+                .unwrap().path(),
+            sqlite.as_path()
+        );
+        // A resurrected legacy writer is never accepted.
+        std::fs::copy(&sealed, &v14).unwrap();
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        assert!(ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -32,6 +32,7 @@ use okx_agent::{
     runtime::{MailboxRuntimeContext, run_mailbox_until_shutdown, run_until_shutdown},
 };
 use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, RateBudget, Region};
+use okx_execution::ExecutionLedgerStore;
 use okx_protocol::{DirectRuntimeProfile, MailboxEnvelope};
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator};
 use zeroize::Zeroize;
@@ -83,6 +84,15 @@ enum Command {
 
     /// Store the separate Read + Trade OKX Demo executor credential payload from stdin.
     SetDemoExecutorOkxCredentials,
+
+    /// Offline one-writer storage cutover under existing stopped CONTROL.
+    /// Called only after CONTROL has fenced its exclusive Windows Job.
+    StorageCutover {
+        #[arg(long)]
+        expected_uid_fingerprint: String,
+        #[arg(long)]
+        expected_v14_sha256: String,
+    },
 
     /// Process one encrypted mailbox envelope from a file or stdin.
     Once {
@@ -223,6 +233,28 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 serde_json::json!({
                     "schema": "okx.agent.demo-executor-okx-credentials/v1",
                     "stored": true
+                })
+            );
+        }
+        Command::StorageCutover {
+            expected_uid_fingerprint,
+            expected_v14_sha256,
+        } => {
+            let chosen = ExecutionLedgerStore::migrate_to_sqlite_offline(
+                &config.root,
+                &expected_uid_fingerprint,
+                &expected_v14_sha256,
+            )?;
+            let proof = chosen.attest_storage()?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.native-storage-cutover/v1",
+                    "owner": "SQLITE",
+                    "format": proof.on_disk_schema,
+                    "integrity": proof.integrity,
+                    "manifest_sha256": proof.manifest_sha256,
+                    "trading_authorized": false
                 })
             );
         }

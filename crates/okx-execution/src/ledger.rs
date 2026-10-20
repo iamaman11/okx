@@ -433,23 +433,26 @@ impl ExecutionLedgerStore {
         }
     }
 
-    /// Select only an already-published storage owner. A missing owner receipt
-    /// keeps the existing v14 writer; an invalid SQLite receipt is fatal.
-    /// Only native CONTROL, after draining the writer and proving parity,
-    /// may publish execution-ledger.owner. This method never publishes it.
+    /// Select exactly one durable owner. The old JSON filename is removed
+    /// from service BEFORE publishing SQLite ownership. The sealed v14 body
+    /// stays readable for provenance, never as a live writer or fallback.
     pub fn select_published_owner(root: &Path) -> Result<Self, ExecutionLedgerError> {
         let legacy = root.join("execution-ledger.json");
+        let sealed = root.join("execution-ledger.v14.sealed");
         let receipt = root.join("execution-ledger.owner");
-        // A staged SQLite file at the canonical path makes owner selection
-        // ambiguous if the durable publication receipt is lost. Fail closed
-        // instead of silently reopening the mutable legacy writer.
-        if !receipt.exists() {
-            if root.join("execution-ledger.sqlite").exists() {
+        let native = root.join("execution-ledger.sqlite");
+        if !receipt.try_exists()? {
+            if native.try_exists()? || sealed.try_exists()? {
                 return Err(ExecutionLedgerError::Corrupt(
-                    "canonical SQLite present without owner receipt",
+                    "SQLite cutover pending without owner receipt",
                 ));
             }
             return Ok(Self::at(legacy));
+        }
+        if !sealed.try_exists()? || legacy.try_exists()? {
+            return Err(ExecutionLedgerError::Corrupt(
+                "sealed v14 source missing or legacy writer resurrected",
+            ));
         }
         if fs::metadata(&receipt)?.len() > 512 {
             return Err(ExecutionLedgerError::Corrupt(
@@ -475,11 +478,11 @@ impl ExecutionLedgerStore {
                 "ledger owner receipt invalid",
             ));
         }
-        let legacy_proof = Self::at(&legacy).attest_storage()?;
+        let legacy_proof = Self::at(&sealed).attest_storage()?;
         if legacy_proof.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V14 {
             return Err(ExecutionLedgerError::Corrupt("legacy source not v14"));
         }
-        let original = fs::read(&legacy)?;
+        let original = fs::read(&sealed)?;
         if format!("{:x}", Sha256::digest(&original)) != parts[3] {
             return Err(ExecutionLedgerError::Corrupt(
                 "legacy source changed after cutover",
@@ -502,13 +505,12 @@ impl ExecutionLedgerStore {
         Ok(chosen)
     }
 
-    /// A native storage cutover primitive. The existing CONTROL must first
-    /// prove that the owned Agent writer has exited and its Job is empty;
-    /// no remote trading request is allowed to invoke this method.
-    ///
-    /// A published receipt is the last step. A crash before publication
-    /// leaves a canonical SQLite candidate and fails closed on Agent boot.
-    /// Publishing changes storage ownership, never trading permissions.
+    /// Native offline cutover. Caller MUST be the existing CONTROL with
+    /// desired STOPPED and a physically empty exclusive Windows Job.
+    /// After parity validation, remove the old writer filename atomically by
+    /// moving it to a sealed proof before publishing the SQLite owner.
+    /// Any crash between those steps blocks Agent boot until exact recovery.
+    /// This is a storage transition, never a trading permission.
     pub fn publish_verified_sqlite_owner(
         root: &Path,
         expected_uid: &str,
@@ -522,9 +524,20 @@ impl ExecutionLedgerStore {
         if !lower_hex_64(expected_uid) || !lower_hex_64(expected_v14_sha256) {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        let legacy = Self::at(root.join("execution-ledger.json"));
+        let original = root.join("execution-ledger.json");
+        let archived = root.join("execution-ledger.v14.sealed");
         let native = Self::sqlite_at(root.join("execution-ledger.sqlite"));
         let receipt = root.join("execution-ledger.owner");
+        if original.try_exists()? && archived.try_exists()? {
+            return Err(ExecutionLedgerError::Corrupt(
+                "both live and sealed v14 source paths exist",
+            ));
+        }
+        let legacy = Self::at(if archived.try_exists()? {
+            &archived
+        } else {
+            &original
+        });
         let (origin_uid, origin_hash) = sqlite_store::read_staging_origin(native.path())?;
         if origin_uid != expected_uid || origin_hash != expected_v14_sha256 {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
@@ -577,6 +590,19 @@ impl ExecutionLedgerStore {
                 "SQLite cutover source changed before publication",
             ));
         }
+        // The one-way durable fence is the path transition itself. Even if
+        // both SQLite and receipt vanish, no original JSON writer remains.
+        // An interrupted rename is replayable only after exact source/parity
+        // validation above. Never overwrite the archived source.
+        if !archived.try_exists()? {
+            if !original.try_exists()? {
+                return Err(ExecutionLedgerError::Corrupt("v14 source missing"));
+            }
+            atomic_replace(&original, &archived)?;
+        }
+        if original.try_exists()? {
+            return Err(ExecutionLedgerError::Corrupt("legacy writer still present"));
+        }
         let pending = temp_path(&receipt);
         let mut file = File::create(&pending)?;
         file.write_all(
@@ -593,6 +619,49 @@ impl ExecutionLedgerStore {
         atomic_replace(&pending, &receipt)?;
         // If anything is corrupt after the atomic commit, do not restore v14.
         Self::select_published_owner(root)
+    }
+
+    /// Complete an offline cutover or resume an interrupted exact cutover.
+    /// This method must only be called by the stopped-Job CONTROL owner.
+    /// No old database is overwritten, no exchange mutation is performed.
+    pub fn migrate_to_sqlite_offline(
+        root: &Path,
+        expected_uid: &str,
+        expected_v14_sha256: &str,
+    ) -> Result<Self, ExecutionLedgerError> {
+        let receipt = root.join("execution-ledger.owner");
+        if receipt.try_exists()? {
+            return Self::publish_verified_sqlite_owner(
+                root,
+                expected_uid,
+                expected_v14_sha256,
+            );
+        }
+        let original = root.join("execution-ledger.json");
+        let sealed = root.join("execution-ledger.v14.sealed");
+        let native = root.join("execution-ledger.sqlite");
+        if original.try_exists()? && sealed.try_exists()? {
+            return Err(ExecutionLedgerError::Corrupt(
+                "both live and sealed v14 source paths exist",
+            ));
+        }
+        let source = Self::at(if sealed.try_exists()? {
+            &sealed
+        } else {
+            &original
+        });
+        if !native.try_exists()? {
+            // Once v14 has been sealed, a missing SQLite might contain
+            // already-executed trades. Never rebuild an empty historical
+            // snapshot from the sealed source after an uncertain cutover.
+            if sealed.try_exists()? {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "SQLite missing after v14 retirement; recovery requires independent proof",
+                ));
+            }
+            source.prepare_sqlite_staging(&native)?;
+        }
+        Self::publish_verified_sqlite_owner(root, expected_uid, expected_v14_sha256)
     }
 
     /// Account-level, read-only observed financial movements from immutable
@@ -732,7 +801,16 @@ impl ExecutionLedgerStore {
                 "verified archive inventory mismatch",
             ));
         }
-        let snapshot_path = self.path.with_extension("pre-v14.json");
+        // A sealed cutover keeps the original pre-v14 proof at its
+        // historical canonical filename, not relative to the new sealed
+        // extension. Both proofs remain in the same immutable source root.
+        let snapshot_path = if self.path.file_name().and_then(|v| v.to_str())
+            == Some("execution-ledger.v14.sealed")
+        {
+            self.path.with_file_name("execution-ledger.pre-v14.json")
+        } else {
+            self.path.with_extension("pre-v14.json")
+        };
         let (snapshot_state, snapshot_sha) = if snapshot_path.exists() {
             let legacy_bytes = fs::read(snapshot_path)?;
             let legacy: ExecutionLedgerFile = serde_json::from_slice(&legacy_bytes)?;

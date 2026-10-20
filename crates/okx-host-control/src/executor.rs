@@ -180,6 +180,13 @@ impl HostExecutor {
             HostControlOperation::RecoverReadOnlySelection => self.recover_read_only_selection(),
             HostControlOperation::StopAgent => self.stop_agent(),
             HostControlOperation::RestartAgent => self.restart_agent(),
+            HostControlOperation::MigrateLedgerToSqlite {
+                expected_uid_fingerprint,
+                expected_v14_sha256,
+            } => self.migrate_ledger_to_sqlite(
+                &expected_uid_fingerprint,
+                &expected_v14_sha256,
+            ),
             HostControlOperation::InstallAutostart => autostart::install(),
             HostControlOperation::AutostartStatus => autostart::status_value(),
             HostControlOperation::HandoffToAutostart
@@ -961,6 +968,79 @@ impl HostExecutor {
             "mailbox_issue": mailbox_issue(profile),
             "runtime_root": runtime_dir(profile),
             "cloudflare_attached": true
+        }))
+    }
+
+    /// One offline transition under the existing CONTROL authority. It is
+    /// impossible to enter this branch while CONTROL desires an active Agent,
+    /// while its Job contains a process, or while release provenance differs.
+    /// A crash leaves the desired state STOPPED, not an automatic restart.
+    fn migrate_ledger_to_sqlite(
+        &mut self,
+        expected_uid: &str,
+        expected_v14_sha256: &str,
+    ) -> HostControlResult<Value> {
+        if self.desired_error.is_some()
+            || self.desired_store.is_pending()?
+            || self.desired_agent != AgentDesired::Stopped
+        {
+            return Err(HostControlError::ProfileHandoffProofRequired);
+        }
+        self.require_agent_stopped()?;
+        if self.agent_child.is_some()
+            || self.native_child_pipe.is_some()
+            || !self.agent_job.is_empty()?
+        {
+            return Err(HostControlError::AgentRunning);
+        }
+        self.require_agent_binary()?;
+        let status = self.status()?;
+        if status["release_parity"]["state"] != "MATCHED"
+            || status["installed_agent"]["state"] != "VERIFIED"
+        {
+            return Err(HostControlError::ArtifactVerification(
+                "native storage cutover requires matched ReleaseSet",
+            ));
+        }
+        let root = runtime_dir(self.desired_profile);
+        let root_text = root.to_string_lossy();
+        let mut command = hidden_command(self.agent_binary());
+        command.arg("--root").arg(root_text.as_ref());
+        if self.desired_profile == AgentProfile::DemoAcceptance {
+            command.arg("--demo");
+        }
+        let output = command
+            .arg("storage-cutover")
+            .arg("--expected-uid-fingerprint")
+            .arg(expected_uid)
+            .arg("--expected-v14-sha256")
+            .arg(expected_v14_sha256)
+            .current_dir(&self.repo_root)
+            .output()?;
+        if !output.status.success() {
+            return Err(HostControlError::CommandFailed("native storage cutover"));
+        }
+        if output.stdout.len() > 4096 {
+            return Err(HostControlError::ControlResponseBudgetInvariant);
+        }
+        let reply: Value = serde_json::from_slice(&output.stdout)?;
+        if reply["schema"] != "okx.native-storage-cutover/v1"
+            || reply["owner"] != "SQLITE"
+            || reply["integrity"] != "VALIDATED_COLD_READ"
+            || reply["trading_authorized"] != false
+        {
+            return Err(HostControlError::ArtifactVerification(
+                "native SQLite ownership receipt invalid",
+            ));
+        }
+        // No implicit restart, read-only switch, account change or grant.
+        Ok(json!({
+            "schema": "okx.host-control.storage-cutover/v1",
+            "status": "SQLITE_OWNER_VERIFIED",
+            "profile": self.desired_profile,
+            "ledger": reply,
+            "agent_desired": self.desired_agent,
+            "trading_authorized": false
         }))
     }
 
