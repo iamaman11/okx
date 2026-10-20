@@ -562,7 +562,7 @@ impl ExecutionRuntime {
             // The existing Windows owner already supplies disjoint roots:
             // Demo C:\okx-runtime\demo and Production C:\okx-runtime.
             // Never silently strand either profile's durable history.
-            ExecutionLedgerStore::at(root.join("execution-ledger.json")),
+            ExecutionLedgerStore::select_published_owner(root)?,
             observed_at_ms,
         )?;
         Ok(Self {
