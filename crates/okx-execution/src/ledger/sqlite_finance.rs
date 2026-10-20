@@ -463,6 +463,8 @@ pub(super) fn finance_window(
 pub(super) fn persist_source_receipt(
     tx: &Transaction<'_>,
     account_uid: &str,
+    run_id: &str,
+    cursor_key: &str,
     cursor: &crate::exchange_evidence::ExchangeCoverageCursor,
 ) -> Result<(), ExecutionLedgerError> {
     let at = crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
@@ -474,6 +476,24 @@ pub(super) fn persist_source_receipt(
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     let body = encode(cursor)?;
+    let digest = checksum(&body);
+    let locator = format!("native_source_cursors/{run_id}/{cursor_key}");
+    tx.execute(
+        "INSERT INTO evidence_objects
+         (evidence_sha256,evidence_kind,codec,relative_path,size_bytes,native_source_time_ms)
+         VALUES(?1,'AUTHENTICATED_SOURCE_RECEIPT','sqlite-msgpack',?2,?3,?4)
+         ON CONFLICT(evidence_sha256) DO NOTHING",
+        params![&digest,&locator,body.len() as i64,at],
+    ).map_err(io)?;
+    let (kind,codec,len,observed):(String,String,i64,Option<i64>)=tx.query_row(
+        "SELECT evidence_kind,codec,size_bytes,native_source_time_ms
+         FROM evidence_objects WHERE evidence_sha256=?1",
+        params![&digest],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
+    ).map_err(io)?;
+    if kind!="AUTHENTICATED_SOURCE_RECEIPT" || codec!="sqlite-msgpack"
+       || len!=body.len() as i64 || observed!=Some(at) {
+        return Err(ExecutionLedgerError::Corrupt("source receipt evidence collision"));
+    }
     for (kind, complete) in [
         ("ORDERS", cursor.order_complete),
         ("FILLS", cursor.fill_complete),
@@ -484,14 +504,15 @@ pub(super) fn persist_source_receipt(
             "INSERT INTO source_receipts
              (receipt_sha256,stream_kind,scope_key,interval_start_ms,interval_end_ms,
               received_at_ms,completeness,evidence_sha256)
-             VALUES(?1,?2,?3,?4,?4,?4,?5,NULL)
+             VALUES(?1,?2,?3,?4,?4,?4,?5,?6)
              ON CONFLICT(receipt_sha256) DO NOTHING",
             params![
                 key,
                 kind,
                 account_uid,
                 at,
-                if complete { "COMPLETE" } else { "PARTIAL" }
+                if complete { "COMPLETE" } else { "PARTIAL" },
+                &digest
             ],
         )
         .map_err(io)?;

@@ -761,6 +761,15 @@ mod tests {
             points.financial_completeness,
             "UNVERIFIED_WITHOUT_CONTIGUOUS_SOURCE_PROOF"
         );
+        let c = Connection::open(&p).unwrap();
+        let linked_receipts: i64 = c.query_row(
+            "SELECT COUNT(*) FROM source_receipts r JOIN evidence_objects e
+             ON e.evidence_sha256=r.evidence_sha256
+             WHERE r.scope_key='uid-test-one'",
+            [], |row|row.get(0),
+        ).unwrap();
+        assert_eq!(linked_receipts,3);
+        drop(c);
 
         let original = source.clone();
         source.events.get_mut("event-1").unwrap().payload =
