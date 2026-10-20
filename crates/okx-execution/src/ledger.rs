@@ -3189,29 +3189,59 @@ impl DurableExecutionLedger {
                 "ledger account or unresolved POST mismatch",
             ));
         }
-        let mut next = self.entries.clone();
+        // Validate every changed entry before the one SQLite transaction.
+        // The existing executor holds its sole account writer lease; there
+        // is no partial in-memory commit or second authority.
+        let mut changed = BTreeMap::new();
         for id in expected_ids {
-            let entry = next
-                .get_mut(id)
+            let mut entry = self
+                .entries
+                .get(id)
+                .cloned()
                 .ok_or_else(|| ExecutionLedgerError::IntentNotFound(id.clone()))?;
-            let timestamp = monotonic_timestamp(entry, observed_at_ms)?;
-            // This enforces the same protection, reverse and mutation
-            // invariants as single-intent abandon_prepared().
+            let timestamp = monotonic_timestamp(&entry, observed_at_ms)?;
+            // Keep the same state machine used by single-intent abandon:
+            // only an unsent PREPARED is eligible, never BEGIN_POST/UNKNOWN.
             entry.record.abandon_prepared()?;
             entry.updated_at_ms = timestamp;
-            validate_entry(entry)?;
+            validate_entry(&entry)?;
+            validate_strategy_run_binding(
+                &entry,
+                self.capital_reservation.as_ref(),
+                &self.strategy_periods.archived_runs,
+                &self.strategy_periods.unverified_runs,
+            )?;
+            changed.insert(id.clone(), entry);
         }
-        // One durable save / one atomic rename. On any failure, the original
-        // in-memory ledger and all of its immutable financial proofs survive.
-        self.store.save(
-            &next,
-            self.risk_stop.as_ref(),
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-            &self.strategy_periods,
-            &self.leverage_attempts,
-        )?;
-        self.entries = next;
+        if self.store.sqlite_native {
+            // One BEGIN IMMEDIATE, one WAL commit for the exact batch.
+            // Historical rows, source bills, STOP and capital are untouched.
+            sqlite_store::save_recovered(
+                &self.store.path,
+                &changed,
+                self.risk_stop.as_ref(),
+                self.capital_reservation.as_ref(),
+                self.exchange_evidence.as_ref(),
+                &self.strategy_periods,
+                &self.leverage_attempts,
+            )?;
+        } else {
+            // Preserve JSON-v14 atomic snapshot/rename semantics until the
+            // exact source account is explicitly cut over to native SQLite.
+            let mut next = self.entries.clone();
+            next.extend(changed.iter().map(|(id, entry)| (id.clone(), entry.clone())));
+            self.store.save(
+                &next,
+                self.risk_stop.as_ref(),
+                self.capital_reservation.as_ref(),
+                self.exchange_evidence.as_ref(),
+                &self.strategy_periods,
+                &self.leverage_attempts,
+            )?;
+        }
+        // Only after the durable commit do changed intents become visible
+        // in the current account's authoritative in-process state machine.
+        self.entries.extend(changed);
         Ok(expected_ids.len())
     }
 
@@ -5675,6 +5705,105 @@ mod tests {
                 .abandon_prepared_batch(&"a".repeat(64), &ids, 220)
                 .is_err()
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sqlite_historical_unsent_batch_is_single_delta_transaction_and_never_replays_post() {
+        let root = temp_root("sqlite-historical-unsent-batch");
+        let _ = fs::remove_dir_all(&root);
+        let path = root.join("account.sqlite");
+        let store = ExecutionLedgerStore::sqlite_at(&path);
+        let uid = "a".repeat(64);
+        let ids = vec![
+            "intent_sqlite_batch_A_0123456789".to_owned(),
+            "intent_sqlite_batch_B_0123456789".to_owned(),
+        ];
+        let mut originals = BTreeMap::new();
+        for (i, id) in ids.iter().enumerate() {
+            let mut request = plan(id);
+            request.account_uid_fingerprint = uid.clone();
+            request.instrument_id = if i == 0 {
+                "BTC-USDT-SWAP".to_owned()
+            } else {
+                "ETH-USDT-SWAP".to_owned()
+            };
+            let entry = ExecutionLedgerEntry {
+                record: ExecutionRecord::new(request),
+                created_at_ms: 100 + i as u64,
+                updated_at_ms: 100 + i as u64,
+            };
+            originals.insert(id.clone(), entry);
+        }
+        store
+            .save(
+                &originals,
+                None,
+                None,
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
+            )
+            .unwrap();
+        store
+            .bind_native_account_identity(&SqliteAccountIdentity {
+                venue: LedgerVenue::Okx,
+                environment: LedgerEnvironment::Demo,
+                account_id: "demo".to_owned(),
+                uid_fingerprint: uid.clone(),
+                bound_at_ms: 200,
+            })
+            .unwrap();
+        let mut ledger = DurableExecutionLedger::open(store.clone(), 210).unwrap();
+        let before = store.load().unwrap().0;
+        assert_eq!(before, originals);
+        assert!(ledger.abandon_prepared_batch(&uid, &ids[0..1], 300).is_err());
+        assert!(ledger.abandon_prepared_batch(&"f".repeat(64), &ids, 300).is_err());
+        assert_eq!(store.load().unwrap().0, before);
+
+        // Force the second row to fail after the first has been processed:
+        // the SQLite transaction must roll back ALL local changes, with no
+        // in-memory transition and no artificial POST attempt.
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(&format!(
+            "CREATE TRIGGER test_batch_abort BEFORE UPDATE ON ledger_entries
+             WHEN NEW.intent_id='{}'
+             BEGIN SELECT RAISE(ABORT,'TEST_SECOND_ROW_ABORT'); END;",
+            ids[1]
+        ))
+        .unwrap();
+        drop(c);
+        assert!(ledger.abandon_prepared_batch(&uid, &ids, 300).is_err());
+        assert_eq!(store.load().unwrap().0, before);
+        assert_eq!(ledger.get(&ids[0]), originals.get(&ids[0]));
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("DROP TRIGGER test_batch_abort").unwrap();
+        drop(c);
+
+        assert_eq!(ledger.abandon_prepared_batch(&uid, &ids, 300).unwrap(), 2);
+        for id in &ids {
+            let saved = store.indexed_intent(&uid, id).unwrap().unwrap();
+            assert_eq!(saved.record.state, ExecutionState::Rejected);
+            assert_eq!(
+                saved.record.rejection_code.as_deref(),
+                Some(crate::state::LOCAL_PREPARED_ABANDONED_CODE)
+            );
+            assert_eq!(ledger.get(id), Some(&saved));
+        }
+        let c = rusqlite::Connection::open(&path).unwrap();
+        let posts: i64 = c
+            .query_row("SELECT COUNT(*) FROM post_attempts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(posts, 0);
+        drop(c);
+        let reopened = DurableExecutionLedger::open(store, 310).unwrap();
+        for id in &ids {
+            assert_eq!(
+                reopened.get(id).unwrap().record.state,
+                ExecutionState::Rejected
+            );
+        }
+        assert!(ledger.abandon_prepared_batch(&uid, &ids, 320).is_err());
         let _ = fs::remove_dir_all(root);
     }
 
