@@ -341,9 +341,18 @@ pub(super) fn save(
     periods: &StrategyPeriodHistory,
     leverage: &[LeverageChangeAttempt],
 ) -> Result<(), ExecutionLedgerError> {
-    save_snapshot(path, entries, SqliteWriteState {
-        stop, reservation, source, periods, leverage,
-    }, true)
+    save_snapshot(
+        path,
+        entries,
+        SqliteWriteState {
+            stop,
+            reservation,
+            source,
+            periods,
+            leverage,
+        },
+        true,
+    )
 }
 
 /// A single-intent mutation persists only this record and its projections.
@@ -360,9 +369,18 @@ pub(super) fn save_one(
 ) -> Result<(), ExecutionLedgerError> {
     let id = entry.record.plan.intent_id.clone();
     let changed = BTreeMap::from([(id, entry.clone())]);
-    save_snapshot(path, &changed, SqliteWriteState {
-        stop, reservation, source, periods, leverage,
-    }, false)
+    save_snapshot(
+        path,
+        &changed,
+        SqliteWriteState {
+            stop,
+            reservation,
+            source,
+            periods,
+            leverage,
+        },
+        false,
+    )
 }
 
 fn save_snapshot(
@@ -372,7 +390,11 @@ fn save_snapshot(
     complete_snapshot: bool,
 ) -> Result<(), ExecutionLedgerError> {
     let SqliteWriteState {
-        stop, reservation, source, periods, leverage,
+        stop,
+        reservation,
+        source,
+        periods,
+        leverage,
     } = state;
     let mut c = connect(path, true)?;
     let tx = c
