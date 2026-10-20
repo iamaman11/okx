@@ -157,8 +157,9 @@ pub(super) fn save(path:&Path, entries:&BTreeMap<String,ExecutionLedgerEntry>,
     ).map_err(io)?;
     let prior:Vec<String>={
         let mut statement=tx.prepare("SELECT intent_id FROM ledger_entries").map_err(io)?;
-        statement.query_map([],|r|r.get(0)).map_err(io)?
-          .collect::<Result<Vec<String>,_>>().map_err(io)?
+        let list=statement.query_map([],|r|r.get(0)).map_err(io)?
+          .collect::<Result<Vec<String>,_>>().map_err(io)?;
+        list
     };
     if prior.iter().any(|id|!entries.contains_key(id)) {
         return Err(ExecutionLedgerError::Corrupt("SQLite intent deletion forbidden"));
@@ -206,4 +207,58 @@ pub(super) fn attest(path:&Path) -> Result<LedgerStorageAttestation,ExecutionLed
         backup_scope:"SQLITE_WAL_AND_IMMUTABLE_SOURCE",
         trading_admission:"READ_ONLY_NOT_TRADING_AUTHORITY"
     })
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_root(label: &str) -> PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("okx-sqlite-{label}-{}-{n}",std::process::id()))
+    }
+
+    #[test]
+    fn sqlite_owner_persists_and_cold_reads_without_json() {
+        let root=test_root("cold");
+        let p=root.join("account.sqlite");
+        let e=BTreeMap::new();
+        save(&p,&e,None,None,None,&StrategyPeriodHistory::default(),&[]).unwrap();
+        let snapshot=load(&p,10).unwrap();
+        assert!(snapshot.0.is_empty());
+        assert_eq!(snapshot.4,StrategyPeriodHistory::default());
+        let a=attest(&p).unwrap();
+        assert_eq!(a.integrity,"VALIDATED_COLD_READ");
+        assert_eq!(a.on_disk_schema,SCHEMA);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn offline_v14_to_sqlite_staging_keeps_original_and_is_not_replayable() {
+        let root=test_root("migration");
+        let original=root.join("source.json");
+        let stage=root.join("prepared.sqlite");
+        let legacy=ExecutionLedgerStore::at(&original);
+        legacy.save(&BTreeMap::new(),None,None,None,
+             &StrategyPeriodHistory::default(),&[]).unwrap();
+        let old=std::fs::read(&original).unwrap();
+        let proof=legacy.prepare_sqlite_staging(&stage).unwrap();
+        assert_eq!(proof.integrity,"VALIDATED_COLD_READ");
+        assert_eq!(std::fs::read(&original).unwrap(),old);
+        assert!(legacy.prepare_sqlite_staging(&stage).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupt_sqlite_does_not_create_empty_ledger() {
+        let root=test_root("corrupt");
+        std::fs::create_dir_all(&root).unwrap();
+        let p=root.join("account.sqlite");
+        std::fs::write(&p,b"not a sqlite database").unwrap();
+        assert!(load(&p,10).is_err());
+        assert!(attest(&p).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
