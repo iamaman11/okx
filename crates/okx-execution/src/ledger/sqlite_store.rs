@@ -370,7 +370,9 @@ pub(super) fn save_one(
     // A delta must never initialize a new account ledger. Only a verified
     // first snapshot / one-owner migration can create its storage.
     if !path.exists() {
-        return Err(ExecutionLedgerError::Corrupt("native intent delta has no account DB"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "native intent delta has no account DB",
+        ));
     }
     let id = entry.record.plan.intent_id.clone();
     let changed = BTreeMap::from([(id, entry.clone())]);
@@ -1287,8 +1289,8 @@ mod tests {
             (historic_id.to_owned(), historic.clone()),
         ]);
         let periods = StrategyPeriodHistory::default();
-        let missing=root.join("missing.sqlite");
-        assert!(save_one(&missing,&changed,None,None,None,&periods,&[]).is_err());
+        let missing = root.join("missing.sqlite");
+        assert!(save_one(&missing, &changed, None, None, None, &periods, &[]).is_err());
         assert!(!missing.exists());
         save(&db, &original, None, None, None, &periods, &[]).unwrap();
         changed.record.begin_submission_with_timing(None).unwrap();
