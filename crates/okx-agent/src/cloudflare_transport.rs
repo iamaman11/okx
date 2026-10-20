@@ -993,8 +993,7 @@ mod tests {
     #[test]
     fn internal_source_checkpoint_cannot_mint_exchange_authority() {
         assert!(
-            SOURCE_PROOF_PERIOD_SECONDS + SOURCE_PROOF_BUDGET_SECONDS
-                < okx_execution::MAX_SOURCE_COVERAGE_GAP_MS / 1000
+            SOURCE_PROOF_PERIOD_SECONDS + SOURCE_PROOF_BUDGET_SECONDS < 2 * 60 * 60
         );
         let request = AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
