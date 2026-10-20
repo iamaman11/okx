@@ -5,9 +5,8 @@ use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::Fut
 use okx_protocol::account_governance::{AuthorizationStatus, CentralGovernanceSnapshotV2};
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
-    AgentResponse, AgentResponseStatus,
-    CentralAccountPolicy, DIRECT_TRANSPORT_FRAME_SCHEMA_V1, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES,
-    DataQuality, DirectRuntimeProfile, DirectTransportFrame,
+    AgentResponse, AgentResponseStatus, CentralAccountPolicy, DIRECT_TRANSPORT_FRAME_SCHEMA_V1,
+    DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DataQuality, DirectRuntimeProfile, DirectTransportFrame,
 };
 use okx_runtime::{PrivateWsHandle, PublicWsHandle};
 use tokio::{
@@ -1070,8 +1069,8 @@ mod tests {
         assert!(!native_source_checkpoint_persisted(&response));
         response.result.as_mut().unwrap()["reconciliation"]["source_checkpoint_deferred"] =
             serde_json::json!(false);
-        response.result.as_mut().unwrap()["reconciliation"]["exchange_evidence"]
-            ["latest_source_received_at_ms"] = serde_json::json!(1792489199000_u64);
+        response.result.as_mut().unwrap()["reconciliation"]["exchange_evidence"]["latest_source_received_at_ms"] =
+            serde_json::json!(1792489199000_u64);
         assert!(!native_source_checkpoint_persisted(&response));
         response.result = None;
         assert!(!native_source_checkpoint_persisted(&response));
@@ -1079,9 +1078,7 @@ mod tests {
 
     #[test]
     fn internal_source_checkpoint_cannot_mint_exchange_authority() {
-        assert!(
-            SOURCE_PROOF_PERIOD_SECONDS + SOURCE_PROOF_BUDGET_SECONDS < 2 * 60 * 60
-        );
+        assert!(SOURCE_PROOF_PERIOD_SECONDS + SOURCE_PROOF_BUDGET_SECONDS < 2 * 60 * 60);
         let request = AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "native_source_checkpoint_1792489000000".to_owned(),
