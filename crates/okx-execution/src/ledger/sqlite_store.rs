@@ -438,10 +438,10 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
     let mut known_uid: Option<String> = None;
     while let Some(row) = rows.next().map_err(io)? {
         let uid: String = row.get(2).map_err(io)?;
-        if entries.len() >= max
-            || known_uid.as_ref().is_some_and(|v| v != &uid)
-        {
-            return Err(ExecutionLedgerError::Corrupt("SQLite entry integrity/scope"));
+        if entries.len() >= max || known_uid.as_ref().is_some_and(|v| v != &uid) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite entry integrity/scope",
+            ));
         }
         let entry = verified_indexed_entry(row, &uid)?;
         let id = entry.record.plan.intent_id.clone();
