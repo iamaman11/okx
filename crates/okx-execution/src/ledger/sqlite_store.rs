@@ -1407,6 +1407,60 @@ mod tests {
     }
 
     #[test]
+    fn native_cutover_accepts_historical_intents_without_active_strategy() {
+        let root = test_root("intent-only-cutover");
+        let legacy = ExecutionLedgerStore::at(root.join("execution-ledger.json"));
+        let uid = "d".repeat(64);
+        let id = "historical_only_intent_000001";
+        let plan = ExecutionPlan {
+            schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+            intent_id: id.to_owned(),
+            client_order_id: derive_client_order_id(id),
+            reference_generation: "sha256:reference".to_owned(),
+            account_generation: "sha256:account".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            instrument_id: "DOGE-USDT-SWAP".to_owned(),
+            trade_mode: crate::TradeMode::Cross,
+            side: crate::OrderSide::Buy,
+            position_side: PositionSide::Long,
+            action: ExecutionAction::Open,
+            order_type: crate::OrderType::Limit,
+            size: "1".to_owned(),
+            price: "0.1".to_owned(),
+            open_risk: None,
+            risk_binding: None,
+        };
+        let entries = BTreeMap::from([(
+            id.to_owned(),
+            ExecutionLedgerEntry {
+                record: ExecutionRecord::new(plan),
+                created_at_ms: 1000,
+                updated_at_ms: 1000,
+            },
+        )]);
+        legacy
+            .save(
+                &entries,
+                None,
+                None,
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
+            )
+            .unwrap();
+        let hash = checksum(&std::fs::read(legacy.path()).unwrap());
+        let sqlite = ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &hash).unwrap();
+        assert_eq!(sqlite.load().unwrap().0, entries);
+        assert_eq!(
+            ExecutionLedgerStore::select_published_owner(&root)
+                .unwrap()
+                .path(),
+            sqlite.path()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_writer_lease_excludes_concurrent_process_owners() {
         let root = test_root("writer-lease");
         let first = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();

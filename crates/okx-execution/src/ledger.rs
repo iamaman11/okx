@@ -501,11 +501,15 @@ impl ExecutionLedgerStore {
         if uid != parts[2] || origin != parts[3] {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        let (_, _, reservation, source, _, _) = chosen.load()?;
+        let (entries, _, reservation, source, _, _) = chosen.load()?;
         if reservation
             .as_ref()
-            .is_none_or(|r| r.account_uid_fingerprint != uid)
-            && source.as_ref().is_none_or(|s| s.account_uid != uid)
+            .is_some_and(|r| r.account_uid_fingerprint != uid)
+            || source.as_ref().is_some_and(|s| s.account_uid != uid)
+            || entries
+                .values()
+                .any(|e| e.record.plan.account_uid_fingerprint != uid)
+            || (reservation.is_none() && source.is_none() && entries.is_empty())
         {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
