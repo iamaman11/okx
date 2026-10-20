@@ -601,19 +601,8 @@ impl ExecutionLedgerStore {
         if uid != parts[2] || origin != parts[3] {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        let (entries, _, reservation, source, _, _) = chosen.load()?;
-        if reservation
-            .as_ref()
-            .is_some_and(|r| r.account_uid_fingerprint != uid)
-            || source.as_ref().is_some_and(|s| s.account_uid != uid)
-            || entries
-                .values()
-                .any(|e| e.record.plan.account_uid_fingerprint != uid)
-            || (reservation.is_none() && source.is_none() && entries.is_empty())
-        {
-            return Err(ExecutionLedgerError::AccountScopeMismatch);
-        }
-        chosen.attest_storage()?;
+        // One streaming cold check, no temporary full historical BTreeMap.
+        sqlite_store::attest_published_owner(&chosen.path, &uid)?;
         Ok(chosen)
     }
 

@@ -1342,6 +1342,38 @@ pub(super) fn read_staging_origin(path: &Path) -> Result<(String, String), Execu
 /// One consistent WAL snapshot feeds both independent read-only
 /// attestation and CONTROL handoff inventory. Never pair counts from a
 /// newer SQL transaction with an older account digest.
+/// Published-owner verification streams all historical facts and then
+/// checks the immutable account identity without materializing old intents.
+pub(super) fn attest_published_owner(
+    path: &Path,
+    expected_uid: &str,
+) -> Result<(), ExecutionLedgerError> {
+    attest_snapshot(path, None)?;
+    let c = connect_indexed_read(path)?;
+    let (uid, digest, bytes): (String, String, Vec<u8>) = c
+        .query_row(
+            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(io)?;
+    if uid != expected_uid || checksum(&bytes) != digest {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let state: StoredState = decode(&bytes)?;
+    let present: i64 = c
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ledger_entries LIMIT 1)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(io)?;
+    if state.reservation.is_none() && state.source_run_id.is_none() && present == 0 {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    Ok(())
+}
+
 pub(super) fn assess_profile(
     path: &Path,
     account_uid: &str,
@@ -1433,6 +1465,13 @@ fn attest_snapshot(
     let sql = format!("{INDEXED_INTENT_COLUMNS} ORDER BY e.intent_id");
     let mut statement = c.prepare(&sql).map_err(io)?;
     let mut rows = statement.query([]).map_err(io)?;
+    let mut guards_stmt = c
+        .prepare(
+            "SELECT intent_id,instrument_id,entry_digest
+             FROM native_guarded_intents ORDER BY intent_id",
+        )
+        .map_err(io)?;
+    let mut guards = guards_stmt.query([]).map_err(io)?;
     let mut count: i64 = 0;
     // [total, nonterminal, unresolved mutation, unresolved protection].
     // No second SQL pass and no BTreeMap allocation for the same account.
@@ -1477,6 +1516,25 @@ fn attest_snapshot(
         }
         let id = &entry.record.plan.intent_id;
         let payload = encode(&entry)?;
+        if needs_instrument_guard(&entry) {
+            let guard = guards
+                .next()
+                .map_err(io)?
+                .ok_or(ExecutionLedgerError::Corrupt(
+                    "missing native instrument guard",
+                ))?;
+            let guard_id: String = guard.get(0).map_err(io)?;
+            let instrument: String = guard.get(1).map_err(io)?;
+            let digest: String = guard.get(2).map_err(io)?;
+            if guard_id != *id
+                || instrument != entry.record.plan.instrument_id
+                || digest != checksum(&payload)
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "native instrument guard mismatch",
+                ));
+            }
+        }
         owner_digest.update((id.len() as u64).to_le_bytes());
         owner_digest.update(id.as_bytes());
         owner_digest.update((payload.len() as u64).to_le_bytes());
@@ -1485,6 +1543,13 @@ fn attest_snapshot(
             .checked_add(1)
             .ok_or(ExecutionLedgerError::Corrupt("SQLite inventory overflow"))?;
     }
+    if guards.next().map_err(io)?.is_some() {
+        return Err(ExecutionLedgerError::Corrupt(
+            "extra native instrument guard",
+        ));
+    }
+    drop(guards);
+    drop(guards_stmt);
     drop(rows);
     drop(statement);
     let (indexed_count, entry_count): (i64, i64) = c
@@ -2148,6 +2213,7 @@ mod tests {
         // Missing an active guard can otherwise cause a duplicate order.
         // Cold ownership checks MUST fail rather than trust an empty index.
         assert!(load(&db, usize::MAX).is_err());
+        assert!(store.attest_storage().is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
