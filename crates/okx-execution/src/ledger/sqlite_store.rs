@@ -589,7 +589,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-
     #[test]
     fn sealed_exchange_sources_roundtrip_with_no_mutation_or_replay() {
         let root = test_root("exchange-evidence");
@@ -632,20 +631,46 @@ mod tests {
         );
         source.checksum_sha256 = checksum(
             &serde_json::to_vec(&(
-                &source.schema, &source.account_uid, &source.run_id,
-                &source.events, &source.cursors,
-            )).unwrap(),
+                &source.schema,
+                &source.account_uid,
+                &source.run_id,
+                &source.events,
+                &source.cursors,
+            ))
+            .unwrap(),
         );
         source.validate().unwrap();
         let history = StrategyPeriodHistory::default();
-        save(&p, &BTreeMap::new(), None, Some(&run), Some(&source), &history, &[]).unwrap();
+        save(
+            &p,
+            &BTreeMap::new(),
+            None,
+            Some(&run),
+            Some(&source),
+            &history,
+            &[],
+        )
+        .unwrap();
         let first = load(&p, 10).unwrap();
         assert_eq!(first.3.as_ref(), Some(&source));
         assert_eq!(first.2.as_ref(), Some(&run));
-        save(&p, &BTreeMap::new(), None, Some(&run), Some(&source), &history, &[]).unwrap();
+        save(
+            &p,
+            &BTreeMap::new(),
+            None,
+            Some(&run),
+            Some(&source),
+            &history,
+            &[],
+        )
+        .unwrap();
         let c = Connection::open(&p).unwrap();
-        let count: i64 = c.query_row("SELECT COUNT(*) FROM native_source_events",[],|r|r.get(0)).unwrap();
-        assert_eq!(count,1);
+        let count: i64 = c
+            .query_row("SELECT COUNT(*) FROM native_source_events", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
         drop(c);
 
         let original = source.clone();
@@ -653,12 +678,27 @@ mod tests {
             serde_json::json!({"source":"OKX_REST_BILL","billId":"forged"});
         source.checksum_sha256 = checksum(
             &serde_json::to_vec(&(
-                &source.schema, &source.account_uid, &source.run_id,
-                &source.events, &source.cursors,
-            )).unwrap(),
+                &source.schema,
+                &source.account_uid,
+                &source.run_id,
+                &source.events,
+                &source.cursors,
+            ))
+            .unwrap(),
         );
-        assert!(save(&p, &BTreeMap::new(), None, Some(&run), Some(&source), &history, &[]).is_err());
-        assert_eq!(load(&p,10).unwrap().3,Some(original));
+        assert!(
+            save(
+                &p,
+                &BTreeMap::new(),
+                None,
+                Some(&run),
+                Some(&source),
+                &history,
+                &[]
+            )
+            .is_err()
+        );
+        assert_eq!(load(&p, 10).unwrap().3, Some(original));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
