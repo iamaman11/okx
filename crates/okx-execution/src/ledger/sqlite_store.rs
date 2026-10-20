@@ -1357,6 +1357,12 @@ mod tests {
         .unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
         std::fs::rename(&v14, root.join("execution-ledger.v14.sealed")).unwrap();
+        // A forged receipt with exact historical parity is insufficient:
+        // CONTROL must have durably retired the previous writer.
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        let mut writer = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
+        ExecutionLedgerStore::mark_sqlite_cutover(&mut writer).unwrap();
+        drop(writer);
         assert_eq!(
             ExecutionLedgerStore::select_published_owner(&root)
                 .unwrap()

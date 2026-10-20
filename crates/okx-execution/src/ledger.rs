@@ -453,6 +453,11 @@ impl ExecutionLedgerStore {
             }
             return Ok(Self::at(legacy));
         }
+        if !marked {
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite owner receipt without durable cutover watermark",
+            ));
+        }
         if !sealed.try_exists()? || legacy.try_exists()? {
             return Err(ExecutionLedgerError::Corrupt(
                 "sealed v14 source missing or legacy writer resurrected",
