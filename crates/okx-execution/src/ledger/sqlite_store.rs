@@ -985,6 +985,11 @@ mod tests {
         entries.insert(id.to_owned(), forged);
         assert!(save(&db, &entries, None, None, None, &periods, &[]).is_err());
         assert_eq!(load(&db, 10).unwrap().0.get(id), Some(&entry));
+        // An obsolete/incomplete caller snapshot cannot remove a historic
+        // intent, nor erase the outstanding UNKNOWN POST identity.
+        assert!(save(&db, &BTreeMap::new(), None, None, None, &periods, &[]).is_err());
+        assert_eq!(load(&db, 10).unwrap().0.get(id), Some(&entry));
+        assert_eq!(super::ExecutionLedgerStore::sqlite_at(&db).max_records, usize::MAX);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
