@@ -44,6 +44,7 @@ const SOURCE_PROOF_PERIOD_SECONDS: u64 = 60 * 60;
 const SOURCE_PROOF_FIRST_SECONDS: u64 = 5 * 60;
 const SOURCE_PROOF_RETRY_SECONDS: u64 = 15 * 60;
 const SOURCE_PROOF_BUDGET_SECONDS: u64 = 45;
+const _: () = assert!(SOURCE_PROOF_PERIOD_SECONDS + SOURCE_PROOF_BUDGET_SECONDS < 2 * 60 * 60);
 const MAX_INFLIGHT_READ_QUERIES: usize = 8;
 const MAX_PENDING_DELIVERY_CHALLENGES: usize = 64;
 const DELIVERY_CHALLENGE_MAX_AGE: Duration = Duration::from_secs(15);
@@ -1078,7 +1079,6 @@ mod tests {
 
     #[test]
     fn internal_source_checkpoint_cannot_mint_exchange_authority() {
-        assert!(SOURCE_PROOF_PERIOD_SECONDS + SOURCE_PROOF_BUDGET_SECONDS < 2 * 60 * 60);
         let request = AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "native_source_checkpoint_1792489000000".to_owned(),
