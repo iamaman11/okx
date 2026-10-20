@@ -1097,13 +1097,13 @@ impl ExecutionLedgerStore {
         // commit_new/mutate. Their original full proofs were validated at
         // ledger open or at the transaction that changed them; validating
         // thousands of old fills on every BEGIN_POST would be quadratic.
-        if let Some(source) = exchange_evidence {
-            if capital_reservation.as_ref().is_none_or(|run| {
+        if let Some(source) = exchange_evidence
+            && capital_reservation.as_ref().is_none_or(|run| {
                 source.account_uid != run.account_uid_fingerprint
                     || source.run_id != run.allocation_id
-            }) {
-                return Err(ExecutionLedgerError::AccountScopeMismatch);
-            }
+            })
+        {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
         sqlite_store::save_one(
             &self.path,

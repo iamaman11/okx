@@ -641,10 +641,8 @@ fn save_snapshot(
     }
     // Existing intents are inserted before projecting fill attribution, so a
     // foreign-key-bound source_intent_id is proved in this same transaction.
-    if complete_snapshot {
-        if let Some(evidence) = source {
-            super::sqlite_source::persist(&tx, evidence)?;
-        }
+    if complete_snapshot && let Some(evidence) = source {
+        super::sqlite_source::persist(&tx, evidence)?;
     }
     tx.commit().map_err(io)?;
     Ok(())
