@@ -1070,9 +1070,9 @@ impl ExecutionLedgerStore {
         if !self.sqlite_native {
             return self.save(
                 all_entries,
-                risk_stop,
-                capital_reservation,
-                exchange_evidence,
+                risk_stop.as_ref(),
+                capital_reservation.as_ref(),
+                exchange_evidence.as_ref(),
                 history,
                 leverage_attempts,
             );
@@ -1083,7 +1083,7 @@ impl ExecutionLedgerStore {
         validate_entry(changed)?;
         validate_strategy_run_binding(
             changed,
-            capital_reservation,
+            capital_reservation.as_ref(),
             &history.archived_runs,
             &history.unverified_runs,
         )?;
@@ -1095,21 +1095,21 @@ impl ExecutionLedgerStore {
         }
         if let Some(source) = exchange_evidence {
             source.validate()?;
-            if capital_reservation.is_none_or(|run| {
+            if capital_reservation.as_ref().is_none_or(|run| {
                 source.account_uid != run.account_uid_fingerprint
                     || source.run_id != run.allocation_id
             }) {
                 return Err(ExecutionLedgerError::AccountScopeMismatch);
             }
         }
-        history.validate(capital_reservation, exchange_evidence)?;
-        validate_leverage_attempts(leverage_attempts, capital_reservation)?;
+        history.validate(capital_reservation.as_ref(), exchange_evidence.as_ref())?;
+        validate_leverage_attempts(leverage_attempts, capital_reservation.as_ref())?;
         sqlite_store::save_one(
             &self.path,
             changed,
-            risk_stop,
-            capital_reservation,
-            exchange_evidence,
+            risk_stop.as_ref(),
+            capital_reservation.as_ref(),
+            exchange_evidence.as_ref(),
             history,
             leverage_attempts,
         )
