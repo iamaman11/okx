@@ -704,16 +704,26 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 3);
-        let fill_count: i64 = c.query_row("SELECT COUNT(*) FROM fills", [], |r|r.get(0)).unwrap();
-        let bill_count: i64 = c.query_row("SELECT COUNT(*) FROM bills", [], |r|r.get(0)).unwrap();
-        let gap_count: i64 = c.query_row(
-            "SELECT COUNT(*) FROM source_gaps WHERE materiality='FINANCIAL'",
-            [], |r|r.get(0)
-        ).unwrap();
-        let delta: String = c.query_row(
-            "SELECT delta_decimal FROM bills WHERE bill_id='bill-1'",
-            [], |r|r.get(0)
-        ).unwrap();
+        let fill_count: i64 = c
+            .query_row("SELECT COUNT(*) FROM fills", [], |r| r.get(0))
+            .unwrap();
+        let bill_count: i64 = c
+            .query_row("SELECT COUNT(*) FROM bills", [], |r| r.get(0))
+            .unwrap();
+        let gap_count: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM source_gaps WHERE materiality='FINANCIAL'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let delta: String = c
+            .query_row(
+                "SELECT delta_decimal FROM bills WHERE bill_id='bill-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!((fill_count, bill_count, gap_count), (1, 1, 1));
         assert_eq!(delta, "-0.12");
         drop(c);
