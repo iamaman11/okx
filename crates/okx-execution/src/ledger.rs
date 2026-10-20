@@ -1740,12 +1740,10 @@ impl DurableExecutionLedger {
             closed.validate(run, source)?;
             return Ok(closed.clone());
         }
-        let as_of = facts
-            .summary
-            .current_account_as_of_ms
-            .as_deref()
-            .and_then(|s| s.parse::<u64>().ok())
-            .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
+        let as_of = crate::exchange_evidence::source_receipt_ms(
+            &facts.summary.source_received_at,
+        )
+        .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
         if self.strategy_periods.finalized_run.is_some()
             || !coherent
             || !native_protection_empty
@@ -1836,12 +1834,10 @@ impl DurableExecutionLedger {
         native_protection_empty: bool,
         observed_at_ms: u64,
     ) -> Result<StrategyFinalization, ExecutionLedgerError> {
-        let as_of = facts
-            .summary
-            .current_account_as_of_ms
-            .as_deref()
-            .and_then(|v| v.parse::<u64>().ok())
-            .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
+        let as_of = crate::exchange_evidence::source_receipt_ms(
+            &facts.summary.source_received_at,
+        )
+        .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
         if !coherent
             || !native_protection_empty
             || observed_at_ms < as_of
