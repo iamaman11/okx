@@ -16,7 +16,7 @@ pub const MAX_SOURCE_COVERAGE_GAP_MS: u64 = 7_200_000;
 /// Timestamp of the native authenticated REST history RECEIPT, not OKX's
 /// balance/position last-change uTime (which may be days old in a quiet account).
 /// Both already exist in immutable source cursors: never rewrite old hashes.
-pub(crate) fn source_receipt_ms(value: &str) -> Option<u64> {
+pub fn source_receipt_ms(value: &str) -> Option<u64> {
     DateTime::parse_from_rfc3339(value)
         .ok()
         .and_then(|date| u64::try_from(date.timestamp_millis()).ok())
