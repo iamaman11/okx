@@ -40,6 +40,62 @@ CREATE TRIGGER IF NOT EXISTS immutable_native_cursor_delete
 BEFORE DELETE ON native_source_cursors BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SOURCE'); END;
 ";
 
+/// Merge source keys in their canonical index order: prior rows must
+/// reappear byte-for-byte, and only NEW keys are held temporarily. Avoid
+/// loading a duplicate BTreeMap of all historical exchange receipts.
+#[derive(Clone, Copy)]
+enum IndexedSourceKind {
+    Events,
+    Cursors,
+}
+
+fn new_source_keys<'a, T: serde::Serialize>(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    kind: IndexedSourceKind,
+    current: &'a BTreeMap<String, T>,
+) -> Result<Vec<&'a str>, ExecutionLedgerError> {
+    let query = match kind {
+        IndexedSourceKind::Events =>
+            "SELECT event_key,payload_digest FROM native_source_events WHERE run_id=?1 ORDER BY event_key",
+        IndexedSourceKind::Cursors =>
+            "SELECT cursor_key,payload_digest FROM native_source_cursors WHERE run_id=?1 ORDER BY cursor_key",
+    };
+    let mut stmt = tx.prepare(query).map_err(io)?;
+    let mut rows = stmt.query(params![run_id]).map_err(io)?;
+    let mut incoming = current.iter();
+    let mut next = incoming.next();
+    let mut added = Vec::new();
+    while let Some(row) = rows.next().map_err(io)? {
+        let prior_key: String = row.get(0).map_err(io)?;
+        let prior_hash: String = row.get(1).map_err(io)?;
+        while next.is_some_and(|(key, _)| key.as_str() < prior_key.as_str()) {
+            let (key, _) = next.expect("checked source next");
+            added.push(key.as_str());
+            next = incoming.next();
+        }
+        let Some((key, body)) = next else {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native exchange source key was removed",
+            ));
+        };
+        if key != &prior_key {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native exchange source key was removed",
+            ));
+        }
+        if checksum(&encode(body)?) != prior_hash {
+            return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+        }
+        next = incoming.next();
+    }
+    while let Some((key, _)) = next {
+        added.push(key.as_str());
+        next = incoming.next();
+    }
+    Ok(added)
+}
+
 pub(super) fn persist(
     tx: &Transaction<'_>,
     source: &DurableExchangeEvidence,
@@ -75,81 +131,51 @@ pub(super) fn persist(
     )
     .map_err(io)?;
 
-    let mut old_events = BTreeMap::<String, String>::new();
-    {
-        let mut q = tx
-            .prepare("SELECT event_key,payload_digest FROM native_source_events WHERE run_id=?1")
-            .map_err(io)?;
-        let rows = q
-            .query_map(params![source.run_id], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(io)?;
-        for row in rows {
-            let (key, hash) = row.map_err(io)?;
-            old_events.insert(key, hash);
-        }
+    let new_events = new_source_keys(
+        tx,
+        &source.run_id,
+        IndexedSourceKind::Events,
+        &source.events,
+    )?;
+    for key in new_events {
+        let event = source
+            .events
+            .get(key)
+            .ok_or(ExecutionLedgerError::ExchangeEvidenceConflict)?;
+        let body = encode(event)?;
+        tx.execute(
+            "INSERT INTO native_source_events VALUES(?1,?2,?3,?4)",
+            params![source.run_id, key, checksum(&body), body],
+        )
+        .map_err(io)?;
+        super::sqlite_finance::persist_event(tx, &source.run_id, key, event)?;
     }
-    if old_events
-        .keys()
-        .any(|key| !source.events.contains_key(key))
-    {
-        return Err(ExecutionLedgerError::Corrupt(
-            "exchange source event deletion",
-        ));
-    }
-    for (key, event) in &source.events {
-        if !old_events.contains_key(key) {
-            let body = encode(event)?;
-            tx.execute(
-                "INSERT INTO native_source_events VALUES(?1,?2,?3,?4)",
-                params![source.run_id, key, checksum(&body), body],
-            )
-            .map_err(io)?;
-            super::sqlite_finance::persist_event(tx, &source.run_id, key, event)?;
-        } else if old_events.get(key) != Some(&checksum(&encode(event)?)) {
-            return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
-        }
-    }
-    let mut old_cursors = BTreeMap::<String, String>::new();
-    {
-        let mut q = tx
-            .prepare("SELECT cursor_key,payload_digest FROM native_source_cursors WHERE run_id=?1")
-            .map_err(io)?;
-        let rows = q
-            .query_map(params![source.run_id], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(io)?;
-        for row in rows {
-            let (key, hash) = row.map_err(io)?;
-            old_cursors.insert(key, hash);
-        }
-    }
-    if old_cursors
-        .keys()
-        .any(|key| !source.cursors.contains_key(key))
-    {
-        return Err(ExecutionLedgerError::Corrupt(
-            "exchange source cursor deletion",
-        ));
-    }
-    for (key, cursor) in &source.cursors {
-        if !old_cursors.contains_key(key) {
-            let body = encode(cursor)?;
-            let time = crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
-                .ok_or(ExecutionLedgerError::Corrupt("invalid REST receipt time"))?;
-            tx.execute(
-                "INSERT INTO native_source_cursors VALUES(?1,?2,?3,?4,?5)",
-                params![source.run_id, key, time, checksum(&body), body],
-            )
-            .map_err(io)?;
-            super::sqlite_finance::persist_source_receipt(
-                tx,
-                &source.account_uid,
-                &source.run_id,
-                key,
-                cursor,
-            )?;
-        } else if old_cursors.get(key) != Some(&checksum(&encode(cursor)?)) {
-            return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
-        }
+    let new_cursors = new_source_keys(
+        tx,
+        &source.run_id,
+        IndexedSourceKind::Cursors,
+        &source.cursors,
+    )?;
+    for key in new_cursors {
+        let cursor = source
+            .cursors
+            .get(key)
+            .ok_or(ExecutionLedgerError::ExchangeEvidenceConflict)?;
+        let body = encode(cursor)?;
+        let time = crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
+            .ok_or(ExecutionLedgerError::Corrupt("invalid REST receipt time"))?;
+        tx.execute(
+            "INSERT INTO native_source_cursors VALUES(?1,?2,?3,?4,?5)",
+            params![source.run_id, key, time, checksum(&body), body],
+        )
+        .map_err(io)?;
+        super::sqlite_finance::persist_source_receipt(
+            tx,
+            &source.account_uid,
+            &source.run_id,
+            key,
+            cursor,
+        )?;
     }
     Ok(())
 }
@@ -225,4 +251,60 @@ pub(super) fn read(
     };
     result.validate()?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indexed_source_merge_only_returns_new_keys_and_rejects_loss_or_rewrite() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(TABLES).unwrap();
+        connection
+            .execute(
+                "INSERT INTO native_source_runs VALUES('run','uid','source','digest')",
+                [],
+            )
+            .unwrap();
+        for (key, value) in [("a", "prior-a"), ("c", "prior-c")] {
+            let payload = encode(&value.to_owned()).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO native_source_events VALUES('run',?1,?2,?3)",
+                    params![key, checksum(&payload), payload],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO native_source_cursors VALUES('run',?1,1,?2,?3)",
+                    params![key, checksum(&payload), payload],
+                )
+                .unwrap();
+        }
+        let tx = connection.transaction().unwrap();
+        let current = BTreeMap::from([
+            ("0".to_owned(), "new-zero".to_owned()),
+            ("a".to_owned(), "prior-a".to_owned()),
+            ("b".to_owned(), "new-b".to_owned()),
+            ("c".to_owned(), "prior-c".to_owned()),
+            ("z".to_owned(), "new-z".to_owned()),
+        ]);
+        for kind in [IndexedSourceKind::Events, IndexedSourceKind::Cursors] {
+            let added = new_source_keys(&tx, "run", kind, &current).unwrap();
+            assert_eq!(added, vec!["0", "b", "z"]);
+            let deleted = BTreeMap::from([("c".to_owned(), "prior-c".to_owned())]);
+            assert!(matches!(
+                new_source_keys(&tx, "run", kind, &deleted),
+                Err(ExecutionLedgerError::Corrupt(_))
+            ));
+            let mut rewritten = current.clone();
+            rewritten.insert("a".to_owned(), "altered".to_owned());
+            assert!(matches!(
+                new_source_keys(&tx, "run", kind, &rewritten),
+                Err(ExecutionLedgerError::ExchangeEvidenceConflict)
+            ));
+        }
+        tx.rollback().unwrap();
+    }
 }

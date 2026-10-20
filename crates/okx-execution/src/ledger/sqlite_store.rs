@@ -1065,7 +1065,13 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
 fn attest_snapshot(
     path: &Path,
     expected_uid: Option<&str>,
-) -> Result<(LedgerStorageAttestation, Option<ProfileHandoffLedgerAssessment>), ExecutionLedgerError> {
+) -> Result<
+    (
+        LedgerStorageAttestation,
+        Option<ProfileHandoffLedgerAssessment>,
+    ),
+    ExecutionLedgerError,
+> {
     let c = connect(path, false)?; // FULL integrity_check at cold boundary
     // Hold one consistent WAL snapshot through manifest, source and fences.
     c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
