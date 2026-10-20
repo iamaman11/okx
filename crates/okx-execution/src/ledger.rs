@@ -631,7 +631,9 @@ impl ExecutionLedgerStore {
             .write(true)
             .create(true)
             .open(root.join("execution-ledger.writer-lock"))?;
-        lease.try_lock()?;
+        lease
+            .try_lock()
+            .map_err(|_| ExecutionLedgerError::Corrupt("ledger writer lease unavailable"))?;
         Ok(lease)
     }
 
