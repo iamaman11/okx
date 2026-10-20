@@ -202,6 +202,34 @@ pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, Exe
             ));
         }
     }
+    // Reconcile all native POST fences against the immutable event chain.
+    // There may be legacy imported submissions with no native BEGIN_POST;
+    // absence of a native fence is never upgraded to affirmative proof.
+    {
+        let mut query=c.prepare(
+            "SELECT p.intent_id,p.client_order_id,p.begin_post_at_ms,
+                    e.event_type,e.subject_id,e.effective_at_ms
+             FROM post_attempts p
+             JOIN domain_events e ON e.event_id=p.begin_post_event_id"
+        ).map_err(io)?;
+        let mut rows=query.query([]).map_err(io)?;
+        while let Some(row)=rows.next().map_err(io)? {
+            let id:String=row.get(0).map_err(io)?;
+            let client:String=row.get(1).map_err(io)?;
+            let at:i64=row.get(2).map_err(io)?;
+            let kind:String=row.get(3).map_err(io)?;
+            let subject:String=row.get(4).map_err(io)?;
+            let effective:i64=row.get(5).map_err(io)?;
+            let entry=entries.get(&id).ok_or(
+                ExecutionLedgerError::Corrupt("orphan native post fence"))?;
+            if client!=entry.record.plan.client_order_id
+                || kind!="BEGIN_POST" || subject!=id
+                || effective!=at
+                || entry.record.state==ExecutionState::Prepared {
+                return Err(ExecutionLedgerError::Corrupt("native post fence mismatch"));
+            }
+        }
+    }
     let state = if let Some((uid, sha, bytes)) = meta {
         if checksum(&bytes) != sha || known_uid.as_deref().is_some_and(|v| v != uid) {
             return Err(ExecutionLedgerError::Corrupt(
@@ -367,32 +395,54 @@ pub(super) fn save(
             )
             .map_err(io)?;
         for (id, e) in entries {
-            let existing: Option<(String, String, String, i64)> = tx
+            let existing: Option<(String, String, String, i64, Vec<u8>)> = tx
                 .query_row(
-                    "SELECT client_order_id,uid,digest,updated_at_ms FROM ledger_entries WHERE intent_id=?1",
+                    "SELECT client_order_id,uid,digest,updated_at_ms,bytes
+                     FROM ledger_entries WHERE intent_id=?1",
                     params![id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
                 )
                 .optional()
                 .map_err(io)?;
             if existing
                 .as_ref()
-                .is_some_and(|(client, existing_uid, _, _)| {
+                .is_some_and(|(client, existing_uid, _, _, _)| {
                     client != &e.record.plan.client_order_id
                         || existing_uid != &e.record.plan.account_uid_fingerprint
                 })
             {
                 return Err(ExecutionLedgerError::IntentConflict);
             }
+            let prior_state = existing.as_ref().map(|(_,_,old_digest,_,prior_bytes)| {
+                if checksum(prior_bytes) != *old_digest {
+                    return Err(ExecutionLedgerError::Corrupt("prior intent digest mismatch"));
+                }
+                let old:ExecutionLedgerEntry=decode(prior_bytes)?;
+                Ok(old.record.state)
+            }).transpose()?;
+            let is_begin_post = prior_state == Some(ExecutionState::Prepared)
+                && e.record.state == ExecutionState::Submitting;
+            // Existing post records are durable fences: PREPARED cannot be
+            // re-entered after a BEGIN_POST, even through a caller error.
+            let posted:Option<String> = tx.query_row(
+                "SELECT client_order_id FROM post_attempts WHERE intent_id=?1",
+                params![id],|r|r.get(0)
+            ).optional().map_err(io)?;
+            if posted.as_deref().is_some_and(|client|
+                    client != e.record.plan.client_order_id)
+                || posted.is_some() && e.record.state==ExecutionState::Prepared
+                || posted.is_some() && is_begin_post {
+                return Err(ExecutionLedgerError::IntentConflict);
+            }
             let bytes = encode(e)?;
             let entry_digest = checksum(&bytes);
             if existing
                 .as_ref()
-                .is_some_and(|(_, _, prior_digest, _)| prior_digest == &entry_digest)
+                .is_some_and(|(_, _, prior_digest, _, _)| prior_digest == &entry_digest)
             {
                 continue;
             }
-            if existing.as_ref().is_some_and(|(_, _, _, prior_time)| {
+            if existing.as_ref().is_some_and(|(_, _, _, prior_time, _)| {
                 i64::try_from(e.updated_at_ms)
                     .ok()
                     .is_none_or(|t| t <= *prior_time)
@@ -452,10 +502,23 @@ pub(super) fn save(
                 "INSERT INTO domain_events
                  (event_id,event_type,event_version,subject_kind,subject_id,
                   effective_at_ms,recorded_at_ms,previous_event_sha256,event_sha256)
-                 VALUES (?1,'INTENT_TRANSITION',1,'INTENT',?2,?3,?3,?4,?5)",
-                params![event_id, id, e.updated_at_ms, prev_hash, event_hash],
+                 VALUES (?1,?6,1,'INTENT',?2,?3,?3,?4,?5)",
+                params![event_id, id, e.updated_at_ms, prev_hash, event_hash,
+                    if is_begin_post {"BEGIN_POST"} else {"INTENT_TRANSITION"}],
             )
             .map_err(io)?;
+            if is_begin_post {
+                // This row proves that the old PREPARED record existed
+                // before a native durable SUBMITTING transition. Imported
+                // historical SUBMITTING/UNKNOWN rows do not fabricate it.
+                tx.execute(
+                    "INSERT INTO post_attempts
+                     (intent_id,client_order_id,begin_post_event_id,
+                      begin_post_at_ms,delivery_outcome)
+                     VALUES(?1,?2,?3,?4,'BEGIN_POST_UNRESOLVED')",
+                    params![id,&e.record.plan.client_order_id,event_id,e.updated_at_ms],
+                ).map_err(io)?;
+            }
         }
     }
     // Existing intents are inserted before projecting fill attribution, so a
