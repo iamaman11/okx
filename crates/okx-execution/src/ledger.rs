@@ -905,10 +905,14 @@ impl ExecutionLedgerStore {
         if !valid_intent_id(run_id) {
             return Err(ExecutionLedgerError::Corrupt("invalid archive run ID"));
         }
-        Ok(self
-            .path
-            .with_extension("archive")
-            .join(format!("{}-{run_id}.json", kind.as_str())))
+        let directory = if self.path.file_name().and_then(|v| v.to_str())
+            == Some("execution-ledger.v14.sealed")
+        {
+            self.path.with_file_name("execution-ledger.archive")
+        } else {
+            self.path.with_extension("archive")
+        };
+        Ok(directory.join(format!("{}-{run_id}.json", kind.as_str())))
     }
 
     /// Seal native evidence before atomically committing the primary manifest.

@@ -2248,7 +2248,7 @@ impl HostControlOperation {
             } => {
                 validate_sha256(expected_uid_fingerprint)?;
                 validate_sha256(expected_v14_sha256)
-            },
+            }
             Self::ConfigureProductionTrading { policy } => policy.validate(),
             Self::StopProductionTrading { expected_revision } => {
                 if *expected_revision == 0 {
@@ -4639,7 +4639,10 @@ mod native_drain_source_tests {
         assert!(operation.validate().is_ok());
         let serialized = serde_json::to_value(&operation).unwrap();
         assert_eq!(serialized["type"], "migrate_ledger_to_sqlite");
-        assert_eq!(serde_json::from_value::<HostControlOperation>(serialized).unwrap(), operation);
+        assert_eq!(
+            serde_json::from_value::<HostControlOperation>(serialized).unwrap(),
+            operation
+        );
         let invalid = HostControlOperation::MigrateLedgerToSqlite {
             expected_uid_fingerprint: "a".repeat(63),
             expected_v14_sha256: "b".repeat(64),

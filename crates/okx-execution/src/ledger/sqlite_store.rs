@@ -1167,6 +1167,18 @@ mod tests {
     }
 
     #[test]
+    fn sealed_manifest_keeps_original_archive_directory() {
+        let root = test_root("archive-dir");
+        let active = ExecutionLedgerStore::at(root.join("execution-ledger.json"));
+        let sealed = ExecutionLedgerStore::at(root.join("execution-ledger.v14.sealed"));
+        let name = "archived_run_integrity_000001";
+        assert_eq!(
+            active.archive_path(ArchivedRunKind::Finalized, name).unwrap(),
+            sealed.archive_path(ArchivedRunKind::Finalized, name).unwrap()
+        );
+    }
+
+    #[test]
     fn native_cutover_publishes_only_after_full_v14_parity_and_is_idempotent() {
         let root = test_root("cutover-commit");
         let v14 = root.join("execution-ledger.json");

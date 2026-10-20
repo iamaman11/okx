@@ -183,10 +183,7 @@ impl HostExecutor {
             HostControlOperation::MigrateLedgerToSqlite {
                 expected_uid_fingerprint,
                 expected_v14_sha256,
-            } => self.migrate_ledger_to_sqlite(
-                &expected_uid_fingerprint,
-                &expected_v14_sha256,
-            ),
+            } => self.migrate_ledger_to_sqlite(&expected_uid_fingerprint, &expected_v14_sha256),
             HostControlOperation::InstallAutostart => autostart::install(),
             HostControlOperation::AutostartStatus => autostart::status_value(),
             HostControlOperation::HandoffToAutostart
