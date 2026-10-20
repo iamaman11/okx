@@ -1042,92 +1042,30 @@ pub(super) fn read_staging_origin(path: &Path) -> Result<(String, String), Execu
     Ok((uid, source))
 }
 
-/// A source-complete native handoff assessment is independent of the
-/// in-memory executor history: one verified SQL stream, bounded RAM, and
-/// the same physical manifest already attested by the caller.
+/// One consistent WAL snapshot feeds both independent read-only
+/// attestation and CONTROL handoff inventory. Never pair counts from a
+/// newer SQL transaction with an older account digest.
 pub(super) fn assess_profile(
     path: &Path,
     account_uid: &str,
-    physical: LedgerStorageAttestation,
 ) -> Result<ProfileHandoffLedgerAssessment, ExecutionLedgerError> {
-    let c = connect_indexed_read(path)?;
-    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
-    require_indexed_scope(&c, account_uid)?;
-    let sql = format!("{INDEXED_INTENT_COLUMNS} ORDER BY e.intent_id");
-    let mut stmt = c.prepare(&sql).map_err(io)?;
-    let mut rows = stmt.query([]).map_err(io)?;
-    let mut total = 0usize;
-    let mut nonterminal = 0usize;
-    let mut unresolved_mutations = 0usize;
-    let mut unresolved_protection = 0usize;
-    while let Some(row) = rows.next().map_err(io)? {
-        let entry = verified_indexed_entry(row, account_uid)?;
-        total = total.checked_add(1).ok_or(ExecutionLedgerError::Corrupt(
-            "account intent inventory overflow",
-        ))?;
-        if !entry.record.state.is_terminal() {
-            nonterminal += 1;
-        }
-        unresolved_mutations += entry
-            .record
-            .mutations
-            .iter()
-            .filter(|change| !change.state.is_terminal())
-            .count();
-        if let Some(protective) = entry.record.protection.as_ref()
-            && (!matches!(
-                protective.status,
-                ProtectiveOrderStatus::CleanedUp | ProtectiveOrderStatus::NotActivated
-            ) || protective
-                .cleanup
-                .as_ref()
-                .is_some_and(|c| c.state != ProtectiveCleanupState::ConfirmedAbsent)
-                || protective.size_amend.as_ref().is_some_and(|amend| {
-                    !matches!(
-                        amend.state,
-                        ProtectiveSizeAmendState::Confirmed
-                            | ProtectiveSizeAmendState::RetiredAbsent
-                    )
-                }))
-        {
-            unresolved_protection += 1;
-        }
-    }
-    drop(rows);
-    drop(stmt);
-    let (n_entries, n_proj): (i64, i64) = c
-        .query_row(
-            "SELECT (SELECT COUNT(*) FROM ledger_entries),
-                    (SELECT COUNT(*) FROM intents)",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .map_err(io)?;
-    if usize::try_from(n_entries).ok() != Some(total) || usize::try_from(n_proj).ok() != Some(total)
-    {
-        return Err(ExecutionLedgerError::Corrupt(
-            "native account profile inventory mismatch",
-        ));
-    }
-    Ok(ProfileHandoffLedgerAssessment {
-        schema: PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1,
-        managed_intents_total: total,
-        nonterminal_intents: nonterminal,
-        unresolved_order_mutations: unresolved_mutations,
-        unresolved_protective_lifecycle: unresolved_protection,
-        account_uid_mismatches: 0,
-        source_ledger_manifest_sha256: physical.manifest_sha256,
-        source_ledger_format: physical.on_disk_schema,
-        immutable_stop_reason: physical.active_risk_stop_reason,
-        finalized_run_checksum_sha256: physical.finalized_run_checksum_sha256,
-    })
+    let (_, profile) = attest_snapshot(path, Some(account_uid))?;
+    profile.ok_or(ExecutionLedgerError::Corrupt(
+        "native profile snapshot absent",
+    ))
+}
+
+pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
+    Ok(attest_snapshot(path, None)?.0)
 }
 
 /// Exhaustive read-only attestation without a second full historical
-/// BTreeMap. Every intent is validated once and streamed through the same
-/// legacy-compatible manifest digest; source/periods/POST remain checked.
-/// No source mutations, account registration or exchange commands occur.
-pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
+/// BTreeMap. The snapshot also carries exact operational counters when
+/// called for native CONTROL handoff.
+fn attest_snapshot(
+    path: &Path,
+    expected_uid: Option<&str>,
+) -> Result<(LedgerStorageAttestation, Option<ProfileHandoffLedgerAssessment>), ExecutionLedgerError> {
     let c = connect(path, false)?; // FULL integrity_check at cold boundary
     // Hold one consistent WAL snapshot through manifest, source and fences.
     c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
@@ -1155,7 +1093,9 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
         )
         .optional()
         .map_err(io)?;
-    if bound.as_deref().is_some_and(|value| value != uid) {
+    if bound.as_deref().is_some_and(|value| value != uid)
+        || expected_uid.is_some_and(|value| value != uid || bound.as_deref() != Some(value))
+    {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     if let Some(stop) = &state.stop {
@@ -1191,6 +1131,9 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
     let mut statement = c.prepare(&sql).map_err(io)?;
     let mut rows = statement.query([]).map_err(io)?;
     let mut count: i64 = 0;
+    // [total, nonterminal, unresolved mutation, unresolved protection].
+    // No second SQL pass and no BTreeMap allocation for the same account.
+    let mut profile_counts = expected_uid.map(|_| [0usize; 4]);
     while let Some(row) = rows.next().map_err(io)? {
         let entry = verified_indexed_entry(row, &uid)?;
         validate_strategy_run_binding(
@@ -1199,6 +1142,36 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
             &state.periods.archived_runs,
             &state.periods.unverified_runs,
         )?;
+        if let Some(counts) = &mut profile_counts {
+            counts[0] += 1;
+            if !entry.record.state.is_terminal() {
+                counts[1] += 1;
+            }
+            counts[2] += entry
+                .record
+                .mutations
+                .iter()
+                .filter(|change| !change.state.is_terminal())
+                .count();
+            if let Some(protective) = entry.record.protection.as_ref()
+                && (!matches!(
+                    protective.status,
+                    ProtectiveOrderStatus::CleanedUp | ProtectiveOrderStatus::NotActivated
+                ) || protective
+                    .cleanup
+                    .as_ref()
+                    .is_some_and(|c| c.state != ProtectiveCleanupState::ConfirmedAbsent)
+                    || protective.size_amend.as_ref().is_some_and(|amend| {
+                        !matches!(
+                            amend.state,
+                            ProtectiveSizeAmendState::Confirmed
+                                | ProtectiveSizeAmendState::RetiredAbsent
+                        )
+                    }))
+            {
+                counts[3] += 1;
+            }
+        }
         let id = &entry.record.plan.intent_id;
         let payload = encode(&entry)?;
         owner_digest.update((id.len() as u64).to_le_bytes());
@@ -1273,7 +1246,7 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
         ));
     }
     let full_manifest = format!("{:x}", owner_digest.finalize());
-    Ok(LedgerStorageAttestation {
+    let physical = LedgerStorageAttestation {
         schema: LEDGER_STORAGE_ATTESTATION_SCHEMA_V1,
         on_disk_schema: SCHEMA.to_owned(),
         integrity: "VALIDATED_COLD_READ",
@@ -1294,7 +1267,20 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
             .map(|f| f.checksum_sha256.clone()),
         backup_scope: "SQLITE_WAL_AND_IMMUTABLE_SOURCE",
         trading_admission: "READ_ONLY_NOT_TRADING_AUTHORITY",
-    })
+    };
+    let profile = profile_counts.map(|counts| ProfileHandoffLedgerAssessment {
+        schema: PROFILE_HANDOFF_LEDGER_ASSESSMENT_SCHEMA_V1,
+        managed_intents_total: counts[0],
+        nonterminal_intents: counts[1],
+        unresolved_order_mutations: counts[2],
+        unresolved_protective_lifecycle: counts[3],
+        account_uid_mismatches: 0,
+        source_ledger_manifest_sha256: physical.manifest_sha256.clone(),
+        source_ledger_format: physical.on_disk_schema.clone(),
+        immutable_stop_reason: physical.active_risk_stop_reason.clone(),
+        finalized_run_checksum_sha256: physical.finalized_run_checksum_sha256.clone(),
+    });
+    Ok((physical, profile))
 }
 
 #[cfg(test)]
