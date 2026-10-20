@@ -544,6 +544,50 @@ mod tests {
     }
 
     #[test]
+    fn quiet_venue_u_time_does_not_create_a_false_receipt_gap() {
+        // Four authenticated hourly reads; OKX never changes the account.
+        // This must remain continuous even though uTime is frozen.
+        let base = 1_790_000_000_000_u64;
+        let mut evidence = DurableExchangeEvidence {
+            schema: EXCHANGE_EVIDENCE_SCHEMA_V1.into(),
+            account_uid: "uid".into(),
+            run_id: "run_1".into(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        for hour in 0..4_u64 {
+            let read_at = base + hour * 3_600_000;
+            evidence.cursors.insert(
+                format!("read_{hour}"),
+                ExchangeCoverageCursor {
+                    source: "OKX_REST_ACCOUNT_HISTORY".into(),
+                    source_received_at:
+                        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(read_at as i64)
+                            .unwrap()
+                            .to_rfc3339(),
+                    generation: format!("generation_{hour}"),
+                    account_as_of_ms: base - 86_400_000, // unchanged for 24h
+                    order_complete: true,
+                    fill_complete: true,
+                    bill_complete: true,
+                    covered_ranges: Value::Null,
+                },
+            );
+        }
+        evidence.seal().unwrap();
+        let checksum = evidence.checksum_sha256.clone();
+        let summary = evidence.summary();
+        assert_eq!(summary.oldest_source_asof_ms, Some(base - 86_400_000));
+        assert_eq!(summary.latest_source_asof_ms, Some(base - 86_400_000));
+        assert_eq!(summary.latest_source_received_at_ms, Some(base + 3 * 3_600_000));
+        assert_eq!(summary.largest_persisted_gap_ms, Some(3_600_000));
+        assert!(!summary.source_gap_over_two_hours);
+        assert!(summary.latest_source_complete);
+        assert_eq!(evidence.checksum_sha256, checksum);
+    }
+
+    #[test]
     fn quiet_source_queries_do_not_exhaust_cursors_but_new_fills_write_immediately() {
         let first = 1_000_000;
         assert!(should_persist_source_cursor(None, first, false, false));
