@@ -1406,47 +1406,6 @@ impl ExecutionLedgerStore {
         )
     }
 
-    /// Cold startup recovery of SUBMITTING/UNKNOWN and inflight changes.
-    /// Native SQLite updates only the affected intent rows in one transaction;
-    /// the immutable full history and financial snapshot are left untouched.
-    fn save_recovered_intents(
-        &self,
-        changed: &BTreeMap<String, ExecutionLedgerEntry>,
-        all: &BTreeMap<String, ExecutionLedgerEntry>,
-        stop: Option<&ExecutionRiskStop>,
-        reservation: Option<&StrategyCapitalReservation>,
-        source: Option<&DurableExchangeEvidence>,
-        periods: &StrategyPeriodHistory,
-        leverage: &[LeverageChangeAttempt],
-    ) -> Result<(), ExecutionLedgerError> {
-        if !self.sqlite_native {
-            return self.save(all, stop, reservation, source, periods, leverage);
-        }
-        if changed.is_empty() || changed.iter().any(|(id, e)| all.get(id) != Some(e)) {
-            return Err(ExecutionLedgerError::Corrupt(
-                "invalid recovered SQLite intent batch",
-            ));
-        }
-        for entry in changed.values() {
-            validate_entry(entry)?;
-            validate_strategy_run_binding(
-                entry,
-                reservation,
-                &periods.archived_runs,
-                &periods.unverified_runs,
-            )?;
-        }
-        sqlite_store::save_recovered(
-            &self.path,
-            changed,
-            stop,
-            reservation,
-            source,
-            periods,
-            leverage,
-        )
-    }
-
     fn save(
         &self,
         entries: &BTreeMap<String, ExecutionLedgerEntry>,
@@ -1884,15 +1843,35 @@ impl DurableExecutionLedger {
         }
 
         if !recovered.is_empty() {
-            store.save_recovered_intents(
-                &recovered,
-                &entries,
-                risk_stop.as_ref(),
-                capital_reservation.as_ref(),
-                exchange_evidence.as_ref(),
-                &strategy_periods,
-                &leverage_attempts,
-            )?;
+            if store.sqlite_native {
+                for changed in recovered.values() {
+                    validate_entry(changed)?;
+                    validate_strategy_run_binding(
+                        changed,
+                        capital_reservation.as_ref(),
+                        &strategy_periods.archived_runs,
+                        &strategy_periods.unverified_runs,
+                    )?;
+                }
+                sqlite_store::save_recovered(
+                    &store.path,
+                    &recovered,
+                    risk_stop.as_ref(),
+                    capital_reservation.as_ref(),
+                    exchange_evidence.as_ref(),
+                    &strategy_periods,
+                    &leverage_attempts,
+                )?;
+            } else {
+                store.save(
+                    &entries,
+                    risk_stop.as_ref(),
+                    capital_reservation.as_ref(),
+                    exchange_evidence.as_ref(),
+                    &strategy_periods,
+                    &leverage_attempts,
+                )?;
+            }
         }
 
         Ok(Self {
