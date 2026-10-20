@@ -396,13 +396,36 @@ pub struct LedgerStorageAttestation {
     pub trading_admission: &'static str,
 }
 
+/// Storage identity is native to the execution domain, independent of
+/// transport DTOs. At the Agent boundary we map the verified native route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerVenue {
+    Okx,
+    Bybit,
+}
+
+impl LedgerVenue {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Okx => "okx",
+            Self::Bybit => "bybit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerEnvironment {
+    Production,
+    Demo,
+}
+
 /// Persisted account ownership is a type-safe storage identity, not a
 /// credential or trading authorization. The caller MUST derive it from the
 /// existing authenticated native account route, never an MCP/JSON claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteAccountIdentity {
-    pub venue: okx_protocol::TradingVenue,
-    pub environment: okx_protocol::AccountCatalogEnvironment,
+    pub venue: LedgerVenue,
+    pub environment: LedgerEnvironment,
     pub account_id: String,
     pub uid_fingerprint: String,
     pub bound_at_ms: u64,
@@ -437,8 +460,8 @@ impl SqliteAccountIdentity {
 
     fn environment_key(&self) -> &'static str {
         match self.environment {
-            okx_protocol::AccountCatalogEnvironment::Production => "production",
-            okx_protocol::AccountCatalogEnvironment::Demo => "demo",
+            LedgerEnvironment::Production => "production",
+            LedgerEnvironment::Demo => "demo",
         }
     }
 }
@@ -778,12 +801,7 @@ impl ExecutionLedgerStore {
         expected_uid: &str,
         expected_v14_sha256: &str,
     ) -> Result<Self, ExecutionLedgerError> {
-        Self::migrate_to_sqlite_offline_with_account(
-            root,
-            expected_uid,
-            expected_v14_sha256,
-            None,
-        )
+        Self::migrate_to_sqlite_offline_with_account(root, expected_uid, expected_v14_sha256, None)
     }
 
     /// CONTROL-selected, UID-attested account identity is bound in the

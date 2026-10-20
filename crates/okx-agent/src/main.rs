@@ -32,8 +32,8 @@ use okx_agent::{
     runtime::{MailboxRuntimeContext, run_mailbox_until_shutdown, run_until_shutdown},
 };
 use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, RateBudget, Region};
-use okx_execution::{ExecutionLedgerStore, SqliteAccountIdentity};
-use okx_protocol::{AccountCatalogEnvironment, DirectRuntimeProfile, MailboxEnvelope, TradingVenue};
+use okx_execution::{ExecutionLedgerStore, LedgerEnvironment, LedgerVenue, SqliteAccountIdentity};
+use okx_protocol::{DirectRuntimeProfile, MailboxEnvelope};
 use okx_runtime::{PrivateWsCoordinator, PrivateWsHandle, PublicWsCoordinator};
 use zeroize::Zeroize;
 
@@ -245,11 +245,11 @@ async fn run(cli: Cli) -> AgentResult<()> {
             // Bind the immutable account identity to SQLite BEFORE the owner
             // receipt is published; never infer the account from a UI toggle.
             let account_identity = SqliteAccountIdentity {
-                venue: TradingVenue::Okx,
+                venue: LedgerVenue::Okx,
                 environment: if environment.demo {
-                    AccountCatalogEnvironment::Demo
+                    LedgerEnvironment::Demo
                 } else {
-                    AccountCatalogEnvironment::Production
+                    LedgerEnvironment::Production
                 },
                 account_id: if environment.demo { "demo" } else { "real" }.to_owned(),
                 uid_fingerprint: expected_uid_fingerprint.clone(),

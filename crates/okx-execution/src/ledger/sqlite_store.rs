@@ -1,7 +1,6 @@
 //! In-process SQLite WAL persistence for the existing execution ledger.
 //! Explicitly selected; Production v14 stays authoritative until a cutover.
 use super::*;
-use okx_protocol::{AccountCatalogEnvironment, TradingVenue};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -203,7 +202,9 @@ pub(super) fn bound_account_identity(
     path: &Path,
 ) -> Result<Option<SqliteAccountIdentity>, ExecutionLedgerError> {
     if !path.exists() {
-        return Err(ExecutionLedgerError::Corrupt("SQLite account ledger missing"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "SQLite account ledger missing",
+        ));
     }
     let connection = connect(path, false)?;
     let row: Option<(String, String, String, String, i64)> = connection
@@ -220,13 +221,13 @@ pub(super) fn bound_account_identity(
     };
     let scope = SqliteAccountIdentity {
         venue: match venue.as_str() {
-            "okx" => TradingVenue::Okx,
-            "bybit" => TradingVenue::Bybit,
+            "okx" => LedgerVenue::Okx,
+            "bybit" => LedgerVenue::Bybit,
             _ => return Err(ExecutionLedgerError::AccountScopeMismatch),
         },
         environment: match environment.as_str() {
-            "production" => AccountCatalogEnvironment::Production,
-            "demo" => AccountCatalogEnvironment::Demo,
+            "production" => LedgerEnvironment::Production,
+            "demo" => LedgerEnvironment::Demo,
             _ => return Err(ExecutionLedgerError::AccountScopeMismatch),
         },
         account_id,
@@ -1001,8 +1002,8 @@ mod tests {
         let store = ExecutionLedgerStore::sqlite_at(&path);
         assert!(store.bound_native_account_identity().is_err());
         let identity = SqliteAccountIdentity {
-            venue: TradingVenue::Okx,
-            environment: AccountCatalogEnvironment::Production,
+            venue: LedgerVenue::Okx,
+            environment: LedgerEnvironment::Production,
             account_id: "real".to_owned(),
             uid_fingerprint: uid.clone(),
             bound_at_ms: 1000,
@@ -1027,32 +1028,45 @@ mod tests {
         let mut same = identity.clone();
         same.bound_at_ms += 1; // Repeated native verification never edits history.
         store.bind_native_account_identity(&same).unwrap();
-        assert_eq!(store.bound_native_account_identity().unwrap(), Some(identity.clone()));
+        assert_eq!(
+            store.bound_native_account_identity().unwrap(),
+            Some(identity.clone())
+        );
 
         let mut foreign = identity.clone();
         foreign.account_id = "subaccount".to_owned();
         assert!(store.bind_native_account_identity(&foreign).is_err());
         foreign = identity.clone();
-        foreign.environment = AccountCatalogEnvironment::Demo;
+        foreign.environment = LedgerEnvironment::Demo;
         assert!(store.bind_native_account_identity(&foreign).is_err());
         foreign = identity.clone();
-        foreign.venue = TradingVenue::Bybit;
+        foreign.venue = LedgerVenue::Bybit;
         assert!(store.bind_native_account_identity(&foreign).is_err());
         foreign = identity.clone();
         foreign.uid_fingerprint = "c".repeat(64);
         assert!(store.bind_native_account_identity(&foreign).is_err());
-        assert!(ExecutionLedgerStore::at(root.join("v14.json"))
-            .bind_native_account_identity(&identity)
-            .is_err());
+        assert!(
+            ExecutionLedgerStore::at(root.join("v14.json"))
+                .bind_native_account_identity(&identity)
+                .is_err()
+        );
         let sql = Connection::open(&path).unwrap();
-        assert!(sql
-            .execute("DELETE FROM account_identity WHERE singleton=1", [])
-            .is_err());
-        assert!(sql
-            .execute("UPDATE account_identity SET account_id='foreign' WHERE singleton=1", [])
-            .is_err());
+        assert!(
+            sql.execute("DELETE FROM account_identity WHERE singleton=1", [])
+                .is_err()
+        );
+        assert!(
+            sql.execute(
+                "UPDATE account_identity SET account_id='foreign' WHERE singleton=1",
+                []
+            )
+            .is_err()
+        );
         drop(sql);
-        assert_eq!(store.bound_native_account_identity().unwrap(), Some(identity));
+        assert_eq!(
+            store.bound_native_account_identity().unwrap(),
+            Some(identity)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1483,8 +1497,8 @@ mod tests {
         );
         assert!(!root.join("execution-ledger.owner").exists());
         let scope = SqliteAccountIdentity {
-            venue: TradingVenue::Okx,
-            environment: AccountCatalogEnvironment::Production,
+            venue: LedgerVenue::Okx,
+            environment: LedgerEnvironment::Production,
             account_id: "real".to_owned(),
             uid_fingerprint: uid.clone(),
             bound_at_ms: 101,
@@ -1493,7 +1507,10 @@ mod tests {
             &root, &uid, &digest, &scope,
         )
         .unwrap();
-        assert_eq!(chosen.bound_native_account_identity().unwrap(), Some(scope.clone()));
+        assert_eq!(
+            chosen.bound_native_account_identity().unwrap(),
+            Some(scope.clone())
+        );
         assert_eq!(chosen.path(), sqlite.as_path());
         assert_eq!(
             chosen.attest_storage().unwrap().integrity,
@@ -1504,7 +1521,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(duplicate.path(), sqlite.as_path());
-        assert_eq!(duplicate.bound_native_account_identity().unwrap(), Some(scope));
+        assert_eq!(
+            duplicate.bound_native_account_identity().unwrap(),
+            Some(scope)
+        );
         let sealed = root.join("execution-ledger.v14.sealed");
         assert!(!v14.exists());
         assert_eq!(std::fs::read(&sealed).unwrap(), original);

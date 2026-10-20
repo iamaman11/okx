@@ -574,12 +574,12 @@ impl ExecutionRuntime {
                 .bound_native_account_identity()?
                 .ok_or(okx_execution::ExecutionLedgerError::AccountScopeMismatch)?;
             let expected_environment = if environment.demo {
-                okx_protocol::AccountCatalogEnvironment::Demo
+                okx_execution::LedgerEnvironment::Demo
             } else {
-                okx_protocol::AccountCatalogEnvironment::Production
+                okx_execution::LedgerEnvironment::Production
             };
             let expected_account = if environment.demo { "demo" } else { "real" };
-            if bound.venue != okx_protocol::TradingVenue::Okx
+            if bound.venue != okx_execution::LedgerVenue::Okx
                 || bound.environment != expected_environment
                 || bound.account_id != expected_account
             {

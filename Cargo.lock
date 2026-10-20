@@ -1563,7 +1563,6 @@ dependencies = [
  "okx-analysis",
  "okx-api",
  "okx-observation",
- "okx-protocol",
  "rmp-serde",
  "rusqlite",
  "rust_decimal",
