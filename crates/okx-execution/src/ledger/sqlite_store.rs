@@ -2399,6 +2399,10 @@ mod tests {
         let first = load(&p, 10).unwrap();
         assert_eq!(first.3.as_ref(), Some(&source));
         assert_eq!(first.2.as_ref(), Some(&run));
+        // The metadata-only path must preserve the exact same source
+        // and financial projections as a full original save.
+        save_metadata(&p, None, Some(&run), Some(&source), &history, &[]).unwrap();
+        assert_eq!(load(&p, 10).unwrap(), first);
         save(
             &p,
             &BTreeMap::new(),
@@ -2511,6 +2515,10 @@ mod tests {
             )
             .is_err()
         );
+        // No partial financial evidence is committed by a failed
+        // account-state/source transaction, and the original manifest
+        // remains the only live proof.
+        assert!(save_metadata(&p, None, Some(&run), Some(&source), &history, &[]).is_err());
         assert_eq!(load(&p, 10).unwrap().3, Some(original));
         // Financial reports must not accept a forged ledger-state digest,
         // even when the account UID and individual bill rows still look valid.
