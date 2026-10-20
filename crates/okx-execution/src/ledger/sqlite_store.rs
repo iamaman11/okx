@@ -783,8 +783,7 @@ pub(super) fn save_metadata(
     if let Some(value) = source {
         value.validate()?;
         if reservation.is_none_or(|run| {
-            value.account_uid != run.account_uid_fingerprint
-                || value.run_id != run.allocation_id
+            value.account_uid != run.account_uid_fingerprint || value.run_id != run.allocation_id
         }) {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
@@ -818,7 +817,11 @@ pub(super) fn save_metadata(
     let expected = reservation
         .map(|r| r.account_uid_fingerprint.as_str())
         .or_else(|| source.map(|s| s.account_uid.as_str()))
-        .or_else(|| old.reservation.as_ref().map(|r| r.account_uid_fingerprint.as_str()))
+        .or_else(|| {
+            old.reservation
+                .as_ref()
+                .map(|r| r.account_uid_fingerprint.as_str())
+        })
         .unwrap_or(uid.as_str());
     let bound: Option<String> = tx
         .query_row(
@@ -828,7 +831,24 @@ pub(super) fn save_metadata(
         )
         .optional()
         .map_err(io)?;
-    if uid != expected || bound.as_deref().is_some_and(|v| v != uid) {
+    // One previously empty, unbound account can acquire its first verified
+    // UID from the typed capital opening. Never rebind populated history.
+    let first_uid = if uid.is_empty()
+        && !expected.is_empty()
+        && bound.is_none()
+        && old.reservation.is_none()
+        && old.source_run_id.is_none()
+    {
+        let count: i64 = tx
+            .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
+            .map_err(io)?;
+        count == 0
+    } else {
+        false
+    };
+    if (uid != expected && !first_uid)
+        || bound.as_deref().is_some_and(|v| v != uid)
+    {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     let bytes = encode(&StoredState {
@@ -841,15 +861,13 @@ pub(super) fn save_metadata(
     })?;
     let changed = tx
         .execute(
-            "UPDATE ledger_state SET digest=?1,bytes=?2
-             WHERE key=1 AND uid=?3 AND digest=?4",
-            params![checksum(&bytes), bytes, uid, digest],
+            "UPDATE ledger_state SET uid=?1,digest=?2,bytes=?3
+             WHERE key=1 AND uid=?4 AND digest=?5",
+            params![expected, checksum(&bytes), bytes, uid, digest],
         )
         .map_err(io)?;
     if changed != 1 {
-        return Err(ExecutionLedgerError::Corrupt(
-            "native metadata CAS lost",
-        ));
+        return Err(ExecutionLedgerError::Corrupt("native metadata CAS lost"));
     }
     // Source observations and derived immutable financial rows are
     // committed with their state pointer, never as a competing write owner.
@@ -2132,6 +2150,97 @@ mod tests {
         // Missing an active guard can otherwise cause a duplicate order.
         // Cold ownership checks MUST fail rather than trust an empty index.
         assert!(load(&db, usize::MAX).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn metadata_wal_commit_preserves_all_historical_intents_and_guard_proofs() {
+        let root = test_root("metadata-only");
+        let db = root.join("account.sqlite");
+        let uid = "a".repeat(64);
+        let id = "intent_metadata_000001";
+        let plan = ExecutionPlan {
+            schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+            intent_id: id.to_owned(),
+            client_order_id: derive_client_order_id(id),
+            reference_generation: "sha256:reference".to_owned(),
+            account_generation: "sha256:account".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            trade_mode: crate::TradeMode::Cross,
+            side: crate::OrderSide::Buy,
+            position_side: PositionSide::Long,
+            action: ExecutionAction::Open,
+            order_type: crate::OrderType::Limit,
+            size: "1".to_owned(),
+            price: "0.1".to_owned(),
+            open_risk: None,
+            risk_binding: None,
+        };
+        let entry = ExecutionLedgerEntry {
+            record: ExecutionRecord::new(plan),
+            created_at_ms: 1000,
+            updated_at_ms: 1000,
+        };
+        let entries = BTreeMap::from([(id.to_owned(), entry)]);
+        save(&db, &entries, None, None, None, &StrategyPeriodHistory::default(), &[]).unwrap();
+        let original = Connection::open(&db).unwrap();
+        let (intent_bytes, guard_digest): (Vec<u8>, String) = original
+            .query_row(
+                "SELECT e.bytes,g.entry_digest FROM ledger_entries e
+                 JOIN native_guarded_intents g ON g.intent_id=e.intent_id
+                 WHERE e.intent_id=?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let event_count: i64 = original
+            .query_row("SELECT COUNT(*) FROM domain_events", [], |row| row.get(0))
+            .unwrap();
+        drop(original);
+        let stop = ExecutionRiskStop {
+            schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
+            stopped_at_ms: 2000,
+            reason: "TEST_DURABLE_STOP".to_owned(),
+        };
+        save_metadata(
+            &db,
+            Some(&stop),
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
+        let stored = load(&db, usize::MAX).unwrap();
+        assert_eq!(stored.0, entries);
+        assert_eq!(stored.1, Some(stop));
+        let c = Connection::open(&db).unwrap();
+        let (actual, guard): (Vec<u8>, String) = c
+            .query_row(
+                "SELECT e.bytes,g.entry_digest FROM ledger_entries e
+                 JOIN native_guarded_intents g ON g.intent_id=e.intent_id
+                 WHERE e.intent_id=?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let after_events: i64 = c
+            .query_row("SELECT COUNT(*) FROM domain_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((actual, guard, after_events), (intent_bytes, guard_digest, event_count));
+        drop(c);
+        assert!(
+            save_metadata(
+                &root.join("missing.sqlite"),
+                None,
+                None,
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
+            )
+            .is_err()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
