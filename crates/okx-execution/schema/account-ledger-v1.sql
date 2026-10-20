@@ -14,6 +14,12 @@ CREATE TABLE IF NOT EXISTS account_identity (
     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
     UNIQUE(venue, environment, account_id, uid_fingerprint)
 ) STRICT;
+-- The first authenticated native binding is permanent. A runtime must
+-- never silently relabel a populated DB as a different account.
+CREATE TRIGGER IF NOT EXISTS immutable_account_identity_update
+BEFORE UPDATE ON account_identity BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_ACCOUNT_IDENTITY'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_account_identity_delete
+BEFORE DELETE ON account_identity BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_ACCOUNT_IDENTITY'); END;
 
 CREATE TABLE IF NOT EXISTS evidence_objects (
     evidence_sha256 TEXT PRIMARY KEY,

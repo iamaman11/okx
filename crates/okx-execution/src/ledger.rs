@@ -396,6 +396,52 @@ pub struct LedgerStorageAttestation {
     pub trading_admission: &'static str,
 }
 
+/// Persisted account ownership is a type-safe storage identity, not a
+/// credential or trading authorization. The caller MUST derive it from the
+/// existing authenticated native account route, never an MCP/JSON claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteAccountIdentity {
+    pub venue: okx_protocol::TradingVenue,
+    pub environment: okx_protocol::AccountCatalogEnvironment,
+    pub account_id: String,
+    pub uid_fingerprint: String,
+    pub bound_at_ms: u64,
+}
+
+impl SqliteAccountIdentity {
+    fn validate(&self) -> Result<(), ExecutionLedgerError> {
+        let id = self.account_id.as_bytes();
+        let uid = self.uid_fingerprint.as_bytes();
+        if id.is_empty()
+            || id.len() > 32
+            || !id[0].is_ascii_lowercase()
+            || !id
+                .iter()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+            || id.last() == Some(&b'-')
+            || uid.len() != 64
+            || !uid
+                .iter()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+            || self.bound_at_ms == 0
+        {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        Ok(())
+    }
+
+    fn venue_key(&self) -> &'static str {
+        self.venue.as_str()
+    }
+
+    fn environment_key(&self) -> &'static str {
+        match self.environment {
+            okx_protocol::AccountCatalogEnvironment::Production => "production",
+            okx_protocol::AccountCatalogEnvironment::Demo => "demo",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecutionLedgerStore {
     path: PathBuf,
@@ -897,6 +943,33 @@ impl ExecutionLedgerStore {
             max_records,
             sqlite_native: false,
         }
+    }
+
+    /// Bind a native-authenticated account once to an existing SQLite
+    /// ledger. Never creates a new ledger, never replaces a foreign owner,
+    /// and does not change risk or exchange mutation permissions.
+    pub fn bind_native_account_identity(
+        &self,
+        identity: &SqliteAccountIdentity,
+    ) -> Result<(), ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt(
+                "account identity binding requires existing SQLite",
+            ));
+        }
+        identity.validate()?;
+        sqlite_store::bind_account_identity(&self.path, identity)
+    }
+
+    pub fn bound_native_account_identity(
+        &self,
+    ) -> Result<Option<SqliteAccountIdentity>, ExecutionLedgerError> {
+        if !self.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt(
+                "account identity lookup requires existing SQLite",
+            ));
+        }
+        sqlite_store::bound_account_identity(&self.path)
     }
 
     pub fn path(&self) -> &Path {

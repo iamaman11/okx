@@ -1,6 +1,7 @@
 //! In-process SQLite WAL persistence for the existing execution ledger.
 //! Explicitly selected; Production v14 stays authoritative until a cutover.
 use super::*;
+use okx_protocol::{AccountCatalogEnvironment, TradingVenue};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -123,6 +124,124 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
         }
     }
     Ok(connection)
+}
+
+/// A binding is created only by an authenticated native owner for an
+/// ALREADY VALID, nonempty, UID-scoped ledger. This is not a registration
+/// endpoint or a separate authorizer.
+pub(super) fn bind_account_identity(
+    path: &Path,
+    identity: &SqliteAccountIdentity,
+) -> Result<(), ExecutionLedgerError> {
+    identity.validate()?;
+    // Validate the complete authoritative historical state once at binding,
+    // not on every hot-path order transition.
+    let (entries, _, reservation, source, _, _) = load(path, usize::MAX)?;
+    let expected = identity.uid_fingerprint.as_str();
+    if entries
+        .values()
+        .any(|entry| entry.record.plan.account_uid_fingerprint != expected)
+        || reservation
+            .as_ref()
+            .is_some_and(|r| r.account_uid_fingerprint != expected)
+        || source.as_ref().is_some_and(|e| e.account_uid != expected)
+        || (entries.is_empty() && reservation.is_none() && source.is_none())
+    {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+
+    let mut connection = connect(path, true)?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io)?;
+    let persisted_uid: String = tx
+        .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |r| r.get(0))
+        .map_err(io)?;
+    if persisted_uid != expected {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let previous: Option<(String, String, String, String)> = tx
+        .query_row(
+            "SELECT venue,environment,account_id,uid_fingerprint
+             FROM account_identity WHERE singleton=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(io)?;
+    let next = (
+        identity.venue_key().to_owned(),
+        identity.environment_key().to_owned(),
+        identity.account_id.clone(),
+        expected.to_owned(),
+    );
+    if let Some(prior) = previous {
+        if prior != next {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+    } else {
+        tx.execute(
+            "INSERT INTO account_identity
+             (singleton,venue,environment,account_id,uid_fingerprint,created_at_ms,schema_version)
+             VALUES (1,?1,?2,?3,?4,?5,1)",
+            params![
+                identity.venue_key(),
+                identity.environment_key(),
+                identity.account_id,
+                expected,
+                identity.bound_at_ms,
+            ],
+        )
+        .map_err(io)?;
+    }
+    tx.commit().map_err(io)?;
+    Ok(())
+}
+
+/// An indexed, bounded identity read; does not load historical intents.
+pub(super) fn bound_account_identity(
+    path: &Path,
+) -> Result<Option<SqliteAccountIdentity>, ExecutionLedgerError> {
+    if !path.exists() {
+        return Err(ExecutionLedgerError::Corrupt("SQLite account ledger missing"));
+    }
+    let connection = connect(path, false)?;
+    let row: Option<(String, String, String, String, i64)> = connection
+        .query_row(
+            "SELECT venue,environment,account_id,uid_fingerprint,created_at_ms
+             FROM account_identity WHERE singleton=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()
+        .map_err(io)?;
+    let Some((venue, environment, account_id, uid_fingerprint, bound_at)) = row else {
+        return Ok(None);
+    };
+    let scope = SqliteAccountIdentity {
+        venue: match venue.as_str() {
+            "okx" => TradingVenue::Okx,
+            "bybit" => TradingVenue::Bybit,
+            _ => return Err(ExecutionLedgerError::AccountScopeMismatch),
+        },
+        environment: match environment.as_str() {
+            "production" => AccountCatalogEnvironment::Production,
+            "demo" => AccountCatalogEnvironment::Demo,
+            _ => return Err(ExecutionLedgerError::AccountScopeMismatch),
+        },
+        account_id,
+        uid_fingerprint,
+        bound_at_ms: u64::try_from(bound_at)
+            .map_err(|_| ExecutionLedgerError::AccountScopeMismatch)?,
+    };
+    scope.validate()?;
+    let ledger_uid: String = connection
+        .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |r| r.get(0))
+        .map_err(io)?;
+    if ledger_uid != scope.uid_fingerprint {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    Ok(Some(scope))
 }
 
 pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
@@ -449,6 +568,19 @@ fn save_snapshot(
         .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |r| r.get(0))
         .optional()
         .map_err(io)?;
+    // An authenticated account binding is immutable once present, including
+    // on full-snapshot writes. Staging without such a binding is still legal.
+    let bound_uid: Option<String> = tx
+        .query_row(
+            "SELECT uid_fingerprint FROM account_identity WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(io)?;
+    if bound_uid.as_deref().is_some_and(|bound| bound != uid) {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
     if uid.is_empty() && (!entries.is_empty() || reservation.is_some() || source.is_some()) {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
@@ -832,6 +964,82 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("okx-sqlite-{label}-{}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn sqlite_native_account_identity_is_single_permanent_and_uid_scoped() {
+        let root = test_root("account-identity");
+        let path = root.join("account.sqlite");
+        let uid = "b".repeat(64);
+        let reservation = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "account_identity_test_run_000001".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            origin_schema: "test/v1".to_owned(),
+            origin_version: "v1".to_owned(),
+            mandate_version: "1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "127".to_owned(),
+            account_generation: "g1".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1,
+        };
+        let store = ExecutionLedgerStore::sqlite_at(&path);
+        assert!(store.bound_native_account_identity().is_err());
+        let identity = SqliteAccountIdentity {
+            venue: TradingVenue::Okx,
+            environment: AccountCatalogEnvironment::Production,
+            account_id: "real".to_owned(),
+            uid_fingerprint: uid.clone(),
+            bound_at_ms: 1000,
+        };
+        assert!(store.bind_native_account_identity(&identity).is_err());
+        save(
+            &path,
+            &BTreeMap::new(),
+            None,
+            Some(&reservation),
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
+        assert!(store.bound_native_account_identity().unwrap().is_none());
+        store.bind_native_account_identity(&identity).unwrap();
+        assert_eq!(
+            store.bound_native_account_identity().unwrap(),
+            Some(identity.clone())
+        );
+        let mut same = identity.clone();
+        same.bound_at_ms += 1; // Repeated native verification never edits history.
+        store.bind_native_account_identity(&same).unwrap();
+        assert_eq!(store.bound_native_account_identity().unwrap(), Some(identity.clone()));
+
+        let mut foreign = identity.clone();
+        foreign.account_id = "subaccount".to_owned();
+        assert!(store.bind_native_account_identity(&foreign).is_err());
+        foreign = identity.clone();
+        foreign.environment = AccountCatalogEnvironment::Demo;
+        assert!(store.bind_native_account_identity(&foreign).is_err());
+        foreign = identity.clone();
+        foreign.venue = TradingVenue::Bybit;
+        assert!(store.bind_native_account_identity(&foreign).is_err());
+        foreign = identity.clone();
+        foreign.uid_fingerprint = "c".repeat(64);
+        assert!(store.bind_native_account_identity(&foreign).is_err());
+        assert!(ExecutionLedgerStore::at(root.join("v14.json"))
+            .bind_native_account_identity(&identity)
+            .is_err());
+        let sql = Connection::open(&path).unwrap();
+        assert!(sql
+            .execute("DELETE FROM account_identity WHERE singleton=1", [])
+            .is_err());
+        assert!(sql
+            .execute("UPDATE account_identity SET account_id='foreign' WHERE singleton=1", [])
+            .is_err());
+        drop(sql);
+        assert_eq!(store.bound_native_account_identity().unwrap(), Some(identity));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
