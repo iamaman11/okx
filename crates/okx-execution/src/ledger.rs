@@ -580,10 +580,8 @@ impl ExecutionLedgerStore {
         let pending = temp_path(&receipt);
         let mut file = File::create(&pending)?;
         file.write_all(
-            format!(
-                "okx.ledger-owner/v1\nSQLITE\n{expected_uid}\n{expected_v14_sha256}\n"
-            )
-            .as_bytes(),
+            format!("okx.ledger-owner/v1\nSQLITE\n{expected_uid}\n{expected_v14_sha256}\n")
+                .as_bytes(),
         )?;
         file.sync_all()?;
         drop(file);

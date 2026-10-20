@@ -1206,26 +1206,21 @@ mod tests {
         source.prepare_sqlite_staging(&sqlite).unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
         assert!(
-            ExecutionLedgerStore::publish_verified_sqlite_owner(
-                &root,
-                &"f".repeat(64),
-                &digest
-            )
-            .is_err()
+            ExecutionLedgerStore::publish_verified_sqlite_owner(&root, &"f".repeat(64), &digest)
+                .is_err()
         );
         assert!(
-            ExecutionLedgerStore::publish_verified_sqlite_owner(
-                &root,
-                &uid,
-                &"0".repeat(64)
-            )
-            .is_err()
+            ExecutionLedgerStore::publish_verified_sqlite_owner(&root, &uid, &"0".repeat(64))
+                .is_err()
         );
         assert!(!root.join("execution-ledger.owner").exists());
         let chosen =
             ExecutionLedgerStore::publish_verified_sqlite_owner(&root, &uid, &digest).unwrap();
         assert_eq!(chosen.path(), sqlite.as_path());
-        assert_eq!(chosen.attest_storage().unwrap().integrity, "VALIDATED_COLD_READ");
+        assert_eq!(
+            chosen.attest_storage().unwrap().integrity,
+            "VALIDATED_COLD_READ"
+        );
         let duplicate =
             ExecutionLedgerStore::publish_verified_sqlite_owner(&root, &uid, &digest).unwrap();
         assert_eq!(duplicate.path(), sqlite.as_path());
