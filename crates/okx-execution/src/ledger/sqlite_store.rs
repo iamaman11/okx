@@ -1167,6 +1167,75 @@ mod tests {
     }
 
     #[test]
+    fn native_cutover_publishes_only_after_full_v14_parity_and_is_idempotent() {
+        let root = test_root("cutover-commit");
+        let v14 = root.join("execution-ledger.json");
+        let sqlite = root.join("execution-ledger.sqlite");
+        let uid = "b".repeat(64);
+        let capital = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "native_cutover_test_000001".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            origin_schema: "test/v1".to_owned(),
+            origin_version: "v1".to_owned(),
+            mandate_version: "1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "127".to_owned(),
+            account_generation: "g1".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1,
+        };
+        let stop = ExecutionRiskStop {
+            schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
+            stopped_at_ms: 100,
+            reason: "test stop".to_owned(),
+        };
+        let source = ExecutionLedgerStore::at(&v14);
+        source
+            .save(
+                &BTreeMap::new(),
+                Some(&stop),
+                Some(&capital),
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
+            )
+            .unwrap();
+        let original = std::fs::read(&v14).unwrap();
+        let digest = checksum(&original);
+        source.prepare_sqlite_staging(&sqlite).unwrap();
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        assert!(
+            ExecutionLedgerStore::publish_verified_sqlite_owner(
+                &root,
+                &"f".repeat(64),
+                &digest
+            )
+            .is_err()
+        );
+        assert!(
+            ExecutionLedgerStore::publish_verified_sqlite_owner(
+                &root,
+                &uid,
+                &"0".repeat(64)
+            )
+            .is_err()
+        );
+        assert!(!root.join("execution-ledger.owner").exists());
+        let chosen =
+            ExecutionLedgerStore::publish_verified_sqlite_owner(&root, &uid, &digest).unwrap();
+        assert_eq!(chosen.path(), sqlite.as_path());
+        assert_eq!(chosen.attest_storage().unwrap().integrity, "VALIDATED_COLD_READ");
+        let duplicate =
+            ExecutionLedgerStore::publish_verified_sqlite_owner(&root, &uid, &digest).unwrap();
+        assert_eq!(duplicate.path(), sqlite.as_path());
+        assert_eq!(std::fs::read(&v14).unwrap(), original);
+        std::fs::remove_file(root.join("execution-ledger.owner")).unwrap();
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn owner_receipt_requires_sealed_source_and_never_falls_back_after_failure() {
         let root = test_root("owner-proof");
         let v14 = root.join("execution-ledger.json");

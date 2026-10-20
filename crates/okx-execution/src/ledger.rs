@@ -502,6 +502,101 @@ impl ExecutionLedgerStore {
         Ok(chosen)
     }
 
+    /// A native storage cutover primitive. The existing CONTROL must first
+    /// prove that the owned Agent writer has exited and its Job is empty;
+    /// no remote trading request is allowed to invoke this method.
+    ///
+    /// A published receipt is the last step. A crash before publication
+    /// leaves a canonical SQLite candidate and fails closed on Agent boot.
+    /// Publishing changes storage ownership, never trading permissions.
+    pub fn publish_verified_sqlite_owner(
+        root: &Path,
+        expected_uid: &str,
+        expected_v14_sha256: &str,
+    ) -> Result<Self, ExecutionLedgerError> {
+        let lower_hex_64 = |v: &str| {
+            v.len() == 64
+                && v.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        if !lower_hex_64(expected_uid) || !lower_hex_64(expected_v14_sha256) {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        let legacy = Self::at(root.join("execution-ledger.json"));
+        let native = Self::sqlite_at(root.join("execution-ledger.sqlite"));
+        let receipt = root.join("execution-ledger.owner");
+        let (origin_uid, origin_hash) = sqlite_store::read_staging_origin(native.path())?;
+        if origin_uid != expected_uid || origin_hash != expected_v14_sha256 {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        // A duplicate request is an attested read, not another publication.
+        // The migrated database may already have new, legitimate trades.
+        if receipt.exists() {
+            let chosen = Self::select_published_owner(root)?;
+            if chosen.path() != native.path() {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+            return Ok(chosen);
+        }
+        let source_attestation = legacy.attest_storage()?;
+        if source_attestation.on_disk_schema != EXECUTION_LEDGER_SCHEMA_V14
+            || source_attestation.manifest_sha256 != expected_v14_sha256
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite cutover source schema/hash mismatch",
+            ));
+        }
+        let prior = legacy.load()?;
+        let expected_record_uid = prior
+            .2
+            .as_ref()
+            .map(|r| r.account_uid_fingerprint.as_str())
+            .or_else(|| prior.3.as_ref().map(|s| s.account_uid.as_str()))
+            .or_else(|| {
+                prior
+                    .0
+                    .values()
+                    .next()
+                    .map(|v| v.record.plan.account_uid_fingerprint.as_str())
+            });
+        if expected_record_uid != Some(expected_uid) {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        // Exact immutable evidence, STOP, UNKNOWN, reservations, archives and
+        // account-scoped intents must be identical before choosing SQLite.
+        if prior != native.load()? {
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite cutover historical state differs from v14",
+            ));
+        }
+        native.attest_storage()?;
+        // Re-check v14 immediately before publication. A writer that did not
+        // drain cannot accidentally produce a valid cutover receipt.
+        if legacy.attest_storage()?.manifest_sha256 != expected_v14_sha256 {
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite cutover source changed before publication",
+            ));
+        }
+        let pending = temp_path(&receipt);
+        let mut file = File::create(&pending)?;
+        file.write_all(
+            format!(
+                "okx.ledger-owner/v1\nSQLITE\n{expected_uid}\n{expected_v14_sha256}\n"
+            )
+            .as_bytes(),
+        )?;
+        file.sync_all()?;
+        drop(file);
+        if receipt.exists() {
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite cutover owner changed during publication",
+            ));
+        }
+        atomic_replace(&pending, &receipt)?;
+        // If anything is corrupt after the atomic commit, do not restore v14.
+        Self::select_published_owner(root)
+    }
+
     /// Account-level, read-only observed financial movements from immutable
     /// native bills. Never an independent NAV, strategy attribution, or permit.
     pub fn observed_finance_window(
