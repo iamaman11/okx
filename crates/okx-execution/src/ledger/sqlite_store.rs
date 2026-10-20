@@ -745,17 +745,22 @@ mod tests {
             read_as_wrong_account,
             Err(ExecutionLedgerError::AccountScopeMismatch)
         ));
-        let at = crate::exchange_evidence::source_receipt_ms(
-            "2026-10-20T12:00:00Z",
-        ).unwrap();
-        let points = super::sqlite_finance::finance_window(
-            &p, "uid-test-one", at - 1, at + 1
-        ).unwrap();
-        assert_eq!((points.order_source_receipts, points.fill_source_receipts,
-                    points.bill_source_receipts), (1,1,1));
-        assert_eq!(points.bill_rows,0);
-        assert_eq!(points.financial_completeness,
-                   "UNVERIFIED_WITHOUT_CONTIGUOUS_SOURCE_PROOF");
+        let at = crate::exchange_evidence::source_receipt_ms("2026-10-20T12:00:00Z").unwrap();
+        let points =
+            super::sqlite_finance::finance_window(&p, "uid-test-one", at - 1, at + 1).unwrap();
+        assert_eq!(
+            (
+                points.order_source_receipts,
+                points.fill_source_receipts,
+                points.bill_source_receipts
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(points.bill_rows, 0);
+        assert_eq!(
+            points.financial_completeness,
+            "UNVERIFIED_WITHOUT_CONTIGUOUS_SOURCE_PROOF"
+        );
 
         let original = source.clone();
         source.events.get_mut("event-1").unwrap().payload =
