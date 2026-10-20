@@ -440,7 +440,15 @@ impl ExecutionLedgerStore {
     pub fn select_published_owner(root: &Path) -> Result<Self, ExecutionLedgerError> {
         let legacy = root.join("execution-ledger.json");
         let receipt = root.join("execution-ledger.owner");
+        // A staged SQLite file at the canonical path makes owner selection
+        // ambiguous if the durable publication receipt is lost. Fail closed
+        // instead of silently reopening the mutable legacy writer.
         if !receipt.exists() {
+            if root.join("execution-ledger.sqlite").exists() {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "canonical SQLite present without owner receipt",
+                ));
+            }
             return Ok(Self::at(legacy));
         }
         if fs::metadata(&receipt)?.len() > 512 {

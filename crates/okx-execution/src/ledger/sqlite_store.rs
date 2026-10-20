@@ -1214,12 +1214,9 @@ mod tests {
         )
         .unwrap();
         seal_staging_origin(&sqlite, &uid, &witness_sha).unwrap();
-        assert_eq!(
-            ExecutionLedgerStore::select_published_owner(&root)
-                .unwrap()
-                .path(),
-            v14.as_path()
-        );
+        // A candidate in the canonical location without its owner receipt is
+        // ambiguous, not proof that the original v14 writer can resume.
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
         // The published receipt is owned by CONTROL; tests simulate it only
         // after source and target are independently materialized.
         let receipt = root.join("execution-ledger.owner");
@@ -1232,6 +1229,20 @@ mod tests {
             ),
         )
         .unwrap();
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        std::fs::write(
+            &receipt,
+            format!("okx.ledger-owner/v1\nSQLITE\n{}\n{}\n", uid, witness_sha),
+        )
+        .unwrap();
+        assert_eq!(
+            ExecutionLedgerStore::select_published_owner(&root)
+                .unwrap()
+                .path(),
+            sqlite.as_path()
+        );
+        // Losing the receipt after cutover cannot silently reactivate v14.
+        std::fs::remove_file(&receipt).unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
         std::fs::write(
             &receipt,
