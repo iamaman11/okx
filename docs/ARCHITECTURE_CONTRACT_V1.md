@@ -225,3 +225,109 @@ history, not competing domain designs. Updates should change this contract
 only for a genuine cross-layer/ownership decision; ordinary features stay in
 the owned existing module. No new ceremony, second roadmap or duplicate
 architecture policy is needed.
+
+
+## 8. Accepted account storage and accounting epochs (2026-10-20)
+
+**Decision:** replace operational JSON snapshot persistence with **embedded SQLite
+in WAL mode**. This section is a *target and migration invariant*, not a claim
+that the installed Windows agent currently writes SQLite. The existing v14
+Ledger remains the only production execution authority until verified cutover.
+
+### Storage boundaries, designed not to change for new strategies or venues
+
+- One SQLite database **per natively verified account** keyed by
+  `(venue, environment, account_id, authenticated UID)`; a single bounded
+  native writer per account, independent writers for distinct accounts.
+  A UI selector never changes a write's immutable account destination.
+  Multiple strategies/runs share that account's execution facts, not separate
+  exchange ledgers. Global Cloudflare Durable Object governance/RiskBook stays
+  one CAS authority; SQLite risk receipts are evidence only, NOT competing
+  reservations.
+- Append-only typed **domain events** and source-exact fills/bills are the
+  durable account truth. Indexed projections (intents, order state, positions,
+  NAV/TCA) are transactionally derived and rebuildable; there is no dual-write
+  JSON/SQLite mode. Native contracts, not SQL column names, are external API.
+- `BEGIN IMMEDIATE` only for bounded local transitions. Persist the one
+  BEGIN_POST transaction before the exchange network call; after a lost ACK,
+  UNKNOWN remains charged, native exact-ID reconciliation follows, **never
+  a second POST**. Cloudflare CAS and exchange POST are **not** SQLite
+  transactions and must retain the existing durable fencing protocol.
+- Connection admission MUST verify `journal_mode=WAL`,
+  `synchronous=FULL`, `foreign_keys=ON`, schema version and account UID.
+  Reject a mismatched/corrupt DB; do not silently create another ledger,
+  downgrade durability or replay mutations. Money, prices and quantities are
+  checked Rust decimal types stored as exact canonical decimal TEXT, never
+  SQLite FLOAT/REAL. Signed proofs use canonical byte hashes.
+- Trade/decision metadata and account cash flows are relational and indexed;
+  **large** history trades/order-book datasets belong in immutable,
+  content-addressed **binary/columnar research artifacts** with SQLite
+  catalog references; do not stuff market ticks into the order commit path.
+  JSON remains at required OKX/GitHub/MCP wire boundaries and as immutable
+  historical original source bytes when byte-for-byte evidence matters.
+  Remove JSON from live internal persistence, not from external protocols.
+- Schema migrations are additive/versioned where possible. No dangerous
+  JSON-to-SQL dual writer: freeze old writer, verify v14 original/archives and
+  account identity, import on a staging DB, compare **all** states/receipts/
+  positions/fills/bills/NAV/UNKNOWN/STOP/cashflows, integrity_check, backup,
+  atomically install the new owner, retain old immutable bytes, prohibit
+  automatic fallback to old write paths. Crash tests at every cutover stage.
+
+### Permanent financial timeline vs strategy capital epochs
+
+1. **Account financial timeline never resets.** Native fills, bills, fees,
+   funding, transfers, liabilities, independent position observations and
+   exposure continuity belong to the account even without an active strategy.
+2. **Capital epoch** = an attributed run of a strategy or ChatGPT/manual
+   research mandate with start time, account identity, source-confirmed
+   opening capital, flows, decision lineage, and closure. Closing/reopening an
+   epoch must not reset account- or strategy-level daily loss, drawdown STOP,
+   unresolved orders or risk exposure. Epoch IDs are not exchange POST keys.
+3. **Coverage** is per native source and materiality, not one global clock:
+   `ORDER_LIFECYCLE`, `FILLS`, `BILLS`, `CASHFLOWS`,
+   `POSITIONS`, `VALUATION`, `PROTECTION` and `ACCOUNT_IDENTITY`.
+   An order-history gap is **execution coverage unknown**; it is not by
+   definition a financial cash-flow gap. Conversely current FLAT is not
+   historical PnL proof. Every relevant source records covered interval,
+   freshness, completeness, identity and digest.
+4. A financial epoch is `FINANCIALLY_CLOSED` only with source-attributable
+   flows/fills/fees/funding and NAV, or `UNVERIFIED_CLOSED` with original
+   evidence and unknown PnL explicitly preserved. Unverified closure is
+   **not** a loss of global risk memory, a reset, or a trading permit.
+   A fresh epoch may start only with verified opening balance, exposure,
+   positions, protection, STOP, source continuity and complete native
+   cross-account risk census. Unknown actual losses remain conservatively
+   charged to the account/strategy risk budget.
+5. **Materiality, not a universal two-hour ritual.** The current two-hour
+   order-history retention constraint stays attached to that source.
+   Financial completeness is independently demonstrated by exhaustive
+   authoritative fill/bill/transfer/position evidence. Where gaps cannot
+   be proved immaterial, leave those dimensions UNVERIFIED. Avoid
+   exception switches, fabricated zero PnL, blank database resets and
+   rerouting a blocked quarantine through another API.
+6. A ChatGPT-initiated trade is a normal `decision → intent → order →
+   fill → bill → PnL/TCA` record. The decision must include hypothesis,
+   source/market snapshot hash, rationales, assumptions, versions and
+   attribution — not only the order ID. Pure strategies and manual
+   research decisions use the **same** executor and ledger.
+
+The proposed version-1 relational schema is
+`crates/okx-execution/schema/account-ledger-v1.sql`. It is intentionally
+**not activated** by current runtime. SQLite schema conformance executes in
+the existing architecture CI job using Python's built-in sqlite3 solely as a
+test, not as an application runtime/database owner.
+
+### Acceptance before SQLite becomes execution authority
+
+- Exact original v14 source, 100% inventory/byte hash and archived histories
+  copied without semantic reinterpretation; verified account identity and
+  source-bound intent collision checks. No old proof rewritten.
+- Real/Demo isolated, account-keyed writer; no global mutation serialization;
+  migration restarted after crash without creating a parallel active writer.
+- Deterministic replay of event/projection consistency, 1/10/50/100 account
+  scoped concurrent requests (not 100 simultaneous POSTs on one account),
+  measured p95/p99, no duplicate POST on ACK loss/crash, STOP and daily
+  loss conserved across epoch boundaries, backup/restore checked with WAL.
+- Current Real P0 financial NO_GO is unchanged until native facts establish
+  permission. A green schema test does **not** mean SQLite is installed or
+  authorize Real trading.

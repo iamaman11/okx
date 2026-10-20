@@ -95,6 +95,9 @@ jobs:
       - name: Enforce accepted local-crate dependency graph
         run: python3 scripts/check_architecture.py
 
+      - name: Verify versioned SQLite account ledger schema
+        run: python3 scripts/check_ledger_sql.py
+
   linux-rust:
     name: linux-rust
     needs: classify
