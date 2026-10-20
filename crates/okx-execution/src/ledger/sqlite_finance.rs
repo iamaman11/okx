@@ -3,8 +3,8 @@
 //! UNKNOWN legacy cash changes become explicit material source gaps, never zero PnL.
 use super::sqlite_store::{checksum, encode, io};
 use super::*;
-use crate::exchange_evidence::{DurableExchangeEvidence, StoredExchangeEvent};
-use rusqlite::{OptionalExtension, Transaction, params};
+use crate::exchange_evidence::StoredExchangeEvent;
+use rusqlite::{Transaction, params};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use std::str::FromStr;
@@ -100,6 +100,18 @@ fn assert_evidence_object(
     Ok(digest)
 }
 
+struct IndexedFill {
+    order_id: Option<String>,
+    intent_id: Option<String>,
+    exchange_time_ms: i64,
+    side: String,
+    position_side: String,
+    price: String,
+    size: String,
+    fee: Option<String>,
+    fee_currency: Option<String>,
+}
+
 fn insert_fill(
     tx: &Transaction<'_>,
     v: &Value,
@@ -134,46 +146,36 @@ fn insert_fill(
          ON CONFLICT(instrument_id,trade_id) DO NOTHING",
         params![inst,trade,ord,intent,timestamp,side,pos,price,contracts,fee,ccy,proof],
     ).map_err(io)?;
-    let stored: (
-        Option<String>,
-        Option<String>,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-    ) = tx
+    let stored: IndexedFill = tx
         .query_row(
             "SELECT venue_order_id,intent_id,exchange_time_ms,side,position_side,
                     price_decimal,contracts_decimal,fee_decimal,fee_currency
              FROM fills WHERE instrument_id=?1 AND trade_id=?2",
             params![inst, trade],
             |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                ))
+                Ok(IndexedFill {
+                    order_id: r.get(0)?,
+                    intent_id: r.get(1)?,
+                    exchange_time_ms: r.get(2)?,
+                    side: r.get(3)?,
+                    position_side: r.get(4)?,
+                    price: r.get(5)?,
+                    size: r.get(6)?,
+                    fee: r.get(7)?,
+                    fee_currency: r.get(8)?,
+                })
             },
         )
         .map_err(io)?;
-    if stored.0.as_deref() != ord
-        || stored.1.as_deref() != intent
-        || stored.2 != timestamp
-        || stored.3 != side
-        || stored.4 != pos
-        || stored.5 != price
-        || stored.6 != contracts
-        || stored.7.as_deref() != fee
-        || stored.8.as_deref() != ccy
+    if stored.order_id.as_deref() != ord
+        || stored.intent_id.as_deref() != intent
+        || stored.exchange_time_ms != timestamp
+        || stored.side != side
+        || stored.position_side != pos
+        || stored.price != price
+        || stored.size != contracts
+        || stored.fee.as_deref() != fee
+        || stored.fee_currency.as_deref() != ccy
     {
         return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
     }
