@@ -1201,4 +1201,72 @@ mod tests {
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn native_single_intent_delta_preserves_unrelated_history_and_post_fence() {
+        let root=test_root("single-intent-delta");
+        let db=root.join("account.sqlite");
+        let build = |id:&str| {
+            let plan=ExecutionPlan {
+                schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+                intent_id: id.to_owned(),
+                client_order_id: derive_client_order_id(id),
+                reference_generation:"sha256:reference".to_owned(),
+                account_generation:"sha256:account".to_owned(),
+                account_uid_fingerprint:"uid-fingerprint".to_owned(),
+                instrument_id:"DOGE-USDT-SWAP".to_owned(),
+                trade_mode:crate::TradeMode::Cross,
+                side:crate::OrderSide::Buy,
+                position_side:PositionSide::Long,
+                action:ExecutionAction::Open,
+                order_type:crate::OrderType::Limit,
+                size:"1".to_owned(),
+                price:"0.1".to_owned(),
+                open_risk:None,
+                risk_binding:None,
+            };
+            ExecutionLedgerEntry {
+                record:ExecutionRecord::new(plan),
+                created_at_ms:1000,
+                updated_at_ms:1000,
+            }
+        };
+        let changed_id="delta_trade_intent_00001";
+        let historic_id="historic_trade_intent_00002";
+        let mut changed=build(changed_id);
+        let historic=build(historic_id);
+        let original=BTreeMap::from([
+            (changed_id.to_owned(),changed.clone()),
+            (historic_id.to_owned(),historic.clone()),
+        ]);
+        let periods=StrategyPeriodHistory::default();
+        save(&db,&original,None,None,None,&periods,&[]).unwrap();
+        changed.record.begin_submission_with_timing(None).unwrap();
+        changed.updated_at_ms=1001;
+        // Delta write includes ONE entry. Previous source, other intent and
+        // original writer history MUST remain unchanged, not deleted.
+        save_one(&db,&changed,None,None,None,&periods,&[]).unwrap();
+        let recovered=load(&db,usize::MAX).unwrap().0;
+        assert_eq!(recovered.len(),2);
+        assert_eq!(recovered.get(changed_id),Some(&changed));
+        assert_eq!(recovered.get(historic_id),Some(&historic));
+        let dbconn=Connection::open(&db).unwrap();
+        let n: i64=dbconn.query_row(
+            "SELECT COUNT(*) FROM post_attempts",[],|r|r.get(0)
+        ).unwrap();
+        assert_eq!(n,1);
+        drop(dbconn);
+        changed.record.mark_unknown_submission().unwrap();
+        changed.updated_at_ms=1002;
+        save_one(&db,&changed,None,None,None,&periods,&[]).unwrap();
+        save_one(&db,&changed,None,None,None,&periods,&[]).unwrap();
+        let mut forged=changed.clone();
+        forged.record.state=ExecutionState::Prepared;
+        forged.updated_at_ms=1003;
+        assert!(save_one(&db,&forged,None,None,None,&periods,&[]).is_err());
+        let recovered=load(&db,usize::MAX).unwrap().0;
+        assert_eq!(recovered.get(changed_id),Some(&changed));
+        assert_eq!(recovered.get(historic_id),Some(&historic));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
