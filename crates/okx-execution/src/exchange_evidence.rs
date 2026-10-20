@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use chrono::DateTime;
 use okx_observation::AccountLedgerFacts;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -11,6 +12,15 @@ pub const EXCHANGE_EVIDENCE_SCHEMA_V1: &str = "okx.exchange-evidence/v1";
 const MAX_EVENTS: usize = 40_000;
 const MAX_CURSORS: usize = 4_096;
 pub const MAX_SOURCE_COVERAGE_GAP_MS: u64 = 7_200_000;
+
+/// Timestamp of the native authenticated REST history RECEIPT, not OKX's
+/// balance/position last-change uTime (which may be days old in a quiet account).
+/// Both already exist in immutable source cursors: never rewrite old hashes.
+pub(crate) fn source_receipt_ms(value: &str) -> Option<u64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|date| u64::try_from(date.timestamp_millis()).ok())
+}
 /// Source-validated empty REST reads must not exhaust 4096 durable cursors.
 /// This is admission logic only, not a timer or source-continuity claim.
 const MIN_REDUNDANT_SOURCE_CURSOR_SPACING_MS: u64 = 300_000;
@@ -59,6 +69,8 @@ pub struct ExchangeEvidenceSummary {
     pub latest_source_complete: bool,
     pub oldest_source_asof_ms: Option<u64>,
     pub latest_source_asof_ms: Option<u64>,
+    /// Latest native receipt time, distinct from exchange last-change uTime.
+    pub latest_source_received_at_ms: Option<u64>,
     pub largest_persisted_gap_ms: Option<u64>,
     pub source_gap_over_two_hours: bool,
     pub remaining_source_cursors: usize,
@@ -194,17 +206,28 @@ impl DurableExchangeEvidence {
         {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        let now = facts
+        let venue_last_change_ms = facts
             .summary
             .current_account_as_of_ms
             .as_deref()
             .and_then(|v| v.parse::<u64>().ok())
             .ok_or(ExecutionLedgerError::Corrupt("missing exchange as-of"))?;
+        let now = source_receipt_ms(&facts.summary.source_received_at)
+            .ok_or(ExecutionLedgerError::Corrupt("invalid native REST history receipt"))?;
         if now < run.started_at_ms {
-            return Err(ExecutionLedgerError::Corrupt("exchange as-of before run"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "native source receipt before strategy run",
+            ));
         }
         let original_events = self.events.len();
-        let last_cursor_time = self.cursors.values().map(|c| c.account_as_of_ms).max();
+        let last_cursor_time = self
+            .cursors
+            .values()
+            .map(|c| source_receipt_ms(&c.source_received_at))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(ExecutionLedgerError::ExchangeEvidenceConflict)?
+            .into_iter()
+            .max();
         if last_cursor_time.is_some_and(|last| now < last) {
             return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
         }
@@ -356,7 +379,7 @@ impl DurableExchangeEvidence {
             source: "OKX_REST_ACCOUNT_HISTORY".to_owned(),
             source_received_at: facts.summary.source_received_at.clone(),
             generation: facts.summary.account_generation.clone(),
-            account_as_of_ms: now,
+            account_as_of_ms: venue_last_change_ms,
             order_complete: facts.exchange_orders_history_complete,
             fill_complete: facts.exchange_fills_history_complete,
             bill_complete: facts.bills_history_complete,
@@ -376,28 +399,42 @@ impl DurableExchangeEvidence {
     }
 
     pub fn summary(&self) -> ExchangeEvidenceSummary {
-        let latest = self.cursors.values().max_by_key(|v| v.account_as_of_ms);
-        let mut epochs = self
+        let mut venue_epochs = self
             .cursors
             .values()
             .map(|v| v.account_as_of_ms)
             .collect::<Vec<_>>();
+        venue_epochs.sort_unstable();
+        venue_epochs.dedup();
+        let receipts = self
+            .cursors
+            .values()
+            .map(|v| source_receipt_ms(&v.source_received_at))
+            .collect::<Option<Vec<_>>>();
+        let mut epochs = receipts.clone().unwrap_or_default();
         epochs.sort_unstable();
         epochs.dedup();
         let largest_gap = epochs.windows(2).map(|v| v[1] - v[0]).max();
+        let latest = self
+            .cursors
+            .values()
+            .max_by_key(|v| source_receipt_ms(&v.source_received_at));
         ExchangeEvidenceSummary {
             schema: EXCHANGE_EVIDENCE_SCHEMA_V1,
             run_id: self.run_id.clone(),
             events: self.events.len(),
             cursors: self.cursors.len(),
             checksum_sha256: self.checksum_sha256.clone(),
-            latest_source_complete: latest
-                .is_some_and(|v| v.order_complete && v.fill_complete && v.bill_complete),
-            oldest_source_asof_ms: epochs.first().copied(),
-            latest_source_asof_ms: epochs.last().copied(),
+            latest_source_complete: receipts.is_some()
+                && latest.is_some_and(|v| {
+                    v.order_complete && v.fill_complete && v.bill_complete
+                }),
+            oldest_source_asof_ms: venue_epochs.first().copied(),
+            latest_source_asof_ms: venue_epochs.last().copied(),
+            latest_source_received_at_ms: epochs.last().copied(),
             largest_persisted_gap_ms: largest_gap,
-            source_gap_over_two_hours: largest_gap
-                .is_some_and(|ms| ms > MAX_SOURCE_COVERAGE_GAP_MS),
+            source_gap_over_two_hours: receipts.is_none()
+                || largest_gap.is_some_and(|ms| ms > MAX_SOURCE_COVERAGE_GAP_MS),
             remaining_source_cursors: MAX_CURSORS - self.cursors.len(),
             remaining_events: MAX_EVENTS - self.events.len(),
             next_source_coverage_deadline_ms: epochs
@@ -475,7 +512,9 @@ mod tests {
                 key.into(),
                 ExchangeCoverageCursor {
                     source: "OKX_REST_ACCOUNT_HISTORY".into(),
-                    source_received_at: key.into(),
+                    source_received_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(time as i64)
+                        .expect("test timestamp")
+                        .to_rfc3339(),
                     generation: "one".into(),
                     account_as_of_ms: time,
                     order_complete: true,
@@ -489,9 +528,18 @@ mod tests {
         let summary = evidence.summary();
         assert_eq!(summary.oldest_source_asof_ms, Some(1000));
         assert_eq!(summary.latest_source_asof_ms, Some(7_210_001));
+        assert_eq!(summary.latest_source_received_at_ms, Some(7_210_001));
         assert_eq!(summary.largest_persisted_gap_ms, Some(7_208_001));
         assert!(summary.source_gap_over_two_hours);
         assert_eq!(summary.remaining_source_cursors, MAX_CURSORS - 3);
+    }
+
+    #[test]
+    fn receipt_time_is_distinct_from_idle_venue_last_change() {
+        let fresh_source = "2026-10-20T09:40:00.000Z";
+        assert_eq!(source_receipt_ms(fresh_source), Some(1_792_489_200_000));
+        assert_ne!(source_receipt_ms(fresh_source), Some(1_000));
+        assert_eq!(source_receipt_ms("invalid"), None);
     }
 
     #[test]
