@@ -938,16 +938,20 @@ fn save_snapshot(
             }
         }
     }
-    // An old intent may not disappear: a count alone is sufficient here
-    // because the upsert loop proved every input intent has one SQL row.
-    // Unexpected historical rows increase the count and roll back all writes.
-    let persisted: i64 = tx
-        .query_row("SELECT COUNT(*) FROM ledger_entries", [], |row| row.get(0))
-        .map_err(io)?;
-    if complete_snapshot && usize::try_from(persisted).ok() != Some(entries.len()) {
-        return Err(ExecutionLedgerError::Corrupt(
-            "SQLite historical intent deletion",
-        ));
+    // A full import/snapshot must prove it has not silently dropped an old
+    // intent. A native per-intent delta never claims to replace the entire
+    // account, so counting all historical rows on every POST is unnecessary.
+    // Existing delta rows are independently validated by exact ID/digest
+    // and must not mutate unrelated history.
+    if complete_snapshot {
+        let persisted: i64 = tx
+            .query_row("SELECT COUNT(*) FROM ledger_entries", [], |row| row.get(0))
+            .map_err(io)?;
+        if usize::try_from(persisted).ok() != Some(entries.len()) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "SQLite historical intent deletion",
+            ));
+        }
     }
     // Existing intents are inserted before projecting fill attribution, so a
     // foreign-key-bound source_intent_id is proved in this same transaction.
