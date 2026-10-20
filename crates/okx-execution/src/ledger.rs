@@ -433,6 +433,50 @@ impl ExecutionLedgerStore {
         }
     }
 
+    /// Select only an already-published storage owner. A missing owner receipt
+    /// keeps the existing v14 writer; an invalid SQLite receipt is fatal.
+    /// Only native CONTROL, after draining the writer and proving parity,
+    /// may publish execution-ledger.owner. This method never publishes it.
+    pub fn select_published_owner(root: &Path) -> Result<Self, ExecutionLedgerError> {
+        let legacy=root.join("execution-ledger.json");
+        let receipt=root.join("execution-ledger.owner");
+        if !receipt.exists() {
+            return Ok(Self::at(legacy));
+        }
+        if fs::metadata(&receipt)?.len()>512 {
+            return Err(ExecutionLedgerError::Corrupt("ledger owner receipt oversized"));
+        }
+        let bytes=fs::read(&receipt)?;
+        let text=std::str::from_utf8(&bytes)
+            .map_err(|_|ExecutionLedgerError::Corrupt("ledger owner receipt invalid UTF8"))?;
+        let parts=text.split('\n').collect::<Vec<_>>();
+        if parts.len()!=5 || parts[0]!="okx.ledger-owner/v1"
+            || parts[1]!="SQLITE" || !parts[4].is_empty()
+            || parts[2].len()!=64 || parts[3].len()!=64
+            || !parts[2..4].iter().all(|x|
+                x.bytes().all(|b|b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+        {
+            return Err(ExecutionLedgerError::Corrupt("ledger owner receipt invalid"));
+        }
+        let original=fs::read(&legacy)?;
+        if format!("{:x}",Sha256::digest(&original))!=parts[3] {
+            return Err(ExecutionLedgerError::Corrupt("legacy source changed after cutover"));
+        }
+        let chosen=Self::sqlite_at(root.join("execution-ledger.sqlite"));
+        let (uid,origin)=sqlite_store::read_staging_origin(&chosen.path)?;
+        if uid!=parts[2] || origin!=parts[3] {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        let (_,_,reservation,source,_,_)=chosen.load()?;
+        if reservation.as_ref().is_none_or(|r|r.account_uid_fingerprint!=uid)
+            && source.as_ref().is_none_or(|s|s.account_uid!=uid)
+        {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        chosen.attest_storage()?;
+        Ok(chosen)
+    }
+
     /// Account-level, read-only observed financial movements from immutable
     /// native bills. Never an independent NAV, strategy attribution, or permit.
     pub fn observed_finance_window(
@@ -495,6 +539,16 @@ impl ExecutionLedgerStore {
             return Err(ExecutionLedgerError::Corrupt(
                 "v14 changed during SQLite staging",
             ));
+        }
+        // Origin stamp is immutable and independent of later SQLite changes.
+        // It exists only for natively verified nonempty accounts.
+        let uid=reservation.as_ref().map(|r|r.account_uid_fingerprint.as_str())
+            .or_else(||source.as_ref().map(|e|e.account_uid.as_str()))
+            .or_else(||entries.values().next().map(|e|
+                e.record.plan.account_uid_fingerprint.as_str()));
+        if let Some(uid)=uid {
+            let original_sha=format!("{:x}",Sha256::digest(fs::read(&self.path)?));
+            sqlite_store::seal_staging_origin(&staged.path,uid,&original_sha)?;
         }
         Ok(attestation)
     }
