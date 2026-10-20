@@ -583,17 +583,27 @@ pub(super) fn seal_staging_origin(
     expected_uid: &str,
     source_sha256: &str,
 ) -> Result<(), ExecutionLedgerError> {
-    if expected_uid.is_empty() || source_sha256.len() != 64
-        || !source_sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    if expected_uid.is_empty()
+        || source_sha256.len() != 64
+        || !source_sha256
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     {
-        return Err(ExecutionLedgerError::Corrupt("invalid staging origin identity"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "invalid staging origin identity",
+        ));
     }
     let mut c = connect(path, true)?;
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate).map_err(io)?;
-    let (uid,digest,bytes):(String,String,Vec<u8>) = tx.query_row(
-        "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",[],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))
-    ).map_err(io)?;
+    let tx = c
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io)?;
+    let (uid, digest, bytes): (String, String, Vec<u8>) = tx
+        .query_row(
+            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(io)?;
     if uid != expected_uid || checksum(&bytes) != digest {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
@@ -608,18 +618,23 @@ pub(super) fn seal_staging_origin(
            SELECT RAISE(ABORT,'IMMUTABLE_ORIGIN'); END;
          CREATE TRIGGER IF NOT EXISTS immutable_native_origin_delete
          BEFORE DELETE ON native_migration_origin BEGIN
-           SELECT RAISE(ABORT,'IMMUTABLE_ORIGIN'); END;"
-    ).map_err(io)?;
+           SELECT RAISE(ABORT,'IMMUTABLE_ORIGIN'); END;",
+    )
+    .map_err(io)?;
     tx.execute(
         "INSERT INTO native_migration_origin VALUES(1,?1,?2)
          ON CONFLICT(singleton) DO NOTHING",
-        params![expected_uid,source_sha256]
-    ).map_err(io)?;
-    let (recorded_uid,recorded_hash):(String,String)=tx.query_row(
-        "SELECT uid,original_v14_sha256 FROM native_migration_origin WHERE singleton=1",
-        [],|r|Ok((r.get(0)?,r.get(1)?))
-    ).map_err(io)?;
-    if recorded_uid!=expected_uid || recorded_hash!=source_sha256 {
+        params![expected_uid, source_sha256],
+    )
+    .map_err(io)?;
+    let (recorded_uid, recorded_hash): (String, String) = tx
+        .query_row(
+            "SELECT uid,original_v14_sha256 FROM native_migration_origin WHERE singleton=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(io)?;
+    if recorded_uid != expected_uid || recorded_hash != source_sha256 {
         return Err(ExecutionLedgerError::Corrupt("migration origin conflict"));
     }
     tx.commit().map_err(io)?;
@@ -628,16 +643,21 @@ pub(super) fn seal_staging_origin(
 
 /// The immutable source hash survives subsequent writes to the same SQLite
 /// Ledger; unlike a live manifest digest it remains stable after OPEN/CLOSE.
-pub(super) fn read_staging_origin(path: &Path) -> Result<(String,String), ExecutionLedgerError> {
-    let c=connect(path,false)?;
-    let (uid,source):(String,String)=c.query_row(
-        "SELECT uid,original_v14_sha256 FROM native_migration_origin WHERE singleton=1",
-        [],|r|Ok((r.get(0)?,r.get(1)?))
-    ).map_err(io)?;
-    if uid.is_empty() || source.len()!=64 {
-        return Err(ExecutionLedgerError::Corrupt("missing staging origin proof"));
+pub(super) fn read_staging_origin(path: &Path) -> Result<(String, String), ExecutionLedgerError> {
+    let c = connect(path, false)?;
+    let (uid, source): (String, String) = c
+        .query_row(
+            "SELECT uid,original_v14_sha256 FROM native_migration_origin WHERE singleton=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(io)?;
+    if uid.is_empty() || source.len() != 64 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "missing staging origin proof",
+        ));
     }
-    Ok((uid,source))
+    Ok((uid, source))
 }
 
 pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
@@ -1069,52 +1089,80 @@ mod tests {
 
     #[test]
     fn owner_receipt_requires_sealed_source_and_never_falls_back_after_failure() {
-        let root=test_root("owner-proof");
-        let v14=root.join("execution-ledger.json");
-        let sqlite=root.join("execution-ledger.sqlite");
-        let legacy=ExecutionLedgerStore::at(&v14);
-        legacy.save(&BTreeMap::new(),None,None,None,
-            &StrategyPeriodHistory::default(),&[]).unwrap();
-        let witness_sha=checksum(&std::fs::read(&v14).unwrap());
-        let uid="a".repeat(64);
+        let root = test_root("owner-proof");
+        let v14 = root.join("execution-ledger.json");
+        let sqlite = root.join("execution-ledger.sqlite");
+        let legacy = ExecutionLedgerStore::at(&v14);
+        legacy
+            .save(
+                &BTreeMap::new(),
+                None,
+                None,
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
+            )
+            .unwrap();
+        let witness_sha = checksum(&std::fs::read(&v14).unwrap());
+        let uid = "a".repeat(64);
         assert_eq!(
-            ExecutionLedgerStore::select_published_owner(&root).unwrap().path(),
+            ExecutionLedgerStore::select_published_owner(&root)
+                .unwrap()
+                .path(),
             v14.as_path()
         );
-        let capital=StrategyCapitalReservation {
-            schema:STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
-            allocation_id:"sqlite_owner_test_000001".to_owned(),
-            account_uid_fingerprint:uid.clone(),
-            origin_schema:"test/v1".to_owned(),
-            origin_version:"v1".to_owned(),
-            mandate_version:"1".to_owned(),
-            allocated_usdt:"100".to_owned(),
-            opening_account_usdt_equity:"127".to_owned(),
-            account_generation:"g1".to_owned(),
-            operator_authority_id:format!("sha256:{}", "a".repeat(64)),
-            started_at_ms:1,
+        let capital = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
+            allocation_id: "sqlite_owner_test_000001".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            origin_schema: "test/v1".to_owned(),
+            origin_version: "v1".to_owned(),
+            mandate_version: "1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "127".to_owned(),
+            account_generation: "g1".to_owned(),
+            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
+            started_at_ms: 1,
         };
-        save(&sqlite,&BTreeMap::new(),None,Some(&capital),None,
-            &StrategyPeriodHistory::default(),&[]).unwrap();
-        seal_staging_origin(&sqlite,&uid,&witness_sha).unwrap();
+        save(
+            &sqlite,
+            &BTreeMap::new(),
+            None,
+            Some(&capital),
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
+        seal_staging_origin(&sqlite, &uid, &witness_sha).unwrap();
         assert_eq!(
-            ExecutionLedgerStore::select_published_owner(&root).unwrap().path(),
+            ExecutionLedgerStore::select_published_owner(&root)
+                .unwrap()
+                .path(),
             v14.as_path()
         );
         // The published receipt is owned by CONTROL; tests simulate it only
         // after source and target are independently materialized.
-        let receipt=root.join("execution-ledger.owner");
-        std::fs::write(&receipt,format!(
-            "okx.ledger-owner/v1\nSQLITE\n{}\n{}\n",
-            "0".repeat(64),witness_sha
-        )).unwrap();
+        let receipt = root.join("execution-ledger.owner");
+        std::fs::write(
+            &receipt,
+            format!(
+                "okx.ledger-owner/v1\nSQLITE\n{}\n{}\n",
+                "0".repeat(64),
+                witness_sha
+            ),
+        )
+        .unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        std::fs::write(&receipt,format!(
-            "okx.ledger-owner/v1\nSQLITE\n{}\n{}\n",
-            uid,witness_sha
-        )).unwrap();
+        std::fs::write(
+            &receipt,
+            format!("okx.ledger-owner/v1\nSQLITE\n{}\n{}\n", uid, witness_sha),
+        )
+        .unwrap();
         assert_eq!(
-            ExecutionLedgerStore::select_published_owner(&root).unwrap().path(),
+            ExecutionLedgerStore::select_published_owner(&root)
+                .unwrap()
+                .path(),
             sqlite.as_path()
         );
         // Even if the SQLite target disappears after receipt publication,
