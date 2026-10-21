@@ -215,6 +215,25 @@ impl<'a> SourceOrderIndex<'a> {
         Self { orders, fills }
     }
 
+    /// Exact read from the same source index used for terminal native order
+    /// coverage. Previous finance performed a full event-map scan for each
+    /// fill; both lookups now share one immutable index.
+    fn contains_exact_order(
+        &self,
+        order_id: &str,
+        client_id: &str,
+        instrument_id: &str,
+        intent_id: &str,
+    ) -> bool {
+        self.orders.get(order_id).is_some_and(|history| {
+            history.iter().any(|event| {
+                string(&event.payload, "clOrdId") == Some(client_id)
+                    && string(&event.payload, "instId") == Some(instrument_id)
+                    && event.source_intent_id.as_deref() == Some(intent_id)
+            })
+        })
+    }
+
     pub(crate) fn validate_entry(
         &self,
         entry: &ExecutionLedgerEntry,
@@ -559,7 +578,10 @@ pub fn assess_persisted_financial_period_with_verified_source(
         .iter()
         .map(|x| (x.record.plan.intent_id.as_str(), x))
         .collect::<BTreeMap<_, _>>();
-    validate_terminal_order_coverage(e, entries, run.started_at_ms, &mut reasons);
+    let source_index = SourceOrderIndex::new(e);
+    for entry in entries {
+        source_index.validate_entry(entry, run.started_at_ms, &mut reasons);
+    }
     let mut fills = Vec::<FilledLeg>::new();
     for item in e
         .events
@@ -668,13 +690,8 @@ pub fn assess_persisted_financial_period_with_verified_source(
         }
         // Only exact originating order identity and native fill source can
         // establish this leg. A shared instrument is not a sufficient link.
-        let matching_order = e.events.values().any(|x| {
-            x.payload["source"] == "OKX_REST_ORDER"
-                && string(&x.payload, "ordId") == Some(f.ord.as_str())
-                && string(&x.payload, "clOrdId") == Some(f.client.as_str())
-                && string(&x.payload, "instId") == Some(f.inst.as_str())
-                && x.source_intent_id.as_deref() == Some(intent)
-        });
+        let matching_order =
+            source_index.contains_exact_order(&f.ord, &f.client, &f.inst, intent);
         if !matching_order {
             reasons.insert("exact_source_order_missing");
             continue;
