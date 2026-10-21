@@ -2788,7 +2788,10 @@ mod tests {
         assert!(reopened.entries.is_empty());
         let recent = crate::reconciliation::managed_execution_inventory(&reopened).unwrap();
         assert_eq!(recent.total, 608);
-        assert_eq!(recent.shown, crate::reconciliation::MAX_MANAGED_EXECUTION_INVENTORY_ROWS);
+        assert_eq!(
+            recent.shown,
+            crate::reconciliation::MAX_MANAGED_EXECUTION_INVENTORY_ROWS
+        );
         assert!(!recent.complete_within_bound);
         assert_eq!(recent.rows[0].intent_id, "bounded_historical_intent_000607");
         drop(reopened);
