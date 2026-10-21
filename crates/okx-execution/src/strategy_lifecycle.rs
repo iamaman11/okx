@@ -495,7 +495,10 @@ impl StrategyPeriodHistory {
     where
         F: FnMut(
             &str,
-        ) -> Result<Option<crate::exchange_evidence::ExchangeCoverageCursor>, ExecutionLedgerError>,
+        ) -> Result<
+            Option<crate::exchange_evidence::ExchangeCoverageCursor>,
+            ExecutionLedgerError,
+        >,
     {
         if self.archived_runs.len() + self.unverified_runs.len() > MAX_ARCHIVED_STRATEGY_RUNS {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);

@@ -401,17 +401,22 @@ pub(super) fn attest_indexed(
         let saved_hash: String = row.get(2).map_err(io)?;
         let bytes: Vec<u8> = row.get(3).map_err(io)?;
         if checksum(&bytes) != saved_hash {
-            return Err(ExecutionLedgerError::Corrupt("indexed source cursor digest"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "indexed source cursor digest",
+            ));
         }
         let cursor: ExchangeCoverageCursor = decode(&bytes)?;
         if i64::try_from(
-            crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
-                .ok_or(ExecutionLedgerError::Corrupt("invalid indexed source receipt"))?,
+            crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at).ok_or(
+                ExecutionLedgerError::Corrupt("invalid indexed source receipt"),
+            )?,
         )
         .ok()
             != Some(receipt_ms)
         {
-            return Err(ExecutionLedgerError::Corrupt("indexed source receipt index"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "indexed source receipt index",
+            ));
         }
         if count != 0 {
             digest.update(b",");
@@ -461,7 +466,9 @@ pub(super) fn indexed_cursor(
         return Ok(None);
     };
     if checksum(&bytes) != hash {
-        return Err(ExecutionLedgerError::Corrupt("indexed NAV source cursor checksum"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "indexed NAV source cursor checksum",
+        ));
     }
     let cursor: ExchangeCoverageCursor = decode(&bytes)?;
     if i64::try_from(
@@ -471,7 +478,9 @@ pub(super) fn indexed_cursor(
     .ok()
         != Some(receipt)
     {
-        return Err(ExecutionLedgerError::Corrupt("indexed NAV source cursor timestamp"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "indexed NAV source cursor timestamp",
+        ));
     }
     Ok(Some(cursor))
 }

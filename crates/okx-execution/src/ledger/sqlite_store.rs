@@ -2052,16 +2052,14 @@ fn attest_snapshot(
         .as_deref()
         .map(|run_id| super::sqlite_source::attest_indexed(&c, run_id, &uid))
         .transpose()?;
-    state.periods.validate_indexed(
-        state.reservation.as_ref(),
-        source.as_ref(),
-        |key| {
+    state
+        .periods
+        .validate_indexed(state.reservation.as_ref(), source.as_ref(), |key| {
             let Some(run_id) = state.source_run_id.as_deref() else {
                 return Ok(None);
             };
             super::sqlite_source::indexed_cursor(&c, run_id, key)
-        },
-    )?;
+        })?;
     validate_leverage_attempts(&state.leverage, state.reservation.as_ref())?;
 
     let mut owner_digest = Sha256::new();
