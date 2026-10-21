@@ -3340,9 +3340,21 @@ impl DurableExecutionLedger {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
 
-        if let Some(existing) = self.entries.get(&record.plan.intent_id) {
+        // An old ID is immutable regardless of whether its completed
+        // record is present in the active in-memory working set. Native
+        // SQLite resolves exact identity by indexed durable plan/row proof.
+        let prior = if self.store.sqlite_native {
+            sqlite_store::indexed_intent(
+                &self.store.path,
+                &record.plan.account_uid_fingerprint,
+                &record.plan.intent_id,
+            )?
+        } else {
+            self.entries.get(&record.plan.intent_id).cloned()
+        };
+        if let Some(existing) = prior {
             return if existing.record == record {
-                Ok(PrepareDisposition::Existing(existing.clone()))
+                Ok(PrepareDisposition::Existing(existing))
             } else {
                 Err(ExecutionLedgerError::IntentConflict)
             };
