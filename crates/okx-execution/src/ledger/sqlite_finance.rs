@@ -114,7 +114,14 @@ fn insert_order(
     let v = &event.payload;
     let order_id = field(v, "ordId")?;
     let instrument = field(v, "instId")?;
-    let client_order_id = field(v, "clOrdId")?;
+    // Manual and external OKX orders can legitimately have an empty clOrdId.
+    // Only a ledger-owned order must prove its immutable client identity.
+    let client_order_id = nullable(v, "clOrdId")?.unwrap_or("");
+    if event.source_intent_id.is_some() && client_order_id.is_empty() {
+        return Err(ExecutionLedgerError::Corrupt(
+            "managed native order missing client identity",
+        ));
+    }
     let state = field(v, "state")?;
     let update_at_ms = field(v, "uTime")?
         .parse::<i64>()
@@ -663,6 +670,37 @@ mod snapshot_tests {
             .unwrap();
         assert_eq!(state, "filled");
         assert_eq!(updated, 2000);
+
+        // Another account-owned or manual venue order may have no client
+        // order ID. It remains a real immutable exchange fact, never an
+        // invented managed intent.
+        let external = StoredExchangeEvent {
+            payload: serde_json::json!({
+                "source":"OKX_REST_ORDER",
+                "ordId":"unmanaged-456",
+                "clOrdId":"",
+                "instId":"BTC-USDT-SWAP",
+                "state":"canceled",
+                "uTime":"4000",
+            }),
+            source_intent_id: None,
+            strategy_run_id: None,
+            allocation: "UNALLOCATED".to_owned(),
+        };
+        {
+            let tx = c.transaction().unwrap();
+            insert_order(&tx, &external).unwrap();
+            tx.commit().unwrap();
+        }
+        let client_id: String = c
+            .query_row(
+                "SELECT client_order_id FROM exchange_orders
+                 WHERE venue_order_id='unmanaged-456'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(client_id.is_empty());
     }
 
     /// The same deferred read transaction used by finance_window must pin
