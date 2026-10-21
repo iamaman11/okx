@@ -2413,12 +2413,7 @@ impl DurableExecutionLedger {
         let daily = Decimal::from_str(&binding.policy.max_daily_realized_loss_usd)
             .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy daily loss"))?;
         Ok(strategy_nav_stop_reason(
-            nav,
-            peak,
-            gross_loss,
-            mandate_dd,
-            policy_dd,
-            daily,
+            nav, peak, gross_loss, mandate_dd, policy_dd, daily,
         ))
     }
 
@@ -2511,13 +2506,15 @@ impl DurableExecutionLedger {
             // Read an old candidate by ID even if it is absent from source.
             // Only a proven unsent PREPARED may be excluded from finance.
             if !excluded_seen
-                && self.read_intent(&candidate.intent_id)?.is_some_and(|entry| {
-                    !Self::inert_candidate_for_financial_projection(
-                        &entry.record,
-                        candidate,
-                        &run.allocation_id,
-                    )
-                })
+                && self
+                    .read_intent(&candidate.intent_id)?
+                    .is_some_and(|entry| {
+                        !Self::inert_candidate_for_financial_projection(
+                            &entry.record,
+                            candidate,
+                            &run.allocation_id,
+                        )
+                    })
             {
                 return Err(ExecutionLedgerError::Corrupt(
                     "non-inert financial new-risk candidate",
@@ -2799,18 +2796,16 @@ impl DurableExecutionLedger {
                 &self.store.path,
                 &run.account_uid_fingerprint,
                 run.started_at_ms,
-                |entry| {
-                    match Self::nav_stop_policy(entry, run, nav, peak, gross_loss) {
-                        Ok(stop) => {
-                            if reason.is_none() {
-                                reason = stop;
-                            }
-                            true
+                |entry| match Self::nav_stop_policy(entry, run, nav, peak, gross_loss) {
+                    Ok(stop) => {
+                        if reason.is_none() {
+                            reason = stop;
                         }
-                        Err(err) => {
-                            scan_error = Some(err);
-                            false
-                        }
+                        true
+                    }
+                    Err(err) => {
+                        scan_error = Some(err);
+                        false
                     }
                 },
             )?;
