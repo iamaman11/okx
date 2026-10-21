@@ -2538,9 +2538,11 @@ mod tests {
                 "guarded_intent_000061".to_owned()
             ]
         );
-        assert!(verified_engine
-            .bounded_run_entries(&uid, 1060, 33, |_| Some(()))
-            .is_err());
+        assert!(
+            verified_engine
+                .bounded_run_entries(&uid, 1060, 33, |_| Some(()))
+                .is_err()
+        );
         assert!(
             verified_engine
                 .account_scope_matches(&"b".repeat(64))
