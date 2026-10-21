@@ -6,6 +6,23 @@ use super::*;
 use crate::exchange_evidence::{ExchangeCoverageCursor, StoredExchangeEvent};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+/// Reject an excessively large individual SQLite BLOB before Row::get
+/// allocates it. This applies even when the row digest is self-consistent.
+fn source_row_bytes(
+    row: &rusqlite::Row<'_>,
+    length_column: usize,
+) -> Result<Vec<u8>, ExecutionLedgerError> {
+    let len: i64 = row.get(length_column).map_err(io)?;
+    if len <= 0 {
+        return Err(ExecutionLedgerError::Corrupt("empty indexed source BLOB"));
+    }
+    let len = usize::try_from(len).map_err(|_| ExecutionLedgerError::ExchangeEvidenceCapacity)?;
+    if len > crate::exchange_evidence::MAX_BYTES {
+        return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+    }
+    row.get(length_column + 1).map_err(io)
+}
+
 pub(super) const TABLES: &str = "
 CREATE TABLE IF NOT EXISTS native_source_runs (
     run_id TEXT PRIMARY KEY,
@@ -225,7 +242,7 @@ pub(super) fn summary(
     }
     let mut stmt = connection
         .prepare(
-            "SELECT cursor_key,receipt_ms,payload_digest,payload
+            "SELECT cursor_key,receipt_ms,payload_digest,length(payload),payload
              FROM native_source_cursors WHERE run_id=?1
              ORDER BY receipt_ms,cursor_key",
         )
@@ -241,7 +258,7 @@ pub(super) fn summary(
         let _key: String = row.get(0).map_err(io)?;
         let stored_receipt: i64 = row.get(1).map_err(io)?;
         let digest: String = row.get(2).map_err(io)?;
-        let bytes: Vec<u8> = row.get(3).map_err(io)?;
+        let bytes = source_row_bytes(row, 3)?;
         if checksum(&bytes) != digest {
             return Err(ExecutionLedgerError::Corrupt(
                 "native source summary checksum",
@@ -405,7 +422,7 @@ pub(super) fn attest_indexed(
 
     let mut stmt = connection
         .prepare(
-            "SELECT event_key,payload_digest,payload
+            "SELECT event_key,payload_digest,length(payload),payload
              FROM native_source_events WHERE run_id=?1 ORDER BY event_key",
         )
         .map_err(io)?;
@@ -414,7 +431,7 @@ pub(super) fn attest_indexed(
     while let Some(row) = rows.next().map_err(io)? {
         let key: String = row.get(0).map_err(io)?;
         let saved_hash: String = row.get(1).map_err(io)?;
-        let bytes: Vec<u8> = row.get(2).map_err(io)?;
+        let bytes = source_row_bytes(row, 2)?;
         if checksum(&bytes) != saved_hash {
             return Err(ExecutionLedgerError::Corrupt("indexed source event digest"));
         }
@@ -444,7 +461,7 @@ pub(super) fn attest_indexed(
 
     let mut stmt = connection
         .prepare(
-            "SELECT cursor_key,receipt_ms,payload_digest,payload
+            "SELECT cursor_key,receipt_ms,payload_digest,length(payload),payload
              FROM native_source_cursors WHERE run_id=?1 ORDER BY cursor_key",
         )
         .map_err(io)?;
@@ -454,7 +471,7 @@ pub(super) fn attest_indexed(
         let key: String = row.get(0).map_err(io)?;
         let receipt_ms: i64 = row.get(1).map_err(io)?;
         let saved_hash: String = row.get(2).map_err(io)?;
-        let bytes: Vec<u8> = row.get(3).map_err(io)?;
+        let bytes = source_row_bytes(row, 3)?;
         if checksum(&bytes) != saved_hash {
             return Err(ExecutionLedgerError::Corrupt(
                 "indexed source cursor digest",
@@ -515,18 +532,19 @@ pub(super) fn indexed_cursor(
     run_id: &str,
     key: &str,
 ) -> Result<Option<ExchangeCoverageCursor>, ExecutionLedgerError> {
-    let row: Option<(i64, String, Vec<u8>)> = connection
-        .query_row(
-            "SELECT receipt_ms,payload_digest,payload
+    let mut stmt = connection
+        .prepare(
+            "SELECT receipt_ms,payload_digest,length(payload),payload
              FROM native_source_cursors WHERE run_id=?1 AND cursor_key=?2",
-            params![run_id, key],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .optional()
         .map_err(io)?;
-    let Some((receipt, hash, bytes)) = row else {
+    let mut rows = stmt.query(params![run_id, key]).map_err(io)?;
+    let Some(row) = rows.next().map_err(io)? else {
         return Ok(None);
     };
+    let receipt: i64 = row.get(0).map_err(io)?;
+    let hash: String = row.get(1).map_err(io)?;
+    let bytes = source_row_bytes(row, 2)?;
     if checksum(&bytes) != hash {
         return Err(ExecutionLedgerError::Corrupt(
             "indexed NAV source cursor checksum",
@@ -566,14 +584,14 @@ pub(super) fn read(
     {
         let mut q = connection
             .prepare(
-                "SELECT event_key,payload_digest,payload FROM native_source_events WHERE run_id=?1",
+                "SELECT event_key,payload_digest,length(payload),payload FROM native_source_events WHERE run_id=?1",
             )
             .map_err(io)?;
         let mut rows = q.query(params![run_id]).map_err(io)?;
         while let Some(row) = rows.next().map_err(io)? {
             let key: String = row.get(0).map_err(io)?;
             let hash: String = row.get(1).map_err(io)?;
-            let bytes: Vec<u8> = row.get(2).map_err(io)?;
+            let bytes = source_row_bytes(row, 2)?;
             if checksum(&bytes) != hash {
                 return Err(ExecutionLedgerError::Corrupt(
                     "exchange source event checksum",
@@ -586,7 +604,7 @@ pub(super) fn read(
     {
         let mut q = connection
             .prepare(
-                "SELECT cursor_key,receipt_ms,payload_digest,payload
+                "SELECT cursor_key,receipt_ms,payload_digest,length(payload),payload
              FROM native_source_cursors WHERE run_id=?1",
             )
             .map_err(io)?;
@@ -595,7 +613,7 @@ pub(super) fn read(
             let key: String = row.get(0).map_err(io)?;
             let received: i64 = row.get(1).map_err(io)?;
             let hash: String = row.get(2).map_err(io)?;
-            let bytes: Vec<u8> = row.get(3).map_err(io)?;
+            let bytes = source_row_bytes(row, 3)?;
             let cursor: ExchangeCoverageCursor = decode(&bytes)?;
             if checksum(&bytes) != hash
                 || u64::try_from(received).ok()
