@@ -203,9 +203,13 @@ pub(super) fn summary(
     }
     if schema != crate::exchange_evidence::EXCHANGE_EVIDENCE_SCHEMA_V1
         || proof.len() != 64
-        || !proof.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        || !proof
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     {
-        return Err(ExecutionLedgerError::Corrupt("native source summary identity"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "native source summary identity",
+        ));
     }
     let event_rows: i64 = connection
         .query_row(
@@ -239,23 +243,35 @@ pub(super) fn summary(
         let digest: String = row.get(2).map_err(io)?;
         let bytes: Vec<u8> = row.get(3).map_err(io)?;
         if checksum(&bytes) != digest {
-            return Err(ExecutionLedgerError::Corrupt("native source summary checksum"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "native source summary checksum",
+            ));
         }
         let cursor: ExchangeCoverageCursor = decode(&bytes)?;
         let receipt = crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
-            .ok_or(ExecutionLedgerError::Corrupt("invalid native source receipt"))?;
+            .ok_or(ExecutionLedgerError::Corrupt(
+                "invalid native source receipt",
+            ))?;
         if i64::try_from(receipt).ok() != Some(stored_receipt)
             || previous_receipt.is_some_and(|prior| receipt < prior)
         {
-            return Err(ExecutionLedgerError::Corrupt("native source receipt index mismatch"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "native source receipt index mismatch",
+            ));
         }
-        if let Some(prior) = previous_receipt {
+        // The v1 source proof computes gaps over DISTINCT receipt epochs.
+        // Two valid source receipts at the same timestamp are not a new gap.
+        if let Some(prior) = previous_receipt
+            && receipt > prior
+        {
             let gap = receipt - prior;
             largest_gap = Some(largest_gap.unwrap_or(0).max(gap));
         }
         previous_receipt = Some(receipt);
-        oldest_asof = Some(oldest_asof.map_or(cursor.account_as_of_ms, |v| v.min(cursor.account_as_of_ms)));
-        latest_asof = Some(latest_asof.map_or(cursor.account_as_of_ms, |v| v.max(cursor.account_as_of_ms)));
+        oldest_asof =
+            Some(oldest_asof.map_or(cursor.account_as_of_ms, |v| v.min(cursor.account_as_of_ms)));
+        latest_asof =
+            Some(latest_asof.map_or(cursor.account_as_of_ms, |v| v.max(cursor.account_as_of_ms)));
         latest_complete = cursor.order_complete && cursor.fill_complete && cursor.bill_complete;
         cursors += 1;
         if cursors > crate::exchange_evidence::MAX_CURSORS {
@@ -273,11 +289,13 @@ pub(super) fn summary(
         latest_source_asof_ms: latest_asof,
         latest_source_received_at_ms: previous_receipt,
         largest_persisted_gap_ms: largest_gap,
-        source_gap_over_two_hours: largest_gap.is_some_and(|gap| gap > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS),
+        source_gap_over_two_hours: largest_gap
+            .is_some_and(|gap| gap > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS),
         remaining_source_cursors: crate::exchange_evidence::MAX_CURSORS - cursors,
         remaining_events: crate::exchange_evidence::MAX_EVENTS - events,
-        next_source_coverage_deadline_ms: previous_receipt
-            .and_then(|last| last.checked_add(crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS)),
+        next_source_coverage_deadline_ms: previous_receipt.and_then(|last| {
+            last.checked_add(crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS)
+        }),
     })
 }
 
@@ -357,6 +375,80 @@ pub(super) fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_source_summary_matches_exact_legacy_receipt_semantics_and_denies_tampering() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(TABLES).unwrap();
+        let uid = "uid";
+        let run_id = "run";
+        let mut source = DurableExchangeEvidence {
+            schema: crate::exchange_evidence::EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
+            account_uid: uid.to_owned(),
+            run_id: run_id.to_owned(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        let cursor = ExchangeCoverageCursor {
+            source: "OKX_REST_ACCOUNT_HISTORY".to_owned(),
+            source_received_at: "2026-10-20T12:00:00Z".to_owned(),
+            generation: "g1".to_owned(),
+            account_as_of_ms: 1000,
+            order_complete: true,
+            fill_complete: true,
+            bill_complete: true,
+            covered_ranges: serde_json::json!({}),
+        };
+        source.cursors.insert("receipt-1".to_owned(), cursor.clone());
+        // Independent cursors at an identical receipt time count as one
+        // coverage epoch, never an invented 0ms coverage gap.
+        source.cursors.insert("receipt-2".to_owned(), cursor);
+        source.checksum_sha256 = checksum(
+            &serde_json::to_vec(&(
+                &source.schema,
+                &source.account_uid,
+                &source.run_id,
+                &source.events,
+                &source.cursors,
+            ))
+            .unwrap(),
+        );
+        source.validate().unwrap();
+        c.execute(
+            "INSERT INTO native_source_runs VALUES(?1,?2,?3,?4)",
+            params![run_id, uid, &source.schema, &source.checksum_sha256],
+        )
+        .unwrap();
+        for (key, cursor) in &source.cursors {
+            let bytes = encode(cursor).unwrap();
+            let at = crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
+                .unwrap();
+            c.execute(
+                "INSERT INTO native_source_cursors VALUES(?1,?2,?3,?4,?5)",
+                params![run_id, key, at, checksum(&bytes), bytes],
+            )
+            .unwrap();
+        }
+        let exact = summary(&c, run_id, uid).unwrap();
+        assert_eq!(exact.largest_persisted_gap_ms, None);
+        assert_eq!(
+            serde_json::to_value(&exact).unwrap(),
+            serde_json::to_value(source.summary()).unwrap()
+        );
+        assert!(matches!(
+            summary(&c, run_id, "different-uid"),
+            Err(ExecutionLedgerError::AccountScopeMismatch)
+        ));
+        c.execute_batch("DROP TRIGGER immutable_native_cursor_update;")
+            .unwrap();
+        c.execute(
+            "UPDATE native_source_cursors SET payload_digest='forged' WHERE cursor_key='receipt-1'",
+            [],
+        )
+        .unwrap();
+        assert!(summary(&c, run_id, uid).is_err());
+    }
 
     #[test]
     fn indexed_source_merge_only_returns_new_keys_and_rejects_loss_or_rewrite() {

@@ -948,7 +948,9 @@ pub(super) fn source_summary(
         )
         .map_err(io)?;
     if checksum(&bytes) != digest {
-        return Err(ExecutionLedgerError::Corrupt("native source state digest mismatch"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "native source state digest mismatch",
+        ));
     }
     require_indexed_scope(&c, &uid)?;
     let state: StoredState = decode(&bytes)?;
