@@ -304,8 +304,8 @@ pub struct ManagedExecutionInventory {
 pub fn managed_execution_inventory(ledger: &DurableExecutionLedger) -> ManagedExecutionInventory {
     let mut entries = ledger.entries().collect::<Vec<_>>();
     let total = ledger.total_intents().unwrap_or(entries.len());
-    let historically_complete = total == entries.len()
-        && ledger.historical_reconciliation_eligible().unwrap_or(false);
+    let historically_complete =
+        total == entries.len() && ledger.historical_reconciliation_eligible().unwrap_or(false);
     entries.sort_by(|a, b| {
         b.updated_at_ms
             .cmp(&a.updated_at_ms)
@@ -349,10 +349,7 @@ pub fn reconcile_account_ledger(
     ledger: &DurableExecutionLedger,
     facts: &AccountLedgerFacts,
 ) -> Result<AccountLedgerReconciliation, AccountLedgerReconciliationError> {
-    if !ledger
-        .historical_reconciliation_eligible()
-        .unwrap_or(false)
-    {
+    if !ledger.historical_reconciliation_eligible().unwrap_or(false) {
         return Err(AccountLedgerReconciliationError::HistoricalCoverageUnattested);
     }
     let mut result = reconcile_exchange_evidence(

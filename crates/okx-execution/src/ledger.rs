@@ -3166,9 +3166,7 @@ impl DurableExecutionLedger {
     /// in-RAM history. Until their indexed equivalent is accepted, denying
     /// incomplete materialization is mandatory: never claim consistent=true
     /// from an active-guard-only cache.
-    pub(crate) fn historical_reconciliation_eligible(
-        &self,
-    ) -> Result<bool, ExecutionLedgerError> {
+    pub(crate) fn historical_reconciliation_eligible(&self) -> Result<bool, ExecutionLedgerError> {
         Ok(!self.store.sqlite_native || self.total_intents()? == self.entries.len())
     }
 

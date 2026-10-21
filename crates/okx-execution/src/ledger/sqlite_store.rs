@@ -737,8 +737,7 @@ pub(super) fn count_account_intents(path: &Path) -> Result<usize, ExecutionLedge
     let rows: i64 = c
         .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
         .map_err(io)?;
-    usize::try_from(rows)
-        .map_err(|_| ExecutionLedgerError::Corrupt("native inventory overflow"))
+    usize::try_from(rows).map_err(|_| ExecutionLedgerError::Corrupt("native inventory overflow"))
 }
 
 /// A binding is created only by an authenticated native owner for an
