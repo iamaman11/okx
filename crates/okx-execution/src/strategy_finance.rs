@@ -235,10 +235,8 @@ impl<'a> SourceOrderIndex<'a> {
             .flatten()
             .copied()
             .filter(|event| {
-                string(&event.payload, "clOrdId")
-                    == Some(record.plan.client_order_id.as_str())
-                    && string(&event.payload, "instId")
-                        == Some(record.plan.instrument_id.as_str())
+                string(&event.payload, "clOrdId") == Some(record.plan.client_order_id.as_str())
+                    && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
                     && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str())
             })
             .collect::<Vec<_>>();
@@ -263,10 +261,8 @@ impl<'a> SourceOrderIndex<'a> {
             .flatten()
             .copied()
             .filter(|event| {
-                string(&event.payload, "clOrdId")
-                    == Some(record.plan.client_order_id.as_str())
-                    && string(&event.payload, "instId")
-                        == Some(record.plan.instrument_id.as_str())
+                string(&event.payload, "clOrdId") == Some(record.plan.client_order_id.as_str())
+                    && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
                     && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str())
             })
             .collect::<Vec<_>>();
