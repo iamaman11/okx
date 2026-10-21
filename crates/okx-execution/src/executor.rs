@@ -4874,7 +4874,11 @@ mod tests {
         let plan = protected_plan();
         ledger.prepare(plan.clone(), 101).expect("prepare");
         let executor = OrderExecutor::new(ledger, MockGateway::new(vec![], vec![]));
-        assert!(!executor.has_unresolved_native_mutation(&plan.intent_id));
+        assert!(
+            !executor
+                .has_unresolved_native_mutation(&plan.account_uid_fingerprint, &plan.intent_id)
+                .unwrap()
+        );
         assert_eq!(executor.gateway().place_calls(), 0);
         drop(executor);
 
@@ -4890,7 +4894,11 @@ mod tests {
 
         let restarted = DurableExecutionLedger::open(store, 105).expect("restart");
         let executor = OrderExecutor::new(restarted, MockGateway::new(vec![], vec![]));
-        assert!(executor.has_unresolved_native_mutation(&plan.intent_id));
+        assert!(
+            executor
+                .has_unresolved_native_mutation(&plan.account_uid_fingerprint, &plan.intent_id)
+                .unwrap()
+        );
         assert_eq!(executor.gateway().place_calls(), 0);
         let _ = fs::remove_dir_all(root);
     }
