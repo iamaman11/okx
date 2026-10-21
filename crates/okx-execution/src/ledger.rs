@@ -2332,7 +2332,7 @@ impl DurableExecutionLedger {
     /// ONLY the active capital epoch with a strict upper bound; at the cap
     /// fail closed instead of silently claiming complete NAV/PnL from partial
     /// source. Current source receipts remain independently verified.
-    fn run_entries(
+    pub(crate) fn run_entries(
         &self,
         run: &StrategyCapitalReservation,
     ) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
@@ -3159,6 +3159,29 @@ impl DurableExecutionLedger {
             sqlite_store::count_account_intents(&self.store.path)
         } else {
             Ok(self.entries.len())
+        }
+    }
+
+    /// Bounded, authenticated recent history including terminal intents.
+    /// Diagnostic sampling never grants trade admission.
+    pub(crate) fn recent_intents(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if !(1..=256).contains(&limit) {
+            return Err(ExecutionLedgerError::Corrupt("invalid recent intent limit"));
+        }
+        if self.store.sqlite_native {
+            sqlite_store::recent_intents(&self.store.path, limit)
+        } else {
+            let mut recent = self.entries.values().cloned().collect::<Vec<_>>();
+            recent.sort_by(|a, b| {
+                b.updated_at_ms
+                    .cmp(&a.updated_at_ms)
+                    .then_with(|| a.record.plan.intent_id.cmp(&b.record.plan.intent_id))
+            });
+            recent.truncate(limit);
+            Ok(recent)
         }
     }
 

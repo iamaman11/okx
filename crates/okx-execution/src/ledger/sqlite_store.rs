@@ -725,6 +725,44 @@ pub(super) fn clear_for_capital_opening(
     Ok(true)
 }
 
+/// Read the latest exact native intents from the authoritative WAL owner.
+/// The caller never consumes the bounded active working set as history.
+pub(super) fn recent_intents(
+    path: &Path,
+    limit: usize,
+) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
+    if !(1..=256).contains(&limit) {
+        return Err(ExecutionLedgerError::Corrupt("invalid recent intent limit"));
+    }
+    let c = connect_indexed_read(path)?;
+    let uid: String = c
+        .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |r| r.get(0))
+        .map_err(io)?;
+    require_account_read_scope(&c, &uid, false)?;
+    // Check the ordering column against the authenticated record bytes.
+    let sql = "
+        SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
+               i.instrument_id,i.requested_action,i.plan_sha256,i.current_state,i.created_at_ms,
+               e.updated_at_ms
+        FROM ledger_entries e LEFT JOIN intents i ON i.intent_id=e.intent_id
+        WHERE e.uid=?1
+        ORDER BY e.updated_at_ms DESC,e.intent_id LIMIT ?2";
+    let mut stmt = c.prepare(sql).map_err(io)?;
+    let mut rows = stmt.query(params![uid, limit as i64]).map_err(io)?;
+    let mut recent = Vec::with_capacity(limit);
+    while let Some(row) = rows.next().map_err(io)? {
+        let updated_at: i64 = row.get(10).map_err(io)?;
+        let entry = verified_indexed_entry(row, &uid)?;
+        if i64::try_from(entry.updated_at_ms).ok() != Some(updated_at) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "indexed intent update timestamp mismatch",
+            ));
+        }
+        recent.push(entry);
+    }
+    Ok(recent)
+}
+
 /// Count exact authoritative rows from this account's WAL owner without
 /// visiting, decoding or retaining the historical intent payloads. Caller
 /// must separately prove row/guard parity at the cold owner boundary.
@@ -2734,7 +2772,7 @@ mod tests {
         assert_eq!(owner.total_intents().unwrap(), 608);
         assert_eq!(owner.entries.len(), 32);
         assert!(!owner.historical_reconciliation_eligible().unwrap());
-        let sample = crate::reconciliation::managed_execution_inventory(&owner);
+        let sample = crate::reconciliation::managed_execution_inventory(&owner).unwrap();
         assert_eq!(sample.total, 608);
         assert!(!sample.complete_within_bound);
         assert_eq!(
@@ -2744,6 +2782,16 @@ mod tests {
             entries.get("bounded_historical_intent_000001").cloned()
         );
         drop(owner);
+        // No active obligations survive cold restart: a borrowed cache-only
+        // inventory would incorrectly report zero recent executions.
+        let reopened = DurableExecutionLedger::open(store, 4000).unwrap();
+        assert!(reopened.entries.is_empty());
+        let recent = crate::reconciliation::managed_execution_inventory(&reopened).unwrap();
+        assert_eq!(recent.total, 608);
+        assert_eq!(recent.shown, crate::reconciliation::MAX_MANAGED_EXECUTION_INVENTORY_ROWS);
+        assert!(!recent.complete_within_bound);
+        assert_eq!(recent.rows[0].intent_id, "bounded_historical_intent_000607");
+        drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
 

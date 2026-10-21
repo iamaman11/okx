@@ -301,16 +301,16 @@ pub struct ManagedExecutionInventory {
 
 /// Bounded deterministic inventory for resolving pre-existing Demo intent IDs.
 /// Truncation is explicit and cannot be used as a proof of absence.
-pub fn managed_execution_inventory(ledger: &DurableExecutionLedger) -> ManagedExecutionInventory {
-    let mut entries = ledger.entries().collect::<Vec<_>>();
-    let total = ledger.total_intents().unwrap_or(entries.len());
-    let historically_complete =
-        total == entries.len() && ledger.historical_reconciliation_eligible().unwrap_or(false);
-    entries.sort_by(|a, b| {
-        b.updated_at_ms
-            .cmp(&a.updated_at_ms)
-            .then_with(|| a.record.plan.intent_id.cmp(&b.record.plan.intent_id))
-    });
+pub fn managed_execution_inventory(
+    ledger: &DurableExecutionLedger,
+) -> Result<ManagedExecutionInventory, ExecutionLedgerError> {
+    let entries = ledger.recent_intents(MAX_MANAGED_EXECUTION_INVENTORY_ROWS)?;
+    let total = ledger.total_intents()?;
+    if entries.len() != total.min(MAX_MANAGED_EXECUTION_INVENTORY_ROWS) {
+        return Err(ExecutionLedgerError::Corrupt(
+            "historical inventory differs from authoritative count",
+        ));
+    }
     let rows = entries
         .into_iter()
         .take(MAX_MANAGED_EXECUTION_INVENTORY_ROWS)
@@ -335,14 +335,13 @@ pub fn managed_execution_inventory(ledger: &DurableExecutionLedger) -> ManagedEx
             }
         })
         .collect::<Vec<_>>();
-    ManagedExecutionInventory {
+    Ok(ManagedExecutionInventory {
         schema: MANAGED_EXECUTION_INVENTORY_SCHEMA_V1,
         total,
         shown: rows.len(),
-        complete_within_bound: historically_complete
-            && total <= MAX_MANAGED_EXECUTION_INVENTORY_ROWS,
+        complete_within_bound: total <= MAX_MANAGED_EXECUTION_INVENTORY_ROWS,
         rows,
-    }
+    })
 }
 
 pub fn reconcile_account_ledger(
@@ -1245,8 +1244,13 @@ fn assess_flat_strategy_nav(
     {
         reasons.push("nav_open_position_or_pending_order");
     }
-    let entries = ledger
-        .entries()
+    // The operational cache cannot establish complete capital-epoch NAV.
+    // Insufficient historical coverage returns an error, never a false PASS.
+    let historical = ledger
+        .run_entries(capital)
+        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
+    let entries = historical
+        .iter()
         .filter(|e| e.created_at_ms > capital.started_at_ms)
         .collect::<Vec<_>>();
     if entries.iter().any(|e| {
@@ -2610,7 +2614,7 @@ mod tests {
             plan.instrument_id = format!("TOKEN{time}-USDT-SWAP");
             ledger.prepare(plan, time).expect("prepare");
         }
-        let inventory = managed_execution_inventory(&ledger);
+        let inventory = managed_execution_inventory(&ledger).unwrap();
         assert_eq!(inventory.schema, MANAGED_EXECUTION_INVENTORY_SCHEMA_V1);
         assert_eq!(inventory.total, 2);
         assert_eq!(inventory.shown, 2);
@@ -2626,7 +2630,7 @@ mod tests {
             derive_client_order_id(&inventory.rows[0].intent_id)
         );
         assert_eq!(
-            managed_execution_inventory(&ledger),
+            managed_execution_inventory(&ledger).unwrap(),
             inventory,
             "read-only repeat must not mutate ledger"
         );
@@ -2644,7 +2648,7 @@ mod tests {
             plan.instrument_id = format!("TOKEN{n}-USDT-SWAP");
             ledger.prepare(plan, (n + 100) as u64).expect("prepare");
         }
-        let inventory = managed_execution_inventory(&ledger);
+        let inventory = managed_execution_inventory(&ledger).unwrap();
         assert_eq!(inventory.total, MAX_MANAGED_EXECUTION_INVENTORY_ROWS + 1);
         assert_eq!(inventory.shown, MAX_MANAGED_EXECUTION_INVENTORY_ROWS);
         assert!(!inventory.complete_within_bound);

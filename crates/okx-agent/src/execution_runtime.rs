@@ -724,7 +724,7 @@ impl ExecutionRuntime {
         let capture_guard = self.mutation_ingress.admit().await;
         let mut executor = self.executor.lock().await;
         let mut reconciliation = reconcile_account_ledger(executor.ledger(), facts)?;
-        let inventory = managed_execution_inventory(executor.ledger());
+        let inventory = managed_execution_inventory(executor.ledger())?;
         // Never capture a contradictory or private-WS-incoherent snapshot.
         let mut current_source_captured = false;
         if executor.ledger().capital_reservation().is_some()
