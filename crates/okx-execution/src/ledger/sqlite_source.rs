@@ -303,11 +303,37 @@ pub(super) fn summary(
 /// materializing either exchange map. Row digests, source identity and the
 /// exact historical tuple digest must all agree before a native owner can
 /// report a valid cold attestation.
-struct SourceHashWriter<'a>(&'a mut Sha256);
+struct SourceHashWriter {
+    digest: Sha256,
+    tuple_bytes: usize,
+}
 
-impl std::io::Write for SourceHashWriter<'_> {
+impl SourceHashWriter {
+    fn new() -> Self {
+        Self {
+            digest: Sha256::new(),
+            tuple_bytes: 0,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        self.digest.update(bytes);
+        self.tuple_bytes = self.tuple_bytes.saturating_add(bytes.len());
+    }
+
+    fn json<T: serde::Serialize>(&mut self, value: &T) -> Result<(), ExecutionLedgerError> {
+        serde_json::to_writer(&mut *self, value)?;
+        Ok(())
+    }
+
+    fn finish(self) -> (String, usize) {
+        (format!("{:x}", self.digest.finalize()), self.tuple_bytes)
+    }
+}
+
+impl std::io::Write for SourceHashWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.update(bytes);
+        self.push(bytes);
         Ok(bytes.len())
     }
 
@@ -316,12 +342,36 @@ impl std::io::Write for SourceHashWriter<'_> {
     }
 }
 
-fn feed_json<T: serde::Serialize>(
-    digest: &mut Sha256,
-    value: &T,
-) -> Result<(), ExecutionLedgerError> {
-    serde_json::to_writer(SourceHashWriter(digest), value)?;
-    Ok(())
+/// The original hash covers a JSON tuple, while the legacy 24 MiB capacity
+/// rule covers the JSON struct, including its checksum field. Both have
+/// identical serialized map entries; the envelope size delta is constant.
+/// Serialize ONLY empty envelopes to preserve exact legacy byte accounting.
+fn source_struct_overhead(
+    schema: &str,
+    uid: &str,
+    run_id: &str,
+    proof: &str,
+) -> Result<usize, ExecutionLedgerError> {
+    let empty = DurableExchangeEvidence {
+        schema: schema.to_owned(),
+        account_uid: uid.to_owned(),
+        run_id: run_id.to_owned(),
+        events: BTreeMap::new(),
+        cursors: BTreeMap::new(),
+        checksum_sha256: proof.to_owned(),
+    };
+    let struct_len = serde_json::to_vec(&empty)?.len();
+    let tuple_len = serde_json::to_vec(&(
+        &empty.schema,
+        &empty.account_uid,
+        &empty.run_id,
+        &empty.events,
+        &empty.cursors,
+    ))?
+    .len();
+    struct_len
+        .checked_sub(tuple_len)
+        .ok_or(ExecutionLedgerError::Corrupt("source JSON envelope length"))
 }
 
 pub(super) fn attest_indexed(
@@ -339,14 +389,14 @@ pub(super) fn attest_indexed(
     if uid != expected_uid || schema != crate::EXCHANGE_EVIDENCE_SCHEMA_V1 {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
-    let mut digest = Sha256::new();
-    digest.update(b"[");
-    feed_json(&mut digest, &schema)?;
-    digest.update(b",");
-    feed_json(&mut digest, &uid)?;
-    digest.update(b",");
-    feed_json(&mut digest, &run_id)?;
-    digest.update(b",{");
+    let mut writer = SourceHashWriter::new();
+    writer.push(b"[");
+    writer.json(&schema)?;
+    writer.push(b",");
+    writer.json(&uid)?;
+    writer.push(b",");
+    writer.json(&run_id)?;
+    writer.push(b",{");
 
     let mut stmt = connection
         .prepare(
@@ -373,11 +423,11 @@ pub(super) fn attest_indexed(
             return Err(ExecutionLedgerError::Corrupt("indexed source allocation"));
         }
         if count != 0 {
-            digest.update(b",");
+            writer.push(b",");
         }
-        feed_json(&mut digest, &key)?;
-        digest.update(b":");
-        feed_json(&mut digest, &event)?;
+        writer.json(&key)?;
+        writer.push(b":");
+        writer.json(&event)?;
         count += 1;
         if count > crate::exchange_evidence::MAX_EVENTS {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
@@ -385,7 +435,7 @@ pub(super) fn attest_indexed(
     }
     drop(rows);
     drop(stmt);
-    digest.update(b"},{");
+    writer.push(b"},{");
 
     let mut stmt = connection
         .prepare(
@@ -419,11 +469,11 @@ pub(super) fn attest_indexed(
             ));
         }
         if count != 0 {
-            digest.update(b",");
+            writer.push(b",");
         }
-        feed_json(&mut digest, &key)?;
-        digest.update(b":");
-        feed_json(&mut digest, &cursor)?;
+        writer.json(&key)?;
+        writer.push(b":");
+        writer.json(&cursor)?;
         count += 1;
         if count > crate::exchange_evidence::MAX_CURSORS {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
@@ -431,11 +481,18 @@ pub(super) fn attest_indexed(
     }
     drop(rows);
     drop(stmt);
-    digest.update(b"}]");
-    if format!("{:x}", digest.finalize()) != proof {
+    writer.push(b"}]");
+    let (actual, tuple_len) = writer.finish();
+    if actual != proof {
         return Err(ExecutionLedgerError::Corrupt(
             "indexed source canonical digest mismatch",
         ));
+    }
+    let serialized_bytes = tuple_len
+        .checked_add(source_struct_overhead(&schema, &uid, run_id, &proof)?)
+        .ok_or(ExecutionLedgerError::ExchangeEvidenceCapacity)?;
+    if serialized_bytes > crate::exchange_evidence::MAX_BYTES {
+        return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
     }
     let summary = summary(connection, run_id, expected_uid)?;
     Ok(crate::strategy_lifecycle::SourceIdentity {
@@ -643,6 +700,91 @@ mod tests {
         .unwrap();
         assert!(summary(&c, run_id, uid).is_err());
         assert!(attest_indexed(&c, run_id, uid).is_err());
+    }
+
+    #[test]
+    fn indexed_source_exact_legacy_struct_byte_limit() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(TABLES).unwrap();
+        let mut source = DurableExchangeEvidence {
+            schema: crate::EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
+            account_uid: "uid-byte-bound".to_owned(),
+            run_id: "run-byte-bound".to_owned(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        let proof_of = |s: &DurableExchangeEvidence| {
+            checksum(
+                &serde_json::to_vec(&(
+                    &s.schema,
+                    &s.account_uid,
+                    &s.run_id,
+                    &s.events,
+                    &s.cursors,
+                ))
+                .unwrap(),
+            )
+        };
+        source.checksum_sha256 = proof_of(&source);
+        let tuple_len = serde_json::to_vec(&(
+            &source.schema,
+            &source.account_uid,
+            &source.run_id,
+            &source.events,
+            &source.cursors,
+        ))
+        .unwrap()
+        .len();
+        assert_eq!(
+            tuple_len
+                + source_struct_overhead(
+                    &source.schema,
+                    &source.account_uid,
+                    &source.run_id,
+                    &source.checksum_sha256,
+                )
+                .unwrap(),
+            serde_json::to_vec(&source).unwrap().len(),
+        );
+        c.execute(
+            "INSERT INTO native_source_runs VALUES(?1,?2,?3,?4)",
+            params![
+                &source.run_id,
+                &source.account_uid,
+                &source.schema,
+                &source.checksum_sha256
+            ],
+        )
+        .unwrap();
+        assert!(attest_indexed(&c, &source.run_id, &source.account_uid).is_ok());
+
+        // One self-consistent, correctly hashed source exceeding the legacy
+        // serialized size is rejected even though it has only one event.
+        let event = StoredExchangeEvent {
+            payload: serde_json::json!({"blob": "x".repeat(crate::exchange_evidence::MAX_BYTES)}),
+            source_intent_id: None,
+            strategy_run_id: None,
+            allocation: "UNALLOCATED".to_owned(),
+        };
+        source.events.insert("large".to_owned(), event.clone());
+        source.checksum_sha256 = proof_of(&source);
+        assert!(source.validate().is_err());
+        let bytes = encode(&event).unwrap();
+        c.execute(
+            "INSERT INTO native_source_events VALUES(?1,'large',?2,?3)",
+            params![&source.run_id, checksum(&bytes), bytes],
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE native_source_runs SET proof_digest=?1 WHERE run_id=?2",
+            params![&source.checksum_sha256, &source.run_id],
+        )
+        .unwrap();
+        assert!(matches!(
+            attest_indexed(&c, &source.run_id, &source.account_uid),
+            Err(ExecutionLedgerError::ExchangeEvidenceCapacity)
+        ));
     }
 
     #[test]

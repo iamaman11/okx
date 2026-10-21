@@ -24,7 +24,7 @@ pub fn source_receipt_ms(value: &str) -> Option<u64> {
 /// Source-validated empty REST reads must not exhaust 4096 durable cursors.
 /// This is admission logic only, not a timer or source-continuity claim.
 const MIN_REDUNDANT_SOURCE_CURSOR_SPACING_MS: u64 = 300_000;
-const MAX_BYTES: usize = 24 * 1024 * 1024;
+pub(crate) const MAX_BYTES: usize = 24 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
