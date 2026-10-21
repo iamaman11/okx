@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, path::Path, str::FromStr, sync::Arc, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use okx_analysis::{PortfolioRiskAnalysis, StrategyNavRiskEvidence, durable_account_stop_reason};
@@ -8,7 +8,7 @@ use okx_api::{
     RateBudget, RateBudgetSnapshot, TradeApi,
 };
 use okx_execution::{
-    AccountLedgerReconciliation, DurableExchangeEvidence, DurableExecutionLedger, ExecutionAction,
+    AccountKey, AccountLedgerReconciliation, DurableExchangeEvidence, DurableExecutionLedger, ExecutionAction,
     ExecutionLedgerEntry, ExecutionLedgerError, ExecutionLedgerStore, ExecutionLineageBinding,
     ExecutionPlan, ExecutionRiskStop, ExecutionState, ExecutionStatusEnvelope,
     FencedProtectiveShrinkRequest, LeverageAttemptState, ManagedExecutionInventory,
@@ -467,6 +467,7 @@ impl MutationIngress {
 }
 
 pub struct ExecutionRuntime {
+    native_account_key: Option<AccountKey>,
     mutation_ingress: MutationIngress,
     environment: OkxEnvironment,
     mode: ExecutionRuntimeMode,
@@ -477,6 +478,60 @@ pub struct ExecutionRuntime {
     // Held for the full lifetime, including read-only source checkpoints.
     // CONTROL offline migration acquires the same cross-process file lock.
     _writer_lease: std::fs::File,
+}
+
+/// Account-local execution routing inside the EXISTING Agent process.
+///
+/// Each entry is the complete existing execution owner (its own trade
+/// gateway, mutation ingress, SQLite WAL and writer lease). A second owner
+/// for an already-bound account or UID is rejected; routing does not fall
+/// back to another account, does not create a new service, and cannot bypass
+/// the existing Real/Demo native admission or global CAS RiskBook.
+#[derive(Default)]
+pub struct ExecutionRuntimeRegistry {
+    routes: BTreeMap<AccountKey, Arc<ExecutionRuntime>>,
+}
+
+impl ExecutionRuntimeRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registration can only consume an already opened SQLite-native runtime.
+    /// v14 has no immutable typed AccountKey, so it cannot enter this router.
+    pub fn register_existing(
+        &mut self,
+        owner: Arc<ExecutionRuntime>,
+    ) -> Result<AccountKey, ExecutionLedgerError> {
+        let key = owner
+            .native_account_key()
+            .cloned()
+            .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
+        if self.routes.keys().any(|prior| {
+            prior.venue == key.venue
+                && prior.environment == key.environment
+                && (prior.account_id == key.account_id
+                    || prior.uid_fingerprint == key.uid_fingerprint)
+        }) {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        self.routes.insert(key.clone(), owner);
+        Ok(key)
+    }
+
+    /// Exact route only. Missing or cross-environment accounts are NOT_READY,
+    /// never rerouted to the one currently selected Demo/Real account.
+    pub fn get(&self, key: &AccountKey) -> Option<Arc<ExecutionRuntime>> {
+        self.routes.get(key).cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.routes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
 }
 
 impl ExecutionRuntime {
@@ -569,7 +624,7 @@ impl ExecutionRuntime {
             root,
             &mut writer_lease,
         )?;
-        if store.is_sqlite_native() {
+        let native_account_key = if store.is_sqlite_native() {
             let bound = store
                 .bound_native_account_identity()?
                 .ok_or(okx_execution::ExecutionLedgerError::AccountScopeMismatch)?;
@@ -578,16 +633,27 @@ impl ExecutionRuntime {
             } else {
                 okx_execution::LedgerEnvironment::Production
             };
-            let expected_account = if environment.demo { "demo" } else { "real" };
             if bound.venue != okx_execution::LedgerVenue::Okx
                 || bound.environment != expected_environment
-                || bound.account_id != expected_account
             {
                 return Err(okx_execution::ExecutionLedgerError::AccountScopeMismatch.into());
             }
-        }
+            // Account ID is an immutable CONTROL-bound identity. Never assume
+            // all Demo/Real credentials refer to literal "demo"/"real".
+            // The existing native credential preflight independently proves
+            // the exact UID before any venue mutation can be admitted.
+            Some(AccountKey::from(&bound))
+        } else {
+            None
+        };
         let ledger = DurableExecutionLedger::open(store, observed_at_ms)?;
+        if let Some(key) = &native_account_key
+            && !ledger.account_scope_matches(&key.uid_fingerprint)?
+        {
+            return Err(okx_execution::ExecutionLedgerError::AccountScopeMismatch.into());
+        }
         Ok(Self {
+            native_account_key,
             mutation_ingress: MutationIngress::new(),
             environment,
             mode,
@@ -601,6 +667,12 @@ impl ExecutionRuntime {
 
     pub const fn mode(&self) -> ExecutionRuntimeMode {
         self.mode
+    }
+
+    /// The immutable, CONTROL-verified route of this owner. No user-supplied
+    /// account selector or runtime mode can create this binding.
+    pub fn native_account_key(&self) -> Option<&AccountKey> {
+        self.native_account_key.as_ref()
     }
 
     /// The request holds the returned guard THROUGH the final executor
