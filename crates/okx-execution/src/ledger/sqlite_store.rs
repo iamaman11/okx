@@ -380,18 +380,14 @@ pub(super) fn indexed_exact_prepared_batch(
             if expected_ids.get(next_expected).map(String::as_str)
                 != Some(entry.record.plan.intent_id.as_str())
             {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "prepared inventory mismatch",
-                ));
+                return Err(ExecutionLedgerError::Corrupt("prepared inventory mismatch"));
             }
             found.push(entry);
             next_expected += 1;
         }
     }
     if next_expected != expected_ids.len() {
-        return Err(ExecutionLedgerError::Corrupt(
-            "prepared inventory mismatch",
-        ));
+        return Err(ExecutionLedgerError::Corrupt("prepared inventory mismatch"));
     }
     Ok(found)
 }
@@ -2268,6 +2264,69 @@ mod tests {
     }
 
     #[test]
+    fn native_sqlite_transition_survives_evicted_memory_without_replaying_post() {
+        let root = test_root("native-cached-intent-eviction");
+        let db = root.join("account.sqlite");
+        let id = "cache_eviction_native_intent_000001";
+        let plan = ExecutionPlan {
+            schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+            intent_id: id.to_owned(),
+            client_order_id: derive_client_order_id(id),
+            reference_generation: "sha256:reference".to_owned(),
+            account_generation: "sha256:account".to_owned(),
+            account_uid_fingerprint: "a".repeat(64),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            trade_mode: crate::TradeMode::Cross,
+            side: crate::OrderSide::Buy,
+            position_side: PositionSide::Long,
+            action: ExecutionAction::Open,
+            order_type: crate::OrderType::Limit,
+            size: "1".to_owned(),
+            price: "0.1".to_owned(),
+            open_risk: None,
+            risk_binding: None,
+        };
+        let prepared = ExecutionLedgerEntry {
+            record: ExecutionRecord::new(plan),
+            created_at_ms: 1000,
+            updated_at_ms: 1000,
+        };
+        save(
+            &db,
+            &BTreeMap::from([(id.to_owned(), prepared.clone())]),
+            None,
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
+        let store = ExecutionLedgerStore::sqlite_at(&db);
+        let mut engine = DurableExecutionLedger::open(store.clone(), 1001).unwrap();
+        // The SQLite row, not an in-memory historical BTreeMap, must own
+        // both the precise transition and the original immutable plan.
+        engine.entries.clear();
+        assert!(engine.get(id).is_none());
+        assert_eq!(owner_intent(&db, id).unwrap(), Some(prepared));
+        let submitting = engine.begin_submission(id, 1002).unwrap();
+        assert_eq!(submitting.record.state, ExecutionState::Submitting);
+        assert_eq!(engine.get(id), Some(&submitting));
+        drop(engine);
+        let reopened = DurableExecutionLedger::open(store, 1003).unwrap();
+        assert_eq!(
+            reopened.get(id).unwrap().record.state,
+            ExecutionState::UnknownSubmission
+        );
+        let c = Connection::open(&db).unwrap();
+        let post_count: i64 = c
+            .query_row("SELECT COUNT(*) FROM post_attempts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(post_count, 1);
+        assert!(reopened.begin_submission(id, 1004).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_guard_index_keeps_only_material_intents_and_cannot_lose_one() {
         let root = test_root("active-guard-inventory");
         let db = root.join("account.sqlite");
@@ -2328,6 +2387,17 @@ mod tests {
         let guards = indexed_instrument_guards(&db, &uid, "BTC-USDT-SWAP").unwrap();
         assert_eq!(guards.len(), 1);
         assert_eq!(guards[0].record.plan.intent_id, "guarded_intent_000063");
+        let batch = vec!["guarded_intent_000063".to_owned()];
+        assert_eq!(
+            indexed_exact_prepared_batch(&db, &uid, &batch).unwrap(),
+            guards
+        );
+        assert!(indexed_exact_prepared_batch(
+            &db,
+            &uid,
+            &["guarded_intent_000000".to_owned()]
+        )
+        .is_err());
         assert!(
             client_order_id_exists(&db, &uid, &derive_client_order_id("guarded_intent_000001"))
                 .unwrap()
