@@ -1577,9 +1577,9 @@ impl ExecutionLedgerStore {
                 leverage_attempts,
             );
         }
-        if all_entries.get(&changed.record.plan.intent_id) != Some(changed) {
-            return Err(ExecutionLedgerError::IntentConflict);
-        }
+        // The native writer verifies the exact old row and immutable plan
+        // inside its SQLite transaction. It is independent of whether the
+        // current working set has cached this historical intent.
         validate_entry(changed)?;
         validate_strategy_run_binding(
             changed,
@@ -3194,14 +3194,17 @@ impl DurableExecutionLedger {
         intent_id: &str,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
-        let entry = self
-            .get(intent_id)
-            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        let entry = if self.store.sqlite_native {
+            sqlite_store::owner_intent(&self.store.path, intent_id)?
+        } else {
+            self.get(intent_id).cloned()
+        }
+        .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         if entry.record.state == ExecutionState::Rejected
             && entry.record.rejection_code.as_deref()
                 == Some(crate::state::LOCAL_PREPARED_ABANDONED_CODE)
         {
-            return Ok(entry.clone());
+            return Ok(entry);
         }
         self.mutate(intent_id, observed_at_ms, |record| {
             record.abandon_prepared()
@@ -3918,6 +3921,14 @@ impl DurableExecutionLedger {
         intent_id: String,
         entry: ExecutionLedgerEntry,
     ) -> Result<(), ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            // Commit the record and its BEGIN_POST/guard projections before
+            // publishing it to the in-process working set. No full-history
+            // map is required to validate the SQLite durable mutation.
+            self.store.save_changed_intent(&entry, self)?;
+            self.entries.insert(intent_id, entry);
+            return Ok(());
+        }
         self.entries.insert(intent_id.clone(), entry.clone());
         if let Err(error) = self.store.save_changed_intent(&entry, self) {
             self.entries.remove(&intent_id);
@@ -3936,6 +3947,29 @@ impl DurableExecutionLedger {
         F: FnOnce(&mut ExecutionRecord) -> Result<(), ExecutionTransitionError>,
     {
         require_timestamp(observed_at_ms)?;
+        if self.store.sqlite_native {
+            // All native transitions read one authenticated SQL row, apply
+            // the original Rust state machine, and write exactly one WAL
+            // delta. A historical intent can be evicted from RAM safely.
+            let mut next = sqlite_store::owner_intent(&self.store.path, intent_id)?
+                .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+            if self
+                .entries
+                .get(intent_id)
+                .is_some_and(|cached| cached != &next)
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "SQLite cached intent differs from durable owner",
+                ));
+            }
+            let next_timestamp = monotonic_timestamp(&next, observed_at_ms)?;
+            mutation(&mut next.record)?;
+            next.updated_at_ms = next_timestamp;
+            validate_entry(&next)?;
+            self.store.save_changed_intent(&next, self)?;
+            self.entries.insert(intent_id.to_owned(), next.clone());
+            return Ok(next);
+        }
         let original = self
             .entries
             .get(intent_id)

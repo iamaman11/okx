@@ -521,6 +521,44 @@ pub(super) fn indexed_intent_page(
     })
 }
 
+/// Read one exact authoritative record for the single writer. Unlike
+/// user-facing history reads, a staged native owner can be not yet bound to
+/// its credential UID, but the durable manifest and every indexed projection
+/// MUST already agree. Never manufacture a missing account or empty intent.
+pub(super) fn owner_intent(
+    path: &Path,
+    intent_id: &str,
+) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+    if intent_id.is_empty() || intent_id.len() > 128 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "invalid owner intent ID",
+        ));
+    }
+    let c = connect_indexed_read(path)?;
+    let uid: String = c
+        .query_row(
+            "SELECT uid FROM ledger_state WHERE key=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(io)?;
+    require_account_read_scope(&c, &uid, false)?;
+    let sql = format!("{INDEXED_INTENT_COLUMNS} WHERE e.intent_id=?1");
+    let mut stmt = c.prepare(&sql).map_err(io)?;
+    let mut rows = stmt.query(params![intent_id]).map_err(io)?;
+    let found = rows
+        .next()
+        .map_err(io)?
+        .map(|row| verified_indexed_entry(row, &uid))
+        .transpose()?;
+    if rows.next().map_err(io)?.is_some() {
+        return Err(ExecutionLedgerError::Corrupt(
+            "duplicate owner intent",
+        ));
+    }
+    Ok(found)
+}
+
 /// A binding is created only by an authenticated native owner for an
 /// ALREADY VALID, nonempty, UID-scoped ledger. This is not a registration
 /// endpoint or a separate authorizer.
