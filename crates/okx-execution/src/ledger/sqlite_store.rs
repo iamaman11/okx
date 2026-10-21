@@ -666,6 +666,63 @@ where
     Ok(())
 }
 
+/// Source-exact capital epoch opening must not infer a flat account
+/// merely because completed historical intents were evicted from RAM.
+/// Read the material guards and created-since interval from the native
+/// durable owner; support the explicit initially-empty account only.
+pub(super) fn clear_for_capital_opening(
+    path: &Path,
+    expected_uid: &str,
+    started_at_ms: u64,
+) -> Result<bool, ExecutionLedgerError> {
+    if started_at_ms == 0 || expected_uid.is_empty() {
+        return Err(ExecutionLedgerError::CapitalReservationUnattested);
+    }
+    let started = i64::try_from(started_at_ms)
+        .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?;
+    let c = connect_indexed_read(path)?;
+    let uid: String = c
+        .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |row| row.get(0))
+        .map_err(io)?;
+    if uid.is_empty() {
+        let count: i64 = c
+            .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
+            .map_err(io)?;
+        if count != 0 {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        return Ok(true);
+    }
+    if uid != expected_uid {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    require_account_read_scope(&c, expected_uid, false)?;
+    let guards: i64 = c
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM native_guarded_intents LIMIT 1)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(io)?;
+    if guards != 0 {
+        return Ok(false);
+    }
+    let sql = format!(
+        "{INDEXED_INTENT_COLUMNS}
+         WHERE e.uid=?1 AND e.updated_at_ms>=?2
+         ORDER BY e.updated_at_ms,e.intent_id"
+    );
+    let mut stmt = c.prepare(&sql).map_err(io)?;
+    let mut rows = stmt.query(params![expected_uid, started]).map_err(io)?;
+    while let Some(row) = rows.next().map_err(io)? {
+        let entry = verified_indexed_entry(row, expected_uid)?;
+        if entry.created_at_ms >= started_at_ms {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// A binding is created only by an authenticated native owner for an
 /// ALREADY VALID, nonempty, UID-scoped ledger. This is not a registration
 /// endpoint or a separate authorizer.

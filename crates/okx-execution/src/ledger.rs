@@ -1565,8 +1565,8 @@ impl ExecutionLedgerStore {
         ))
     }
 
-    /// Fast native path for an individual intent. The current in-memory
-    /// ledger still owns the state machine and rollback; SQLite commits only
+    /// Fast native path for an individual intent. The active in-memory
+    /// ledger shares the Rust state machine; SQLite commits only
     /// one changed record. JSON v14 continues through the full legacy save.
     fn save_changed_intent(
         &self,
@@ -2656,10 +2656,24 @@ impl DurableExecutionLedger {
             || !source.summary().source_gap_over_two_hours
             || !source.events.is_empty()
             || self.risk_stop.is_some()
-            || self.entries.values().any(|e| {
-                e.created_at_ms >= run.started_at_ms
-                    || e.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
-                    || !e.record.state.is_terminal()
+            || (if self.store.sqlite_native {
+                self.any_entry_created_since(
+                    &run.account_uid_fingerprint,
+                    run.started_at_ms,
+                    |_| true,
+                )
+                .unwrap_or(true)
+                    || self.entries.values().any(|e| {
+                        e.record.strategy_run_id.as_deref()
+                            == Some(run.allocation_id.as_str())
+                            || !e.record.state.is_terminal()
+                    })
+            } else {
+                self.entries.values().any(|e| {
+                    e.created_at_ms >= run.started_at_ms
+                        || e.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
+                        || !e.record.state.is_terminal()
+                })
             })
             || facts
                 .exchange_fills
@@ -2949,11 +2963,19 @@ impl DurableExecutionLedger {
             || !opening.zero_pending_orders
             || !opening.zero_native_protection
             || self.risk_stop.is_some() != rearm.is_some()
-            || self.entries.values().any(|e| {
-                !e.record.state.is_terminal() || e.created_at_ms >= reservation.started_at_ms
-            })
-            || self.entries.values().any(|e| {
-                e.record.plan.account_uid_fingerprint != reservation.account_uid_fingerprint
+            || (if self.store.sqlite_native {
+                !sqlite_store::clear_for_capital_opening(
+                    &self.store.path,
+                    &reservation.account_uid_fingerprint,
+                    reservation.started_at_ms,
+                )
+                .unwrap_or(false)
+            } else {
+                self.entries.values().any(|e| {
+                    !e.record.state.is_terminal() || e.created_at_ms >= reservation.started_at_ms
+                }) || self.entries.values().any(|e| {
+                    e.record.plan.account_uid_fingerprint != reservation.account_uid_fingerprint
+                })
             })
         {
             return Err(ExecutionLedgerError::CapitalReservationUnattested);
