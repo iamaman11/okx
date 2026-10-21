@@ -565,6 +565,60 @@ pub(super) fn indexed_cursor(
     Ok(Some(cursor))
 }
 
+/// Stream one account-scoped native source without constructing a
+/// historical Rust BTreeMap. Each immutable row is hash-verified, decoded,
+/// handed to the caller and discarded before advancing the WAL cursor.
+/// The caller must pin one consistent WAL snapshot for related queries.
+pub(super) fn visit_events<F>(
+    connection: &Connection,
+    run_id: &str,
+    expected_uid: &str,
+    mut visit: F,
+) -> Result<(), ExecutionLedgerError>
+where
+    F: FnMut(&str, &StoredExchangeEvent) -> Result<(), ExecutionLedgerError>,
+{
+    let (uid, schema): (String, String) = connection
+        .query_row(
+            "SELECT uid,source_schema FROM native_source_runs WHERE run_id=?1",
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(io)?;
+    if run_id.is_empty()
+        || uid.is_empty()
+        || uid != expected_uid
+        || schema != crate::exchange_evidence::EXCHANGE_EVIDENCE_SCHEMA_V1
+    {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let mut stmt = connection
+        .prepare(
+            "SELECT event_key,payload_digest,length(payload),payload
+             FROM native_source_events WHERE run_id=?1 ORDER BY event_key",
+        )
+        .map_err(io)?;
+    let mut rows = stmt.query(params![run_id]).map_err(io)?;
+    let mut count = 0usize;
+    while let Some(row) = rows.next().map_err(io)? {
+        let key: String = row.get(0).map_err(io)?;
+        let digest: String = row.get(1).map_err(io)?;
+        let bytes = source_row_bytes(row, 2)?;
+        if checksum(&bytes) != digest {
+            return Err(ExecutionLedgerError::Corrupt(
+                "indexed event stream digest mismatch",
+            ));
+        }
+        let event: StoredExchangeEvent = decode(&bytes)?;
+        count += 1;
+        if count > crate::exchange_evidence::MAX_EVENTS {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+        visit(&key, &event)?;
+    }
+    Ok(())
+}
+
 pub(super) fn read(
     connection: &Connection,
     run_id: &str,
@@ -581,25 +635,12 @@ pub(super) fn read(
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     let mut events = BTreeMap::new();
-    {
-        let mut q = connection
-            .prepare(
-                "SELECT event_key,payload_digest,length(payload),payload FROM native_source_events WHERE run_id=?1",
-            )
-            .map_err(io)?;
-        let mut rows = q.query(params![run_id]).map_err(io)?;
-        while let Some(row) = rows.next().map_err(io)? {
-            let key: String = row.get(0).map_err(io)?;
-            let hash: String = row.get(1).map_err(io)?;
-            let bytes = source_row_bytes(row, 2)?;
-            if checksum(&bytes) != hash {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "exchange source event checksum",
-                ));
-            }
-            events.insert(key, decode::<StoredExchangeEvent>(&bytes)?);
+    visit_events(connection, run_id, expected_uid, |key, event| {
+        if events.insert(key.to_owned(), event.clone()).is_some() {
+            return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
         }
-    }
+        Ok(())
+    })?;
     let mut cursors = BTreeMap::new();
     {
         let mut q = connection
@@ -704,6 +745,17 @@ mod tests {
         let cursor = indexed_cursor(&c, run_id, "receipt-1").unwrap().unwrap();
         assert_eq!(cursor.source, "OKX_REST_ACCOUNT_HISTORY");
         assert!(indexed_cursor(&c, run_id, "missing").unwrap().is_none());
+        let mut visited = 0usize;
+        visit_events(&c, run_id, uid, |_, _| {
+            visited += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(visited, 0);
+        assert!(matches!(
+            visit_events(&c, run_id, "foreign-uid", |_, _| Ok(())),
+            Err(ExecutionLedgerError::AccountScopeMismatch)
+        ));
         let exact = summary(&c, run_id, uid).unwrap();
         assert_eq!(exact.largest_persisted_gap_ms, None);
         assert_eq!(

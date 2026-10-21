@@ -674,14 +674,21 @@ pub(super) fn owner_intent(
 pub(super) fn source_linked_intents(
     path: &Path,
     expected_uid: &str,
-    intent_ids: &BTreeSet<String>,
+    run_id: &str,
 ) -> Result<BTreeMap<String, ExecutionLedgerEntry>, ExecutionLedgerError> {
-    if intent_ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
     let c = connect_indexed_read(path)?;
     c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
     require_indexed_scope(&c, expected_uid)?;
+    let mut intent_ids = BTreeSet::new();
+    // Original SQL evidence, NOT the caller's in-memory event cache, is the
+    // source of linked intent IDs. All reads share one authenticated WAL
+    // snapshot and preserve cross-account isolation.
+    super::sqlite_source::visit_events(&c, run_id, expected_uid, |_, event| {
+        if let Some(id) = &event.source_intent_id {
+            intent_ids.insert(id.clone());
+        }
+        Ok(())
+    })?;
     let sql = format!("{INDEXED_INTENT_COLUMNS} WHERE e.intent_id=?1");
     let mut statement = c.prepare(&sql).map_err(io)?;
     let mut out = BTreeMap::new();
@@ -2905,21 +2912,55 @@ mod tests {
             ),
             Err(ExecutionLedgerError::AccountScopeMismatch)
         ));
-        let linked =
-            source_linked_intents(&db, &uid, &BTreeSet::from([intent_id.to_owned()])).unwrap();
+        // Source-linked IDs are derived only from verified SQL source rows.
+        let event = crate::exchange_evidence::StoredExchangeEvent {
+            payload: serde_json::json!({
+                "source": "OKX_REST_ORDER",
+                "ordId": "venue_order_456"
+            }),
+            source_intent_id: Some(intent_id.to_owned()),
+            strategy_run_id: None,
+            allocation: "UNALLOCATED".to_owned(),
+        };
+        let source_run_id = "sql-source-linked-intents";
+        let src = crate::exchange_evidence::DurableExchangeEvidence {
+            schema: crate::EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
+            account_uid: uid.clone(),
+            run_id: source_run_id.to_owned(),
+            events: BTreeMap::from([("event-1".to_owned(), event.clone())]),
+            cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        let proof = checksum(
+            &serde_json::to_vec(&(
+                &src.schema,
+                &src.account_uid,
+                &src.run_id,
+                &src.events,
+                &src.cursors,
+            ))
+            .unwrap(),
+        );
+        let c = Connection::open(&db).unwrap();
+        c.execute(
+            "INSERT INTO native_source_runs VALUES(?1,?2,?3,?4)",
+            params![source_run_id, &uid, crate::EXCHANGE_EVIDENCE_SCHEMA_V1, proof],
+        )
+        .unwrap();
+        let bytes = encode(&event).unwrap();
+        c.execute(
+            "INSERT INTO native_source_events VALUES(?1,'event-1',?2,?3)",
+            params![source_run_id, checksum(&bytes), bytes],
+        )
+        .unwrap();
+        drop(c);
+        let linked = source_linked_intents(&db, &uid, source_run_id).unwrap();
         assert_eq!(linked.get(intent_id), Some(&entry));
         assert!(matches!(
-            source_linked_intents(
-                &db,
-                &"b".repeat(64),
-                &BTreeSet::from([intent_id.to_owned()])
-            ),
+            source_linked_intents(&db, &"b".repeat(64), source_run_id),
             Err(ExecutionLedgerError::AccountScopeMismatch)
         ));
-        assert!(matches!(
-            source_linked_intents(&db, &uid, &BTreeSet::from(["missing".to_owned()])),
-            Err(ExecutionLedgerError::IntentNotFound(_))
-        ));
+        assert!(source_linked_intents(&db, &uid, "missing-run").is_err());
         drop(reader);
         std::fs::remove_dir_all(root).unwrap();
     }

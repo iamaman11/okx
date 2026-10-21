@@ -2367,12 +2367,7 @@ impl DurableExecutionLedger {
         &self,
         source: &DurableExchangeEvidence,
     ) -> Result<BTreeMap<String, ExecutionLedgerEntry>, ExecutionLedgerError> {
-        let intent_ids = source
-            .events
-            .values()
-            .filter_map(|item| item.source_intent_id.clone())
-            .collect::<BTreeSet<_>>();
-        sqlite_store::source_linked_intents(&self.store.path, &source.account_uid, &intent_ids)
+        sqlite_store::source_linked_intents(&self.store.path, &source.account_uid, &source.run_id)
     }
 
     /// A run-specific mandate is checked on every original risk-increasing
