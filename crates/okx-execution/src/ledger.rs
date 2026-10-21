@@ -2689,8 +2689,7 @@ impl DurableExecutionLedger {
                 )
                 .unwrap_or(true)
                     || self.entries.values().any(|e| {
-                        e.record.strategy_run_id.as_deref()
-                            == Some(run.allocation_id.as_str())
+                        e.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
                             || !e.record.state.is_terminal()
                     })
             } else {

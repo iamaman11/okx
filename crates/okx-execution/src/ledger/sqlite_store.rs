@@ -682,7 +682,9 @@ pub(super) fn clear_for_capital_opening(
         .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?;
     let c = connect_indexed_read(path)?;
     let uid: String = c
-        .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |row| row.get(0))
+        .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |row| {
+            row.get(0)
+        })
         .map_err(io)?;
     if uid.is_empty() {
         let count: i64 = c
