@@ -776,23 +776,30 @@ mod tests {
         .unwrap();
         assert!(attest_indexed(&c, &source.run_id, &source.account_uid).is_ok());
 
-        // One self-consistent, correctly hashed source exceeding the legacy
-        // serialized size is rejected even though it has only one event.
-        let event = StoredExchangeEvent {
-            payload: serde_json::json!({"blob": "x".repeat(crate::exchange_evidence::MAX_BYTES)}),
-            source_intent_id: None,
-            strategy_run_id: None,
-            allocation: "UNALLOCATED".to_owned(),
-        };
-        source.events.insert("large".to_owned(), event.clone());
+        // Individually bounded BLOBs are allowed to be read, but together
+        // exceed the same legacy WHOLE-source serialized JSON byte limit.
+        // This proves we enforce cumulative size, not only row size.
+        for i in 0..2 {
+            let event = StoredExchangeEvent {
+                payload: serde_json::json!({
+                    "blob": "x".repeat(crate::exchange_evidence::MAX_BYTES / 2 + 1024)
+                }),
+                source_intent_id: None,
+                strategy_run_id: None,
+                allocation: "UNALLOCATED".to_owned(),
+            };
+            let key = format!("large-{i}");
+            source.events.insert(key.clone(), event.clone());
+            let bytes = encode(&event).unwrap();
+            assert!(bytes.len() < crate::exchange_evidence::MAX_BYTES);
+            c.execute(
+                "INSERT INTO native_source_events VALUES(?1,?2,?3,?4)",
+                params![&source.run_id, key, checksum(&bytes), bytes],
+            )
+            .unwrap();
+        }
         source.checksum_sha256 = proof_of(&source);
         assert!(source.validate().is_err());
-        let bytes = encode(&event).unwrap();
-        c.execute(
-            "INSERT INTO native_source_events VALUES(?1,'large',?2,?3)",
-            params![&source.run_id, checksum(&bytes), bytes],
-        )
-        .unwrap();
         c.execute(
             "UPDATE native_source_runs SET proof_digest=?1 WHERE run_id=?2",
             params![&source.checksum_sha256, &source.run_id],
