@@ -641,6 +641,7 @@ where
         let source = self
             .ledger
             .exchange_evidence_summary()
+            .map_err(|_| Reject::SourceUnattested)?
             .ok_or(Reject::SourceUnattested)?;
         if source.run_id != run.allocation_id
             || !source.latest_source_complete
