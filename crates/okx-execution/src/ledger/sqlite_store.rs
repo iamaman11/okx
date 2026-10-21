@@ -220,10 +220,7 @@ pub(super) fn open_finance_read(path: &Path) -> Result<Connection, ExecutionLedg
 fn needs_instrument_guard(entry: &ExecutionLedgerEntry) -> bool {
     let record = &entry.record;
     !record.state.is_terminal()
-        || record
-            .mutations
-            .iter()
-            .any(|mutation| mutation.state == OrderMutationState::Submitting)
+        || record.active_mutation().is_some()
         || record.protection_blocks_new_managed_intent()
         || record.reverse.as_ref().is_some_and(|link| {
             link.leg == ReverseLeg::Close

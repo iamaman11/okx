@@ -3477,6 +3477,14 @@ impl DurableExecutionLedger {
         if !entry.record.state.is_terminal() {
             return true;
         }
+        // A terminal parent does not retire an unresolved amend/cancel.
+        // Until native reconciliation proves the mutation terminal, an
+        // additional new-risk/reduce operation cannot borrow its slot.
+        if entry.record.active_mutation().is_some()
+            && (incoming_action.is_risk_increasing() || incoming_action == ExecutionAction::Reduce)
+        {
+            return true;
+        }
         // The ONLY newly permitted reservation is a terminal, fully
         // filled, actively protected old lot proved under the same
         // executor lock by exact venue GET + complete OCO inventory +
