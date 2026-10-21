@@ -3072,11 +3072,7 @@ impl DurableExecutionLedger {
     ) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
         if self.store.sqlite_native {
             if let Some(instrument) = instrument_id {
-                sqlite_store::indexed_instrument_guards(
-                    &self.store.path,
-                    account_uid,
-                    instrument,
-                )
+                sqlite_store::indexed_instrument_guards(&self.store.path, account_uid, instrument)
             } else {
                 sqlite_store::indexed_account_guards(&self.store.path, account_uid)
             }
@@ -3085,8 +3081,7 @@ impl DurableExecutionLedger {
                 .entries
                 .values()
                 .filter(|entry| {
-                    instrument_id
-                        .is_none_or(|inst| entry.record.plan.instrument_id == inst)
+                    instrument_id.is_none_or(|inst| entry.record.plan.instrument_id == inst)
                 })
                 .cloned()
                 .collect())

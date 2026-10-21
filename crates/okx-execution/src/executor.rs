@@ -540,44 +540,44 @@ where
             .operational_entries(account_uid, None)?
             .iter()
             .any(|entry| {
-            let record = &entry.record;
-            let other = record.plan.intent_id != candidate_intent_id;
-            (other
-                && record.plan.action.is_risk_increasing()
-                && record.state == ExecutionState::Prepared)
-                || matches!(
-                    record.state,
-                    ExecutionState::Submitting | ExecutionState::UnknownSubmission
-                )
-                || record.mutations.iter().any(|mutation| {
-                    matches!(
-                        mutation.state,
-                        OrderMutationState::Submitting | OrderMutationState::Unknown
+                let record = &entry.record;
+                let other = record.plan.intent_id != candidate_intent_id;
+                (other
+                    && record.plan.action.is_risk_increasing()
+                    && record.state == ExecutionState::Prepared)
+                    || matches!(
+                        record.state,
+                        ExecutionState::Submitting | ExecutionState::UnknownSubmission
                     )
-                })
-                || record.protection.as_ref().is_some_and(|protection| {
-                    (other
-                        && matches!(
-                            protection.status,
-                            crate::ProtectiveOrderStatus::Pending
-                                | crate::ProtectiveOrderStatus::Failed
-                        ))
-                        || protection.cleanup.as_ref().is_some_and(|cleanup| {
-                            matches!(
-                                cleanup.state,
-                                ProtectiveCleanupState::Submitting
-                                    | ProtectiveCleanupState::Unknown
-                            )
-                        })
-                        || protection.size_amend.as_ref().is_some_and(|amend| {
-                            matches!(
-                                amend.state,
-                                ProtectiveSizeAmendState::Submitting
-                                    | ProtectiveSizeAmendState::Unknown
-                            )
-                        })
-                })
-        }))
+                    || record.mutations.iter().any(|mutation| {
+                        matches!(
+                            mutation.state,
+                            OrderMutationState::Submitting | OrderMutationState::Unknown
+                        )
+                    })
+                    || record.protection.as_ref().is_some_and(|protection| {
+                        (other
+                            && matches!(
+                                protection.status,
+                                crate::ProtectiveOrderStatus::Pending
+                                    | crate::ProtectiveOrderStatus::Failed
+                            ))
+                            || protection.cleanup.as_ref().is_some_and(|cleanup| {
+                                matches!(
+                                    cleanup.state,
+                                    ProtectiveCleanupState::Submitting
+                                        | ProtectiveCleanupState::Unknown
+                                )
+                            })
+                            || protection.size_amend.as_ref().is_some_and(|amend| {
+                                matches!(
+                                    amend.state,
+                                    ProtectiveSizeAmendState::Submitting
+                                        | ProtectiveSizeAmendState::Unknown
+                                )
+                            })
+                    })
+            }))
     }
 
     /// The single executor must cross-check a policy against its OWN durable
