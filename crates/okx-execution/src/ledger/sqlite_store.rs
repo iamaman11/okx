@@ -2312,7 +2312,7 @@ mod tests {
         assert_eq!(submitting.record.state, ExecutionState::Submitting);
         assert_eq!(engine.get(id), Some(&submitting));
         drop(engine);
-        let reopened = DurableExecutionLedger::open(store, 1003).unwrap();
+        let mut reopened = DurableExecutionLedger::open(store, 1003).unwrap();
         assert_eq!(
             reopened.get(id).unwrap().record.state,
             ExecutionState::UnknownSubmission
