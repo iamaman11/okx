@@ -166,7 +166,9 @@ impl AccountContextRegistry {
     }
 
     pub fn get(&self, key: &AccountKey) -> Option<AccountContextHandle> {
-        self.accounts.get(key).map(|owned| Arc::clone(&owned.handle))
+        self.accounts
+            .get(key)
+            .map(|owned| Arc::clone(&owned.handle))
     }
 
     pub fn len(&self) -> usize {
@@ -294,7 +296,12 @@ mod tests {
                 safe_exit.risk_binding = None;
                 ctx.ledger_mut().prepare(safe_exit.clone(), 3500).unwrap();
                 assert_eq!(
-                    ctx.ledger().read_intent(&safe_exit.intent_id).unwrap().unwrap().record.state,
+                    ctx.ledger()
+                        .read_intent(&safe_exit.intent_id)
+                        .unwrap()
+                        .unwrap()
+                        .record
+                        .state,
                     ExecutionState::Prepared
                 );
             }));
