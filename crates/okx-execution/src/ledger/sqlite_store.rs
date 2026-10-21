@@ -2800,14 +2800,18 @@ mod tests {
         assert_eq!(reopened.total_intents().unwrap(), total);
         assert!(reopened.entries().next().is_none());
         assert_eq!(reopened.recent_intents(32).unwrap().len(), 32);
-        assert!(reopened
-            .read_intent("bulk_terminal_intent_000000000")
-            .unwrap()
-            .is_some());
-        assert!(reopened
-            .read_intent(&format!("bulk_terminal_intent_{:09}", total - 1))
-            .unwrap()
-            .is_some());
+        assert!(
+            reopened
+                .read_intent("bulk_terminal_intent_000000000")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            reopened
+                .read_intent(&format!("bulk_terminal_intent_{:09}", total - 1))
+                .unwrap()
+                .is_some()
+        );
         let mut scanned = 0usize;
         reopened
             .visit_historical_entries(|_| {
