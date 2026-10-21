@@ -128,7 +128,7 @@ jobs:
       - name: Accept one million native SQLite terminal intents
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/sqlite-ledger-accounting-epochs-20261020'
         timeout-minutes: 30
-        run: cargo test --locked -p okx-execution --lib sqlite_million_history_bounded_rss -- --ignored --exact --nocapture
+        run: cargo test --locked -p okx-execution --lib sqlite_million_history_bounded_rss -- --ignored --nocapture
 
 
   cloudflare-mcp:
