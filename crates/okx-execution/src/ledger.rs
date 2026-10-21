@@ -2360,6 +2360,68 @@ impl DurableExecutionLedger {
         )
     }
 
+    /// The active source proves a finite set of exact source-intent links.
+    /// NAV/bill reconciliation needs only these indexed originals, never
+    /// every unrelated historical prepared/rejected intent in the epoch.
+    fn native_source_linked_entries(
+        &self,
+        source: &DurableExchangeEvidence,
+    ) -> Result<BTreeMap<String, ExecutionLedgerEntry>, ExecutionLedgerError> {
+        let mut out = BTreeMap::new();
+        for intent_id in source
+            .events
+            .values()
+            .filter_map(|item| item.source_intent_id.as_deref())
+            .collect::<BTreeSet<_>>()
+        {
+            let entry = self
+                .read_intent(intent_id)?
+                .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+            out.insert(intent_id.to_owned(), entry);
+        }
+        Ok(out)
+    }
+
+    /// A run-specific mandate is checked on every original risk-increasing
+    /// intent, including intents that never produced an exchange event.
+    /// This is the exact same policy shared by native SQL streaming and v14.
+    fn nav_stop_policy(
+        entry: &ExecutionLedgerEntry,
+        run: &StrategyCapitalReservation,
+        nav: Decimal,
+        peak: Decimal,
+        gross_loss: Decimal,
+    ) -> Result<Option<&'static str>, ExecutionLedgerError> {
+        if entry.record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
+            || !entry.record.plan.action.is_risk_increasing()
+        {
+            return Ok(None);
+        }
+        let binding = entry
+            .record
+            .plan
+            .risk_binding
+            .as_ref()
+            .ok_or(ExecutionLedgerError::Corrupt("missing run risk policy"))?;
+        if binding.mandate.version != run.mandate_version {
+            return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
+        }
+        let mandate_dd = Decimal::from_str(&binding.mandate.max_drawdown_ratio)
+            .map_err(|_| ExecutionLedgerError::Corrupt("invalid mandate drawdown"))?;
+        let policy_dd = Decimal::from_str(&binding.policy.max_drawdown_ratio)
+            .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy drawdown"))?;
+        let daily = Decimal::from_str(&binding.policy.max_daily_realized_loss_usd)
+            .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy daily loss"))?;
+        Ok(strategy_nav_stop_reason(
+            nav,
+            peak,
+            gross_loss,
+            mandate_dd,
+            policy_dd,
+            daily,
+        ))
+    }
+
     /// Native finance does not materialize all historical intents in an
     /// epoch. The source is still an independently sealed exchange snapshot:
     /// we load ONLY the exact persisted intent IDs named by those events.
@@ -2685,11 +2747,21 @@ impl DurableExecutionLedger {
         }
         let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(source_cursor)?));
         let day = as_of / 86_400_000 * 86_400_000;
-        let run_history = self.run_entries(run)?;
-        let owned: BTreeMap<_, _> = run_history
-            .iter()
-            .map(|entry| (entry.record.plan.intent_id.clone(), entry.clone()))
-            .collect();
+        let run_history = if self.store.sqlite_native {
+            None
+        } else {
+            Some(self.run_entries(run)?)
+        };
+        let owned: BTreeMap<_, _> = if self.store.sqlite_native {
+            self.native_source_linked_entries(evidence)?
+        } else {
+            run_history
+                .as_ref()
+                .expect("legacy run history")
+                .iter()
+                .map(|entry| (entry.record.plan.intent_id.clone(), entry.clone()))
+                .collect()
+        };
         let Some(gross_loss) =
             verified_daily_strategy_bill_loss(evidence, &owned, run, report, day, as_of)?
         else {
@@ -2736,31 +2808,39 @@ impl DurableExecutionLedger {
         point.checksum_sha256 = point.hash()?;
         point.validate()?;
         let mut reason = (nav <= Decimal::ZERO).then_some("STRATEGY_NAV_DEPLETED");
-        // Only exact immutable run-bound plans may supply risk limits.
-        for entry in &run_history {
-            if entry.record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
-                || !entry.record.plan.action.is_risk_increasing()
-            {
-                continue;
+        // Always scan every risk-increasing mandate in the epoch. The SQL
+        // cursor releases each verified row immediately, so 10,000+ inert
+        // historical intents do not exhaust the financial working set.
+        if self.store.sqlite_native {
+            let mut scan_error = None;
+            sqlite_store::visit_entries_created_since(
+                &self.store.path,
+                &run.account_uid_fingerprint,
+                run.started_at_ms,
+                |entry| {
+                    match Self::nav_stop_policy(entry, run, nav, peak, gross_loss) {
+                        Ok(stop) => {
+                            if reason.is_none() {
+                                reason = stop;
+                            }
+                            true
+                        }
+                        Err(err) => {
+                            scan_error = Some(err);
+                            false
+                        }
+                    }
+                },
+            )?;
+            if let Some(err) = scan_error {
+                return Err(err);
             }
-            let binding = entry
-                .record
-                .plan
-                .risk_binding
-                .as_ref()
-                .ok_or(ExecutionLedgerError::Corrupt("missing run risk policy"))?;
-            if binding.mandate.version != run.mandate_version {
-                return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
-            }
-            let mandate_dd = Decimal::from_str(&binding.mandate.max_drawdown_ratio)
-                .map_err(|_| ExecutionLedgerError::Corrupt("invalid mandate drawdown"))?;
-            let policy_dd = Decimal::from_str(&binding.policy.max_drawdown_ratio)
-                .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy drawdown"))?;
-            let daily = Decimal::from_str(&binding.policy.max_daily_realized_loss_usd)
-                .map_err(|_| ExecutionLedgerError::Corrupt("invalid policy daily loss"))?;
-            if reason.is_none() {
-                reason =
-                    strategy_nav_stop_reason(nav, peak, gross_loss, mandate_dd, policy_dd, daily);
+        } else {
+            for entry in run_history.as_ref().expect("legacy run history") {
+                let stop = Self::nav_stop_policy(entry, run, nav, peak, gross_loss)?;
+                if reason.is_none() {
+                    reason = stop;
+                }
             }
         }
         let mut next = self.strategy_periods.clone();
