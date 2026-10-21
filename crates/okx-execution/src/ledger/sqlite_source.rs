@@ -716,14 +716,8 @@ mod tests {
         };
         let proof_of = |s: &DurableExchangeEvidence| {
             checksum(
-                &serde_json::to_vec(&(
-                    &s.schema,
-                    &s.account_uid,
-                    &s.run_id,
-                    &s.events,
-                    &s.cursors,
-                ))
-                .unwrap(),
+                &serde_json::to_vec(&(&s.schema, &s.account_uid, &s.run_id, &s.events, &s.cursors))
+                    .unwrap(),
             )
         };
         source.checksum_sha256 = proof_of(&source);
