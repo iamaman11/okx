@@ -3388,23 +3388,27 @@ impl DurableExecutionLedger {
         }
 
         let busy = if self.store.sqlite_native {
-            // Read only current material guards, not decades of completed
-            // intents. The same Rust predicate remains the sole risk rule.
-            sqlite_store::indexed_instrument_guards(
+            // Only currently material guards matter; exact reverse-continuation
+            // lookup is a fallible SQL proof, never an in-memory shortcut.
+            let guards = sqlite_store::indexed_instrument_guards(
                 &self.store.path,
                 &record.plan.account_uid_fingerprint,
                 &record.plan.instrument_id,
-            )?
-            .iter()
-            .any(|entry| {
-                self.entry_blocks_instrument(
+            )?;
+            let mut busy = false;
+            for entry in &guards {
+                if self.entry_blocks_instrument(
                     entry,
                     &record.plan.intent_id,
                     record.plan.action,
                     reverse_root_bypass,
                     confirmed_coverage,
-                )
-            })
+                )? {
+                    busy = true;
+                    break;
+                }
+            }
+            busy
         } else if confirmed_coverage {
             self.instrument_reserved_with_confirmed_coverage(
                 &record.plan.instrument_id,
@@ -3412,14 +3416,14 @@ impl DurableExecutionLedger {
                 record.plan.action,
                 reverse_root_bypass,
                 true,
-            )
+            )?
         } else {
             self.instrument_reserved(
                 &record.plan.instrument_id,
                 &record.plan.intent_id,
                 record.plan.action,
                 reverse_root_bypass,
-            )
+            )?
         };
         if busy {
             return Err(ExecutionLedgerError::InstrumentBusy);
@@ -3457,7 +3461,7 @@ impl DurableExecutionLedger {
         incoming_intent_id: &str,
         incoming_action: ExecutionAction,
         reverse_root_bypass: Option<&str>,
-    ) -> bool {
+    ) -> Result<bool, ExecutionLedgerError> {
         self.instrument_reserved_with_confirmed_coverage(
             instrument_id,
             incoming_intent_id,
@@ -3474,17 +3478,21 @@ impl DurableExecutionLedger {
         incoming_action: ExecutionAction,
         reverse_root_bypass: Option<&str>,
         confirmed_coverage: bool,
-    ) -> bool {
-        self.entries.values().any(|entry| {
-            entry.record.plan.instrument_id == instrument_id
+    ) -> Result<bool, ExecutionLedgerError> {
+        for entry in self.entries.values() {
+            if entry.record.plan.instrument_id == instrument_id
                 && self.entry_blocks_instrument(
                     entry,
                     incoming_intent_id,
                     incoming_action,
                     reverse_root_bypass,
                     confirmed_coverage,
-                )
-        })
+                )?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn entry_blocks_instrument(
@@ -3494,9 +3502,9 @@ impl DurableExecutionLedger {
         incoming_action: ExecutionAction,
         reverse_root_bypass: Option<&str>,
         confirmed_coverage: bool,
-    ) -> bool {
+    ) -> Result<bool, ExecutionLedgerError> {
         if !entry.record.state.is_terminal() {
-            return true;
+            return Ok(true);
         }
         // A terminal parent does not retire an unresolved amend/cancel.
         // Until native reconciliation proves the mutation terminal, an
@@ -3504,7 +3512,7 @@ impl DurableExecutionLedger {
         if entry.record.active_mutation().is_some()
             && (incoming_action.is_risk_increasing() || incoming_action == ExecutionAction::Reduce)
         {
-            return true;
+            return Ok(true);
         }
         // The ONLY newly permitted reservation is a terminal, fully
         // filled, actively protected old lot proved under the same
@@ -3531,18 +3539,26 @@ impl DurableExecutionLedger {
                             .is_none_or(|amend| amend.state == ProtectiveSizeAmendState::Confirmed)
                 });
             if !proven_old_lot {
-                return true;
+                return Ok(true);
             }
         }
         let Some(reverse) = entry.record.reverse.as_ref() else {
-            return false;
+            return Ok(false);
         };
-        reverse.leg == ReverseLeg::Close
-            && reverse.continuation == ReverseContinuation::Required
-            && entry.record.state == ExecutionState::Filled
-            && !self.entries.contains_key(&reverse.open_intent_id)
-            && !(reverse_root_bypass == Some(reverse.root_intent_id.as_str())
+        if reverse.leg != ReverseLeg::Close
+            || reverse.continuation != ReverseContinuation::Required
+            || entry.record.state != ExecutionState::Filled
+            || (reverse_root_bypass == Some(reverse.root_intent_id.as_str())
                 && incoming_intent_id == reverse.open_intent_id)
+        {
+            return Ok(false);
+        }
+        let open_exists = if self.store.sqlite_native {
+            sqlite_store::owner_intent(&self.store.path, &reverse.open_intent_id)?.is_some()
+        } else {
+            self.entries.contains_key(&reverse.open_intent_id)
+        };
+        Ok(!open_exists)
     }
 
     pub fn begin_submission(
@@ -6423,12 +6439,16 @@ mod tests {
             restarted.prepare(plan("intent_blocked_01234567"), 201),
             Err(ExecutionLedgerError::InstrumentBusy)
         ));
-        assert!(!restarted.instrument_reserved(
-            "DOGE-USDT-SWAP",
-            "intent_close_pending_012345",
-            ExecutionAction::Close,
-            None,
-        ));
+        assert!(
+            !restarted
+                .instrument_reserved(
+                    "DOGE-USDT-SWAP",
+                    "intent_close_pending_012345",
+                    ExecutionAction::Close,
+                    None,
+                )
+                .unwrap()
+        );
 
         let resolved = restarted
             .reconcile_found_with_resolutions(
@@ -6457,12 +6477,16 @@ mod tests {
             Err(ExecutionLedgerError::InstrumentBusy)
         ));
         // A partial reduce cannot safely resize the active venue OCO yet.
-        assert!(restarted.instrument_reserved(
-            "DOGE-USDT-SWAP",
-            "intent_partial_reduce_01234567",
-            ExecutionAction::Reduce,
-            None
-        ));
+        assert!(
+            restarted
+                .instrument_reserved(
+                    "DOGE-USDT-SWAP",
+                    "intent_partial_reduce_01234567",
+                    ExecutionAction::Reduce,
+                    None,
+                )
+                .unwrap()
+        );
         assert!(matches!(
             restarted
                 .prepare(
