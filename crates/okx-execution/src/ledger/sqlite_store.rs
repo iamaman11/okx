@@ -2485,17 +2485,23 @@ mod tests {
         assert!(verified_engine.account_scope_matches(&uid).unwrap());
         // The indexed temporal query checks authoritative created_at_ms,
         // not only updated_at_ms (older intents can be updated later).
-        assert!(verified_engine
-            .any_entry_created_since(&uid, 1060, |entry| {
-                entry.record.plan.intent_id == "guarded_intent_000063"
-            })
-            .unwrap());
-        assert!(!verified_engine
-            .any_entry_created_since(&uid, 2000, |_| true)
-            .unwrap());
-        assert!(verified_engine
-            .any_entry_created_since(&"b".repeat(64), 1060, |_| false)
-            .is_err());
+        assert!(
+            verified_engine
+                .any_entry_created_since(&uid, 1060, |entry| {
+                    entry.record.plan.intent_id == "guarded_intent_000063"
+                })
+                .unwrap()
+        );
+        assert!(
+            !verified_engine
+                .any_entry_created_since(&uid, 2000, |_| true)
+                .unwrap()
+        );
+        assert!(
+            verified_engine
+                .any_entry_created_since(&"b".repeat(64), 1060, |_| false)
+                .is_err()
+        );
         assert!(
             verified_engine
                 .account_scope_matches(&"b".repeat(64))

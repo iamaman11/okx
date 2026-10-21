@@ -814,22 +814,18 @@ impl ExecutionRuntime {
             || run.mandate_version != binding.mandate.version
             || run.allocated_usdt != binding.mandate.capital_base_usd
             || ledger
-                .any_entry_created_since(
-                    &run.account_uid_fingerprint,
-                    run.started_at_ms,
-                    |e| {
-                        (e.record.state == ExecutionState::Rejected
-                            && !inert_terminal_rejection(
-                                &e.record,
-                                &run.account_uid_fingerprint,
-                                &run.allocation_id,
-                            ))
-                            || (!e.record.state.is_terminal()
-                                && (e.record.plan.intent_id != plan.intent_id
-                                    || e.record.plan != *plan
-                                    || e.record.state != ExecutionState::Prepared))
-                    },
-                )
+                .any_entry_created_since(&run.account_uid_fingerprint, run.started_at_ms, |e| {
+                    (e.record.state == ExecutionState::Rejected
+                        && !inert_terminal_rejection(
+                            &e.record,
+                            &run.account_uid_fingerprint,
+                            &run.allocation_id,
+                        ))
+                        || (!e.record.state.is_terminal()
+                            && (e.record.plan.intent_id != plan.intent_id
+                                || e.record.plan != *plan
+                                || e.record.state != ExecutionState::Prepared))
+                })
                 .ok()?
             || !reconcile_account_ledger(ledger, facts).ok()?.consistent
         {
@@ -935,11 +931,7 @@ impl ExecutionRuntime {
             || executor.ledger().capital_reservation().is_some_and(|r| {
                 executor
                     .ledger()
-                    .any_entry_created_since(
-                        &r.account_uid_fingerprint,
-                        r.started_at_ms,
-                        |_| true,
-                    )
+                    .any_entry_created_since(&r.account_uid_fingerprint, r.started_at_ms, |_| true)
                     .unwrap_or(true)
             })
         {
