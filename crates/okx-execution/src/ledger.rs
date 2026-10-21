@@ -2377,12 +2377,11 @@ impl DurableExecutionLedger {
         captured: bool,
         excluded_candidate: Option<&ExecutionPlan>,
     ) -> Result<StrategyFinancialPeriod, ExecutionLedgerError> {
-        let source = self.exchange_evidence.as_ref().ok_or(
-            ExecutionLedgerError::ExchangeSourceIncomplete,
-        )?;
-        if source.account_uid != run.account_uid_fingerprint
-            || source.run_id != run.allocation_id
-        {
+        let source = self
+            .exchange_evidence
+            .as_ref()
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        if source.account_uid != run.account_uid_fingerprint || source.run_id != run.allocation_id {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
         let ids = source
@@ -2421,8 +2420,7 @@ impl DurableExecutionLedger {
             &run.account_uid_fingerprint,
             run.started_at_ms,
             |entry| {
-                if excluded_candidate.is_some_and(|p| p.intent_id == entry.record.plan.intent_id)
-                {
+                if excluded_candidate.is_some_and(|p| p.intent_id == entry.record.plan.intent_id) {
                     excluded_seen = true;
                     if !Self::inert_candidate_for_financial_projection(
                         &entry.record,
@@ -2433,9 +2431,7 @@ impl DurableExecutionLedger {
                     }
                     return true;
                 }
-                if entry.created_at_ms > run.started_at_ms
-                    && !entry.record.state.is_terminal()
-                {
+                if entry.created_at_ms > run.started_at_ms && !entry.record.state.is_terminal() {
                     extra_reasons.insert("unresolved_managed_execution");
                 }
                 if entry.record.order_id.is_some() {
@@ -2564,14 +2560,7 @@ impl DurableExecutionLedger {
         let run = self.capital_reservation.as_ref()?;
         if self.store.sqlite_native {
             return self
-                .native_financial_period(
-                    run,
-                    facts,
-                    coherent,
-                    &BTreeMap::new(),
-                    true,
-                    Some(plan),
-                )
+                .native_financial_period(run, facts, coherent, &BTreeMap::new(), true, Some(plan))
                 .ok();
         }
         let mut entries = self.run_entries(run).ok()?;
