@@ -299,6 +299,183 @@ pub(super) fn summary(
     })
 }
 
+/// Stream the original v1 canonical JSON tuple through SHA256 without
+/// materializing either exchange map. Row digests, source identity and the
+/// exact historical tuple digest must all agree before a native owner can
+/// report a valid cold attestation.
+struct SourceHashWriter<'a>(&'a mut Sha256);
+
+impl std::io::Write for SourceHashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn feed_json<T: serde::Serialize>(
+    digest: &mut Sha256,
+    value: &T,
+) -> Result<(), ExecutionLedgerError> {
+    serde_json::to_writer(SourceHashWriter(digest), value)?;
+    Ok(())
+}
+
+pub(super) fn attest_indexed(
+    connection: &Connection,
+    run_id: &str,
+    expected_uid: &str,
+) -> Result<crate::strategy_lifecycle::SourceIdentity, ExecutionLedgerError> {
+    let (uid, schema, proof): (String, String, String) = connection
+        .query_row(
+            "SELECT uid,source_schema,proof_digest FROM native_source_runs WHERE run_id=?1",
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(io)?;
+    if uid != expected_uid || schema != crate::EXCHANGE_EVIDENCE_SCHEMA_V1 {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"[");
+    feed_json(&mut digest, &schema)?;
+    digest.update(b",");
+    feed_json(&mut digest, &uid)?;
+    digest.update(b",");
+    feed_json(&mut digest, &run_id)?;
+    digest.update(b",{");
+
+    let mut stmt = connection
+        .prepare(
+            "SELECT event_key,payload_digest,payload
+             FROM native_source_events WHERE run_id=?1 ORDER BY event_key",
+        )
+        .map_err(io)?;
+    let mut rows = stmt.query(params![run_id]).map_err(io)?;
+    let mut count = 0usize;
+    while let Some(row) = rows.next().map_err(io)? {
+        let key: String = row.get(0).map_err(io)?;
+        let saved_hash: String = row.get(1).map_err(io)?;
+        let bytes: Vec<u8> = row.get(2).map_err(io)?;
+        if checksum(&bytes) != saved_hash {
+            return Err(ExecutionLedgerError::Corrupt("indexed source event digest"));
+        }
+        let event: StoredExchangeEvent = decode(&bytes)?;
+        if !matches!(event.allocation.as_str(), "RUN_OWNED" | "UNALLOCATED")
+            || (event.allocation == "RUN_OWNED"
+                && (event.strategy_run_id.as_deref() != Some(run_id)
+                    || event.source_intent_id.is_none()))
+            || (event.allocation == "UNALLOCATED" && event.strategy_run_id.is_some())
+        {
+            return Err(ExecutionLedgerError::Corrupt("indexed source allocation"));
+        }
+        if count != 0 {
+            digest.update(b",");
+        }
+        feed_json(&mut digest, &key)?;
+        digest.update(b":");
+        feed_json(&mut digest, &event)?;
+        count += 1;
+        if count > crate::exchange_evidence::MAX_EVENTS {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+    }
+    drop(rows);
+    drop(stmt);
+    digest.update(b"},{");
+
+    let mut stmt = connection
+        .prepare(
+            "SELECT cursor_key,receipt_ms,payload_digest,payload
+             FROM native_source_cursors WHERE run_id=?1 ORDER BY cursor_key",
+        )
+        .map_err(io)?;
+    let mut rows = stmt.query(params![run_id]).map_err(io)?;
+    let mut count = 0usize;
+    while let Some(row) = rows.next().map_err(io)? {
+        let key: String = row.get(0).map_err(io)?;
+        let receipt_ms: i64 = row.get(1).map_err(io)?;
+        let saved_hash: String = row.get(2).map_err(io)?;
+        let bytes: Vec<u8> = row.get(3).map_err(io)?;
+        if checksum(&bytes) != saved_hash {
+            return Err(ExecutionLedgerError::Corrupt("indexed source cursor digest"));
+        }
+        let cursor: ExchangeCoverageCursor = decode(&bytes)?;
+        if i64::try_from(
+            crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
+                .ok_or(ExecutionLedgerError::Corrupt("invalid indexed source receipt"))?,
+        )
+        .ok()
+            != Some(receipt_ms)
+        {
+            return Err(ExecutionLedgerError::Corrupt("indexed source receipt index"));
+        }
+        if count != 0 {
+            digest.update(b",");
+        }
+        feed_json(&mut digest, &key)?;
+        digest.update(b":");
+        feed_json(&mut digest, &cursor)?;
+        count += 1;
+        if count > crate::exchange_evidence::MAX_CURSORS {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+    }
+    drop(rows);
+    drop(stmt);
+    digest.update(b"}]");
+    if format!("{:x}", digest.finalize()) != proof {
+        return Err(ExecutionLedgerError::Corrupt(
+            "indexed source canonical digest mismatch",
+        ));
+    }
+    let summary = summary(connection, run_id, expected_uid)?;
+    Ok(crate::strategy_lifecycle::SourceIdentity {
+        account_uid: uid,
+        run_id: run_id.to_owned(),
+        checksum_sha256: proof,
+        source_gap_over_two_hours: summary.source_gap_over_two_hours,
+    })
+}
+
+/// Exact key lookup for NAV/source lineage after a full immutable
+/// streaming digest has attested the same WAL read snapshot.
+pub(super) fn indexed_cursor(
+    connection: &Connection,
+    run_id: &str,
+    key: &str,
+) -> Result<Option<ExchangeCoverageCursor>, ExecutionLedgerError> {
+    let row: Option<(i64, String, Vec<u8>)> = connection
+        .query_row(
+            "SELECT receipt_ms,payload_digest,payload
+             FROM native_source_cursors WHERE run_id=?1 AND cursor_key=?2",
+            params![run_id, key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(io)?;
+    let Some((receipt, hash, bytes)) = row else {
+        return Ok(None);
+    };
+    if checksum(&bytes) != hash {
+        return Err(ExecutionLedgerError::Corrupt("indexed NAV source cursor checksum"));
+    }
+    let cursor: ExchangeCoverageCursor = decode(&bytes)?;
+    if i64::try_from(
+        crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
+            .ok_or(ExecutionLedgerError::Corrupt("invalid NAV source receipt"))?,
+    )
+    .ok()
+        != Some(receipt)
+    {
+        return Err(ExecutionLedgerError::Corrupt("indexed NAV source cursor timestamp"));
+    }
+    Ok(Some(cursor))
+}
+
 pub(super) fn read(
     connection: &Connection,
     run_id: &str,
@@ -432,6 +609,12 @@ mod tests {
             )
             .unwrap();
         }
+        let indexed = attest_indexed(&c, run_id, uid).unwrap();
+        assert_eq!(indexed.checksum_sha256, source.checksum_sha256);
+        assert_eq!(indexed.run_id, run_id);
+        let cursor = indexed_cursor(&c, run_id, "receipt-1").unwrap().unwrap();
+        assert_eq!(cursor.source, "OKX_REST_ACCOUNT_HISTORY");
+        assert!(indexed_cursor(&c, run_id, "missing").unwrap().is_none());
         let exact = summary(&c, run_id, uid).unwrap();
         assert_eq!(exact.largest_persisted_gap_ms, None);
         assert_eq!(
@@ -450,6 +633,7 @@ mod tests {
         )
         .unwrap();
         assert!(summary(&c, run_id, uid).is_err());
+        assert!(attest_indexed(&c, run_id, uid).is_err());
     }
 
     #[test]

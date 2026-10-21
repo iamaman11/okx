@@ -2050,11 +2050,18 @@ fn attest_snapshot(
     let source = state
         .source_run_id
         .as_deref()
-        .map(|run_id| super::sqlite_source::read(&c, run_id, &uid))
+        .map(|run_id| super::sqlite_source::attest_indexed(&c, run_id, &uid))
         .transpose()?;
-    state
-        .periods
-        .validate(state.reservation.as_ref(), source.as_ref())?;
+    state.periods.validate_indexed(
+        state.reservation.as_ref(),
+        source.as_ref(),
+        |key| {
+            let Some(run_id) = state.source_run_id.as_deref() else {
+                return Ok(None);
+            };
+            super::sqlite_source::indexed_cursor(&c, run_id, key)
+        },
+    )?;
     validate_leverage_attempts(&state.leverage, state.reservation.as_ref())?;
 
     let mut owner_digest = Sha256::new();
@@ -3498,6 +3505,15 @@ mod tests {
         .unwrap();
         let first = load(&p, 10).unwrap();
         assert_eq!(first.3.as_ref(), Some(&source));
+        let c = Connection::open(&p).unwrap();
+        let indexed = super::sqlite_source::attest_indexed(
+            &c,
+            &run.allocation_id,
+            &run.account_uid_fingerprint,
+        )
+        .unwrap();
+        assert_eq!(indexed.checksum_sha256, source.checksum_sha256);
+        drop(c);
         assert_eq!(source_summary(&p).unwrap(), Some(source.summary()));
         assert_eq!(first.2.as_ref(), Some(&run));
         // The metadata-only path must preserve the exact same source
