@@ -740,6 +740,34 @@ pub(super) fn count_account_intents(path: &Path) -> Result<usize, ExecutionLedge
     usize::try_from(rows).map_err(|_| ExecutionLedgerError::Corrupt("native inventory overflow"))
 }
 
+/// Stream immutable, checked execution rows without allocating any
+/// historical collection. Trade authority remains with the existing owner.
+pub(super) fn visit_account_history<F>(
+    path: &Path,
+    mut visit: F,
+) -> Result<(), ExecutionLedgerError>
+where
+    F: FnMut(&ExecutionLedgerEntry) -> bool,
+{
+    let c = connect_indexed_read(path)?;
+    let uid: String = c
+        .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |row| {
+            row.get(0)
+        })
+        .map_err(io)?;
+    require_account_read_scope(&c, &uid, false)?;
+    let sql = format!("{INDEXED_INTENT_COLUMNS} ORDER BY e.intent_id");
+    let mut stmt = c.prepare(&sql).map_err(io)?;
+    let mut rows = stmt.query([]).map_err(io)?;
+    while let Some(row) = rows.next().map_err(io)? {
+        let entry = verified_indexed_entry(row, &uid)?;
+        if !visit(&entry) {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// A binding is created only by an authenticated native owner for an
 /// ALREADY VALID, nonempty, UID-scoped ledger. This is not a registration
 /// endpoint or a separate authorizer.

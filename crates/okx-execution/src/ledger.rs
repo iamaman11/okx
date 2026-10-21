@@ -3162,6 +3162,27 @@ impl DurableExecutionLedger {
         }
     }
 
+    /// Full-history read-only streaming cursor for account reconciliation.
+    /// Each decoded and authenticated SQL row is released after the callback.
+    pub(crate) fn visit_historical_entries<F>(
+        &self,
+        mut visit: F,
+    ) -> Result<(), ExecutionLedgerError>
+    where
+        F: FnMut(&ExecutionLedgerEntry) -> bool,
+    {
+        if self.store.sqlite_native {
+            sqlite_store::visit_account_history(&self.store.path, visit)
+        } else {
+            for entry in self.entries.values() {
+                if !visit(entry) {
+                    break;
+                }
+            }
+            Ok(())
+        }
+    }
+
     /// Old account-wide reconciliation algorithms still require a complete
     /// in-RAM history. Until their indexed equivalent is accepted, denying
     /// incomplete materialization is mandatory: never claim consistent=true
