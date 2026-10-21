@@ -2826,10 +2826,20 @@ impl DurableExecutionLedger {
         Ok(closed)
     }
 
-    pub fn exchange_evidence_summary(&self) -> Option<ExchangeEvidenceSummary> {
-        self.exchange_evidence
-            .as_ref()
-            .map(DurableExchangeEvidence::summary)
+    /// A source summary is an authenticated read of the account's native
+    /// SQLite owner. SQL errors propagate; they are never an empty account
+    /// or positive coverage witness.
+    pub fn exchange_evidence_summary(
+        &self,
+    ) -> Result<Option<ExchangeEvidenceSummary>, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            sqlite_store::source_summary(&self.store.path)
+        } else {
+            Ok(self
+                .exchange_evidence
+                .as_ref()
+                .map(DurableExchangeEvidence::summary))
+        }
     }
 
     pub fn risk_stop(&self) -> Option<&ExecutionRiskStop> {

@@ -934,6 +934,40 @@ pub(super) fn bound_account_identity(
 /// The cold attestation enforces the entire original snapshot, post fences
 /// and guard inventory before these bounded-state views may be used.
 /// The same account writer lease must remain held by the calling Engine.
+/// A report or risk freshness gate reads the source from the same account
+/// SQL owner, not an in-memory copy of its historical exchange evidence.
+pub(super) fn source_summary(
+    path: &Path,
+) -> Result<Option<ExchangeEvidenceSummary>, ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    let (uid, digest, bytes): (String, String, Vec<u8>) = c
+        .query_row(
+            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(io)?;
+    if checksum(&bytes) != digest {
+        return Err(ExecutionLedgerError::Corrupt("native source state digest mismatch"));
+    }
+    require_indexed_scope(&c, &uid)?;
+    let state: StoredState = decode(&bytes)?;
+    if state.version != 1 {
+        return Err(ExecutionLedgerError::Corrupt("native source state version"));
+    }
+    let Some(run_id) = state.source_run_id else {
+        return Ok(None);
+    };
+    if state
+        .reservation
+        .as_ref()
+        .is_none_or(|run| run.account_uid_fingerprint != uid || run.allocation_id != run_id)
+    {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    super::sqlite_source::summary(&c, &run_id, &uid).map(Some)
+}
+
 pub(super) fn load_operational(path: &Path) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
     attest_snapshot(path, None)?;
     let c = connect(path, false)?;
@@ -3234,11 +3268,13 @@ mod tests {
         .unwrap();
         let first = load(&p, 10).unwrap();
         assert_eq!(first.3.as_ref(), Some(&source));
+        assert_eq!(source_summary(&p).unwrap(), Some(source.summary()));
         assert_eq!(first.2.as_ref(), Some(&run));
         // The metadata-only path must preserve the exact same source
         // and financial projections as a full original save.
         save_metadata(&p, None, Some(&run), Some(&source), &history, &[]).unwrap();
         assert_eq!(load(&p, 10).unwrap(), first);
+        assert_eq!(source_summary(&p).unwrap(), Some(source.summary()));
         save(
             &p,
             &BTreeMap::new(),

@@ -358,7 +358,9 @@ pub fn reconcile_account_ledger(
         .capital_reservation()
         .map(|capital| assess_flat_strategy_nav(capital, ledger, facts))
         .transpose()?;
-    result.exchange_evidence = ledger.exchange_evidence_summary();
+    result.exchange_evidence = ledger
+        .exchange_evidence_summary()
+        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
     result.strategy_nav_watermark = ledger.strategy_nav_watermark().cloned();
     result.strategy_nav_checkpoint_count = ledger.strategy_nav_point_count();
     result.strategy_risk_stop = ledger.risk_stop().cloned();

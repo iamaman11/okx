@@ -706,6 +706,8 @@ impl ExecutionRuntime {
             run.started_at_ms,
             ledger
                 .exchange_evidence_summary()
+                .ok()
+                .flatten()
                 .and_then(|source| source.latest_source_received_at_ms),
             now_ms,
         )
@@ -741,7 +743,7 @@ impl ExecutionRuntime {
                 reconciliation.source_checkpoint_deferred = true;
             }
         }
-        reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary();
+        reconciliation.exchange_evidence = executor.ledger().exchange_evidence_summary()?;
         reconciliation.financial_period = if executor.ledger().unverified_run().is_some() {
             None
         } else {
@@ -836,7 +838,7 @@ impl ExecutionRuntime {
         executor
             .capture_exchange_evidence_fresh_cursor(facts)
             .ok()?;
-        let source = executor.ledger().exchange_evidence_summary()?;
+        let source = executor.ledger().exchange_evidence_summary().ok()??;
         if source.run_id != run.allocation_id
             || !source.latest_source_complete
             || source.source_gap_over_two_hours

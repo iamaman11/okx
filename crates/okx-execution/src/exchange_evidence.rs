@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use crate::{ExecutionLedgerEntry, ExecutionLedgerError, StrategyCapitalReservation};
 
 pub const EXCHANGE_EVIDENCE_SCHEMA_V1: &str = "okx.exchange-evidence/v1";
-const MAX_EVENTS: usize = 40_000;
-const MAX_CURSORS: usize = 4_096;
+pub(crate) const MAX_EVENTS: usize = 40_000;
+pub(crate) const MAX_CURSORS: usize = 4_096;
 pub const MAX_SOURCE_COVERAGE_GAP_MS: u64 = 7_200_000;
 
 /// Timestamp of the native authenticated REST history RECEIPT, not OKX's

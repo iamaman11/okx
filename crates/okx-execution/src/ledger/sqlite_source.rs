@@ -182,6 +182,105 @@ pub(super) fn persist(
     Ok(())
 }
 
+/// Exact, bounded-memory native source summary. Cursors are scanned in
+/// receipt order and individually authenticated; old events remain indexed
+/// in SQLite rather than being reconstructed as a historical Rust map.
+/// Cold owner attestation separately verifies the complete source digest.
+pub(super) fn summary(
+    connection: &Connection,
+    run_id: &str,
+    expected_uid: &str,
+) -> Result<ExchangeEvidenceSummary, ExecutionLedgerError> {
+    let (uid, schema, proof): (String, String, String) = connection
+        .query_row(
+            "SELECT uid,source_schema,proof_digest FROM native_source_runs WHERE run_id=?1",
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(io)?;
+    if uid != expected_uid {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    if schema != crate::exchange_evidence::EXCHANGE_EVIDENCE_SCHEMA_V1
+        || proof.len() != 64
+        || !proof.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(ExecutionLedgerError::Corrupt("native source summary identity"));
+    }
+    let event_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM native_source_events WHERE run_id=?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .map_err(io)?;
+    let events = usize::try_from(event_rows)
+        .map_err(|_| ExecutionLedgerError::Corrupt("native event inventory overflow"))?;
+    if events > crate::exchange_evidence::MAX_EVENTS {
+        return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+    }
+    let mut stmt = connection
+        .prepare(
+            "SELECT cursor_key,receipt_ms,payload_digest,payload
+             FROM native_source_cursors WHERE run_id=?1
+             ORDER BY receipt_ms,cursor_key",
+        )
+        .map_err(io)?;
+    let mut rows = stmt.query(params![run_id]).map_err(io)?;
+    let mut cursors = 0usize;
+    let mut oldest_asof = None::<u64>;
+    let mut latest_asof = None::<u64>;
+    let mut previous_receipt = None::<u64>;
+    let mut largest_gap = None::<u64>;
+    let mut latest_complete = false;
+    while let Some(row) = rows.next().map_err(io)? {
+        let _key: String = row.get(0).map_err(io)?;
+        let stored_receipt: i64 = row.get(1).map_err(io)?;
+        let digest: String = row.get(2).map_err(io)?;
+        let bytes: Vec<u8> = row.get(3).map_err(io)?;
+        if checksum(&bytes) != digest {
+            return Err(ExecutionLedgerError::Corrupt("native source summary checksum"));
+        }
+        let cursor: ExchangeCoverageCursor = decode(&bytes)?;
+        let receipt = crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
+            .ok_or(ExecutionLedgerError::Corrupt("invalid native source receipt"))?;
+        if i64::try_from(receipt).ok() != Some(stored_receipt)
+            || previous_receipt.is_some_and(|prior| receipt < prior)
+        {
+            return Err(ExecutionLedgerError::Corrupt("native source receipt index mismatch"));
+        }
+        if let Some(prior) = previous_receipt {
+            let gap = receipt - prior;
+            largest_gap = Some(largest_gap.unwrap_or(0).max(gap));
+        }
+        previous_receipt = Some(receipt);
+        oldest_asof = Some(oldest_asof.map_or(cursor.account_as_of_ms, |v| v.min(cursor.account_as_of_ms)));
+        latest_asof = Some(latest_asof.map_or(cursor.account_as_of_ms, |v| v.max(cursor.account_as_of_ms)));
+        latest_complete = cursor.order_complete && cursor.fill_complete && cursor.bill_complete;
+        cursors += 1;
+        if cursors > crate::exchange_evidence::MAX_CURSORS {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+    }
+    Ok(ExchangeEvidenceSummary {
+        schema: crate::exchange_evidence::EXCHANGE_EVIDENCE_SCHEMA_V1,
+        run_id: run_id.to_owned(),
+        events,
+        cursors,
+        checksum_sha256: proof,
+        latest_source_complete: previous_receipt.is_some() && latest_complete,
+        oldest_source_asof_ms: oldest_asof,
+        latest_source_asof_ms: latest_asof,
+        latest_source_received_at_ms: previous_receipt,
+        largest_persisted_gap_ms: largest_gap,
+        source_gap_over_two_hours: largest_gap.is_some_and(|gap| gap > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS),
+        remaining_source_cursors: crate::exchange_evidence::MAX_CURSORS - cursors,
+        remaining_events: crate::exchange_evidence::MAX_EVENTS - events,
+        next_source_coverage_deadline_ms: previous_receipt
+            .and_then(|last| last.checked_add(crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS)),
+    })
+}
+
 pub(super) fn read(
     connection: &Connection,
     run_id: &str,
