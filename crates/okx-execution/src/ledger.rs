@@ -2508,20 +2508,20 @@ impl DurableExecutionLedger {
             },
         )?;
         if let Some(candidate) = excluded_candidate {
-            // The candidate may predate the source's latest native events.
-            // Read it independently so exclusion can never hide an UNKNOWN.
-            if !excluded_seen {
-                if let Some(entry) = self.read_intent(&candidate.intent_id)? {
-                    if !Self::inert_candidate_for_financial_projection(
+            // Read an old candidate by ID even if it is absent from source.
+            // Only a proven unsent PREPARED may be excluded from finance.
+            if !excluded_seen
+                && self.read_intent(&candidate.intent_id)?.is_some_and(|entry| {
+                    !Self::inert_candidate_for_financial_projection(
                         &entry.record,
                         candidate,
                         &run.allocation_id,
-                    ) {
-                        return Err(ExecutionLedgerError::Corrupt(
-                            "non-inert financial new-risk candidate",
-                        ));
-                    }
-                }
+                    )
+                })
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "non-inert financial new-risk candidate",
+                ));
             }
         }
         let mut report = crate::assess_persisted_financial_period_with_verified_source(
@@ -2549,37 +2549,19 @@ impl DurableExecutionLedger {
         Ok(report)
     }
 
-    /// The financial Rust evaluator is still a finite-memory consumer. Read
-    /// ONLY the active capital epoch with a strict upper bound; at the cap
-    /// fail closed instead of silently claiming complete NAV/PnL from partial
-    /// source. Current source receipts remain independently verified.
+    /// Legacy v14 alone keeps the historical borrowed financial snapshot.
+    /// Native SQLite callers MUST use indexed source links + full-run
+    /// streaming checks, never silently resurrect a materialized epoch map.
     pub(crate) fn run_entries(
         &self,
-        run: &StrategyCapitalReservation,
+        _run: &StrategyCapitalReservation,
     ) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
-        if !self.store.sqlite_native {
-            return Ok(self.entries.values().cloned().collect());
+        if self.store.sqlite_native {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native finance cannot materialize epoch intents",
+            ));
         }
-        const MAX_RUN_FINANCIAL_ROWS: usize = 8192;
-        let mut selected = Vec::new();
-        let mut exceeded = false;
-        sqlite_store::visit_entries_created_since(
-            &self.store.path,
-            &run.account_uid_fingerprint,
-            run.started_at_ms,
-            |entry| {
-                if selected.len() >= MAX_RUN_FINANCIAL_ROWS {
-                    exceeded = true;
-                    return false;
-                }
-                selected.push(entry.clone());
-                true
-            },
-        )?;
-        if exceeded {
-            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
-        }
-        Ok(selected)
+        Ok(self.entries.values().cloned().collect())
     }
 
     /// An unsent risk-increasing candidate is a planned operation, not a
