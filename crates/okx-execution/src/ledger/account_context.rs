@@ -130,11 +130,10 @@ impl AccountContextRegistry {
         observed_at_ms: u64,
     ) -> Result<(), ExecutionLedgerError> {
         if self.accounts.contains_key(expected)
-            || self.accounts.values().any(|ctx| {
-                ctx.lock()
-                    .map(|owned| owned.root == root)
-                    .unwrap_or(true)
-            })
+            || self
+                .accounts
+                .values()
+                .any(|ctx| ctx.lock().map(|owned| owned.root == root).unwrap_or(true))
         {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
@@ -168,9 +167,9 @@ impl AccountContextRegistry {
 mod tests {
     use super::*;
     use crate::{
-        ExecutionAction, ExecutionLedgerEntry, ExecutionPlan, ExecutionRecord,
-        ExecutionState, OrderSide, OrderType, PositionSide, StrategyPeriodHistory, TradeMode,
-        EXECUTION_PLAN_SCHEMA_V1, derive_client_order_id,
+        EXECUTION_PLAN_SCHEMA_V1, ExecutionAction, ExecutionLedgerEntry, ExecutionPlan,
+        ExecutionRecord, ExecutionState, OrderSide, OrderType, PositionSide, StrategyPeriodHistory,
+        TradeMode, derive_client_order_id,
     };
     use std::{collections::BTreeMap, fs, thread};
 
@@ -239,17 +238,17 @@ mod tests {
 
     #[test]
     fn ten_native_account_contexts_are_isolated_and_exclude_second_writers() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-account-contexts-ten-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("okx-account-contexts-ten-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let mut registry = AccountContextRegistry::new();
         let mut identities = Vec::new();
         for ordinal in 1..=10 {
             let account_root = root.join(format!("account-{ordinal}"));
             let (key, intent_id) = fixture(&account_root, ordinal);
-            registry.register_existing(&account_root, &key, 3000).unwrap();
+            registry
+                .register_existing(&account_root, &key, 3000)
+                .unwrap();
             identities.push((account_root, key, intent_id));
         }
         assert_eq!(registry.len(), 10);
@@ -264,7 +263,12 @@ mod tests {
                 assert_eq!(ctx.root(), account_root);
                 assert_eq!(AccountKey::from(ctx.identity()), key);
                 assert_eq!(
-                    ctx.ledger().read_intent(&intent_id).unwrap().unwrap().record.state,
+                    ctx.ledger()
+                        .read_intent(&intent_id)
+                        .unwrap()
+                        .unwrap()
+                        .record
+                        .state,
                     ExecutionState::Rejected
                 );
                 assert_eq!(ctx.ledger().total_intents().unwrap(), 1);
@@ -276,10 +280,18 @@ mod tests {
             worker.join().unwrap();
         }
         let (first_root, first_key, _) = &identities[0];
-        assert!(registry.register_existing(first_root, first_key, 3000).is_err());
+        assert!(
+            registry
+                .register_existing(first_root, first_key, 3000)
+                .is_err()
+        );
         let mut impostor = first_key.clone();
         impostor.uid_fingerprint = "f".repeat(64);
-        assert!(registry.register_existing(first_root, &impostor, 3000).is_err());
+        assert!(
+            registry
+                .register_existing(first_root, &impostor, 3000)
+                .is_err()
+        );
         drop(registry);
         // The lease is released only after every handle is gone, and a
         // restart revalidates each independent native owner without replay.

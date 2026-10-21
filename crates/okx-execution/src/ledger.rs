@@ -365,7 +365,9 @@ impl ArchivedRunKind {
 }
 
 mod account_context;
-pub use account_context::{AccountContext, AccountContextRegistry, AccountKey, AccountContextHandle};
+pub use account_context::{
+    AccountContext, AccountContextHandle, AccountContextRegistry, AccountKey,
+};
 
 type LoadedExecutionLedger = (
     BTreeMap<String, ExecutionLedgerEntry>,
