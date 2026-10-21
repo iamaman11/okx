@@ -2832,7 +2832,7 @@ mod tests {
                 Some("long"),
             )
             .unwrap(),
-            Some(entry),
+            Some(entry.clone()),
         );
         // Only the exact original UID, run boundary, order, instrument,
         // client ID, side and position may establish strategy ownership.
