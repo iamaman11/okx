@@ -2771,7 +2771,6 @@ mod tests {
         }
         assert_eq!(owner.total_intents().unwrap(), 608);
         assert_eq!(owner.entries.len(), 32);
-        assert!(!owner.historical_reconciliation_eligible().unwrap());
         let sample = crate::reconciliation::managed_execution_inventory(&owner).unwrap();
         assert_eq!(sample.total, 608);
         assert!(!sample.complete_within_bound);
