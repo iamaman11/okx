@@ -220,6 +220,10 @@ pub(super) fn open_finance_read(path: &Path) -> Result<Connection, ExecutionLedg
 fn needs_instrument_guard(entry: &ExecutionLedgerEntry) -> bool {
     let record = &entry.record;
     !record.state.is_terminal()
+        || record
+            .mutations
+            .iter()
+            .any(|mutation| mutation.state == OrderMutationState::Submitting)
         || record.protection_blocks_new_managed_intent()
         || record.reverse.as_ref().is_some_and(|link| {
             link.leg == ReverseLeg::Close
@@ -268,6 +272,56 @@ pub(super) fn indexed_instrument_guards(
         result.push(entry);
     }
     Ok(result)
+}
+
+/// Only active guards can contain a lost native BEGIN_POST or an in-flight
+/// order mutation. The caller holds the same account writer lease used to
+/// apply UNKNOWN transitions; no status here authorizes a second venue POST.
+///
+/// Staging tests may be unbound before physical owner cutover, but immutable
+/// ledger UID and state digest are still verified. Published accounts use
+/// the same UID and stricter bound-owner checks at their cold boundary.
+pub(super) fn indexed_recovery_candidates(
+    path: &Path,
+    expected_uid: &str,
+) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    require_account_read_scope(&c, expected_uid, false)?;
+    let sql = "SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
+                      i.instrument_id,i.requested_action,i.plan_sha256,i.current_state,i.created_at_ms,
+                      g.entry_digest
+               FROM native_guarded_intents g
+               JOIN ledger_entries e ON e.intent_id=g.intent_id
+               LEFT JOIN intents i ON i.intent_id=e.intent_id
+               ORDER BY g.intent_id";
+    let mut stmt = c.prepare(sql).map_err(io)?;
+    let mut rows = stmt.query([]).map_err(io)?;
+    let mut pending = Vec::new();
+    while let Some(row) = rows.next().map_err(io)? {
+        let digest: String = row.get(3).map_err(io)?;
+        let guard_digest: String = row.get(10).map_err(io)?;
+        if digest != guard_digest {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native recovery guard digest mismatch",
+            ));
+        }
+        let entry = verified_indexed_entry(row, expected_uid)?;
+        if !needs_instrument_guard(&entry) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native recovery guard projection mismatch",
+            ));
+        }
+        if entry.record.state == ExecutionState::Submitting
+            || entry
+                .record
+                .mutations
+                .iter()
+                .any(|mutation| mutation.state == OrderMutationState::Submitting)
+        {
+            pending.push(entry);
+        }
+    }
+    Ok(pending)
 }
 
 /// The authoritative ledger_entries UNIQUE index checks client IDs without
@@ -3118,7 +3172,8 @@ mod tests {
         };
         let historic_id = "old_historical_intent_00001";
         let inflight_id = "inflight_post_intent_00001";
-        let historic = make(historic_id);
+        let mut historic = make(historic_id);
+        historic.record.abandon_prepared().unwrap();
         let mut inflight = make(inflight_id);
         let periods = StrategyPeriodHistory::default();
         let entries = BTreeMap::from([
@@ -3141,8 +3196,14 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM domain_events", [], |r| r.get(0))
             .unwrap();
         drop(prior);
+        let candidates = indexed_recovery_candidates(&path, "account-uid-test").unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], inflight);
         let opened =
             DurableExecutionLedger::open(ExecutionLedgerStore::sqlite_at(&path), 1002).unwrap();
+        assert!(indexed_recovery_candidates(&path, "account-uid-test")
+            .unwrap()
+            .is_empty());
         assert_eq!(
             opened.get(inflight_id).unwrap().record.state,
             ExecutionState::UnknownSubmission

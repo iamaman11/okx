@@ -2071,19 +2071,56 @@ impl DurableExecutionLedger {
         ) = store.load()?;
         let mut recovered = BTreeMap::new();
 
-        for (id, entry) in &mut entries {
-            let mut changed = false;
-            if entry.record.state == ExecutionState::Submitting {
-                entry.record.mark_unknown_submission()?;
-                entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
-                changed = true;
+        if store.sqlite_native {
+            // Native recovery only visits material active guards; historical
+            // terminal intents are verified by the cold storage attestation,
+            // never scanned again to discover a pending POST/mutation.
+            if let Some(first) = entries.values().next() {
+                let uid = first.record.plan.account_uid_fingerprint.clone();
+                for candidate in sqlite_store::indexed_recovery_candidates(&store.path, &uid)? {
+                    let id = candidate.record.plan.intent_id.clone();
+                    let entry = entries
+                        .get_mut(&id)
+                        .ok_or(ExecutionLedgerError::Corrupt(
+                            "native recovery intent absent from cold snapshot",
+                        ))?;
+                    if *entry != candidate {
+                        return Err(ExecutionLedgerError::Corrupt(
+                            "native recovery WAL snapshot mismatch",
+                        ));
+                    }
+                    let mut changed = false;
+                    if entry.record.state == ExecutionState::Submitting {
+                        entry.record.mark_unknown_submission()?;
+                        entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
+                        changed = true;
+                    }
+                    if entry.record.recover_inflight_mutation() {
+                        entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
+                        changed = true;
+                    }
+                    if changed {
+                        recovered.insert(id, entry.clone());
+                    }
+                }
             }
-            if entry.record.recover_inflight_mutation() {
-                entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
-                changed = true;
-            }
-            if changed {
-                recovered.insert(id.clone(), entry.clone());
+        } else {
+            // The pre-cutover v14 owner preserves its original full-snapshot
+            // recovery semantics until the native storage switch.
+            for (id, entry) in &mut entries {
+                let mut changed = false;
+                if entry.record.state == ExecutionState::Submitting {
+                    entry.record.mark_unknown_submission()?;
+                    entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
+                    changed = true;
+                }
+                if entry.record.recover_inflight_mutation() {
+                    entry.updated_at_ms = monotonic_timestamp(entry, observed_at_ms)?;
+                    changed = true;
+                }
+                if changed {
+                    recovered.insert(id.clone(), entry.clone());
+                }
             }
         }
 
