@@ -2944,7 +2944,12 @@ mod tests {
         let c = Connection::open(&db).unwrap();
         c.execute(
             "INSERT INTO native_source_runs VALUES(?1,?2,?3,?4)",
-            params![source_run_id, &uid, crate::EXCHANGE_EVIDENCE_SCHEMA_V1, proof],
+            params![
+                source_run_id,
+                &uid,
+                crate::EXCHANGE_EVIDENCE_SCHEMA_V1,
+                proof
+            ],
         )
         .unwrap();
         let bytes = encode(&event).unwrap();
