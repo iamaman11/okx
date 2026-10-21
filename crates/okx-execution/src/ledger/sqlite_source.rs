@@ -389,6 +389,11 @@ pub(super) fn attest_indexed(
     if uid != expected_uid || schema != crate::EXCHANGE_EVIDENCE_SCHEMA_V1 {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
+    if uid.trim().is_empty() || run_id.trim().is_empty() {
+        return Err(ExecutionLedgerError::Corrupt(
+            "indexed exchange source identity missing",
+        ));
+    }
     let mut writer = SourceHashWriter::new();
     writer.push(b"[");
     writer.json(&schema)?;
@@ -778,6 +783,23 @@ mod tests {
         assert!(matches!(
             attest_indexed(&c, &source.run_id, &source.account_uid),
             Err(ExecutionLedgerError::ExchangeEvidenceCapacity)
+        ));
+    }
+
+    #[test]
+    fn streaming_source_identity_cannot_accept_empty_legacy_owner() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(TABLES).unwrap();
+        c.execute(
+            "INSERT INTO native_source_runs VALUES('','',?1,?2)",
+            params![crate::EXCHANGE_EVIDENCE_SCHEMA_V1, "0".repeat(64)],
+        )
+        .unwrap();
+        assert!(matches!(
+            attest_indexed(&c, "", ""),
+            Err(ExecutionLedgerError::Corrupt(
+                "indexed exchange source identity missing"
+            ))
         ));
     }
 
