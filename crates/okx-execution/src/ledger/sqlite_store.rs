@@ -2781,12 +2781,54 @@ mod tests {
         // client ID, side and position may establish strategy ownership.
         for (started, ord, client, instrument, side, position) in [
             (1_000, None, client_id.as_str(), "BTC-USDT-SWAP", None, None),
-            (1_000, Some("other_order"), client_id.as_str(), "BTC-USDT-SWAP", None, None),
-            (1_000, Some("venue_order_456"), "foreign_client", "BTC-USDT-SWAP", None, None),
-            (1_000, Some("venue_order_456"), client_id.as_str(), "ETH-USDT-SWAP", None, None),
-            (1_000, Some("venue_order_456"), client_id.as_str(), "BTC-USDT-SWAP", Some("sell"), None),
-            (1_000, Some("venue_order_456"), client_id.as_str(), "BTC-USDT-SWAP", None, Some("short")),
-            (1_101, Some("venue_order_456"), client_id.as_str(), "BTC-USDT-SWAP", None, None),
+            (
+                1_000,
+                Some("other_order"),
+                client_id.as_str(),
+                "BTC-USDT-SWAP",
+                None,
+                None,
+            ),
+            (
+                1_000,
+                Some("venue_order_456"),
+                "foreign_client",
+                "BTC-USDT-SWAP",
+                None,
+                None,
+            ),
+            (
+                1_000,
+                Some("venue_order_456"),
+                client_id.as_str(),
+                "ETH-USDT-SWAP",
+                None,
+                None,
+            ),
+            (
+                1_000,
+                Some("venue_order_456"),
+                client_id.as_str(),
+                "BTC-USDT-SWAP",
+                Some("sell"),
+                None,
+            ),
+            (
+                1_000,
+                Some("venue_order_456"),
+                client_id.as_str(),
+                "BTC-USDT-SWAP",
+                None,
+                Some("short"),
+            ),
+            (
+                1_101,
+                Some("venue_order_456"),
+                client_id.as_str(),
+                "BTC-USDT-SWAP",
+                None,
+                None,
+            ),
         ] {
             assert!(
                 lookup(&uid, started, ord, client, instrument, side, position)
