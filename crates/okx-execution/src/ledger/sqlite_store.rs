@@ -321,6 +321,81 @@ pub(super) fn indexed_recovery_candidates(
     Ok(pending)
 }
 
+/// A bounded caller-proved batch can retire only ALL currently unsent
+/// PREPARED intents of this account. Read the active material SQL projection
+/// (rather than its unbounded historical journal), validate each BLOB and
+/// preserve a fail-closed no-UNKNOWN rule under the account's writer lease.
+pub(super) fn indexed_exact_prepared_batch(
+    path: &Path,
+    expected_uid: &str,
+    expected_ids: &[String],
+) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
+    if expected_ids.is_empty()
+        || expected_ids.len() > 32
+        || !expected_ids.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        return Err(ExecutionLedgerError::Corrupt(
+            "invalid native exact prepared inventory",
+        ));
+    }
+    let c = connect_indexed_read(path)?;
+    require_account_read_scope(&c, expected_uid, false)?;
+    let mut stmt = c
+        .prepare(
+            "SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
+                    i.instrument_id,i.requested_action,i.plan_sha256,i.current_state,i.created_at_ms,
+                    g.entry_digest
+             FROM native_guarded_intents g
+             JOIN ledger_entries e ON e.intent_id=g.intent_id
+             LEFT JOIN intents i ON i.intent_id=e.intent_id
+             ORDER BY g.intent_id",
+        )
+        .map_err(io)?;
+    let mut rows = stmt.query([]).map_err(io)?;
+    let mut found = Vec::with_capacity(expected_ids.len());
+    let mut next_expected = 0;
+    while let Some(row) = rows.next().map_err(io)? {
+        let digest: String = row.get(3).map_err(io)?;
+        let guard_digest: String = row.get(10).map_err(io)?;
+        if digest != guard_digest {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native prepared guard digest mismatch",
+            ));
+        }
+        let entry = verified_indexed_entry(row, expected_uid)?;
+        if !needs_instrument_guard(&entry) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native prepared inventory index mismatch",
+            ));
+        }
+        if matches!(
+            entry.record.state,
+            ExecutionState::Submitting | ExecutionState::UnknownSubmission
+        ) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "ledger account or unresolved POST mismatch",
+            ));
+        }
+        if entry.record.state == ExecutionState::Prepared {
+            if expected_ids.get(next_expected).map(String::as_str)
+                != Some(entry.record.plan.intent_id.as_str())
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "prepared inventory mismatch",
+                ));
+            }
+            found.push(entry);
+            next_expected += 1;
+        }
+    }
+    if next_expected != expected_ids.len() {
+        return Err(ExecutionLedgerError::Corrupt(
+            "prepared inventory mismatch",
+        ));
+    }
+    Ok(found)
+}
+
 /// The authoritative ledger_entries UNIQUE index checks client IDs without
 /// searching all historical intents. The caller retains its account lease.
 pub(super) fn client_order_id_exists(

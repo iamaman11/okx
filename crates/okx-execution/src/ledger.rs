@@ -3140,11 +3140,13 @@ impl DurableExecutionLedger {
         plan: ExecutionPlan,
         observed_at_ms: u64,
     ) -> Result<PrepareDisposition, ExecutionLedgerError> {
-        let root = self
-            .entries
-            .get(root_intent_id)
-            .cloned()
-            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(root_intent_id.to_owned()))?;
+        let root = if self.store.sqlite_native {
+            let uid = &plan.account_uid_fingerprint;
+            sqlite_store::indexed_intent(&self.store.path, uid, root_intent_id)?
+        } else {
+            self.entries.get(root_intent_id).cloned()
+        }
+        .ok_or_else(|| ExecutionLedgerError::IntentNotFound(root_intent_id.to_owned()))?;
         let reverse = root
             .record
             .reverse
@@ -3228,36 +3230,52 @@ impl DurableExecutionLedger {
         }
         // Exact set equality avoids accidentally clearing only a subset and
         // reporting readiness while other unsent records remain outstanding.
-        let pending = self
-            .entries
-            .iter()
-            .filter(|(_, entry)| entry.record.state == ExecutionState::Prepared)
-            .map(|(id, _)| id.as_str())
-            .collect::<Vec<_>>();
-        if pending != expected_ids.iter().map(String::as_str).collect::<Vec<_>>() {
-            return Err(ExecutionLedgerError::Corrupt("prepared inventory mismatch"));
-        }
-        if self.entries.values().any(|entry| {
-            entry.record.plan.account_uid_fingerprint != account_uid
-                || matches!(
-                    entry.record.state,
-                    ExecutionState::Submitting | ExecutionState::UnknownSubmission
-                )
-        }) {
-            return Err(ExecutionLedgerError::Corrupt(
-                "ledger account or unresolved POST mismatch",
-            ));
-        }
+        let native_pending = if self.store.sqlite_native {
+            Some(sqlite_store::indexed_exact_prepared_batch(
+                &self.store.path,
+                account_uid,
+                expected_ids,
+            )?)
+        } else {
+            let pending = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.record.state == ExecutionState::Prepared)
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>();
+            if pending != expected_ids.iter().map(String::as_str).collect::<Vec<_>>() {
+                return Err(ExecutionLedgerError::Corrupt("prepared inventory mismatch"));
+            }
+            if self.entries.values().any(|entry| {
+                entry.record.plan.account_uid_fingerprint != account_uid
+                    || matches!(
+                        entry.record.state,
+                        ExecutionState::Submitting | ExecutionState::UnknownSubmission
+                    )
+            }) {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "ledger account or unresolved POST mismatch",
+                ));
+            }
+            None
+        };
         // Validate every changed entry before the one SQLite transaction.
         // The existing executor holds its sole account writer lease; there
         // is no partial in-memory commit or second authority.
         let mut changed = BTreeMap::new();
         for id in expected_ids {
-            let mut entry = self
-                .entries
-                .get(id)
-                .cloned()
-                .ok_or_else(|| ExecutionLedgerError::IntentNotFound(id.clone()))?;
+            let mut entry = if let Some(pending) = &native_pending {
+                pending
+                    .iter()
+                    .find(|entry| entry.record.plan.intent_id == *id)
+                    .cloned()
+                    .ok_or_else(|| ExecutionLedgerError::IntentNotFound(id.clone()))?
+            } else {
+                self.entries
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| ExecutionLedgerError::IntentNotFound(id.clone()))?
+            };
             let timestamp = monotonic_timestamp(&entry, observed_at_ms)?;
             // Keep the same state machine used by single-intent abandon:
             // only an unsent PREPARED is eligible, never BEGIN_POST/UNKNOWN.
@@ -3360,7 +3378,7 @@ impl DurableExecutionLedger {
             };
         }
 
-        if self.entries.len() >= self.store.max_records {
+        if !self.store.sqlite_native && self.entries.len() >= self.store.max_records {
             return Err(ExecutionLedgerError::CapacityExceeded(
                 self.store.max_records,
             ));
