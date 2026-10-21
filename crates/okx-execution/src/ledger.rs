@@ -2367,19 +2367,16 @@ impl DurableExecutionLedger {
         &self,
         source: &DurableExchangeEvidence,
     ) -> Result<BTreeMap<String, ExecutionLedgerEntry>, ExecutionLedgerError> {
-        let mut out = BTreeMap::new();
-        for intent_id in source
+        let intent_ids = source
             .events
             .values()
-            .filter_map(|item| item.source_intent_id.as_deref())
-            .collect::<BTreeSet<_>>()
-        {
-            let entry = self
-                .read_intent(intent_id)?
-                .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
-            out.insert(intent_id.to_owned(), entry);
-        }
-        Ok(out)
+            .filter_map(|item| item.source_intent_id.clone())
+            .collect::<BTreeSet<_>>();
+        sqlite_store::source_linked_intents(
+            &self.store.path,
+            &source.account_uid,
+            &intent_ids,
+        )
     }
 
     /// A run-specific mandate is checked on every original risk-increasing
@@ -2441,19 +2438,11 @@ impl DurableExecutionLedger {
         if source.account_uid != run.account_uid_fingerprint || source.run_id != run.allocation_id {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        let ids = source
-            .events
-            .values()
-            .filter_map(|item| item.source_intent_id.as_deref())
-            .collect::<BTreeSet<_>>();
-        let mut entries = Vec::with_capacity(ids.len());
+        let linked = self.native_source_linked_entries(source)?;
+        let mut entries = Vec::with_capacity(linked.len());
         let mut extra_reasons = BTreeSet::new();
         let mut excluded_seen = false;
-        for intent_id in ids {
-            let Some(entry) = self.read_intent(intent_id)? else {
-                extra_reasons.insert("source_intent_not_present");
-                continue;
-            };
+        for (intent_id, entry) in linked {
             if excluded_candidate.is_some_and(|p| p.intent_id == intent_id) {
                 excluded_seen = true;
                 if !Self::inert_candidate_for_financial_projection(

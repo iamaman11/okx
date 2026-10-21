@@ -667,6 +667,41 @@ pub(super) fn owner_intent(
     Ok(found)
 }
 
+/// Read only the exact immutable intent IDs referenced by the sealed
+/// source, under ONE pinned account-scoped WAL snapshot. Unlike opening
+/// SQLite per fill/bill this has constant connection overhead and cannot
+/// accidentally sample mixed exchange-account owners.
+pub(super) fn source_linked_intents(
+    path: &Path,
+    expected_uid: &str,
+    intent_ids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, ExecutionLedgerEntry>, ExecutionLedgerError> {
+    if intent_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let c = connect_indexed_read(path)?;
+    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
+    require_indexed_scope(&c, expected_uid)?;
+    let sql = format!("{INDEXED_INTENT_COLUMNS} WHERE e.intent_id=?1");
+    let mut statement = c.prepare(&sql).map_err(io)?;
+    let mut out = BTreeMap::new();
+    for id in intent_ids {
+        if id.is_empty() || id.len() > 128 {
+            return Err(ExecutionLedgerError::Corrupt("invalid source-owned intent ID"));
+        }
+        let mut rows = statement.query(params![id]) .map_err(io)?;
+        let Some(row) = rows.next().map_err(io)? else {
+            return Err(ExecutionLedgerError::IntentNotFound(id.clone()));
+        };
+        let value = verified_indexed_entry(row, expected_uid)?;
+        if rows.next().map_err(io)?.is_some() {
+            return Err(ExecutionLedgerError::Corrupt("duplicate source-owned intent"));
+        }
+        out.insert(id.clone(), value);
+    }
+    Ok(out)
+}
+
 /// Read a risk predicate over intents CREATED during the current
 /// run without building a historical BTreeMap or selecting all terminal
 /// account operations. Every row is authenticated against its exact BLOB
@@ -2865,6 +2900,21 @@ mod tests {
                 None
             ),
             Err(ExecutionLedgerError::AccountScopeMismatch)
+        ));
+        let linked = source_linked_intents(
+            &db,
+            &uid,
+            &BTreeSet::from([intent_id.to_owned()]),
+        )
+        .unwrap();
+        assert_eq!(linked.get(intent_id), Some(&entry));
+        assert!(matches!(
+            source_linked_intents(&db, &"b".repeat(64), &BTreeSet::from([intent_id.to_owned()])),
+            Err(ExecutionLedgerError::AccountScopeMismatch)
+        ));
+        assert!(matches!(
+            source_linked_intents(&db, &uid, &BTreeSet::from(["missing".to_owned()])),
+            Err(ExecutionLedgerError::IntentNotFound(_))
         ));
         drop(reader);
         std::fs::remove_dir_all(root).unwrap();
