@@ -2726,7 +2726,9 @@ mod tests {
             plan.client_order_id = derive_client_order_id(&plan.intent_id);
             let prepared = owner.prepare(plan.clone(), 2200 + index).unwrap();
             assert!(matches!(prepared, PrepareDisposition::Created(_)));
-            owner.abandon_prepared(&plan.intent_id, 2201 + index).unwrap();
+            owner
+                .abandon_prepared(&plan.intent_id, 2201 + index)
+                .unwrap();
             assert!(owner.entries.len() <= 32);
         }
         assert_eq!(owner.total_intents().unwrap(), 608);
@@ -2736,7 +2738,9 @@ mod tests {
         assert_eq!(sample.total, 608);
         assert!(!sample.complete_within_bound);
         assert_eq!(
-            owner.read_intent("bounded_historical_intent_000001").unwrap(),
+            owner
+                .read_intent("bounded_historical_intent_000001")
+                .unwrap(),
             entries.get("bounded_historical_intent_000001").cloned()
         );
         drop(owner);

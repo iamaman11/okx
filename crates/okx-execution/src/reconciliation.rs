@@ -588,7 +588,11 @@ fn reconcile_exchange_evidence(
     let observed_clients = exchange_orders
         .iter()
         .map(|order| order.client_order_id.as_str())
-        .chain(exchange_fills.iter().map(|fill| fill.client_order_id.as_str()))
+        .chain(
+            exchange_fills
+                .iter()
+                .map(|fill| fill.client_order_id.as_str()),
+        )
         .collect::<BTreeSet<_>>();
     let observed_order_ids = exchange_fills
         .iter()
@@ -628,81 +632,82 @@ fn reconcile_exchange_evidence(
             {
                 relevant_managed_order_ids.insert(id.to_owned());
             }
-        let matches = by_client
-            .get(plan.client_order_id.as_str())
-            .cloned()
-            .unwrap_or_default();
-        if matches.len() > 1 {
-            duplicate_managed_client = Some(plan.client_order_id.clone());
-            return false;
-        }
-
-        let observed = matches.first().copied();
-        if let Some(order) = observed {
-            if order.instrument_id != plan.instrument_id {
-                identity_mismatches += 1;
-                return true;
+            let matches = by_client
+                .get(plan.client_order_id.as_str())
+                .cloned()
+                .unwrap_or_default();
+            if matches.len() > 1 {
+                duplicate_managed_client = Some(plan.client_order_id.clone());
+                return false;
             }
-            if let Some(expected_order_id) = entry.record.order_id.as_deref()
-                && order.order_id != expected_order_id
-            {
-                identity_mismatches += 1;
-                return true;
-            }
-        }
 
-        let fill_observed = exchange_fills.iter().any(|fill| {
-            fill.client_order_id == plan.client_order_id
-                || entry
-                    .record
-                    .order_id
-                    .as_deref()
-                    .is_some_and(|order_id| fill.order_id.as_deref() == Some(order_id))
-        });
-
-        match entry.record.state {
-            ExecutionState::Prepared | ExecutionState::Rejected => {
-                if observed.is_some() {
-                    unexpected_orders += 1;
+            let observed = matches.first().copied();
+            if let Some(order) = observed {
+                if order.instrument_id != plan.instrument_id {
+                    identity_mismatches += 1;
+                    return true;
                 }
-                if fill_observed {
-                    unexpected_fills += 1;
+                if let Some(expected_order_id) = entry.record.order_id.as_deref()
+                    && order.order_id != expected_order_id
+                {
+                    identity_mismatches += 1;
+                    return true;
                 }
             }
-            ExecutionState::Submitting
-            | ExecutionState::Acknowledged
-            | ExecutionState::UnknownSubmission
-            | ExecutionState::Live
-            | ExecutionState::PartiallyFilled
-            | ExecutionState::Filled
-            | ExecutionState::Canceled => {
-                if observed.is_some() {
-                    matched += 1;
-                } else {
-                    unresolved += 1;
-                    if unmatched_historical.len() < MAX_UNMATCHED_HISTORICAL_ROWS {
-                        unmatched_historical.push(ManagedIntentOutsideExchangeWindow {
-                        intent_id: plan.intent_id.clone(),
-                        state: entry.record.state,
-                        ledger_terminal: entry.record.state.is_terminal(),
-                        recorded_order_id: entry.record.order_id.clone(),
-                        evidence_status: "NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW",
-                        });
+
+            let fill_observed = exchange_fills.iter().any(|fill| {
+                fill.client_order_id == plan.client_order_id
+                    || entry
+                        .record
+                        .order_id
+                        .as_deref()
+                        .is_some_and(|order_id| fill.order_id.as_deref() == Some(order_id))
+            });
+
+            match entry.record.state {
+                ExecutionState::Prepared | ExecutionState::Rejected => {
+                    if observed.is_some() {
+                        unexpected_orders += 1;
+                    }
+                    if fill_observed {
+                        unexpected_fills += 1;
+                    }
+                }
+                ExecutionState::Submitting
+                | ExecutionState::Acknowledged
+                | ExecutionState::UnknownSubmission
+                | ExecutionState::Live
+                | ExecutionState::PartiallyFilled
+                | ExecutionState::Filled
+                | ExecutionState::Canceled => {
+                    if observed.is_some() {
+                        matched += 1;
+                    } else {
+                        unresolved += 1;
+                        if unmatched_historical.len() < MAX_UNMATCHED_HISTORICAL_ROWS {
+                            unmatched_historical.push(ManagedIntentOutsideExchangeWindow {
+                                intent_id: plan.intent_id.clone(),
+                                state: entry.record.state,
+                                ledger_terminal: entry.record.state.is_terminal(),
+                                recorded_order_id: entry.record.order_id.clone(),
+                                evidence_status: "NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW",
+                            });
+                        }
                     }
                 }
             }
-        }
-                true
+            true
         })
         .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
     if let Some(client_order_id) = duplicate_managed_client {
-        return Err(AccountLedgerReconciliationError::DuplicateManagedExchangeOrder {
-            client_order_id,
-        });
+        return Err(
+            AccountLedgerReconciliationError::DuplicateManagedExchangeOrder { client_order_id },
+        );
     }
-    if historical_count != ledger
-        .total_intents()
-        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?
+    if historical_count
+        != ledger
+            .total_intents()
+            .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?
     {
         return Err(AccountLedgerReconciliationError::HistoricalCoverageUnattested);
     }
@@ -842,130 +847,131 @@ fn attribute_strategy_exchange_evidence(
                 let Some(lineage) = entry.record.lineage.as_ref() else {
                     return Ok(());
                 };
-        lineage_bound_intents += 1;
-        let plan = &entry.record.plan;
-        let key = (
-            lineage.origin_schema.clone(),
-            lineage.origin_version.clone(),
-            plan.risk_binding
-                .as_ref()
-                .map(|risk| risk.mandate.version.clone()),
-            plan.risk_binding
-                .as_ref()
-                .map(|risk| risk.mandate.capital_base_usd.clone()),
-            plan.account_uid_fingerprint.clone(),
-        );
-        cohorts.entry(key.clone()).or_default().intents += 1;
-        let Some(order_id) = entry.record.order_id.as_deref() else {
-            return Ok(());
-        };
-        if !orders.iter().any(|order| {
-            order.instrument_id == plan.instrument_id
-                && order.client_order_id == plan.client_order_id
-                && order.order_id == order_id
-        }) {
-            return Ok(());
-        }
-        exact_orders += 1;
+                lineage_bound_intents += 1;
+                let plan = &entry.record.plan;
+                let key = (
+                    lineage.origin_schema.clone(),
+                    lineage.origin_version.clone(),
+                    plan.risk_binding
+                        .as_ref()
+                        .map(|risk| risk.mandate.version.clone()),
+                    plan.risk_binding
+                        .as_ref()
+                        .map(|risk| risk.mandate.capital_base_usd.clone()),
+                    plan.account_uid_fingerprint.clone(),
+                );
+                cohorts.entry(key.clone()).or_default().intents += 1;
+                let Some(order_id) = entry.record.order_id.as_deref() else {
+                    return Ok(());
+                };
+                if !orders.iter().any(|order| {
+                    order.instrument_id == plan.instrument_id
+                        && order.client_order_id == plan.client_order_id
+                        && order.order_id == order_id
+                }) {
+                    return Ok(());
+                }
+                exact_orders += 1;
 
-        // A fill matching only one of the two independently bound order IDs,
-        // or having the wrong position side, must not be silently discarded.
-        for fill in fills.iter().filter(|fill| {
-            fill.client_order_id == plan.client_order_id
-                || fill.order_id.as_deref() == Some(order_id)
-        }) {
-            if fill.instrument_id != plan.instrument_id
-                || fill.client_order_id != plan.client_order_id
-                || fill.order_id.as_deref() != Some(order_id)
-                || fill.position_side != plan.position_side.as_str()
-                || fill.side != plan.side.as_str()
-            {
-                unmatched_lineage_fills += 1;
-                continue;
-            }
-            let fill_key = (&fill.instrument_id, &fill.trade_id);
-            if !seen_fills.insert(fill_key) {
-                duplicate_claims += 1;
-                continue;
-            }
-            exact_fills += 1;
+                // A fill matching only one of the two independently bound order IDs,
+                // or having the wrong position side, must not be silently discarded.
+                for fill in fills.iter().filter(|fill| {
+                    fill.client_order_id == plan.client_order_id
+                        || fill.order_id.as_deref() == Some(order_id)
+                }) {
+                    if fill.instrument_id != plan.instrument_id
+                        || fill.client_order_id != plan.client_order_id
+                        || fill.order_id.as_deref() != Some(order_id)
+                        || fill.position_side != plan.position_side.as_str()
+                        || fill.side != plan.side.as_str()
+                    {
+                        unmatched_lineage_fills += 1;
+                        continue;
+                    }
+                    let fill_key = (&fill.instrument_id, &fill.trade_id);
+                    if !seen_fills.insert(fill_key) {
+                        duplicate_claims += 1;
+                        continue;
+                    }
+                    exact_fills += 1;
 
-            let Some(bill_id) = fill.bill_id.as_deref() else {
-                missing_exact_bill_links += 1;
-                continue;
-            };
-            let linked = bills
-                .iter()
-                .filter(|bill| bill.bill_id == bill_id)
-                .collect::<Vec<_>>();
-            if linked.len() > 1 {
-                duplicate_claims += linked.len() - 1;
-            }
-            let Some(bill) = linked.first() else {
-                missing_exact_bill_links += 1;
-                continue;
-            };
-            if !claimed_bills.insert(&bill.bill_id) {
-                duplicate_claims += 1;
-                continue;
-            }
-            // Funding and unrelated bills are never allowed to inherit a
-            // fill's strategy identity just because billId happens to match.
-            if matches!(bill.sub_type.as_str(), "173" | "174")
-                || bill.instrument_id != fill.instrument_id
-                || bill.trade_id.as_deref() != Some(fill.trade_id.as_str())
-                || bill.order_id.as_deref().is_some_and(|id| id != order_id)
-                || bill
-                    .client_order_id
-                    .as_deref()
-                    .is_some_and(|id| id != plan.client_order_id)
-            {
-                unmatched_lineage_fills += 1;
-                continue;
-            }
+                    let Some(bill_id) = fill.bill_id.as_deref() else {
+                        missing_exact_bill_links += 1;
+                        continue;
+                    };
+                    let linked = bills
+                        .iter()
+                        .filter(|bill| bill.bill_id == bill_id)
+                        .collect::<Vec<_>>();
+                    if linked.len() > 1 {
+                        duplicate_claims += linked.len() - 1;
+                    }
+                    let Some(bill) = linked.first() else {
+                        missing_exact_bill_links += 1;
+                        continue;
+                    };
+                    if !claimed_bills.insert(&bill.bill_id) {
+                        duplicate_claims += 1;
+                        continue;
+                    }
+                    // Funding and unrelated bills are never allowed to inherit a
+                    // fill's strategy identity just because billId happens to match.
+                    if matches!(bill.sub_type.as_str(), "173" | "174")
+                        || bill.instrument_id != fill.instrument_id
+                        || bill.trade_id.as_deref() != Some(fill.trade_id.as_str())
+                        || bill.order_id.as_deref().is_some_and(|id| id != order_id)
+                        || bill
+                            .client_order_id
+                            .as_deref()
+                            .is_some_and(|id| id != plan.client_order_id)
+                    {
+                        unmatched_lineage_fills += 1;
+                        continue;
+                    }
 
-            let (Some(fill_fee), Some(fill_currency), Some(bill_fee)) = (
-                fill.fee.as_deref(),
-                fill.fee_currency.as_deref(),
-                bill.fee.as_deref(),
-            ) else {
-                fee_bill_mismatches += 1;
-                continue;
-            };
-            if fill_currency != bill.currency
-                || fill_currency.trim().is_empty()
-                || decimal("attribution.fill_fee", fill_fee)?
-                    != decimal("attribution.bill_fee", bill_fee)?
-            {
-                fee_bill_mismatches += 1;
-                continue;
-            }
+                    let (Some(fill_fee), Some(fill_currency), Some(bill_fee)) = (
+                        fill.fee.as_deref(),
+                        fill.fee_currency.as_deref(),
+                        bill.fee.as_deref(),
+                    ) else {
+                        fee_bill_mismatches += 1;
+                        continue;
+                    };
+                    if fill_currency != bill.currency
+                        || fill_currency.trim().is_empty()
+                        || decimal("attribution.fill_fee", fill_fee)?
+                            != decimal("attribution.bill_fee", bill_fee)?
+                    {
+                        fee_bill_mismatches += 1;
+                        continue;
+                    }
 
-            let (Some(fill_pnl), Some(bill_pnl)) = (fill.fill_pnl.as_deref(), bill.pnl.as_deref())
-            else {
-                fill_pnl_bill_mismatches += 1;
-                continue;
-            };
-            let fill_realized = decimal("attribution.fill_pnl", fill_pnl)?;
-            let bill_realized = decimal("attribution.bill_pnl", bill_pnl)?;
-            if fill_realized != bill_realized {
-                fill_pnl_bill_mismatches += 1;
-                continue;
-            }
+                    let (Some(fill_pnl), Some(bill_pnl)) =
+                        (fill.fill_pnl.as_deref(), bill.pnl.as_deref())
+                    else {
+                        fill_pnl_bill_mismatches += 1;
+                        continue;
+                    };
+                    let fill_realized = decimal("attribution.fill_pnl", fill_pnl)?;
+                    let bill_realized = decimal("attribution.bill_pnl", bill_pnl)?;
+                    if fill_realized != bill_realized {
+                        fill_pnl_bill_mismatches += 1;
+                        continue;
+                    }
 
-            // Only source-complete, independently cross-checked financial
-            // events enter either total; bill fee is NOT added to fill fee.
-            exact_trade_bills += 1;
-            verified_bills.insert(&bill.bill_id);
-            *fees.entry(fill_currency.to_owned()).or_default() +=
-                decimal("attribution.verified_fee", fill_fee)?;
-            *pnl.entry(bill.currency.clone()).or_default() += bill_realized;
-            let cohort = cohorts.entry(key.clone()).or_default();
-            cohort.exact_trade_bills += 1;
-            *cohort.fees.entry(fill_currency.to_owned()).or_default() +=
-                decimal("attribution.verified_fee", fill_fee)?;
-            *cohort.pnl.entry(bill.currency.clone()).or_default() += bill_realized;
-        }
+                    // Only source-complete, independently cross-checked financial
+                    // events enter either total; bill fee is NOT added to fill fee.
+                    exact_trade_bills += 1;
+                    verified_bills.insert(&bill.bill_id);
+                    *fees.entry(fill_currency.to_owned()).or_default() +=
+                        decimal("attribution.verified_fee", fill_fee)?;
+                    *pnl.entry(bill.currency.clone()).or_default() += bill_realized;
+                    let cohort = cohorts.entry(key.clone()).or_default();
+                    cohort.exact_trade_bills += 1;
+                    *cohort.fees.entry(fill_currency.to_owned()).or_default() +=
+                        decimal("attribution.verified_fee", fill_fee)?;
+                    *cohort.pnl.entry(bill.currency.clone()).or_default() += bill_realized;
+                }
                 Ok(())
             })();
             match result {
