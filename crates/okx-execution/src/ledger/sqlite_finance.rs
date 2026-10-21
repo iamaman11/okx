@@ -4,7 +4,7 @@
 use super::sqlite_store::{checksum, encode, io};
 use super::*;
 use crate::exchange_evidence::StoredExchangeEvent;
-use rusqlite::{Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use std::str::FromStr;
@@ -98,6 +98,83 @@ fn assert_evidence_object(
         ));
     }
     Ok(digest)
+}
+
+/// Transactional current-order projection from the SAME immutable source
+/// event that proves exchange order identity. Historical order transitions
+/// remain sealed in native_source_events; this row is only an indexed view.
+///
+/// A later partial REST window must not move exchange order state backwards.
+/// Equal-timestamp disagreements and reused order IDs fail the whole WAL
+/// transaction, including fills, bills, cursors and STOP metadata.
+fn insert_order(
+    tx: &Transaction<'_>,
+    event: &StoredExchangeEvent,
+) -> Result<(), ExecutionLedgerError> {
+    let v = &event.payload;
+    let order_id = field(v, "ordId")?;
+    let instrument = field(v, "instId")?;
+    let client_order_id = field(v, "clOrdId")?;
+    let state = field(v, "state")?;
+    let update_at_ms = field(v, "uTime")?
+        .parse::<i64>()
+        .ok()
+        .filter(|ms| *ms > 0)
+        .ok_or(ExecutionLedgerError::Corrupt(
+            "invalid native order timestamp",
+        ))?;
+    let current: Option<(Option<String>, String, String, String, i64)> = tx
+        .query_row(
+            "SELECT intent_id,instrument_id,client_order_id,status,last_exchange_update_ms
+             FROM exchange_orders WHERE venue_order_id=?1",
+            params![order_id],
+            |row| Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            )),
+        )
+        .optional()
+        .map_err(io)?;
+    if let Some((prior_intent, prior_instrument, prior_client, prior_state, prior_time)) = current {
+        if prior_intent.as_deref() != event.source_intent_id.as_deref()
+            || prior_instrument != instrument
+            || prior_client != client_order_id
+            || (prior_time == update_at_ms && prior_state != state)
+        {
+            return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+        }
+        if update_at_ms > prior_time {
+            let changed = tx
+                .execute(
+                    "UPDATE exchange_orders SET status=?1,last_exchange_update_ms=?2
+                     WHERE venue_order_id=?3 AND last_exchange_update_ms=?4",
+                    params![state, update_at_ms, order_id, prior_time],
+                )
+                .map_err(io)?;
+            if changed != 1 {
+                return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+            }
+        }
+    } else {
+        tx.execute(
+            "INSERT INTO exchange_orders
+             (venue_order_id,intent_id,instrument_id,client_order_id,status,last_exchange_update_ms)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                order_id,
+                event.source_intent_id.as_deref(),
+                instrument,
+                client_order_id,
+                state,
+                update_at_ms,
+            ],
+        )
+        .map_err(io)?;
+    }
+    Ok(())
 }
 
 struct IndexedFill {
@@ -259,7 +336,10 @@ pub(super) fn persist_event(
             let evidence = assert_evidence_object(tx, run_id, event_key, event)?;
             insert_bill(tx, &event.payload, &evidence)?;
         }
-        Some("OKX_REST_ORDER") => {}
+        Some("OKX_REST_ORDER") => {
+            assert_evidence_object(tx, run_id, event_key, event)?;
+            insert_order(tx, event)?;
+        }
         _ => {
             return Err(ExecutionLedgerError::Corrupt(
                 "unknown native financial source kind",
@@ -527,6 +607,62 @@ pub(super) fn persist_source_receipt(
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+
+    #[test]
+    fn source_order_projection_preserves_identity_and_monotonic_exchange_time() {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE exchange_orders (
+                venue_order_id TEXT PRIMARY KEY,
+                intent_id TEXT,
+                instrument_id TEXT NOT NULL,
+                client_order_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                last_exchange_update_ms INTEGER NOT NULL
+            ) STRICT;",
+        )
+        .unwrap();
+        let event = |state: &str, ts: &str, client: &str| StoredExchangeEvent {
+            payload: serde_json::json!({
+                "source":"OKX_REST_ORDER",
+                "ordId":"order-123",
+                "clOrdId":client,
+                "instId":"BTC-USDT-SWAP",
+                "state":state,
+                "uTime":ts,
+            }),
+            source_intent_id: None,
+            strategy_run_id: None,
+            allocation: "UNALLOCATED".to_owned(),
+        };
+        {
+            let tx = c.transaction().unwrap();
+            insert_order(&tx, &event("live", "1000", "client-1")).unwrap();
+            insert_order(&tx, &event("filled", "2000", "client-1")).unwrap();
+            // Out-of-order windows cannot regress the current state.
+            insert_order(&tx, &event("live", "1000", "client-1")).unwrap();
+            assert!(matches!(
+                insert_order(&tx, &event("canceled", "2000", "client-1")),
+                Err(ExecutionLedgerError::ExchangeEvidenceConflict)
+            ));
+            assert!(matches!(
+                insert_order(&tx, &event("filled", "3000", "client-2")),
+                Err(ExecutionLedgerError::ExchangeEvidenceConflict)
+            ));
+            tx.commit().unwrap();
+        }
+        let (state, updated): (String, i64) = c
+            .query_row(
+                "SELECT status,last_exchange_update_ms FROM exchange_orders
+                 WHERE venue_order_id='order-123'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "filled");
+        assert_eq!(updated, 2000);
+    }
+
 
     /// The same deferred read transaction used by finance_window must pin
     /// all constituent counts to one point, even when another owner commits
