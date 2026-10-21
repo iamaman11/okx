@@ -2342,6 +2342,11 @@ impl DurableExecutionLedger {
         production_marks: &BTreeMap<String, ProductionMarkEvidence>,
     ) -> Option<StrategyFinancialPeriod> {
         let run = self.capital_reservation.as_ref()?;
+        if self.store.sqlite_native {
+            return self
+                .native_financial_period(run, facts, coherent, production_marks, false, None)
+                .ok();
+        }
         let entries = self.run_entries(run).ok()?;
         Some(
             crate::assess_persisted_financial_period_with_production_marks(
@@ -2353,6 +2358,137 @@ impl DurableExecutionLedger {
                 production_marks,
             ),
         )
+    }
+
+    /// Native finance does not materialize all historical intents in an
+    /// epoch. The source is still an independently sealed exchange snapshot:
+    /// we load ONLY the exact persisted intent IDs named by those events.
+    /// Every OTHER managed order is checked by an authenticated streaming
+    /// SQL cursor, so absent native order/fill coverage still fails closed.
+    ///
+    /// This intentionally keeps source capture and NAV/day-loss on their old
+    /// bounded route until their separate SQL migration is accepted.
+    fn native_financial_period(
+        &self,
+        run: &StrategyCapitalReservation,
+        facts: &AccountLedgerFacts,
+        coherent: bool,
+        production_marks: &BTreeMap<String, ProductionMarkEvidence>,
+        captured: bool,
+        excluded_candidate: Option<&ExecutionPlan>,
+    ) -> Result<StrategyFinancialPeriod, ExecutionLedgerError> {
+        let source = self.exchange_evidence.as_ref().ok_or(
+            ExecutionLedgerError::ExchangeSourceIncomplete,
+        )?;
+        if source.account_uid != run.account_uid_fingerprint
+            || source.run_id != run.allocation_id
+        {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        let ids = source
+            .events
+            .values()
+            .filter_map(|item| item.source_intent_id.as_deref())
+            .collect::<BTreeSet<_>>();
+        let mut entries = Vec::with_capacity(ids.len());
+        let mut extra_reasons = BTreeSet::new();
+        let mut excluded_seen = false;
+        for intent_id in ids {
+            let Some(entry) = self.read_intent(intent_id)? else {
+                extra_reasons.insert("source_intent_not_present");
+                continue;
+            };
+            if excluded_candidate.is_some_and(|p| p.intent_id == intent_id) {
+                excluded_seen = true;
+                if !Self::inert_candidate_for_financial_projection(
+                    &entry.record,
+                    excluded_candidate.expect("checked candidate"),
+                    &run.allocation_id,
+                ) {
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "non-inert financial new-risk candidate",
+                    ));
+                }
+                continue;
+            }
+            entries.push(entry);
+        }
+        // The entire run's order coverage is scanned, but never collected.
+        // A missing managed exchange acknowledgement is NOT treated as a
+        // valid flat period merely because it was absent from source IDs.
+        sqlite_store::visit_entries_created_since(
+            &self.store.path,
+            &run.account_uid_fingerprint,
+            run.started_at_ms,
+            |entry| {
+                if excluded_candidate.is_some_and(|p| p.intent_id == entry.record.plan.intent_id)
+                {
+                    excluded_seen = true;
+                    if !Self::inert_candidate_for_financial_projection(
+                        &entry.record,
+                        excluded_candidate.expect("checked candidate"),
+                        &run.allocation_id,
+                    ) {
+                        extra_reasons.insert("non_inert_candidate_in_financial_projection");
+                    }
+                    return true;
+                }
+                if entry.created_at_ms > run.started_at_ms
+                    && !entry.record.state.is_terminal()
+                {
+                    extra_reasons.insert("unresolved_managed_execution");
+                }
+                if entry.record.order_id.is_some() {
+                    crate::strategy_finance::validate_terminal_order_coverage(
+                        source,
+                        std::slice::from_ref(entry),
+                        run.started_at_ms,
+                        &mut extra_reasons,
+                    );
+                }
+                true
+            },
+        )?;
+        if let Some(candidate) = excluded_candidate {
+            // The candidate may predate the source's latest native events.
+            // Read it independently so exclusion can never hide an UNKNOWN.
+            if !excluded_seen {
+                if let Some(entry) = self.read_intent(&candidate.intent_id)? {
+                    if !Self::inert_candidate_for_financial_projection(
+                        &entry.record,
+                        candidate,
+                        &run.allocation_id,
+                    ) {
+                        return Err(ExecutionLedgerError::Corrupt(
+                            "non-inert financial new-risk candidate",
+                        ));
+                    }
+                }
+            }
+        }
+        let mut report = crate::assess_persisted_financial_period_with_verified_source(
+            run,
+            Some(source),
+            &entries,
+            facts,
+            coherent,
+            production_marks,
+            captured,
+        );
+        for reason in extra_reasons {
+            if !report.reasons.contains(&reason) {
+                report.reasons.push(reason);
+            }
+        }
+        if !report.reasons.is_empty() {
+            report.reasons.sort_unstable();
+            report.state = "INCOMPLETE";
+            report.funding_usdt = None;
+            report.unrealized_usdt = None;
+            report.nav_usdt = None;
+            report.usable_for_new_risk = false;
+        }
+        Ok(report)
     }
 
     /// The financial Rust evaluator is still a finite-memory consumer. Read
@@ -2426,6 +2562,18 @@ impl DurableExecutionLedger {
         plan: &ExecutionPlan,
     ) -> Option<StrategyFinancialPeriod> {
         let run = self.capital_reservation.as_ref()?;
+        if self.store.sqlite_native {
+            return self
+                .native_financial_period(
+                    run,
+                    facts,
+                    coherent,
+                    &BTreeMap::new(),
+                    true,
+                    Some(plan),
+                )
+                .ok();
+        }
         let mut entries = self.run_entries(run).ok()?;
         let mut active_candidate_seen = false;
         entries.retain(|entry| {
@@ -2469,6 +2617,11 @@ impl DurableExecutionLedger {
         captured: bool,
     ) -> Option<StrategyFinancialPeriod> {
         let run = self.capital_reservation.as_ref()?;
+        if self.store.sqlite_native {
+            return self
+                .native_financial_period(run, facts, coherent, marks, captured, None)
+                .ok();
+        }
         let entries = self.run_entries(run).ok()?;
         Some(
             crate::assess_persisted_financial_period_with_verified_source(

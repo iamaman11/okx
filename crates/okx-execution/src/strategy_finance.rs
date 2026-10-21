@@ -187,7 +187,7 @@ fn latest_order_state(orders: &[&crate::exchange_evidence::StoredExchangeEvent])
     latest.map(|(_, state)| state)
 }
 
-fn validate_terminal_order_coverage(
+pub(crate) fn validate_terminal_order_coverage(
     evidence: &DurableExchangeEvidence,
     entries: &[ExecutionLedgerEntry],
     run_started_at_ms: u64,
