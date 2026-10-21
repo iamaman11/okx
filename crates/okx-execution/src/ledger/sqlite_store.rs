@@ -602,6 +602,46 @@ pub(super) fn owner_intent(
     Ok(found)
 }
 
+/// Read a risk predicate over intents CREATED during the current
+/// run without building a historical BTreeMap or selecting all terminal
+/// account operations. Every row is authenticated against its exact BLOB
+/// and immutable relational projection before the predicate is evaluated.
+///
+/// updated_at >= started_at is a *safe indexed superset* of
+/// created_at >= started_at because native transitions never move time
+/// backward. The actual created-at test uses the verified authoritative
+/// record. Do not trust the material projection alone for a negative gate.
+pub(super) fn any_entry_created_since<F>(
+    path: &Path,
+    expected_uid: &str,
+    since_ms: u64,
+    mut predicate: F,
+) -> Result<bool, ExecutionLedgerError>
+where
+    F: FnMut(&ExecutionLedgerEntry) -> bool,
+{
+    if since_ms == 0 {
+        return Err(ExecutionLedgerError::InvalidTimestamp);
+    }
+    let since = i64::try_from(since_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    let c = connect_indexed_read(path)?;
+    require_indexed_scope(&c, expected_uid)?;
+    let sql = format!(
+        "{INDEXED_INTENT_COLUMNS}
+         WHERE e.uid=?1 AND e.updated_at_ms>=?2
+         ORDER BY e.updated_at_ms,e.intent_id"
+    );
+    let mut stmt = c.prepare(&sql).map_err(io)?;
+    let mut rows = stmt.query(params![expected_uid, since]).map_err(io)?;
+    while let Some(row) = rows.next().map_err(io)? {
+        let entry = verified_indexed_entry(row, expected_uid)?;
+        if entry.created_at_ms >= since_ms && predicate(&entry) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// A binding is created only by an authenticated native owner for an
 /// ALREADY VALID, nonempty, UID-scoped ledger. This is not a registration
 /// endpoint or a separate authorizer.
@@ -2443,6 +2483,19 @@ mod tests {
         assert_eq!(guards[0].record.plan.intent_id, "guarded_intent_000063");
         let verified_engine = DurableExecutionLedger::open(store.clone(), 2500).unwrap();
         assert!(verified_engine.account_scope_matches(&uid).unwrap());
+        // The indexed temporal query checks authoritative created_at_ms,
+        // not only updated_at_ms (older intents can be updated later).
+        assert!(verified_engine
+            .any_entry_created_since(&uid, 1060, |entry| {
+                entry.record.plan.intent_id == "guarded_intent_000063"
+            })
+            .unwrap());
+        assert!(!verified_engine
+            .any_entry_created_since(&uid, 2000, |_| true)
+            .unwrap());
+        assert!(verified_engine
+            .any_entry_created_since(&"b".repeat(64), 1060, |_| false)
+            .is_err());
         assert!(
             verified_engine
                 .account_scope_matches(&"b".repeat(64))

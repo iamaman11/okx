@@ -813,19 +813,24 @@ impl ExecutionRuntime {
             || run.account_uid_fingerprint != plan.account_uid_fingerprint
             || run.mandate_version != binding.mandate.version
             || run.allocated_usdt != binding.mandate.capital_base_usd
-            || ledger.entries().any(|e| {
-                e.created_at_ms >= run.started_at_ms
-                    && ((e.record.state == ExecutionState::Rejected
-                        && !inert_terminal_rejection(
-                            &e.record,
-                            &run.account_uid_fingerprint,
-                            &run.allocation_id,
-                        ))
-                        || (!e.record.state.is_terminal()
-                            && (e.record.plan.intent_id != plan.intent_id
-                                || e.record.plan != *plan
-                                || e.record.state != ExecutionState::Prepared)))
-            })
+            || ledger
+                .any_entry_created_since(
+                    &run.account_uid_fingerprint,
+                    run.started_at_ms,
+                    |e| {
+                        (e.record.state == ExecutionState::Rejected
+                            && !inert_terminal_rejection(
+                                &e.record,
+                                &run.account_uid_fingerprint,
+                                &run.allocation_id,
+                            ))
+                            || (!e.record.state.is_terminal()
+                                && (e.record.plan.intent_id != plan.intent_id
+                                    || e.record.plan != *plan
+                                    || e.record.state != ExecutionState::Prepared))
+                    },
+                )
+                .ok()?
             || !reconcile_account_ledger(ledger, facts).ok()?.consistent
         {
             return None;
@@ -927,11 +932,15 @@ impl ExecutionRuntime {
                     &preflight.account_uid_fingerprint,
                 )
             })
-            || executor.ledger().entries().any(|e| {
+            || executor.ledger().capital_reservation().is_some_and(|r| {
                 executor
                     .ledger()
-                    .capital_reservation()
-                    .is_some_and(|r| e.created_at_ms >= r.started_at_ms)
+                    .any_entry_created_since(
+                        &r.account_uid_fingerprint,
+                        r.started_at_ms,
+                        |_| true,
+                    )
+                    .unwrap_or(true)
             })
         {
             return None;
@@ -1437,14 +1446,21 @@ impl ExecutionRuntime {
                             && rust_decimal::Decimal::from_str(&plan.size).ok() == Some(quantity)
                     })
                 && executor.ledger().capital_reservation().is_some_and(|run| {
-                    executor.ledger().entries().any(|owned| {
-                        owned.record.plan.action == ExecutionAction::Open
-                            && owned.record.strategy_run_id.as_deref()
-                                == Some(run.allocation_id.as_str())
-                            && owned.record.plan.instrument_id == plan.instrument_id
-                            && owned.record.plan.position_side == plan.position_side
-                            && owned.record.order_id.is_some()
-                    })
+                    executor
+                        .ledger()
+                        .any_entry_created_since(
+                            &run.account_uid_fingerprint,
+                            run.started_at_ms,
+                            |owned| {
+                                owned.record.plan.action == ExecutionAction::Open
+                                    && owned.record.strategy_run_id.as_deref()
+                                        == Some(run.allocation_id.as_str())
+                                    && owned.record.plan.instrument_id == plan.instrument_id
+                                    && owned.record.plan.position_side == plan.position_side
+                                    && owned.record.order_id.is_some()
+                            },
+                        )
+                        .unwrap_or(false)
                 })
         } else {
             false
@@ -1452,15 +1468,20 @@ impl ExecutionRuntime {
         let finance_complete = if new_risk {
             let ledger = executor.ledger();
             let historical_rejections_safe = ledger.capital_reservation().is_some_and(|run| {
-                ledger.entries().all(|entry| {
-                    entry.created_at_ms < run.started_at_ms
-                        || entry.record.state != ExecutionState::Rejected
-                        || inert_terminal_rejection(
-                            &entry.record,
-                            &run.account_uid_fingerprint,
-                            &run.allocation_id,
-                        )
-                })
+                !ledger
+                    .any_entry_created_since(
+                        &run.account_uid_fingerprint,
+                        run.started_at_ms,
+                        |entry| {
+                            entry.record.state == ExecutionState::Rejected
+                                && !inert_terminal_rejection(
+                                    &entry.record,
+                                    &run.account_uid_fingerprint,
+                                    &run.allocation_id,
+                                )
+                        },
+                    )
+                    .unwrap_or(true)
             });
             historical_rejections_safe
                 && ledger

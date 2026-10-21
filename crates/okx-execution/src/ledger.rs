@@ -3098,6 +3098,37 @@ impl DurableExecutionLedger {
         }
     }
 
+    /// Evaluate a caller's typed predicate over this account's current
+    /// run history. Native reads stream one verified SQLite row at a time;
+    /// v14 preserves the previous in-memory semantics. Never treats a
+    /// failed read or corrupt projection as a negative trading witness.
+    pub fn any_entry_created_since<F>(
+        &self,
+        expected_uid: &str,
+        since_ms: u64,
+        mut predicate: F,
+    ) -> Result<bool, ExecutionLedgerError>
+    where
+        F: FnMut(&ExecutionLedgerEntry) -> bool,
+    {
+        if self.store.sqlite_native {
+            sqlite_store::any_entry_created_since(
+                &self.store.path,
+                expected_uid,
+                since_ms,
+                predicate,
+            )
+        } else {
+            if !self.account_scope_matches(expected_uid)? {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+            Ok(self
+                .entries
+                .values()
+                .any(|entry| entry.created_at_ms >= since_ms && predicate(entry)))
+        }
+    }
+
     /// Operational view of all durable *material* native obligations.
     /// The native SQLite path reads verified active guards, so terminal
     /// history is not scanned on each risk/protection decision. The legacy
