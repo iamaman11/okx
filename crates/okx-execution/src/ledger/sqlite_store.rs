@@ -2681,6 +2681,36 @@ mod tests {
                 .unwrap(),
             entries.get("bounded_historical_intent_000001").cloned()
         );
+        // A long-running writer can complete many more intents without
+        // accumulating the old terminal history in the active Engine map.
+        let mut owner = owner;
+        owner
+            .abandon_prepared("bounded_historical_intent_000511", 2100)
+            .unwrap();
+        for index in 512..608_u64 {
+            let mut plan = entries
+                .get("bounded_historical_intent_000511")
+                .unwrap()
+                .record
+                .plan
+                .clone();
+            plan.intent_id = format!("bounded_historical_intent_{index:06}");
+            plan.client_order_id = derive_client_order_id(&plan.intent_id);
+            let prepared = owner.prepare(plan.clone(), 2200 + index).unwrap();
+            assert!(matches!(prepared, PrepareDisposition::Created(_)));
+            owner.abandon_prepared(&plan.intent_id, 2201 + index).unwrap();
+            assert!(owner.entries.len() <= 32);
+        }
+        assert_eq!(owner.total_intents().unwrap(), 608);
+        assert_eq!(owner.entries.len(), 32);
+        assert!(!owner.historical_reconciliation_eligible().unwrap());
+        let sample = crate::reconciliation::managed_execution_inventory(&owner);
+        assert_eq!(sample.total, 608);
+        assert!(!sample.complete_within_bound);
+        assert_eq!(
+            owner.read_intent("bounded_historical_intent_000001").unwrap(),
+            entries.get("bounded_historical_intent_000001").cloned()
+        );
         drop(owner);
         std::fs::remove_dir_all(root).unwrap();
     }
