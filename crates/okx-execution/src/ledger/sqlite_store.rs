@@ -687,15 +687,19 @@ pub(super) fn source_linked_intents(
     let mut out = BTreeMap::new();
     for id in intent_ids {
         if id.is_empty() || id.len() > 128 {
-            return Err(ExecutionLedgerError::Corrupt("invalid source-owned intent ID"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "invalid source-owned intent ID",
+            ));
         }
-        let mut rows = statement.query(params![id]) .map_err(io)?;
+        let mut rows = statement.query(params![id]).map_err(io)?;
         let Some(row) = rows.next().map_err(io)? else {
             return Err(ExecutionLedgerError::IntentNotFound(id.clone()));
         };
         let value = verified_indexed_entry(row, expected_uid)?;
         if rows.next().map_err(io)?.is_some() {
-            return Err(ExecutionLedgerError::Corrupt("duplicate source-owned intent"));
+            return Err(ExecutionLedgerError::Corrupt(
+                "duplicate source-owned intent",
+            ));
         }
         out.insert(id.clone(), value);
     }
@@ -2901,15 +2905,15 @@ mod tests {
             ),
             Err(ExecutionLedgerError::AccountScopeMismatch)
         ));
-        let linked = source_linked_intents(
-            &db,
-            &uid,
-            &BTreeSet::from([intent_id.to_owned()]),
-        )
-        .unwrap();
+        let linked =
+            source_linked_intents(&db, &uid, &BTreeSet::from([intent_id.to_owned()])).unwrap();
         assert_eq!(linked.get(intent_id), Some(&entry));
         assert!(matches!(
-            source_linked_intents(&db, &"b".repeat(64), &BTreeSet::from([intent_id.to_owned()])),
+            source_linked_intents(
+                &db,
+                &"b".repeat(64),
+                &BTreeSet::from([intent_id.to_owned()])
+            ),
             Err(ExecutionLedgerError::AccountScopeMismatch)
         ));
         assert!(matches!(

@@ -2372,11 +2372,7 @@ impl DurableExecutionLedger {
             .values()
             .filter_map(|item| item.source_intent_id.clone())
             .collect::<BTreeSet<_>>();
-        sqlite_store::source_linked_intents(
-            &self.store.path,
-            &source.account_uid,
-            &intent_ids,
-        )
+        sqlite_store::source_linked_intents(&self.store.path, &source.account_uid, &intent_ids)
     }
 
     /// A run-specific mandate is checked on every original risk-increasing
