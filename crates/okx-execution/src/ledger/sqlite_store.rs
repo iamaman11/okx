@@ -526,17 +526,13 @@ pub(super) fn owner_intent(
     intent_id: &str,
 ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
     if intent_id.is_empty() || intent_id.len() > 128 {
-        return Err(ExecutionLedgerError::Corrupt(
-            "invalid owner intent ID",
-        ));
+        return Err(ExecutionLedgerError::Corrupt("invalid owner intent ID"));
     }
     let c = connect_indexed_read(path)?;
     let uid: String = c
-        .query_row(
-            "SELECT uid FROM ledger_state WHERE key=1",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |row| {
+            row.get(0)
+        })
         .map_err(io)?;
     require_account_read_scope(&c, &uid, false)?;
     let sql = format!("{INDEXED_INTENT_COLUMNS} WHERE e.intent_id=?1");
@@ -548,9 +544,7 @@ pub(super) fn owner_intent(
         .map(|row| verified_indexed_entry(row, &uid))
         .transpose()?;
     if rows.next().map_err(io)?.is_some() {
-        return Err(ExecutionLedgerError::Corrupt(
-            "duplicate owner intent",
-        ));
+        return Err(ExecutionLedgerError::Corrupt("duplicate owner intent"));
     }
     Ok(found)
 }
@@ -2392,12 +2386,9 @@ mod tests {
             indexed_exact_prepared_batch(&db, &uid, &batch).unwrap(),
             guards
         );
-        assert!(indexed_exact_prepared_batch(
-            &db,
-            &uid,
-            &["guarded_intent_000000".to_owned()]
-        )
-        .is_err());
+        assert!(
+            indexed_exact_prepared_batch(&db, &uid, &["guarded_intent_000000".to_owned()]).is_err()
+        );
         assert!(
             client_order_id_exists(&db, &uid, &derive_client_order_id("guarded_intent_000001"))
                 .unwrap()
