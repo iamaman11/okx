@@ -312,18 +312,6 @@ impl<'a> SourceOrderIndex<'a> {
     }
 }
 
-pub(crate) fn validate_terminal_order_coverage(
-    evidence: &DurableExchangeEvidence,
-    entries: &[ExecutionLedgerEntry],
-    run_started_at_ms: u64,
-    reasons: &mut BTreeSet<&'static str>,
-) {
-    let index = SourceOrderIndex::new(evidence);
-    for entry in entries {
-        index.validate_entry(entry, run_started_at_ms, reasons);
-    }
-}
-
 struct LotChange<'a> {
     inst: &'a str,
     pos: &'a str,
