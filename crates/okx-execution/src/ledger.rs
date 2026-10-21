@@ -1899,6 +1899,27 @@ pub struct DurableExecutionLedger {
 }
 
 impl DurableExecutionLedger {
+    /// Bounded convenience cache for the existing borrowed `get()` API.
+    /// This never decides admission or reconciles exchange orders: those
+    /// paths read the verified SQL row. Every active protection, mutation,
+    /// unresolved submission or reverse obligation is retained.
+    fn compact_native_entries(&mut self) {
+        if !self.store.sqlite_native {
+            return;
+        }
+        const RECENT_TERMINAL_CACHE: usize = 32;
+        let terminal = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| !sqlite_store::needs_instrument_guard(entry))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let remove = terminal.len().saturating_sub(RECENT_TERMINAL_CACHE);
+        for id in terminal.into_iter().take(remove) {
+            self.entries.remove(&id);
+        }
+    }
+
     /// Read-only on-disk bundle verification; never changes in-memory executor
     /// state or triggers its first-open UNKNOWN/POST recovery transitions.
     pub fn attest_storage(&self) -> Result<LedgerStorageAttestation, ExecutionLedgerError> {
@@ -2295,14 +2316,16 @@ impl DurableExecutionLedger {
     ) -> Option<StrategyFinancialPeriod> {
         let run = self.capital_reservation.as_ref()?;
         let entries = self.run_entries(run).ok()?;
-        Some(crate::assess_persisted_financial_period_with_production_marks(
-            run,
-            self.exchange_evidence.as_ref(),
-            &entries,
-            facts,
-            coherent,
-            production_marks,
-        ))
+        Some(
+            crate::assess_persisted_financial_period_with_production_marks(
+                run,
+                self.exchange_evidence.as_ref(),
+                &entries,
+                facts,
+                coherent,
+                production_marks,
+            ),
+        )
     }
 
     /// The financial Rust evaluator is still a finite-memory consumer. Read
@@ -2420,15 +2443,17 @@ impl DurableExecutionLedger {
     ) -> Option<StrategyFinancialPeriod> {
         let run = self.capital_reservation.as_ref()?;
         let entries = self.run_entries(run).ok()?;
-        Some(crate::assess_persisted_financial_period_with_verified_source(
-            run,
-            self.exchange_evidence.as_ref(),
-            &entries,
-            facts,
-            coherent,
-            marks,
-            captured,
-        ))
+        Some(
+            crate::assess_persisted_financial_period_with_verified_source(
+                run,
+                self.exchange_evidence.as_ref(),
+                &entries,
+                facts,
+                coherent,
+                marks,
+                captured,
+            ),
+        )
     }
 
     /// One atomic writer for NAV, high-water, source-exact daily gross loss
@@ -3566,6 +3591,7 @@ impl DurableExecutionLedger {
         // Only after the durable commit do changed intents become visible
         // in the current account's authoritative in-process state machine.
         self.entries.extend(changed);
+        self.compact_native_entries();
         Ok(expected_ids.len())
     }
 
@@ -4189,6 +4215,7 @@ impl DurableExecutionLedger {
             // map is required to validate the SQLite durable mutation.
             self.store.save_changed_intent(&entry, self)?;
             self.entries.insert(intent_id, entry);
+            self.compact_native_entries();
             return Ok(());
         }
         self.entries.insert(intent_id.clone(), entry.clone());
@@ -4230,6 +4257,7 @@ impl DurableExecutionLedger {
             validate_entry(&next)?;
             self.store.save_changed_intent(&next, self)?;
             self.entries.insert(intent_id.to_owned(), next.clone());
+            self.compact_native_entries();
             return Ok(next);
         }
         let original = self

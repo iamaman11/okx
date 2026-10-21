@@ -1358,7 +1358,7 @@ impl ExecutionRuntime {
             return Ok(None);
         };
         let mut executor = self.executor.lock().await;
-        let Some(entry) = executor.ledger().get(intent_id) else {
+        let Some(entry) = executor.ledger().read_intent(intent_id).ok().flatten() else {
             return Ok(None);
         };
         let Some(run) = executor.ledger().capital_reservation() else {
@@ -1812,7 +1812,7 @@ impl ExecutionRuntime {
         intent_id: &str,
     ) -> Option<StrategyCapitalReservation> {
         let owner = self.executor.lock().await;
-        let entry = owner.ledger().get(intent_id)?;
+        let entry = owner.ledger().read_intent(intent_id).ok()??;
         let run = owner.ledger().capital_reservation()?;
         (entry.record.state == ExecutionState::Prepared
             && entry.record.plan.action.is_risk_increasing()
@@ -1905,7 +1905,13 @@ impl ExecutionRuntime {
     }
 
     pub async fn entry(&self, intent_id: &str) -> Option<ExecutionLedgerEntry> {
-        self.executor.lock().await.ledger().get(intent_id).cloned()
+        self.executor
+            .lock()
+            .await
+            .ledger()
+            .read_intent(intent_id)
+            .ok()
+            .flatten()
     }
 
     pub async fn reconcile_once(
@@ -1920,7 +1926,7 @@ impl ExecutionRuntime {
             return Ok(ExecutionReconciliation::Unavailable);
         };
         let mut executor = self.executor.lock().await;
-        if executor.ledger().get(intent_id).is_none() {
+        if executor.ledger().read_intent(intent_id)?.is_none() {
             return Err(ExecutionLedgerError::IntentNotFound(intent_id.to_owned()).into());
         }
         match executor.reconcile(intent_id, observed_at_ms).await {
@@ -1947,7 +1953,11 @@ impl ExecutionRuntime {
         intent_id: &str,
     ) -> AgentResult<Option<(ExecutionLedgerEntry, ExecutionStatusEnvelope)>> {
         let executor = self.executor.lock().await;
-        let Some(entry) = executor.ledger().get(intent_id).cloned() else {
+        let Some(entry) = executor
+            .ledger()
+            .read_intent(intent_id)
+            .map_err(AgentError::ExecutionLedger)?
+        else {
             return Ok(None);
         };
         let status =

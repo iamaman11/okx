@@ -228,7 +228,7 @@ pub(super) fn open_finance_read(path: &Path) -> Result<Connection, ExecutionLedg
 /// authority. Its membership is defined entirely by the native state
 /// machine. Historical terminal intents without blocking protection or
 /// unfinished reverse continuation are excluded from trading hot reads.
-fn needs_instrument_guard(entry: &ExecutionLedgerEntry) -> bool {
+pub(super) fn needs_instrument_guard(entry: &ExecutionLedgerEntry) -> bool {
     let record = &entry.record;
     !record.state.is_terminal()
         || record.active_mutation().is_some()
@@ -851,9 +851,7 @@ pub(super) fn bound_account_identity(
 /// The cold attestation enforces the entire original snapshot, post fences
 /// and guard inventory before these bounded-state views may be used.
 /// The same account writer lease must remain held by the calling Engine.
-pub(super) fn load_operational(
-    path: &Path,
-) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
+pub(super) fn load_operational(path: &Path) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
     attest_snapshot(path, None)?;
     let c = connect(path, false)?;
     let (uid, digest, bytes): (String, String, Vec<u8>) = c
@@ -870,7 +868,10 @@ pub(super) fn load_operational(
     }
     let state: StoredState = decode(&bytes)?;
     if state.version != 1
-        || state.reservation.as_ref().is_some_and(|r| r.account_uid_fingerprint != uid)
+        || state
+            .reservation
+            .as_ref()
+            .is_some_and(|r| r.account_uid_fingerprint != uid)
     {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
@@ -880,7 +881,9 @@ pub(super) fn load_operational(
         .as_deref()
         .map(|run_id| super::sqlite_source::read(&c, run_id, &uid))
         .transpose()?;
-    state.periods.validate(state.reservation.as_ref(), source.as_ref())?;
+    state
+        .periods
+        .validate(state.reservation.as_ref(), source.as_ref())?;
     validate_leverage_attempts(&state.leverage, state.reservation.as_ref())?;
 
     let mut statement = c
@@ -906,9 +909,7 @@ pub(super) fn load_operational(
         }
         let entry = verified_indexed_entry(row, &uid)?;
         if !needs_instrument_guard(&entry) {
-            return Err(ExecutionLedgerError::Corrupt(
-                "operational guard mismatch",
-            ));
+            return Err(ExecutionLedgerError::Corrupt("operational guard mismatch"));
         }
         let id = entry.record.plan.intent_id.clone();
         if active.insert(id, entry).is_some() {
@@ -2636,11 +2637,21 @@ mod tests {
         let store = ExecutionLedgerStore::sqlite_at(&db);
         let owner = DurableExecutionLedger::open(store.clone(), 2000).unwrap();
         assert_eq!(owner.entries.len(), 1);
-        assert_eq!(owner.entries.values().next().unwrap().record.state, ExecutionState::Prepared);
-        assert_eq!(store.load().unwrap().0, entries);
-        assert_eq!(owner.profile_handoff_ledger_assessment(&uid).unwrap().managed_intents_total, 512);
         assert_eq!(
-            owner.account_intent(&uid, "bounded_historical_intent_000001")
+            owner.entries.values().next().unwrap().record.state,
+            ExecutionState::Prepared
+        );
+        assert_eq!(store.load().unwrap().0, entries);
+        assert_eq!(
+            owner
+                .profile_handoff_ledger_assessment(&uid)
+                .unwrap()
+                .managed_intents_total,
+            512
+        );
+        assert_eq!(
+            owner
+                .account_intent(&uid, "bounded_historical_intent_000001")
                 .unwrap(),
             entries.get("bounded_historical_intent_000001").cloned()
         );

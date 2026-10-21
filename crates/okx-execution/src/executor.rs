@@ -862,7 +862,7 @@ where
         require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
         let entry = self
             .ledger
-            .get(intent_id)
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         if entry.record.state != ExecutionState::Prepared {
             return Err(OrderExecutorError::NotPrepared(entry.record.state));
@@ -1033,8 +1033,7 @@ where
     ) -> Result<ExecutionPlan, OrderExecutorError> {
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         if entry.record.protection.is_some() {
             return Err(OrderExecutorError::ProtectedOrderAmendUnsupported);
@@ -1101,8 +1100,7 @@ where
         let _ = self.amend_revalidation_plan(intent_id, new_size.clone(), new_price.clone())?;
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         if entry.record.protection.is_some() {
             return Err(OrderExecutorError::ProtectedOrderAmendUnsupported);
@@ -1187,8 +1185,7 @@ where
         require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         let protection = entry
             .record
@@ -1364,8 +1361,7 @@ where
     {
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         let protection = entry
             .record
@@ -1493,8 +1489,7 @@ where
         require_live_trading_enabled(self.mutation_authority.allows_exchange_mutation())?;
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         let cleanup = entry
             .record
@@ -1625,8 +1620,7 @@ where
 
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
 
         if entry.record.state != ExecutionState::Prepared {
@@ -1746,8 +1740,7 @@ where
 
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         let mutation = entry
             .record
@@ -1857,8 +1850,7 @@ where
     ) -> Result<ReconcileDisposition, OrderExecutorError> {
         let entry = self
             .ledger
-            .get(intent_id)
-            .cloned()
+            .read_intent(intent_id)?
             .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
 
         if !(matches!(
