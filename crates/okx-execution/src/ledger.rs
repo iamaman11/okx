@@ -3152,6 +3152,26 @@ impl DurableExecutionLedger {
         Ok(())
     }
 
+    /// Historical total is read from SQLite, not inferred from the small
+    /// operational cache. An error is never an empty account witness.
+    pub fn total_intents(&self) -> Result<usize, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            sqlite_store::count_account_intents(&self.store.path)
+        } else {
+            Ok(self.entries.len())
+        }
+    }
+
+    /// Old account-wide reconciliation algorithms still require a complete
+    /// in-RAM history. Until their indexed equivalent is accepted, denying
+    /// incomplete materialization is mandatory: never claim consistent=true
+    /// from an active-guard-only cache.
+    pub(crate) fn historical_reconciliation_eligible(
+        &self,
+    ) -> Result<bool, ExecutionLedgerError> {
+        Ok(!self.store.sqlite_native || self.total_intents()? == self.entries.len())
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

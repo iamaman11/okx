@@ -725,6 +725,22 @@ pub(super) fn clear_for_capital_opening(
     Ok(true)
 }
 
+/// Count exact authoritative rows from this account's WAL owner without
+/// visiting, decoding or retaining the historical intent payloads. Caller
+/// must separately prove row/guard parity at the cold owner boundary.
+pub(super) fn count_account_intents(path: &Path) -> Result<usize, ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    let uid: String = c
+        .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |r| r.get(0))
+        .map_err(io)?;
+    require_account_read_scope(&c, &uid, false)?;
+    let rows: i64 = c
+        .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
+        .map_err(io)?;
+    usize::try_from(rows)
+        .map_err(|_| ExecutionLedgerError::Corrupt("native inventory overflow"))
+}
+
 /// A binding is created only by an authenticated native owner for an
 /// ALREADY VALID, nonempty, UID-scoped ledger. This is not a registration
 /// endpoint or a separate authorizer.

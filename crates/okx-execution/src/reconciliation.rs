@@ -257,6 +257,9 @@ pub struct AccountLedgerReconciliation {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AccountLedgerReconciliationError {
+    #[error("native SQLite historical intent coverage requires indexed account reconciliation")]
+    HistoricalCoverageUnattested,
+
     #[error("multiple exchange orders resolve to managed client order id '{client_order_id}'")]
     DuplicateManagedExchangeOrder { client_order_id: String },
 
@@ -300,7 +303,9 @@ pub struct ManagedExecutionInventory {
 /// Truncation is explicit and cannot be used as a proof of absence.
 pub fn managed_execution_inventory(ledger: &DurableExecutionLedger) -> ManagedExecutionInventory {
     let mut entries = ledger.entries().collect::<Vec<_>>();
-    let total = entries.len();
+    let total = ledger.total_intents().unwrap_or(entries.len());
+    let historically_complete = total == entries.len()
+        && ledger.historical_reconciliation_eligible().unwrap_or(false);
     entries.sort_by(|a, b| {
         b.updated_at_ms
             .cmp(&a.updated_at_ms)
@@ -334,7 +339,8 @@ pub fn managed_execution_inventory(ledger: &DurableExecutionLedger) -> ManagedEx
         schema: MANAGED_EXECUTION_INVENTORY_SCHEMA_V1,
         total,
         shown: rows.len(),
-        complete_within_bound: total <= MAX_MANAGED_EXECUTION_INVENTORY_ROWS,
+        complete_within_bound: historically_complete
+            && total <= MAX_MANAGED_EXECUTION_INVENTORY_ROWS,
         rows,
     }
 }
@@ -343,6 +349,12 @@ pub fn reconcile_account_ledger(
     ledger: &DurableExecutionLedger,
     facts: &AccountLedgerFacts,
 ) -> Result<AccountLedgerReconciliation, AccountLedgerReconciliationError> {
+    if !ledger
+        .historical_reconciliation_eligible()
+        .unwrap_or(false)
+    {
+        return Err(AccountLedgerReconciliationError::HistoricalCoverageUnattested);
+    }
     let mut result = reconcile_exchange_evidence(
         ledger,
         &facts.authoritative_positions,
