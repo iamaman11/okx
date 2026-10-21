@@ -2637,6 +2637,15 @@ mod tests {
         )
         .unwrap();
         let store = ExecutionLedgerStore::sqlite_at(&db);
+        store
+            .bind_native_account_identity(&SqliteAccountIdentity {
+                venue: LedgerVenue::Okx,
+                environment: LedgerEnvironment::Demo,
+                account_id: "demo".to_owned(),
+                uid_fingerprint: uid.clone(),
+                bound_at_ms: 2000,
+            })
+            .unwrap();
         let owner = DurableExecutionLedger::open(store.clone(), 2000).unwrap();
         assert_eq!(owner.entries.len(), 1);
         assert_eq!(
@@ -3780,7 +3789,8 @@ mod tests {
             opened.get(inflight_id).unwrap().record.state,
             ExecutionState::UnknownSubmission
         );
-        assert_eq!(opened.get(historic_id), Some(&historic));
+        assert!(opened.get(historic_id).is_none());
+        assert_eq!(opened.read_intent(historic_id).unwrap(), Some(historic));
         let after = Connection::open(&path).unwrap();
         let same: (String, String) = after
             .query_row(

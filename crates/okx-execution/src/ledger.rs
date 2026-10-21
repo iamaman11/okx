@@ -6273,7 +6273,7 @@ mod tests {
         let reopened = DurableExecutionLedger::open(store, 310).unwrap();
         for id in &ids {
             assert_eq!(
-                reopened.get(id).unwrap().record.state,
+                reopened.read_intent(id).unwrap().unwrap().record.state,
                 ExecutionState::Rejected
             );
         }
