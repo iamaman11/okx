@@ -14,7 +14,7 @@ use okx_agent::{
     cloudflare_auth::{load_native_cloudflare_token, store_native_cloudflare_token},
     cloudflare_transport::CloudflareTransportConfig,
     config::{AgentConfig, default_root},
-    execution_runtime::ExecutionRuntime,
+    execution_runtime::{ExecutionRuntime, ExecutionRuntimeRegistry},
     github_auth::{load_native_github_token, store_native_github_token},
     github_mailbox::GitHubMailboxClient,
     identity::{
@@ -351,7 +351,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     reference,
                     rate_budget.clone(),
                 );
-                let execution = optional_execution_runtime(
+                let candidate_execution = optional_execution_runtime(
                     &config,
                     environment,
                     rate_budget.clone(),
@@ -359,6 +359,21 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     production_trading,
                 )
                 .map(std::sync::Arc::new);
+                // The existing single-account owner remains available before
+                // the one-way v14 -> SQLite cutover. Once native, dispatch is
+                // selected by the immutable CONTROL-bound account identity,
+                // not a hard-coded "real"/"demo" string or request payload.
+                // The registry owns no additional executor, gateway or lease.
+                let mut account_runtimes = ExecutionRuntimeRegistry::new();
+                let execution = match candidate_execution {
+                    Some(owner) if owner.native_account_key().is_some() => {
+                        let key = account_runtimes
+                            .register_existing(owner)
+                            .map_err(AgentError::from)?;
+                        account_runtimes.get(&key)
+                    }
+                    legacy => legacy,
+                };
                 let cloudflare = cloudflare_ws_url.and_then(|ws_url| {
                     match load_native_cloudflare_token() {
                         Ok(token) => match CloudflareTransportConfig::new(
