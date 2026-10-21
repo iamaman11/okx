@@ -530,8 +530,16 @@ where
     /// Read-only native invariant. The ledger, not a caller-provided Boolean,
     /// decides whether an uncertain in-flight mutation blocks another order.
     /// The exact candidate's unsent PREPARED protection is not in-flight.
-    fn has_unresolved_native_mutation(&self, candidate_intent_id: &str) -> bool {
-        self.ledger.entries().any(|entry| {
+    fn has_unresolved_native_mutation(
+        &self,
+        account_uid: &str,
+        candidate_intent_id: &str,
+    ) -> Result<bool, ExecutionLedgerError> {
+        Ok(self
+            .ledger
+            .operational_entries(account_uid, None)?
+            .iter()
+            .any(|entry| {
             let record = &entry.record;
             let other = record.plan.intent_id != candidate_intent_id;
             (other
@@ -569,7 +577,7 @@ where
                             )
                         })
                 })
-        })
+        }))
     }
 
     /// The single executor must cross-check a policy against its OWN durable
@@ -607,7 +615,9 @@ where
         // unrelated parent is UNKNOWN. Exact owned reduce-only venue evidence
         // remains mandatory for every CLOSE.
         if entry.record.plan.action.is_risk_increasing()
-            && self.has_unresolved_native_mutation(intent_id)
+            && self
+                .has_unresolved_native_mutation(&run.account_uid_fingerprint, intent_id)
+                .map_err(|_| Reject::SourceUnattested)?
         {
             return Err(Reject::SourceUnattested);
         }
@@ -912,12 +922,10 @@ where
         }
         let records: Vec<_> = self
             .ledger
-            .entries()
-            .filter(|entry| {
-                entry.record.plan.instrument_id == plan.instrument_id
-                    && entry.record.plan.intent_id != plan.intent_id
-            })
-            .map(|entry| entry.record.clone())
+            .operational_entries(&plan.account_uid_fingerprint, Some(&plan.instrument_id))?
+            .into_iter()
+            .filter(|entry| entry.record.plan.intent_id != plan.intent_id)
+            .map(|entry| entry.record)
             .collect();
         if !records.iter().any(|record| {
             record.state == ExecutionState::Filled
@@ -1201,12 +1209,19 @@ where
         // Single-lot only: multi-lot/other Hedge-side permission needs the
         // separate zero-gap ADD/HEDGE acceptance. An unresolved or foreign
         // managed parent cannot borrow this lot's protective coverage.
-        if self.ledger.entries().any(|other| {
-            other.record.plan.instrument_id == entry.record.plan.instrument_id
-                && other.record.plan.intent_id != intent_id
-                && (!other.record.state.is_terminal()
-                    || other.record.protection_blocks_new_managed_intent())
-        }) {
+        if self
+            .ledger
+            .operational_entries(
+                &entry.record.plan.account_uid_fingerprint,
+                Some(&entry.record.plan.instrument_id),
+            )?
+            .iter()
+            .any(|other| {
+                other.record.plan.intent_id != intent_id
+                    && (!other.record.state.is_terminal()
+                        || other.record.protection_blocks_new_managed_intent())
+            })
+        {
             return Err(OrderExecutorError::ProtectionCoverageUnproven);
         }
         validate_protective_amend_coverage(&entry.record, account, inventory, target)?;
@@ -1393,9 +1408,12 @@ where
         // The agent caller must fence all reads with one private-WS cursor.
         let records: Vec<_> = self
             .ledger
-            .entries()
-            .filter(|item| item.record.plan.instrument_id == entry.record.plan.instrument_id)
-            .map(|item| item.record.clone())
+            .operational_entries(
+                &entry.record.plan.account_uid_fingerprint,
+                Some(&entry.record.plan.instrument_id),
+            )?
+            .into_iter()
+            .map(|item| item.record)
             .collect();
         let mut details = vec![current];
         for other in &records {

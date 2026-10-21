@@ -3061,6 +3061,38 @@ impl DurableExecutionLedger {
         self.entries.values()
     }
 
+    /// Operational view of all durable *material* native obligations.
+    /// The native SQLite path reads verified active guards, so terminal
+    /// history is not scanned on each risk/protection decision. The legacy
+    /// v14 path retains its original full account inventory semantics.
+    pub(crate) fn operational_entries(
+        &self,
+        account_uid: &str,
+        instrument_id: Option<&str>,
+    ) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            if let Some(instrument) = instrument_id {
+                sqlite_store::indexed_instrument_guards(
+                    &self.store.path,
+                    account_uid,
+                    instrument,
+                )
+            } else {
+                sqlite_store::indexed_account_guards(&self.store.path, account_uid)
+            }
+        } else {
+            Ok(self
+                .entries
+                .values()
+                .filter(|entry| {
+                    instrument_id
+                        .is_none_or(|inst| entry.record.plan.instrument_id == inst)
+                })
+                .cloned()
+                .collect())
+        }
+    }
+
     pub fn prepare(
         &mut self,
         plan: ExecutionPlan,

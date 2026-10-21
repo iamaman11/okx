@@ -271,6 +271,48 @@ pub(super) fn indexed_instrument_guards(
     Ok(result)
 }
 
+/// Read every currently material account obligation, not every terminal
+/// historic intent. A matching guard is only an indexed projection: its row,
+/// digest, immutable plan and current state must all match native truth.
+/// The selected account identity is pinned before any answer is returned.
+pub(super) fn indexed_account_guards(
+    path: &Path,
+    expected_uid: &str,
+) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    require_indexed_scope(&c, expected_uid)?;
+    let mut stmt = c
+        .prepare(
+            "SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
+                    i.instrument_id,i.requested_action,i.plan_sha256,i.current_state,i.created_at_ms,
+                    g.entry_digest
+             FROM native_guarded_intents g
+             JOIN ledger_entries e ON e.intent_id=g.intent_id
+             LEFT JOIN intents i ON i.intent_id=e.intent_id
+             ORDER BY g.intent_id",
+        )
+        .map_err(io)?;
+    let mut rows = stmt.query([]).map_err(io)?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().map_err(io)? {
+        let digest: String = row.get(3).map_err(io)?;
+        let guard_digest: String = row.get(10).map_err(io)?;
+        if digest != guard_digest {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native account guard digest mismatch",
+            ));
+        }
+        let entry = verified_indexed_entry(row, expected_uid)?;
+        if !needs_instrument_guard(&entry) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "native account guard projection mismatch",
+            ));
+        }
+        result.push(entry);
+    }
+    Ok(result)
+}
+
 /// Only active guards can contain a lost native BEGIN_POST or an in-flight
 /// order mutation. The caller holds the same account writer lease used to
 /// apply UNKNOWN transitions; no status here authorizes a second venue POST.
@@ -2383,6 +2425,9 @@ mod tests {
         };
         store.bind_native_account_identity(&identity).unwrap();
         let guards = indexed_instrument_guards(&db, &uid, "BTC-USDT-SWAP").unwrap();
+        let account_guards = indexed_account_guards(&db, &uid).unwrap();
+        assert_eq!(account_guards, guards);
+        assert!(indexed_account_guards(&db, &"b".repeat(64)).is_err());
         assert_eq!(guards.len(), 1);
         assert_eq!(guards[0].record.plan.intent_id, "guarded_intent_000063");
         let batch = vec!["guarded_intent_000063".to_owned()];
