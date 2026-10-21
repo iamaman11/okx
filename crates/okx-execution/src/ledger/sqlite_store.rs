@@ -2641,6 +2641,218 @@ mod tests {
     /// Historical pages are keyset indexed, fixed-size and UID-bound.
     /// Two DBs have independent native writer leases without a shared
     /// account-global lock or another controller/transport.
+    /// SQL-first workload: one account with actual immutable Rust intents,
+    /// transactionally consistent plan projections and chained domain events.
+    /// No historical BTreeMap, replayed venue POST or synthetic positive
+    /// financial completeness is introduced by the benchmark.
+    fn attest_large_terminal_history(total: usize) {
+        let root = test_root("large-native-history");
+        let path = root.join("account.sqlite");
+        let uid = "a".repeat(64);
+        let store = ExecutionLedgerStore::sqlite_at(&path);
+        let make = |index: usize| {
+            let id = format!("bulk_terminal_intent_{index:09}");
+            let plan = ExecutionPlan {
+                schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+                intent_id: id.clone(),
+                client_order_id: derive_client_order_id(&id),
+                reference_generation: "sha256:reference".to_owned(),
+                account_generation: "sha256:account".to_owned(),
+                account_uid_fingerprint: uid.clone(),
+                instrument_id: "BTC-USDT-SWAP".to_owned(),
+                trade_mode: crate::TradeMode::Cross,
+                side: crate::OrderSide::Buy,
+                position_side: PositionSide::Long,
+                action: ExecutionAction::Open,
+                order_type: crate::OrderType::Limit,
+                size: "1".to_owned(),
+                price: "0.1".to_owned(),
+                open_risk: None,
+                risk_binding: None,
+            };
+            let mut record = ExecutionRecord::new(plan);
+            record.abandon_prepared().unwrap();
+            ExecutionLedgerEntry {
+                record,
+                created_at_ms: 1_000 + index as u64,
+                updated_at_ms: 1_000 + index as u64,
+            }
+        };
+        let first = make(0);
+        store
+            .save(
+                &BTreeMap::from([(first.record.plan.intent_id.clone(), first)]),
+                None,
+                None,
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
+            )
+            .unwrap();
+        store
+            .bind_native_account_identity(&SqliteAccountIdentity {
+                venue: LedgerVenue::Okx,
+                environment: LedgerEnvironment::Demo,
+                account_id: "demo".to_owned(),
+                uid_fingerprint: uid.clone(),
+                bound_at_ms: 2_000,
+            })
+            .unwrap();
+        {
+            let mut c = Connection::open(&path).unwrap();
+            let tx = c.transaction().unwrap();
+            let (mut seq, mut prior_hash): (i64, String) = tx
+                .query_row(
+                    "SELECT seq,event_sha256 FROM domain_events ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            {
+                let mut entries = tx
+                    .prepare(
+                        "INSERT INTO ledger_entries
+                        (intent_id,client_order_id,uid,updated_at_ms,digest,bytes)
+                        VALUES(?1,?2,?3,?4,?5,?6)",
+                    )
+                    .unwrap();
+                let mut projections = tx
+                    .prepare(
+                        "INSERT INTO intents
+                        (intent_id,epoch_id,decision_id,instrument_id,requested_action,
+                         plan_sha256,current_state,created_at_ms)
+                        VALUES (?1,NULL,NULL,?2,?3,?4,?5,?6)",
+                    )
+                    .unwrap();
+                let mut events = tx
+                    .prepare(
+                        "INSERT INTO domain_events
+                         (event_id,event_type,event_version,subject_kind,subject_id,
+                          effective_at_ms,recorded_at_ms,previous_event_sha256,event_sha256)
+                         VALUES(?1,'INTENT_TRANSITION',1,'INTENT',?2,?3,?3,?4,?5)",
+                    )
+                    .unwrap();
+                for index in 1..total {
+                    let e = make(index);
+                    let plan = &e.record.plan;
+                    let original = encode(&e).unwrap();
+                    let digest = checksum(&original);
+                    entries
+                        .execute(params![
+                            &plan.intent_id,
+                            &plan.client_order_id,
+                            &uid,
+                            e.updated_at_ms,
+                            &digest,
+                            original
+                        ])
+                        .unwrap();
+                    projections
+                        .execute(params![
+                            &plan.intent_id,
+                            &plan.instrument_id,
+                            format!("{:?}", plan.action),
+                            checksum(&encode(plan).unwrap()),
+                            format!("{:?}", e.record.state),
+                            e.created_at_ms
+                        ])
+                        .unwrap();
+                    seq += 1;
+                    let event_id = format!("sqlite-intent-{seq}");
+                    let previous = Some(prior_hash.as_str());
+                    let event_hash = checksum(
+                        &encode(&(
+                            "okx.sqlite.intent-transition/v1",
+                            previous.as_ref(),
+                            &event_id,
+                            &plan.intent_id,
+                            &digest,
+                            e.updated_at_ms,
+                        ))
+                        .unwrap(),
+                    );
+                    events
+                        .execute(params![
+                            event_id,
+                            &plan.intent_id,
+                            e.updated_at_ms,
+                            &prior_hash,
+                            &event_hash
+                        ])
+                        .unwrap();
+                    prior_hash = event_hash;
+                }
+            }
+            tx.commit().unwrap();
+        }
+        let before = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("VmRSS:"))
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .and_then(|text| text.parse::<u64>().ok())
+            });
+        let audit = attest(&path).unwrap();
+        assert_eq!(audit.integrity, "VALIDATED_COLD_READ");
+        let reopened = DurableExecutionLedger::open(store.clone(), total as u64 + 20_000).unwrap();
+        assert_eq!(reopened.total_intents().unwrap(), total);
+        assert!(reopened.entries().next().is_none());
+        assert_eq!(reopened.recent_intents(32).unwrap().len(), 32);
+        assert!(reopened
+            .read_intent("bulk_terminal_intent_000000000")
+            .unwrap()
+            .is_some());
+        assert!(reopened
+            .read_intent(&format!("bulk_terminal_intent_{:09}", total - 1))
+            .unwrap()
+            .is_some());
+        let mut scanned = 0usize;
+        reopened
+            .visit_historical_entries(|_| {
+                scanned += 1;
+                true
+            })
+            .unwrap();
+        assert_eq!(scanned, total);
+        // Linux-only RSS check for the explicit million-history acceptance.
+        // It compares AFTER fixture generation, so the test measures cold
+        // Engine load/read growth rather than SQLite database construction.
+        if total >= 1_000_000
+            && let Some(start) = before
+            && let Ok(status) = std::fs::read_to_string("/proc/self/status")
+            && let Some(end) = status
+                .lines()
+                .find(|line| line.starts_with("VmRSS:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|text| text.parse::<u64>().ok())
+        {
+            assert!(
+                end.saturating_sub(start) <= 256 * 1024,
+                "million historical intents increased RSS by more than 256 MiB"
+            );
+            eprintln!(
+                "MILLION_TERMINAL_INTENTS={} RSS_DELTA_KIB={}",
+                total,
+                end.saturating_sub(start)
+            );
+        }
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn small_terminal_history_uses_only_indexed_operational_state() {
+        attest_large_terminal_history(128);
+    }
+
+    #[test]
+    #[ignore = "explicit Linux one-million-intent cold-attestation acceptance"]
+    fn sqlite_million_history_bounded_rss() {
+        attest_large_terminal_history(1_000_000);
+    }
+
     #[test]
     fn bounded_indexed_history_across_independent_native_accounts() {
         let root = test_root("indexed-account-roots");
