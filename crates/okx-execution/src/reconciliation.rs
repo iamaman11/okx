@@ -1263,7 +1263,7 @@ fn assess_flat_strategy_nav(
     if observed_orders.len() != facts.exchange_orders.len() {
         reasons.push("nav_duplicate_exchange_order_identity");
     }
-    let mut matched = BTreeMap::<String, ExecutionLedgerEntry>::new();
+    let mut matched = BTreeMap::<String, crate::ExecutionLedgerEntry>::new();
     let mut invalid_intent = false;
     let mut duplicate_owner = false;
     ledger
