@@ -1275,8 +1275,7 @@ fn assess_flat_strategy_nav(
                     return true;
                 }
                 if !entry.record.state.is_terminal()
-                    || entry.record.plan.account_uid_fingerprint
-                        != capital.account_uid_fingerprint
+                    || entry.record.plan.account_uid_fingerprint != capital.account_uid_fingerprint
                     || (entry.record.plan.action.is_risk_increasing()
                         && (entry.record.strategy_run_id.as_deref()
                             != Some(capital.allocation_id.as_str())
@@ -1298,10 +1297,12 @@ fn assess_flat_strategy_nav(
                     invalid_intent = true;
                 }
                 if let Some(order_id) = entry.record.order_id.as_deref()
-                    && observed_orders.get(order_id).is_some_and(|(client, instrument)| {
-                        *client == entry.record.plan.client_order_id.as_str()
-                            && *instrument == entry.record.plan.instrument_id.as_str()
-                    })
+                    && observed_orders
+                        .get(order_id)
+                        .is_some_and(|(client, instrument)| {
+                            *client == entry.record.plan.client_order_id.as_str()
+                                && *instrument == entry.record.plan.instrument_id.as_str()
+                        })
                     && matched.insert(order_id.to_owned(), entry.clone()).is_some()
                 {
                     duplicate_owner = true;

@@ -3467,6 +3467,21 @@ mod tests {
                 .any_entry_created_since(&"b".repeat(64), 1060, |_| false)
                 .is_err()
         );
+        let mut streamed = Vec::new();
+        verified_engine
+            .visit_entries_created_since(&uid, 1060, |entry| {
+                streamed.push(entry.record.plan.intent_id.clone());
+                true
+            })
+            .unwrap();
+        assert_eq!(streamed.len(), 4);
+        assert_eq!(streamed[0], "guarded_intent_000060");
+        assert_eq!(streamed[3], "guarded_intent_000063");
+        assert!(
+            verified_engine
+                .visit_entries_created_since(&"b".repeat(64), 1060, |_| true)
+                .is_err()
+        );
         let selected = verified_engine
             .bounded_run_entries(&uid, 1060, 2, |entry| {
                 Some(entry.record.plan.intent_id.clone())
