@@ -2280,22 +2280,25 @@ impl DurableExecutionLedger {
             // Keep one authenticated WAL read snapshot for every source fact:
             // a long-running epoch may contain any number of old intents.
             // Only exact indexed account+client+order matches are considered.
-            let reader = sqlite_store::source_owner_reader(
-                &self.store.path,
-                &run.account_uid_fingerprint,
+            let reader =
+                sqlite_store::source_owner_reader(&self.store.path, &run.account_uid_fingerprint)?;
+            next.capture_with_owner(
+                facts,
+                run,
+                require_fresh_cursor,
+                |ord, cl, inst, side, pos| {
+                    sqlite_store::indexed_source_owner(
+                        &reader,
+                        &run.account_uid_fingerprint,
+                        run.started_at_ms,
+                        ord,
+                        cl,
+                        inst,
+                        side,
+                        pos,
+                    )
+                },
             )?;
-            next.capture_with_owner(facts, run, require_fresh_cursor, |ord, cl, inst, side, pos| {
-                sqlite_store::indexed_source_owner(
-                    &reader,
-                    &run.account_uid_fingerprint,
-                    run.started_at_ms,
-                    ord,
-                    cl,
-                    inst,
-                    side,
-                    pos,
-                )
-            })?;
         } else {
             let owned = self.run_entries(run)?;
             next.capture(facts, &owned, run, require_fresh_cursor)?;

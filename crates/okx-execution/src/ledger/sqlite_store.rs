@@ -2777,22 +2777,33 @@ mod tests {
             .unwrap(),
             Some(entry),
         );
-        assert!(lookup(&uid, 1_000, None, &client_id, "BTC-USDT-SWAP", None, None)
-            .unwrap().is_none());
-        assert!(lookup(&uid, 1_000, Some("other_order"), &client_id, "BTC-USDT-SWAP", None, None)
-            .unwrap().is_none());
-        assert!(lookup(&uid, 1_000, Some("venue_order_456"), "foreign_client", "BTC-USDT-SWAP", None, None)
-            .unwrap().is_none());
-        assert!(lookup(&uid, 1_000, Some("venue_order_456"), &client_id, "ETH-USDT-SWAP", None, None)
-            .unwrap().is_none());
-        assert!(lookup(&uid, 1_000, Some("venue_order_456"), &client_id, "BTC-USDT-SWAP", Some("sell"), None)
-            .unwrap().is_none());
-        assert!(lookup(&uid, 1_000, Some("venue_order_456"), &client_id, "BTC-USDT-SWAP", None, Some("short"))
-            .unwrap().is_none());
-        assert!(lookup(&uid, 1_101, Some("venue_order_456"), &client_id, "BTC-USDT-SWAP", None, None)
-            .unwrap().is_none());
+        // Only the exact original UID, run boundary, order, instrument,
+        // client ID, side and position may establish strategy ownership.
+        for (started, ord, client, instrument, side, position) in [
+            (1_000, None, client_id.as_str(), "BTC-USDT-SWAP", None, None),
+            (1_000, Some("other_order"), client_id.as_str(), "BTC-USDT-SWAP", None, None),
+            (1_000, Some("venue_order_456"), "foreign_client", "BTC-USDT-SWAP", None, None),
+            (1_000, Some("venue_order_456"), client_id.as_str(), "ETH-USDT-SWAP", None, None),
+            (1_000, Some("venue_order_456"), client_id.as_str(), "BTC-USDT-SWAP", Some("sell"), None),
+            (1_000, Some("venue_order_456"), client_id.as_str(), "BTC-USDT-SWAP", None, Some("short")),
+            (1_101, Some("venue_order_456"), client_id.as_str(), "BTC-USDT-SWAP", None, None),
+        ] {
+            assert!(
+                lookup(&uid, started, ord, client, instrument, side, position)
+                    .unwrap()
+                    .is_none()
+            );
+        }
         assert!(matches!(
-            lookup(&"b".repeat(64), 1_000, Some("venue_order_456"), &client_id, "BTC-USDT-SWAP", None, None),
+            lookup(
+                &"b".repeat(64),
+                1_000,
+                Some("venue_order_456"),
+                &client_id,
+                "BTC-USDT-SWAP",
+                None,
+                None
+            ),
             Err(ExecutionLedgerError::AccountScopeMismatch)
         ));
         drop(reader);

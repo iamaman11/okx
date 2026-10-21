@@ -198,22 +198,27 @@ impl DurableExchangeEvidence {
     ) -> Result<(), ExecutionLedgerError> {
         // Legacy v14 keeps its original complete snapshot semantics. Native
         // SQLite supplies the same exact owner predicate via an indexed row.
-        self.capture_with_owner(facts, run, require_fresh_cursor, |ord, cl, inst, side, pos| {
-            let mut matches = entries.iter().filter(|e| {
-                ord.is_some()
-                    && e.record.order_id.as_deref() == ord
-                    && e.record.plan.client_order_id == cl
-                    && e.record.plan.instrument_id == inst
-                    && side.is_none_or(|s| e.record.plan.side.as_str() == s)
-                    && pos.is_none_or(|s| e.record.plan.position_side.as_str() == s)
-            });
-            let first = matches.next().cloned();
-            if matches.next().is_some() {
-                Err(ExecutionLedgerError::ExchangeEvidenceConflict)
-            } else {
-                Ok(first)
-            }
-        })
+        self.capture_with_owner(
+            facts,
+            run,
+            require_fresh_cursor,
+            |ord, cl, inst, side, pos| {
+                let mut matches = entries.iter().filter(|e| {
+                    ord.is_some()
+                        && e.record.order_id.as_deref() == ord
+                        && e.record.plan.client_order_id == cl
+                        && e.record.plan.instrument_id == inst
+                        && side.is_none_or(|s| e.record.plan.side.as_str() == s)
+                        && pos.is_none_or(|s| e.record.plan.position_side.as_str() == s)
+                });
+                let first = matches.next().cloned();
+                if matches.next().is_some() {
+                    Err(ExecutionLedgerError::ExchangeEvidenceConflict)
+                } else {
+                    Ok(first)
+                }
+            },
+        )
     }
 
     /// The native path resolves exact exchange ownership using a pinned
@@ -227,8 +232,13 @@ impl DurableExchangeEvidence {
         mut owner: F,
     ) -> Result<(), ExecutionLedgerError>
     where
-        F: FnMut(Option<&str>, &str, &str, Option<&str>, Option<&str>)
-            -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError>,
+        F: FnMut(
+            Option<&str>,
+            &str,
+            &str,
+            Option<&str>,
+            Option<&str>,
+        ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError>,
     {
         self.validate()?;
         if !Self::complete_source_checkpoint(facts) {
