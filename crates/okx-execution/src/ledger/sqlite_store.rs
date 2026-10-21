@@ -2317,6 +2317,10 @@ mod tests {
             .unwrap();
         assert_eq!(post_count, 1);
         assert!(reopened.begin_submission(id, 1004).is_err());
+        // Windows keeps the SQLite file locked while any connection or
+        // prepared owner is alive. Explicitly release both before cleanup.
+        drop(c);
+        drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
 
