@@ -493,7 +493,9 @@ impl StrategyPeriodHistory {
         mut source_cursor: F,
     ) -> Result<(), ExecutionLedgerError>
     where
-        F: FnMut(&str) -> Result<Option<crate::exchange_evidence::ExchangeCoverageCursor>, ExecutionLedgerError>,
+        F: FnMut(
+            &str,
+        ) -> Result<Option<crate::exchange_evidence::ExchangeCoverageCursor>, ExecutionLedgerError>,
     {
         if self.archived_runs.len() + self.unverified_runs.len() > MAX_ARCHIVED_STRATEGY_RUNS {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
@@ -652,7 +654,7 @@ impl StrategyPeriodHistory {
                                 r.reservation.started_at_ms,
                                 Some(r.closure.closed_at_ms),
                                 r.reservation.allocated_usdt.as_str(),
-                                &r.evidence,
+                                Some(&r.evidence),
                             )
                         })
                 });
@@ -666,16 +668,16 @@ impl StrategyPeriodHistory {
                 None => source_cursor(&point.source_cursor_key)?,
             };
             let cursor_proven = cursor.as_ref().is_some_and(|c| {
-                    c.order_complete
-                        && c.fill_complete
-                        && c.bill_complete
-                        && c.account_as_of_ms <= point.account_as_of_ms
-                        && point.account_as_of_ms - c.account_as_of_ms
-                            <= crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
-                        && serde_json::to_vec(c).ok().is_some_and(|data| {
-                            format!("{:x}", Sha256::digest(data)) == point.source_cursor_sha256
-                        })
-                });
+                c.order_complete
+                    && c.fill_complete
+                    && c.bill_complete
+                    && c.account_as_of_ms <= point.account_as_of_ms
+                    && point.account_as_of_ms - c.account_as_of_ms
+                        <= crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS
+                    && serde_json::to_vec(c).ok().is_some_and(|data| {
+                        format!("{:x}", Sha256::digest(data)) == point.source_cursor_sha256
+                    })
+            });
             if point.account_as_of_ms < started_at_ms
                 || ended_at_ms.is_some_and(|end| point.observed_at_ms > end)
                 || previous.is_some_and(|p| {
