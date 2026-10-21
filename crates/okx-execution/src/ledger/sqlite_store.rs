@@ -484,16 +484,27 @@ pub(super) fn source_owner_reader(
 /// The immutable client ID is UNIQUE; order ID, instrument, side, position
 /// and run start are checked AFTER authenticating the full indexed row.
 /// Missing ownership stays UNALLOCATED and cannot become strategy PnL.
+pub(super) struct SourceOwnerKey<'a> {
+    pub order_id: Option<&'a str>,
+    pub client_order_id: &'a str,
+    pub instrument_id: &'a str,
+    pub side: Option<&'a str>,
+    pub position_side: Option<&'a str>,
+}
+
 pub(super) fn indexed_source_owner(
     connection: &Connection,
     expected_uid: &str,
     run_started_at_ms: u64,
-    order_id: Option<&str>,
-    client_order_id: &str,
-    instrument_id: &str,
-    side: Option<&str>,
-    position_side: Option<&str>,
+    key: SourceOwnerKey<'_>,
 ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+    let SourceOwnerKey {
+        order_id,
+        client_order_id,
+        instrument_id,
+        side,
+        position_side,
+    } = key;
     let Some(order_id) = order_id else {
         return Ok(None);
     };
@@ -2757,11 +2768,13 @@ mod tests {
                 &reader,
                 account_uid,
                 opened_at_ms,
-                venue_order,
-                cl,
-                instrument,
-                side,
-                position,
+                SourceOwnerKey {
+                    order_id: venue_order,
+                    client_order_id: cl,
+                    instrument_id: instrument,
+                    side,
+                    position_side: position,
+                },
             )
         };
         assert_eq!(

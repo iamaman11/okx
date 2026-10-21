@@ -2291,11 +2291,13 @@ impl DurableExecutionLedger {
                         &reader,
                         &run.account_uid_fingerprint,
                         run.started_at_ms,
-                        ord,
-                        cl,
-                        inst,
-                        side,
-                        pos,
+                        sqlite_store::SourceOwnerKey {
+                            order_id: ord,
+                            client_order_id: cl,
+                            instrument_id: inst,
+                            side,
+                            position_side: pos,
+                        },
                     )
                 },
             )?;
