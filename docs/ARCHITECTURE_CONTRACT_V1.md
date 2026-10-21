@@ -194,19 +194,23 @@ An addition is complete only when:
 4. Operator compact result explains success/failure and *the next safe action*.
 5. No extra runtime owner/daemon/scheduler/profile-specific API appears.
 
-### Next integration order — prevent P0 from depending on P2
+### Next integration order — complete the engine before trading acceptance
 
-**P0:** accept and install matched Windows artifacts, reconcile historical
-financial admission, prove one Real OPEN/protection/CLOSE with full bills and
-NAV; no external IP binding or account duplication. Native safety gates remain.
+**A — SQLite-native Engine:** make indexed account history, exchange facts,
+capital epochs, source coverage, NAV, daily risk and reconciliation the working
+model. Remove live v14 snapshot dependencies and historical capacity ceilings
+instead of increasing those ceilings. Keep sealed v14 bytes only for migration
+proof and forbid a second writer or implicit rollback.
 
-**P1:** enable repeated protected Real cycles with complete strategy NAV,
-fees, funding, daily STOP, intent->fill->bill->TCA audit and a compact
-operator experience.
+**B — AccountContexts and product:** register independent verified account
+contexts under one process, one writer per account, concurrent strategy epochs
+and the existing global RiskBook CAS. Surface complete trader/analyst/manager
+queries through the existing typed application and MCP interfaces.
 
-**P2:** finish native account-keyed contexts and independent simultaneous
-strategies/accounts; add later venue adapters via `VenuePort` conformance.
-P0 is not gated on implementing P2.
+**Physical acceptance:** exact Windows ReleaseSet and offline CONTROL cutover,
+recovery/fault/load proofs, protected Demo cycle and financial reconciliation.
+Real may mutate only through its existing native admission; neither the SQLite
+migration nor a green CI grants new-risk permission.
 
 ### Evidence/status separation
 

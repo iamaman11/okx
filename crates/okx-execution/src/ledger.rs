@@ -2521,6 +2521,41 @@ impl DurableExecutionLedger {
         Ok(report)
     }
 
+    /// Visit all account intents created in an epoch without materializing
+    /// history. This is the single read-only owner path for reconciliation,
+    /// finance and risk checks. In native mode every row and UID is verified
+    /// under one indexed SQLite cursor; no secondary ledger is opened.
+    pub(crate) fn visit_entries_created_since<F>(
+        &self,
+        expected_uid: &str,
+        started_at_ms: u64,
+        mut visit: F,
+    ) -> Result<(), ExecutionLedgerError>
+    where
+        F: FnMut(&ExecutionLedgerEntry) -> bool,
+    {
+        if self.store.sqlite_native {
+            return sqlite_store::visit_entries_created_since(
+                &self.store.path,
+                expected_uid,
+                started_at_ms,
+                visit,
+            );
+        }
+        for entry in self.entries.values() {
+            if entry.created_at_ms < started_at_ms {
+                continue;
+            }
+            if entry.record.plan.account_uid_fingerprint != expected_uid {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+            if !visit(entry) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Legacy v14 alone keeps the historical borrowed financial snapshot.
     /// Native SQLite callers MUST use indexed source links + full-run
     /// streaming checks, never silently resurrect a materialized epoch map.

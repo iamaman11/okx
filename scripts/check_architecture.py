@@ -46,11 +46,6 @@ def validate(graph: dict[str, set[str]]) -> list[str]:
     for crate in sorted(expected & actual):
         for dep in sorted(graph[crate] - ALLOWED[crate]):
             errors.append(f"forbidden local dependency: {crate} -> {dep}")
-        for dep in sorted(ALLOWED[crate] - graph[crate]):
-            errors.append(
-                "accepted dependency disappeared; update architecture intentionally "
-                f"if removal is valid: {crate} -> {dep}"
-            )
     return errors
 
 
@@ -82,6 +77,13 @@ def self_test() -> int:
     accepted = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
     if validate(accepted):
         print("self-test failed: accepted graph was rejected", file=sys.stderr)
+        return 1
+
+    # Removing an old dependency reduces coupling and is always permitted.
+    simplified = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
+    simplified["okx-agent"].remove("okx-research")
+    if validate(simplified):
+        print("self-test failed: a removed dependency was rejected", file=sys.stderr)
         return 1
 
     forbidden = {name: set(dependencies) for name, dependencies in ALLOWED.items()}

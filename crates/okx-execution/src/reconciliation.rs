@@ -1246,33 +1246,77 @@ fn assess_flat_strategy_nav(
     {
         reasons.push("nav_open_position_or_pending_order");
     }
-    // The operational cache cannot establish complete capital-epoch NAV.
-    // Insufficient historical coverage returns an error, never a false PASS.
-    let historical = ledger
-        .run_entries(capital)
-        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
-    let entries = historical
+    // One owner stream verifies EVERY epoch intent against immutable account
+    // history. Retain only exact current venue order owners; otherwise even a
+    // million historical intents would be cloned merely to reconcile a short
+    // authenticated REST window. Conflicting owners cannot become a NAV PASS.
+    let observed_orders = facts
+        .exchange_orders
         .iter()
-        .filter(|e| e.created_at_ms > capital.started_at_ms)
-        .collect::<Vec<_>>();
-    if entries.iter().any(|e| {
-        !e.record.state.is_terminal()
-            || e.record.plan.account_uid_fingerprint != capital.account_uid_fingerprint
-            || (e.record.plan.action.is_risk_increasing()
-                && (e.record.strategy_run_id.as_deref() != Some(capital.allocation_id.as_str())
-                    || e.record.lineage.as_ref().is_none_or(|l| {
-                        l.origin_schema != capital.origin_schema
-                            || l.origin_version != capital.origin_version
+        .map(|order| {
+            (
+                order.order_id.as_str(),
+                (order.client_order_id.as_str(), order.instrument_id.as_str()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if observed_orders.len() != facts.exchange_orders.len() {
+        reasons.push("nav_duplicate_exchange_order_identity");
+    }
+    let mut matched = BTreeMap::<String, ExecutionLedgerEntry>::new();
+    let mut invalid_intent = false;
+    let mut duplicate_owner = false;
+    ledger
+        .visit_entries_created_since(
+            &capital.account_uid_fingerprint,
+            capital.started_at_ms,
+            |entry| {
+                if entry.created_at_ms <= capital.started_at_ms {
+                    return true;
+                }
+                if !entry.record.state.is_terminal()
+                    || entry.record.plan.account_uid_fingerprint
+                        != capital.account_uid_fingerprint
+                    || (entry.record.plan.action.is_risk_increasing()
+                        && (entry.record.strategy_run_id.as_deref()
+                            != Some(capital.allocation_id.as_str())
+                            || entry.record.lineage.as_ref().is_none_or(|lineage| {
+                                lineage.origin_schema != capital.origin_schema
+                                    || lineage.origin_version != capital.origin_version
+                            })
+                            || entry
+                                .record
+                                .plan
+                                .risk_binding
+                                .as_ref()
+                                .is_none_or(|binding| {
+                                    binding.mandate.version != capital.mandate_version
+                                })))
+                    || (entry.record.plan.action.is_risk_reducing()
+                        && entry.record.strategy_run_id.is_some())
+                {
+                    invalid_intent = true;
+                }
+                if let Some(order_id) = entry.record.order_id.as_deref()
+                    && observed_orders.get(order_id).is_some_and(|(client, instrument)| {
+                        *client == entry.record.plan.client_order_id.as_str()
+                            && *instrument == entry.record.plan.instrument_id.as_str()
                     })
-                    || e.record
-                        .plan
-                        .risk_binding
-                        .as_ref()
-                        .is_none_or(|b| b.mandate.version != capital.mandate_version)))
-            || (e.record.plan.action.is_risk_reducing() && e.record.strategy_run_id.is_some())
-    }) {
+                    && matched.insert(order_id.to_owned(), entry.clone()).is_some()
+                {
+                    duplicate_owner = true;
+                }
+                true
+            },
+        )
+        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
+    if invalid_intent {
         reasons.push("nav_unowned_or_pending_intent");
     }
+    if duplicate_owner {
+        reasons.push("nav_unowned_or_duplicate_fill");
+    }
+    let entries = matched.into_values().collect::<Vec<_>>();
     for order in facts.exchange_orders.iter().filter(|o| {
         o.update_time_ms
             .parse::<u64>()
