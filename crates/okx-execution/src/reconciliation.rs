@@ -595,6 +595,15 @@ fn reconcile_exchange_evidence(
                 .map(|fill| fill.client_order_id.as_str()),
         )
         .collect::<BTreeSet<_>>();
+    // Build the bounded venue-side identity sets ONCE. Comparing every
+    // historical intent to every exchange fill makes a routine read-only
+    // reconciliation O(history × current fills), even when SQLite keeps
+    // historical intent RAM bounded. Membership is exact on either venue
+    // order ID or client order ID, as in the original owner predicate.
+    let observed_fill_clients = exchange_fills
+        .iter()
+        .map(|fill| fill.client_order_id.as_str())
+        .collect::<BTreeSet<_>>();
     let observed_order_ids = exchange_fills
         .iter()
         .filter_map(|fill| fill.order_id.as_deref())
@@ -633,16 +642,13 @@ fn reconcile_exchange_evidence(
             {
                 relevant_managed_order_ids.insert(id.to_owned());
             }
-            let matches = by_client
-                .get(plan.client_order_id.as_str())
-                .cloned()
-                .unwrap_or_default();
-            if matches.len() > 1 {
+            let matches = by_client.get(plan.client_order_id.as_str());
+            if matches.is_some_and(|orders| orders.len() > 1) {
                 duplicate_managed_client = Some(plan.client_order_id.clone());
                 return false;
             }
 
-            let observed = matches.first().copied();
+            let observed = matches.and_then(|orders| orders.first().copied());
             if let Some(order) = observed {
                 if order.instrument_id != plan.instrument_id {
                     identity_mismatches += 1;
@@ -656,14 +662,12 @@ fn reconcile_exchange_evidence(
                 }
             }
 
-            let fill_observed = exchange_fills.iter().any(|fill| {
-                fill.client_order_id == plan.client_order_id
-                    || entry
-                        .record
-                        .order_id
-                        .as_deref()
-                        .is_some_and(|order_id| fill.order_id.as_deref() == Some(order_id))
-            });
+            let fill_observed = observed_fill_clients.contains(plan.client_order_id.as_str())
+                || entry
+                    .record
+                    .order_id
+                    .as_deref()
+                    .is_some_and(|order_id| observed_order_ids.contains(order_id));
 
             match entry.record.state {
                 ExecutionState::Prepared | ExecutionState::Rejected => {
