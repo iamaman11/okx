@@ -128,13 +128,15 @@ fn insert_order(
             "SELECT intent_id,instrument_id,client_order_id,status,last_exchange_update_ms
              FROM exchange_orders WHERE venue_order_id=?1",
             params![order_id],
-            |row| Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            )),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()
         .map_err(io)?;
@@ -662,7 +664,6 @@ mod snapshot_tests {
         assert_eq!(state, "filled");
         assert_eq!(updated, 2000);
     }
-
 
     /// The same deferred read transaction used by finance_window must pin
     /// all constituent counts to one point, even when another owner commits

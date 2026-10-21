@@ -2501,7 +2501,7 @@ impl DurableExecutionLedger {
                 ));
             }
         }
-        let mut report = crate::assess_persisted_financial_period_with_verified_source(
+        let mut report = crate::strategy_finance::assess_persisted_financial_period_with_index(
             run,
             Some(source),
             &entries,
@@ -2509,6 +2509,7 @@ impl DurableExecutionLedger {
             coherent,
             production_marks,
             captured,
+            Some(&source_index),
         );
         for reason in extra_reasons {
             if !report.reasons.contains(&reason) {

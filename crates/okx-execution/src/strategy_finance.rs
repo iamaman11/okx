@@ -475,6 +475,33 @@ pub fn assess_persisted_financial_period_with_verified_source(
     production_marks: &BTreeMap<String, ProductionMarkEvidence>,
     current_source_captured: bool,
 ) -> StrategyFinancialPeriod {
+    let source_index = evidence.map(SourceOrderIndex::new);
+    assess_persisted_financial_period_with_index(
+        run,
+        evidence,
+        entries,
+        facts,
+        coherent,
+        production_marks,
+        current_source_captured,
+        source_index.as_ref(),
+    )
+}
+
+/// Use the identical immutable source index already required by native
+/// terminal-order reconciliation. Only one proof/index is built per financial
+/// calculation, never one for each linked fill or risk candidate.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assess_persisted_financial_period_with_index(
+    run: &StrategyCapitalReservation,
+    evidence: Option<&DurableExchangeEvidence>,
+    entries: &[ExecutionLedgerEntry],
+    facts: &AccountLedgerFacts,
+    coherent: bool,
+    production_marks: &BTreeMap<String, ProductionMarkEvidence>,
+    current_source_captured: bool,
+    source_index: Option<&SourceOrderIndex<'_>>,
+) -> StrategyFinancialPeriod {
     let mut reasons = BTreeSet::new();
     let mut realized = Decimal::ZERO;
     let mut fees = Decimal::ZERO;
@@ -578,7 +605,20 @@ pub fn assess_persisted_financial_period_with_verified_source(
         .iter()
         .map(|x| (x.record.plan.intent_id.as_str(), x))
         .collect::<BTreeMap<_, _>>();
-    let source_index = SourceOrderIndex::new(e);
+    let Some(source_index) = source_index else {
+        reasons.insert("source_order_index_unavailable");
+        return incomplete(
+            run,
+            allocation,
+            evidence_sha256,
+            0,
+            0,
+            realized,
+            fees,
+            Vec::new(),
+            reasons,
+        );
+    };
     for entry in entries {
         source_index.validate_entry(entry, run.started_at_ms, &mut reasons);
     }
@@ -690,8 +730,7 @@ pub fn assess_persisted_financial_period_with_verified_source(
         }
         // Only exact originating order identity and native fill source can
         // establish this leg. A shared instrument is not a sufficient link.
-        let matching_order =
-            source_index.contains_exact_order(&f.ord, &f.client, &f.inst, intent);
+        let matching_order = source_index.contains_exact_order(&f.ord, &f.client, &f.inst, intent);
         if !matching_order {
             reasons.insert("exact_source_order_missing");
             continue;
