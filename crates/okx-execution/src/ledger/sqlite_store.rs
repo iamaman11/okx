@@ -468,6 +468,60 @@ pub(super) fn client_order_id_exists(
     Ok(prior_uid.is_some())
 }
 
+/// The same SQLite read snapshot owns all source-event attribution for
+/// one capture. No cross-account lookup or unverified caller-supplied UID.
+pub(super) fn source_owner_reader(
+    path: &Path,
+    expected_uid: &str,
+) -> Result<Connection, ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
+    require_indexed_scope(&c, expected_uid)?;
+    Ok(c)
+}
+
+/// Resolve one independently observed exchange order to its original intent.
+/// The immutable client ID is UNIQUE; order ID, instrument, side, position
+/// and run start are checked AFTER authenticating the full indexed row.
+/// Missing ownership stays UNALLOCATED and cannot become strategy PnL.
+pub(super) fn indexed_source_owner(
+    connection: &Connection,
+    expected_uid: &str,
+    run_started_at_ms: u64,
+    order_id: Option<&str>,
+    client_order_id: &str,
+    instrument_id: &str,
+    side: Option<&str>,
+    position_side: Option<&str>,
+) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+    let Some(order_id) = order_id else {
+        return Ok(None);
+    };
+    let mut stmt = connection
+        .prepare(
+            "SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
+                    i.instrument_id,i.requested_action,i.plan_sha256,i.current_state,i.created_at_ms
+             FROM ledger_entries e LEFT JOIN intents i ON i.intent_id=e.intent_id
+             WHERE e.client_order_id=?1",
+        )
+        .map_err(io)?;
+    let mut rows = stmt.query(params![client_order_id]).map_err(io)?;
+    let Some(row) = rows.next().map_err(io)? else {
+        return Ok(None);
+    };
+    let entry = verified_indexed_entry(row, expected_uid)?;
+    let plan = &entry.record.plan;
+    if entry.created_at_ms < run_started_at_ms
+        || entry.record.order_id.as_deref() != Some(order_id)
+        || plan.instrument_id != instrument_id
+        || side.is_some_and(|s| plan.side.as_str() != s)
+        || position_side.is_some_and(|p| plan.position_side.as_str() != p)
+    {
+        return Ok(None);
+    }
+    Ok(Some(entry))
+}
+
 /// One exact persisted entry is checked against its BLOB digest, immutable
 /// plan, and indexed relational projection. The left join exposes missing
 /// projections as corruption rather than silently returning incomplete rows.

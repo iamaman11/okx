@@ -196,6 +196,40 @@ impl DurableExchangeEvidence {
         run: &StrategyCapitalReservation,
         require_fresh_cursor: bool,
     ) -> Result<(), ExecutionLedgerError> {
+        // Legacy v14 keeps its original complete snapshot semantics. Native
+        // SQLite supplies the same exact owner predicate via an indexed row.
+        self.capture_with_owner(facts, run, require_fresh_cursor, |ord, cl, inst, side, pos| {
+            let mut matches = entries.iter().filter(|e| {
+                ord.is_some()
+                    && e.record.order_id.as_deref() == ord
+                    && e.record.plan.client_order_id == cl
+                    && e.record.plan.instrument_id == inst
+                    && side.is_none_or(|s| e.record.plan.side.as_str() == s)
+                    && pos.is_none_or(|s| e.record.plan.position_side.as_str() == s)
+            });
+            let first = matches.next().cloned();
+            if matches.next().is_some() {
+                Err(ExecutionLedgerError::ExchangeEvidenceConflict)
+            } else {
+                Ok(first)
+            }
+        })
+    }
+
+    /// The native path resolves exact exchange ownership using a pinned
+    /// SQL index, so source capture never loads the full capital-epoch intent
+    /// history merely to match a handful of current REST events.
+    pub(crate) fn capture_with_owner<F>(
+        &mut self,
+        facts: &AccountLedgerFacts,
+        run: &StrategyCapitalReservation,
+        require_fresh_cursor: bool,
+        mut owner: F,
+    ) -> Result<(), ExecutionLedgerError>
+    where
+        F: FnMut(Option<&str>, &str, &str, Option<&str>, Option<&str>)
+            -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError>,
+    {
         self.validate()?;
         if !Self::complete_source_checkpoint(facts) {
             return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
@@ -232,25 +266,6 @@ impl DurableExchangeEvidence {
         if last_cursor_time.is_some_and(|last| now < last) {
             return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
         }
-        let owner =
-            |ord: Option<&str>, cl: &str, inst: &str, side: Option<&str>, pos: Option<&str>| {
-                let matches = entries
-                    .iter()
-                    .filter(|e| {
-                        ord.is_some()
-                            && e.record.order_id.as_deref() == ord
-                            && e.record.plan.client_order_id == cl
-                            && e.record.plan.instrument_id == inst
-                            && side.is_none_or(|s| e.record.plan.side.as_str() == s)
-                            && pos.is_none_or(|s| e.record.plan.position_side.as_str() == s)
-                    })
-                    .collect::<Vec<_>>();
-                if matches.len() > 1 {
-                    Err(ExecutionLedgerError::ExchangeEvidenceConflict)
-                } else {
-                    Ok(matches.first().copied())
-                }
-            };
         let item = |value: Value, e: Option<&ExecutionLedgerEntry>, funding: bool| {
             let id = if funding {
                 None
@@ -290,7 +305,7 @@ impl DurableExchangeEvidence {
                 "source":"OKX_REST_ORDER","instType":o.instrument_type,"instId":o.instrument_id,
                 "ordId":o.order_id,"clOrdId":o.client_order_id,"state":o.state,
                 "sz":o.size,"accFillSz":o.accumulated_fill_size,"uTime":o.update_time_ms
-            }), e, false))?;
+            }), e.as_ref(), false))?;
         }
         for f in &facts.exchange_fills {
             if f.fill_time_ms < run.started_at_ms {
@@ -311,7 +326,7 @@ impl DurableExchangeEvidence {
                     "fillPx":f.fill_price,"fillSz":f.fill_size,"fee":f.fee,
                     "feeCcy":f.fee_currency,"fillPnl":f.fill_pnl,"execType":f.execution_type,
                     "ts":f.fill_time_ms
-                }), e, false))?;
+                }), e.as_ref(), false))?;
         }
         for b in &facts.exchange_bills {
             if b.timestamp_ms < run.started_at_ms {
@@ -358,7 +373,7 @@ impl DurableExchangeEvidence {
                         "ccy":b.currency,"type":b.bill_type,"subType":b.sub_type,
                         "balChg":b.balance_change,"fee":b.fee,"pnl":b.pnl,"ts":b.timestamp_ms
                     }),
-                    e,
+                    e.as_ref(),
                     funding,
                 ),
             )?;
