@@ -2694,6 +2694,112 @@ mod tests {
     }
 
     #[test]
+    fn source_owner_uses_exact_persisted_identity_without_epoch_materialization() {
+        let root = test_root("source-exact-index");
+        let db = root.join("account.sqlite");
+        let uid = "a".repeat(64);
+        let intent_id = "source_exact_intent_000001";
+        let plan = ExecutionPlan {
+            schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+            intent_id: intent_id.to_owned(),
+            client_order_id: derive_client_order_id(intent_id),
+            reference_generation: "sha256:reference".to_owned(),
+            account_generation: "sha256:account".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            trade_mode: crate::TradeMode::Cross,
+            side: crate::OrderSide::Buy,
+            position_side: PositionSide::Long,
+            action: ExecutionAction::Open,
+            order_type: crate::OrderType::Limit,
+            size: "1".to_owned(),
+            price: "0.1".to_owned(),
+            open_risk: None,
+            risk_binding: None,
+        };
+        let client_id = plan.client_order_id.clone();
+        let mut record = ExecutionRecord::new(plan);
+        record.begin_submission().unwrap();
+        record.acknowledge("venue_order_456").unwrap();
+        let entry = ExecutionLedgerEntry {
+            record,
+            created_at_ms: 1_100,
+            updated_at_ms: 1_200,
+        };
+        save(
+            &db,
+            &BTreeMap::from([(intent_id.to_owned(), entry.clone())]),
+            None,
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
+        ExecutionLedgerStore::sqlite_at(&db)
+            .bind_native_account_identity(&SqliteAccountIdentity {
+                venue: LedgerVenue::Okx,
+                environment: LedgerEnvironment::Demo,
+                account_id: "demo".to_owned(),
+                uid_fingerprint: uid.clone(),
+                bound_at_ms: 2_000,
+            })
+            .unwrap();
+        let reader = source_owner_reader(&db, &uid).unwrap();
+        let lookup = |account_uid: &str,
+                      opened_at_ms: u64,
+                      venue_order: Option<&str>,
+                      cl: &str,
+                      instrument: &str,
+                      side: Option<&str>,
+                      position: Option<&str>| {
+            indexed_source_owner(
+                &reader,
+                account_uid,
+                opened_at_ms,
+                venue_order,
+                cl,
+                instrument,
+                side,
+                position,
+            )
+        };
+        assert_eq!(
+            lookup(
+                &uid,
+                1_000,
+                Some("venue_order_456"),
+                &client_id,
+                "BTC-USDT-SWAP",
+                Some("buy"),
+                Some("long"),
+            )
+            .unwrap(),
+            Some(entry),
+        );
+        assert!(lookup(&uid, 1_000, None, &client_id, "BTC-USDT-SWAP", None, None)
+            .unwrap().is_none());
+        assert!(lookup(&uid, 1_000, Some("other_order"), &client_id, "BTC-USDT-SWAP", None, None)
+            .unwrap().is_none());
+        assert!(lookup(&uid, 1_000, Some("venue_order_456"), "foreign_client", "BTC-USDT-SWAP", None, None)
+            .unwrap().is_none());
+        assert!(lookup(&uid, 1_000, Some("venue_order_456"), &client_id, "ETH-USDT-SWAP", None, None)
+            .unwrap().is_none());
+        assert!(lookup(&uid, 1_000, Some("venue_order_456"), &client_id, "BTC-USDT-SWAP", Some("sell"), None)
+            .unwrap().is_none());
+        assert!(lookup(&uid, 1_000, Some("venue_order_456"), &client_id, "BTC-USDT-SWAP", None, Some("short"))
+            .unwrap().is_none());
+        assert!(lookup(&uid, 1_101, Some("venue_order_456"), &client_id, "BTC-USDT-SWAP", None, None)
+            .unwrap().is_none());
+        assert!(matches!(
+            lookup(&"b".repeat(64), 1_000, Some("venue_order_456"), &client_id, "BTC-USDT-SWAP", None, None),
+            Err(ExecutionLedgerError::AccountScopeMismatch)
+        ));
+        drop(reader);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_sqlite_transition_survives_evicted_memory_without_replaying_post() {
         let root = test_root("native-cached-intent-eviction");
         let db = root.join("account.sqlite");
