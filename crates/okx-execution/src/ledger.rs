@@ -2079,11 +2079,9 @@ impl DurableExecutionLedger {
                 let uid = first.record.plan.account_uid_fingerprint.clone();
                 for candidate in sqlite_store::indexed_recovery_candidates(&store.path, &uid)? {
                     let id = candidate.record.plan.intent_id.clone();
-                    let entry = entries
-                        .get_mut(&id)
-                        .ok_or(ExecutionLedgerError::Corrupt(
-                            "native recovery intent absent from cold snapshot",
-                        ))?;
+                    let entry = entries.get_mut(&id).ok_or(ExecutionLedgerError::Corrupt(
+                        "native recovery intent absent from cold snapshot",
+                    ))?;
                     if *entry != candidate {
                         return Err(ExecutionLedgerError::Corrupt(
                             "native recovery WAL snapshot mismatch",

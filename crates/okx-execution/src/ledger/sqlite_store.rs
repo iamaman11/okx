@@ -3201,9 +3201,11 @@ mod tests {
         assert_eq!(candidates[0], inflight);
         let opened =
             DurableExecutionLedger::open(ExecutionLedgerStore::sqlite_at(&path), 1002).unwrap();
-        assert!(indexed_recovery_candidates(&path, "account-uid-test")
-            .unwrap()
-            .is_empty());
+        assert!(
+            indexed_recovery_candidates(&path, "account-uid-test")
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             opened.get(inflight_id).unwrap().record.state,
             ExecutionState::UnknownSubmission
