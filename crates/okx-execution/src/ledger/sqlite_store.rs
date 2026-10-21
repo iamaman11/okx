@@ -786,6 +786,92 @@ pub(super) fn bound_account_identity(
     Ok(Some(scope))
 }
 
+/// Startup reads authoritative history by STREAMING attestation and only
+/// retains current material obligations in Rust. Old terminal rows remain
+/// searchable by immutable indexed ID, but no terminal BTreeMap is created.
+/// This is the canonical native runtime load, NOT the v14 migration loader.
+///
+/// The cold attestation enforces the entire original snapshot, post fences
+/// and guard inventory before these bounded-state views may be used.
+/// The same account writer lease must remain held by the calling Engine.
+pub(super) fn load_operational(
+    path: &Path,
+) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
+    attest_snapshot(path, None)?;
+    let c = connect(path, false)?;
+    let (uid, digest, bytes): (String, String, Vec<u8>) = c
+        .query_row(
+            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(io)?;
+    if checksum(&bytes) != digest {
+        return Err(ExecutionLedgerError::Corrupt(
+            "operational SQLite state digest mismatch",
+        ));
+    }
+    let state: StoredState = decode(&bytes)?;
+    if state.version != 1
+        || state.reservation.as_ref().is_some_and(|r| r.account_uid_fingerprint != uid)
+    {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    require_account_read_scope(&c, &uid, false)?;
+    let source = state
+        .source_run_id
+        .as_deref()
+        .map(|run_id| super::sqlite_source::read(&c, run_id, &uid))
+        .transpose()?;
+    state.periods.validate(state.reservation.as_ref(), source.as_ref())?;
+    validate_leverage_attempts(&state.leverage, state.reservation.as_ref())?;
+
+    let mut statement = c
+        .prepare(
+            "SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
+                    i.instrument_id,i.requested_action,i.plan_sha256,i.current_state,i.created_at_ms,
+                    g.entry_digest
+             FROM native_guarded_intents g
+             JOIN ledger_entries e ON e.intent_id=g.intent_id
+             LEFT JOIN intents i ON i.intent_id=e.intent_id
+             ORDER BY g.intent_id",
+        )
+        .map_err(io)?;
+    let mut rows = statement.query([]).map_err(io)?;
+    let mut active = BTreeMap::new();
+    while let Some(row) = rows.next().map_err(io)? {
+        let digest: String = row.get(3).map_err(io)?;
+        let guard_digest: String = row.get(10).map_err(io)?;
+        if digest != guard_digest {
+            return Err(ExecutionLedgerError::Corrupt(
+                "operational guard checksum mismatch",
+            ));
+        }
+        let entry = verified_indexed_entry(row, &uid)?;
+        if !needs_instrument_guard(&entry) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "operational guard mismatch",
+            ));
+        }
+        let id = entry.record.plan.intent_id.clone();
+        if active.insert(id, entry).is_some() {
+            return Err(ExecutionLedgerError::Corrupt(
+                "duplicate operational intent",
+            ));
+        }
+    }
+    drop(rows);
+    drop(statement);
+    Ok((
+        active,
+        state.stop,
+        state.reservation,
+        source,
+        state.periods,
+        state.leverage,
+    ))
+}
+
 pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
     // Only explicit staging creation may introduce an empty SQLite file.
     // A missing live account ledger can never silently reopen as an empty one.
@@ -2438,6 +2524,70 @@ mod tests {
         // prepared owner is alive. Explicitly release both before cleanup.
         drop(c);
         drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_runtime_cold_open_does_not_materialize_terminal_history() {
+        let root = test_root("bounded-native-runtime-open");
+        let db = root.join("account.sqlite");
+        let uid = "a".repeat(64);
+        let mut entries = BTreeMap::new();
+        for index in 0..512_u64 {
+            let id = format!("bounded_historical_intent_{index:06}");
+            let plan = ExecutionPlan {
+                schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+                intent_id: id.clone(),
+                client_order_id: derive_client_order_id(&id),
+                reference_generation: "sha256:reference".to_owned(),
+                account_generation: "sha256:account".to_owned(),
+                account_uid_fingerprint: uid.clone(),
+                instrument_id: "BTC-USDT-SWAP".to_owned(),
+                trade_mode: crate::TradeMode::Cross,
+                side: crate::OrderSide::Buy,
+                position_side: PositionSide::Long,
+                action: ExecutionAction::Open,
+                order_type: crate::OrderType::Limit,
+                size: "1".to_owned(),
+                price: "0.1".to_owned(),
+                open_risk: None,
+                risk_binding: None,
+            };
+            let mut record = ExecutionRecord::new(plan);
+            if index < 511 {
+                record.abandon_prepared().unwrap();
+            }
+            entries.insert(
+                id,
+                ExecutionLedgerEntry {
+                    record,
+                    created_at_ms: 1000 + index,
+                    updated_at_ms: 1000 + index,
+                },
+            );
+        }
+        save(
+            &db,
+            &entries,
+            None,
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
+        let store = ExecutionLedgerStore::sqlite_at(&db);
+        let owner = DurableExecutionLedger::open(store.clone(), 2000).unwrap();
+        assert_eq!(owner.entries.len(), 1);
+        assert_eq!(owner.entries.values().next().unwrap().record.state, ExecutionState::Prepared);
+        assert_eq!(store.load().unwrap().0, entries);
+        assert_eq!(owner.profile_handoff_ledger_assessment(&uid).unwrap().managed_intents_total, 512);
+        assert_eq!(
+            owner.account_intent(&uid, "bounded_historical_intent_000001")
+                .unwrap(),
+            entries.get("bounded_historical_intent_000001").cloned()
+        );
+        drop(owner);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -2068,7 +2068,11 @@ impl DurableExecutionLedger {
             exchange_evidence,
             strategy_periods,
             leverage_attempts,
-        ) = store.load()?;
+        ) = if store.sqlite_native {
+            sqlite_store::load_operational(&store.path)?
+        } else {
+            store.load()?
+        };
         let mut recovered = BTreeMap::new();
 
         if store.sqlite_native {
