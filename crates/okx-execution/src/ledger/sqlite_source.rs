@@ -400,7 +400,9 @@ mod tests {
             bill_complete: true,
             covered_ranges: serde_json::json!({}),
         };
-        source.cursors.insert("receipt-1".to_owned(), cursor.clone());
+        source
+            .cursors
+            .insert("receipt-1".to_owned(), cursor.clone());
         // Independent cursors at an identical receipt time count as one
         // coverage epoch, never an invented 0ms coverage gap.
         source.cursors.insert("receipt-2".to_owned(), cursor);
@@ -422,8 +424,8 @@ mod tests {
         .unwrap();
         for (key, cursor) in &source.cursors {
             let bytes = encode(cursor).unwrap();
-            let at = crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
-                .unwrap();
+            let at =
+                crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at).unwrap();
             c.execute(
                 "INSERT INTO native_source_cursors VALUES(?1,?2,?3,?4,?5)",
                 params![run_id, key, at, checksum(&bytes), bytes],

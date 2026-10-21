@@ -952,7 +952,9 @@ pub(super) fn source_summary(
             "native source state digest mismatch",
         ));
     }
-    require_indexed_scope(&c, &uid)?;
+    // Same immutable account scope as finance: allow explicit unbound
+    // migration staging reads but never a cross-UID published-account read.
+    require_finance_read_scope(&c, &uid)?;
     let state: StoredState = decode(&bytes)?;
     if state.version != 1 {
         return Err(ExecutionLedgerError::Corrupt("native source state version"));

@@ -2833,7 +2833,22 @@ impl DurableExecutionLedger {
         &self,
     ) -> Result<Option<ExchangeEvidenceSummary>, ExecutionLedgerError> {
         if self.store.sqlite_native {
-            sqlite_store::source_summary(&self.store.path)
+            let summary = sqlite_store::source_summary(&self.store.path)?;
+            // Until the financial source migrates away from its historical
+            // Rust representation, compare both owner proofs. Divergent
+            // state must not supply a positive risk/coverage witness.
+            let cached = self
+                .exchange_evidence
+                .as_ref()
+                .map(DurableExchangeEvidence::summary);
+            if summary.as_ref().map(|s| (&s.run_id, &s.checksum_sha256))
+                != cached.as_ref().map(|s| (&s.run_id, &s.checksum_sha256))
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "native source SQL/Rust owner proof mismatch",
+                ));
+            }
+            Ok(summary)
         } else {
             Ok(self
                 .exchange_evidence
