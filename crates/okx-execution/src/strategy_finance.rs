@@ -226,7 +226,7 @@ impl<'a> SourceOrderIndex<'a> {
         }
         let record = &entry.record;
         let Some(order_id) = record.order_id.as_deref() else {
-            continue;
+            return;
         };
         let orders = self
             .orders
@@ -244,17 +244,17 @@ impl<'a> SourceOrderIndex<'a> {
             .collect::<Vec<_>>();
         if orders.is_empty() {
             reasons.insert("managed_exchange_order_missing");
-            continue;
+            return;
         }
         let Some(last_state) = latest_order_state(&orders) else {
             reasons.insert("managed_order_terminal_state_unproven");
-            continue;
+            return;
         };
         if !matches!(last_state.as_str(), "filled" | "canceled" | "mmp_canceled")
             || !record.state.is_terminal()
         {
             reasons.insert("managed_order_terminal_state_unproven");
-            continue;
+            return;
         }
         let fills = self
             .fills
@@ -272,11 +272,11 @@ impl<'a> SourceOrderIndex<'a> {
             .collect::<Vec<_>>();
         let Some(expected) = Decimal::from_str(&record.plan.size).ok() else {
             reasons.insert("invalid_managed_order_size");
-            continue;
+            return;
         };
         let Some((exchange_size, accumulated)) = native_terminal_quantities(&orders) else {
             reasons.insert("native_order_accumulated_fill_missing_or_conflicting");
-            continue;
+            return;
         };
         let parts = fills
             .iter()
