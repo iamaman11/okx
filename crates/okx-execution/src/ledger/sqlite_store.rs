@@ -620,6 +620,30 @@ pub(super) fn any_entry_created_since<F>(
 where
     F: FnMut(&ExecutionLedgerEntry) -> bool,
 {
+    let mut matched = false;
+    visit_entries_created_since(path, expected_uid, since_ms, |entry| {
+        if predicate(entry) {
+            matched = true;
+            false
+        } else {
+            true
+        }
+    })?;
+    Ok(matched)
+}
+
+/// A single indexed, authenticated cursor serves risk predicates and bounded
+/// release candidates. Return false from the callback to stop early. The
+/// callback does not gain SQLite write access or a mutation authority.
+pub(super) fn visit_entries_created_since<F>(
+    path: &Path,
+    expected_uid: &str,
+    since_ms: u64,
+    mut visit: F,
+) -> Result<(), ExecutionLedgerError>
+where
+    F: FnMut(&ExecutionLedgerEntry) -> bool,
+{
     if since_ms == 0 {
         return Err(ExecutionLedgerError::InvalidTimestamp);
     }
@@ -635,11 +659,11 @@ where
     let mut rows = stmt.query(params![expected_uid, since]).map_err(io)?;
     while let Some(row) = rows.next().map_err(io)? {
         let entry = verified_indexed_entry(row, expected_uid)?;
-        if entry.created_at_ms >= since_ms && predicate(&entry) {
-            return Ok(true);
+        if entry.created_at_ms >= since_ms && !visit(&entry) {
+            break;
         }
     }
-    Ok(false)
+    Ok(())
 }
 
 /// A binding is created only by an authenticated native owner for an
@@ -2502,6 +2526,21 @@ mod tests {
                 .any_entry_created_since(&"b".repeat(64), 1060, |_| false)
                 .is_err()
         );
+        let selected = verified_engine
+            .bounded_run_entries(&uid, 1060, 2, |entry| {
+                Some(entry.record.plan.intent_id.clone())
+            })
+            .unwrap();
+        assert_eq!(
+            selected,
+            vec![
+                "guarded_intent_000060".to_owned(),
+                "guarded_intent_000061".to_owned()
+            ]
+        );
+        assert!(verified_engine
+            .bounded_run_entries(&uid, 1060, 33, |_| Some(()))
+            .is_err());
         assert!(
             verified_engine
                 .account_scope_matches(&"b".repeat(64))

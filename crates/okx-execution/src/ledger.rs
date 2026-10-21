@@ -3129,6 +3129,55 @@ impl DurableExecutionLedger {
         }
     }
 
+    /// Collect at most 32 native run facts for governance release evidence,
+    /// streamed by one verified indexed cursor. This is a *bounded result*,
+    /// not a second financial ledger or account-wide snapshot.
+    pub fn bounded_run_entries<T, F>(
+        &self,
+        expected_uid: &str,
+        since_ms: u64,
+        limit: usize,
+        mut select: F,
+    ) -> Result<Vec<T>, ExecutionLedgerError>
+    where
+        F: FnMut(&ExecutionLedgerEntry) -> Option<T>,
+    {
+        if !(1..=32).contains(&limit) {
+            return Err(ExecutionLedgerError::Corrupt(
+                "invalid bounded run inventory",
+            ));
+        }
+        let mut selected = Vec::new();
+        if self.store.sqlite_native {
+            sqlite_store::visit_entries_created_since(
+                &self.store.path,
+                expected_uid,
+                since_ms,
+                |entry| {
+                    if let Some(value) = select(entry) {
+                        selected.push(value);
+                    }
+                    selected.len() < limit
+                },
+            )?;
+        } else {
+            if !self.account_scope_matches(expected_uid)? {
+                return Err(ExecutionLedgerError::AccountScopeMismatch);
+            }
+            for entry in self.entries.values() {
+                if entry.created_at_ms >= since_ms {
+                    if let Some(value) = select(entry) {
+                        selected.push(value);
+                    }
+                    if selected.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(selected)
+    }
+
     /// Operational view of all durable *material* native obligations.
     /// The native SQLite path reads verified active guards, so terminal
     /// history is not scanned on each risk/protection decision. The legacy
