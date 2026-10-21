@@ -1257,7 +1257,10 @@ mod tests {
         );
         let no_entries: Vec<ExecutionLedgerEntry> = vec![];
         let mut reasons = BTreeSet::new();
-        validate_terminal_order_coverage(&evidence, &no_entries, 1, &mut reasons);
+        let index = SourceOrderIndex::new(&evidence);
+        for entry in &no_entries {
+            index.validate_entry(entry, 1, &mut reasons);
+        }
         assert!(
             reasons.is_empty(),
             "no invented owner from account-only history"
