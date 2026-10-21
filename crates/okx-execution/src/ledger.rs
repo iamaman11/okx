@@ -1009,6 +1009,21 @@ impl ExecutionLedgerStore {
         }
     }
 
+    /// Exact native writer read, including historical terminal intents that
+    /// are deliberately absent from the operational guard map. The returned
+    /// value is owned and verified against the durable SQL projection.
+    pub fn read_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if self.sqlite_native {
+            sqlite_store::owner_intent(&self.path, intent_id)
+        } else {
+            let (entries, _, _, _, _, _) = self.load()?;
+            Ok(entries.get(intent_id).cloned())
+        }
+    }
+
     /// Read historical account intents without materializing the whole
     /// ledger. This read-only API is explicitly independent of the hot
     /// in-memory execution state machine. It never grants POST authority.
@@ -2240,12 +2255,8 @@ impl DurableExecutionLedger {
         } else {
             DurableExchangeEvidence::new(run)?
         };
-        next.capture(
-            facts,
-            &self.entries.values().cloned().collect::<Vec<_>>(),
-            run,
-            require_fresh_cursor,
-        )?;
+        let owned = self.run_entries(run)?;
+        next.capture(facts, &owned, run, require_fresh_cursor)?;
         if self.exchange_evidence.as_ref() != Some(&next) {
             self.store.save_metadata(
                 &self.entries,
@@ -2282,16 +2293,49 @@ impl DurableExecutionLedger {
         coherent: bool,
         production_marks: &BTreeMap<String, ProductionMarkEvidence>,
     ) -> Option<StrategyFinancialPeriod> {
-        self.capital_reservation.as_ref().map(|run| {
-            crate::assess_persisted_financial_period_with_production_marks(
-                run,
-                self.exchange_evidence.as_ref(),
-                &self.entries.values().cloned().collect::<Vec<_>>(),
-                facts,
-                coherent,
-                production_marks,
-            )
-        })
+        let run = self.capital_reservation.as_ref()?;
+        let entries = self.run_entries(run).ok()?;
+        Some(crate::assess_persisted_financial_period_with_production_marks(
+            run,
+            self.exchange_evidence.as_ref(),
+            &entries,
+            facts,
+            coherent,
+            production_marks,
+        ))
+    }
+
+    /// The financial Rust evaluator is still a finite-memory consumer. Read
+    /// ONLY the active capital epoch with a strict upper bound; at the cap
+    /// fail closed instead of silently claiming complete NAV/PnL from partial
+    /// source. Current source receipts remain independently verified.
+    fn run_entries(
+        &self,
+        run: &StrategyCapitalReservation,
+    ) -> Result<Vec<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if !self.store.sqlite_native {
+            return Ok(self.entries.values().cloned().collect());
+        }
+        const MAX_RUN_FINANCIAL_ROWS: usize = 8192;
+        let mut selected = Vec::new();
+        let mut exceeded = false;
+        sqlite_store::visit_entries_created_since(
+            &self.store.path,
+            &run.account_uid_fingerprint,
+            run.started_at_ms,
+            |entry| {
+                if selected.len() >= MAX_RUN_FINANCIAL_ROWS {
+                    exceeded = true;
+                    return false;
+                }
+                selected.push(entry.clone());
+                true
+            },
+        )?;
+        if exceeded {
+            return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
+        }
+        Ok(selected)
     }
 
     /// An unsent risk-increasing candidate is a planned operation, not a
@@ -2332,18 +2376,26 @@ impl DurableExecutionLedger {
         plan: &ExecutionPlan,
     ) -> Option<StrategyFinancialPeriod> {
         let run = self.capital_reservation.as_ref()?;
-        let mut entries = Vec::with_capacity(self.entries.len());
-        for entry in self.entries.values() {
+        let mut entries = self.run_entries(run).ok()?;
+        let mut active_candidate_seen = false;
+        entries.retain(|entry| {
             if entry.record.plan.intent_id == plan.intent_id {
-                let record = &entry.record;
-                if !Self::inert_candidate_for_financial_projection(record, plan, &run.allocation_id)
-                {
-                    return None;
-                }
-                continue;
+                active_candidate_seen = true;
+                return false;
             }
-            entries.push(entry.clone());
+            true
+        });
+        if active_candidate_seen {
+            let candidate = self.read_intent(&plan.intent_id).ok()??;
+            if !Self::inert_candidate_for_financial_projection(
+                &candidate.record,
+                plan,
+                &run.allocation_id,
+            ) {
+                return None;
+            }
         }
+
         Some(
             crate::assess_persisted_financial_period_with_verified_source(
                 run,
@@ -2366,17 +2418,17 @@ impl DurableExecutionLedger {
         marks: &BTreeMap<String, ProductionMarkEvidence>,
         captured: bool,
     ) -> Option<StrategyFinancialPeriod> {
-        self.capital_reservation.as_ref().map(|run| {
-            crate::assess_persisted_financial_period_with_verified_source(
-                run,
-                self.exchange_evidence.as_ref(),
-                &self.entries.values().cloned().collect::<Vec<_>>(),
-                facts,
-                coherent,
-                marks,
-                captured,
-            )
-        })
+        let run = self.capital_reservation.as_ref()?;
+        let entries = self.run_entries(run).ok()?;
+        Some(crate::assess_persisted_financial_period_with_verified_source(
+            run,
+            self.exchange_evidence.as_ref(),
+            &entries,
+            facts,
+            coherent,
+            marks,
+            captured,
+        ))
     }
 
     /// One atomic writer for NAV, high-water, source-exact daily gross loss
@@ -2439,8 +2491,13 @@ impl DurableExecutionLedger {
         }
         let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(source_cursor)?));
         let day = as_of / 86_400_000 * 86_400_000;
+        let run_history = self.run_entries(run)?;
+        let owned: BTreeMap<_, _> = run_history
+            .iter()
+            .map(|entry| (entry.record.plan.intent_id.clone(), entry.clone()))
+            .collect();
         let Some(gross_loss) =
-            verified_daily_strategy_bill_loss(evidence, &self.entries, run, report, day, as_of)?
+            verified_daily_strategy_bill_loss(evidence, &owned, run, report, day, as_of)?
         else {
             return Ok(None);
         };
@@ -2486,7 +2543,7 @@ impl DurableExecutionLedger {
         point.validate()?;
         let mut reason = (nav <= Decimal::ZERO).then_some("STRATEGY_NAV_DEPLETED");
         // Only exact immutable run-bound plans may supply risk limits.
-        for entry in self.entries.values() {
+        for entry in &run_history {
             if entry.record.strategy_run_id.as_deref() != Some(run.allocation_id.as_str())
                 || !entry.record.plan.action.is_risk_increasing()
             {
@@ -3059,6 +3116,19 @@ impl DurableExecutionLedger {
 
     pub fn get(&self, intent_id: &str) -> Option<&ExecutionLedgerEntry> {
         self.entries.get(intent_id)
+    }
+
+    /// Runtime-safe exact ID read. SQLite's historical rows never need to be
+    /// retained as borrowed references; v14 returns its original cached row.
+    pub fn read_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            sqlite_store::owner_intent(&self.store.path, intent_id)
+        } else {
+            Ok(self.entries.get(intent_id).cloned())
+        }
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &ExecutionLedgerEntry> {
