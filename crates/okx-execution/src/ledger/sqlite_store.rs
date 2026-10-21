@@ -198,6 +198,17 @@ fn require_indexed_scope(c: &Connection, expected_uid: &str) -> Result<(), Execu
     require_account_read_scope(c, expected_uid, true)
 }
 
+/// A published native account's immutable UID and authenticated state
+/// digest can be checked without scanning its historical intents. A full
+/// cold row/projection attestation was required before owner activation.
+pub(super) fn validate_account_scope(
+    path: &Path,
+    expected_uid: &str,
+) -> Result<(), ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    require_indexed_scope(&c, expected_uid)
+}
+
 /// Finance diagnostics are allowed for unbound historical staging, but a
 /// published account binding must NEVER be bypassed or cross-read.
 pub(super) fn require_finance_read_scope(
@@ -2430,6 +2441,19 @@ mod tests {
         assert!(indexed_account_guards(&db, &"b".repeat(64)).is_err());
         assert_eq!(guards.len(), 1);
         assert_eq!(guards[0].record.plan.intent_id, "guarded_intent_000063");
+        let verified_engine = DurableExecutionLedger::open(store.clone(), 2500).unwrap();
+        assert!(verified_engine.account_scope_matches(&uid).unwrap());
+        assert!(verified_engine.account_scope_matches(&"b".repeat(64)).is_err());
+        assert_eq!(
+            verified_engine
+                .account_intent(&uid, "guarded_intent_000010")
+                .unwrap(),
+            entries.get("guarded_intent_000010").cloned()
+        );
+        assert!(verified_engine
+            .account_intent(&"b".repeat(64), "guarded_intent_000010")
+            .is_err());
+        drop(verified_engine);
         let batch = vec!["guarded_intent_000063".to_owned()];
         assert_eq!(
             indexed_exact_prepared_batch(&db, &uid, &batch).unwrap(),

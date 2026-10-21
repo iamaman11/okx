@@ -601,13 +601,18 @@ where
             .ledger
             .capital_reservation()
             .ok_or(Reject::SourceUnattested)?;
-        let entry = self.ledger.get(intent_id).ok_or(Reject::ScopeMismatch)?;
+        let entry = self
+            .ledger
+            .account_intent(&run.account_uid_fingerprint, intent_id)
+            .map_err(|_| Reject::ScopeMismatch)?
+            .ok_or(Reject::ScopeMismatch)?;
         if entry.record.state != ExecutionState::Prepared
             || entry.record.plan.intent_id != intent_id
             || entry.record.plan.account_uid_fingerprint != run.account_uid_fingerprint
-            || self.ledger.entries().any(|record| {
-                record.record.plan.account_uid_fingerprint != run.account_uid_fingerprint
-            })
+            || !self
+                .ledger
+                .account_scope_matches(&run.account_uid_fingerprint)
+                .map_err(|_| Reject::ScopeMismatch)?
         {
             return Err(Reject::ScopeMismatch);
         }

@@ -650,10 +650,9 @@ impl ExecutionRuntime {
             && preflight.credential.accepted
             && !preflight.credential.production_environment
             && !preflight.credential.account_uid_fingerprint.is_empty()
-            && ledger.entries().all(|entry| {
-                entry.record.plan.account_uid_fingerprint
-                    == preflight.credential.account_uid_fingerprint
-            })
+            && ledger
+                .account_scope_matches(&preflight.credential.account_uid_fingerprint)
+                .unwrap_or(false)
     }
 
     pub const fn demo_mutation_acceptance_requested(&self) -> bool {
@@ -1121,8 +1120,8 @@ impl ExecutionRuntime {
             || preflight.account_uid_fingerprint != opening.account_uid_fingerprint
             || !executor
                 .ledger()
-                .entries()
-                .all(|e| e.record.plan.account_uid_fingerprint == preflight.account_uid_fingerprint)
+                .account_scope_matches(&preflight.account_uid_fingerprint)
+                .unwrap_or(false)
         {
             return Ok(None);
         }
@@ -1186,9 +1185,11 @@ impl ExecutionRuntime {
             return Ok(None);
         }
         let mut executor = self.executor.lock().await;
-        if !executor.ledger().entries().all(|entry| {
-            entry.record.plan.account_uid_fingerprint == preflight.account_uid_fingerprint
-        }) {
+        if !executor
+            .ledger()
+            .account_scope_matches(&preflight.account_uid_fingerprint)
+            .unwrap_or(false)
+        {
             return Ok(None);
         }
         Ok(Some(executor.reserve_strategy_capital_with_rearm(
