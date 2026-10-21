@@ -364,6 +364,9 @@ impl ArchivedRunKind {
     }
 }
 
+mod account_context;
+pub use account_context::{AccountContext, AccountContextRegistry, AccountKey, AccountContextHandle};
+
 type LoadedExecutionLedger = (
     BTreeMap<String, ExecutionLedgerEntry>,
     Option<ExecutionRiskStop>,
@@ -398,7 +401,7 @@ pub struct LedgerStorageAttestation {
 
 /// Storage identity is native to the execution domain, independent of
 /// transport DTOs. At the Agent boundary we map the verified native route.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LedgerVenue {
     Okx,
     Bybit,
@@ -413,7 +416,7 @@ impl LedgerVenue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LedgerEnvironment {
     Production,
     Demo,
