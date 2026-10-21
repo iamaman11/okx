@@ -2443,16 +2443,22 @@ mod tests {
         assert_eq!(guards[0].record.plan.intent_id, "guarded_intent_000063");
         let verified_engine = DurableExecutionLedger::open(store.clone(), 2500).unwrap();
         assert!(verified_engine.account_scope_matches(&uid).unwrap());
-        assert!(verified_engine.account_scope_matches(&"b".repeat(64)).is_err());
+        assert!(
+            verified_engine
+                .account_scope_matches(&"b".repeat(64))
+                .is_err()
+        );
         assert_eq!(
             verified_engine
                 .account_intent(&uid, "guarded_intent_000010")
                 .unwrap(),
             entries.get("guarded_intent_000010").cloned()
         );
-        assert!(verified_engine
-            .account_intent(&"b".repeat(64), "guarded_intent_000010")
-            .is_err());
+        assert!(
+            verified_engine
+                .account_intent(&"b".repeat(64), "guarded_intent_000010")
+                .is_err()
+        );
         drop(verified_engine);
         let batch = vec!["guarded_intent_000063".to_owned()];
         assert_eq!(

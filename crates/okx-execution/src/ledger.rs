@@ -3064,10 +3064,7 @@ impl DurableExecutionLedger {
     /// Verify the account identity of this *same* ledger owner. Native
     /// SQLite uses the durable UID/state proof instead of a repeated full
     /// historical scan. Old v14 retains the original in-memory census.
-    pub fn account_scope_matches(
-        &self,
-        expected_uid: &str,
-    ) -> Result<bool, ExecutionLedgerError> {
+    pub fn account_scope_matches(&self, expected_uid: &str) -> Result<bool, ExecutionLedgerError> {
         if self.store.sqlite_native {
             sqlite_store::validate_account_scope(&self.store.path, expected_uid)?;
             Ok(true)
@@ -3091,9 +3088,10 @@ impl DurableExecutionLedger {
             sqlite_store::indexed_intent(&self.store.path, expected_uid, intent_id)
         } else {
             let entry = self.entries.get(intent_id).cloned();
-            if entry.as_ref().is_some_and(|entry| {
-                entry.record.plan.account_uid_fingerprint != expected_uid
-            }) {
+            if entry
+                .as_ref()
+                .is_some_and(|entry| entry.record.plan.account_uid_fingerprint != expected_uid)
+            {
                 return Err(ExecutionLedgerError::AccountScopeMismatch);
             }
             Ok(entry)
