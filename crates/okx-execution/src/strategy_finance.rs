@@ -187,29 +187,58 @@ fn latest_order_state(orders: &[&crate::exchange_evidence::StoredExchangeEvent])
     latest.map(|(_, state)| state)
 }
 
-pub(crate) fn validate_terminal_order_coverage(
-    evidence: &DurableExchangeEvidence,
-    entries: &[ExecutionLedgerEntry],
-    run_started_at_ms: u64,
-    reasons: &mut BTreeSet<&'static str>,
-) {
-    for entry in entries
-        .iter()
-        .filter(|entry| entry.created_at_ms > run_started_at_ms)
-    {
+/// One source-bounded lookup index for original orders and fills. This
+/// replaces a quadratic search during million-intent SQL attestation.
+pub(crate) struct SourceOrderIndex<'a> {
+    orders: BTreeMap<&'a str, Vec<&'a crate::exchange_evidence::StoredExchangeEvent>>,
+    fills: BTreeMap<&'a str, Vec<&'a crate::exchange_evidence::StoredExchangeEvent>>,
+}
+
+impl<'a> SourceOrderIndex<'a> {
+    pub(crate) fn new(evidence: &'a DurableExchangeEvidence) -> Self {
+        let mut orders = BTreeMap::new();
+        let mut fills = BTreeMap::new();
+        for event in evidence.events.values() {
+            let Some(id) = string(&event.payload, "ordId") else {
+                continue;
+            };
+            match string(&event.payload, "source") {
+                Some("OKX_REST_ORDER") => {
+                    orders.entry(id).or_insert_with(Vec::new).push(event);
+                }
+                Some("OKX_REST_FILL") => {
+                    fills.entry(id).or_insert_with(Vec::new).push(event);
+                }
+                _ => {}
+            }
+        }
+        Self { orders, fills }
+    }
+
+    pub(crate) fn validate_entry(
+        &self,
+        entry: &ExecutionLedgerEntry,
+        run_started_at_ms: u64,
+        reasons: &mut BTreeSet<&'static str>,
+    ) {
+        if entry.created_at_ms <= run_started_at_ms {
+            return;
+        }
         let record = &entry.record;
         let Some(order_id) = record.order_id.as_deref() else {
             continue;
         };
-        let orders = evidence
-            .events
-            .values()
+        let orders = self
+            .orders
+            .get(order_id)
+            .into_iter()
+            .flatten()
+            .copied()
             .filter(|event| {
-                event.payload["source"] == "OKX_REST_ORDER"
-                    && string(&event.payload, "ordId") == Some(order_id)
-                    && string(&event.payload, "clOrdId")
-                        == Some(record.plan.client_order_id.as_str())
-                    && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
+                string(&event.payload, "clOrdId")
+                    == Some(record.plan.client_order_id.as_str())
+                    && string(&event.payload, "instId")
+                        == Some(record.plan.instrument_id.as_str())
                     && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str())
             })
             .collect::<Vec<_>>();
@@ -227,15 +256,17 @@ pub(crate) fn validate_terminal_order_coverage(
             reasons.insert("managed_order_terminal_state_unproven");
             continue;
         }
-        let fills = evidence
-            .events
-            .values()
+        let fills = self
+            .fills
+            .get(order_id)
+            .into_iter()
+            .flatten()
+            .copied()
             .filter(|event| {
-                event.payload["source"] == "OKX_REST_FILL"
-                    && string(&event.payload, "ordId") == Some(order_id)
-                    && string(&event.payload, "clOrdId")
-                        == Some(record.plan.client_order_id.as_str())
-                    && string(&event.payload, "instId") == Some(record.plan.instrument_id.as_str())
+                string(&event.payload, "clOrdId")
+                    == Some(record.plan.client_order_id.as_str())
+                    && string(&event.payload, "instId")
+                        == Some(record.plan.instrument_id.as_str())
                     && event.source_intent_id.as_deref() == Some(record.plan.intent_id.as_str())
             })
             .collect::<Vec<_>>();
@@ -263,6 +294,18 @@ pub(crate) fn validate_terminal_order_coverage(
         ) {
             reasons.insert("terminal_order_native_fill_coverage_not_proven");
         }
+    }
+}
+
+pub(crate) fn validate_terminal_order_coverage(
+    evidence: &DurableExchangeEvidence,
+    entries: &[ExecutionLedgerEntry],
+    run_started_at_ms: u64,
+    reasons: &mut BTreeSet<&'static str>,
+) {
+    let index = SourceOrderIndex::new(evidence);
+    for entry in entries {
+        index.validate_entry(entry, run_started_at_ms, reasons);
     }
 }
 

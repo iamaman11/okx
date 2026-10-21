@@ -2454,9 +2454,9 @@ impl DurableExecutionLedger {
             }
             entries.push(entry);
         }
-        // The entire run's order coverage is scanned, but never collected.
-        // A missing managed exchange acknowledgement is NOT treated as a
-        // valid flat period merely because it was absent from source IDs.
+        // Index only the finite source observation once; every historical
+        // order still gets exact venue and quantity validation.
+        let source_index = crate::strategy_finance::SourceOrderIndex::new(source);
         sqlite_store::visit_entries_created_since(
             &self.store.path,
             &run.account_uid_fingerprint,
@@ -2477,12 +2477,7 @@ impl DurableExecutionLedger {
                     extra_reasons.insert("unresolved_managed_execution");
                 }
                 if entry.record.order_id.is_some() {
-                    crate::strategy_finance::validate_terminal_order_coverage(
-                        source,
-                        std::slice::from_ref(entry),
-                        run.started_at_ms,
-                        &mut extra_reasons,
-                    );
+                    source_index.validate_entry(entry, run.started_at_ms, &mut extra_reasons);
                 }
                 true
             },
