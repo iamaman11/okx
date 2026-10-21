@@ -112,7 +112,15 @@ pub type AccountContextHandle = Arc<Mutex<AccountContext>>;
 /// Registry membership does not modify credentials, venue modes or RiskBook.
 #[derive(Debug, Default)]
 pub struct AccountContextRegistry {
-    accounts: BTreeMap<AccountKey, AccountContextHandle>,
+    accounts: BTreeMap<AccountKey, RegisteredAccount>,
+}
+
+/// Registry metadata is immutable after registration. Inspecting routes and
+/// roots never locks a trading account or waits for its in-flight operation.
+#[derive(Debug)]
+struct RegisteredAccount {
+    root: PathBuf,
+    handle: AccountContextHandle,
 }
 
 impl AccountContextRegistry {
@@ -129,18 +137,25 @@ impl AccountContextRegistry {
         expected: &AccountKey,
         observed_at_ms: u64,
     ) -> Result<(), ExecutionLedgerError> {
-        if self.accounts.contains_key(expected)
-            || self
-                .accounts
-                .values()
-                .any(|ctx| ctx.lock().map(|owned| owned.root == root).unwrap_or(true))
+        if self.accounts.keys().any(|owned| {
+            owned.venue == expected.venue
+                && owned.environment == expected.environment
+                && (owned.account_id == expected.account_id
+                    || owned.uid_fingerprint == expected.uid_fingerprint)
+        }) || self.accounts.values().any(|owned| owned.root == root)
         {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
         let context = AccountContext::open_existing(root, expected, observed_at_ms)?;
         if self
             .accounts
-            .insert(expected.clone(), Arc::new(Mutex::new(context)))
+            .insert(
+                expected.clone(),
+                RegisteredAccount {
+                    root: root.to_owned(),
+                    handle: Arc::new(Mutex::new(context)),
+                },
+            )
             .is_some()
         {
             return Err(ExecutionLedgerError::Corrupt(
@@ -151,7 +166,7 @@ impl AccountContextRegistry {
     }
 
     pub fn get(&self, key: &AccountKey) -> Option<AccountContextHandle> {
-        self.accounts.get(key).cloned()
+        self.accounts.get(key).map(|owned| Arc::clone(&owned.handle))
     }
 
     pub fn len(&self) -> usize {
@@ -259,21 +274,29 @@ mod tests {
             let account_root = root.clone();
             let handle = registry.get(&key).expect("registered account");
             workers.push(thread::spawn(move || {
-                let ctx = handle.lock().unwrap();
+                let mut ctx = handle.lock().unwrap();
                 assert_eq!(ctx.root(), account_root);
                 assert_eq!(AccountKey::from(ctx.identity()), key);
-                assert_eq!(
-                    ctx.ledger()
-                        .read_intent(&intent_id)
-                        .unwrap()
-                        .unwrap()
-                        .record
-                        .state,
-                    ExecutionState::Rejected
-                );
+                let prior = ctx.ledger().read_intent(&intent_id).unwrap().unwrap();
+                assert_eq!(prior.record.state, ExecutionState::Rejected);
                 assert_eq!(ctx.ledger().total_intents().unwrap(), 1);
                 let foreign = "f".repeat(64);
                 assert!(ctx.ledger().account_scope_matches(&foreign).is_err());
+
+                // Independent WAL mutations across accounts, but never an
+                // exchange POST: only locally prepare a reducing-side intent.
+                let mut safe_exit = prior.record.plan;
+                safe_exit.intent_id = format!("{intent_id}_exit");
+                safe_exit.client_order_id = derive_client_order_id(&safe_exit.intent_id);
+                safe_exit.action = ExecutionAction::Close;
+                safe_exit.side = OrderSide::Sell;
+                safe_exit.open_risk = None;
+                safe_exit.risk_binding = None;
+                ctx.ledger_mut().prepare(safe_exit.clone(), 3500).unwrap();
+                assert_eq!(
+                    ctx.ledger().read_intent(&safe_exit.intent_id).unwrap().unwrap().record.state,
+                    ExecutionState::Prepared
+                );
             }));
         }
         for worker in workers {
@@ -296,8 +319,21 @@ mod tests {
         // The lease is released only after every handle is gone, and a
         // restart revalidates each independent native owner without replay.
         let mut reopened = AccountContextRegistry::new();
-        for (root, key, _) in &identities {
+        for (root, key, intent_id) in &identities {
             reopened.register_existing(root, key, 4000).unwrap();
+            let handle = reopened.get(key).unwrap();
+            let account = handle.lock().unwrap();
+            assert_eq!(account.ledger().total_intents().unwrap(), 2);
+            assert_eq!(
+                account
+                    .ledger()
+                    .read_intent(&format!("{intent_id}_exit"))
+                    .unwrap()
+                    .unwrap()
+                    .record
+                    .state,
+                ExecutionState::Prepared
+            );
         }
         assert_eq!(reopened.len(), 10);
         drop(reopened);
