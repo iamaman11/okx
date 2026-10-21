@@ -3559,9 +3559,15 @@ impl DurableExecutionLedger {
         request_exchange_time_ms: Option<u64>,
         observed_at_ms: u64,
     ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
-        let entry = self
-            .get(intent_id)
-            .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
+        // PRE-POST checks must read the very same durable owner as mutate:
+        // a safely evicted historical or inactive in-memory cache cannot
+        // produce a false IntentNotFound or weaken immutable capital proof.
+        let entry = if self.store.sqlite_native {
+            sqlite_store::owner_intent(&self.store.path, intent_id)?
+        } else {
+            self.get(intent_id).cloned()
+        }
+        .ok_or_else(|| ExecutionLedgerError::IntentNotFound(intent_id.to_owned()))?;
         self.require_new_risk_allowed(entry.record.plan.action)?;
         self.validate_capital_intent(&entry.record, entry.created_at_ms)?;
         self.mutate(intent_id, observed_at_ms, move |record| {
