@@ -3066,11 +3066,14 @@ impl DurableExecutionLedger {
         if let Some(done) = &self.strategy_periods.finalized_run {
             return Ok(done.clone());
         }
-        let evidence = self
-            .current_source()?
-            .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
+        // Complete financial reconciliation FIRST: that operation owns and
+        // drops its source snapshot. Loading the finalization proof afterward
+        // avoids retaining two full historical maps concurrently.
         let result = self
             .financial_period(facts, coherent)
+            .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
+        let evidence = self
+            .current_source()?
             .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
         let closed = StrategyFinalization::new(reservation, &evidence, &result, observed_at_ms)?;
         let mut next = self.strategy_periods.clone();
