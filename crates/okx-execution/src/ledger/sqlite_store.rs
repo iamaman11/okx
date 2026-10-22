@@ -1898,7 +1898,16 @@ pub(super) fn save_metadata(
     periods: &StrategyPeriodHistory,
     leverage: &[LeverageChangeAttempt],
 ) -> Result<(), ExecutionLedgerError> {
-    save_metadata_inner(path, stop, reservation, source, periods, leverage, None, None)
+    save_metadata_inner(
+        path,
+        stop,
+        reservation,
+        source,
+        periods,
+        leverage,
+        None,
+        None,
+    )
 }
 
 /// Only this typed opening path creates a new capital epoch. A later NAV
@@ -2463,33 +2472,57 @@ pub(super) fn nav_watermark(
     let c = connect_indexed_read(path)?;
     c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
     require_account_read_scope(&c, uid, true)?;
-    let count: i64 = c.query_row(
-        "SELECT COUNT(*) FROM nav_points WHERE epoch_id=?1",
-        params![epoch_id], |r| r.get(0),
-    ).map_err(io)?;
-    let row: Option<(Vec<u8>,String,String,String,String,String,i64)> = c.query_row(
-        "SELECT point_payload,checkpoint_sha256,nav_decimal,
+    let count: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM nav_points WHERE epoch_id=?1",
+            params![epoch_id],
+            |r| r.get(0),
+        )
+        .map_err(io)?;
+    let row: Option<(Vec<u8>, String, String, String, String, String, i64)> = c
+        .query_row(
+            "SELECT point_payload,checkpoint_sha256,nav_decimal,
                 high_water_decimal,gross_daily_loss_decimal,previous_sha256,observed_at_ms
          FROM nav_points WHERE epoch_id=?1 ORDER BY observed_at_ms DESC LIMIT 1",
-        params![epoch_id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
-    ).optional().map_err(io)?;
-    let latest = row.map(|(raw,digest,nav,peak,loss,prev,at)| {
-        let p: StrategyNavPoint = decode(&raw)?;
-        p.validate()?;
-        if p.run_id != epoch_id || p.checksum_sha256 != digest
-            || p.nav_usdt != nav || p.high_water_usdt != peak
-            || p.daily_gross_loss_usdt != loss || p.previous_sha256 != prev
-            || i64::try_from(p.observed_at_ms).ok() != Some(at)
-        {
-            return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
-        }
-        Ok(p)
-    }).transpose()?;
+            params![epoch_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(io)?;
+    let latest = row
+        .map(|(raw, digest, nav, peak, loss, prev, at)| {
+            let p: StrategyNavPoint = decode(&raw)?;
+            p.validate()?;
+            if p.run_id != epoch_id
+                || p.checksum_sha256 != digest
+                || p.nav_usdt != nav
+                || p.high_water_usdt != peak
+                || p.daily_gross_loss_usdt != loss
+                || p.previous_sha256 != prev
+                || i64::try_from(p.observed_at_ms).ok() != Some(at)
+            {
+                return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+            }
+            Ok(p)
+        })
+        .transpose()?;
     if (count == 0) != latest.is_none() {
         return Err(ExecutionLedgerError::Corrupt("native NAV index mismatch"));
     }
-    Ok((latest, usize::try_from(count).map_err(|_| ExecutionLedgerError::ExchangeEvidenceConflict)?))
+    Ok((
+        latest,
+        usize::try_from(count).map_err(|_| ExecutionLedgerError::ExchangeEvidenceConflict)?,
+    ))
 }
 
 /// The STOP, NAV, source receipt and daily risk remain ONE WAL commit.
@@ -2504,7 +2537,16 @@ pub(super) fn save_nav_metadata(
     if !periods.nav_points.is_empty() || point.run_id != reservation.allocation_id {
         return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
     }
-    save_metadata_inner(path, stop, Some(reservation), None, periods, leverage, None, Some(point))
+    save_metadata_inner(
+        path,
+        stop,
+        Some(reservation),
+        None,
+        periods,
+        leverage,
+        None,
+        Some(point),
+    )
 }
 
 fn save_metadata_inner(

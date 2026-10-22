@@ -1722,7 +1722,9 @@ impl DurableExecutionLedger {
             }
             if let Some(run) = capital_reservation.as_ref() {
                 sqlite_store::nav_watermark(
-                    &store.path, &run.account_uid_fingerprint, &run.allocation_id,
+                    &store.path,
+                    &run.account_uid_fingerprint,
+                    &run.allocation_id,
                 )?
             } else {
                 (None, 0)
@@ -2272,9 +2274,14 @@ impl DurableExecutionLedger {
             };
         let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&source_cursor)?));
         let prior = if self.store.sqlite_native {
-            self.native_nav_current.as_ref().filter(|p| p.run_id == run.allocation_id)
+            self.native_nav_current
+                .as_ref()
+                .filter(|p| p.run_id == run.allocation_id)
         } else {
-            self.strategy_periods.nav_points.iter().rev()
+            self.strategy_periods
+                .nav_points
+                .iter()
+                .rev()
                 .find(|p| p.run_id == run.allocation_id)
         };
         if prior.is_some_and(|p| p.observed_at_ms >= now) {
@@ -2372,7 +2379,9 @@ impl DurableExecutionLedger {
                 &point,
             )?;
             let (latest, n) = sqlite_store::nav_watermark(
-                &self.store.path, &run.account_uid_fingerprint, &run.allocation_id,
+                &self.store.path,
+                &run.account_uid_fingerprint,
+                &run.allocation_id,
             )?;
             if latest.as_ref() != Some(&point) {
                 return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
@@ -2404,12 +2413,14 @@ impl DurableExecutionLedger {
     pub fn strategy_nav_watermark(&self) -> Option<&StrategyNavPoint> {
         if self.store.sqlite_native {
             return self.native_nav_current.as_ref().filter(|p| {
-                self.capital_reservation.as_ref()
+                self.capital_reservation
+                    .as_ref()
                     .is_some_and(|r| r.allocation_id == p.run_id)
             });
         }
         self.strategy_periods.nav_points.last().filter(|p| {
-            self.capital_reservation.as_ref()
+            self.capital_reservation
+                .as_ref()
                 .is_some_and(|r| r.allocation_id == p.run_id)
         })
     }
