@@ -1,3 +1,4 @@
+import {initializeRiskBook} from "./risk_book.js";
 import {handleNativeRiskCommand} from "./risk_authority.js";
 import {initial} from "./account_governance.test.js";
 function check(v:boolean,n:string){if(!v)throw Error(n);}
@@ -12,16 +13,16 @@ class Store{
     await last;try{return await fn(this);}finally{release();}
   }
 }
-const s=new Store(),session={connection_generation:99,runtime_profile:"production" as const,hello:true};
+const s=new Store(),session={connection_generation:99,runtime_profile:"engine" as const,hello:true};
 const now=1792344435177,hash="a".repeat(64),uid="b".repeat(64);
 await s.put("generation",99);
 await s.put("account_access_v1",initial);
-const base={schema:"okx.risk-command/v1",command_id:"risk_command_00001",
+const base={schema:"okx.risk-command/v1",command_id:"risk_command_00001",installation_id:initial.installation_id,
  action:{action:"RESERVE",venue:"okx",account_uid:uid,run_id:"run_12345678",
  intent_id:"intent_12345678",strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP",plan_sha256:hash,requested_loss_usdt:"1",
  policy_revision:1,census:{complete:true,source_digest:hash,
  content_digest:hash,source_read_floor_ms:now,generated_at_ms:now,
- account_keys:["okx:real:"+uid],occupied:[{account_key:"okx:real:"+uid,occupied_usdt:"0"}],
+ account_keys:["okx:real:"+uid],occupied:[{account_key:"okx:real:"+uid,occupied_usdt:"0",cumulative_loss_usd:"0"}],
  native_account_evidence_complete:true,native_order_evidence_complete:true,
  native_ledger_evidence_complete:true}}};
 check((await handleNativeRiskCommand(s,{...session,hello:false},base,now)).status==="DENIED",
@@ -38,3 +39,9 @@ check((await handleNativeRiskCommand(s,session,{...base,action:{action:"RESOLVE"
  next_state:"RELEASED",source_proof_sha256:hash}},now)).status==="DENIED",
  "terminal release never available based on digest alone");
 check((await s.get("risk_book_v1"))===undefined,"denials make no reservation");
+
+await initializeRiskBook(s,initial.installation_id);
+const summary=await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",command_id:"summary_12345",installation_id:initial.installation_id,action:{action:"SUMMARY"}},now);
+check(summary.status==="OBSERVED"&&summary.budget?.remaining_loss_usd==="20"&&summary.budget.source_as_of_ms===null,"global summary comes from central owner with explicit source quality");
+s.map.delete("risk_meta_v2");
+check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",command_id:"summary_12346",installation_id:initial.installation_id,action:{action:"SUMMARY"}},now)).reason==="RISK_BOOK_MISSING_OR_CORRUPT","missing central state is never zero budget");

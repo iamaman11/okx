@@ -4,9 +4,9 @@ import {initial,account} from "./account_governance.test.js";
 function check(v:boolean,label:string){if(!v)throw Error(label);}
 const generation=4;
 const attachment={runtimeId:"windows-primary",sessionId:"session_test_012345",generation,hello:true,
- runtimeProfile:"production",connectedAtMs:Date.now(),lastPongAtMs:Date.now()};
-async function fixture(mode:"before_ack"|"after_ack"|"complete"|"stale"|"ping_send_failure"|"request_send_failure"|"duplicate"){
- const map=new Map<string,unknown>([["account_access_v1",{...initial,revision:1,accounts:[account]}]]);
+ runtimeProfile:"engine",connectedAtMs:Date.now(),lastPongAtMs:Date.now()};
+async function fixture(mode:"before_ack"|"after_ack"|"complete"|"stale"|"ping_send_failure"|"request_send_failure"|"duplicate"|"paused_complete"){
+ const map=new Map<string,unknown>([["account_access_v1",{...initial,revision:1,accounts:[mode==="paused_complete"?{...account,explicit_pause:true}:account]}]]);
  let owner:any;
  const ws={deserializeAttachment:()=>({...attachment}),serializeAttachment:()=>{},
   send:(text:string)=>{
@@ -26,7 +26,7 @@ async function fixture(mode:"before_ack"|"after_ack"|"complete"|"stale"|"ping_se
   },close:()=>{}};
  const state={storage:{get:async(k:string)=>map.get(k)},getWebSockets:()=>[ws]};
  owner=new RuntimeSession(state,{} as any);
- const operation=mode==="after_ack"?{type:"submit_prepared_execution",intent_id:"intent_test_012345"}:{type:"account_summary"};
+ const operation=(mode==="after_ack"||mode==="paused_complete")?{type:"trade",request:{action:"close",reference:"intent_test_012345"}}:{type:"portfolio",request:{action:"summary"}};
  const request={schema:"okx.agent.request/v1",request_id:"request_test_012345",operation};
  const running=owner.dispatch(request);
  if(mode==="duplicate")check((await owner.dispatch(request)).reason==="REQUEST_ALREADY_IN_FLIGHT","duplicate request rejected before async freshness");
@@ -46,3 +46,5 @@ check((await fixture("ping_send_failure")).reason==="RUNTIME_OFFLINE","synchrono
 check((await fixture("request_send_failure")).status==="FAILED","synchronous request failure settles both stages");
 
 check((await fixture("duplicate")).status==="completed","duplicate request cannot clear original pending stages");
+
+check((await fixture("paused_complete")).status==="completed","pause_allows_native_verified_close_delivery");

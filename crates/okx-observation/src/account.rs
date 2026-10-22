@@ -22,6 +22,8 @@ pub enum AccountWsEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountBalanceDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liabilities: Option<String>,
     pub currency: String,
     pub equity: String,
     pub cash_balance: Option<String>,
@@ -369,6 +371,7 @@ fn normalize_balance(balance: BalanceSnapshot) -> Result<AccountBalanceState, Ac
             return Err(AccountError::DuplicateBalanceCurrency(currency));
         }
         details.push(AccountBalanceDetail {
+            liabilities: optional(detail.liabilities),
             currency,
             equity: required_balance_detail("eq", detail.equity)?,
             cash_balance: optional(detail.cash_balance),
@@ -671,6 +674,7 @@ mod tests {
             notional_usd: "500".to_owned(),
             update_time: "1790520000000".to_owned(),
             details: vec![BalanceDetail {
+                liabilities: String::new(),
                 ccy: "USDT".to_owned(),
                 equity: "1000.125".to_owned(),
                 cash_balance: "900".to_owned(),

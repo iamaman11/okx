@@ -232,7 +232,7 @@ pub struct AccountGovernance {
 impl AccountGovernance {
     pub fn valid(&self) -> bool {
         if self.schema != GOVERNANCE_SCHEMA
-            || !token(&self.installation_id)
+            || !crate::accounts::valid_installation(&self.installation_id)
             || !self.campaign_id.starts_with("sha256:")
             || !lower_sha256(&self.campaign_id[7..])
             || positive(&self.campaign_loss_limit_usd).is_none()

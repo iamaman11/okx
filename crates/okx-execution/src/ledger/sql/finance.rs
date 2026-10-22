@@ -328,7 +328,7 @@ impl AccountStore {
             let key = format!("bill:{}", event.event_id);
             let mut page = IngestPage::default();
             for (owner, amount) in allocations {
-                if amount == Decimal::ZERO {
+                if amount == Decimal::ZERO && owner != "rounding_residual" {
                     continue;
                 }
                 let instance = if owner == "unattributed" || owner == "rounding_residual" {
@@ -482,6 +482,7 @@ impl AccountStore {
         }
         self.ingest_page(&normalized)
     }
+    #[allow(clippy::too_many_arguments)] // Public bounded pagination/filter facade.
     pub fn finance_history_filtered(
         &self,
         from: i64,
@@ -742,13 +743,13 @@ impl AccountStore {
                         .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))
                 })?;
                 for l in existing_lots {
-                    if let Some(updated) = lots.iter().find(|v| v.lot_id == l.lot_id) {
-                        if updated.signed_qty.abs() != l.remaining_qty {
-                            page.lots.push(StoredLot {
-                                remaining_qty: updated.signed_qty.abs(),
-                                ..l
-                            });
-                        }
+                    if let Some(updated) = lots.iter().find(|v| v.lot_id == l.lot_id)
+                        && updated.signed_qty.abs() != l.remaining_qty
+                    {
+                        page.lots.push(StoredLot {
+                            remaining_qty: updated.signed_qty.abs(),
+                            ..l
+                        });
                     }
                 }
                 if !existing {
@@ -903,17 +904,17 @@ impl AccountStore {
                 return Err(StoreError::Invalid("CURRENCY_REQUIRED"));
             }
             let added=tx.execute("INSERT INTO finance_entries VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(economic_event_key,component,allocation_leg) DO NOTHING",params![e.entry_id,e.economic_event_key,e.component,e.allocation_leg,exact(e.amount),e.currency,e.instance_id,e.source_ref,e.time,e.reverses_entry_id])?;
-            if added == 1 {
-                if let Some(instance) = &e.instance_id {
-                    let old:Option<String>=tx.query_row("SELECT amount FROM instance_finance_totals WHERE instance_id=?1 AND currency=?2 AND component=?3",params![instance,e.currency,e.component],|r|r.get(0)).optional()?;
-                    let total = old
-                        .map(decimal)
-                        .transpose()?
-                        .unwrap_or(Decimal::ZERO)
-                        .checked_add(e.amount)
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-                    tx.execute("INSERT INTO instance_finance_totals VALUES(?1,?2,?3,?4) ON CONFLICT(instance_id,currency,component) DO UPDATE SET amount=excluded.amount",params![instance,e.currency,e.component,exact(total)])?;
-                }
+            if added == 1
+                && let Some(instance) = &e.instance_id
+            {
+                let old:Option<String>=tx.query_row("SELECT amount FROM instance_finance_totals WHERE instance_id=?1 AND currency=?2 AND component=?3",params![instance,e.currency,e.component],|r|r.get(0)).optional()?;
+                let total = old
+                    .map(decimal)
+                    .transpose()?
+                    .unwrap_or(Decimal::ZERO)
+                    .checked_add(e.amount)
+                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+                tx.execute("INSERT INTO instance_finance_totals VALUES(?1,?2,?3,?4) ON CONFLICT(instance_id,currency,component) DO UPDATE SET amount=excluded.amount",params![instance,e.currency,e.component,exact(total)])?;
             }
             if added == 1 {
                 let prior: Option<String> = tx

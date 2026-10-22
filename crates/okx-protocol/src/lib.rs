@@ -13,192 +13,46 @@ pub const MAILBOX_ENVELOPE_SCHEMA_V1: &str = "okx.mailbox.envelope/v1";
 pub const AGENT_REQUEST_SCHEMA_V1: &str = "okx.agent.request/v1";
 pub const AGENT_RESPONSE_SCHEMA_V1: &str = "okx.agent.response/v1";
 /// Authenticated by inherited parent/child pipe handles, NOT a remote API.
-pub const NATIVE_CHILD_CONTROL_SCHEMA_V1: &str = "okx.native-child-control/v1";
+pub const NATIVE_CHILD_CONTROL_SCHEMA_V1: &str = "okx.native-child-control/v2";
 pub const NATIVE_CHILD_CONTROL_PREFIX: &str = "@okx-child-control:";
 pub const NATIVE_CHILD_CONTROL_MAX_BYTES: usize = 4096;
-pub const NATIVE_SOURCE_CANDIDATE_SCHEMA_V1: &str = "okx.native-drained-source/v1";
-const MAX_NATIVE_SOURCE_RECEIPT_AGE_MS: u64 = 10_000;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeChildOperation {
-    Drain,
-    VerifyReadOnly,
+    Shutdown { drain_timeout_ms: u64 },
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeChildRequest {
     pub schema: String,
     pub request_id: String,
     pub operation: NativeChildOperation,
-    pub expected_uid_fingerprint: String,
-    /// Public selection of one of the existing connected accounts; UID is resolved
-    /// by authenticated native REST on the current child, not by the operator.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account_id: Option<String>,
 }
-
 impl NativeChildRequest {
     pub fn valid(&self) -> bool {
         self.schema == NATIVE_CHILD_CONTROL_SCHEMA_V1
             && self.request_id.len() == 64
             && self.request_id.bytes().all(|b| b.is_ascii_hexdigit())
-            && match self.account_id.as_deref() {
-                Some("real" | "demo") => {
-                    self.operation == NativeChildOperation::Drain
-                        && self.expected_uid_fingerprint.is_empty()
+            && matches!(
+                self.operation,
+                NativeChildOperation::Shutdown {
+                    drain_timeout_ms: 10000
                 }
-                None => {
-                    self.expected_uid_fingerprint.len() == 64
-                        && self
-                            .expected_uid_fingerprint
-                            .bytes()
-                            .all(|b| b.is_ascii_hexdigit())
-                }
-                Some(_) => false,
-            }
+            )
     }
 }
-
-/// Read-only source proof. Still cannot authorize a CONTROL profile switch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeDrainedSourceCandidate {
-    pub schema: String,
-    pub account_uid_fingerprint: String,
-    pub snapshot_received_ms: u64,
-    pub source_age_ms: u64,
-    pub private_ws_generation: u64,
-    pub ledger_manifest_sha256: String,
-    pub historical_canceled_identity_exception: bool,
-    pub positions: u64,
-    pub orders: u64,
-    pub native_oco: u64,
-}
-
-impl NativeDrainedSourceCandidate {
-    pub fn valid_for(&self, expected_uid: &str, expected_manifest: &str, now_ms: u64) -> bool {
-        let lower_hex = |value: &str| {
-            value.len() == 64
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        };
-        self.schema == NATIVE_SOURCE_CANDIDATE_SCHEMA_V1
-            && lower_hex(&self.account_uid_fingerprint)
-            && self.account_uid_fingerprint == expected_uid
-            && (lower_hex(&self.ledger_manifest_sha256)
-                || (self.ledger_manifest_sha256.is_empty() && expected_manifest.is_empty()))
-            && self.ledger_manifest_sha256 == expected_manifest
-            && self.snapshot_received_ms != 0
-            && now_ms >= self.snapshot_received_ms
-            && now_ms - self.snapshot_received_ms <= MAX_NATIVE_SOURCE_RECEIPT_AGE_MS
-            && self.source_age_ms <= MAX_NATIVE_SOURCE_RECEIPT_AGE_MS
-            && self.private_ws_generation != 0
-            && self.positions == 0
-            && self.orders == 0
-            && self.native_oco == 0
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeReadOnlyTargetProof {
-    pub schema: String,
-    pub account_uid_fingerprint: String,
-    pub snapshot_received_ms: u64,
-    pub private_ws_generation: u64,
-    pub positions: u64,
-    pub orders: u64,
-    pub native_oco: u64,
-    pub native_oco_complete: bool,
-    pub read_only_credentials: bool,
-    pub executor_mutations_disabled: bool,
-}
-
-impl NativeReadOnlyTargetProof {
-    pub fn valid_for(&self, expected_uid: &str, now_ms: u64) -> bool {
-        self.schema == "okx.native-readonly-target/v1"
-            && self.account_uid_fingerprint == expected_uid
-            && expected_uid.len() == 64
-            && expected_uid
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            && self.snapshot_received_ms != 0
-            && now_ms >= self.snapshot_received_ms
-            && now_ms - self.snapshot_received_ms <= 10_000
-            // An unready target WS/incomplete OCO only degrades observer data.
-            // The mutation-owning SOURCE still requires full WS/OCO evidence.
-            && self.read_only_credentials
-            && self.executor_mutations_disabled
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeChildReply {
     pub schema: String,
     pub request_id: String,
-    pub disposition: String,
-    pub ledger_only: Option<serde_json::Value>,
-    pub source_candidate: Option<NativeDrainedSourceCandidate>,
-    pub target_read_only: Option<NativeReadOnlyTargetProof>,
-    /// Source-bound, authenticated target UID for a one-parameter account choice.
-    /// Never a trading permission; CONTROL still verifies the actual target child.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_target_uid_fingerprint: Option<String>,
-    pub error: Option<String>,
+    pub outcome: String,
 }
-
 impl NativeChildReply {
     pub fn valid_for(&self, request_id: &str) -> bool {
         self.schema == NATIVE_CHILD_CONTROL_SCHEMA_V1
             && self.request_id == request_id
-            && matches!(
-                self.disposition.as_str(),
-                "DRAINED_SOURCE_CANDIDATE" | "VERIFIED_READ_ONLY" | "BLOCKED"
-            )
-            && match self.disposition.as_str() {
-                "DRAINED_SOURCE_CANDIDATE" => {
-                    self.source_candidate.as_ref().is_some_and(|source| {
-                        match self.ledger_only.as_ref() {
-                            Some(ledger) => ledger
-                                .get("source_ledger_manifest_sha256")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|sha| {
-                                    !sha.is_empty() && sha == source.ledger_manifest_sha256
-                                }),
-                            None => source.ledger_manifest_sha256.is_empty(),
-                        }
-                    }) && self.target_read_only.is_none()
-                        && self.error.is_none()
-                        && self
-                            .selected_target_uid_fingerprint
-                            .as_ref()
-                            .is_none_or(|uid| {
-                                uid.len() == 64
-                                    && uid.bytes().all(|b| b.is_ascii_hexdigit())
-                                    && self.source_candidate.as_ref().is_some_and(|source| {
-                                        uid != &source.account_uid_fingerprint
-                                    })
-                            })
-                }
-                "VERIFIED_READ_ONLY" => {
-                    self.ledger_only.is_none()
-                        && self.source_candidate.is_none()
-                        && self.target_read_only.is_some()
-                        && self.selected_target_uid_fingerprint.is_none()
-                        && self.error.is_none()
-                }
-                _ => {
-                    self.ledger_only.is_none()
-                        && self.source_candidate.is_none()
-                        && self.target_read_only.is_none()
-                        && self.selected_target_uid_fingerprint.is_none()
-                        && self.error.is_some()
-                }
-            }
+            && matches!(self.outcome.as_str(), "DRAINED" | "RECOVERY_REQUIRED")
     }
 }
 
@@ -209,8 +63,6 @@ pub const KDF_LABEL_CLIENT_TO_AGENT_V1: &str = "okx-mailbox-v1/client-to-agent";
 pub const KDF_LABEL_AGENT_TO_CLIENT_V1: &str = "okx-mailbox-v1/agent-to-client";
 pub const DIRECT_TRANSPORT_FRAME_SCHEMA_V2: &str = "okx.direct-transport.frame/v2";
 pub const DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
-pub const ANALYTICAL_QUERY_CATALOG_VERSION_V1: &str = "okx.query.catalog/2026-10-02.2";
-pub const RESEARCH_CATALOG_VERSION_V1: &str = "okx.research.catalog/2026-10-05.9";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -250,8 +102,8 @@ pub enum ProtocolError {
     #[error("invalid research request: {0}")]
     InvalidResearchRequest(&'static str),
 
-    #[error("invalid durable Production trading policy")]
-    InvalidProductionTradingPolicy,
+    #[error("invalid authenticated governance or risk message")]
+    InvalidGovernance,
 
     #[error("position scenario requires exactly one exit_price or entry_move_ratio")]
     InvalidPositionScenarioExit,
@@ -336,7 +188,7 @@ impl MailboxEnvelope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -370,773 +222,32 @@ pub enum InstrumentTypeFilter {
     Futures,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryField {
-    InstrumentId,
-    InstrumentType,
-    SettleCurrency,
-    State,
-    Last,
-    BestBid,
-    BestAsk,
-    #[serde(rename = "open_24h")]
-    Open24h,
-    #[serde(rename = "volume_24h")]
-    Volume24h,
-    #[serde(rename = "volume_currency_24h")]
-    VolumeCurrency24h,
-    ExchangeTimestampMs,
-    #[serde(rename = "return_24h_pct")]
-    Return24hPct,
-    SpreadBps,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryMetric {
-    #[serde(rename = "return_24h_pct")]
-    Return24hPct,
-    SpreadBps,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QuerySortKey {
-    #[serde(rename = "return_24h_pct")]
-    Return24hPct,
-    SpreadBps,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QuerySortDirection {
-    Asc,
-    Desc,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryInstrumentState {
-    Live,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct QuerySort {
-    pub key: QuerySortKey,
-    pub direction: QuerySortDirection,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MarketQueryUniverse {
-    pub instrument_types: Vec<InstrumentTypeFilter>,
-    pub settle_currency: Option<String>,
-    pub state: Option<QueryInstrumentState>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AnalyticalQueryPlan {
-    pub catalog_version: String,
-    pub universe: MarketQueryUniverse,
-    pub select: Vec<QueryField>,
-    pub metric: Option<QueryMetric>,
-    pub sort: Option<QuerySort>,
-    pub limit: u16,
-}
-
-impl AnalyticalQueryPlan {
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.catalog_version.is_empty()
-            || self.catalog_version.len() > 64
-            || self.catalog_version.bytes().any(|byte| {
-                !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'/' | b'-' | b'_'))
-            })
-        {
-            return Err(ProtocolError::InvalidAnalyticalQuery("catalog_version"));
-        }
-        if self.universe.instrument_types.is_empty()
-            || self.universe.instrument_types.len() > 2
-            || (self.universe.instrument_types.len() == 2
-                && self.universe.instrument_types[0] == self.universe.instrument_types[1])
-        {
-            return Err(ProtocolError::InvalidAnalyticalQuery("instrument_types"));
-        }
-        if let Some(settle) = self.universe.settle_currency.as_deref() {
-            validate_asset_code(settle)?;
-        }
-        if self.select.is_empty() || self.select.len() > 10 {
-            return Err(ProtocolError::InvalidAnalyticalQuery("select"));
-        }
-        for (index, field) in self.select.iter().enumerate() {
-            if self.select[..index].contains(field) {
-                return Err(ProtocolError::InvalidAnalyticalQuery(
-                    "duplicate select field",
-                ));
-            }
-        }
-        if !(1..=25).contains(&self.limit) {
-            return Err(ProtocolError::InvalidAnalyticalQuery("limit"));
-        }
-        let selected_metric = match (
-            self.select.contains(&QueryField::Return24hPct),
-            self.select.contains(&QueryField::SpreadBps),
-        ) {
-            (true, true) => {
-                return Err(ProtocolError::InvalidAnalyticalQuery(
-                    "one derived metric per query plan",
-                ));
-            }
-            (true, false) => Some(QueryMetric::Return24hPct),
-            (false, true) => Some(QueryMetric::SpreadBps),
-            (false, false) => None,
-        };
-        let sort_metric = self.sort.as_ref().map(|sort| match sort.key {
-            QuerySortKey::Return24hPct => QueryMetric::Return24hPct,
-            QuerySortKey::SpreadBps => QueryMetric::SpreadBps,
-        });
-        let required_metric = match (selected_metric, sort_metric) {
-            (Some(selected), Some(sorted)) if selected != sorted => {
-                return Err(ProtocolError::InvalidAnalyticalQuery(
-                    "selected and sorted metrics must match",
-                ));
-            }
-            (Some(metric), _) | (_, Some(metric)) => Some(metric),
-            (None, None) => None,
-        };
-        if self.metric != required_metric {
-            return Err(ProtocolError::InvalidAnalyticalQuery(
-                "declared metric must exactly match the derived field/sort key",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionTradeMode {
-    Cross,
-    Isolated,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TradingMarginMode {
-    Cross,
-    Isolated,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RiskMinimumQuality {
-    Fresh,
-    Degraded,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RiskDegradedMode {
-    Reject,
-    AllowReadOnly,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortfolioMandateRequest {
-    pub version: String,
-    pub capital_base_usd: String,
-    pub decision_horizon_hours: u32,
-    pub benchmark: Option<String>,
-    pub allowed_instruments: Vec<String>,
-    pub max_drawdown_ratio: String,
-    pub leverage_ceiling: String,
-    pub minimum_liquidity_notional_usd: String,
-    pub max_turnover_ratio: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CorrelatedClusterLimitRequest {
-    pub id: String,
-    pub instruments: Vec<String>,
-    pub max_gross_notional_usd: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HardRiskPolicyRequest {
-    pub version: String,
-    pub max_account_gross_notional_usd: String,
-    pub max_instrument_gross_notional_usd: String,
-    pub max_margin_utilization_ratio: String,
-    pub max_loss_per_trade_usd: String,
-    pub max_daily_realized_loss_usd: String,
-    pub max_drawdown_ratio: String,
-    pub max_leverage: String,
-    pub allowed_instruments: Vec<String>,
-    pub minimum_quality: RiskMinimumQuality,
-    pub degraded_mode: RiskDegradedMode,
-    pub correlated_clusters: Vec<CorrelatedClusterLimitRequest>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionRiskBindingRequest {
-    pub mandate: Box<PortfolioMandateRequest>,
-    pub policy: Box<HardRiskPolicyRequest>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortfolioCandidateRequest {
-    pub instrument: String,
-    pub side: PositionSide,
-    pub notional_usd: String,
-    pub worst_case_loss_usd: String,
-    pub leverage: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortfolioStatisticsRequest {
-    pub bar: String,
-    pub limit: u16,
-    pub parallel_scenario_move_ratio: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VirtualPortfolioPositionRequest {
-    pub instrument: String,
-    pub contracts: String,
-    pub average_price: String,
-    pub leverage: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VirtualPortfolioRequest {
-    pub collateral_usdt: String,
-    pub positions: Vec<VirtualPortfolioPositionRequest>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResearchReplayStrategy {
-    NoTrade,
-    CloseMomentum,
-    TwoBarMomentum,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResearchReplayMechanicsProvenance {
-    DeclaredCounterfactual,
-    HistoricalObserved,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ResearchRequest {
-    InspectTierA {
-        catalog_version: String,
-        instrument: String,
-        bar: String,
-        candle_limit: u16,
-        funding_limit: u16,
-    },
-    InspectTierB {
-        catalog_version: String,
-        instrument: String,
-        trade_limit: u16,
-    },
-    RunReplay {
-        catalog_version: String,
-        instrument: String,
-        replay_dataset_artifact_id: String,
-        strategy: ResearchReplayStrategy,
-        mechanics_provenance: ResearchReplayMechanicsProvenance,
-    },
-    PrepareValidationDataset {
-        catalog_version: String,
-        instrument: String,
-        bar: String,
-        target_candle_count: u16,
-        checkpoint_artifact_id: Option<String>,
-    },
-    PrepareValidationSplit {
-        catalog_version: String,
-        instrument: String,
-        parent_replay_dataset_artifact_id: String,
-        strategy: ResearchReplayStrategy,
-        train_candle_count: u16,
-        validation_candle_count: u16,
-        final_oos_candle_count: u16,
-    },
-    EvaluateValidationEvidence {
-        catalog_version: String,
-        instrument: String,
-        validation_spec_artifact_id: String,
-        train_replay_dataset_artifact_id: String,
-        train_experiment_result_artifact_id: String,
-        validation_replay_dataset_artifact_id: String,
-        validation_experiment_result_artifact_id: String,
-    },
-    EvaluateValidationRobustness {
-        catalog_version: String,
-        instrument: String,
-        validation_spec_artifact_id: String,
-        pre_holdout_evidence_artifact_id: String,
-        train_replay_dataset_artifact_id: String,
-        validation_replay_dataset_artifact_id: String,
-        validation_experiment_result_artifact_id: String,
-    },
-    ConsumeFinalOos {
-        catalog_version: String,
-        instrument: String,
-        validation_spec_artifact_id: String,
-        validation_robustness_artifact_id: String,
-    },
-    StartLiveSession {
-        catalog_version: String,
-        promotion_transition_artifact_id: String,
-        experiment_spec_artifact_id: String,
-    },
-    InspectLiveSession {
-        catalog_version: String,
-    },
-    StopLiveSession {
-        catalog_version: String,
-        session_id: String,
-    },
-}
-
-impl ResearchRequest {
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        match self {
-            Self::InspectTierA {
-                catalog_version,
-                instrument,
-                bar,
-                candle_limit,
-                funding_limit,
-            } => {
-                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
-                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
-                }
-                validate_instrument(instrument)?;
-                if !matches!(
-                    instrument.as_str(),
-                    "BTC-USDT-SWAP" | "ETH-USDT-SWAP" | "DOGE-USDT-SWAP"
-                ) {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "Stage 3A v1 instrument scope",
-                    ));
-                }
-                if bar != "1H" {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "Stage 3A v1 bar must be 1H",
-                    ));
-                }
-                if !(2..=100).contains(candle_limit) {
-                    return Err(ProtocolError::InvalidResearchRequest("candle_limit"));
-                }
-                if !(1..=400).contains(funding_limit) {
-                    return Err(ProtocolError::InvalidResearchRequest("funding_limit"));
-                }
-                Ok(())
-            }
-            Self::InspectTierB {
-                catalog_version,
-                instrument,
-                trade_limit,
-            } => {
-                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
-                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
-                }
-                validate_instrument(instrument)?;
-                if instrument != "BTC-USDT-SWAP" {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "Stage 3A v1 Tier B instrument scope",
-                    ));
-                }
-                if !(2..=100).contains(trade_limit) {
-                    return Err(ProtocolError::InvalidResearchRequest("trade_limit"));
-                }
-                Ok(())
-            }
-            Self::RunReplay {
-                catalog_version,
-                instrument,
-                replay_dataset_artifact_id,
-                ..
-            } => {
-                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
-                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
-                }
-                validate_instrument(instrument)?;
-                if instrument != "BTC-USDT-SWAP" {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "Stage 3B v1 replay instrument scope",
-                    ));
-                }
-                validate_sha256_artifact_id(
-                    replay_dataset_artifact_id,
-                    "replay_dataset_artifact_id",
-                )?;
-                Ok(())
-            }
-            Self::PrepareValidationDataset {
-                catalog_version,
-                instrument,
-                bar,
-                target_candle_count,
-                checkpoint_artifact_id,
-            } => {
-                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
-                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
-                }
-                validate_instrument(instrument)?;
-                if instrument != "BTC-USDT-SWAP" {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "Stage 3C v1 validation instrument scope",
-                    ));
-                }
-                if bar != "1H" {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "Stage 3C v1 validation bar must be 1H",
-                    ));
-                }
-                if !(240..=2400).contains(target_candle_count) {
-                    return Err(ProtocolError::InvalidResearchRequest("target_candle_count"));
-                }
-                if let Some(id) = checkpoint_artifact_id {
-                    validate_sha256_artifact_id(id, "checkpoint_artifact_id")?;
-                }
-                Ok(())
-            }
-            Self::PrepareValidationSplit {
-                catalog_version,
-                instrument,
-                parent_replay_dataset_artifact_id,
-                train_candle_count,
-                validation_candle_count,
-                final_oos_candle_count,
-                ..
-            } => {
-                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
-                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
-                }
-                validate_instrument(instrument)?;
-                if instrument != "BTC-USDT-SWAP" {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "Stage 3C v1 validation instrument scope",
-                    ));
-                }
-                validate_sha256_artifact_id(
-                    parent_replay_dataset_artifact_id,
-                    "parent_replay_dataset_artifact_id",
-                )?;
-                if [
-                    train_candle_count,
-                    validation_candle_count,
-                    final_oos_candle_count,
-                ]
-                .iter()
-                .any(|count| **count < 4 || **count > 2400)
-                {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "validation split candle counts",
-                    ));
-                }
-                let total = u32::from(*train_candle_count)
-                    + u32::from(*validation_candle_count)
-                    + u32::from(*final_oos_candle_count);
-                if !(240..=2400).contains(&total) {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "validation split total candles",
-                    ));
-                }
-                Ok(())
-            }
-            Self::EvaluateValidationEvidence {
-                catalog_version,
-                instrument,
-                validation_spec_artifact_id,
-                train_replay_dataset_artifact_id,
-                train_experiment_result_artifact_id,
-                validation_replay_dataset_artifact_id,
-                validation_experiment_result_artifact_id,
-            } => {
-                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
-                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
-                }
-                validate_instrument(instrument)?;
-                if instrument != "BTC-USDT-SWAP" {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "Stage 3C v1 validation instrument scope",
-                    ));
-                }
-                for (artifact_id, field) in [
-                    (validation_spec_artifact_id, "validation_spec_artifact_id"),
-                    (
-                        train_replay_dataset_artifact_id,
-                        "train_replay_dataset_artifact_id",
-                    ),
-                    (
-                        train_experiment_result_artifact_id,
-                        "train_experiment_result_artifact_id",
-                    ),
-                    (
-                        validation_replay_dataset_artifact_id,
-                        "validation_replay_dataset_artifact_id",
-                    ),
-                    (
-                        validation_experiment_result_artifact_id,
-                        "validation_experiment_result_artifact_id",
-                    ),
-                ] {
-                    validate_sha256_artifact_id(artifact_id, field)?;
-                }
-                Ok(())
-            }
-            Self::EvaluateValidationRobustness {
-                catalog_version,
-                instrument,
-                validation_spec_artifact_id,
-                pre_holdout_evidence_artifact_id,
-                train_replay_dataset_artifact_id,
-                validation_replay_dataset_artifact_id,
-                validation_experiment_result_artifact_id,
-            } => {
-                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
-                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
-                }
-                validate_instrument(instrument)?;
-                if instrument != "BTC-USDT-SWAP" {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "Stage 3C v1 validation instrument scope",
-                    ));
-                }
-                for (artifact_id, field) in [
-                    (validation_spec_artifact_id, "validation_spec_artifact_id"),
-                    (
-                        pre_holdout_evidence_artifact_id,
-                        "pre_holdout_evidence_artifact_id",
-                    ),
-                    (
-                        train_replay_dataset_artifact_id,
-                        "train_replay_dataset_artifact_id",
-                    ),
-                    (
-                        validation_replay_dataset_artifact_id,
-                        "validation_replay_dataset_artifact_id",
-                    ),
-                    (
-                        validation_experiment_result_artifact_id,
-                        "validation_experiment_result_artifact_id",
-                    ),
-                ] {
-                    validate_sha256_artifact_id(artifact_id, field)?;
-                }
-                Ok(())
-            }
-            Self::ConsumeFinalOos {
-                catalog_version,
-                instrument,
-                validation_spec_artifact_id,
-                validation_robustness_artifact_id,
-            } => {
-                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
-                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
-                }
-                validate_instrument(instrument)?;
-                if instrument != "BTC-USDT-SWAP" {
-                    return Err(ProtocolError::InvalidResearchRequest(
-                        "Stage 3C v1 validation instrument scope",
-                    ));
-                }
-                for (artifact_id, field) in [
-                    (validation_spec_artifact_id, "validation_spec_artifact_id"),
-                    (
-                        validation_robustness_artifact_id,
-                        "validation_robustness_artifact_id",
-                    ),
-                ] {
-                    validate_sha256_artifact_id(artifact_id, field)?;
-                }
-                Ok(())
-            }
-            Self::StartLiveSession {
-                catalog_version,
-                promotion_transition_artifact_id,
-                experiment_spec_artifact_id,
-            } => {
-                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
-                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
-                }
-                validate_sha256_artifact_id(
-                    promotion_transition_artifact_id,
-                    "promotion_transition_artifact_id",
-                )?;
-                validate_sha256_artifact_id(
-                    experiment_spec_artifact_id,
-                    "experiment_spec_artifact_id",
-                )
-            }
-            Self::InspectLiveSession { catalog_version } => {
-                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
-                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
-                }
-                Ok(())
-            }
-            Self::StopLiveSession {
-                catalog_version,
-                session_id,
-            } => {
-                if catalog_version != RESEARCH_CATALOG_VERSION_V1 {
-                    return Err(ProtocolError::InvalidResearchRequest("catalog_version"));
-                }
-                validate_sha256_artifact_id(session_id, "session_id")
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionOrderType {
-    Limit,
-    PostOnly,
-    Fok,
-    Ioc,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionReferencePriceBasis {
-    DecisionPrice,
-    ArrivalMid,
-    Mark,
-    Index,
-    Last,
-    LimitPrice,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionDecisionReferenceRequest {
-    pub decision_time_ms: u64,
-    pub price: String,
-    pub price_basis: ExecutionReferencePriceBasis,
-    pub price_policy_version: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionLineageRequest {
-    pub origin_evidence_id: String,
-    pub origin_schema: String,
-    pub origin_version: String,
-    pub authority_evidence_id: Option<String>,
-    pub decision_reference: ExecutionDecisionReferenceRequest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionEntryRequest {
-    pub entry_price: String,
-    pub stop_price: String,
-    pub max_settle_notional: String,
-    pub max_loss_settle: String,
-    pub target_rr: String,
-    pub entry_liquidity_role: LiquidityRole,
-    pub exit_liquidity_role: LiquidityRole,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutionPrepareSpec {
-    Open {
-        position_side: PositionSide,
-        entry: ExecutionEntryRequest,
-    },
-    Add {
-        position_side: PositionSide,
-        entry: ExecutionEntryRequest,
-    },
-    Hedge {
-        position_side: PositionSide,
-        entry: ExecutionEntryRequest,
-    },
-    Reduce {
-        position_side: PositionSide,
-        size: String,
-        price: String,
-    },
-    Close {
-        position_side: PositionSide,
-        size: String,
-        price: String,
-    },
-    Reverse {
-        position_side: PositionSide,
-        size: String,
-        price: String,
-    },
-    ContinueReverse {
-        entry: ExecutionEntryRequest,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutionMutationRequest {
-    Amend {
-        mutation_id: String,
-        new_size: Option<String>,
-        new_price: Option<String>,
-    },
-    Cancel {
-        mutation_id: String,
-    },
-    CancelProtection {
-        mutation_id: String,
-    },
-    /// Local ledger confirmation after independent, fenced venue readback.
-    /// No exchange POST and no replay of the original amend-algos request.
-    ConfirmProtectionSize {
-        mutation_id: String,
-    },
-    ShrinkProtection {
-        mutation_id: String,
-        new_size: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StrategyStopRearmInput {
-    pub expected_stopped_at_ms: u64,
-    pub prior_finalization_sha256: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentOperation {
     ConnectAccount {
         credential_ref: String,
         alias: String,
         operation_id: String,
+        request_digest: String,
     },
-    MarketSnapshot {
-        instrument: String,
+    Market {
+        request: analytics::MarketRequest,
     },
-    InstrumentRules {
-        instrument: String,
+    Research {
+        request: analytics::ResearchRequest,
+    },
+    Trade {
+        request: trading::TradeRequest,
+    },
+    Strategies {
+        request: trading::StrategyRequest,
+    },
+    Portfolio {
+        request: trading::PortfolioRequest,
+    },
+    Diagnostics {
+        request: trading::DiagnosticsRequest,
     },
     FindInstruments {
         asset: String,
@@ -1146,533 +257,82 @@ pub enum AgentOperation {
     MarketOverview {
         instrument: String,
     },
-    MarketIntelligence {
-        instrument: String,
-        impact_contracts: String,
-        depth_levels: u16,
-    },
-    MarketResearch {
-        instruments: Vec<String>,
-        bar: String,
-        limit: Option<u16>,
-    },
-    QueryCapabilities,
-    Query {
-        plan: AnalyticalQueryPlan,
-    },
-    ResearchCapabilities,
-    Research {
-        request: ResearchRequest,
-    },
-    MarketHistory {
-        instrument: String,
-        bar: String,
-        limit: Option<u16>,
-    },
-    HistoryBehavior {
-        instrument: String,
-        bar: String,
-        limit: Option<u16>,
-    },
-    SnapshotQuality {
-        instrument: String,
-    },
-    ExecutorPreflight,
-    /// Local capital allocation: no native exchange mutation.
-    BeginStrategyRun {
-        allocation_id: String,
-        strategy_id: String,
-        origin_schema: String,
-        origin_version: String,
-        mandate_version: String,
-        allocated_usdt: String,
-        operator_authority_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rearm: Option<StrategyStopRearmInput>,
-    },
-    /// One Demo-only native financial close. ALL proof is sourced in Windows.
-    FinalizeStrategyRun {
-        allocation_id: String,
-    },
-    /// Explicit Demo-only NON-financial closure; NAV remains unknown.
-    QuarantineUnverifiedStrategyRun {
-        allocation_id: String,
-    },
-    /// Account leverage configuration: capability is venue-neutral; mutation policy is profile-gated.
-    SetLeverage {
-        mutation_id: String,
-        instrument: String,
-        margin_mode: TradingMarginMode,
-        leverage: String,
-    },
-    PrepareExecution {
-        intent_id: String,
-        instrument: String,
-        trade_mode: ExecutionTradeMode,
-        order_type: ExecutionOrderType,
-        spec: ExecutionPrepareSpec,
-        risk: Option<Box<ExecutionRiskBindingRequest>>,
-        lineage: Option<Box<ExecutionLineageRequest>>,
-    },
-    SubmitPreparedExecution {
-        intent_id: String,
-    },
-    MutateExecution {
-        intent_id: String,
-        mutation: ExecutionMutationRequest,
-    },
-    AbortReverseExecution {
-        intent_id: String,
-    },
-    AbandonPreparedExecution {
-        intent_id: String,
-    },
-    /// Explicit native maintenance of a complete, source-proven historical
-    /// UNSENT batch. Never authorizes exchange POST or new trading risk.
-    ReconcileUnsentPrepared {
-        expected_manifest_sha256: String,
-        account_uid_fingerprint: String,
-        intent_ids: Vec<String>,
-    },
-    ExecutionStatus {
-        intent_id: String,
-    },
-    MailboxTelemetry,
-    AccountSnapshot,
     AccountSummary,
-    /// Read-only compact projection of the SAME account source and ledger owner.
-    /// No market signal, no live trade permission, no independent risk authority.
-    TraderSnapshot,
-    /// Conservative read-only source proof, never a profile switch ticket.
-    ProfileHandoffReadiness,
-    /// Explicit on-disk audit of the one local execution ledger. Never POST.
-    LedgerStorageAudit,
-    PortfolioRisk {
-        mandate: Box<PortfolioMandateRequest>,
-        policy: Box<HardRiskPolicyRequest>,
-        candidate: Option<PortfolioCandidateRequest>,
-        statistics: Option<PortfolioStatisticsRequest>,
-        virtual_portfolio: Option<VirtualPortfolioRequest>,
-    },
-    TradingCapabilities {
-        instrument: String,
-        margin_mode: TradingMarginMode,
-    },
-    CurrentCost {
-        instrument: String,
-        contracts: String,
-        side: PositionSide,
-        liquidity_role: LiquidityRole,
-    },
-    PositionScenario {
-        instrument: String,
-        side: PositionSide,
-        contracts: String,
-        entry_price: String,
-        exit_price: Option<String>,
-        entry_move_ratio: Option<String>,
-        entry_liquidity_role: LiquidityRole,
-        exit_liquidity_role: LiquidityRole,
-    },
-    AnalyzeCandidateOrder {
-        instrument: String,
-        side: PositionSide,
-        entry_price: String,
-        stop_price: String,
-        max_settle_notional: String,
-        max_loss_settle: String,
-        target_rr: String,
-        entry_liquidity_role: LiquidityRole,
-        exit_liquidity_role: LiquidityRole,
-    },
+    MailboxTelemetry,
 }
-
 impl AgentOperation {
-    /// Exact production-intended typed executor surface. The direct transport
-    /// may admit this ONLY for a profile-verified Demo runtime. Live remains
-    /// disabled, irrespective of OAuth or user-supplied operation fields.
-    pub const fn requires_account(&self) -> bool {
-        matches!(
-            self,
-            Self::AccountSnapshot
-                | Self::AccountSummary
-                | Self::TraderSnapshot
-                | Self::ProfileHandoffReadiness
-                | Self::LedgerStorageAudit
-                | Self::PortfolioRisk { .. }
-                | Self::TradingCapabilities { .. }
-                | Self::ExecutorPreflight
-                | Self::BeginStrategyRun { .. }
-                | Self::FinalizeStrategyRun { .. }
-                | Self::QuarantineUnverifiedStrategyRun { .. }
-                | Self::SetLeverage { .. }
-                | Self::PrepareExecution { .. }
-                | Self::SubmitPreparedExecution { .. }
-                | Self::MutateExecution { .. }
-                | Self::AbortReverseExecution { .. }
-                | Self::AbandonPreparedExecution { .. }
-                | Self::ReconcileUnsentPrepared { .. }
-                | Self::ExecutionStatus { .. }
-        )
-    }
-
-    pub const fn direct_transport_demo_execution(&self) -> bool {
-        matches!(
-            self,
-            Self::BeginStrategyRun { .. }
-                | Self::SetLeverage { .. }
-                | Self::FinalizeStrategyRun { .. }
-                | Self::QuarantineUnverifiedStrategyRun { .. }
-                | Self::PrepareExecution { .. }
-                | Self::SubmitPreparedExecution { .. }
-                | Self::MutateExecution { .. }
-                | Self::AbortReverseExecution { .. }
-                | Self::AbandonPreparedExecution { .. }
-        )
-    }
-
-    pub const fn direct_transport_read_only(&self) -> bool {
-        !matches!(
-            self,
-            Self::ConnectAccount { .. }
-                | Self::BeginStrategyRun { .. }
-                | Self::SetLeverage { .. }
-                | Self::FinalizeStrategyRun { .. }
-                | Self::QuarantineUnverifiedStrategyRun { .. }
-                | Self::PrepareExecution { .. }
-                | Self::SubmitPreparedExecution { .. }
-                | Self::MutateExecution { .. }
-                | Self::AbortReverseExecution { .. }
-                | Self::AbandonPreparedExecution { .. }
-                | Self::ReconcileUnsentPrepared { .. }
-        )
-    }
-
-    pub fn validate(&self) -> Result<(), ProtocolError> {
+    pub fn action_class(&self) -> trading::ActionClass {
+        use trading::{ActionClass as C, StrategyRequest as S, TradeRequest as T};
         match self {
+            Self::Trade {
+                request: T::Execute { operation, .. },
+            } => match operation {
+                trading::TradeOperation::Reduce | trading::TradeOperation::Close => C::ReduceRisk,
+                _ => C::IncreaseRisk,
+            },
+            Self::Trade {
+                request: T::Close { .. },
+            } => C::ReduceRisk,
+            Self::Trade {
+                request: T::Cancel { .. },
+            } => C::Maintenance,
+            Self::Strategies {
+                request: S::Create { .. } | S::Update { .. } | S::Start { .. } | S::Stop { .. },
+            }
+            | Self::ConnectAccount { .. } => C::Maintenance,
+            _ => C::Read,
+        }
+    }
+    pub fn requires_account(&self) -> bool {
+        matches!(
+            self,
+            Self::Trade { .. } | Self::Strategies { .. } | Self::AccountSummary
+        )
+    }
+    pub fn direct_transport_read_only(&self) -> bool {
+        self.action_class() == trading::ActionClass::Read
+    }
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let valid = match self {
             Self::ConnectAccount {
                 credential_ref,
                 alias,
                 operation_id,
+                request_digest,
             } => {
-                if !accounts::valid_reference(credential_ref) || !accounts::valid_reference(alias) {
-                    return Err(ProtocolError::InvalidRequestId);
-                }
-                validate_direct_token(operation_id, 8, 128)
+                accounts::valid_reference(credential_ref)
+                    && accounts::valid_reference(alias)
+                    && validate_direct_token(operation_id, 8, 128).is_ok()
+                    && request_digest.len() == 64
+                    && request_digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             }
-            Self::MarketSnapshot { instrument }
-            | Self::InstrumentRules { instrument }
-            | Self::MarketOverview { instrument }
-            | Self::SnapshotQuality { instrument } => validate_instrument(instrument),
-            Self::MarketIntelligence {
-                instrument,
-                impact_contracts,
-                depth_levels,
-            } => {
-                validate_instrument(instrument)?;
-                validate_positive_decimal_text(impact_contracts, "impact_contracts")?;
-                if !(1..=50).contains(depth_levels) {
-                    return Err(ProtocolError::InvalidAnalyticalQuery("depth_levels"));
-                }
-                Ok(())
-            }
+            Self::Market { request } => request.valid(),
+            Self::Research { request } => request.valid(),
+            Self::Trade { request } => request.valid(),
+            Self::Strategies { request } => request.valid(),
+            Self::Portfolio { request } => request.valid(),
+            Self::Diagnostics { request } => request.valid(),
             Self::FindInstruments {
                 asset,
                 settle_currency,
                 ..
             } => {
-                validate_asset_code(asset)?;
-                if let Some(settle_currency) = settle_currency {
-                    validate_asset_code(settle_currency)?;
-                }
-                Ok(())
+                validate_asset_code(asset).is_ok()
+                    && settle_currency
+                        .as_ref()
+                        .is_none_or(|v| validate_asset_code(v).is_ok())
             }
-            Self::MarketResearch {
-                instruments,
-                bar,
-                limit,
-            } => validate_market_research(instruments, bar, *limit),
-            Self::QueryCapabilities | Self::ResearchCapabilities => Ok(()),
-            Self::Query { plan } => plan.validate(),
-            Self::Research { request } => request.validate(),
-            Self::MarketHistory {
-                instrument,
-                bar,
-                limit,
-            }
-            | Self::HistoryBehavior {
-                instrument,
-                bar,
-                limit,
-            } => validate_history_request(instrument, bar, *limit),
-            Self::ExecutorPreflight
-            | Self::MailboxTelemetry
-            | Self::AccountSnapshot
-            | Self::AccountSummary
-            | Self::TraderSnapshot
-            | Self::ProfileHandoffReadiness
-            | Self::LedgerStorageAudit => Ok(()),
-            Self::PortfolioRisk {
-                mandate,
-                policy,
-                candidate,
-                statistics,
-                virtual_portfolio,
-            } => {
-                validate_portfolio_mandate(mandate)?;
-                validate_hard_risk_policy(policy)?;
-                if let Some(candidate) = candidate {
-                    validate_instrument(&candidate.instrument)?;
-                    validate_positive_decimal_text(
-                        &candidate.notional_usd,
-                        "candidate.notional_usd",
-                    )?;
-                    validate_non_negative_decimal_text(
-                        &candidate.worst_case_loss_usd,
-                        "candidate.worst_case_loss_usd",
-                    )?;
-                    validate_positive_decimal_text(&candidate.leverage, "candidate.leverage")?;
-                }
-                if let Some(statistics) = statistics {
-                    validate_statistics_bar(&statistics.bar)?;
-                    if !(3..=100).contains(&statistics.limit) {
-                        return Err(ProtocolError::InvalidHistoryLimit);
-                    }
-                    if let Some(move_ratio) = statistics.parallel_scenario_move_ratio.as_deref() {
-                        validate_decimal_text(
-                            move_ratio,
-                            "statistics.parallel_scenario_move_ratio",
-                        )?;
-                    }
-                }
-                if candidate.is_some() && virtual_portfolio.is_some() {
-                    return Err(ProtocolError::InvalidAnalyticalQuery(
-                        "candidate and virtual_portfolio are mutually exclusive",
-                    ));
-                }
-                if let Some(virtual_portfolio) = virtual_portfolio {
-                    validate_positive_decimal_text(
-                        &virtual_portfolio.collateral_usdt,
-                        "virtual_portfolio.collateral_usdt",
-                    )?;
-                    if !(2..=8).contains(&virtual_portfolio.positions.len()) {
-                        return Err(ProtocolError::InvalidAnalyticalQuery(
-                            "virtual_portfolio.positions",
-                        ));
-                    }
-                    for (index, position) in virtual_portfolio.positions.iter().enumerate() {
-                        validate_instrument(&position.instrument)?;
-                        if virtual_portfolio.positions[..index]
-                            .iter()
-                            .any(|existing| existing.instrument == position.instrument)
-                        {
-                            return Err(ProtocolError::InvalidAnalyticalQuery(
-                                "duplicate virtual portfolio instrument",
-                            ));
-                        }
-                        validate_non_zero_decimal_text(
-                            &position.contracts,
-                            "virtual_portfolio.positions.contracts",
-                        )?;
-                        validate_positive_decimal_text(
-                            &position.average_price,
-                            "virtual_portfolio.positions.average_price",
-                        )?;
-                        validate_positive_decimal_text(
-                            &position.leverage,
-                            "virtual_portfolio.positions.leverage",
-                        )?;
-                    }
-                }
-                Ok(())
-            }
-            Self::TradingCapabilities { instrument, .. } => validate_instrument(instrument),
-            Self::SetLeverage {
-                mutation_id,
-                instrument,
-                margin_mode,
-                leverage,
-            } => {
-                validate_mutation_id(mutation_id)?;
-                validate_instrument(instrument)?;
-                if *margin_mode != TradingMarginMode::Cross {
-                    return Err(ProtocolError::InvalidAnalyticalQuery(
-                        "Demo leverage lowering supports cross only",
-                    ));
-                }
-                validate_positive_decimal_text(leverage, "leverage")
-            }
-            Self::BeginStrategyRun {
-                allocation_id,
-                strategy_id,
-                origin_schema,
-                origin_version,
-                mandate_version,
-                allocated_usdt,
-                operator_authority_id,
-                rearm,
-            } => {
-                validate_request_id(allocation_id)?;
-                if !(2..=64).contains(&strategy_id.len())
-                    || !strategy_id.as_bytes()[0].is_ascii_alphabetic()
-                    || !strategy_id
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-                {
-                    return Err(ProtocolError::InvalidAnalyticalQuery("strategy_id"));
-                }
-                validate_version(origin_schema)?;
-                validate_version(origin_version)?;
-                validate_version(mandate_version)?;
-                validate_positive_decimal_text(allocated_usdt, "allocated_usdt")?;
-                validate_sha256_artifact_id(operator_authority_id, "operator_authority_id")?;
-                if let Some(proof) = rearm
-                    && (proof.expected_stopped_at_ms == 0
-                        || proof.prior_finalization_sha256.len() != 64
-                        || !proof
-                            .prior_finalization_sha256
-                            .bytes()
-                            .all(|b| b.is_ascii_hexdigit()))
-                {
-                    return Err(ProtocolError::InvalidAnalyticalQuery("rearm"));
-                }
-                Ok(())
-            }
-            Self::FinalizeStrategyRun { allocation_id }
-            | Self::QuarantineUnverifiedStrategyRun { allocation_id } => {
-                validate_request_id(allocation_id)
-            }
-            Self::PrepareExecution {
-                intent_id,
-                instrument,
-                spec,
-                risk,
-                lineage,
-                ..
-            } => {
-                validate_request_id(intent_id)?;
-                validate_instrument(instrument)?;
-                validate_execution_prepare_spec(spec)?;
-                if let Some(risk) = risk {
-                    validate_execution_risk_binding(risk)?;
-                }
-                if let Some(lineage) = lineage {
-                    if matches!(spec, ExecutionPrepareSpec::ContinueReverse { .. }) {
-                        return Err(ProtocolError::InvalidAnalyticalQuery(
-                            "continue_reverse inherits root lineage",
-                        ));
-                    }
-                    validate_execution_lineage(lineage)?;
-                }
-                Ok(())
-            }
-            Self::ReconcileUnsentPrepared {
-                expected_manifest_sha256,
-                account_uid_fingerprint,
-                intent_ids,
-            } => {
-                if expected_manifest_sha256.len() != 64
-                    || !expected_manifest_sha256
-                        .bytes()
-                        .all(|v| v.is_ascii_hexdigit())
-                    || validate_sha256(account_uid_fingerprint).is_err()
-                    || intent_ids.is_empty()
-                    || intent_ids.len() > 32
-                    || !intent_ids.windows(2).all(|p| p[0] < p[1])
-                {
-                    return Err(ProtocolError::InvalidProductionTradingPolicy);
-                }
-                for id in intent_ids {
-                    validate_request_id(id)?;
-                }
-                Ok(())
-            }
-            Self::SubmitPreparedExecution { intent_id }
-            | Self::AbortReverseExecution { intent_id }
-            | Self::AbandonPreparedExecution { intent_id }
-            | Self::ExecutionStatus { intent_id } => validate_request_id(intent_id),
-            Self::MutateExecution {
-                intent_id,
-                mutation,
-            } => {
-                validate_request_id(intent_id)?;
-                match mutation {
-                    ExecutionMutationRequest::Amend {
-                        mutation_id,
-                        new_size,
-                        new_price,
-                    } => {
-                        validate_mutation_id(mutation_id)?;
-                        if new_size.is_none() && new_price.is_none() {
-                            return Err(ProtocolError::InvalidAnalyticalQuery(
-                                "amend requires new_size and/or new_price",
-                            ));
-                        }
-                        if let Some(value) = new_size {
-                            validate_positive_decimal_text(value, "mutation.new_size")?;
-                        }
-                        if let Some(value) = new_price {
-                            validate_positive_decimal_text(value, "mutation.new_price")?;
-                        }
-                        Ok(())
-                    }
-                    ExecutionMutationRequest::Cancel { mutation_id }
-                    | ExecutionMutationRequest::CancelProtection { mutation_id }
-                    | ExecutionMutationRequest::ConfirmProtectionSize { mutation_id } => {
-                        validate_mutation_id(mutation_id)
-                    }
-                    ExecutionMutationRequest::ShrinkProtection {
-                        mutation_id,
-                        new_size,
-                    } => {
-                        validate_mutation_id(mutation_id)?;
-                        validate_positive_decimal_text(new_size, "mutation.new_size")
-                    }
-                }
-            }
-            Self::CurrentCost {
-                instrument,
-                contracts,
-                ..
-            } => {
-                validate_instrument(instrument)?;
-                validate_decimal_text(contracts, "contracts")
-            }
-            Self::PositionScenario {
-                instrument,
-                contracts,
-                entry_price,
-                exit_price,
-                entry_move_ratio,
-                ..
-            } => {
-                validate_instrument(instrument)?;
-                validate_decimal_text(contracts, "contracts")?;
-                validate_decimal_text(entry_price, "entry_price")?;
-                match (exit_price, entry_move_ratio) {
-                    (Some(exit_price), None) => validate_decimal_text(exit_price, "exit_price"),
-                    (None, Some(entry_move_ratio)) => {
-                        validate_decimal_text(entry_move_ratio, "entry_move_ratio")
-                    }
-                    _ => Err(ProtocolError::InvalidPositionScenarioExit),
-                }
-            }
-            Self::AnalyzeCandidateOrder {
-                instrument,
-                entry_price,
-                stop_price,
-                max_settle_notional,
-                max_loss_settle,
-                target_rr,
-                ..
-            } => {
-                validate_instrument(instrument)?;
-                validate_decimal_text(entry_price, "entry_price")?;
-                validate_decimal_text(stop_price, "stop_price")?;
-                validate_decimal_text(max_settle_notional, "max_settle_notional")?;
-                validate_decimal_text(max_loss_settle, "max_loss_settle")?;
-                validate_decimal_text(target_rr, "target_rr")
-            }
+            Self::MarketOverview { instrument } => validate_instrument(instrument).is_ok(),
+            Self::AccountSummary | Self::MailboxTelemetry => true,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(ProtocolError::InvalidAnalyticalQuery(
+                "invalid product request",
+            ))
         }
     }
 }
@@ -1682,8 +342,6 @@ impl AgentOperation {
 #[serde(rename_all = "snake_case")]
 pub enum DirectRuntimeProfile {
     Engine,
-    Production,
-    DemoAcceptance,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1693,10 +351,9 @@ pub enum DirectTransportFrame {
         schema: String,
         runtime_id: String,
         connection_id: String,
-        /// None is accepted only for rolling upgrades of an older agent.
-        /// It never proves the active execution environment.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        runtime_profile: Option<DirectRuntimeProfile>,
+        installation_id: String,
+        contract: String,
+        runtime_profile: DirectRuntimeProfile,
     },
     HelloAck {
         schema: String,
@@ -1728,6 +385,12 @@ pub enum DirectTransportFrame {
         session_id: String,
         connection_generation: u64,
         command: risk_authority::RiskCommand,
+    },
+    PolicySnapshot {
+        schema: String,
+        session_id: String,
+        connection_generation: u64,
+        snapshot: account_governance::CentralGovernanceSnapshot,
     },
     RiskControlResult {
         schema: String,
@@ -1781,9 +444,16 @@ impl DirectTransportFrame {
                 schema,
                 runtime_id,
                 connection_id,
+                installation_id,
+                contract,
                 runtime_profile: _,
             } => {
                 validate_direct_schema(schema)?;
+                if !accounts::valid_installation(installation_id)
+                    || contract != accounts::PRODUCT_CONTRACT
+                {
+                    return Err(ProtocolError::InvalidDirectTransportToken);
+                }
                 validate_direct_token(runtime_id, 1, 64)?;
                 validate_direct_token(connection_id, 16, 128)
             }
@@ -1827,9 +497,24 @@ impl DirectTransportFrame {
                     .as_ref()
                     .is_some_and(|p| !p.valid() || p.session_generation != *connection_generation)
                 {
-                    return Err(ProtocolError::InvalidProductionTradingPolicy);
+                    return Err(ProtocolError::InvalidGovernance);
                 }
                 request.validate()
+            }
+            Self::PolicySnapshot {
+                schema,
+                session_id,
+                connection_generation,
+                snapshot,
+            } => {
+                validate_direct_schema(schema)?;
+                validate_direct_token(session_id, 16, 128)?;
+                validate_connection_generation(*connection_generation)?;
+                if snapshot.valid() && snapshot.session_generation == *connection_generation {
+                    Ok(())
+                } else {
+                    Err(ProtocolError::InvalidGovernance)
+                }
             }
             Self::RiskControl {
                 schema,
@@ -1843,7 +528,7 @@ impl DirectTransportFrame {
                 if command.valid() {
                     Ok(())
                 } else {
-                    Err(ProtocolError::InvalidProductionTradingPolicy)
+                    Err(ProtocolError::InvalidGovernance)
                 }
             }
             Self::RiskControlResult {
@@ -1858,7 +543,7 @@ impl DirectTransportFrame {
                 if result.valid() {
                     Ok(())
                 } else {
-                    Err(ProtocolError::InvalidProductionTradingPolicy)
+                    Err(ProtocolError::InvalidGovernance)
                 }
             }
             Self::DeliveryAck {
@@ -1893,6 +578,7 @@ impl DirectTransportFrame {
             | Self::Ping { schema, .. }
             | Self::Pong { schema, .. }
             | Self::Request { schema, .. }
+            | Self::PolicySnapshot { schema, .. }
             | Self::RiskControl { schema, .. }
             | Self::RiskControlResult { schema, .. }
             | Self::DeliveryAck { schema, .. }
@@ -1941,168 +627,12 @@ impl TradingVenue {
     }
 }
 
-/// Metadata only. Registration never provisions an API key, probes a UID,
-/// changes the selected account or grants execution privileges.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AccountCatalogEnvironment {
-    Production,
-    Demo,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AccountCatalogEntry {
-    pub schema: String,
-    /// Defaults to OKX when reading earlier metadata-only catalog files.
-    #[serde(default)]
-    pub venue: TradingVenue,
-    pub account_id: String,
-    pub label: String,
-    pub environment: AccountCatalogEnvironment,
-    pub expected_uid_fingerprint: String,
-}
-
-impl AccountCatalogEntry {
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        let id = self.account_id.as_bytes();
-        if self.schema != ACCOUNT_CATALOG_ENTRY_SCHEMA_V1
-            || id.is_empty()
-            || id.len() > 32
-            || !id[0].is_ascii_lowercase()
-            || !id
-                .iter()
-                .all(|&byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-            || id.last() == Some(&b'-')
-            || matches!(
-                self.account_id.as_str(),
-                "real" | "demo" | "production" | "demo_acceptance"
-            )
-            || self.label.is_empty()
-            || self.label.len() > 48
-            || self.label.trim() != self.label
-            || self.label.chars().any(char::is_control)
-        {
-            return Err(ProtocolError::InvalidRequestId);
-        }
-        validate_sha256(&self.expected_uid_fingerprint)?;
-        if self
-            .expected_uid_fingerprint
-            .bytes()
-            .any(|b| !(b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-        {
-            return Err(ProtocolError::InvalidRequestId);
-        }
-        Ok(())
-    }
-}
-
-/// Immutable operator limit for the existing Production executor, not a
-/// credential and never itself permission to send an exchange request.
-pub const PRODUCTION_TRADING_POLICY_SCHEMA_V1: &str = "okx.production-trading-policy/v1";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ProductionPermission {
-    Off,
-    ReadOnly,
-    Enabled,
-    Stopped,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProductionTradingPolicy {
-    pub schema: String,
-    pub revision: u64,
-    pub permission: ProductionPermission,
-    pub account_uid_fingerprint: String,
-    pub strategy_run_id: String,
-    pub operator_authority_id: String,
-    pub allowed_instruments: Vec<String>,
-    pub max_total_modelled_loss_usdt: String,
-}
-
-impl ProductionTradingPolicy {
-    /// Validate durable operator scope without floating-point arithmetic.
-    /// Financial exposure is independently recomputed by okx-execution.
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        const BAD: ProtocolError = ProtocolError::InvalidProductionTradingPolicy;
-        if self.schema != PRODUCTION_TRADING_POLICY_SCHEMA_V1
-            || self.revision == 0
-            || validate_sha256(&self.account_uid_fingerprint).is_err()
-            || self.strategy_run_id.is_empty()
-            || self.strategy_run_id.len() > 128
-            || !self.operator_authority_id.starts_with("sha256:")
-            || validate_sha256(
-                self.operator_authority_id
-                    .strip_prefix("sha256:")
-                    .unwrap_or(""),
-            )
-            .is_err()
-            || self.allowed_instruments.is_empty()
-            || self.allowed_instruments.len() > 32
-            || self
-                .allowed_instruments
-                .iter()
-                .any(|s| !s.ends_with("-USDT-SWAP") || s.len() > 64)
-        {
-            return Err(BAD);
-        }
-        let mut unique = std::collections::BTreeSet::new();
-        if self
-            .allowed_instruments
-            .iter()
-            .any(|s| !unique.insert(s.as_str()))
-        {
-            return Err(BAD);
-        }
-        let (whole, decimal) = self
-            .max_total_modelled_loss_usdt
-            .split_once('.')
-            .unwrap_or((self.max_total_modelled_loss_usdt.as_str(), ""));
-        if whole.is_empty()
-            || whole.len() > 2
-            || !whole.bytes().all(|b| b.is_ascii_digit())
-            || decimal.len() > 18
-            || !decimal.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Err(BAD);
-        }
-        let integral = whole.parse::<u8>().map_err(|_| BAD)?;
-        if integral > 10
-            || (integral == 10 && decimal.bytes().any(|b| b != b'0'))
-            || (integral == 0 && !decimal.bytes().any(|b| b != b'0'))
-        {
-            return Err(BAD);
-        }
-        Ok(())
-    }
-}
-
+/// CONTROL owns installation and process lifecycle. Access and limits belong to governance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostControlOperation {
     Status,
-    /// Read-only metadata registry in the existing CONTROL owner.
     AccountCatalog,
-    /// Metadata registration ONLY, never new credentials or account selection.
-    RegisterReadOnlyAccount {
-        entry: AccountCatalogEntry,
-    },
-    /// One durable CONTROL authorization, never an ephemeral pilot permit.
-    ConfigureProductionTrading {
-        policy: ProductionTradingPolicy,
-    },
-    /// Fail-closed durable revocation, also effective after restart.
-    StopProductionTrading {
-        expected_revision: u64,
-    },
-    /// Native negative lifecycle switch only. Governance/v2 is the sole
-    /// positive Real authorization and remains required for every POST.
-    SetProductionReadOnly {
-        read_only: bool,
-    },
     Sync,
     BuildAgent,
     DeployAgent {
@@ -2136,29 +666,27 @@ pub enum HostControlOperation {
     BootstrapAgentGithubToken,
     ProvisionCloudflareRuntimeToken,
     StartAgent,
-    StartDemoAcceptance,
-    RestoreProductionAgent,
-    /// One canonical venue+account selector. The native account registry owns
-    /// credential readiness and the exclusive source/UID handoff.
-    /// Older OKX-only requests default to the OKX venue.
-    SelectAccount {
-        #[serde(default)]
-        venue: TradingVenue,
-        account_id: String,
-    },
-    /// Legacy technical operation: same native agent, ALWAYS target ReadOnly.
-    SelectReadOnlyAccount {
-        target_profile: String,
-        expected_source_uid_fingerprint: String,
-        expected_target_uid_fingerprint: String,
-    },
-    RecoverReadOnlySelection,
     StopAgent,
     RestartAgent,
-    /// Explicit fresh SQLite genesis only. Requires stopped CONTROL and
-    /// independent flat venue readback; no legacy history is imported.
-    InitializeFreshLedger {
-        expected_uid_fingerprint: String,
+    InitializeInstallation {
+        installation_id: String,
+        expected_release: String,
+        operation_id: String,
+    },
+    InitializeAccount {
+        account_key: String,
+        installation_id: String,
+        expected_release: String,
+        operation_id: String,
+    },
+    BackupAccount {
+        account_key: String,
+    },
+    RestoreAccount {
+        account_key: String,
+        snapshot_id: String,
+        expected_release: String,
+        operation_id: String,
     },
     InstallAutostart,
     AutostartStatus,
@@ -2168,33 +696,50 @@ pub enum HostControlOperation {
     AcceptanceFailNextControllerActivation,
     TransportStatus,
 }
-
 impl HostControlOperation {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
-            Self::SelectAccount { account_id, .. } => {
-                let id = account_id.as_bytes();
-                if id.is_empty()
-                    || id.len() > 32
-                    || !id[0].is_ascii_lowercase()
-                    || !id
-                        .iter()
-                        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-                    || id.last() == Some(&b'-')
-                    || matches!(account_id.as_str(), "production" | "demo_acceptance")
-                {
-                    Err(ProtocolError::InvalidRequestId)
-                } else {
-                    Ok(())
-                }
+            Self::InitializeInstallation {
+                installation_id,
+                expected_release,
+                operation_id,
             }
-            Self::RegisterReadOnlyAccount { entry } => entry.validate(),
-            Self::InitializeFreshLedger {
-                expected_uid_fingerprint,
-            } => validate_sha256(expected_uid_fingerprint),
-            Self::ConfigureProductionTrading { policy } => policy.validate(),
-            Self::StopProductionTrading { expected_revision } => {
-                if *expected_revision == 0 {
+            | Self::InitializeAccount {
+                installation_id,
+                expected_release,
+                operation_id,
+                ..
+            } => {
+                if !accounts::valid_installation(installation_id)
+                    || !(8..=128).contains(&operation_id.len())
+                    || !operation_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                {
+                    return Err(ProtocolError::InvalidRequestId);
+                }
+                validate_source_tree(expected_release)?;
+                if let Self::InitializeAccount { account_key, .. } = self {
+                    validate_account_wire(account_key)?;
+                }
+                Ok(())
+            }
+            Self::BackupAccount { account_key } => validate_account_wire(account_key),
+            Self::RestoreAccount {
+                account_key,
+                snapshot_id,
+                expected_release,
+                operation_id,
+            } => {
+                validate_account_wire(account_key)?;
+                validate_source_tree(expected_release)?;
+                if snapshot_id.is_empty()
+                    || snapshot_id.len() > 128
+                    || !snapshot_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                    || !(8..=128).contains(&operation_id.len())
+                {
                     Err(ProtocolError::InvalidRequestId)
                 } else {
                     Ok(())
@@ -2214,40 +759,36 @@ impl HostControlOperation {
                 run_id,
                 artifact_id,
                 expected_source_tree,
-            } => {
-                if *run_id == 0 || *artifact_id == 0 {
-                    return Err(ProtocolError::InvalidRequestId);
-                }
-                validate_source_tree(expected_source_tree)
             }
-            Self::UpgradeLauncherRoot {
+            | Self::UpgradeLauncherRoot {
                 run_id,
                 artifact_id,
                 expected_source_tree,
-                expected_current_launcher_sha256,
+                ..
             } => {
                 if *run_id == 0 || *artifact_id == 0 {
                     return Err(ProtocolError::InvalidRequestId);
                 }
                 validate_source_tree(expected_source_tree)?;
-                validate_sha256(expected_current_launcher_sha256)
-            }
-            Self::SelectReadOnlyAccount {
-                target_profile,
-                expected_source_uid_fingerprint,
-                expected_target_uid_fingerprint,
-            } => {
-                if !matches!(target_profile.as_str(), "production" | "demo_acceptance")
-                    || expected_source_uid_fingerprint == expected_target_uid_fingerprint
+                if let Self::UpgradeLauncherRoot {
+                    expected_current_launcher_sha256,
+                    ..
+                } = self
                 {
-                    return Err(ProtocolError::InvalidRequestId);
+                    validate_sha256(expected_current_launcher_sha256)?;
                 }
-                validate_sha256(expected_source_uid_fingerprint)?;
-                validate_sha256(expected_target_uid_fingerprint)
+                Ok(())
             }
             _ => Ok(()),
         }
     }
+}
+fn validate_account_wire(value: &str) -> Result<(), ProtocolError> {
+    let p = value.split(':').collect::<Vec<_>>();
+    if p.len() != 3 || p[0] != "okx" || !matches!(p[1], "real" | "demo") {
+        return Err(ProtocolError::InvalidRequestId);
+    }
+    validate_sha256(p[2])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2283,20 +824,6 @@ impl HostControlResult {
         }
         validate_host_control_request_id(&self.request_id)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PositionSide {
-    Long,
-    Short,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LiquidityRole {
-    Maker,
-    Taker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2376,34 +903,6 @@ fn validate_direct_token(value: &str, min: usize, max: usize) -> Result<(), Prot
     }
 }
 
-fn validate_version(value: &str) -> Result<(), ProtocolError> {
-    if value.is_empty()
-        || value.len() > 64
-        || !value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'/' | b'-' | b'_'))
-    {
-        Err(ProtocolError::InvalidAnalyticalQuery("version"))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_instrument_list(values: &[String], max: usize) -> Result<(), ProtocolError> {
-    if values.len() > max {
-        return Err(ProtocolError::InvalidAnalyticalQuery("instrument_list"));
-    }
-    for (index, value) in values.iter().enumerate() {
-        validate_instrument(value)?;
-        if values[..index].contains(value) {
-            return Err(ProtocolError::InvalidAnalyticalQuery(
-                "duplicate instrument",
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
     if (16..=128).contains(&value.len())
         && value
@@ -2413,18 +912,6 @@ fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
         Ok(())
     } else {
         Err(ProtocolError::InvalidRequestId)
-    }
-}
-
-fn validate_mutation_id(value: &str) -> Result<(), ProtocolError> {
-    if (8..=128).contains(&value.len())
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
-        Ok(())
-    } else {
-        Err(ProtocolError::InvalidMutationId)
     }
 }
 
@@ -2484,218 +971,6 @@ fn validate_asset_code(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
-fn validate_market_research(
-    instruments: &[String],
-    bar: &str,
-    limit: Option<u16>,
-) -> Result<(), ProtocolError> {
-    if !(2..=8).contains(&instruments.len()) {
-        return Err(ProtocolError::InvalidMarketResearchInstruments);
-    }
-    for (index, instrument) in instruments.iter().enumerate() {
-        validate_history_request(instrument, bar, limit)?;
-        if instruments[..index].contains(instrument) {
-            return Err(ProtocolError::InvalidMarketResearchInstruments);
-        }
-    }
-    Ok(())
-}
-
-fn validate_history_request(
-    instrument: &str,
-    bar: &str,
-    limit: Option<u16>,
-) -> Result<(), ProtocolError> {
-    validate_instrument(instrument)?;
-    validate_history_bar(bar)?;
-    if matches!(limit, Some(0 | 101..)) {
-        return Err(ProtocolError::InvalidHistoryLimit);
-    }
-    Ok(())
-}
-
-fn validate_execution_entry_request(entry: &ExecutionEntryRequest) -> Result<(), ProtocolError> {
-    validate_decimal_text(&entry.entry_price, "entry.entry_price")?;
-    validate_decimal_text(&entry.stop_price, "entry.stop_price")?;
-    validate_decimal_text(&entry.max_settle_notional, "entry.max_settle_notional")?;
-    validate_decimal_text(&entry.max_loss_settle, "entry.max_loss_settle")?;
-    validate_decimal_text(&entry.target_rr, "entry.target_rr")
-}
-
-fn validate_execution_lineage(value: &ExecutionLineageRequest) -> Result<(), ProtocolError> {
-    validate_sha256_artifact_id(&value.origin_evidence_id, "lineage.origin_evidence_id")?;
-    if let Some(authority) = value.authority_evidence_id.as_deref() {
-        validate_sha256_artifact_id(authority, "lineage.authority_evidence_id")?;
-    }
-    if value.origin_schema.trim().is_empty()
-        || value.origin_schema.len() > 128
-        || value.origin_version.trim().is_empty()
-        || value.origin_version.len() > 128
-        || value.decision_reference.decision_time_ms == 0
-        || value
-            .decision_reference
-            .price_policy_version
-            .trim()
-            .is_empty()
-        || value.decision_reference.price_policy_version.len() > 128
-    {
-        return Err(ProtocolError::InvalidAnalyticalQuery("execution lineage"));
-    }
-    validate_positive_decimal_text(
-        &value.decision_reference.price,
-        "lineage.decision_reference.price",
-    )
-}
-
-fn validate_execution_prepare_spec(spec: &ExecutionPrepareSpec) -> Result<(), ProtocolError> {
-    match spec {
-        ExecutionPrepareSpec::Open { entry, .. }
-        | ExecutionPrepareSpec::Add { entry, .. }
-        | ExecutionPrepareSpec::Hedge { entry, .. }
-        | ExecutionPrepareSpec::ContinueReverse { entry } => {
-            validate_execution_entry_request(entry)
-        }
-        ExecutionPrepareSpec::Reduce { size, price, .. }
-        | ExecutionPrepareSpec::Close { size, price, .. }
-        | ExecutionPrepareSpec::Reverse { size, price, .. } => {
-            validate_positive_decimal_text(size, "size")?;
-            validate_positive_decimal_text(price, "price")
-        }
-    }
-}
-
-fn validate_execution_risk_binding(
-    risk: &ExecutionRiskBindingRequest,
-) -> Result<(), ProtocolError> {
-    validate_portfolio_mandate(&risk.mandate)?;
-    validate_hard_risk_policy(&risk.policy)
-}
-
-fn validate_portfolio_mandate(mandate: &PortfolioMandateRequest) -> Result<(), ProtocolError> {
-    validate_version(&mandate.version)?;
-    validate_positive_decimal_text(&mandate.capital_base_usd, "mandate.capital_base_usd")?;
-    if mandate.decision_horizon_hours == 0 || mandate.decision_horizon_hours > 24 * 365 {
-        return Err(ProtocolError::InvalidAnalyticalQuery(
-            "mandate.decision_horizon_hours",
-        ));
-    }
-    validate_non_negative_decimal_text(&mandate.max_drawdown_ratio, "mandate.max_drawdown_ratio")?;
-    validate_positive_decimal_text(&mandate.leverage_ceiling, "mandate.leverage_ceiling")?;
-    validate_non_negative_decimal_text(
-        &mandate.minimum_liquidity_notional_usd,
-        "mandate.minimum_liquidity_notional_usd",
-    )?;
-    validate_non_negative_decimal_text(&mandate.max_turnover_ratio, "mandate.max_turnover_ratio")?;
-    validate_instrument_list(&mandate.allowed_instruments, 32)
-}
-
-fn validate_hard_risk_policy(policy: &HardRiskPolicyRequest) -> Result<(), ProtocolError> {
-    validate_version(&policy.version)?;
-    for (value, field) in [
-        (
-            &policy.max_account_gross_notional_usd,
-            "policy.max_account_gross_notional_usd",
-        ),
-        (
-            &policy.max_instrument_gross_notional_usd,
-            "policy.max_instrument_gross_notional_usd",
-        ),
-        (
-            &policy.max_margin_utilization_ratio,
-            "policy.max_margin_utilization_ratio",
-        ),
-        (
-            &policy.max_loss_per_trade_usd,
-            "policy.max_loss_per_trade_usd",
-        ),
-        (
-            &policy.max_daily_realized_loss_usd,
-            "policy.max_daily_realized_loss_usd",
-        ),
-        (&policy.max_drawdown_ratio, "policy.max_drawdown_ratio"),
-    ] {
-        validate_non_negative_decimal_text(value, field)?;
-    }
-    validate_positive_decimal_text(&policy.max_leverage, "policy.max_leverage")?;
-    validate_instrument_list(&policy.allowed_instruments, 32)?;
-    if policy.correlated_clusters.len() > 16 {
-        return Err(ProtocolError::InvalidAnalyticalQuery(
-            "policy.correlated_clusters",
-        ));
-    }
-    for cluster in &policy.correlated_clusters {
-        validate_version(&cluster.id)?;
-        validate_instrument_list(&cluster.instruments, 16)?;
-        validate_non_negative_decimal_text(
-            &cluster.max_gross_notional_usd,
-            "policy.cluster.max_gross_notional_usd",
-        )?;
-    }
-    Ok(())
-}
-
-fn validate_statistics_bar(bar: &str) -> Result<(), ProtocolError> {
-    if matches!(
-        bar,
-        "1m" | "3m"
-            | "5m"
-            | "15m"
-            | "30m"
-            | "1H"
-            | "2H"
-            | "4H"
-            | "6H"
-            | "12H"
-            | "1D"
-            | "2D"
-            | "3D"
-            | "1W"
-            | "6Hutc"
-            | "12Hutc"
-            | "1Dutc"
-            | "2Dutc"
-            | "3Dutc"
-            | "1Wutc"
-    ) {
-        Ok(())
-    } else {
-        Err(ProtocolError::InvalidHistoryBar)
-    }
-}
-
-fn validate_history_bar(bar: &str) -> Result<(), ProtocolError> {
-    if !matches!(
-        bar,
-        "1s" | "1m"
-            | "3m"
-            | "5m"
-            | "15m"
-            | "30m"
-            | "1H"
-            | "2H"
-            | "4H"
-            | "6H"
-            | "12H"
-            | "1D"
-            | "2D"
-            | "3D"
-            | "1W"
-            | "1M"
-            | "3M"
-            | "6Hutc"
-            | "12Hutc"
-            | "1Dutc"
-            | "2Dutc"
-            | "3Dutc"
-            | "1Wutc"
-            | "1Mutc"
-            | "3Mutc"
-    ) {
-        return Err(ProtocolError::InvalidHistoryBar);
-    }
-    Ok(())
-}
-
 fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     if (3..=64).contains(&value.len())
         && value
@@ -2708,1971 +983,53 @@ fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
-fn validate_sha256_artifact_id(value: &str, field: &'static str) -> Result<(), ProtocolError> {
-    let Some(hex) = value.strip_prefix("sha256:") else {
-        return Err(ProtocolError::InvalidResearchRequest(field));
-    };
-    if hex.len() != 64
-        || !hex
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        return Err(ProtocolError::InvalidResearchRequest(field));
-    }
-    Ok(())
-}
-
-fn validate_non_negative_decimal_text(
-    value: &str,
-    field: &'static str,
-) -> Result<(), ProtocolError> {
-    if value.is_empty() || value.len() > 64 {
-        return Err(ProtocolError::InvalidDecimalInput(field));
-    }
-    let bytes = value.as_bytes();
-    let mut dots = 0usize;
-    let mut digits = 0usize;
-    for (index, byte) in bytes.iter().copied().enumerate() {
-        match byte {
-            b'0'..=b'9' => digits += 1,
-            b'.' if dots == 0 && index > 0 && index + 1 < bytes.len() => dots += 1,
-            _ => return Err(ProtocolError::InvalidDecimalInput(field)),
-        }
-    }
-    if digits == 0 {
-        return Err(ProtocolError::InvalidDecimalInput(field));
-    }
-    Ok(())
-}
-
-fn validate_positive_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
-    if value.is_empty() || value.len() > 64 {
-        return Err(ProtocolError::InvalidDecimalInput(field));
-    }
-
-    let mut dots = 0usize;
-    let mut digits = 0usize;
-    let mut non_zero_digits = 0usize;
-    let bytes = value.as_bytes();
-    for (index, byte) in bytes.iter().copied().enumerate() {
-        match byte {
-            b'0'..=b'9' => {
-                digits += 1;
-                if byte != b'0' {
-                    non_zero_digits += 1;
-                }
-            }
-            b'.' if dots == 0 && index > 0 && index + 1 < bytes.len() => {
-                dots += 1;
-            }
-            _ => return Err(ProtocolError::InvalidDecimalInput(field)),
-        }
-    }
-
-    if digits == 0 || non_zero_digits == 0 {
-        return Err(ProtocolError::InvalidDecimalInput(field));
-    }
-
-    Ok(())
-}
-
-fn validate_non_zero_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
-    validate_decimal_text(value, field)?;
-    if value.bytes().any(|byte| matches!(byte, b'1'..=b'9')) {
-        Ok(())
-    } else {
-        Err(ProtocolError::InvalidDecimalInput(field))
-    }
-}
-
-fn validate_decimal_text(value: &str, field: &'static str) -> Result<(), ProtocolError> {
-    if value.is_empty() || value.len() > 64 {
-        return Err(ProtocolError::InvalidDecimalInput(field));
-    }
-
-    let mut dots = 0usize;
-    let mut digits = 0usize;
-    for (index, byte) in value.bytes().enumerate() {
-        match byte {
-            b'0'..=b'9' => digits += 1,
-            b'.' if dots == 0 => dots += 1,
-            b'+' | b'-' if index == 0 => {}
-            _ => return Err(ProtocolError::InvalidDecimalInput(field)),
-        }
-    }
-
-    if digits == 0 {
-        return Err(ProtocolError::InvalidDecimalInput(field));
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn production_policy_scope_is_typed_bounded_and_strict() {
-        let mut p = ProductionTradingPolicy {
-            schema: PRODUCTION_TRADING_POLICY_SCHEMA_V1.to_owned(),
-            revision: 1,
-            permission: ProductionPermission::Enabled,
-            account_uid_fingerprint: "a".repeat(64),
-            strategy_run_id: "run_for_current_strategy".to_owned(),
-            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
-            allowed_instruments: vec!["BTC-USDT-SWAP".to_owned()],
-            max_total_modelled_loss_usdt: "10".to_owned(),
-        };
-        assert!(p.validate().is_ok());
-        for bad in ["10.000000001", "11", "0", "-1", "1e2", "Infinity"] {
-            p.max_total_modelled_loss_usdt = bad.to_owned();
-            assert!(p.validate().is_err(), "bad budget: {bad}");
-        }
-        p.max_total_modelled_loss_usdt = "0.000000001".to_owned();
-        assert!(p.validate().is_ok());
-        p.allowed_instruments.push("BTC-USDT-SWAP".to_owned());
-        assert!(p.validate().is_err());
-        p.allowed_instruments.pop();
-        p.account_uid_fingerprint = "not-an-account".to_owned();
-        assert!(p.validate().is_err());
-    }
-
+mod product_contract_tests {
     use super::*;
-
     #[test]
-    fn research_v1_scope_is_narrow_and_versioned() {
-        let valid = ResearchRequest::InspectTierA {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            bar: "1H".to_owned(),
-            candle_limit: 24,
-            funding_limit: 24,
-        };
-        assert_eq!(valid.validate(), Ok(()));
-
-        let wrong_instrument = ResearchRequest::InspectTierA {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "SOL-USDT-SWAP".to_owned(),
-            bar: "1H".to_owned(),
-            candle_limit: 24,
-            funding_limit: 24,
-        };
-        assert!(matches!(
-            wrong_instrument.validate(),
-            Err(ProtocolError::InvalidResearchRequest(
-                "Stage 3A v1 instrument scope"
-            ))
-        ));
-
-        let wrong_catalog = ResearchRequest::InspectTierA {
-            catalog_version: "okx.research.catalog/old".to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            bar: "1H".to_owned(),
-            candle_limit: 24,
-            funding_limit: 24,
-        };
-        assert!(matches!(
-            wrong_catalog.validate(),
-            Err(ProtocolError::InvalidResearchRequest("catalog_version"))
-        ));
-
-        let tier_b = ResearchRequest::InspectTierB {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            trade_limit: 20,
-        };
-        assert_eq!(tier_b.validate(), Ok(()));
-
-        let tier_b_wrong_instrument = ResearchRequest::InspectTierB {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "ETH-USDT-SWAP".to_owned(),
-            trade_limit: 20,
-        };
-        assert!(matches!(
-            tier_b_wrong_instrument.validate(),
-            Err(ProtocolError::InvalidResearchRequest(
-                "Stage 3A v1 Tier B instrument scope"
-            ))
-        ));
-
-        let tier_b_unbounded = ResearchRequest::InspectTierB {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            trade_limit: 101,
-        };
-        assert!(matches!(
-            tier_b_unbounded.validate(),
-            Err(ProtocolError::InvalidResearchRequest("trade_limit"))
-        ));
-
-        let replay = ResearchRequest::RunReplay {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            replay_dataset_artifact_id:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-            strategy: ResearchReplayStrategy::NoTrade,
-            mechanics_provenance: ResearchReplayMechanicsProvenance::DeclaredCounterfactual,
-        };
-        assert_eq!(replay.validate(), Ok(()));
-
-        let mut bad_replay = replay;
-        if let ResearchRequest::RunReplay {
-            replay_dataset_artifact_id,
-            ..
-        } = &mut bad_replay
-        {
-            *replay_dataset_artifact_id = "bad".to_owned();
-        }
-        assert!(matches!(
-            bad_replay.validate(),
-            Err(ProtocolError::InvalidResearchRequest(
-                "replay_dataset_artifact_id"
-            ))
-        ));
-
-        let validation = ResearchRequest::PrepareValidationDataset {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            bar: "1H".to_owned(),
-            target_candle_count: 240,
-            checkpoint_artifact_id: None,
-        };
-        assert_eq!(validation.validate(), Ok(()));
-
-        let validation_resume = ResearchRequest::PrepareValidationDataset {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            bar: "1H".to_owned(),
-            target_candle_count: 2400,
-            checkpoint_artifact_id: Some(
-                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                    .to_owned(),
-            ),
-        };
-        assert_eq!(validation_resume.validate(), Ok(()));
-
-        let validation_too_short = ResearchRequest::PrepareValidationDataset {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            bar: "1H".to_owned(),
-            target_candle_count: 239,
-            checkpoint_artifact_id: None,
-        };
-        assert!(matches!(
-            validation_too_short.validate(),
-            Err(ProtocolError::InvalidResearchRequest("target_candle_count"))
-        ));
-
-        let validation_bad_checkpoint = ResearchRequest::PrepareValidationDataset {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            bar: "1H".to_owned(),
-            target_candle_count: 240,
-            checkpoint_artifact_id: Some("bad".to_owned()),
-        };
-        assert!(matches!(
-            validation_bad_checkpoint.validate(),
-            Err(ProtocolError::InvalidResearchRequest(
-                "checkpoint_artifact_id"
-            ))
-        ));
-
-        let validation_split = ResearchRequest::PrepareValidationSplit {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            parent_replay_dataset_artifact_id:
-                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
-            strategy: ResearchReplayStrategy::CloseMomentum,
-            train_candle_count: 144,
-            validation_candle_count: 48,
-            final_oos_candle_count: 48,
-        };
-        assert_eq!(validation_split.validate(), Ok(()));
-
-        let invalid_split_total = ResearchRequest::PrepareValidationSplit {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            parent_replay_dataset_artifact_id:
-                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
-            strategy: ResearchReplayStrategy::CloseMomentum,
-            train_candle_count: 120,
-            validation_candle_count: 40,
-            final_oos_candle_count: 40,
-        };
-        assert!(matches!(
-            invalid_split_total.validate(),
-            Err(ProtocolError::InvalidResearchRequest(
-                "validation split total candles"
-            ))
-        ));
-
-        let validation_evidence = ResearchRequest::EvaluateValidationEvidence {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            validation_spec_artifact_id:
-                "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
-            train_replay_dataset_artifact_id:
-                "sha256:2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
-            train_experiment_result_artifact_id:
-                "sha256:3333333333333333333333333333333333333333333333333333333333333333".to_owned(),
-            validation_replay_dataset_artifact_id:
-                "sha256:4444444444444444444444444444444444444444444444444444444444444444".to_owned(),
-            validation_experiment_result_artifact_id:
-                "sha256:5555555555555555555555555555555555555555555555555555555555555555".to_owned(),
-        };
-        assert_eq!(validation_evidence.validate(), Ok(()));
-
-        let mut invalid_validation_evidence = validation_evidence;
-        if let ResearchRequest::EvaluateValidationEvidence {
-            validation_experiment_result_artifact_id,
-            ..
-        } = &mut invalid_validation_evidence
-        {
-            *validation_experiment_result_artifact_id = "bad".to_owned();
-        }
-        assert!(matches!(
-            invalid_validation_evidence.validate(),
-            Err(ProtocolError::InvalidResearchRequest(
-                "validation_experiment_result_artifact_id"
-            ))
-        ));
-
-        let validation_robustness = ResearchRequest::EvaluateValidationRobustness {
-            catalog_version: RESEARCH_CATALOG_VERSION_V1.to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            validation_spec_artifact_id:
-                "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
-            pre_holdout_evidence_artifact_id:
-                "sha256:2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
-            train_replay_dataset_artifact_id:
-                "sha256:3333333333333333333333333333333333333333333333333333333333333333".to_owned(),
-            validation_replay_dataset_artifact_id:
-                "sha256:4444444444444444444444444444444444444444444444444444444444444444".to_owned(),
-            validation_experiment_result_artifact_id:
-                "sha256:5555555555555555555555555555555555555555555555555555555555555555".to_owned(),
-        };
-        assert_eq!(validation_robustness.validate(), Ok(()));
-
-        let mut invalid_validation_robustness = validation_robustness;
-        if let ResearchRequest::EvaluateValidationRobustness {
-            pre_holdout_evidence_artifact_id,
-            ..
-        } = &mut invalid_validation_robustness
-        {
-            *pre_holdout_evidence_artifact_id = "bad".to_owned();
-        }
-        assert!(matches!(
-            invalid_validation_robustness.validate(),
-            Err(ProtocolError::InvalidResearchRequest(
-                "pre_holdout_evidence_artifact_id"
-            ))
-        ));
-    }
-
-    fn execution_risk_request() -> ExecutionRiskBindingRequest {
-        ExecutionRiskBindingRequest {
-            mandate: Box::new(PortfolioMandateRequest {
-                version: "mandate/v1".to_owned(),
-                capital_base_usd: "100".to_owned(),
-                decision_horizon_hours: 24,
-                benchmark: Some("none/v1".to_owned()),
-                allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
-                max_drawdown_ratio: "1".to_owned(),
-                leverage_ceiling: "5".to_owned(),
-                minimum_liquidity_notional_usd: "0".to_owned(),
-                max_turnover_ratio: "5".to_owned(),
-            }),
-            policy: Box::new(HardRiskPolicyRequest {
-                version: "policy/v1".to_owned(),
-                max_account_gross_notional_usd: "1000".to_owned(),
-                max_instrument_gross_notional_usd: "1000".to_owned(),
-                max_margin_utilization_ratio: "1".to_owned(),
-                max_loss_per_trade_usd: "100".to_owned(),
-                max_daily_realized_loss_usd: "100".to_owned(),
-                max_drawdown_ratio: "1".to_owned(),
-                max_leverage: "5".to_owned(),
-                allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
-                minimum_quality: RiskMinimumQuality::Fresh,
-                degraded_mode: RiskDegradedMode::Reject,
-                correlated_clusters: Vec::new(),
-            }),
-        }
-    }
-
-    #[test]
-    fn direct_transport_read_only_gate_rejects_execution_mutations() {
-        let read = AgentOperation::MarketOverview {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-        };
-        assert!(read.direct_transport_read_only());
-        let trader = AgentOperation::TraderSnapshot;
-        assert!(trader.direct_transport_read_only());
-        assert!(!trader.direct_transport_demo_execution());
-        assert_eq!(
-            serde_json::to_value(&trader).unwrap(),
-            serde_json::json!({"type": "trader_snapshot"})
-        );
-        assert!(trader.validate().is_ok());
-        let audit = AgentOperation::LedgerStorageAudit;
-        assert!(audit.direct_transport_read_only());
-        assert!(!audit.direct_transport_demo_execution());
-        assert!(audit.validate().is_ok());
-        let preview = AgentOperation::ProfileHandoffReadiness;
-        assert!(preview.direct_transport_read_only());
-        assert!(!preview.direct_transport_demo_execution());
-        assert!(preview.validate().is_ok());
-        let generic = AgentOperation::PrepareExecution {
-            intent_id: "intent_generic_01234567".to_owned(),
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            trade_mode: ExecutionTradeMode::Cross,
-            order_type: ExecutionOrderType::Limit,
-            spec: ExecutionPrepareSpec::Reverse {
-                position_side: PositionSide::Long,
-                size: "1".to_owned(),
-                price: "0.1".to_owned(),
-            },
-            risk: None,
-            lineage: None,
-        };
-        assert!(!generic.direct_transport_read_only());
-
-        let submit = AgentOperation::SubmitPreparedExecution {
-            intent_id: "intent_0123456789abcdef".to_owned(),
-        };
-        assert!(!submit.direct_transport_read_only());
-
-        let mutate = AgentOperation::MutateExecution {
-            intent_id: "intent_0123456789abcdef".to_owned(),
-            mutation: ExecutionMutationRequest::Cancel {
-                mutation_id: "cancel_01234567".to_owned(),
-            },
-        };
-        mutate.validate().expect("valid mutation");
-        assert!(!mutate.direct_transport_read_only());
-
-        let abort = AgentOperation::AbortReverseExecution {
-            intent_id: "intent_0123456789abcdef".to_owned(),
-        };
-        assert!(!abort.direct_transport_read_only());
-    }
-
-    #[test]
-    fn analytical_query_plan_is_bounded_and_strict() {
-        let plan = AnalyticalQueryPlan {
-            catalog_version: ANALYTICAL_QUERY_CATALOG_VERSION_V1.to_owned(),
-            universe: MarketQueryUniverse {
-                instrument_types: vec![InstrumentTypeFilter::Swap, InstrumentTypeFilter::Futures],
-                settle_currency: Some("USDT".to_owned()),
-                state: Some(QueryInstrumentState::Live),
-            },
-            select: vec![
-                QueryField::InstrumentId,
-                QueryField::Last,
-                QueryField::Return24hPct,
-            ],
-            metric: Some(QueryMetric::Return24hPct),
-            sort: Some(QuerySort {
-                key: QuerySortKey::Return24hPct,
-                direction: QuerySortDirection::Desc,
-            }),
-            limit: 10,
-        };
-        plan.validate().expect("valid bounded query plan");
-
-        let mut stale = plan.clone();
-        stale.catalog_version = "okx.query.catalog/2026-09-01.1".to_owned();
-        stale
-            .validate()
-            .expect("stale catalog is a product-level rejection, not malformed transport input");
-
-        let mut duplicate = plan.clone();
-        duplicate.select.push(QueryField::Last);
-        assert!(matches!(
-            duplicate.validate(),
-            Err(ProtocolError::InvalidAnalyticalQuery(
-                "duplicate select field"
-            ))
-        ));
-
-        let mut unbounded = plan.clone();
-        unbounded.limit = 26;
-        assert!(matches!(
-            unbounded.validate(),
-            Err(ProtocolError::InvalidAnalyticalQuery("limit"))
-        ));
-
-        let mut undeclared_metric = plan;
-        undeclared_metric.metric = None;
-        assert!(matches!(
-            undeclared_metric.validate(),
-            Err(ProtocolError::InvalidAnalyticalQuery(
-                "declared metric must exactly match the derived field/sort key"
-            ))
-        ));
-    }
-
-    #[test]
-    fn analytical_query_json_contract_matches_mcp_field_ids_exactly() {
-        let json = r#"{
-            "schema":"okx.agent.request/v1",
-            "request_id":"req_query_json_contract_0001",
-            "operation":{
-                "type":"query",
-                "plan":{
-                    "catalog_version":"okx.query.catalog/2026-10-02.2",
-                    "universe":{
-                        "instrument_types":["SWAP","FUTURES"],
-                        "settle_currency":null,
-                        "state":"live"
-                    },
-                    "select":[
-                        "instrument_id",
-                        "open_24h",
-                        "volume_24h",
-                        "volume_currency_24h",
-                        "return_24h_pct"
-                    ],
-                    "metric":"return_24h_pct",
-                    "sort":{"key":"return_24h_pct","direction":"desc"},
-                    "limit":10
-                }
-            }
-        }"#;
-
-        let request: AgentRequest =
-            serde_json::from_str(json).expect("MCP query contract must deserialize");
-        request
-            .validate()
-            .expect("MCP query contract must validate");
-
-        let encoded = serde_json::to_string(&request).expect("serialize query contract");
-        assert!(encoded.contains(r#""open_24h""#));
-        assert!(encoded.contains(r#""volume_24h""#));
-        assert!(encoded.contains(r#""volume_currency_24h""#));
-        assert!(encoded.contains(r#""return_24h_pct""#));
-        assert!(!encoded.contains(r#""open24h""#));
-        assert!(!encoded.contains(r#""return24h_pct""#));
-    }
-
-    #[test]
-    fn spread_query_and_market_intelligence_contracts_are_strict_and_read_only() {
-        let spread = AnalyticalQueryPlan {
-            catalog_version: ANALYTICAL_QUERY_CATALOG_VERSION_V1.to_owned(),
-            universe: MarketQueryUniverse {
-                instrument_types: vec![InstrumentTypeFilter::Swap],
-                settle_currency: Some("USDT".to_owned()),
-                state: Some(QueryInstrumentState::Live),
-            },
-            select: vec![
-                QueryField::InstrumentId,
-                QueryField::BestBid,
-                QueryField::BestAsk,
-                QueryField::SpreadBps,
-            ],
-            metric: Some(QueryMetric::SpreadBps),
-            sort: Some(QuerySort {
-                key: QuerySortKey::SpreadBps,
-                direction: QuerySortDirection::Asc,
-            }),
-            limit: 10,
-        };
-        spread.validate().expect("valid spread plan");
-
-        let mut mixed = spread.clone();
-        mixed.select.push(QueryField::Return24hPct);
-        assert!(matches!(
-            mixed.validate(),
-            Err(ProtocolError::InvalidAnalyticalQuery(
-                "one derived metric per query plan"
-            ))
-        ));
-
-        let operation = AgentOperation::MarketIntelligence {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            impact_contracts: "10".to_owned(),
-            depth_levels: 20,
-        };
-        operation.validate().expect("market intelligence contract");
-        assert!(operation.direct_transport_read_only());
-
-        let too_deep = AgentOperation::MarketIntelligence {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            impact_contracts: "10".to_owned(),
-            depth_levels: 51,
-        };
-        assert!(matches!(
-            too_deep.validate(),
-            Err(ProtocolError::InvalidAnalyticalQuery("depth_levels"))
-        ));
-
-        for invalid_impact in ["0", "0.0", "-1", "+1", "1.", ".1"] {
-            let invalid = AgentOperation::MarketIntelligence {
-                instrument: "DOGE-USDT-SWAP".to_owned(),
-                impact_contracts: invalid_impact.to_owned(),
-                depth_levels: 20,
-            };
-            assert!(matches!(
-                invalid.validate(),
-                Err(ProtocolError::InvalidDecimalInput("impact_contracts"))
-            ));
-        }
-    }
-
-    #[test]
-    fn analytical_query_operations_remain_read_only_on_direct_transport() {
-        let capabilities = AgentOperation::QueryCapabilities;
-        assert!(capabilities.direct_transport_read_only());
-
-        let query = AgentOperation::Query {
-            plan: AnalyticalQueryPlan {
-                catalog_version: ANALYTICAL_QUERY_CATALOG_VERSION_V1.to_owned(),
-                universe: MarketQueryUniverse {
-                    instrument_types: vec![InstrumentTypeFilter::Swap],
-                    settle_currency: None,
-                    state: Some(QueryInstrumentState::Live),
-                },
-                select: vec![QueryField::InstrumentId],
-                metric: None,
-                sort: None,
-                limit: 5,
-            },
-        };
-        assert!(query.direct_transport_read_only());
-        query.validate().expect("valid query operation");
-    }
-
-    fn request_id() -> String {
-        "req_0123456789abcdef".to_owned()
-    }
-
-    #[test]
-    fn trading_capabilities_request_is_strict_and_round_trips() {
-        let request = AgentRequest {
-            account: None,
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "req_caps_0123456789".to_owned(),
-            operation: AgentOperation::TradingCapabilities {
-                instrument: "DOGE-USDT-SWAP".to_owned(),
-                margin_mode: TradingMarginMode::Isolated,
-            },
-        };
-
-        request
-            .validate()
-            .expect("valid trading capabilities request");
-        let json = serde_json::to_string(&request).expect("serialize");
-        let decoded: AgentRequest = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(decoded, request);
-        decoded.validate().expect("valid decoded request");
-
-        let invalid = AgentRequest {
-            account: None,
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "req_caps_invalid_012345".to_owned(),
-            operation: AgentOperation::TradingCapabilities {
-                instrument: "doge/usdt".to_owned(),
-                margin_mode: TradingMarginMode::Cross,
-            },
-        };
-        assert_eq!(invalid.validate(), Err(ProtocolError::InvalidInstrument));
-    }
-
-    #[test]
-    fn execution_operations_are_strict_and_bounded() {
-        let open = AgentRequest {
-            account: None,
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: request_id(),
-            operation: AgentOperation::PrepareExecution {
-                intent_id: "intent_open_0123456789".to_owned(),
-                instrument: "DOGE-USDT-SWAP".to_owned(),
-                trade_mode: ExecutionTradeMode::Cross,
-                order_type: ExecutionOrderType::Limit,
-                spec: ExecutionPrepareSpec::Open {
-                    position_side: PositionSide::Long,
-                    entry: ExecutionEntryRequest {
-                        entry_price: "0.1".to_owned(),
-                        stop_price: "0.09".to_owned(),
-                        max_settle_notional: "100".to_owned(),
-                        max_loss_settle: "5".to_owned(),
-                        target_rr: "2".to_owned(),
-                        entry_liquidity_role: LiquidityRole::Taker,
-                        exit_liquidity_role: LiquidityRole::Taker,
-                    },
-                },
-                risk: Some(Box::new(execution_risk_request())),
-                lineage: None,
-            },
-        };
-        open.validate().expect("valid open execution request");
-
-        let close = AgentRequest {
-            account: None,
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "req_close_0123456789".to_owned(),
-            operation: AgentOperation::PrepareExecution {
-                intent_id: "intent_close_0123456789".to_owned(),
-                instrument: "DOGE-USDT-SWAP".to_owned(),
-                trade_mode: ExecutionTradeMode::Cross,
-                order_type: ExecutionOrderType::Limit,
-                spec: ExecutionPrepareSpec::Close {
-                    position_side: PositionSide::Long,
-                    size: "1".to_owned(),
-                    price: "0.1".to_owned(),
-                },
-                risk: None,
-                lineage: None,
-            },
-        };
-        close.validate().expect("valid close execution request");
-
-        let submit = AgentRequest {
-            account: None,
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "req_submit_0123456789".to_owned(),
-            operation: AgentOperation::SubmitPreparedExecution {
-                intent_id: "intent_open_0123456789".to_owned(),
-            },
-        };
-        submit.validate().expect("valid submit request");
-
-        let status = AgentRequest {
-            account: None,
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "req_status_0123456789".to_owned(),
-            operation: AgentOperation::ExecutionStatus {
-                intent_id: "intent_open_0123456789".to_owned(),
-            },
-        };
-        status.validate().expect("valid execution status request");
-
-        let invalid = AgentRequest {
-            account: None,
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "req_invalid_exec_012345".to_owned(),
-            operation: AgentOperation::PrepareExecution {
-                intent_id: "short".to_owned(),
-                instrument: "DOGE-USDT-SWAP".to_owned(),
-                trade_mode: ExecutionTradeMode::Cross,
-                order_type: ExecutionOrderType::Limit,
-                spec: ExecutionPrepareSpec::Close {
-                    position_side: PositionSide::Long,
-                    size: "1".to_owned(),
-                    price: "0.1".to_owned(),
-                },
-                risk: None,
-                lineage: None,
-            },
-        };
-        assert!(invalid.validate().is_err());
-    }
-
-    #[test]
-    fn generic_execution_prepare_contract_is_tagged_strict_and_round_trips() {
-        let entry = ExecutionEntryRequest {
-            entry_price: "0.1".to_owned(),
-            stop_price: "0.09".to_owned(),
-            max_settle_notional: "100".to_owned(),
-            max_loss_settle: "5".to_owned(),
-            target_rr: "2".to_owned(),
-            entry_liquidity_role: LiquidityRole::Taker,
-            exit_liquidity_role: LiquidityRole::Taker,
-        };
-        let operations = [
-            AgentOperation::PrepareExecution {
-                intent_id: "intent_generic_open_012345".to_owned(),
-                instrument: "DOGE-USDT-SWAP".to_owned(),
-                trade_mode: ExecutionTradeMode::Cross,
-                order_type: ExecutionOrderType::Limit,
-                spec: ExecutionPrepareSpec::Open {
-                    position_side: PositionSide::Long,
-                    entry: entry.clone(),
-                },
-                risk: Some(Box::new(execution_risk_request())),
-                lineage: None,
-            },
-            AgentOperation::PrepareExecution {
-                intent_id: "intent_generic_reverse_01".to_owned(),
-                instrument: "DOGE-USDT-SWAP".to_owned(),
-                trade_mode: ExecutionTradeMode::Cross,
-                order_type: ExecutionOrderType::Limit,
-                spec: ExecutionPrepareSpec::Reverse {
-                    position_side: PositionSide::Long,
-                    size: "1".to_owned(),
-                    price: "0.1".to_owned(),
-                },
-                risk: None,
-                lineage: None,
-            },
-            AgentOperation::PrepareExecution {
-                intent_id: "intent_generic_reverse_01".to_owned(),
-                instrument: "DOGE-USDT-SWAP".to_owned(),
-                trade_mode: ExecutionTradeMode::Cross,
-                order_type: ExecutionOrderType::Limit,
-                spec: ExecutionPrepareSpec::ContinueReverse { entry },
-                risk: Some(Box::new(execution_risk_request())),
-                lineage: None,
-            },
-        ];
-
-        for operation in operations {
-            operation.validate().expect("valid generic execution");
-            assert!(!operation.direct_transport_read_only());
-            let json = serde_json::to_string(&operation).expect("serialize");
-            let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(decoded, operation);
-        }
-
-        let invalid = AgentOperation::PrepareExecution {
-            intent_id: "intent_generic_invalid_01".to_owned(),
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            trade_mode: ExecutionTradeMode::Cross,
-            order_type: ExecutionOrderType::Limit,
-            spec: ExecutionPrepareSpec::Reverse {
-                position_side: PositionSide::Long,
-                size: "0".to_owned(),
-                price: "0.1".to_owned(),
-            },
-            risk: None,
-            lineage: None,
-        };
-        assert!(invalid.validate().is_err());
-    }
-
-    #[test]
-    fn host_control_request_is_strict_and_round_trips() {
-        let request = HostControlRequest {
-            schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "ctl_0123456789abcdef".to_owned(),
-            operation: HostControlOperation::Status,
-        };
-
-        request.validate().expect("valid control request");
-        let json = serde_json::to_string(&request).expect("serialize");
-        let decoded: HostControlRequest = serde_json::from_str(&json).expect("deserialize");
-
-        assert_eq!(decoded, request);
-        decoded.validate().expect("valid decoded control request");
-
-        let arbitrary = r#"{"schema":"okx.windows.control/v1","request_id":"ctl_0123456789abcdef","operation":{"type":"run_shell","command":"whoami"}}"#;
-        assert!(serde_json::from_str::<HostControlRequest>(arbitrary).is_err());
-    }
-
-    #[test]
-    fn account_catalog_accepts_only_nonsecret_named_metadata() {
-        let entry = AccountCatalogEntry {
-            schema: ACCOUNT_CATALOG_ENTRY_SCHEMA_V1.to_owned(),
-            account_id: "sub-1".to_owned(),
-            label: "Read only account".to_owned(),
-            venue: TradingVenue::Okx,
-            environment: AccountCatalogEnvironment::Production,
-            expected_uid_fingerprint: "a".repeat(64),
-        };
-        let register = HostControlOperation::RegisterReadOnlyAccount {
-            entry: entry.clone(),
-        };
-        register.validate().expect("valid metadata only");
-        let json = serde_json::to_string(&register).expect("serialize");
-        assert_eq!(
-            serde_json::from_str::<HostControlOperation>(&json).unwrap(),
-            register
-        );
-        for wrong_id in [
-            "",
-            "sub_1",
-            "../account",
-            "Demo",
-            "production",
-            "demo_acceptance",
-        ] {
-            let mut wrong = entry.clone();
-            wrong.account_id = wrong_id.to_owned();
-            assert!(wrong.validate().is_err(), "{wrong_id}");
-        }
-        let mut wrong = entry.clone();
-        wrong.expected_uid_fingerprint = "A".repeat(64);
-        assert!(wrong.validate().is_err());
-        let mut wrong = entry.clone();
-        wrong.label = " \nunsafe".to_owned();
-        assert!(wrong.validate().is_err());
-        let mut multibyte = entry.clone();
-        multibyte.label = "🔒".repeat(13);
-        assert!(
-            multibyte.validate().is_err(),
-            "48-byte bound includes UTF-8 expansion"
-        );
-        let smuggled = format!(
-            "{{\"schema\":\"{}\",\"account_id\":\"sub-1\",\"label\":\"ok\",\"environment\":\"production\",\"expected_uid_fingerprint\":\"{}\",\"api_key\":\"secret\"}}",
-            ACCOUNT_CATALOG_ENTRY_SCHEMA_V1,
-            "a".repeat(64)
-        );
-        assert!(serde_json::from_str::<AccountCatalogEntry>(&smuggled).is_err());
-        assert!(HostControlOperation::AccountCatalog.validate().is_ok());
-    }
-
-    #[test]
-    fn demo_lifecycle_control_operations_are_typed_and_parameter_free() {
+    fn removed_period_and_activation_operations_are_rejected() {
         for operation in [
-            HostControlOperation::StartDemoAcceptance,
-            HostControlOperation::RestoreProductionAgent,
+            "begin_strategy_run",
+            "finalize_strategy_run",
+            "prepare_execution",
+            "submit_prepared_execution",
         ] {
-            let request = HostControlRequest {
-                schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
-                request_id: "ctl_stage4c_demo_01234567".to_owned(),
-                operation,
-            };
-            request.validate().expect("typed demo lifecycle request");
-            let json = serde_json::to_string(&request).expect("serialize");
-            let decoded: HostControlRequest = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(decoded, request);
+            let value = serde_json::json!({"type":operation,"intent_id":"intent_12345678"});
+            assert!(serde_json::from_value::<AgentOperation>(value).is_err());
         }
     }
-
     #[test]
-    fn deploy_agent_requires_bounded_ids_and_exact_tree_shape() {
-        let request = HostControlRequest {
-            schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "ctl_0123456789abcdef".to_owned(),
-            operation: HostControlOperation::DeployAgent {
-                run_id: 123,
-                artifact_id: 456,
-                expected_source_tree: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-            },
+    fn account_reference_is_preserved_in_transport() {
+        let request = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.into(),
+            request_id: "request_12345678".into(),
+            account: Some("main-real".into()),
+            operation: AgentOperation::AccountSummary,
         };
-        request.validate().expect("valid deploy request");
-
-        let invalid = HostControlRequest {
-            schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "ctl_0123456789abcdef".to_owned(),
-            operation: HostControlOperation::DeployAgent {
-                run_id: 0,
-                artifact_id: 456,
-                expected_source_tree: "not-a-tree".to_owned(),
-            },
+        let decoded: AgentRequest =
+            serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+        assert_eq!(decoded, request);
+        assert!(decoded.validate().is_ok());
+        let mut bad = serde_json::to_value(request).unwrap();
+        bad["selected_profile"] = serde_json::json!("demo");
+        assert!(serde_json::from_value::<AgentRequest>(bad).is_err());
+    }
+    #[test]
+    fn account_connect_is_maintenance_and_body_bounded() {
+        let command = AgentOperation::ConnectAccount {
+            alias: "main-real".into(),
+            credential_ref: "main-keys".into(),
+            operation_id: "connect_command_001".into(),
+            request_digest: "a".repeat(64),
+        };
+        assert!(command.validate().is_ok());
+        assert!(!command.direct_transport_read_only());
+        let invalid = AgentOperation::ConnectAccount {
+            alias: "../escape".into(),
+            credential_ref: "main-keys".into(),
+            operation_id: "connect_command_001".into(),
+            request_digest: "a".repeat(64),
         };
         assert!(invalid.validate().is_err());
-    }
-
-    #[test]
-    fn host_control_request_requires_ctl_prefix() {
-        let request = HostControlRequest {
-            schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "req_0123456789abcdef".to_owned(),
-            operation: HostControlOperation::Status,
-        };
-
-        assert_eq!(
-            request.validate(),
-            Err(ProtocolError::InvalidHostControlRequestId)
-        );
-    }
-
-    #[test]
-    fn typed_request_round_trips_without_loss() {
-        let request = AgentRequest {
-            account: None,
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: request_id(),
-            operation: AgentOperation::AnalyzeCandidateOrder {
-                instrument: "DOGE-USDT-SWAP".to_owned(),
-                side: PositionSide::Long,
-                entry_price: "0.2".to_owned(),
-                stop_price: "0.18".to_owned(),
-                max_settle_notional: "500".to_owned(),
-                max_loss_settle: "20".to_owned(),
-                target_rr: "3".to_owned(),
-                entry_liquidity_role: LiquidityRole::Taker,
-                exit_liquidity_role: LiquidityRole::Taker,
-            },
-        };
-
-        request.validate().expect("valid request");
-        let json = serde_json::to_string(&request).expect("serialize");
-        let decoded: AgentRequest = serde_json::from_str(&json).expect("deserialize");
-
-        assert_eq!(decoded, request);
-        decoded.validate().expect("valid decoded request");
-    }
-
-    #[test]
-    fn discovery_and_overview_requests_are_typed_and_validated() {
-        let discovery = AgentOperation::FindInstruments {
-            asset: "DOGE".to_owned(),
-            settle_currency: Some("USDT".to_owned()),
-            instrument_type: Some(InstrumentTypeFilter::Swap),
-        };
-        assert!(discovery.validate().is_ok());
-
-        let invalid = AgentOperation::FindInstruments {
-            asset: "doge".to_owned(),
-            settle_currency: None,
-            instrument_type: None,
-        };
-        assert_eq!(invalid.validate(), Err(ProtocolError::InvalidAssetCode));
-
-        let overview = AgentOperation::MarketOverview {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-        };
-        assert!(overview.validate().is_ok());
-    }
-
-    #[test]
-    fn history_behavior_reuses_market_history_bounds() {
-        let valid = AgentOperation::HistoryBehavior {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            bar: "1H".to_owned(),
-            limit: Some(24),
-        };
-        assert!(valid.validate().is_ok());
-
-        let bad_bar = AgentOperation::HistoryBehavior {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            bar: "7H".to_owned(),
-            limit: Some(24),
-        };
-        assert_eq!(bad_bar.validate(), Err(ProtocolError::InvalidHistoryBar));
-
-        let too_many = AgentOperation::HistoryBehavior {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            bar: "1H".to_owned(),
-            limit: Some(101),
-        };
-        assert_eq!(too_many.validate(), Err(ProtocolError::InvalidHistoryLimit));
-    }
-
-    #[test]
-    fn market_history_is_bounded_and_uses_supported_bars() {
-        let valid = AgentOperation::MarketHistory {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            bar: "4H".to_owned(),
-            limit: Some(100),
-        };
-        assert!(valid.validate().is_ok());
-
-        let utc = AgentOperation::MarketHistory {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            bar: "1Dutc".to_owned(),
-            limit: None,
-        };
-        assert!(utc.validate().is_ok());
-
-        let bad_bar = AgentOperation::MarketHistory {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            bar: "7H".to_owned(),
-            limit: Some(50),
-        };
-        assert_eq!(bad_bar.validate(), Err(ProtocolError::InvalidHistoryBar));
-
-        let too_many = AgentOperation::MarketHistory {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            bar: "1H".to_owned(),
-            limit: Some(101),
-        };
-        assert_eq!(too_many.validate(), Err(ProtocolError::InvalidHistoryLimit));
-    }
-
-    #[test]
-    fn account_summary_is_typed_and_read_only() {
-        let operation = AgentOperation::AccountSummary;
-        assert!(operation.validate().is_ok());
-        assert!(operation.direct_transport_read_only());
-        assert_eq!(
-            serde_json::to_string(&operation).expect("serialize"),
-            r#"{"type":"account_summary"}"#
-        );
-    }
-
-    #[test]
-    fn mailbox_telemetry_request_is_typed() {
-        let request = AgentOperation::MailboxTelemetry;
-        assert!(request.validate().is_ok());
-        let json = serde_json::to_string(&request).expect("serialize");
-        assert_eq!(json, r#"{"type":"mailbox_telemetry"}"#);
-    }
-
-    #[test]
-    fn launcher_root_upgrade_requires_exact_sha256() {
-        let valid = HostControlOperation::UpgradeLauncherRoot {
-            run_id: 1,
-            artifact_id: 2,
-            expected_source_tree: "a".repeat(40),
-            expected_current_launcher_sha256: "b".repeat(64),
-        };
-        assert!(valid.validate().is_ok());
-
-        let invalid = HostControlOperation::UpgradeLauncherRoot {
-            run_id: 1,
-            artifact_id: 2,
-            expected_source_tree: "a".repeat(40),
-            expected_current_launcher_sha256: "not-a-sha".to_owned(),
-        };
-        assert_eq!(invalid.validate(), Err(ProtocolError::InvalidSha256));
-    }
-
-    #[test]
-    fn unknown_operation_is_rejected_by_deserialization() {
-        let json = format!(
-            r#"{{"schema":"{}","request_id":"{}","operation":{{"type":"run_shell","command":"whoami"}}}}"#,
-            AGENT_REQUEST_SCHEMA_V1,
-            request_id()
-        );
-
-        assert!(serde_json::from_str::<AgentRequest>(&json).is_err());
-    }
-
-    #[test]
-    fn unknown_request_field_is_rejected() {
-        let json = format!(
-            r#"{{"schema":"{}","request_id":"{}","unexpected":true,"operation":{{"type":"account_snapshot"}}}}"#,
-            AGENT_REQUEST_SCHEMA_V1,
-            request_id()
-        );
-
-        assert!(serde_json::from_str::<AgentRequest>(&json).is_err());
-    }
-
-    #[test]
-    fn malformed_request_id_fails_closed() {
-        let request = AgentRequest {
-            account: None,
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "../bad".to_owned(),
-            operation: AgentOperation::AccountSnapshot,
-        };
-
-        assert_eq!(request.validate(), Err(ProtocolError::InvalidRequestId));
-    }
-
-    #[test]
-    fn aad_is_stable_and_binds_repository_direction_and_key() {
-        let envelope = MailboxEnvelope {
-            schema: MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
-            request_id: request_id(),
-            direction: MailboxDirection::ClientToAgent,
-            agent_key_id: "agent-key-1".to_owned(),
-            client_ephemeral_public_key: "AA==".to_owned(),
-            nonce: "AA==".to_owned(),
-            ciphertext: "AA==".to_owned(),
-        };
-
-        assert_eq!(
-            envelope.aad().expect("aad"),
-            "schema=okx.mailbox.envelope/v1;repo=iamaman11/okx;request_id=req_0123456789abcdef;direction=client_to_agent;agent_key_id=agent-key-1"
-        );
-        assert_eq!(
-            envelope.direction.kdf_label(),
-            "okx-mailbox-v1/client-to-agent"
-        );
-    }
-
-    #[test]
-    fn wrong_envelope_direction_is_rejected() {
-        let envelope = MailboxEnvelope {
-            schema: MAILBOX_ENVELOPE_SCHEMA_V1.to_owned(),
-            request_id: request_id(),
-            direction: MailboxDirection::ClientToAgent,
-            agent_key_id: "agent-key-1".to_owned(),
-            client_ephemeral_public_key: "AA==".to_owned(),
-            nonce: "AA==".to_owned(),
-            ciphertext: "AA==".to_owned(),
-        };
-
-        assert_eq!(
-            envelope.validate(MailboxDirection::AgentToClient),
-            Err(ProtocolError::DirectionMismatch)
-        );
-    }
-
-    #[test]
-    fn market_research_is_bounded_unique_and_round_trips() {
-        let request = AgentOperation::MarketResearch {
-            instruments: vec![
-                "DOGE-USDT-SWAP".to_owned(),
-                "QNT-USDT-SWAP".to_owned(),
-                "BTC-USDT-SWAP".to_owned(),
-            ],
-            bar: "1H".to_owned(),
-            limit: Some(48),
-        };
-        assert!(request.validate().is_ok());
-
-        let json = serde_json::to_string(&request).expect("serialize");
-        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(decoded, request);
-
-        let too_short = AgentOperation::MarketResearch {
-            instruments: vec!["DOGE-USDT-SWAP".to_owned()],
-            bar: "1H".to_owned(),
-            limit: Some(48),
-        };
-        assert_eq!(
-            too_short.validate(),
-            Err(ProtocolError::InvalidMarketResearchInstruments)
-        );
-
-        let duplicate = AgentOperation::MarketResearch {
-            instruments: vec!["DOGE-USDT-SWAP".to_owned(), "DOGE-USDT-SWAP".to_owned()],
-            bar: "1H".to_owned(),
-            limit: Some(48),
-        };
-        assert_eq!(
-            duplicate.validate(),
-            Err(ProtocolError::InvalidMarketResearchInstruments)
-        );
-    }
-
-    fn portfolio_risk_operation(statistics: Option<PortfolioStatisticsRequest>) -> AgentOperation {
-        AgentOperation::PortfolioRisk {
-            mandate: Box::new(PortfolioMandateRequest {
-                version: "mandate/v1".to_owned(),
-                capital_base_usd: "100".to_owned(),
-                decision_horizon_hours: 24,
-                benchmark: None,
-                allowed_instruments: Vec::new(),
-                max_drawdown_ratio: "1".to_owned(),
-                leverage_ceiling: "5".to_owned(),
-                minimum_liquidity_notional_usd: "0".to_owned(),
-                max_turnover_ratio: "5".to_owned(),
-            }),
-            policy: Box::new(HardRiskPolicyRequest {
-                version: "policy/v1".to_owned(),
-                max_account_gross_notional_usd: "1000".to_owned(),
-                max_instrument_gross_notional_usd: "1000".to_owned(),
-                max_margin_utilization_ratio: "1".to_owned(),
-                max_loss_per_trade_usd: "100".to_owned(),
-                max_daily_realized_loss_usd: "100".to_owned(),
-                max_drawdown_ratio: "1".to_owned(),
-                max_leverage: "5".to_owned(),
-                allowed_instruments: Vec::new(),
-                minimum_quality: RiskMinimumQuality::Fresh,
-                degraded_mode: RiskDegradedMode::Reject,
-                correlated_clusters: Vec::new(),
-            }),
-            candidate: None,
-            statistics,
-            virtual_portfolio: None,
-        }
-    }
-
-    #[test]
-    fn portfolio_statistics_request_is_optional_bounded_and_fixed_interval() {
-        let legacy = portfolio_risk_operation(None);
-        assert!(legacy.validate().is_ok());
-
-        let statistical = portfolio_risk_operation(Some(PortfolioStatisticsRequest {
-            bar: "1H".to_owned(),
-            limit: 24,
-            parallel_scenario_move_ratio: Some("-0.1".to_owned()),
-        }));
-        assert!(statistical.validate().is_ok());
-        let json = serde_json::to_string(&statistical).expect("serialize");
-        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(decoded, statistical);
-
-        let monthly = portfolio_risk_operation(Some(PortfolioStatisticsRequest {
-            bar: "1M".to_owned(),
-            limit: 24,
-            parallel_scenario_move_ratio: None,
-        }));
-        assert_eq!(monthly.validate(), Err(ProtocolError::InvalidHistoryBar));
-
-        let too_short = portfolio_risk_operation(Some(PortfolioStatisticsRequest {
-            bar: "1H".to_owned(),
-            limit: 2,
-            parallel_scenario_move_ratio: None,
-        }));
-        assert_eq!(
-            too_short.validate(),
-            Err(ProtocolError::InvalidHistoryLimit)
-        );
-    }
-
-    #[test]
-    fn virtual_portfolio_proof_is_bounded_unique_and_mutually_exclusive_with_candidate() {
-        let mut virtual_proof = portfolio_risk_operation(None);
-        if let AgentOperation::PortfolioRisk {
-            virtual_portfolio, ..
-        } = &mut virtual_proof
-        {
-            *virtual_portfolio = Some(VirtualPortfolioRequest {
-                collateral_usdt: "10000".to_owned(),
-                positions: vec![
-                    VirtualPortfolioPositionRequest {
-                        instrument: "BTC-USDT-SWAP".to_owned(),
-                        contracts: "2".to_owned(),
-                        average_price: "100000".to_owned(),
-                        leverage: "3".to_owned(),
-                    },
-                    VirtualPortfolioPositionRequest {
-                        instrument: "ETH-USDT-SWAP".to_owned(),
-                        contracts: "-3".to_owned(),
-                        average_price: "4000".to_owned(),
-                        leverage: "3".to_owned(),
-                    },
-                ],
-            });
-        }
-        virtual_proof.validate().expect("valid virtual portfolio");
-        assert!(virtual_proof.direct_transport_read_only());
-        let json = serde_json::to_string(&virtual_proof).expect("serialize");
-        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(decoded, virtual_proof);
-
-        let mut duplicate = virtual_proof.clone();
-        if let AgentOperation::PortfolioRisk {
-            virtual_portfolio: Some(value),
-            ..
-        } = &mut duplicate
-        {
-            value.positions[1].instrument = value.positions[0].instrument.clone();
-        }
-        assert_eq!(
-            duplicate.validate(),
-            Err(ProtocolError::InvalidAnalyticalQuery(
-                "duplicate virtual portfolio instrument"
-            ))
-        );
-
-        let mut zero = virtual_proof.clone();
-        if let AgentOperation::PortfolioRisk {
-            virtual_portfolio: Some(value),
-            ..
-        } = &mut zero
-        {
-            value.positions[0].contracts = "0".to_owned();
-        }
-        assert_eq!(
-            zero.validate(),
-            Err(ProtocolError::InvalidDecimalInput(
-                "virtual_portfolio.positions.contracts"
-            ))
-        );
-
-        let mut ambiguous = virtual_proof;
-        if let AgentOperation::PortfolioRisk {
-            candidate,
-            virtual_portfolio: Some(_),
-            ..
-        } = &mut ambiguous
-        {
-            *candidate = Some(PortfolioCandidateRequest {
-                instrument: "BTC-USDT-SWAP".to_owned(),
-                side: PositionSide::Long,
-                notional_usd: "100".to_owned(),
-                worst_case_loss_usd: "10".to_owned(),
-                leverage: "3".to_owned(),
-            });
-        }
-        assert_eq!(
-            ambiguous.validate(),
-            Err(ProtocolError::InvalidAnalyticalQuery(
-                "candidate and virtual_portfolio are mutually exclusive"
-            ))
-        );
-    }
-
-    #[test]
-    fn current_cost_is_typed_and_keeps_decimal_contracts_as_text() {
-        let request = AgentOperation::CurrentCost {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            contracts: "2.5".to_owned(),
-            side: PositionSide::Long,
-            liquidity_role: LiquidityRole::Taker,
-        };
-        assert!(request.validate().is_ok());
-
-        let json = serde_json::to_string(&request).expect("serialize");
-        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(decoded, request);
-
-        let invalid = AgentOperation::CurrentCost {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            contracts: "2e3".to_owned(),
-            side: PositionSide::Short,
-            liquidity_role: LiquidityRole::Maker,
-        };
-        assert_eq!(
-            invalid.validate(),
-            Err(ProtocolError::InvalidDecimalInput("contracts"))
-        );
-    }
-
-    #[test]
-    fn position_scenario_requires_exactly_one_typed_exit_assumption() {
-        let explicit_price = AgentOperation::PositionScenario {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            side: PositionSide::Long,
-            contracts: "2".to_owned(),
-            entry_price: "0.2".to_owned(),
-            exit_price: Some("0.206".to_owned()),
-            entry_move_ratio: None,
-            entry_liquidity_role: LiquidityRole::Taker,
-            exit_liquidity_role: LiquidityRole::Maker,
-        };
-        assert!(explicit_price.validate().is_ok());
-
-        let signed_move = AgentOperation::PositionScenario {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            side: PositionSide::Short,
-            contracts: "2".to_owned(),
-            entry_price: "0.2".to_owned(),
-            exit_price: None,
-            entry_move_ratio: Some("-0.03".to_owned()),
-            entry_liquidity_role: LiquidityRole::Maker,
-            exit_liquidity_role: LiquidityRole::Taker,
-        };
-        assert!(signed_move.validate().is_ok());
-
-        let json = serde_json::to_string(&signed_move).expect("serialize");
-        let decoded: AgentOperation = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(decoded, signed_move);
-
-        let missing_exit = AgentOperation::PositionScenario {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            side: PositionSide::Long,
-            contracts: "2".to_owned(),
-            entry_price: "0.2".to_owned(),
-            exit_price: None,
-            entry_move_ratio: None,
-            entry_liquidity_role: LiquidityRole::Taker,
-            exit_liquidity_role: LiquidityRole::Taker,
-        };
-        assert_eq!(
-            missing_exit.validate(),
-            Err(ProtocolError::InvalidPositionScenarioExit)
-        );
-
-        let ambiguous_exit = AgentOperation::PositionScenario {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            side: PositionSide::Long,
-            contracts: "2".to_owned(),
-            entry_price: "0.2".to_owned(),
-            exit_price: Some("0.21".to_owned()),
-            entry_move_ratio: Some("0.05".to_owned()),
-            entry_liquidity_role: LiquidityRole::Taker,
-            exit_liquidity_role: LiquidityRole::Taker,
-        };
-        assert_eq!(
-            ambiguous_exit.validate(),
-            Err(ProtocolError::InvalidPositionScenarioExit)
-        );
-    }
-
-    #[test]
-    fn decimal_inputs_remain_strings_and_are_syntax_checked() {
-        let valid = AgentOperation::AnalyzeCandidateOrder {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            side: PositionSide::Short,
-            entry_price: "0.2".to_owned(),
-            stop_price: "0.22".to_owned(),
-            max_settle_notional: "500.25".to_owned(),
-            max_loss_settle: "20.00".to_owned(),
-            target_rr: "3.0".to_owned(),
-            entry_liquidity_role: LiquidityRole::Taker,
-            exit_liquidity_role: LiquidityRole::Maker,
-        };
-        assert!(valid.validate().is_ok());
-
-        let invalid = AgentOperation::AnalyzeCandidateOrder {
-            instrument: "DOGE-USDT-SWAP".to_owned(),
-            side: PositionSide::Short,
-            entry_price: "2e-1".to_owned(),
-            stop_price: "0.22".to_owned(),
-            max_settle_notional: "500".to_owned(),
-            max_loss_settle: "20".to_owned(),
-            target_rr: "3".to_owned(),
-            entry_liquidity_role: LiquidityRole::Taker,
-            exit_liquidity_role: LiquidityRole::Taker,
-        };
-        assert_eq!(
-            invalid.validate(),
-            Err(ProtocolError::InvalidDecimalInput("entry_price"))
-        );
-    }
-}
-
-#[cfg(test)]
-mod direct_transport_tests {
-    use super::*;
-
-    fn request() -> AgentRequest {
-        AgentRequest {
-            account: None,
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "req_direct_0123456789".to_owned(),
-            operation: AgentOperation::MarketOverview {
-                instrument: "ADA-USDT-SWAP".to_owned(),
-            },
-        }
-    }
-
-    #[test]
-    fn direct_transport_request_round_trips() {
-        let frame = DirectTransportFrame::Request {
-            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-            session_id: "session_0123456789".to_owned(),
-            connection_generation: 7,
-            request: request(),
-            operator_governance: None,
-        };
-        frame.validate().expect("valid frame");
-        let encoded = serde_json::to_string(&frame).expect("encode");
-        assert!(encoded.len() < DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES);
-        let decoded: DirectTransportFrame = serde_json::from_str(&encoded).expect("decode");
-        assert_eq!(decoded, frame);
-        decoded.validate().expect("valid decoded frame");
-    }
-
-    #[test]
-    fn invalid_trade_operation_does_not_invalidate_authenticated_transport_envelope() {
-        let mut request = request();
-        request.operation = AgentOperation::PrepareExecution {
-            intent_id: "intent_lineage_bad_012345".to_owned(),
-            instrument: "BTC-USDT-SWAP".to_owned(),
-            trade_mode: ExecutionTradeMode::Cross,
-            order_type: ExecutionOrderType::Fok,
-            spec: ExecutionPrepareSpec::Open {
-                position_side: PositionSide::Long,
-                entry: ExecutionEntryRequest {
-                    entry_price: "80000".to_owned(),
-                    stop_price: "79000".to_owned(),
-                    max_settle_notional: "10".to_owned(),
-                    max_loss_settle: "1".to_owned(),
-                    target_rr: "2".to_owned(),
-                    entry_liquidity_role: LiquidityRole::Taker,
-                    exit_liquidity_role: LiquidityRole::Taker,
-                },
-            },
-            risk: None,
-            lineage: Some(Box::new(ExecutionLineageRequest {
-                origin_evidence_id: "invalid-text-is-not-sha256".to_owned(),
-                origin_schema: "stage4c.demo/v1".to_owned(),
-                origin_version: "v1".to_owned(),
-                authority_evidence_id: None,
-                decision_reference: ExecutionDecisionReferenceRequest {
-                    decision_time_ms: 1_790_000_000_000,
-                    price: "80000".to_owned(),
-                    price_basis: ExecutionReferencePriceBasis::LimitPrice,
-                    price_policy_version: "v1".to_owned(),
-                },
-            })),
-        };
-        let frame = DirectTransportFrame::Request {
-            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-            session_id: "session_direct_0123456789".to_owned(),
-            connection_generation: 7,
-            request,
-            operator_governance: None,
-        };
-        assert!(frame.validate_incoming_envelope().is_ok());
-        assert!(frame.validate().is_err());
-        if let DirectTransportFrame::Request { request, .. } = frame {
-            assert!(request.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn direct_transport_hello_binds_demo_profile_and_rejects_unknown_profile() {
-        let hello = DirectTransportFrame::Hello {
-            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-            runtime_id: "windows-primary".to_owned(),
-            connection_id: "connection_0123456789".to_owned(),
-            runtime_profile: Some(DirectRuntimeProfile::DemoAcceptance),
-        };
-        hello.validate().expect("demo handshake");
-        let json = serde_json::to_string(&hello).expect("serialize");
-        assert!(json.contains("\"runtime_profile\":\"demo_acceptance\""));
-        assert_eq!(
-            serde_json::from_str::<DirectTransportFrame>(&json).expect("deserialize"),
-            hello
-        );
-        let old = r#"{"type":"hello","schema":"okx.direct-transport.frame/v2","runtime_id":"windows-primary","connection_id":"connection_0123456789"}"#;
-        let old_frame: DirectTransportFrame = serde_json::from_str(old).expect("rollout old hello");
-        assert!(matches!(
-            old_frame,
-            DirectTransportFrame::Hello {
-                runtime_profile: None,
-                ..
-            }
-        ));
-        let wrong = json.replace("demo_acceptance", "production-demo-unknown");
-        assert!(serde_json::from_str::<DirectTransportFrame>(&wrong).is_err());
-    }
-
-    #[test]
-    fn active_demo_direct_transport_never_authorizes_order_submission() {
-        assert!(AgentOperation::AccountSummary.direct_transport_read_only());
-        assert!(
-            AgentOperation::ExecutionStatus {
-                intent_id: "intent_test_demo_read_only_01".to_owned(),
-            }
-            .direct_transport_read_only()
-        );
-        assert!(
-            !AgentOperation::SubmitPreparedExecution {
-                intent_id: "intent_test_demo_mutation_01".to_owned(),
-            }
-            .direct_transport_read_only()
-        );
-    }
-
-    #[test]
-    fn direct_demo_executor_actions_are_an_explicit_closed_set() {
-        assert!(
-            AgentOperation::SubmitPreparedExecution {
-                intent_id: "intent_test_01234567".to_owned(),
-            }
-            .direct_transport_demo_execution()
-        );
-        assert!(
-            AgentOperation::AbortReverseExecution {
-                intent_id: "intent_test_01234567".to_owned(),
-            }
-            .direct_transport_demo_execution()
-        );
-        let abandon = AgentOperation::AbandonPreparedExecution {
-            intent_id: "intent_test_01234567".to_owned(),
-        };
-        abandon.validate().expect("strict abandon intent");
-        assert!(abandon.direct_transport_demo_execution());
-        assert!(!abandon.direct_transport_read_only());
-        assert!(
-            !AgentOperation::ExecutionStatus {
-                intent_id: "intent_test_01234567".to_owned(),
-            }
-            .direct_transport_demo_execution()
-        );
-        assert!(!AgentOperation::AccountSummary.direct_transport_demo_execution());
-    }
-
-    #[test]
-    fn native_strategy_begin_is_strict_demo_only_and_cannot_be_replayed_as_read_only() {
-        let begin = AgentOperation::BeginStrategyRun {
-            allocation_id: "strategy_run_new_20261013_01".to_owned(),
-            strategy_id: "real_manual_v1".to_owned(),
-            origin_schema: "okx.research.live-decision/v1".to_owned(),
-            origin_version: "run-2026-10-13".to_owned(),
-            mandate_version: "demo-mandate-v1".to_owned(),
-            allocated_usdt: "100".to_owned(),
-            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
-            rearm: None,
-        };
-        begin.validate().expect("typed native opening");
-        let close = AgentOperation::FinalizeStrategyRun {
-            allocation_id: "strategy_run_new_20261013_01".to_owned(),
-        };
-        close.validate().expect("typed financial finalization");
-        let quarantine = AgentOperation::QuarantineUnverifiedStrategyRun {
-            allocation_id: "strategy_run_new_20261013_01".to_owned(),
-        };
-        quarantine.validate().expect("typed NON-financial closure");
-        assert!(quarantine.direct_transport_demo_execution());
-        assert!(!quarantine.direct_transport_read_only());
-        assert!(
-            AgentOperation::QuarantineUnverifiedStrategyRun {
-                allocation_id: "invalid!".to_owned(),
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(close.direct_transport_demo_execution());
-        assert!(!close.direct_transport_read_only());
-        let invalid_close = AgentOperation::FinalizeStrategyRun {
-            allocation_id: "invalid!".to_owned(),
-        };
-        assert!(invalid_close.validate().is_err());
-        assert!(begin.direct_transport_demo_execution());
-        assert!(!begin.direct_transport_read_only());
-        let mut bad = begin.clone();
-        if let AgentOperation::BeginStrategyRun { allocated_usdt, .. } = &mut bad {
-            *allocated_usdt = "0".to_owned();
-        }
-        assert!(bad.validate().is_err(), "zero capital cannot be reserved");
-        let mut bad = begin;
-        if let AgentOperation::BeginStrategyRun {
-            operator_authority_id,
-            ..
-        } = &mut bad
-        {
-            *operator_authority_id = "caller-witness".to_owned();
-        }
-        assert!(
-            bad.validate().is_err(),
-            "witness id format is checked at runtime too"
-        );
-    }
-
-    #[test]
-    fn direct_transport_rejects_zero_generation_and_bad_schema() {
-        let bad_generation = DirectTransportFrame::Request {
-            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-            session_id: "session_0123456789".to_owned(),
-            connection_generation: 0,
-            request: request(),
-            operator_governance: None,
-        };
-        assert_eq!(
-            bad_generation.validate(),
-            Err(ProtocolError::InvalidConnectionGeneration)
-        );
-
-        let bad_schema = DirectTransportFrame::Hello {
-            schema: "okx.direct-transport.frame/v0".to_owned(),
-            runtime_id: "windows-primary".to_owned(),
-            connection_id: "connection_0123456789".to_owned(),
-            runtime_profile: Some(DirectRuntimeProfile::Production),
-        };
-        assert!(matches!(
-            bad_schema.validate(),
-            Err(ProtocolError::UnsupportedSchema(_))
-        ));
-    }
-}
-
-#[cfg(test)]
-mod native_drain_source_tests {
-    use super::*;
-
-    fn source() -> NativeDrainedSourceCandidate {
-        NativeDrainedSourceCandidate {
-            schema: NATIVE_SOURCE_CANDIDATE_SCHEMA_V1.to_owned(),
-            account_uid_fingerprint: "a".repeat(64),
-            snapshot_received_ms: 20_000,
-            source_age_ms: 100,
-            private_ws_generation: 7,
-            ledger_manifest_sha256: "b".repeat(64),
-            historical_canceled_identity_exception: true,
-            positions: 0,
-            orders: 0,
-            native_oco: 0,
-        }
-    }
-
-    #[test]
-    fn native_source_must_be_fresh_flat_same_uid_and_same_exact_ledger() {
-        let original = source();
-        assert!(original.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
-        assert!(!original.valid_for(&"a".repeat(64), &"c".repeat(64), 20_100));
-        assert!(!original.valid_for(&"c".repeat(64), &"b".repeat(64), 20_100));
-        assert!(!original.valid_for(&"a".repeat(64), &"b".repeat(64), 19_999));
-        assert!(!original.valid_for(&"a".repeat(64), &"b".repeat(64), 30_001));
-        let mut altered = original.clone();
-        altered.private_ws_generation = 0;
-        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
-        altered = original.clone();
-        altered.orders = 1;
-        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
-        altered = original.clone();
-        altered.native_oco = 1;
-        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
-        altered = original.clone();
-        altered.positions = 1;
-        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
-        altered = original.clone();
-        altered.source_age_ms = 10_001;
-        assert!(!altered.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
-        let mut encoded = serde_json::to_value(&original).unwrap();
-        encoded["unexpected"] = serde_json::json!("bypass");
-        assert!(serde_json::from_value::<NativeDrainedSourceCandidate>(encoded).is_err());
-    }
-
-    #[test]
-    fn native_simple_account_selection_is_typed_and_never_a_trade_grant() {
-        let mut req = NativeChildRequest {
-            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
-            request_id: "a".repeat(64),
-            operation: NativeChildOperation::Drain,
-            expected_uid_fingerprint: String::new(),
-            account_id: Some("real".to_owned()),
-        };
-        assert!(req.valid());
-        req.account_id = Some("demo".to_owned());
-        assert!(req.valid());
-        req.account_id = Some("unknown".to_owned());
-        assert!(!req.valid());
-        req.account_id = Some("real".to_owned());
-        req.operation = NativeChildOperation::VerifyReadOnly;
-        assert!(!req.valid());
-        req.operation = NativeChildOperation::Drain;
-        req.expected_uid_fingerprint = "b".repeat(64);
-        assert!(!req.valid());
-        assert!(
-            HostControlOperation::SelectAccount {
-                venue: TradingVenue::Okx,
-                account_id: "real".to_owned()
-            }
-            .validate()
-            .is_ok()
-        );
-        assert!(
-            HostControlOperation::SelectAccount {
-                venue: TradingVenue::Okx,
-                account_id: "demo".to_owned()
-            }
-            .validate()
-            .is_ok()
-        );
-        assert!(
-            HostControlOperation::SelectAccount {
-                venue: TradingVenue::Okx,
-                account_id: "demo_acceptance".to_owned()
-            }
-            .validate()
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn fresh_sqlite_owner_genesis_requires_exact_typed_uid_only() {
-        let operation = HostControlOperation::InitializeFreshLedger {
-            expected_uid_fingerprint: "a".repeat(64),
-        };
-        assert!(operation.validate().is_ok());
-        let serialized = serde_json::to_value(&operation).unwrap();
-        assert_eq!(serialized["type"], "initialize_fresh_ledger");
-        assert_eq!(
-            serde_json::from_value::<HostControlOperation>(serialized).unwrap(),
-            operation
-        );
-        assert!(
-            HostControlOperation::InitializeFreshLedger {
-                expected_uid_fingerprint: "a".repeat(63),
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            HostControlOperation::InitializeFreshLedger {
-                expected_uid_fingerprint: "INVALID".to_owned(),
-            }
-            .validate()
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn venue_scoped_selectors_are_typed_and_do_not_grant_venue_support() {
-        let old: HostControlOperation =
-            serde_json::from_str(r#"{"type":"select_account","account_id":"real"}"#)
-                .expect("legacy selector");
-        assert_eq!(
-            old,
-            HostControlOperation::SelectAccount {
-                venue: TradingVenue::Okx,
-                account_id: "real".to_owned(),
-            }
-        );
-        let bybit = HostControlOperation::SelectAccount {
-            venue: TradingVenue::Bybit,
-            account_id: "desk-a".to_owned(),
-        };
-        assert!(bybit.validate().is_ok());
-        assert!(
-            serde_json::to_string(&bybit)
-                .expect("typed selector")
-                .contains(r#""venue":"bybit""#)
-        );
-        assert!(
-            serde_json::from_str::<HostControlOperation>(
-                r#"{"type":"select_account","venue":"unknown","account_id":"real"}"#,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn ledgerless_readonly_source_never_claims_a_fabricated_manifest() {
-        let mut source = source();
-        source.ledger_manifest_sha256.clear();
-        assert!(source.valid_for(&"a".repeat(64), "", 20_100));
-        assert!(!source.valid_for(&"a".repeat(64), &"b".repeat(64), 20_100));
-        let id = "f".repeat(64);
-        let mut reply = NativeChildReply {
-            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
-            request_id: id.clone(),
-            disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
-            ledger_only: None,
-            source_candidate: Some(source),
-            target_read_only: None,
-            selected_target_uid_fingerprint: None,
-            error: None,
-        };
-        assert!(reply.valid_for(&id));
-        reply.ledger_only = Some(serde_json::json!({
-            "source_ledger_manifest_sha256": "b".repeat(64)
-        }));
-        assert!(!reply.valid_for(&id));
-        reply.ledger_only = None;
-        reply
-            .source_candidate
-            .as_mut()
-            .unwrap()
-            .ledger_manifest_sha256 = "b".repeat(64);
-        assert!(!reply.valid_for(&id));
-    }
-
-    #[test]
-    fn readonly_target_requires_fresh_exact_uid_and_disabled_trade() {
-        let uid = "c".repeat(64);
-        let original = NativeReadOnlyTargetProof {
-            schema: "okx.native-readonly-target/v1".to_owned(),
-            account_uid_fingerprint: uid.clone(),
-            snapshot_received_ms: 20_000,
-            private_ws_generation: 3,
-            positions: 0,
-            orders: 0,
-            native_oco: 0,
-            native_oco_complete: true,
-            read_only_credentials: true,
-            executor_mutations_disabled: true,
-        };
-        assert!(original.valid_for(&uid, 20_100));
-        assert!(!original.valid_for(&"a".repeat(64), 20_100));
-        assert!(!original.valid_for(&uid, 30_001));
-        let mut changed = original.clone();
-        changed.native_oco = 1;
-        changed.orders = 2;
-        changed.positions = 3;
-        assert!(
-            changed.valid_for(&uid, 20_100),
-            "existing independent real-account exposure is observable in ReadOnly"
-        );
-        changed = original.clone();
-        changed.native_oco_complete = false;
-        assert!(changed.valid_for(&uid, 20_100));
-        changed = original.clone();
-        changed.read_only_credentials = false;
-        assert!(!changed.valid_for(&uid, 20_100));
-        changed = original.clone();
-        changed.executor_mutations_disabled = false;
-        assert!(!changed.valid_for(&uid, 20_100));
-        changed = original.clone();
-        changed.private_ws_generation = 0;
-        assert!(changed.valid_for(&uid, 20_100));
-    }
-
-    #[test]
-    fn protocol_rejects_malformed_or_unsolicited_drain_receipts() {
-        let id = "f".repeat(64);
-        let reply = NativeChildReply {
-            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.to_owned(),
-            request_id: id.clone(),
-            disposition: "DRAINED_SOURCE_CANDIDATE".to_owned(),
-            ledger_only: Some(serde_json::json!({"source_ledger_manifest_sha256": "b".repeat(64)})),
-            source_candidate: Some(source()),
-            target_read_only: None,
-            selected_target_uid_fingerprint: None,
-            error: None,
-        };
-        assert!(reply.valid_for(&id));
-        assert!(!reply.valid_for(&"0".repeat(64)));
-        let mut missing = reply.clone();
-        missing.source_candidate = None;
-        assert!(!missing.valid_for(&id));
-        missing = reply.clone();
-        missing.disposition = "DRAINED_LEDGER_ONLY".to_owned();
-        assert!(!missing.valid_for(&id));
-        missing = reply.clone();
-        missing.error = Some("uncertain".to_owned());
-        assert!(!missing.valid_for(&id));
     }
 }

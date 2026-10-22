@@ -1,5 +1,6 @@
 import {GOVERNANCE_STORAGE_KEY,validGovernance,validLimits,accessEnabled,
   reviseGovernance,type GovernanceUpdate,type Governance,type Account,type Limits} from "./account_governance.js";
+import {initializeRiskBook} from "./risk_book.js";
 export {GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 
 type Reply={status:number;body:Record<string,unknown>};
@@ -24,14 +25,22 @@ function result(policy:Governance){
 /** Only the authenticated installation lifecycle may initialize this namespace.
  * A missing registered installation never becomes a new zero-budget state on GET.
  */
-export async function initializeGovernance(storage:any,configuration:Governance):Promise<Reply>{
+export async function initializeGovernance(storage:any,configuration:Governance,lifecycle?:{operation_id:string;release_sha256:string;contract:string}):Promise<Reply>{
   if(!validGovernance(configuration)||configuration.revision!==0||configuration.accounts.length!==0)
     return fail(400,"INVALID_INSTALLATION_CONFIGURATION");
+  const bodyHash=lifecycle?await digest({configuration,...lifecycle}):null;
   return storage.transaction(async(tx:any)=>{
+    const receiptKey=lifecycle?"installation_operation:"+lifecycle.operation_id:null;
+    const receipt=receiptKey?await tx.get(receiptKey):undefined;
+    if(receipt!==undefined)return receipt.hash===bodyHash?receipt.reply:fail(409,"IDEMPOTENCY_CONFLICT");
     const previous:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
     if(previous!==undefined)return fail(409,"INSTALLATION_ALREADY_INITIALIZED");
+    await initializeRiskBook(tx,configuration.installation_id);
     await tx.put(GOVERNANCE_STORAGE_KEY,configuration);
-    return {status:200,body:result(configuration)};
+    const reply={status:200,body:result(configuration)};
+    if(receiptKey)await tx.put(receiptKey,{hash:bodyHash,reply});
+    if(lifecycle)await tx.put("installation_release_v1",{release_sha256:lifecycle.release_sha256,contract:lifecycle.contract,installation_id:configuration.installation_id});
+    return reply;
   });
 }
 /** Every accepted mutation has one durable body-bound outcome. */
@@ -116,4 +125,16 @@ export async function stopNewRealRisk(storage:any,idempotency_key:string):Promis
       ?{...a,explicit_pause:true,policy_revision:revision}:a)};
     return {status:200,body:{...result(next),configuration:next}};
   });
+}
+
+export async function setAccountLimits(storage:any,raw:unknown):Promise<Reply>{
+ if(!record(raw)||Object.keys(raw).sort().join(',')!=="account,action,expected_revision,idempotency_key,limits"||raw.action!=="set_limits"||typeof raw.account!=="string"||!validLimits(raw.limits)||!Number.isSafeInteger(raw.expected_revision))return fail(400,"INVALID_LIMITS_REQUEST");
+ return mutate(storage,raw.idempotency_key,raw,previous=>{
+ if(previous.revision!==raw.expected_revision)return fail(409,"STALE_ACCESS_REVISION");
+ if(!previous.accounts.some(a=>a.id===raw.account||a.account_key===raw.account))return fail(404,"ACCOUNT_NOT_FOUND");
+ const revision=previous.revision+1;
+ const next={...previous,revision,accounts:previous.accounts.map(a=>a.id===raw.account||a.account_key===raw.account?{...a,limits:raw.limits as Limits,policy_revision:revision}:a)};
+ if(!validGovernance(next))return fail(400,"INVALID_ACCOUNT_LIMITS");
+ return {status:200,body:{...result(next),configuration:next}};
+ });
 }

@@ -91,7 +91,7 @@ impl AccountStoreHandle {
             let result = if Instant::now() >= deadline {
                 Err(StoreError::Invalid("ACCOUNT_QUEUE_DEADLINE"))
             } else {
-                operation(store)
+                store.run_before_deadline(deadline, operation)
             };
             let _ = tx.send(result);
         });

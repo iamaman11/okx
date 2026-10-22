@@ -106,7 +106,7 @@ export function validGovernance(value:unknown):value is Governance{
   const fields=["schema","revision","installation_id","campaign_id","campaign_loss_limit_usd","max_total_modelled_loss_usdt","accounts"];
   if(Object.keys(value).sort().join("|")!==fields.sort().join("|"))return false;
   if(value.schema!==GOVERNANCE_SCHEMA||!Number.isSafeInteger(value.revision)||(value.revision as number)<0
-    ||typeof value.installation_id!=="string"||!ID.test(value.installation_id)
+    ||typeof value.installation_id!=="string"||value.installation_id.length<8||!ID.test(value.installation_id)
     ||typeof value.campaign_id!=="string"||!/^sha256:[0-9a-f]{64}$/.test(value.campaign_id)
     ||!positive(value.campaign_loss_limit_usd)||!positive(value.max_total_modelled_loss_usdt)
     ||!Array.isArray(value.accounts)||value.accounts.length>32||!value.accounts.every(validAccount))return false;

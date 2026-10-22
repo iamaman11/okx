@@ -99,6 +99,11 @@ jobs:
       - name: Verify versioned SQLite account ledger schema
         run: python3 scripts/check_ledger_sql.py
 
+      - name: Verify clean Engine product contract
+        run: |
+          python3 scripts/check_product_contract.py --self-test
+          python3 scripts/check_product_contract.py
+
 
   linux-rust:
     name: linux-rust
@@ -127,7 +132,6 @@ jobs:
         run: cargo test --locked --workspace --exclude okx-agent --exclude okx-host-control
 
       - name: Accept one million native SQLite terminal intents
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.head_ref == 'feat/sqlite-ledger-accounting-epochs-20261020' && github.event.pull_request.draft == false)
         timeout-minutes: 30
         run: cargo test --locked -p okx-execution --lib sqlite_million_history_bounded_rss -- --ignored --nocapture
 
@@ -206,6 +210,7 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: pwsh
         run: |
+          $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
           cargo build --locked --release -p okx-agent -p okx-host-control -p okx-host-launcher
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

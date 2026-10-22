@@ -41,13 +41,28 @@ pub struct TerminalRiskLedgerProof {
     pub intent_id: String,
     pub state: String,
     pub record_digest: String,
+    pub cumulative_loss_usd: String,
+    pub remaining_exposure_usdt: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsdConversion {
+    pub usd_per_usdt: String,
+    pub source_digest: String,
+    pub observed_at_ms: u64,
+}
+impl UsdConversion {
+    pub fn valid(&self) -> bool {
+        positive(&self.usd_per_usdt) && hash(&self.source_digest) && self.observed_at_ms > 0
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RiskAccountOccupancy {
     pub account_key: String,
     pub occupied_usdt: String,
+    pub cumulative_loss_usd: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,7 +118,8 @@ impl NativeRiskCensus {
                     .collect::<Vec<_>>()
             && self.occupied.iter().all(|v| {
                 let x = &v.occupied_usdt;
-                x == "0" || positive(x)
+                (x == "0" || positive(x))
+                    && (v.cumulative_loss_usd == "0" || positive(&v.cumulative_loss_usd))
             })
     }
 }
@@ -130,6 +146,7 @@ pub enum RiskReservationState {
     deny_unknown_fields
 )]
 pub enum RiskCommandAction {
+    Summary {},
     Inspect {
         reservation_key: String,
         plan_sha256: String,
@@ -143,6 +160,8 @@ pub enum RiskCommandAction {
         instrument_id: String,
         plan_sha256: String,
         requested_loss_usdt: String,
+        requested_loss_usd: String,
+        usd_conversion: UsdConversion,
         policy_revision: u64,
         census: NativeRiskCensus,
     },
@@ -169,14 +188,19 @@ pub enum RiskCommandAction {
 pub struct RiskCommand {
     pub schema: String,
     pub command_id: String,
+    pub installation_id: String,
     pub action: RiskCommandAction,
 }
 impl RiskCommand {
     pub fn valid(&self) -> bool {
-        if self.schema != RISK_COMMAND_SCHEMA_V1 || !token(&self.command_id) {
+        if self.schema != RISK_COMMAND_SCHEMA_V1
+            || !token(&self.command_id)
+            || !token(&self.installation_id)
+        {
             return false;
         }
         match &self.action {
+            RiskCommandAction::Summary {} => true,
             RiskCommandAction::Inspect {
                 reservation_key,
                 plan_sha256,
@@ -190,6 +214,8 @@ impl RiskCommand {
                 instrument_id,
                 plan_sha256,
                 requested_loss_usdt,
+                requested_loss_usd,
+                usd_conversion,
                 policy_revision,
                 census,
             } => {
@@ -211,6 +237,8 @@ impl RiskCommand {
                     })
                     && hash(plan_sha256)
                     && positive(requested_loss_usdt)
+                    && positive(requested_loss_usd)
+                    && usd_conversion.valid()
                     && *policy_revision > 0
                     && census.valid()
             }
@@ -254,6 +282,9 @@ impl RiskCommand {
                                         && token(&proof.run_id)
                                         && token(&proof.intent_id)
                                         && hash(&proof.record_digest)
+                                        && proof.remaining_exposure_usdt == "0"
+                                        && (proof.cumulative_loss_usd == "0"
+                                            || positive(&proof.cumulative_loss_usd))
                                         && matches!(
                                             proof.state.as_str(),
                                             "FILLED" | "CANCELED" | "REJECTED"
@@ -277,6 +308,29 @@ pub enum RiskDecisionStatus {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RiskBudgetSnapshot {
+    pub campaign_limit_usd: String,
+    pub consumed_loss_usd: String,
+    pub reserved_loss_usd: String,
+    pub remaining_loss_usd: String,
+    pub occupied_modelled_loss_usdt: String,
+    pub source_as_of_ms: Option<u64>,
+}
+impl RiskBudgetSnapshot {
+    pub fn valid(&self) -> bool {
+        self.campaign_limit_usd == "20"
+            && [
+                &self.consumed_loss_usd,
+                &self.reserved_loss_usd,
+                &self.remaining_loss_usd,
+                &self.occupied_modelled_loss_usdt,
+            ]
+            .iter()
+            .all(|v| v.as_str() == "0" || positive(v))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskResult {
     pub schema: String,
     pub command_id: String,
@@ -290,13 +344,20 @@ pub struct RiskResult {
     pub existing_modelled_loss_usdt: Option<String>,
     #[serde(default)]
     pub reservation_state: Option<RiskReservationState>,
+    pub budget: Option<RiskBudgetSnapshot>,
 }
 impl RiskResult {
     pub fn valid(&self) -> bool {
         self.schema == RISK_RESULT_SCHEMA_V1
             && token(&self.command_id)
             && (self.status == RiskDecisionStatus::Denied
+                || self.status == RiskDecisionStatus::Observed
+                    && self.budget.as_ref().is_some_and(RiskBudgetSnapshot::valid)
+                    && self.reservation_key.is_none()
+                    && self.risk_book_sequence.is_some()
+                    && self.reservation_state.is_none()
                 || self.reservation_key.is_some()
+                    && self.budget.is_none()
                     && self.risk_book_sequence.is_some_and(|s| s > 0)
                     && self.policy_revision.is_some_and(|r| r > 0))
             && match self.status {
@@ -306,7 +367,9 @@ impl RiskResult {
                     .is_some_and(|v| v == "0" || positive(v)),
                 _ => self.existing_modelled_loss_usdt.is_none(),
             }
-            && (self.status == RiskDecisionStatus::Observed && self.reservation_state.is_some()
+            && (self.status == RiskDecisionStatus::Observed
+                && (self.reservation_state.is_some()
+                    || self.budget.as_ref().is_some_and(RiskBudgetSnapshot::valid))
                 || self.status != RiskDecisionStatus::Observed && self.reservation_state.is_none())
             && self
                 .reason
@@ -324,6 +387,7 @@ mod tests {
         let command = RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
             command_id: "risk_request_01".to_owned(),
+            installation_id: "installation_test".into(),
             action: RiskCommandAction::Reserve {
                 venue: "okx".to_owned(),
                 account_uid: uid,
@@ -333,12 +397,19 @@ mod tests {
                 instrument_id: "BTC-USDT-SWAP".to_owned(),
                 plan_sha256: "c".repeat(64),
                 requested_loss_usdt: "1".to_owned(),
+                requested_loss_usd: "1".into(),
+                usd_conversion: UsdConversion {
+                    usd_per_usdt: "1".into(),
+                    source_digest: "a".repeat(64),
+                    observed_at_ms: 1,
+                },
                 policy_revision: 1,
                 census: NativeRiskCensus {
                     account_keys: vec![key.clone()],
                     occupied: vec![RiskAccountOccupancy {
                         account_key: key,
                         occupied_usdt: "0".to_owned(),
+                        cumulative_loss_usd: "0".into(),
                     }],
                     generated_at_ms: 1,
                     source_digest: "b".repeat(64),
@@ -376,6 +447,7 @@ mod tests {
             occupied: vec![RiskAccountOccupancy {
                 account_key: format!("okx:real:{uid}"),
                 occupied_usdt: "0".to_owned(),
+                cumulative_loss_usd: "0".into(),
             }],
             generated_at_ms: 2,
             source_digest: "b".repeat(64),
@@ -389,6 +461,7 @@ mod tests {
         let mut release = RiskCommand {
             schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
             command_id: "release_0001".to_owned(),
+            installation_id: "installation_test".into(),
             action: RiskCommandAction::Resolve {
                 reservation_key: "reservation_identity".to_owned(),
                 plan_sha256: "d".repeat(64),
@@ -413,6 +486,8 @@ mod tests {
                 intent_id: "intent_accepted_001".to_owned(),
                 state: "FILLED".to_owned(),
                 record_digest: "f".repeat(64),
+                cumulative_loss_usd: "0".into(),
+                remaining_exposure_usdt: "0".into(),
             });
         }
         assert!(release.valid());
@@ -437,6 +512,7 @@ mod tests {
             policy_revision: None,
             existing_modelled_loss_usdt: None,
             reservation_state: None,
+            budget: None,
         };
         assert!(result.valid());
         result.status = RiskDecisionStatus::PostAuthorized;

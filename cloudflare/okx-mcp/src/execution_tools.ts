@@ -1,313 +1,55 @@
-import { isObject, type Json } from "./shared.js";
+import {isObject,type Json} from './shared.js';
+type Schema=Record<string,any>;
+const text=(max=128):Schema=>({type:'string',minLength:1,maxLength:max});
+const token={...text(),minLength:8,pattern:'^[A-Za-z0-9_-]+$'};
+const money={type:'string',pattern:'^(?!0+(?:\\.0+)?$)(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,9})?$',maxLength:32};
+const integer=(min=0,max=Number.MAX_SAFE_INTEGER):Schema=>({type:'integer',minimum:min,maximum:max});
+const choice=(...values:string[]):Schema=>({type:'string',enum:values});
+const array=(items:Schema,max=32):Schema=>({type:'array',items,maxItems:max,uniqueItems:true});
+const object=(properties:Schema,required=Object.keys(properties)):Schema=>({type:'object',properties,required,additionalProperties:false});
+const action=(name:string,props:Schema={},required=Object.keys(props)):Schema=>object({action:{const:name},...props},['action',...required]);
+const account=text();const mutation={idempotency_key:token};
+const limits=object({max_modelled_loss_usdt:money,max_order_loss_usdt:money,max_notional_usdt:{anyOf:[money,{type:'null'}]},max_leverage:{anyOf:[money,{type:'null'}]},max_daily_realized_loss_usdt:{anyOf:[money,{type:'null'}]},max_drawdown_ratio:{anyOf:[{type:'string',pattern:'^(?:0(?:\\.[0-9]{1,9})?|1(?:\\.0{1,9})?)$',maxLength:11},{type:'null'}]},allowed_instruments:array(text(64))});
+const sizing={oneOf:[object({contracts:money}),object({max_loss_usd:money})]};
+const constraints=object({type:choice('limit','market','post_only','ioc','fok'),limit_price:money,reference:text(),max_slippage_bps:integer(0,10000)},['type','max_slippage_bps']);
+const protection={oneOf:[object({stop_price:money}),object({stop_distance_bps:integer(1,10000)})]};
+const trade={operation:choice('open','add','reduce','close','replace'),strategy_instance:text(64),instrument:text(64),side:choice('long','short'),sizing,order:constraints,protection};
+const ema=object({fast:integer(1,10000),slow:integer(2,10000)});
+const costs=object({maker_fee_bps:{type:'number',minimum:0,maximum:1000},taker_fee_bps:{type:'number',minimum:0,maximum:1000},slippage_bps:{type:'number',minimum:0,maximum:1000},funding_mode:choice('observed','zero_assumption')});
+const range={instruments:array(text(64)),timeframe_ms:integer(1000,2678400000),start_ms:integer(1),end_ms:integer(1)};
+const research={...mutation,...range,strategy_id:choice('ema_cross_v1'),costs,data_mode:choice('historical_observed','counterfactual'),seed:integer()};
+const instance={instance_id:text(64)};
+const number=(minimum=0,maximum=Number.MAX_SAFE_INTEGER)=>({type:'number',minimum,maximum});
+const marketParameters=object({ema_period:integer(1,1000),atr_period:integer(1,1000),rsi_period:integer(1,1000),budget:number(0.000000001),price:number(0.000000001),stop_distance:number(0.000000001,0.999999999),notional:number(),fee_bps:number(0,10000),slippage_bps:number(0,10000)},[]);
+export const ACTION_SCHEMAS:Record<string,Schema[]>={
+ accounts:[action('list'),action('status',{account}),action('connect',{...mutation,credential_ref:text(),alias:text(64),label:text(128),limits,enabled:{type:'boolean'}},['idempotency_key','credential_ref','alias','limits','enabled']),...['pause','resume'].map(a=>action(a,{account,...mutation,expected_revision:integer()})),action('set_limits',{account,...mutation,expected_revision:integer(),limits})],
+ strategies:[action('list',{account}),action('status',{account,...instance}),action('create',{account,...mutation,...instance,definition_id:text(64),version:integer(1),parameters:ema,instruments:array(text(64)),timeframe_ms:integer(1000),budget_usd:money}),action('update',{account,...mutation,...instance,expected_revision:integer(),parameters:ema,budget_usd:money}),...['start','stop'].map(a=>action(a,{account,...mutation,...instance}))],
+ market:['screen','compare'].map(a=>action(a,{...range,fields:array(text(64)),parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}}),limit:integer(1,50),cursor:text(512)},['instruments','fields','timeframe_ms','start_ms','end_ms','limit'])),
+ research:[action('backtest',{...research,parameters:ema},Object.keys(research).filter(k=>k!=='seed').concat('parameters')),action('grid',{...research,variants:array(ema,64)},Object.keys(research).filter(k=>k!=='seed').concat('variants')),action('status',{job_id:text()}),action('cancel',{job_id:text(),...mutation}),action('result',{job_id:text(),cursor:text(512),limit:integer(1,50)},['job_id','limit'])],
+ trade:[action('preview',{account,...trade},['account','operation','strategy_instance','instrument','side','sizing','order']),action('execute',{account,...mutation,...trade,expires_in_ms:integer(1,30000)},['account','idempotency_key','operation','strategy_instance','instrument','side','sizing','order','expires_in_ms']),action('status',{account,reference:text()}),action('cancel',{account,...mutation,reference:text()}),action('close',{account,...mutation,reference:text(),expires_in_ms:integer(1,30000)})],
+ portfolio:['summary','history'].map(a=>action(a,{accounts:array(account),start_ms:integer(0),end_ms:integer(1),strategies:array(text()),currencies:array(text(16)),cursor:text(512),limit:integer(1,50)},['accounts','start_ms','end_ms','limit'])),
+ diagnostics:[action('explain',{reference:text(),account},[])],
+};
+for(const schema of ACTION_SCHEMAS.trade){if(['preview','execute'].includes(schema.properties.action.const))schema.allOf=[{if:{properties:{operation:{enum:['open','add','replace']}}},then:{required:['protection']}}];}
+ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['reference']}]}];
+export const PUBLIC_TOOLS:Json[]=Object.entries(ACTION_SCHEMAS).map(([name,schemas])=>({name,description:`${name} actions. Mutations require body-bound idempotency. Responses contain bounded results and quality diagnostics.`,inputSchema:{oneOf:schemas}}));
+export function matches(s:Schema,v:unknown):boolean {
+ if(s.allOf&&!s.allOf.every((x:Schema)=>matches(x,v)))return false;
+ if(s.if&&matches(s.if,v)&&s.then&&!matches(s.then,v))return false;
+ if(s.required&&(!isObject(v)||!s.required.every((k:string)=>k in v)))return false;
+ if(!s.type&&s.properties&&isObject(v)&&!Object.entries(s.properties).every(([k,x])=>!(k in v)||matches(x as Schema,v[k])))return false;
+ if(s.oneOf)return s.oneOf.filter((x:Schema)=>matches(x,v)).length===1;
+ if(s.anyOf)return s.anyOf.some((x:Schema)=>matches(x,v));
+ if('const'in s&&v!==s.const)return false;
+ if(s.enum&&!s.enum.includes(v))return false;
+ if(s.type==='null')return v===null;
+ if(s.type==='object')return isObject(v)&&Object.keys(v).every(k=>k in s.properties)&&s.required.every((k:string)=>k in v)&&Object.entries(v).every(([k,x])=>matches(s.properties[k],x));
+ if(s.type==='array')return Array.isArray(v)&&v.length<=(s.maxItems??100)&&(!s.uniqueItems||new Set(v.map(x=>JSON.stringify(x))).size===v.length)&&v.every(x=>matches(s.items,x));
+ if(s.type==='string')return typeof v==='string'&&v.length>=(s.minLength??0)&&v.length<=(s.maxLength??Infinity)&&(!s.pattern||new RegExp(s.pattern).test(v));
+ if(s.type==='integer'||s.type==='number')return typeof v==='number'&&Number.isFinite(v)&&(s.type!=='integer'||Number.isSafeInteger(v))&&v>=(s.minimum??-Infinity)&&v<=(s.maximum??Infinity);
+ if(s.type==='boolean')return typeof v==='boolean';return true;
+}
+export function validTool(name:string,args:unknown):boolean {if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
+export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&action!=='preview'&&action!=='status')||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','grid','cancel'].includes(String(action)));}
+export function executionProfilePermitsOperation(profile:unknown,_type:unknown):boolean{return profile==='engine';}
 
-// This is an explicit, finite product execution contract, not an RPC tunnel.
-// All real order/UID/policy/risk/reconciliation authority stays in okx-execution.
-const ID = { type: "string", minLength: 16, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$" };
-const MUTATION_ID = { type: "string", minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$" };
-const EVIDENCE_ID = { type: "string", minLength: 71, maxLength: 71, pattern: "^sha256:[0-9a-f]{64}$" };
-const DECIMAL = { type: "string", minLength: 1, maxLength: 64, pattern: "^[0-9]+(?:\\.[0-9]+)?$" };
-const POSITIVE = DECIMAL;
-const INSTRUMENT = { type: "string", minLength: 3, maxLength: 64, pattern: "^[A-Za-z0-9_-]+$" };
-const VERSION = { type: "string", minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._/-]+$" };
-const instrumentSet = { type: "array", maxItems: 32, uniqueItems: true, items: INSTRUMENT };
-const mandate = {
-  type: "object", additionalProperties: false,
-  properties: {
-    version: VERSION, capital_base_usd: POSITIVE, decision_horizon_hours: { type: "integer", minimum: 1, maximum: 8760 },
-    benchmark: VERSION, allowed_instruments: instrumentSet,
-    max_drawdown_ratio: DECIMAL, leverage_ceiling: POSITIVE,
-    minimum_liquidity_notional_usd: DECIMAL, max_turnover_ratio: DECIMAL,
-  },
-  required: ["version","capital_base_usd","decision_horizon_hours","allowed_instruments","max_drawdown_ratio","leverage_ceiling","minimum_liquidity_notional_usd","max_turnover_ratio"],
-};
-const correlatedCluster = {
-  type: "object", additionalProperties: false,
-  properties: { id: VERSION, instruments: instrumentSet, max_gross_notional_usd: DECIMAL },
-  required: ["id","instruments","max_gross_notional_usd"],
-};
-const hardPolicy = {
-  type: "object", additionalProperties: false,
-  properties: {
-    version: VERSION, max_account_gross_notional_usd: POSITIVE,
-    max_instrument_gross_notional_usd: POSITIVE, max_margin_utilization_ratio: POSITIVE,
-    max_loss_per_trade_usd: POSITIVE, max_daily_realized_loss_usd: POSITIVE,
-    max_drawdown_ratio: DECIMAL, max_leverage: POSITIVE, allowed_instruments: instrumentSet,
-    minimum_quality: { type: "string", enum: ["fresh","degraded"] },
-    degraded_mode: { type: "string", enum: ["reject","allow_read_only"] },
-    correlated_clusters: { type: "array", maxItems: 16, items: correlatedCluster },
-  },
-  required: ["version","max_account_gross_notional_usd","max_instrument_gross_notional_usd","max_margin_utilization_ratio","max_loss_per_trade_usd","max_daily_realized_loss_usd","max_drawdown_ratio","max_leverage","allowed_instruments","minimum_quality","degraded_mode","correlated_clusters"],
-};
-const entry = {
-  type: "object", additionalProperties: false,
-  properties: {
-    entry_price: POSITIVE, stop_price: POSITIVE, max_settle_notional: POSITIVE,
-    max_loss_settle: POSITIVE, target_rr: POSITIVE,
-    entry_liquidity_role: { type: "string", enum: ["maker","taker"] },
-    exit_liquidity_role: { type: "string", enum: ["maker","taker"] },
-  },
-  required: ["entry_price","stop_price","max_settle_notional","max_loss_settle","target_rr","entry_liquidity_role","exit_liquidity_role"],
-};
-const spec = {
-  type: "object", additionalProperties: false,
-  properties: {
-    action: { type: "string", enum: ["open","add","hedge","reduce","close","reverse","continue_reverse"] },
-    position_side: { type: "string", enum: ["long","short"] },
-    size: POSITIVE, price: POSITIVE, entry,
-  },
-  required: ["action"],
-};
-const risk = {
-  type: "object", additionalProperties: false,
-  properties: { mandate, policy: hardPolicy },
-  required: ["mandate","policy"],
-};
-const lineage = {
-  type: "object", additionalProperties: false,
-  properties: {
-    origin_evidence_id: EVIDENCE_ID,
-    origin_schema: VERSION, origin_version: VERSION,
-    authority_evidence_id: EVIDENCE_ID,
-    decision_reference: {
-      type: "object", additionalProperties: false,
-      properties: {
-        decision_time_ms: { type: "integer", minimum: 1 },
-        price: POSITIVE, price_basis: { type: "string", enum: ["decision_price","arrival_mid","mark","index","last","limit_price"] },
-        price_policy_version: VERSION,
-      },
-      required: ["decision_time_ms","price","price_basis","price_policy_version"],
-    },
-  },
-  required: ["origin_evidence_id","origin_schema","origin_version","decision_reference"],
-};
-export const EXECUTION_TOOLS: Json[] = [
-  {
-    name: "executor_preflight",
-    description: "READ ONLY: verify the exact authenticated account/environment, Trade credential, clock and native executor admission; no order created.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  },
-  {
-    name: "execution_action",
-    description: "WRITE: one typed action contract for the selected authenticated account, including Demo and Real. The existing Rust owner independently enforces account UID, execution permission, venue capabilities, STOP/UNKNOWN, source quality and RiskBook for each mutation; some actions are not yet accepted on every account. Never retry an uncertain result or use as a batch/raw RPC.",
-    inputSchema: {
-      type: "object", additionalProperties: false,
-      properties: {
-        action: { type: "string", enum: ["prepare","submit","amend","cancel","cancel_protection","confirm_protection_size","shrink_protection_size","abort_reverse","abandon_prepared","begin_strategy_run","finalize_strategy_run","quarantine_unverified_strategy_run","set_leverage","reconcile_unsent_prepared"] },
-        intent_id: ID, instrument: INSTRUMENT,
-        trade_mode: { type: "string", enum: ["cross","isolated"] },
-        order_type: { type: "string", enum: ["limit","post_only","fok","ioc"] },
-        spec, risk, lineage, mutation_id: MUTATION_ID, new_size: POSITIVE, new_price: POSITIVE,
-        expected_manifest_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
-        account_uid_fingerprint: { type: "string", pattern: "^[0-9a-f]{64}$" },
-        intent_ids: { type: "array", minItems: 1, maxItems: 32, uniqueItems: true, items: ID },
-        strategy_id: { type: "string", minLength: 2, maxLength: 64, pattern: "^[A-Za-z][A-Za-z0-9_-]*$" },
-        origin_schema: VERSION, origin_version: VERSION, mandate_version: VERSION,
-        allocated_usdt: POSITIVE, operator_authority_id: EVIDENCE_ID, leverage: POSITIVE,
-        rearm: { type: "object", additionalProperties: false, properties: {
-          expected_stopped_at_ms: { type: "integer", minimum: 1 },
-          prior_finalization_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" }
-        }, required: ["expected_stopped_at_ms","prior_finalization_sha256"] },
-      },
-      required: ["action","intent_id"],
-    },
-  },
-];
-function exactKeys(v: Record<string, unknown>, keys: readonly string[]): boolean {
-  return Object.keys(v).every(k => keys.includes(k));
-}
-function token(v: unknown, min: number, max: number): v is string {
-  return typeof v === "string" && v.length >= min && v.length <= max && /^[A-Za-z0-9_-]+$/.test(v);
-}
-function decimal(v: unknown): v is string {
-  return typeof v === "string" && v.length <= 64 && /^[0-9]+(?:\.[0-9]+)?$/.test(v) && Number(v) > 0;
-}
-function entryInput(v: unknown): boolean {
-  return isObject(v) && exactKeys(v, [
-    "entry_price","stop_price","max_settle_notional","max_loss_settle","target_rr",
-    "entry_liquidity_role","exit_liquidity_role",
-  ]) && ["entry_price","stop_price","max_settle_notional","max_loss_settle","target_rr"].every(k => decimal(v[k]))
-    && ["maker","taker"].includes(String(v.entry_liquidity_role))
-    && ["maker","taker"].includes(String(v.exit_liquidity_role));
-}
-function preparedSpec(v: unknown): boolean {
-  if (!isObject(v) || typeof v.action !== "string") return false;
-  const action = v.action;
-  if (["open","add","hedge"].includes(action)) {
-    return exactKeys(v,["action","position_side","entry"])
-      && ["long","short"].includes(String(v.position_side)) && entryInput(v.entry);
-  }
-  if (["reduce","close","reverse"].includes(action)) {
-    return exactKeys(v,["action","position_side","size","price"])
-      && ["long","short"].includes(String(v.position_side)) && decimal(v.size) && decimal(v.price);
-  }
-  return action === "continue_reverse" && exactKeys(v,["action","entry"]) && entryInput(v.entry);
-}
-function riskInput(v: unknown): boolean {
-  if (!isObject(v) || !exactKeys(v,["mandate","policy"]) || !isObject(v.mandate) || !isObject(v.policy)) return false;
-  const m=v.mandate,p=v.policy;
-  if (!exactKeys(m,Object.keys(mandate.properties)) || !exactKeys(p,Object.keys(hardPolicy.properties))) return false;
-  const version=(x:unknown)=>typeof x==="string"&&x.length>0&&x.length<=64&&/^[A-Za-z0-9._/-]+$/.test(x);
-  const number=(x:unknown)=>typeof x==="string"&&x.length>0&&x.length<=64&&/^[0-9]+(?:\.[0-9]+)?$/.test(x);
-  const instruments=(x:unknown)=>Array.isArray(x)&&x.length<=32
-    && x.every(v=>token(v,3,64))&&new Set(x).size===x.length;
-  if (!version(m.version)||!version(p.version)
-    || !Number.isInteger(m.decision_horizon_hours)||Number(m.decision_horizon_hours)<1||Number(m.decision_horizon_hours)>8760
-    || (m.benchmark!==undefined&&!version(m.benchmark))
-    || !instruments(m.allowed_instruments)||!instruments(p.allowed_instruments)) return false;
-  for (const key of ["capital_base_usd","max_drawdown_ratio","leverage_ceiling","minimum_liquidity_notional_usd","max_turnover_ratio"]) {
-    if (!number(m[key])) return false;
-  }
-  for (const key of ["max_account_gross_notional_usd","max_instrument_gross_notional_usd",
-    "max_margin_utilization_ratio","max_loss_per_trade_usd","max_daily_realized_loss_usd",
-    "max_drawdown_ratio","max_leverage"]) {
-    if (!number(p[key])) return false;
-  }
-  if (!["fresh","degraded"].includes(String(p.minimum_quality))
-    || !["reject","allow_read_only"].includes(String(p.degraded_mode))
-    || !Array.isArray(p.correlated_clusters)||p.correlated_clusters.length>16) return false;
-  for (const raw of p.correlated_clusters) {
-    if (!isObject(raw)||!exactKeys(raw,["id","instruments","max_gross_notional_usd"])
-      || !version(raw.id)||!instruments(raw.instruments)||!number(raw.max_gross_notional_usd)) return false;
-  }
-  // Native Rust revalidates immutable policy semantics, account UID,
-  // generation, positions, available margin and hard-risk limits again.
-  return true;
-}
-function lineageInput(v: unknown): boolean {
-  if (!isObject(v) || !exactKeys(v,["origin_evidence_id","origin_schema","origin_version","authority_evidence_id","decision_reference"]) || !isObject(v.decision_reference)) return false;
-  const d = v.decision_reference;
-  const version = (x: unknown) => typeof x === "string" && x.length > 0
-    && x.length <= 128 && /^[A-Za-z0-9._/-]+$/.test(x);
-  const evidence = (x: unknown) => typeof x === "string" && /^sha256:[0-9a-f]{64}$/.test(x);
-  return evidence(v.origin_evidence_id)
-    && (v.authority_evidence_id === undefined || evidence(v.authority_evidence_id))
-    && version(v.origin_schema) && version(v.origin_version)
-    && exactKeys(d,["decision_time_ms","price","price_basis","price_policy_version"])
-    && Number.isSafeInteger(d.decision_time_ms) && Number(d.decision_time_ms) > 0
-    && decimal(d.price)
-    && ["decision_price","arrival_mid","mark","index","last","limit_price"].includes(String(d.price_basis))
-    && version(d.price_policy_version);
-}
-export function isExecutionMutation(operationType: unknown): boolean {
-  return [
-    "connect_account", "prepare_execution", "submit_prepared_execution",
-    "mutate_execution", "abort_reverse_execution", "abandon_prepared_execution",
-    "begin_strategy_run", "finalize_strategy_run", "quarantine_unverified_strategy_run", "set_leverage",
-    "reconcile_unsent_prepared",
-  ].includes(String(operationType));
-}
-
-// One transport contract for every authenticated account. Cloudflare neither
-// grants trades nor owns a second Demo/Real permission table; the existing
-// Rust executor checks the account's actual capabilities before any mutation.
-// Unauthenticated/unrecognized sessions remain fail-closed.
-export function executionProfilePermitsOperation(profile: string | undefined, operationType: unknown): boolean {
-  if (!isExecutionMutation(operationType)) return true;
-  return profile === "engine" || profile === "demo_acceptance" || profile === "production";
-}
-
-/** Return exactly one whitelisted native Rust AgentOperation, never arbitrary operation JSON. */
-export function buildExecutionOperation(args: Record<string, unknown>): Record<string, unknown> | null {
-  if (!token(args.intent_id,16,128) || typeof args.action !== "string") return null;
-  const intent_id=args.intent_id;
-  switch(args.action){
-    case "reconcile_unsent_prepared": {
-      // Exact whole-inventory maintenance: not a trade, not a dry-run signal
-      // and never operator-supplied evidence about OKX orders/fills.
-      const ids=args.intent_ids;
-      if (!exactKeys(args, [
-          "action","intent_id","expected_manifest_sha256",
-          "account_uid_fingerprint","intent_ids"
-        ])
-        || typeof args.expected_manifest_sha256 !== "string"
-        || !/^[0-9a-f]{64}$/.test(args.expected_manifest_sha256)
-        || typeof args.account_uid_fingerprint !== "string"
-        || !/^[0-9a-f]{64}$/.test(args.account_uid_fingerprint)
-        || !Array.isArray(ids) || ids.length===0 || ids.length>32
-        || !ids.every(v=>token(v,16,128))
-        || !ids.every((v,i)=>i===0 || String(ids[i-1])<String(v))) return null;
-      return {
-        type:"reconcile_unsent_prepared",
-        expected_manifest_sha256:args.expected_manifest_sha256,
-        account_uid_fingerprint:args.account_uid_fingerprint,
-        intent_ids:ids,
-      };
-    }
-    case "set_leverage": {
-      if (!exactKeys(args,["action","intent_id","instrument","trade_mode","leverage"])
-        || !token(args.instrument,3,64)
-        || !String(args.instrument).endsWith("-USDT-SWAP")
-        || args.trade_mode!=="cross" || !decimal(args.leverage)) return null;
-      return {type:"set_leverage",mutation_id:intent_id,
-        instrument:args.instrument,margin_mode:"cross",leverage:args.leverage};
-    }
-    case "finalize_strategy_run": {
-      if (!exactKeys(args,["action","intent_id"])) return null;
-      return {type:"finalize_strategy_run",allocation_id:intent_id};
-    }
-    case "quarantine_unverified_strategy_run": {
-      if (!exactKeys(args,["action","intent_id"])) return null;
-      return {type:"quarantine_unverified_strategy_run",allocation_id:intent_id};
-    }
-    case "begin_strategy_run": {
-      if (!exactKeys(args,["action","intent_id","strategy_id","origin_schema","origin_version","mandate_version","allocated_usdt","operator_authority_id","rearm"])
-        || !token(args.strategy_id,2,64)
-        || ![args.origin_schema,args.origin_version,args.mandate_version].every(v =>
-          typeof v==="string" && v.length>0 && v.length<=64 && /^[A-Za-z0-9._/-]+$/.test(v))
-        || !decimal(args.allocated_usdt)
-        || typeof args.operator_authority_id!=="string"
-        || !/^sha256:[0-9a-f]{64}$/.test(args.operator_authority_id)
-        || (args.rearm !== undefined
-          && (!isObject(args.rearm)
-            || !exactKeys(args.rearm,["expected_stopped_at_ms","prior_finalization_sha256"])
-            || !Number.isSafeInteger(args.rearm.expected_stopped_at_ms)
-            || Number(args.rearm.expected_stopped_at_ms) <= 0
-            || !/^[0-9a-f]{64}$/.test(String(args.rearm.prior_finalization_sha256))))) return null;
-      return {type:"begin_strategy_run",allocation_id:intent_id,
-        strategy_id:args.strategy_id,
-        origin_schema:args.origin_schema,origin_version:args.origin_version,
-        mandate_version:args.mandate_version,allocated_usdt:args.allocated_usdt,
-        operator_authority_id:args.operator_authority_id,
-        ...(args.rearm===undefined?{}:{rearm:args.rearm})};
-    }
-    case "prepare": {
-      if (!exactKeys(args,["action","intent_id","instrument","trade_mode","order_type","spec","risk","lineage"])
-        || !token(args.instrument,3,64) || !["cross","isolated"].includes(String(args.trade_mode))
-        || !["limit","post_only","fok","ioc"].includes(String(args.order_type))
-        || !preparedSpec(args.spec) || !riskInput(args.risk)
-        || (args.lineage!==undefined && !lineageInput(args.lineage))) return null;
-      return {
-        type:"prepare_execution", intent_id, instrument:args.instrument, trade_mode:args.trade_mode,
-        order_type:args.order_type, spec:args.spec, risk:args.risk, lineage:args.lineage??null,
-      };
-    }
-    case "submit":
-    case "abort_reverse":
-    case "abandon_prepared":
-      if (!exactKeys(args,["action","intent_id"])) return null;
-      return {type:args.action==="submit"?"submit_prepared_execution"
-        :args.action==="abort_reverse"?"abort_reverse_execution":"abandon_prepared_execution",intent_id};
-    case "amend":
-      if (!exactKeys(args,["action","intent_id","mutation_id","new_size","new_price"])
-        || !token(args.mutation_id,8,128)
-        || (args.new_size===undefined && args.new_price===undefined)
-        || (args.new_size!==undefined && !decimal(args.new_size))
-        || (args.new_price!==undefined && !decimal(args.new_price))) return null;
-      return {type:"mutate_execution",intent_id,mutation:{
-        type:"amend",mutation_id:args.mutation_id,new_size:args.new_size??null,new_price:args.new_price??null,
-      }};
-    case "shrink_protection_size":
-      if (!exactKeys(args,["action","intent_id","mutation_id","new_size"])
-        || !token(args.mutation_id,8,128) || !decimal(args.new_size)) return null;
-      return {type:"mutate_execution",intent_id,mutation:{
-        type:"shrink_protection",mutation_id:args.mutation_id,new_size:args.new_size,
-      }};
-    case "cancel":
-    case "cancel_protection":
-    case "confirm_protection_size":
-      if (!exactKeys(args,["action","intent_id","mutation_id"]) || !token(args.mutation_id,8,128)) return null;
-      return {type:"mutate_execution",intent_id,mutation:{type:args.action,mutation_id:args.mutation_id}};
-    default:
-      return null;
-  }
-}

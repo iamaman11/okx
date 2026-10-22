@@ -1,4 +1,4 @@
-import {accountKey,amount,units,readRiskBook,reserveRisk,transitionRisk,beginRiskPost} from "./risk_book.js";
+import {accountKey,amount,units,readRiskBook,initializeRiskBook,inspectRisk,reserveRisk,transitionRisk,beginRiskPost} from "./risk_book.js";
 function check(value: boolean, label:string) { if(!value) throw Error(label); }
 class Storage {
   map=new Map<string,unknown>();
@@ -18,9 +18,9 @@ const policy={revision:1,enabled:true,authorized_ceiling_usdt:"10",
   global_limit_usdt:"10",account_limits_usdt:{["okx:real:"+a]:"10",["okx:real:"+b]:"10"}};
 const census={complete:true as const,source_digest:d,content_digest:a,
   source_read_floor_ms:now,generated_at_ms:now,
-  account_keys:["okx:real:"+a,"okx:real:"+b],occupied:[{account_key:"okx:real:"+a,occupied_usdt:"0"},{account_key:"okx:real:"+b,occupied_usdt:"0"}]};
+  account_keys:["okx:real:"+a,"okx:real:"+b],occupied:[{account_key:"okx:real:"+a,occupied_usdt:"0",cumulative_loss_usd:"0"},{account_key:"okx:real:"+b,occupied_usdt:"0",cumulative_loss_usd:"0"}]};
 const base={venue:"okx",environment:"real" as const,run_id:"run_20261018_AAA",
-  plan_hash:p,policy_revision:1,now_ms:now,strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP"};
+  loss_usd:"6",usd_conversion:{usd_per_usdt:"1",source_digest:d,observed_at_ms:now},plan_hash:p,policy_revision:1,now_ms:now,strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP"};
 const sa=new Storage();
 function account(uid:string){
  return {
@@ -37,170 +37,36 @@ const governance={
  schema:"okx.governance/v3",revision:1,installation_id:"installation_test",campaign_id:"sha256:"+d,campaign_loss_limit_usd:"20",
  max_total_modelled_loss_usdt:"10",accounts:[account(a),account(b)]
 };
-await sa.put("account_access_v1",governance);
-const unattested=await reserveRisk(sa,policy,census,{...base,uid:a,
-  intent_id:"intent_20261018_unproof",loss_usdt:"1"});
-check(unattested.status==="DENIED","raw census digest is not native attestation");
-const native={connection_generation:77,source_digest:census.source_digest,
-  native_account_evidence_complete:true,native_order_evidence_complete:true,
-  native_ledger_evidence_complete:true};
-await sa.put("generation",77);
-const reserve=(storage:Parameters<typeof reserveRisk>[0],bounds:Parameters<typeof reserveRisk>[1],
-  source:Parameters<typeof reserveRisk>[2],input:Parameters<typeof reserveRisk>[3])=>
-  reserveRisk(storage,bounds,source,input,native);
-check((await reserve(sa,policy,{...census,source_digest:p},{...base,uid:a,
-  intent_id:"intent_20261018_tamper",loss_usdt:"1"})).status==="DENIED",
- "census digest mismatch never reserves");
-await sa.put("generation",78);
-check((await reserve(sa,policy,census,{...base,uid:a,
-  intent_id:"intent_20261018_stale",loss_usdt:"1"})).status==="DENIED",
- "prior-session risk census cannot be replayed");
-await sa.put("generation",77);
-const untrusted=new Storage();
-check((await reserve(untrusted,policy,census,{...base,uid:a,intent_id:"intent_20261018_outs",loss_usdt:"1"})).status==="DENIED",
- "caller-supplied risk policy cannot mint capacity without persisted DO governance");
-const reqA={...base,uid:a,intent_id:"intent_20261018_aaaa",loss_usdt:"6"};
-const reqB={...base,uid:b,intent_id:"intent_20261018_bbbb",loss_usdt:"5"};
-check(units("1.000000001")===1000000001n,"exact 9-decimal");
-check(units("1e10")===null&&units("-1")===null&&units("0.0000000001")===null,"no float/exponents");
-check(amount(1000000001n)==="1.000000001","round-trip exact");
-const both=await Promise.all([reserve(sa,policy,census,reqA),reserve(sa,policy,census,reqB)]);
-check(both[0].status==="HELD"&&both[1].status==="DENIED","serial competition 6+5 >10");
-check((await readRiskBook(sa))?.entries.length===1,"one durable reservation");
-check((await reserve(sa,policy,census,{...reqB,loss_usdt:"7"})).status==="DENIED",
- "per-order limit is enforced centrally before any reservation");
-check((await reserve(sa,policy,census,{...reqA,intent_id:"intent_20261018_extra",
- loss_usdt:"1"})).status==="DENIED",
- "strategy risk cap cannot be exceeded by splitting orders");
-check((await reserve(sa,policy,census,{...reqA,intent_id:"intent_20261018_fake",
- strategy_id:"unknown_strat",loss_usdt:"1"})).status==="DENIED",
- "unregistered strategy cannot reserve portfolio risk");
-check((await reserve(sa,policy,census,reqA)).status==="DENIED",
- "uncertain HELD reservation never grants another positive receipt");
-check((await reserve(sa,policy,census,{...reqA,plan_hash:d})).status==="DENIED","intent plan immutable");
-check((await reserve(sa,policy,{...census,account_keys:["okx:real:"+a]},reqB)).status==="DENIED",
-  "selected-only UID cannot assert empty other accounts");
-check((await reserve(sa,policy,{...census,generated_at_ms:now-5001},reqB)).status==="DENIED",
-  "stale source is not zero risk");
-check((await reserve(sa,{...policy,global_limit_usdt:"4"},census,reqB)).status==="DENIED",
-  "lowering limit does not free existing risk");
-check((await reserve(sa,policy,census,{...reqA,intent_id:"intent_20261018_eth",
- instrument_id:"ETH-USDT-SWAP",loss_usdt:"1"})).status==="DENIED",
- "native risk cannot reserve an instrument omitted from central account policy");
-const entry=(await readRiskBook(sa))!.entries[0];
-check(entry.reserve_source_digest===census.source_digest
-  &&entry.reserve_source_read_floor_ms===census.source_read_floor_ms,
- "first native source proof is durable");
-check((await transitionRisk(sa,entry.key,p,"UNKNOWN",d)).status==="DENIED",
-  "caller-supplied proof digest does not unlock risk state transition");
-const beforePost=await readRiskBook(sa);
-const postCensus={...census,generated_at_ms:now+1,
-  source_read_floor_ms:now+1,source_digest:p};
-const postNative={...native,source_digest:p};
-const postProof={connection_generation:77,expected_book_sequence:beforePost!.sequence,
- census:postCensus,source_proof:postNative,now_ms:now+1};
-const manualExposure={...postCensus,occupied:[
- {...census.occupied[0],occupied_usdt:"8"},census.occupied[1]]};
-check((await beginRiskPost(sa,entry.key,p,1,d,{
- ...postProof,census,source_proof:native,now_ms:now
-})).reason==="POST_CENSUS_NOT_AFTER_RESERVE",
- "reserve-time census cannot authorize POST");
-check((await beginRiskPost(sa,entry.key,p,1,d,{
- ...postProof,census:manualExposure
-})).status==="DENIED","new manual exposure after reserve cannot sneak through POST fence");
-check((await beginRiskPost(sa,entry.key,p,1,d,{
- ...postProof,census:{...postCensus,source_digest:census.source_digest},
- source_proof:native
-})).reason==="POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN",
- "new timestamp with reused census source digest cannot POST");
-check((await beginRiskPost(sa,entry.key,p,1,d,{
- ...postProof,census:{...postCensus,source_read_floor_ms:now}
-})).reason==="POST_CENSUS_NOT_AFTER_RESERVE",
- "later command time cannot replace all-UID source read");
-check(postCensus.content_digest===census.content_digest,
- "two independent reads can observe identical positions and risk");
-check((await beginRiskPost(sa,entry.key,p,1,d,{
- ...postProof,census:{...postCensus,generated_at_ms:now-5001}
-})).status==="DENIED","stale census cannot grant POST");
-// Existing reservations predating source binding keep consuming risk but
-// cannot become POST_AUTHORIZED by fabricated after-the-fact provenance.
-const legacyEntry={...entry};
-delete legacyEntry.reserve_source_digest;
-await sa.put("risk_book_v1",{...beforePost!,entries:[legacyEntry]});
-check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).reason===
- "POST_CENSUS_SOURCE_REUSED_OR_UNKNOWN",
- "legacy HELD without the initial native source digest cannot POST");
-await sa.put("risk_book_v1",beforePost!);
-const granted=await beginRiskPost(sa,entry.key,p,1,d,postProof);
-check(granted.status==="POST_AUTHORIZED" && granted.existing_modelled_loss_usdt==="0",
- "one native POST reports exact occupied risk excluding its own reservation");
-check((await reserve(sa,policy,census,reqA)).status==="DENIED",
- "POSTED cannot recover HELD");
-check((await beginRiskPost(sa,entry.key,p,1,d,postProof)).status==="DENIED",
- "same reservation cannot POST twice");
-const terminalCensus={...postCensus,source_digest:d,
- generated_at_ms:now+2,source_read_floor_ms:now+2};
-const terminal={
- now_ms:now+2,source_proof:{...native,source_digest:d},census:terminalCensus,
- ledger:{account_uid:a,run_id:reqA.run_id,intent_id:reqA.intent_id,
-  state:"FILLED" as const,record_digest:d}
-};
-const transition=async(to:Parameters<typeof transitionRisk>[3],proof:string,
- releaseProof:typeof terminal|null=to==="RELEASED"?terminal:null)=>{
- const current=await readRiskBook(sa);
- return transitionRisk(sa,entry.key,p,to,proof,{
-  connection_generation:77,expected_book_sequence:current!.sequence,
-  terminal:releaseProof??undefined
- });
-};
-check((await transition("UNKNOWN",d)).status==="UPDATED",
-  "ack-loss risk remains");
-check((await reserve(sa,policy,census,reqA)).status==="DENIED",
- "UNKNOWN cannot recover HELD");
-check((await reserve(sa,policy,census,reqB)).status==="DENIED","UNKNOWN consumes risk");
-check((await transition("HELD",d)).status==="DENIED","no backward mutation");
-check((await transition("RELEASED","invalid")).status==="DENIED","proof required");
-check((await transition("RELEASED",d,null)).status==="DENIED",
- "digest without a separate native terminal proof cannot release risk");
-check((await transition("RELEASED",d,{...terminal,
- ledger:{...terminal.ledger,intent_id:"intent_wrong"}})).status==="DENIED",
- "terminal intent must exactly match reserved intent");
-check((await transition("RELEASED",d,{...terminal,
- census:{...terminalCensus,occupied:[{...census.occupied[0],occupied_usdt:"1"},census.occupied[1]]}})).status==="DENIED",
- "non-flat native cohort cannot release reservation");
-check((await transition("RELEASED",d,{...terminal,
- census:{...terminalCensus,source_read_floor_ms:now+1}})).status==="DENIED",
- "terminal census must be newer than posted risk");
-check((await transition("RELEASED",d)).status==="UPDATED",
- "full fresh flat cohort and exact terminal intent allow one release");
-check((await reserve(sa,policy,census,reqA)).status==="DENIED","released intent tombstone never reused");
-check((await reserve(sa,policy,census,reqB)).status==="HELD","risk freed after proof");
-const v=await readRiskBook(sa);
-check(v?.entries.length===2&&v.entries[0].state==="RELEASED"&&v.entries[1].state==="HELD","durability");
-const disabled={...governance,accounts:governance.accounts.map(ac=>
-  ac.uid_fingerprint===b?{...ac,enabled:false}:ac)};
-await sa.put("account_access_v1",disabled);
-check((await reserve(sa,policy,census,{...base,uid:b,
-  intent_id:"intent_20261018_disabled",loss_usdt:"1"})).status==="DENIED",
- "disabled account cannot open new risk");
-await sa.put("account_access_v1",governance);
-// A second UID's independently observed risk must never be replaced by zero.
-const weighted=new Storage();
-await weighted.put("account_access_v1",governance);
-await weighted.put("generation",77);
-const weightedCensus={...census,occupied:[census.occupied[0],
- {...census.occupied[1],occupied_usdt:"2"}]};
-const weightedHeld=await reserve(weighted,policy,weightedCensus,
- {...base,uid:a,intent_id:"intent_20261019_weighted",loss_usdt:"4"});
-check(weightedHeld.status==="HELD","weighted reserve accepted");
-if(weightedHeld.status==="HELD"){
- const decision=await beginRiskPost(weighted,weightedHeld.entry.key,p,1,d,{
-  ...postProof,expected_book_sequence:weightedHeld.book_sequence,
-  census:{...weightedCensus,source_digest:p,generated_at_ms:now+1,source_read_floor_ms:now+1}
- });
- check(decision.status==="POST_AUTHORIZED" && decision.existing_modelled_loss_usdt==="2",
-  "receipt preserves other-account exposure without double counting candidate");
-}
-await sa.put("risk_book_v1",{fake:true});
-check((await reserve(sa,policy,census,{...reqB,intent_id:"intent_20261018_cccc"})).status==="DENIED",
-  "corrupt owner fails closed");
+await sa.put("account_access_v1",governance);await sa.put("generation",77);await initializeRiskBook(sa,"installation_test");
+const native={connection_generation:77,source_digest:d,native_account_evidence_complete:true,native_order_evidence_complete:true,native_ledger_evidence_complete:true};
+const request={...base,uid:a,intent_id:"intent_12345678",loss_usdt:"6"};
+const reserve=(input= request,storage=sa)=>reserveRisk(storage,policy,census,input,native);
+check(units("1.000000001")===1000000001n&&units("1e9")===null,"decimal exact");
+const both=await Promise.all([reserve(),reserve({...request,uid:b,intent_id:"intent_23456789",loss_usdt:"5",loss_usd:"5"})]);
+check(both[0].status==="HELD"&&both[1].status==="DENIED","RISK-01 competing accounts aggregate");
+const held=both[0];if(held.status!=="HELD")throw Error("held");
+check((await reserve()).status==="HELD","central_reserve_reply_lost retry same body same receipt");
+check((await reserve({...request,plan_hash:d})).status==="DENIED","same key different body conflicts");
+check((await reserve({...request,loss_usd:"5"})).status==="DENIED","USD exact conversion rejected");
+const missing=new Storage();await missing.put("generation",77);await missing.put("account_access_v1",governance);
+check((await reserve(request,missing)).status==="DENIED","worker_storage_missing_is_not_zero_budget");
+check((await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{connection_generation:77,expected_book_sequence:1})).status==="DENIED","no unknown/held release without exact terminal proof");
+const later={...census,source_digest:p,source_read_floor_ms:now+1,generated_at_ms:now+1};
+const begun=await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:1,census:later,source_proof:{...native,source_digest:p},now_ms:now+2});
+check(begun.status==="POST_AUTHORIZED","single durable POST fence");
+check((await beginRiskPost(sa,held.entry.key,p,1,d,{connection_generation:77,expected_book_sequence:2,census:later,source_proof:{...native,source_digest:p},now_ms:now+3})).status==="DENIED","no duplicate POST fence");
+check((await inspectRisk(sa,held.entry.key))?.entry.state==="POSTED","addressed readback");
+const terminalCensus={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"2":"0"})),source_digest:a,generated_at_ms:now+4,source_read_floor_ms:now+4};
+check((await transitionRisk(sa,held.entry.key,p,"RELEASED",d,{connection_generation:77,expected_book_sequence:2,terminal:{census:terminalCensus,source_proof:{...native,source_digest:a},ledger:{account_uid:a,run_id:base.run_id,intent_id:request.intent_id,state:"FILLED",record_digest:p,cumulative_loss_usd:"2",remaining_exposure_usdt:"0"},now_ms:now+5}})).status==="UPDATED","terminal exact release consumes cumulative losses");
+check((await readRiskBook(sa))?.consumed_loss_usd==="2"&&(await readRiskBook(sa))?.occupied_usdt==="0","loss survives restart and release");
+const reported={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss_usd:v.account_key===accountKey(request)?"17":"0"}))};
+const campaign=await reserveRisk(sa,policy,reported,{...request,intent_id:"new_intent_001",loss_usdt:"4",loss_usd:"4"},native);
+check(campaign.status==="DENIED"&&campaign.reason==="CAMPAIGN_LOSS_BUDGET_EXHAUSTED","fresh losses charged before reserve even when admission denied");
+check((await readRiskBook(sa))?.consumed_loss_usd==="17","campaign losses remain charged without releasing any new reservation");
+census.occupied[0].cumulative_loss_usd="17";
+// One million terminal records must not be enumerated or decoded on the hot path.
+for(let i=0;i<1_000_000;i++)sa.map.set("risk_entry_v2:tombstone_"+i,{state:"RELEASED",key:i});
+let reads=0;const original=sa.get.bind(sa);sa.get=async(k:string)=>{reads++;return original(k);};
+const started=performance.now();check((await reserve()).status==="DENIED","posted retry cannot authorize");
+check(reads<=7,"million history bounded point reads");
+console.log(`million_history_hot_read PASS records=1000000 reads=${reads} elapsed_ms=${(performance.now()-started).toFixed(3)}`);

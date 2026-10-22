@@ -7,7 +7,8 @@ pub struct AdmissionEvidence {
     pub deadline: i64,
     pub quote_at: i64,
     pub account_at: i64,
-    pub generation: u64,
+    pub public_generation: u64,
+    pub private_generation: u64,
     pub quote_generation: u64,
     pub account_generation: u64,
     pub rules_generation: u64,
@@ -40,9 +41,9 @@ pub fn evaluate_admission(e: &AdmissionEvidence, ttl: FreshnessLimits) -> StoreR
     if e.policy_revision != e.planned_policy_revision {
         return Err(StoreError::Invalid("POLICY_CHANGED"));
     }
-    if [e.quote_generation, e.account_generation, e.rules_generation]
-        .iter()
-        .any(|g| *g != e.generation)
+    if e.quote_generation != e.public_generation
+        || e.rules_generation != e.public_generation
+        || e.account_generation != e.private_generation
     {
         return Err(StoreError::Invalid("SOURCE_GENERATION_MISMATCH"));
     }
@@ -86,9 +87,10 @@ mod tests {
             deadline: 101,
             quote_at: 100,
             account_at: 100,
-            generation: 1,
+            public_generation: 1,
+            private_generation: 2,
             quote_generation: 1,
-            account_generation: 1,
+            account_generation: 2,
             rules_generation: 1,
             policy_revision: 1,
             planned_policy_revision: 1,
@@ -104,5 +106,45 @@ mod tests {
     #[test]
     fn reservation_rounds_up() {
         assert_eq!(reserve_units(Decimal::new(1, 10)).unwrap(), 1);
+    }
+    #[test]
+    fn ttl_boundaries_and_independent_source_generations() {
+        let mut e = AdmissionEvidence {
+            now: 5001,
+            deadline: 6000,
+            quote_at: 3001,
+            account_at: 1,
+            public_generation: 7,
+            private_generation: 91,
+            quote_generation: 7,
+            account_generation: 91,
+            rules_generation: 7,
+            policy_revision: 2,
+            planned_policy_revision: 2,
+            risk_increase: true,
+            paused: false,
+            stopped: false,
+            complete: true,
+            confirmed_reduce_qty: Decimal::ZERO,
+            requested_qty: Decimal::ONE,
+        };
+        evaluate_admission(&e, FreshnessLimits::default()).unwrap();
+        e.quote_at = 3000;
+        assert!(matches!(
+            evaluate_admission(&e, FreshnessLimits::default()),
+            Err(StoreError::Invalid("WAITING_FRESH_QUOTE"))
+        ));
+        e.quote_at = 3001;
+        e.account_at = 0;
+        assert!(matches!(
+            evaluate_admission(&e, FreshnessLimits::default()),
+            Err(StoreError::Invalid("WAITING_ACCOUNT_EVIDENCE"))
+        ));
+        e.account_at = 1;
+        e.account_generation = 7;
+        assert!(matches!(
+            evaluate_admission(&e, FreshnessLimits::default()),
+            Err(StoreError::Invalid("SOURCE_GENERATION_MISMATCH"))
+        ));
     }
 }

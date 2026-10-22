@@ -411,6 +411,27 @@ impl MarketBootstrapper {
     }
 }
 
+impl MarketBootstrapper {
+    pub async fn analytics_ticker(
+        &self,
+        instrument: &str,
+    ) -> Result<okx_api::PublicTicker, MarketBootstrapError> {
+        Ok(self.api.ticker(instrument).await?)
+    }
+}
+impl MarketBootstrapper {
+    pub async fn analytics_oi(
+        &self,
+        instrument: &str,
+        period: &str,
+    ) -> Result<Vec<okx_api::PublicOpenInterestHistory>, MarketBootstrapError> {
+        Ok(self
+            .api
+            .open_interest_history(instrument, period, 100)
+            .await?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

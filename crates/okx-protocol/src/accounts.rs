@@ -77,6 +77,10 @@ pub fn valid_reference(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+pub fn valid_installation(value: &str) -> bool {
+    valid_reference(value) && value.len() >= 8
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifiedAccountConfig {
@@ -84,11 +88,17 @@ pub struct VerifiedAccountConfig {
     pub alias: String,
     pub credential_ref: String,
     pub connect_operation_id: String,
+    pub configuration_digest: String,
 }
 
 impl VerifiedAccountConfig {
     pub fn valid(&self) -> bool {
         self.account_key.valid()
+            && self.configuration_digest.len() == 64
+            && self
+                .configuration_digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             && valid_reference(&self.alias)
             && valid_reference(&self.credential_ref)
             && (8..=128).contains(&self.connect_operation_id.len())
@@ -115,7 +125,7 @@ impl AccountCatalog {
         let mut keys = BTreeSet::new();
         let mut refs = BTreeSet::new();
         self.schema == Self::SCHEMA
-            && valid_reference(&self.installation_id)
+            && valid_installation(&self.installation_id)
             && self.accounts.len() <= 32
             && self.accounts.iter().all(|a| {
                 a.valid()

@@ -77,11 +77,11 @@ pub enum ApiTriggerPriceType {
 pub struct AttachedAlgoOrderRequest {
     #[serde(rename = "attachAlgoClOrdId")]
     pub client_order_id: String,
-    #[serde(rename = "tpTriggerPx")]
+    #[serde(rename = "tpTriggerPx", skip_serializing_if = "String::is_empty")]
     pub take_profit_trigger_price: String,
     #[serde(rename = "tpTriggerPxType")]
     pub take_profit_trigger_price_type: ApiTriggerPriceType,
-    #[serde(rename = "tpOrdPx")]
+    #[serde(rename = "tpOrdPx", skip_serializing_if = "String::is_empty")]
     pub take_profit_order_price: String,
     #[serde(rename = "slTriggerPx")]
     pub stop_loss_trigger_price: String,
@@ -315,7 +315,7 @@ impl<T> From<ApiEnvelope<T>> for TradeResponse<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradeOrderDetails {
     #[serde(rename = "instId", default)]
     pub instrument_id: String,
@@ -347,7 +347,7 @@ pub struct TradeOrderDetails {
     pub update_time_ms: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradeAlgoOrderDetails {
     #[serde(rename = "instId", default)]
     pub instrument_id: String,
@@ -1076,8 +1076,12 @@ fn validate_place(request: &PlaceOrderRequest) -> Result<(), OkxError> {
     validate_nonempty("px", &request.price)?;
     for attached in &request.attached_algo_orders {
         validate_client_id("attachAlgoClOrdId", &attached.client_order_id)?;
-        validate_nonempty("tpTriggerPx", &attached.take_profit_trigger_price)?;
-        validate_nonempty("tpOrdPx", &attached.take_profit_order_price)?;
+        if !attached.take_profit_trigger_price.is_empty()
+            || !attached.take_profit_order_price.is_empty()
+        {
+            validate_nonempty("tpTriggerPx", &attached.take_profit_trigger_price)?;
+            validate_nonempty("tpOrdPx", &attached.take_profit_order_price)?;
+        }
         validate_nonempty("slTriggerPx", &attached.stop_loss_trigger_price)?;
         validate_nonempty("slOrdPx", &attached.stop_loss_order_price)?;
     }

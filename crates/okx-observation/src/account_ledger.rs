@@ -917,6 +917,7 @@ mod tests {
                 notional_usd: None,
                 update_time_ms: Some("1790884800000".to_owned()),
                 details: vec![AccountBalanceDetail {
+                    liabilities: None,
                     currency: "USDT".to_owned(),
                     equity: "100.5".to_owned(),
                     cash_balance: None,
@@ -1120,6 +1121,7 @@ mod tests {
             account.positions.clear();
             account.pending_orders.clear();
             account.balance.details.push(AccountBalanceDetail {
+                liabilities: None,
                 currency: "BTC".to_owned(),
                 equity: other_equity.to_owned(),
                 cash_balance: None,

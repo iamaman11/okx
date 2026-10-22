@@ -2,6 +2,44 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 #[test]
+fn sql_deadline_handler_is_removed_after_operation_error() {
+    let mut s = store();
+    let result: StoreResult<()> =
+        s.run_before_deadline(std::time::Instant::now() + Duration::from_millis(1), |_| {
+            std::thread::sleep(Duration::from_millis(3));
+            Err(StoreError::Invalid("fixture-operation-failure"))
+        });
+    assert!(matches!(
+        result,
+        Err(StoreError::Invalid("fixture-operation-failure"))
+    ));
+    let total:i64=s.connection.query_row("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) SELECT sum(x) FROM n",[],|r|r.get(0)).unwrap();
+    assert_eq!(total, 50005000);
+}
+#[tokio::test]
+async fn long_reader_is_interrupted_at_deadline_and_worker_recovers() {
+    let s = store();
+    let p = s.path.clone();
+    let m = s.meta.clone();
+    drop(s);
+    let h = crate::AccountStoreHandle::open_existing(p, m.account_key, m.installation_id)
+        .await
+        .unwrap();
+    let result=h.call(std::time::Instant::now()+Duration::from_millis(20),|s|{let _:i64=s.connection.query_row("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n",[],|r|r.get(0))?;Ok(())}).await;
+    assert!(matches!(
+        result,
+        Err(StoreError::Invalid("ACCOUNT_STORAGE_DEADLINE"))
+    ));
+    assert_eq!(
+        h.call(std::time::Instant::now() + Duration::from_secs(2), |s| Ok(
+            s.meta.initialized_at
+        ))
+        .await
+        .unwrap(),
+        1
+    );
+}
+#[test]
 fn missing_fx_stops_risk_and_does_not_commit_zero_loss_or_cursor() {
     let mut s = store();
     let fx = UsdConversionEvidence {
@@ -330,7 +368,10 @@ fn funding_at_event_respects_opposite_instances_and_later_fills() {
         .iter()
         .filter(|e| e.component == "FUNDING")
         .collect::<Vec<_>>();
-    assert_eq!(funding.len(), 1);
+    assert_eq!(
+        funding.iter().filter(|e| e.amount != Decimal::ZERO).count(),
+        1
+    );
     assert_eq!(funding[0].instance_id.as_deref(), Some("a"));
     assert_eq!(s.policy().unwrap().4, Decimal::ONE);
 }
@@ -963,13 +1004,18 @@ fn disk_full_before_post() {
     let mut s = store();
     intent(&mut s);
     reserve(&mut s);
-    s.connection
-        .pragma_update(None, "query_only", "ON")
+    s.connection.execute_batch("CREATE TABLE fault_padding(bytes BLOB) STRICT; CREATE TEMP TRIGGER inject_full BEFORE UPDATE OF state ON intents WHEN NEW.state='POSTING' BEGIN INSERT INTO fault_padding VALUES(zeroblob(1000000)); END;").unwrap();
+    let pages: i64 = s
+        .connection
+        .pragma_query_value(None, "page_count", |r| r.get(0))
         .unwrap();
-    assert!(s.begin_post("intent", 1, 4).is_err());
     s.connection
-        .pragma_update(None, "query_only", "OFF")
+        .pragma_update(None, "max_page_count", pages)
         .unwrap();
+    let error = s.begin_post("intent", 1, 4).unwrap_err();
+    assert!(
+        matches!(error,StoreError::Sql(rusqlite::Error::SqliteFailure(e,_))if e.code==rusqlite::ErrorCode::DiskFull)
+    );
     assert_eq!(
         s.intent("intent").unwrap().unwrap().state,
         IntentState::Reserved

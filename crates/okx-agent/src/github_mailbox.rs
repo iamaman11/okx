@@ -3,22 +3,15 @@ use std::{collections::BTreeSet, path::Path, time::Instant};
 use chrono::{DateTime, Utc};
 use okx_github::{
     GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCommentCursor, IssueCursorStore,
-    IssuePollTelemetryStatus, IssuePollTelemetryStore, IssueResponseSizeTelemetry, OWNER_USER_ID,
-    REPOSITORY_ID,
+    IssuePollTelemetryStore, IssueResponseSizeTelemetry, OWNER_USER_ID, REPOSITORY_ID,
 };
 use okx_protocol::{MailboxDirection, MailboxEnvelope};
-use okx_runtime::{PrivateWsHandle, PublicWsHandle};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::{
-    AgentError, AgentResult,
-    account_bootstrap::AccountBootstrapper,
-    execution_runtime::ExecutionRuntime,
-    identity::AgentIdentity,
-    market_bootstrap::MarketBootstrapper,
-    once::{ObservationQueryContext, process_once_now_with_size_telemetry},
-    research_session::ResearchSessionHandle,
+    AgentError, AgentResult, identity::AgentIdentity, once::process_once_now_with_size_telemetry,
+    query::DispatchContext,
 };
 
 pub const GITHUB_MAILBOX_IDENTITY_SCHEMA_V1: &str = "okx.github-mailbox.identity/v1";
@@ -26,13 +19,7 @@ pub const GITHUB_MAILBOX_IDENTITY_SCHEMA_V1: &str = "okx.github-mailbox.identity
 pub struct MailboxQueryRuntimeContext<'a> {
     pub expected_key_id: &'a str,
     pub agent_private_key: &'a [u8; 32],
-    pub public_ws: &'a PublicWsHandle,
-    pub market: &'a MarketBootstrapper,
-    pub account: Option<&'a AccountBootstrapper>,
-    pub private_ws: Option<&'a PrivateWsHandle>,
-    pub execution: Option<&'a ExecutionRuntime>,
-    pub research_root: &'a Path,
-    pub research_session: &'a ResearchSessionHandle,
+    pub dispatch: &'a DispatchContext,
 }
 
 pub struct GitHubMailboxClient {
@@ -102,13 +89,7 @@ impl GitHubMailboxClient {
         let MailboxQueryRuntimeContext {
             expected_key_id,
             agent_private_key,
-            public_ws,
-            market,
-            account,
-            private_ws,
-            execution,
-            research_root,
-            research_session,
+            dispatch,
         } = context;
         let mut checkpoint = self.load_checkpoint_for_poll()?;
         let fetch_started = Instant::now();
@@ -161,7 +142,6 @@ impl GitHubMailboxClient {
         let mut last_terminal_request_id = last_terminal_request_id(&comments);
         let mut last_request_latency_ms = None;
         let mut last_response_size = None;
-        let mailbox_telemetry = self.telemetry_for_query();
 
         for comment in &comments {
             if comment.user_id != OWNER_USER_ID {
@@ -181,16 +161,7 @@ impl GitHubMailboxClient {
                 &envelope,
                 expected_key_id,
                 agent_private_key,
-                ObservationQueryContext::live_with_execution_research_and_session(
-                    public_ws,
-                    market,
-                    mailbox_telemetry.as_ref(),
-                    account,
-                    private_ws,
-                    execution,
-                    Some(research_root),
-                    Some(research_session),
-                ),
+                dispatch,
             )
             .await
             {
@@ -242,16 +213,6 @@ impl GitHubMailboxClient {
         );
 
         Ok(processed)
-    }
-
-    fn telemetry_for_query(&self) -> Option<IssuePollTelemetryStatus> {
-        match self.telemetry_store.status() {
-            Ok(status) => status,
-            Err(error) => {
-                eprintln!("mailbox telemetry read failed: {error}");
-                None
-            }
-        }
     }
 
     fn record_poll_telemetry(

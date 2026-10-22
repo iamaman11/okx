@@ -57,7 +57,7 @@ def main():
             for query, index in [
                 ("SELECT intent_id FROM intents WHERE state IN('PREPARED','RESERVED','POSTING','UNKNOWN','ACKNOWLEDGED','PARTIALLY_FILLED') ORDER BY state,updated_at,intent_id LIMIT 100", "idx_intents_active"),
                 ("SELECT entry_id FROM finance_entries WHERE instance_id='a' AND time>=1 AND time<=100 ORDER BY time,entry_id LIMIT 100", "idx_finance_instance"),
-                ("SELECT lot_id FROM position_lots WHERE instrument_id='BTC' AND side='long' AND instance_id='a'", "idx_lots_active"),
+                ("SELECT lot_id FROM position_lots WHERE instrument_id='BTC' AND side='long' AND instance_id='a' AND remaining_qty<>'0'", "idx_lots_active"),
             ]:
                 plan = a.execute("EXPLAIN QUERY PLAN " + query).fetchall()
                 assert any(index in row[3] for row in plan), plan
@@ -85,6 +85,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 

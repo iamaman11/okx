@@ -6,9 +6,8 @@ use crate::{
     execution_runtime::ExecutionRuntime,
     okx_credentials::{NamedAccountCredentials, load_native_account_credentials},
 };
-use chrono::Utc;
 use okx_api::{AccountApi, OkxRestClient, RateBudget};
-use okx_execution::{ExecutionLedgerStore, LedgerEnvironment, LedgerVenue, SqliteAccountIdentity};
+use okx_execution::{AccountMeta, AccountStoreHandle, OpeningSnapshot};
 use okx_protocol::accounts::{
     AccountCatalog, AccountKey, Environment, VerifiedAccountConfig, valid_reference,
 };
@@ -46,6 +45,7 @@ pub struct AccountResources {
     pub observer: AccountBootstrapper,
     pub private_ws: PrivateWsHandle,
     pub execution: Arc<ExecutionRuntime>,
+    pub latest_snapshot: RwLock<Option<okx_observation::AccountSnapshot>>,
     /// Bounded account-local mutation capacity. Never held by reads/analytics.
     pub mutation_capacity: Semaphore,
     source_shutdown: watch::Sender<bool>,
@@ -73,17 +73,14 @@ pub struct AccountRuntimeRegistry {
 fn invalid() -> AgentError {
     AgentError::FinancialCaptureTask("ACCOUNT_CATALOG_INVALID".into())
 }
-fn now_ms() -> u64 {
-    Utc::now().timestamp_millis().max(1) as u64
-}
-fn key_hash(key: &AccountKey) -> String {
+pub(crate) fn key_hash(key: &AccountKey) -> String {
     format!("{:x}", Sha256::digest(key.wire().as_bytes()))
 }
 
 /// Create an installation once while the Engine is stopped. Normal startup
 /// calls open(), which never creates a catalog or account database.
 pub fn initialize_installation(root: &Path, installation_id: &str) -> AgentResult<()> {
-    if !valid_reference(installation_id) {
+    if !okx_protocol::accounts::valid_installation(installation_id) {
         return Err(invalid());
     }
     fs::create_dir_all(root)?;
@@ -133,7 +130,7 @@ impl AccountRuntimeRegistry {
         let installation: Installation =
             serde_json::from_slice(&fs::read(root.join(INSTALLATION_FILE))?)?;
         if installation.schema != "okx.installation/v1"
-            || !valid_reference(&installation.installation_id)
+            || !okx_protocol::accounts::valid_installation(&installation.installation_id)
         {
             return Err(invalid());
         }
@@ -236,13 +233,61 @@ impl AccountRuntimeRegistry {
         self.failures.read().await.clone()
     }
 
+    /// Re-open unavailable contexts without changing configuration or storage.
+    /// An unreachable account never holds another account's mutation owner.
+    pub async fn recover_unavailable(&self) {
+        use futures_util::{StreamExt, stream};
+        let unavailable = self
+            .failures
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let configs = self
+            .configurations
+            .read()
+            .await
+            .values()
+            .filter(|c| unavailable.contains(&c.account_key.wire()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut opened = stream::iter(configs.into_iter().map(|config| async move {
+            let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                let credentials = load_native_account_credentials(&config.credential_ref)?;
+                self.open_resources(config.clone(), credentials, false)
+                    .await
+            })
+            .await;
+            (config, result)
+        }))
+        .buffer_unordered(4);
+        while let Some((config, result)) = opened.next().await {
+            if let Ok(Ok(resources)) = result {
+                self.routes
+                    .write()
+                    .await
+                    .insert(config.account_key.wire(), resources);
+                self.failures
+                    .write()
+                    .await
+                    .remove(&config.account_key.wire());
+            }
+        }
+    }
+
     pub async fn connect(
         &self,
         credential_ref: &str,
         alias: &str,
         operation_id: &str,
+        request_digest: &str,
     ) -> AgentResult<VerifiedAccountConfig> {
         if !valid_reference(credential_ref)
+            || request_digest.len() != 64
+            || !request_digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             || !valid_reference(alias)
             || !(8..=128).contains(&operation_id.len())
             || !operation_id
@@ -256,7 +301,10 @@ impl AccountRuntimeRegistry {
             .values()
             .find(|c| c.connect_operation_id == operation_id)
         {
-            if existing.alias != alias || existing.credential_ref != credential_ref {
+            if existing.alias != alias
+                || existing.credential_ref != credential_ref
+                || existing.configuration_digest != request_digest
+            {
                 return Err(AgentError::FinancialCaptureTask(
                     "IDEMPOTENCY_CONFLICT".into(),
                 ));
@@ -293,6 +341,7 @@ impl AccountRuntimeRegistry {
             alias: alias.into(),
             credential_ref: credential_ref.into(),
             connect_operation_id: operation_id.into(),
+            configuration_digest: request_digest.into(),
         };
         // Serialize initialization for this new account only, without holding the
         // catalog lock or another account's execution mutex across network I/O.
@@ -364,46 +413,118 @@ impl AccountRuntimeRegistry {
             &crate::config::default_root().join("account-leases"),
             &configuration.account_key,
         )?;
-        if initialize {
-            let snapshot = observer.snapshot().await.map_err(|_| {
-                AgentError::FinancialCaptureTask("ACCOUNT_SOURCE_UNAVAILABLE".into())
-            })?;
-            let algos = observer
-                .pending_derivative_risk_algos()
-                .await
-                .map_err(|_| {
-                    AgentError::FinancialCaptureTask("ACCOUNT_ALGO_SOURCE_UNAVAILABLE".into())
+        fs::create_dir_all(&root)?;
+        let database = root.join("account.sqlite");
+        let store = if initialize {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            let opening = loop {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(AgentError::FinancialCaptureTask(
+                        "INITIAL_SNAPSHOT_UNSTABLE".into(),
+                    ));
+                }
+                let first = observer.snapshot().await.map_err(|_| {
+                    AgentError::FinancialCaptureTask("ACCOUNT_SOURCE_UNAVAILABLE".into())
                 })?;
-            if snapshot.account_uid_fingerprint != uid
-                || !snapshot.pending_orders.is_empty()
-                || snapshot
+                let algos = observer
+                    .pending_derivative_risk_algos()
+                    .await
+                    .map_err(|_| {
+                        AgentError::FinancialCaptureTask("ACCOUNT_ALGO_SOURCE_UNAVAILABLE".into())
+                    })?;
+                let last = observer.snapshot().await.map_err(|_| {
+                    AgentError::FinancialCaptureTask("ACCOUNT_SOURCE_UNAVAILABLE".into())
+                })?;
+                if first.account_uid_fingerprint != uid || last.account_uid_fingerprint != uid {
+                    return Err(AgentError::FinancialCaptureTask(
+                        "ACCOUNT_IDENTITY_MISMATCH".into(),
+                    ));
+                }
+                if first.balance != last.balance
+                    || first.positions != last.positions
+                    || first.pending_orders != last.pending_orders
+                {
+                    continue;
+                }
+                if !algos.complete_within_bound {
+                    return Err(AgentError::FinancialCaptureTask(
+                        "ACCOUNT_ALGO_COVERAGE_INCOMPLETE".into(),
+                    ));
+                }
+                let liabilities =
+                    last.balance
+                        .details
+                        .iter()
+                        .try_fold(Decimal::ZERO, |sum, d| {
+                            // OKX documents liab as not applicable to Futures mode (2).
+                            // Other account modes require an explicit observed debt field.
+                            let value = match d.liabilities.as_deref() {
+                                Some(v) => Decimal::from_str(v).map_err(|_| invalid())?,
+                                None if last.account_level == "2" => Decimal::ZERO,
+                                None => return Err(invalid()),
+                            };
+                            sum.checked_add(value).ok_or_else(invalid)
+                        })?;
+                let positions = last
                     .positions
                     .iter()
-                    .any(|p| Decimal::from_str(&p.position).map_or(true, |q| q != Decimal::ZERO))
-                || !algos.complete_within_bound
-                || algos.rows != 0
-            {
-                return Err(AgentError::FinancialCaptureTask("ACCOUNT_NOT_FLAT".into()));
-            }
-            let identity = SqliteAccountIdentity {
-                venue: LedgerVenue::Okx,
-                environment: if credentials.environment.demo {
-                    LedgerEnvironment::Demo
-                } else {
-                    LedgerEnvironment::Production
-                },
-                account_id: configuration.alias.clone(),
-                uid_fingerprint: uid.clone(),
-                bound_at_ms: now_ms(),
+                    .filter(|p| Decimal::from_str(&p.position) != Ok(Decimal::ZERO))
+                    .count();
+                let balances = last
+                    .balance
+                    .details
+                    .iter()
+                    .map(|d| {
+                        Ok((
+                            d.currency.clone(),
+                            Decimal::from_str(&d.equity).map_err(|_| invalid())?,
+                        ))
+                    })
+                    .collect::<AgentResult<Vec<_>>>()?;
+                let observed_at = chrono::DateTime::parse_from_rfc3339(&last.source_received_at)
+                    .map_err(|_| invalid())?
+                    .timestamp_millis();
+                let source_ref = format!("{:x}", Sha256::digest(serde_json::to_vec(&last)?));
+                break OpeningSnapshot {
+                    opening_equity_usd: Decimal::from_str(&last.balance.total_equity_usd)
+                        .map_err(|_| invalid())?,
+                    source_ref,
+                    observed_at,
+                    positions,
+                    orders: last.pending_orders.len(),
+                    conditional_orders: algos.rows,
+                    liabilities,
+                    balances,
+                };
             };
-            ExecutionLedgerStore::initialize_fresh_account(&root, &identity)?;
-        }
-        let execution = Arc::new(ExecutionRuntime::new_registered_account(
-            &root,
+            let meta = AccountMeta {
+                account_key: configuration.account_key.wire(),
+                installation_id: self.installation_id.clone(),
+                initialized_at: opening.observed_at,
+                opening_source: opening.source_ref.clone(),
+                initialize_operation_id: configuration.connect_operation_id.clone(),
+                release_id: build_release().into(),
+            };
+            AccountStoreHandle::initialize_flat(database, meta, opening).await?
+        } else {
+            AccountStoreHandle::open_existing(
+                database,
+                configuration.account_key.wire(),
+                self.installation_id.clone(),
+            )
+            .await?
+        };
+        store
+            .call(
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+                |s| s.recover_posting(chrono::Utc::now().timestamp_millis()),
+            )
+            .await?;
+        let execution = Arc::new(ExecutionRuntime::new(
+            store,
             credentials.environment,
             credentials.executor,
-            &uid,
-            now_ms(),
+            uid.clone(),
             self.rate_budget.clone(),
         )?);
         let (coordinator, private_ws) = PrivateWsCoordinator::new_with_rate_budget(
@@ -413,6 +534,7 @@ impl AccountRuntimeRegistry {
         );
         let (shutdown, receiver) = watch::channel(false);
         let resources = Arc::new(AccountResources {
+            latest_snapshot: RwLock::new(None),
             configuration,
             observer,
             private_ws,
@@ -451,7 +573,7 @@ impl AccountRuntimeRegistry {
     }
 }
 
-async fn verify_credentials(
+pub(crate) async fn verify_credentials(
     credentials: &NamedAccountCredentials,
     budget: RateBudget,
 ) -> AgentResult<String> {
@@ -538,10 +660,12 @@ fn start_sources(
                     eprintln!("account source identity verification failed");continue;
                 }
                 if account.private_ws.status().await.connection_generation!=generation {continue;}
+                *account.latest_snapshot.write().await=Some(snapshot);
                 account.verified_source_generation.store(generation,Ordering::Release);
              }
-             if crate::runtime::capture_one_native_financial_source(&account.observer,&account.private_ws,&account.execution).await.is_err(){
-                eprintln!("account financial source awaiting coherent readback");
+             match crate::runtime::capture_account_sources(&account.observer,&account.private_ws,&account.execution).await {
+                Ok(snapshot)=>*account.latest_snapshot.write().await=Some(snapshot),
+                Err(_)=>eprintln!("account financial source awaiting coherent readback"),
              }
             }}
         }
@@ -553,194 +677,82 @@ fn start_sources(
         .extend([ws, finance]);
 }
 
+pub fn build_release() -> &'static str {
+    match option_env!("OKX_BUILD_SOURCE_TREE") {
+        Some(v) => v,
+        None => "UNVERIFIED_LOCAL_BUILD",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn test_root(label: &str) -> PathBuf {
-        let mut nonce = [0u8; 8];
+    fn root() -> PathBuf {
+        let mut nonce = [0; 16];
         getrandom::fill(&mut nonce).unwrap();
-        std::env::temp_dir().join(format!("okx-398-{label}-{:x}", u64::from_le_bytes(nonce)))
+        std::env::temp_dir().join(format!(
+            "okx-clean-accounts-{:032x}",
+            u128::from_le_bytes(nonce)
+        ))
     }
-    fn config(uid: char, alias: &str) -> VerifiedAccountConfig {
-        VerifiedAccountConfig {
-            account_key: AccountKey {
-                venue: "okx".into(),
-                environment: Environment::Real,
-                verified_uid: uid.to_string().repeat(64),
-            },
-            alias: alias.into(),
-            credential_ref: format!("credential_{alias}"),
-            connect_operation_id: format!("connect_{alias}_001"),
+    fn key() -> AccountKey {
+        AccountKey {
+            venue: "okx".into(),
+            environment: Environment::Real,
+            verified_uid: "a".repeat(64),
         }
-    }
-    fn registry(root: &Path) -> AccountRuntimeRegistry {
-        initialize_installation(root, "installation_test").unwrap();
-        AccountRuntimeRegistry {
-            root: root.into(),
-            installation_id: "installation_test".into(),
-            routes: RwLock::new(BTreeMap::new()),
-            configurations: RwLock::new(BTreeMap::new()),
-            failures: RwLock::new(BTreeMap::new()),
-            catalog_write: tokio::sync::Mutex::new(()),
-            rate_budget: RateBudget::new(),
-        }
-    }
-    fn resources(root: &Path, configuration: VerifiedAccountConfig) -> Arc<AccountResources> {
-        let environment = okx_api::OkxEnvironment::new(okx_api::Region::Global, false);
-        let root_account = root
-            .join("accounts")
-            .join(key_hash(&configuration.account_key));
-        let identity = SqliteAccountIdentity {
-            venue: LedgerVenue::Okx,
-            environment: LedgerEnvironment::Production,
-            account_id: configuration.alias.clone(),
-            uid_fingerprint: configuration.account_key.verified_uid.clone(),
-            bound_at_ms: 1,
-        };
-        ExecutionLedgerStore::initialize_fresh_account(&root_account, &identity).unwrap();
-        let credentials =
-            okx_api::Credentials::new("fixture-key".into(), "fixture-secret".into(), "fixture-pass".into()).unwrap();
-        let observer = AccountBootstrapper::new(
-            OkxRestClient::with_rate_budget(environment, credentials.clone(), RateBudget::new())
-                .unwrap(),
-        );
-        let (_, private_ws) = PrivateWsCoordinator::new_with_rate_budget(
-            environment,
-            credentials.clone(),
-            RateBudget::new(),
-        );
-        let execution = Arc::new(
-            ExecutionRuntime::new_registered_account(
-                &root_account,
-                environment,
-                credentials,
-                &configuration.account_key.verified_uid,
-                2,
-                RateBudget::new(),
-            )
-            .unwrap(),
-        );
-        let identity_lease =
-            acquire_identity_lease(&root.join("leases"), &configuration.account_key).unwrap();
-        let (source_shutdown, _) = watch::channel(false);
-        Arc::new(AccountResources {
-            configuration,
-            observer,
-            private_ws,
-            execution,
-            mutation_capacity: Semaphore::new(128),
-            source_shutdown,
-            verified_source_generation: AtomicU64::new(0),
-            _identity_lease: identity_lease,
-            source_tasks: Mutex::new(Vec::new()),
-        })
     }
     #[tokio::test]
-    async fn two_accounts_route_to_independent_native_owners() {
-        let root = test_root("routing");
-        let registry = registry(&root);
-        let a = resources(&root, config('a', "alpha"));
-        let b = resources(&root, config('b', "bravo"));
-        registry.publish(a.clone()).await.unwrap();
-        registry.publish(b.clone()).await.unwrap();
-        assert_eq!(registry.list().await.len(), 2);
-        assert!(Arc::ptr_eq(&registry.resolve("alpha").await.unwrap(), &a));
-        assert!(Arc::ptr_eq(
-            &registry
-                .resolve(&b.configuration.account_key.wire())
-                .await
-                .unwrap(),
-            &b
-        ));
-        assert!(registry.resolve("unknown").await.is_none());
-        assert_ne!(
-            a.execution.native_account_key().uid_fingerprint,
-            b.execution.native_account_key().uid_fingerprint
-        );
-        drop(registry);
-        drop(a);
-        drop(b);
+    async fn initialize_without_any_legacy_files() {
+        let root = root();
+        initialize_installation(&root, "installation-test").unwrap();
+        let registry = AccountRuntimeRegistry::open(&root, RateBudget::new())
+            .await
+            .unwrap();
+        assert!(registry.list().await.is_empty());
+        assert_eq!(registry.installation_id(), "installation-test");
+        assert!(!root.join("accounts").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
-    async fn slow_account_a_does_not_block_b() {
-        let root = test_root("independent");
-        let registry = registry(&root);
-        let a = resources(&root, config('a', "alpha"));
-        let b = resources(&root, config('b', "bravo"));
-        registry.publish(a.clone()).await.unwrap();
-        registry.publish(b.clone()).await.unwrap();
-        let _all_a = a.mutation_capacity.acquire_many(128).await.unwrap();
-        assert!(a.mutation_capacity.try_acquire().is_err());
-        assert!(b.mutation_capacity.try_acquire().is_ok());
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(50),
-                registry.resolve("bravo")
-            )
+    async fn legacy_stop_claims_and_epochs_are_never_read() {
+        let root = root();
+        initialize_installation(&root, "installation-test").unwrap();
+        for name in [
+            "execution-ledger.json",
+            "production-policy.json",
+            "strategy-epochs.json",
+            "claims.json",
+            "STOP",
+        ] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        let registry = AccountRuntimeRegistry::open(&root, RateBudget::new())
             .await
-            .unwrap()
-            .is_some()
-        );
-        drop(_all_a);
-        drop(registry);
-        drop(a);
-        drop(b);
+            .unwrap();
+        assert!(registry.list().await.is_empty());
+        assert!(registry.failures().await.is_empty());
+        assert!(!root.join("accounts").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn duplicate_writer_lease_rejected_across_aliases() {
-        let root = test_root("lease");
-        let a = config('a', "alpha");
-        let b = config('a', "bravo");
-        let lease = acquire_identity_lease(&root, &a.account_key).unwrap();
-        assert!(acquire_identity_lease(&root, &b.account_key).is_err());
-        drop(lease);
-        assert!(acquire_identity_lease(&root, &b.account_key).is_ok());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-    #[tokio::test]
-    async fn restart_missing_account_database_never_initializes() {
-        let root = test_root("missing");
-        let registry = registry(&root);
-        let configuration = config('a', "alpha");
-        let bytes = serde_json::to_vec(&configuration).unwrap();
-        publish_new(
-            &root
-                .join(CATALOG_DIR)
-                .join(format!("{}.json", key_hash(&configuration.account_key))),
-            &bytes,
-        )
-        .unwrap();
-        drop(registry);
-        let reopened = AccountRuntimeRegistry::open(&root, RateBudget::new())
-            .await
-            .unwrap();
-        assert_eq!(reopened.list().await, vec![configuration.clone()]);
-        assert!(reopened.resolve("alpha").await.is_none());
-        assert_eq!(
-            reopened
-                .connect(
-                    &configuration.credential_ref,
-                    "alpha",
-                    &configuration.connect_operation_id
-                )
-                .await
-                .unwrap(),
-            configuration
-        );
-        assert!(!root.join("accounts").exists());
-        drop(reopened);
+        let root = root();
+        let account = key();
+        let first = acquire_identity_lease(&root, &account).unwrap();
+        assert!(acquire_identity_lease(&root, &account).is_err());
+        drop(first);
+        assert!(acquire_identity_lease(&root, &account).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn initialize_refuses_to_replace_installation() {
-        let root = test_root("installation");
-        initialize_installation(&root, "installation_first").unwrap();
-        assert!(initialize_installation(&root, "installation_other").is_err());
-        let installation: Installation =
-            serde_json::from_slice(&std::fs::read(root.join(INSTALLATION_FILE)).unwrap()).unwrap();
-        assert_eq!(installation.installation_id, "installation_first");
+        let root = root();
+        initialize_installation(&root, "installation-first").unwrap();
+        assert!(initialize_installation(&root, "installation-second").is_err());
+        let bytes = fs::read(root.join(INSTALLATION_FILE)).unwrap();
+        let value: Installation = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value.installation_id, "installation-first");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

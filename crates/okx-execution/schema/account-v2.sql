@@ -13,6 +13,7 @@ CREATE INDEX idx_orders_intent ON orders(intent_id);
 CREATE INDEX idx_orders_active ON orders(state,order_id);
 CREATE TABLE fills(fill_id TEXT PRIMARY KEY,instrument_id TEXT NOT NULL,trade_id TEXT NOT NULL,exchange_order_id TEXT NOT NULL,intent_id TEXT REFERENCES intents(intent_id),time INTEGER NOT NULL,qty TEXT NOT NULL,price TEXT NOT NULL,fee TEXT NOT NULL,currency TEXT NOT NULL,side TEXT NOT NULL CHECK(side IN('buy','sell')),UNIQUE(instrument_id,trade_id,exchange_order_id)) STRICT;
 CREATE INDEX idx_fills_time ON fills(time,fill_id);
+CREATE INDEX idx_fills_instrument_time ON fills(instrument_id,time,fill_id);
 CREATE TABLE fill_projection_pending(fill_id TEXT PRIMARY KEY REFERENCES fills(fill_id),side TEXT NOT NULL) STRICT;
 CREATE TABLE funding_projection_pending(event_id TEXT PRIMARY KEY REFERENCES bills(bill_id),instrument_id TEXT NOT NULL,time INTEGER NOT NULL,amount TEXT NOT NULL,currency TEXT NOT NULL) STRICT;
 CREATE TABLE bills(bill_id TEXT PRIMARY KEY,kind TEXT NOT NULL,time INTEGER NOT NULL,amount TEXT NOT NULL,currency TEXT NOT NULL,economic_event_key TEXT NOT NULL) STRICT;
@@ -21,7 +22,7 @@ CREATE TABLE cash_flows(event_id TEXT PRIMARY KEY,kind TEXT NOT NULL,currency TE
 CREATE TABLE allocations(event_id TEXT PRIMARY KEY,instance_id TEXT NOT NULL REFERENCES strategy_instances(instance_id),delta TEXT NOT NULL,currency TEXT NOT NULL,time INTEGER NOT NULL) STRICT;
 CREATE INDEX idx_allocations_instance ON allocations(instance_id,time,event_id);
 CREATE TABLE position_lots(lot_id TEXT PRIMARY KEY,instance_id TEXT REFERENCES strategy_instances(instance_id),intent_id TEXT REFERENCES intents(intent_id),fill_id TEXT REFERENCES fills(fill_id),instrument_id TEXT NOT NULL,side TEXT NOT NULL,remaining_qty TEXT NOT NULL,cost TEXT NOT NULL,opened_at INTEGER NOT NULL) STRICT;
-CREATE INDEX idx_lots_active ON position_lots(instrument_id,side,instance_id,opened_at,lot_id);
+CREATE INDEX idx_lots_active ON position_lots(instrument_id,side,instance_id,opened_at,lot_id) WHERE remaining_qty<>'0';
 CREATE TABLE finance_entries(entry_id TEXT PRIMARY KEY,economic_event_key TEXT NOT NULL,component TEXT NOT NULL,allocation_leg TEXT NOT NULL,amount TEXT NOT NULL,currency TEXT NOT NULL,instance_id TEXT REFERENCES strategy_instances(instance_id),source_ref TEXT NOT NULL,time INTEGER NOT NULL,reverses_entry_id TEXT REFERENCES finance_entries(entry_id),UNIQUE(economic_event_key,component,allocation_leg)) STRICT;
 CREATE INDEX idx_finance_time ON finance_entries(time,entry_id);
 CREATE INDEX idx_finance_instance ON finance_entries(instance_id,time,entry_id);

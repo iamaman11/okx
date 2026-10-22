@@ -5,7 +5,7 @@ import {
   sameHex,
   sha256Hex,
   TOOL_CONTRACT_VERSION,
-} from "./shared";
+} from "./shared.js";
 
 const AUTH_CSRF_TTL_MS = 5 * 60 * 1000;
 const AUTH_APPROVAL_TTL_MS = 2 * 60 * 1000;
@@ -123,6 +123,11 @@ export const defaultHandler = {
       });
     }
 
+    if(url.pathname==="/installation/initialize"&&request.method==="POST"){
+      const supplied=request.headers.get("authorization");
+      if(!supplied?.startsWith("Bearer ")||!sameHex(await sha256Hex(supplied.slice(7)),await sha256Hex(env.MCP_OWNER_SECRET)))return new Response("unauthorized",{status:401});
+      const stub=await runtimeStub(env);return stub.fetch(request);
+    }
     if (url.pathname === "/runtime") {
       const stub = await runtimeStub(env);
       return stub.fetch(request);

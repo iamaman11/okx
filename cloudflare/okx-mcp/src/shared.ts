@@ -24,14 +24,8 @@ export interface Env {
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
-export type RuntimeProfile = "engine" | "production" | "demo_acceptance" | "unverified";
-
-/** An old agent has an unverified profile until its Hello is upgraded. */
-export function decodeRuntimeProfile(value: unknown): RuntimeProfile | null {
-  if (value === undefined) return "unverified";
-  if (value === "engine" || value === "production" || value === "demo_acceptance") return value;
-  return null;
-}
+export type RuntimeProfile = "engine";
+export function decodeRuntimeProfile(value:unknown):RuntimeProfile|null{return value==="engine"?"engine":null;}
 
 export interface SocketAttachment {
   runtimeId: string;

@@ -1,17 +1,22 @@
-use std::{collections::HashMap, path::Path, time::Duration};
-
-use chrono::{SecondsFormat, Utc};
-use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use okx_protocol::account_governance::CentralGovernanceSnapshot;
-use okx_protocol::{
-    AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
-    AgentResponse, AgentResponseStatus, DIRECT_TRANSPORT_FRAME_SCHEMA_V2,
-    DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES, DataQuality, DirectRuntimeProfile, DirectTransportFrame,
+//! One authenticated connection multiplexes bounded independent native work.
+use crate::{
+    AgentError, AgentResult,
+    query::{DispatchContext, dispatch_with_governance, response},
+    risk_bridge::OutboundRiskCommand,
 };
-use okx_runtime::{PrivateWsHandle, PublicWsHandle};
+use futures_util::{FutureExt, SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use okx_protocol::{
+    DIRECT_TRANSPORT_FRAME_SCHEMA_V2 as SCHEMA, DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES,
+    DirectRuntimeProfile, DirectTransportFrame as F,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     sync::{mpsc, oneshot, watch},
-    time::{Instant, MissedTickBehavior, interval, sleep},
+    time::Instant,
 };
 use tokio_tungstenite::{
     connect_async,
@@ -23,1334 +28,184 @@ use tokio_tungstenite::{
 };
 use zeroize::Zeroizing;
 
-use crate::{
-    AgentError, AgentResult,
-    account_bootstrap::AccountBootstrapper,
-    execution_runtime::{ExecutionRuntime, ExecutionRuntimeMode},
-    market_bootstrap::MarketBootstrapper,
-    query::{ObservationQueryContext, dispatch},
-    research_session::ResearchSessionHandle,
-    risk_bridge::{NativeRiskClient, OutboundRiskCommand},
-};
-
-const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
-const HEARTBEAT_INTERVAL_SECONDS: u64 = 15;
-const HEARTBEAT_DEADLINE_SECONDS: u64 = 5;
-const HEARTBEAT_IDLE_RESET_SECONDS: u64 = 24 * 60 * 60;
-/// OKX canceled orders may vanish from the bounded REST history in two hours.
-/// Reuse the EXISTING transport heartbeat to trigger one read-only, source-exact
-/// checkpoint each hour. No second process, scheduler, trading channel or POST.
-const SOURCE_PROOF_PERIOD_SECONDS: u64 = 60 * 60;
-const SOURCE_PROOF_FIRST_SECONDS: u64 = 5 * 60;
-const SOURCE_PROOF_RETRY_SECONDS: u64 = 15 * 60;
-const SOURCE_PROOF_BUDGET_SECONDS: u64 = 45;
-const _: () = assert!(SOURCE_PROOF_PERIOD_SECONDS + SOURCE_PROOF_BUDGET_SECONDS < 2 * 60 * 60);
-const MAX_INFLIGHT_READ_QUERIES: usize = 8;
-const MAX_PENDING_DELIVERY_CHALLENGES: usize = 64;
-const DELIVERY_CHALLENGE_MAX_AGE: Duration = Duration::from_secs(15);
-const DIRECT_TRANSPORT_MUTATION_REJECTED: &str = "DIRECT_TRANSPORT_MUTATION_REJECTED";
-const DIRECT_TRANSPORT_BUSY: &str = "DIRECT_TRANSPORT_BUSY";
-const DIRECT_TRANSPORT_QUERY_FAILED: &str = "DIRECT_TRANSPORT_QUERY_FAILED";
-const DIRECT_TRANSPORT_INPUT_REJECTED: &str = "DIRECT_TRANSPORT_INPUT_REJECTED";
-const DIRECT_TRANSPORT_MUTATION_OUTCOME_UNKNOWN: &str =
-    "EXECUTION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT";
-/// Prepare can durably create a local PREPARED record but never executes an
-/// exchange POST. Unknown delivery/response still requires exact intent
-/// readback before any new request; it is NOT an unknown exchange fill.
-const DIRECT_TRANSPORT_PREPARE_OUTCOME_UNKNOWN: &str =
-    "EXECUTION_PREPARE_OUTCOME_UNKNOWN_READ_EXACT_INTENT";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DirectRequestKind {
-    ReadOnly,
-    LocalPrepare,
-    ExchangeMutation,
-}
-
-impl DirectRequestKind {
-    fn from_operation(operation: &AgentOperation) -> Self {
-        if matches!(operation, AgentOperation::PrepareExecution { .. }) {
-            Self::LocalPrepare
-        } else if operation.direct_transport_read_only() {
-            Self::ReadOnly
-        } else {
-            Self::ExchangeMutation
-        }
-    }
-
-    fn is_mutating(self) -> bool {
-        self != Self::ReadOnly
-    }
-}
-
-/// A FRESH account packet is not proof that the ONE ledger owner appended a
-/// durable source cursor: ingestion may be deferred during drain or the
-/// financial source can be incomplete. Compare the observed native receipt
-/// against the actual persisted cursor; never infer coverage from quality.
-fn native_source_checkpoint_persisted(response: &AgentResponse) -> bool {
-    if response.status != AgentResponseStatus::Completed {
-        return false;
-    }
-    let Some(result) = response.result.as_ref() else {
-        return false;
-    };
-    let receipt = result
-        .pointer("/coherence/history_source_received_at")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
-        .and_then(|date| u64::try_from(date.timestamp_millis()).ok());
-    let persisted = result
-        .pointer("/reconciliation/exchange_evidence/latest_source_received_at_ms")
-        .and_then(serde_json::Value::as_u64);
-    result
-        .pointer("/coherence/coherent")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-        && result
-            .pointer("/reconciliation/consistent")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-        && result
-            .pointer("/reconciliation/source_checkpoint_deferred")
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
-        && result
-            .pointer("/reconciliation/exchange_evidence/latest_source_complete")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-        && receipt.is_some()
-        && receipt == persisted
-}
-
-fn direct_operation_allowed(
-    profile: DirectRuntimeProfile,
-    runtime_mode: Option<ExecutionRuntimeMode>,
-    operation: &AgentOperation,
-) -> bool {
-    operation.direct_transport_read_only()
-        || (profile == DirectRuntimeProfile::Production
-            && runtime_mode == Some(ExecutionRuntimeMode::ReadOnly)
-            && matches!(operation, AgentOperation::ReconcileUnsentPrepared { .. }))
-        || (profile == DirectRuntimeProfile::DemoAcceptance
-            && runtime_mode == Some(ExecutionRuntimeMode::DemoAcceptance)
-            && operation.direct_transport_demo_execution())
-}
-
-/// The one precise terminal-status read can finalize a source-proven
-/// RiskBook RELEASE (never RESERVE, BEGIN_POST, or exchange POST). Do not
-/// elevate normal read queries to risk-mutation ownership.
-fn terminal_risk_status_owner(
-    profile: DirectRuntimeProfile,
-    operation: &AgentOperation,
-    governance_present: bool,
-    nonce_verified: bool,
-) -> bool {
-    profile == DirectRuntimeProfile::Production
-        && matches!(operation, AgentOperation::ExecutionStatus { .. })
-        && governance_present
-        && nonce_verified
-}
-
-/// Consume the exact ping/pong challenge delivered by the authenticated Worker.
-/// Only a native monotonic clock measures freshness; Cloudflare's Date.now()
-/// advances on I/O and cannot be used as a cross-runtime admission clock.
-fn consume_fresh_delivery_challenge(
-    pending: &mut HashMap<String, Instant>,
-    nonce: Option<&str>,
-) -> bool {
-    nonce
-        .and_then(|nonce| pending.remove(nonce))
-        .is_some_and(|seen_at| seen_at.elapsed() <= DELIVERY_CHALLENGE_MAX_AGE)
-}
-
-/// One-use monotonic challenge freshness from this authenticated connection.
-#[derive(Clone, Copy)]
-struct DeliveryFreshness {
-    challenge_verified: bool,
-}
-
-/// Delivery admission only. Native Rust will independently check UID,
-/// Trade credential, financial continuity and shared risk before any POST.
-fn central_production_delivery_admission(
-    profile: DirectRuntimeProfile,
-    mode: Option<ExecutionRuntimeMode>,
-    operation: &AgentOperation,
-    governance: Option<&CentralGovernanceSnapshot>,
-    generation: u64,
-    freshness: DeliveryFreshness,
-) -> Result<(), &'static str> {
-    if profile != DirectRuntimeProfile::Production {
-        return Err("PRODUCTION_PROFILE_REQUIRED");
-    }
-    if mode != Some(ExecutionRuntimeMode::Production) {
-        return Err("NATIVE_PRODUCTION_EXECUTOR_NOT_ACTIVE");
-    }
-    if !matches!(
-        operation,
-        AgentOperation::BeginStrategyRun { .. }
-            | AgentOperation::PrepareExecution { .. }
-            | AgentOperation::SubmitPreparedExecution { .. }
-            | AgentOperation::FinalizeStrategyRun { .. }
-            | AgentOperation::QuarantineUnverifiedStrategyRun { .. }
-    ) {
-        return Err("PRODUCTION_OPERATION_UNSUPPORTED");
-    }
-    // One source of admission truth, with a stable, nonsecret reason on
-    // rejection. Positive trade rights remain with native Rust/RiskBook.
-    if let Some(scope) = governance {
-        if !scope.valid() {
-            return Err("CENTRAL_ACCESS_INVALID");
-        }
-        if scope.session_generation != generation {
-            return Err("CENTRAL_ACCESS_GENERATION_MISMATCH");
-        }
-        // Challenge was issued for THIS request by the authenticated Worker
-        // after a successful ping/pong. A nonce is consumed only once on the
-        // native WebSocket, and its lifetime uses Instant (not wall clocks).
-        if !freshness.challenge_verified {
-            return Err("CENTRAL_ACCESS_CHALLENGE_NOT_FRESH");
-        }
-        if !scope.state.has_real_access() {
-            return Err("CENTRAL_ACCESS_STOPPED");
-        }
-        return Ok(());
-    }
-    Err("CENTRAL_PRODUCTION_SCOPE_NOT_DELIVERED")
-}
-
 pub struct CloudflareTransportConfig {
     ws_url: String,
     runtime_id: String,
-    runtime_profile: DirectRuntimeProfile,
     bearer_token: Zeroizing<String>,
 }
-
 impl CloudflareTransportConfig {
     pub fn new(
         ws_url: String,
         runtime_id: String,
         bearer_token: Zeroizing<String>,
-        runtime_profile: DirectRuntimeProfile,
+        profile: DirectRuntimeProfile,
     ) -> AgentResult<Self> {
-        validate_ws_url(&ws_url)?;
-        validate_runtime_id(&runtime_id)?;
+        if !ws_url.starts_with("wss://") || ws_url.contains('@') || ws_url.contains('#') {
+            return Err(AgentError::InvalidCloudflareWsUrl);
+        }
+        if runtime_id.is_empty()
+            || runtime_id.len() > 64
+            || !runtime_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(AgentError::InvalidCloudflareRuntimeId);
+        }
+        if profile != DirectRuntimeProfile::Engine {
+            return Err(AgentError::InvalidCloudflareRuntimeId);
+        }
         Ok(Self {
             ws_url,
             runtime_id,
-            runtime_profile,
             bearer_token,
         })
     }
-
     pub fn ws_url(&self) -> &str {
         &self.ws_url
     }
 }
-
-#[derive(Clone, Copy)]
-pub struct CloudflareQueryRuntimeContext<'a> {
-    pub public_ws: &'a PublicWsHandle,
-    pub market: &'a MarketBootstrapper,
-    pub account: Option<&'a AccountBootstrapper>,
-    pub private_ws: Option<&'a PrivateWsHandle>,
-    pub execution: Option<&'a ExecutionRuntime>,
-    pub research_root: &'a Path,
-    pub accounts: Option<&'a crate::accounts::AccountRuntimeRegistry>,
-    pub research_session: &'a ResearchSessionHandle,
+fn nonce() -> u128 {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("system random unavailable");
+    u128::from_le_bytes(bytes)
 }
-
-pub async fn run_cloudflare_transport(
-    config: &CloudflareTransportConfig,
-    context: CloudflareQueryRuntimeContext<'_>,
-    mut shutdown: watch::Receiver<bool>,
-) -> AgentResult<()> {
-    let mut retry_index = 0usize;
-
-    loop {
-        if *shutdown.borrow() {
-            return Ok(());
-        }
-
-        let session = run_session(config, context, shutdown.clone());
-        tokio::pin!(session);
-
-        let session_result = tokio::select! {
-            changed = shutdown.changed() => {
-                match changed {
-                    Ok(()) if *shutdown.borrow() => return Ok(()),
-                    Ok(()) => continue,
-                    Err(_) => return Ok(()),
-                }
-            }
-            result = &mut session => result,
-        };
-
-        match session_result {
-            Ok(()) => {
-                retry_index = 0;
-            }
-            Err(error) => {
-                eprintln!("cloudflare transport session unavailable: {error}");
-            }
-        }
-
-        let delay = RECONNECT_BACKOFF_SECONDS[retry_index.min(RECONNECT_BACKOFF_SECONDS.len() - 1)];
-        retry_index = retry_index.saturating_add(1);
-        eprintln!("cloudflare transport reconnect in {delay}s");
-
-        tokio::select! {
-            _ = sleep(Duration::from_secs(delay)) => {}
-            changed = shutdown.changed() => {
-                match changed {
-                    Ok(()) if *shutdown.borrow() => return Ok(()),
-                    Ok(()) => {}
-                    Err(_) => return Ok(()),
-                }
-            }
-        }
-    }
+fn transport(message: &str) -> AgentError {
+    AgentError::CloudflareTransport(message.into())
 }
-
-async fn run_session(
-    config: &CloudflareTransportConfig,
-    context: CloudflareQueryRuntimeContext<'_>,
-    mut shutdown: watch::Receiver<bool>,
-) -> AgentResult<()> {
-    let mut request = config
-        .ws_url
-        .as_str()
-        .into_client_request()
-        .map_err(|error| AgentError::CloudflareTransport(error.to_string()))?;
-    let auth = HeaderValue::from_str(&format!("Bearer {}", config.bearer_token.as_str()))
-        .map_err(|_| AgentError::InvalidCloudflareToken)?;
-    request.headers_mut().insert(AUTHORIZATION, auth);
-
-    let (stream, _) = connect_async(request)
-        .await
-        .map_err(|error| AgentError::CloudflareTransport(error.to_string()))?;
-    let (mut sink, mut source) = stream.split();
-
-    let connection_id = random_token("conn_")?;
-    send_frame(
-        &mut sink,
-        &DirectTransportFrame::Hello {
-            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-            runtime_id: config.runtime_id.clone(),
-            connection_id,
-            runtime_profile: Some(config.runtime_profile),
-        },
-    )
-    .await?;
-
-    let hello = tokio::select! {
-        changed = shutdown.changed() => {
-            match changed {
-                Ok(()) if *shutdown.borrow() => return Ok(()),
-                Ok(()) => return Err(AgentError::CloudflareTransport("shutdown state changed during handshake".to_owned())),
-                Err(_) => return Ok(()),
-            }
-        }
-        message = source.next() => {
-            next_text_frame(message)?
-        }
+fn frame(message: Message) -> AgentResult<F> {
+    let Message::Text(text) = message else {
+        return Err(transport("NON_TEXT_FRAME"));
     };
-
-    let (session_id, connection_generation) = match hello {
-        DirectTransportFrame::HelloAck {
-            session_id,
-            connection_generation,
-            ..
-        } => (session_id, connection_generation),
-        _ => {
-            return Err(AgentError::CloudflareTransport(
-                "expected hello_ack".to_owned(),
-            ));
-        }
-    };
-
-    eprintln!(
-        "cloudflare transport connected generation={} endpoint={}",
-        connection_generation,
-        config.ws_url()
-    );
-
-    let mut heartbeat = interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS));
-    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    heartbeat.tick().await;
-    let mut heartbeat_nonce: Option<String> = None;
-    let heartbeat_deadline = sleep(Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
-    tokio::pin!(heartbeat_deadline);
-    let mut in_flight: FuturesUnordered<
-        BoxFuture<'_, (String, DirectRequestKind, AgentResult<AgentResponse>)>,
-    > = FuturesUnordered::new();
-    // One bounded proof read owned by this SAME runtime/ledger owner. It only
-    // runs when the existing heartbeat fires; no additional polling loop.
-    let mut source_proof_flight: FuturesUnordered<BoxFuture<'_, AgentResult<AgentResponse>>> =
-        FuturesUnordered::new();
-    let mut next_source_proof_at = Instant::now() + Duration::from_secs(SOURCE_PROOF_FIRST_SECONDS);
-    // No two exchange-affecting commands may be outstanding on the same
-    // transport generation. Read/status requests remain independently bounded.
-    let mut active_mutations: HashMap<String, String> = HashMap::new();
-    // Request-scoped Worker ping challenges. No scheduler or second owner.
-    let mut pending_delivery_challenges: HashMap<String, Instant> = HashMap::new();
-    // One existing transport and exactly one outbound mutation owner.
-    let (risk_tx, mut risk_rx) = mpsc::channel::<OutboundRiskCommand>(32);
-    let risk_client = NativeRiskClient::new(risk_tx);
-    let mut pending_risk: HashMap<
-        String,
-        oneshot::Sender<okx_protocol::risk_authority::RiskResult>,
-    > = HashMap::new();
-
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                match changed {
-                    Ok(()) if *shutdown.borrow() => {
-                        let _ = sink.send(Message::Close(None)).await;
-                        return Ok(());
-                    }
-                    Ok(()) => {}
-                    Err(_) => return Ok(()),
-                }
-            }
-            _ = heartbeat.tick() => {
-                if heartbeat_nonce.is_some() {
-                    return Err(AgentError::CloudflareTransport(
-                        "cloudflare heartbeat already pending".to_owned(),
-                    ));
-                }
-                let nonce = random_token("heartbeat_")?;
-                send_frame(
-                    &mut sink,
-                    &DirectTransportFrame::Ping {
-                        schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-                        session_id: session_id.clone(),
-                        connection_generation,
-                        nonce: nonce.clone(),
-                    },
-                )
-                .await?;
-                heartbeat_nonce = Some(nonce);
-                heartbeat_deadline
-                    .as_mut()
-                    .reset(Instant::now() + Duration::from_secs(HEARTBEAT_DEADLINE_SECONDS));
-
-                // Durable finance coverage has a bounded exchange retention
-                // window even when NO orders occur. Only authenticated native
-                // AccountSummary owns the REST/WS proof and ledger checkpoint.
-                // Never invent missing historical coverage after reconnect.
-                let proof_due = if context.account.is_some()
-                    && active_mutations.is_empty()
-                    && source_proof_flight.is_empty()
-                    && Instant::now() >= next_source_proof_at
-                {
-                    if let Some(execution) = context.execution {
-                        execution
-                            .strategy_quiet_source_capture_due(
-                                u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default(),
-                            )
-                            .await
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                if proof_due {
-                    let query_context =
-                        ObservationQueryContext::live_with_execution_research_and_session(
-                            context.public_ws,
-                            context.market,
-                            None,
-                            context.account,
-                            context.private_ws,
-                            context.execution,
-                            Some(context.research_root),
-                            Some(context.research_session),
-                        );
-                    let request = AgentRequest {
-                        account: None,
-                        schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-                        request_id: format!(
-                            "native_source_checkpoint_{}",
-                            Utc::now().timestamp_millis()
-                        ),
-                        operation: AgentOperation::AccountSummary,
-                    };
-                    let generated_at =
-                        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-                    source_proof_flight.push(
-                        async move {
-                            tokio::time::timeout(
-                                Duration::from_secs(SOURCE_PROOF_BUDGET_SECONDS),
-                                dispatch(&request, query_context, &generated_at),
-                            )
-                            .await
-                            .map_err(|_| {
-                                AgentError::CloudflareTransport(
-                                    "bounded native source checkpoint timed out".to_owned(),
-                                )
-                            })?
-                        }
-                        .boxed(),
-                    );
-                    // On failure this is a bounded retry, NOT an assumption
-                    // that the missed source checkpoint was completed.
-                    next_source_proof_at =
-                        Instant::now() + Duration::from_secs(SOURCE_PROOF_RETRY_SECONDS);
-                }
-            }
-            _ = &mut heartbeat_deadline => {
-                if heartbeat_nonce.is_some() {
-                    return Err(AgentError::CloudflareTransport(
-                        "cloudflare heartbeat pong deadline exceeded".to_owned(),
-                    ));
-                }
-                heartbeat_deadline
-                    .as_mut()
-                    .reset(Instant::now() + Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
-            }
-            outbound_risk = risk_rx.recv() => {
-                if let Some(outbound) = outbound_risk {
-                    if active_mutations.is_empty() || pending_risk.len() >= 32 {
-                        drop(outbound.return_to);
-                        continue;
-                    }
-                    let id = outbound.command.command_id.clone();
-                    if pending_risk.contains_key(&id) {
-                        drop(outbound.return_to);
-                        continue;
-                    }
-                    pending_risk.insert(id, outbound.return_to);
-                    send_frame(
-                        &mut sink,
-                        &DirectTransportFrame::RiskControl {
-                            schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-                            session_id: session_id.clone(),
-                            connection_generation,
-                            command: outbound.command,
-                        },
-                    ).await?;
-                }
-            }
-            source_result = source_proof_flight.next(), if !source_proof_flight.is_empty() => {
-                if let Some(result) = source_result {
-                    match result {
-                        Ok(response) if native_source_checkpoint_persisted(&response) => {
-                            next_source_proof_at =
-                                Instant::now() + Duration::from_secs(SOURCE_PROOF_PERIOD_SECONDS);
-                        }
-                        Ok(response) => {
-                            eprintln!(
-                                "native source checkpoint incomplete: status={:?}, quality={:?}; no historical coverage inferred",
-                                response.status, response.quality
-                            );
-                        }
-                        Err(error) => {
-                            eprintln!(
-                                "native source checkpoint unavailable: {error}; financial admission remains fail-closed"
-                            );
-                        }
-                    }
-                }
-            }
-            completed = in_flight.next(), if !in_flight.is_empty() => {
-                let Some((request_id, kind, result)) = completed else {
-                    continue;
-                };
-                active_mutations.retain(|_,id|id!=&request_id);
-                let response = completed_direct_response(&request_id, kind, result);
-                response.validate()?;
-                send_frame(
-                    &mut sink,
-                    &DirectTransportFrame::Response {
-                        schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-                        session_id: session_id.clone(),
-                        connection_generation,
-                        response,
-                    },
-                )
-                .await?;
-            }
-            message = source.next() => {
-                let frame = next_text_frame(message)?;
-                match frame {
-                    DirectTransportFrame::Ping {
-                        session_id: frame_session,
-                        connection_generation: frame_generation,
-                        nonce,
-                        ..
-                    } => {
-                        require_session(
-                            &session_id,
-                            connection_generation,
-                            &frame_session,
-                            frame_generation,
-                        )?;
-                        pending_delivery_challenges.retain(|_, seen_at| {
-                            seen_at.elapsed() <= DELIVERY_CHALLENGE_MAX_AGE
-                        });
-                        if nonce.starts_with("ping_")
-                            && pending_delivery_challenges.len() < MAX_PENDING_DELIVERY_CHALLENGES
-                        {
-                            pending_delivery_challenges.insert(nonce.clone(), Instant::now());
-                        }
-                        send_frame(
-                            &mut sink,
-                            &DirectTransportFrame::Pong {
-                                schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-                                session_id: session_id.clone(),
-                                connection_generation,
-                                nonce,
-                            },
-                        )
-                        .await?;
-                    }
-                    DirectTransportFrame::Pong {
-                        session_id: frame_session,
-                        connection_generation: frame_generation,
-                        nonce,
-                        ..
-                    } => {
-                        require_session(
-                            &session_id,
-                            connection_generation,
-                            &frame_session,
-                            frame_generation,
-                        )?;
-                        match heartbeat_nonce.as_deref() {
-                            Some(expected) if expected == nonce => {
-                                heartbeat_nonce = None;
-                                heartbeat_deadline
-                                    .as_mut()
-                                    .reset(Instant::now() + Duration::from_secs(HEARTBEAT_IDLE_RESET_SECONDS));
-                            }
-                            _ => {
-                                return Err(AgentError::CloudflareTransport(
-                                    "unexpected cloudflare heartbeat pong".to_owned(),
-                                ));
-                            }
-                        }
-                    }
-                    DirectTransportFrame::Request {
-                        session_id: frame_session,
-                        connection_generation: frame_generation,
-                        request,
-                        operator_governance,
-                        ..
-                    } => {
-                        require_session(
-                            &session_id,
-                            connection_generation,
-                            &frame_session,
-                            frame_generation,
-                        )?;
-                        // Envelope and request ID were validated by next_text_frame;
-                        // send ACK before validating the typed operation so that bad
-                        // user input cannot disconnect a healthy trading session.
-                        send_frame(
-                            &mut sink,
-                            &DirectTransportFrame::DeliveryAck {
-                                schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-                                session_id: session_id.clone(),
-                                connection_generation,
-                                request_id: request.request_id.clone(),
-                            },
-                        )
-                        .await?;
-
-                        if let Err(error) = request.validate() {
-                            eprintln!("direct transport rejected malformed operation: {error}");
-                            let response = direct_rejection(
-                                &request.request_id,
-                                DIRECT_TRANSPORT_INPUT_REJECTED,
-                                "native typed request failed validation before any trade action",
-                                false,
-                            );
-                            send_frame(
-                                &mut sink,
-                                &DirectTransportFrame::Response {
-                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-                                    session_id: session_id.clone(),
-                                    connection_generation,
-                                    response,
-                                },
-                            )
-                            .await?;
-                            continue;
-                        }
-
-                        // Explicit user-authorized Demo acceptance reuses the same
-                        // immutable Rust prepare/submit/mutate executor and policy.
-                        // Production is denied even if Worker/OAuth sends a write
-                        // through this otherwise authenticated read transport.
-                        let routed = match (context.accounts,request.account.as_deref()) {
-                            (Some(registry),Some(account))=>registry.resolve(account).await,
-                            _=>None,
-                        };
-                        if request.operation.requires_account() && routed.is_none() {
-                            let response=direct_rejection(&request.request_id,"ACCOUNT_ROUTE_NOT_READY","Explicit account is missing or its native context is unavailable",false);
-                            send_frame(&mut sink,&DirectTransportFrame::Response{schema:DIRECT_TRANSPORT_FRAME_SCHEMA_V2.into(),session_id:session_id.clone(),connection_generation,response}).await?;
-                            continue;
-                        }
-                        let routed_mode=routed.as_ref().map(|r|r.execution.mode()).or_else(||context.execution.map(ExecutionRuntime::mode));
-                        let delivery_profile=if config.runtime_profile==DirectRuntimeProfile::Engine {
-                            if routed_mode==Some(ExecutionRuntimeMode::DemoAcceptance){DirectRuntimeProfile::DemoAcceptance}else{DirectRuntimeProfile::Production}
-                        }else{config.runtime_profile};
-                        let request_kind = DirectRequestKind::from_operation(&request.operation);
-                        let mutating = request_kind.is_mutating();
-                        if mutating && request.operation.requires_account() && let Some(account)=routed.as_ref()
-                            && !account.source_identity_ready().await {
-                            let response=direct_rejection(&request.request_id,"SOURCE_GENERATION_AWAITING_IDENTITY","Account sources are refreshing automatically",true);
-                            send_frame(&mut sink,&DirectTransportFrame::Response{schema:DIRECT_TRANSPORT_FRAME_SCHEMA_V2.into(),session_id:session_id.clone(),connection_generation,response}).await?;
-                            continue;
-                        }
-                        let terminal_status = delivery_profile == DirectRuntimeProfile::Production
-                            && matches!(&request.operation, AgentOperation::ExecutionStatus { .. });
-                        let governance_challenge_fresh = if mutating || terminal_status {
-                            consume_fresh_delivery_challenge(
-                                &mut pending_delivery_challenges,
-                                operator_governance
-                                    .as_ref()
-                                    .and_then(|scope| scope.delivery_challenge.as_deref()),
-                            )
-                        } else {
-                            false
-                        };
-                        let terminal_risk_owner = terminal_risk_status_owner(
-                            delivery_profile,
-                            &request.operation,
-                            operator_governance.is_some(),
-                            governance_challenge_fresh,
-                        );
-                        let delivery = central_production_delivery_admission(
-                            delivery_profile,
-                            routed_mode,
-                            &request.operation,
-                            operator_governance.as_ref(),
-                            frame_generation,
-                            DeliveryFreshness {
-                                challenge_verified: governance_challenge_fresh,
-                            },
-                        );
-                        let allowed = direct_operation_allowed(
-                            delivery_profile,
-                            routed_mode,
-                            &request.operation,
-                        ) || delivery.is_ok() || matches!(request.operation,AgentOperation::ConnectAccount{..}) && config.runtime_profile==DirectRuntimeProfile::Engine;
-                        if !allowed {
-                            // A specific typed native reason avoids repeated
-                            // permission/configuration changes on an unknown gate.
-                            let reason = if config.runtime_profile == DirectRuntimeProfile::DemoAcceptance {
-                                "DEMO_MUTATION_ADMISSION_NOT_ACTIVE"
-                            } else {
-                                delivery.err().unwrap_or("NATIVE_MUTATION_ADMISSION_DENIED")
-                            };
-                            eprintln!("direct mutation delivery denied: {reason}");
-                            let response = direct_rejection(
-                                &request.request_id,
-                                DIRECT_TRANSPORT_MUTATION_REJECTED,
-                                reason,
-                                false,
-                            );
-                            send_frame(
-                                &mut sink,
-                                &DirectTransportFrame::Response {
-                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-                                    session_id: session_id.clone(),
-                                    connection_generation,
-                                    response,
-                                },
-                            )
-                            .await?;
-                            continue;
-                        }
-
-                        let mutation_account=routed.as_ref().map(|r|r.configuration.account_key.wire())
-                            .unwrap_or_else(||match &request.operation{AgentOperation::ConnectAccount{alias,..}=>format!("connect:{alias}"),_=>"unrouted".into()});
-                        if in_flight.len() >= MAX_INFLIGHT_READ_QUERIES
-                            || ((mutating || terminal_risk_owner) && active_mutations.contains_key(&mutation_account))
-                        {
-                            let response = direct_rejection(
-                                &request.request_id,
-                                DIRECT_TRANSPORT_BUSY,
-                                "direct transport read concurrency bound reached",
-                                true,
-                            );
-                            send_frame(
-                                &mut sink,
-                                &DirectTransportFrame::Response {
-                                    schema: DIRECT_TRANSPORT_FRAME_SCHEMA_V2.to_owned(),
-                                    session_id: session_id.clone(),
-                                    connection_generation,
-                                    response,
-                                },
-                            )
-                            .await?;
-                            continue;
-                        }
-
-                        let generated_at =
-                            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-                        let response_request_id = request.request_id.clone();
-                        if mutating || terminal_risk_owner {
-                            active_mutations.insert(mutation_account,response_request_id.clone());
-                        }
-                        let risk_client = risk_client.clone();
-                        in_flight.push(
-                            async move {
-                                let account=routed.as_ref();
-                                let query_context=ObservationQueryContext::live_with_execution_research_and_session(
-                                    context.public_ws,context.market,None,account.map(|r|&r.observer),account.map(|r|&r.private_ws),
-                                    account.map(|r|r.execution.as_ref()),Some(context.research_root),Some(context.research_session))
-                                    .with_account_registry(context.accounts);
-                                let query_context = query_context
-                                    .with_transport_generation(frame_generation)
-                                    .with_operator_governance(operator_governance.as_ref())
-                                    .with_verified_governance_challenge(governance_challenge_fresh)
-                                    .with_risk_client(Some(&risk_client));
-                                let result =
-                                    dispatch(&request, query_context, &generated_at).await;
-                                (response_request_id, request_kind, result)
-                            }
-                            .boxed(),
-                        );
-                    }
-                    DirectTransportFrame::RiskControlResult {
-                        session_id: frame_session,
-                        connection_generation: frame_generation,
-                        result,
-                        ..
-                    } => {
-                        require_session(
-                            &session_id,
-                            connection_generation,
-                            &frame_session,
-                            frame_generation,
-                        )?;
-                        let Some(tx) = pending_risk.remove(&result.command_id) else {
-                            return Err(AgentError::CloudflareTransport(
-                                "unsolicited risk authority result".to_owned(),
-                            ));
-                        };
-                        let _ = tx.send(result);
-                    }
-                    DirectTransportFrame::Hello { .. }
-                    | DirectTransportFrame::HelloAck { .. }
-                    | DirectTransportFrame::DeliveryAck { .. }
-                    | DirectTransportFrame::Response { .. }
-                    | DirectTransportFrame::RiskControl { .. } => {
-                        return Err(AgentError::CloudflareTransport(
-                            "unexpected direct transport frame from server".to_owned(),
-                        ));
-                    }
-                }
-            }
-        }
+    if text.len() > DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES {
+        return Err(transport("OVERSIZED_FRAME"));
     }
+    let f: F = serde_json::from_str(&text)?;
+    f.validate_incoming_envelope()?;
+    Ok(f)
 }
-
-fn completed_direct_response(
-    request_id: &str,
-    kind: DirectRequestKind,
-    result: AgentResult<AgentResponse>,
-) -> AgentResponse {
-    match result {
-        Ok(response) => response,
-        Err(error) => {
-            // A local PREPARE may have persisted PREPARED, but by contract
-            // cannot execute an exchange POST. Do not disguise this as an
-            // uncertain exchange fill, and never infer that persistence failed.
-            eprintln!("direct transport request {request_id} failed (kind={kind:?}): {error}");
-            let (code, message, retryable) = match kind {
-                DirectRequestKind::ReadOnly => (
-                    DIRECT_TRANSPORT_QUERY_FAILED,
-                    "direct transport read query failed",
-                    true,
-                ),
-                DirectRequestKind::LocalPrepare => (
-                    DIRECT_TRANSPORT_PREPARE_OUTCOME_UNKNOWN,
-                    "local prepare result is unconfirmed; read the exact intent before any new preparation; no exchange POST was requested",
-                    false,
-                ),
-                DirectRequestKind::ExchangeMutation => (
-                    DIRECT_TRANSPORT_MUTATION_OUTCOME_UNKNOWN,
-                    "trade result is unconfirmed; reconcile the exact intent, never replay POST",
-                    false,
-                ),
-            };
-            AgentResponse {
-                schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-                request_id: request_id.to_owned(),
-                status: AgentResponseStatus::Failed,
-                generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-                quality: DataQuality::NotReady,
-                result_schema: None,
-                result: None,
-                failure: Some(AgentFailure {
-                    code: code.to_owned(),
-                    message: message.to_owned(),
-                    retryable,
-                }),
-                warnings: Vec::new(),
-            }
-        }
-    }
-}
-
-fn direct_rejection(request_id: &str, code: &str, message: &str, retryable: bool) -> AgentResponse {
-    AgentResponse {
-        schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-        request_id: request_id.to_owned(),
-        status: AgentResponseStatus::Rejected,
-        generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        quality: DataQuality::NotReady,
-        result_schema: None,
-        result: None,
-        failure: Some(AgentFailure {
-            code: code.to_owned(),
-            message: message.to_owned(),
-            retryable,
-        }),
-        warnings: Vec::new(),
-    }
-}
-
-async fn send_frame<S>(sink: &mut S, frame: &DirectTransportFrame) -> AgentResult<()>
+async fn send<S>(sink: &mut S, f: F) -> AgentResult<()>
 where
     S: futures_util::Sink<Message> + Unpin,
     S::Error: std::fmt::Display,
 {
-    frame.validate()?;
-    let payload = serde_json::to_string(frame)?;
-    if payload.len() > DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES {
-        return Err(AgentError::CloudflareTransport(
-            "direct transport payload exceeds bound".to_owned(),
-        ));
+    let data = serde_json::to_string(&f)?;
+    if data.len() > DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES {
+        return Err(transport("OVERSIZED_RESPONSE"));
     }
-    sink.send(Message::Text(payload.into()))
+    sink.send(Message::Text(data.into()))
         .await
-        .map_err(|error| AgentError::CloudflareTransport(error.to_string()))
+        .map_err(|_| transport("WS_WRITE_FAILED"))
 }
-
-fn next_text_frame(
-    message: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
-) -> AgentResult<DirectTransportFrame> {
-    let message = message
-        .ok_or_else(|| AgentError::CloudflareTransport("cloudflare WebSocket closed".to_owned()))?;
-    let message = message.map_err(|error| AgentError::CloudflareTransport(error.to_string()))?;
-
-    let text = match message {
-        Message::Text(text) => text,
-        Message::Close(_) => {
-            return Err(AgentError::CloudflareTransport(
-                "cloudflare WebSocket closed".to_owned(),
-            ));
-        }
-        Message::Ping(_) | Message::Pong(_) => {
-            return Err(AgentError::CloudflareTransport(
-                "unexpected WebSocket control frame".to_owned(),
-            ));
-        }
-        Message::Binary(_) | Message::Frame(_) => {
-            return Err(AgentError::CloudflareTransport(
-                "binary direct transport frames are not supported".to_owned(),
-            ));
-        }
-    };
-
-    if text.len() > DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES {
-        return Err(AgentError::CloudflareTransport(
-            "direct transport payload exceeds bound".to_owned(),
-        ));
-    }
-    let frame: DirectTransportFrame = serde_json::from_str(text.as_str())?;
-    frame.validate_incoming_envelope()?;
-    Ok(frame)
-}
-
-fn require_session(
-    expected_session: &str,
-    expected_generation: u64,
-    actual_session: &str,
-    actual_generation: u64,
+pub async fn run_cloudflare_transport(
+    config: &CloudflareTransportConfig,
+    ctx: DispatchContext,
+    mut risk: mpsc::Receiver<OutboundRiskCommand>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> AgentResult<()> {
-    if actual_session == expected_session && actual_generation == expected_generation {
-        Ok(())
-    } else {
-        Err(AgentError::CloudflareTransport(
-            "stale or mismatched direct transport generation".to_owned(),
-        ))
-    }
-}
-
-fn validate_ws_url(value: &str) -> AgentResult<()> {
-    if value.len() <= 512
-        && value.starts_with("wss://")
-        && !value
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
-    {
-        Ok(())
-    } else {
-        Err(AgentError::InvalidCloudflareWsUrl)
-    }
-}
-
-fn validate_runtime_id(value: &str) -> AgentResult<()> {
-    if (1..=64).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
-        Ok(())
-    } else {
-        Err(AgentError::InvalidCloudflareRuntimeId)
-    }
-}
-
-fn random_token(prefix: &str) -> AgentResult<String> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|error| AgentError::Random(error.to_string()))?;
-    let mut result = String::with_capacity(prefix.len() + bytes.len() * 2);
-    result.push_str(prefix);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        write!(&mut result, "{byte:02x}")
-            .map_err(|error| AgentError::CloudflareTransport(error.to_string()))?;
-    }
-    Ok(result)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn source_checkpoint_requires_exact_durable_receipt_not_merely_fresh_packet() {
-        let mut response = AgentResponse {
-            schema: AGENT_RESPONSE_SCHEMA_V1.to_owned(),
-            request_id: "proof_read_20261020_0001".to_owned(),
-            status: AgentResponseStatus::Completed,
-            generated_at: "2026-10-20T09:40:00Z".to_owned(),
-            quality: DataQuality::Fresh,
-            result_schema: Some("okx.account.summary/v1".to_owned()),
-            result: Some(serde_json::json!({
-                "coherence": {
-                    "coherent": true,
-                    "history_source_received_at": "2026-10-20T09:40:00.000Z"
-                },
-                "reconciliation": {
-                    "consistent": true,
-                    "source_checkpoint_deferred": false,
-                    "exchange_evidence": {
-                        "latest_source_complete": true,
-                        "latest_source_received_at_ms": 1792489200000_u64
-                    }
-                }
-            })),
-            failure: None,
-            warnings: Vec::new(),
-        };
-        assert!(native_source_checkpoint_persisted(&response));
-        response.result.as_mut().unwrap()["reconciliation"]["source_checkpoint_deferred"] =
-            serde_json::json!(true);
-        assert!(!native_source_checkpoint_persisted(&response));
-        response.result.as_mut().unwrap()["reconciliation"]["source_checkpoint_deferred"] =
-            serde_json::json!(false);
-        response.result.as_mut().unwrap()["reconciliation"]["exchange_evidence"]["latest_source_received_at_ms"] =
-            serde_json::json!(1792489199000_u64);
-        assert!(!native_source_checkpoint_persisted(&response));
-        response.result = None;
-        assert!(!native_source_checkpoint_persisted(&response));
-    }
-
-    #[test]
-    fn internal_source_checkpoint_cannot_mint_exchange_authority() {
-        let request = AgentRequest {
-            account: None,
-            schema: AGENT_REQUEST_SCHEMA_V1.to_owned(),
-            request_id: "native_source_checkpoint_1792489000000".to_owned(),
-            operation: AgentOperation::AccountSummary,
-        };
-        assert!(request.validate().is_ok());
-        assert!(request.operation.direct_transport_read_only());
-        assert_eq!(
-            DirectRequestKind::from_operation(&request.operation),
-            DirectRequestKind::ReadOnly
-        );
-    }
-
-    #[test]
-    fn cloudflare_endpoint_is_wss_only_and_bounded() {
-        assert!(validate_ws_url("wss://okx.example.test/runtime").is_ok());
-        assert!(matches!(
-            validate_ws_url("https://okx.example.test/runtime"),
-            Err(AgentError::InvalidCloudflareWsUrl)
-        ));
-        assert!(matches!(
-            validate_ws_url("wss://bad host/runtime"),
-            Err(AgentError::InvalidCloudflareWsUrl)
-        ));
-    }
-
-    #[test]
-    fn main_transport_demonstrates_strict_profile_admission() {
-        let submit = AgentOperation::SubmitPreparedExecution {
-            intent_id: "intent_demo_stage4c_01234567".to_owned(),
-        };
-        let read = AgentOperation::AccountSummary;
-        assert!(direct_operation_allowed(
-            DirectRuntimeProfile::DemoAcceptance,
-            Some(ExecutionRuntimeMode::DemoAcceptance),
-            &submit,
-        ));
-        for (profile, mode) in [
-            (
-                DirectRuntimeProfile::Production,
-                Some(ExecutionRuntimeMode::ReadOnly),
-            ),
-            (
-                DirectRuntimeProfile::DemoAcceptance,
-                Some(ExecutionRuntimeMode::ReadOnly),
-            ),
-            (
-                DirectRuntimeProfile::Production,
-                Some(ExecutionRuntimeMode::DemoAcceptance),
-            ),
-            (DirectRuntimeProfile::DemoAcceptance, None),
-        ] {
-            assert!(!direct_operation_allowed(profile, mode, &submit));
-            assert!(direct_operation_allowed(profile, mode, &read));
+    let mut retry = 0usize;
+    loop {
+        if *shutdown.borrow() {
+            return Ok(());
         }
+        let result = run_session(config, ctx.clone(), &mut risk, shutdown.clone()).await;
+        if *shutdown.borrow() {
+            return Ok(());
+        }
+        if result.is_err() {
+            eprintln!(
+                "direct transport disconnected; pending exchange outcomes require exact readback"
+            );
+        }
+        let seconds = [1, 5, 15, 30, 60][retry.min(4)];
+        retry = (retry + 1).min(4);
+        tokio::select! {_=shutdown.changed()=>return Ok(()),_=tokio::time::sleep(Duration::from_secs(seconds))=>{}}
     }
-
-    #[test]
-    fn production_governance_v2_delivery_reports_exact_blocker() {
-        use okx_protocol::account_governance::{
-            AccountControl, AccountEnvironment, AccountGovernance, AccountLimits,
-            GOVERNANCE_SCHEMA, StrategyLimits,
-        };
-        let submit = AgentOperation::SubmitPreparedExecution {
-            intent_id: "intent_governance_delivery_20261019".to_owned(),
-        };
-        let mut scope = CentralGovernanceSnapshot {
-            state: AccountGovernance {
-                schema: GOVERNANCE_SCHEMA.to_owned(),
-                revision: 3,
-                installation_id: "installation_test".into(),
-                campaign_id: format!("sha256:{}", "a".repeat(64)),
-                campaign_loss_limit_usd: "20".into(),
-                max_total_modelled_loss_usdt: "10".to_owned(),
-                accounts: vec![AccountControl {
-                    id: "okx_real_1beb3c684155".to_owned(),
-                    label: "OKX Real".to_owned(),
-                    venue: "okx".to_owned(),
-                    environment: AccountEnvironment::Real,
-                    uid_fingerprint: "b".repeat(64),
-                    identity_verified: true,
-                    enabled: true,
-                    explicit_pause: false,
-                    policy_revision: 1,
-                    account_key: format!("okx:real:{}", "b".repeat(64)),
-                    limits: AccountLimits {
-                        max_modelled_loss_usdt: "10".to_owned(),
-                        max_order_loss_usdt: "10".to_owned(),
-                        max_notional_usdt: Some("200".to_owned()),
-                        max_leverage: Some("3".to_owned()),
-                        max_daily_realized_loss_usdt: Some("10".to_owned()),
-                        max_drawdown_ratio: Some("0.1".to_owned()),
-                        allowed_instruments: vec!["DOGE-USDT-SWAP".to_owned()],
-                    },
-                    strategies: vec![StrategyLimits {
-                        id: "real_manual_v1".to_owned(),
-                        enabled: true,
-                        allocated_capital_usdt: "100".to_owned(),
-                        max_modelled_loss_usdt: "10".to_owned(),
-                        max_daily_realized_loss_usdt: Some("10".to_owned()),
-                        max_drawdown_ratio: Some("0.1".to_owned()),
-                    }],
-                }],
-            },
-            issued_at_ms: 1_000,
-            session_generation: 514,
-            delivery_challenge: Some("ping_valid_governance_probe".to_owned()),
-        };
-        assert!(scope.valid());
-        let admitted = |value: Option<&CentralGovernanceSnapshot>, generation, _now| {
-            central_production_delivery_admission(
-                DirectRuntimeProfile::Production,
-                Some(ExecutionRuntimeMode::Production),
-                &submit,
-                value,
-                generation,
-                DeliveryFreshness {
-                    challenge_verified: true,
-                },
-            )
-        };
-        assert_eq!(admitted(Some(&scope), 514, 1_001), Ok(()));
-        assert_eq!(
-            admitted(None, 514, 1_001),
-            Err("CENTRAL_PRODUCTION_SCOPE_NOT_DELIVERED")
-        );
-        assert_eq!(
-            admitted(Some(&scope), 515, 1_001),
-            Err("CENTRAL_ACCESS_GENERATION_MISMATCH")
-        );
-        // No cross-machine clock agreement is required when the exact
-        // request-scoped challenge passed the native monotonic freshness gate.
-        assert_eq!(admitted(Some(&scope), 514, 16_001), Ok(()));
-        assert_eq!(
-            central_production_delivery_admission(
-                DirectRuntimeProfile::Production,
-                Some(ExecutionRuntimeMode::Production),
-                &submit,
-                Some(&scope),
-                514,
-                DeliveryFreshness {
-                    challenge_verified: false,
-                },
-            ),
-            Err("CENTRAL_ACCESS_CHALLENGE_NOT_FRESH")
-        );
-        scope
-            .state
-            .accounts
-            .iter_mut()
-            .for_each(|a| a.explicit_pause = true);
-        assert_eq!(
-            admitted(Some(&scope), 514, 1_001),
-            Err("CENTRAL_ACCESS_STOPPED")
-        );
-        assert_eq!(
-            central_production_delivery_admission(
-                DirectRuntimeProfile::Production,
-                Some(ExecutionRuntimeMode::ReadOnly),
-                &submit,
-                Some(&scope),
-                514,
-                DeliveryFreshness {
-                    challenge_verified: true,
-                },
-            ),
-            Err("NATIVE_PRODUCTION_EXECUTOR_NOT_ACTIVE")
-        );
-    }
-
-    #[test]
-    fn delivery_challenge_is_single_use_bounded_and_monotonic() {
-        let mut pending = HashMap::new();
-        let nonce = "ping_verified_once_012345";
-        pending.insert(nonce.to_owned(), Instant::now());
-        assert!(!consume_fresh_delivery_challenge(
-            &mut pending,
-            Some("ping_different")
-        ));
-        assert!(consume_fresh_delivery_challenge(&mut pending, Some(nonce)));
-        assert!(!consume_fresh_delivery_challenge(&mut pending, Some(nonce)));
-        assert!(!consume_fresh_delivery_challenge(&mut pending, None));
-        pending.insert(
-            nonce.to_owned(),
-            Instant::now() - DELIVERY_CHALLENGE_MAX_AGE - Duration::from_millis(1),
-        );
-        assert!(!consume_fresh_delivery_challenge(&mut pending, Some(nonce)));
-    }
-
-    #[test]
-    fn exact_terminal_read_may_own_only_fenced_native_risk_release() {
-        let status = AgentOperation::ExecutionStatus {
-            intent_id: "real_terminal_exact_intent_20261019".to_owned(),
-        };
-        assert!(terminal_risk_status_owner(
-            DirectRuntimeProfile::Production,
-            &status,
-            true,
-            true
-        ));
-        assert!(!terminal_risk_status_owner(
-            DirectRuntimeProfile::Production,
-            &status,
-            false,
-            true
-        ));
-        assert!(!terminal_risk_status_owner(
-            DirectRuntimeProfile::Production,
-            &status,
-            true,
-            false
-        ));
-        assert!(!terminal_risk_status_owner(
-            DirectRuntimeProfile::DemoAcceptance,
-            &status,
-            true,
-            true
-        ));
-        assert!(!terminal_risk_status_owner(
-            DirectRuntimeProfile::Production,
-            &AgentOperation::AccountSummary,
-            true,
-            true
-        ));
-    }
-
-    #[test]
-    fn session_generation_must_match_exactly() {
-        assert!(require_session("session_0123456789", 4, "session_0123456789", 4).is_ok());
-        assert!(require_session("session_0123456789", 4, "session_0123456789", 3).is_err());
-        assert!(require_session("session_0123456789", 4, "session_other_012345", 4).is_err());
-    }
-
-    #[test]
-    fn post_mutation_internal_error_requires_exact_intent_readback_without_retry() {
-        let response = completed_direct_response(
-            "req_direct_submit_unsafe_0001",
-            DirectRequestKind::ExchangeMutation,
-            Err(AgentError::CloudflareTransport(
-                "private exchange detail".to_owned(),
-            )),
-        );
-        assert_eq!(response.status, AgentResponseStatus::Failed);
-        let failure = response.failure.expect("typed uncertain mutation");
-        assert_eq!(failure.code, DIRECT_TRANSPORT_MUTATION_OUTCOME_UNKNOWN);
-        assert!(!failure.retryable);
-        assert!(failure.message.contains("exact intent"));
-        assert!(!failure.message.contains("private exchange detail"));
-    }
-
-    #[test]
-    fn local_prepare_error_requires_exact_readback_but_is_not_unknown_exchange_post() {
-        let response = completed_direct_response(
-            "req_direct_prepare_unsafe_0001",
-            DirectRequestKind::LocalPrepare,
-            Err(AgentError::CloudflareTransport(
-                "private ledger write detail".to_owned(),
-            )),
-        );
-        assert_eq!(response.status, AgentResponseStatus::Failed);
-        let failure = response.failure.expect("typed local uncertainty");
-        assert_eq!(failure.code, DIRECT_TRANSPORT_PREPARE_OUTCOME_UNKNOWN);
-        assert!(!failure.retryable);
-        assert!(failure.message.contains("exact intent"));
-        assert!(failure.message.contains("no exchange POST"));
-        assert!(!failure.message.contains("private ledger"));
-    }
-
-    #[test]
-    fn request_local_read_error_becomes_typed_failure() {
-        let response = completed_direct_response(
-            "req_direct_query_failure_0001",
-            DirectRequestKind::ReadOnly,
-            Err(AgentError::CloudflareTransport(
-                "internal detail must stay local".to_owned(),
-            )),
-        );
-
-        assert_eq!(response.status, AgentResponseStatus::Failed);
-        let failure = response.failure.expect("typed failure");
-        assert_eq!(failure.code, DIRECT_TRANSPORT_QUERY_FAILED);
-        assert_eq!(failure.message, "direct transport read query failed");
-        assert!(failure.retryable);
-        assert!(!failure.message.contains("internal detail"));
+}
+async fn run_session(
+    config: &CloudflareTransportConfig,
+    ctx: DispatchContext,
+    risk: &mut mpsc::Receiver<OutboundRiskCommand>,
+    mut shutdown: watch::Receiver<bool>,
+) -> AgentResult<()> {
+    let mut request = config
+        .ws_url
+        .clone()
+        .into_client_request()
+        .map_err(|_| transport("INVALID_WS_URL"))?;
+    request.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", config.bearer_token.as_str()))
+            .map_err(|_| transport("INVALID_TOKEN"))?,
+    );
+    let (socket, _) = tokio::time::timeout(Duration::from_secs(15), connect_async(request))
+        .await
+        .map_err(|_| transport("WS_CONNECT_TIMEOUT"))?
+        .map_err(|_| transport("WS_CONNECT_FAILED"))?;
+    let (mut sink, mut source) = socket.split();
+    let connection_id = format!("native_{:032x}", nonce());
+    send(
+        &mut sink,
+        F::Hello {
+            schema: SCHEMA.into(),
+            runtime_id: config.runtime_id.clone(),
+            connection_id,
+            runtime_profile: DirectRuntimeProfile::Engine,
+            installation_id: ctx.accounts.installation_id().into(),
+            contract: okx_protocol::accounts::PRODUCT_CONTRACT.into(),
+        },
+    )
+    .await?;
+    let hello = tokio::time::timeout(Duration::from_secs(5), source.next())
+        .await
+        .map_err(|_| transport("HELLO_TIMEOUT"))?
+        .ok_or_else(|| transport("WS_CLOSED"))?
+        .map_err(|_| transport("WS_READ_FAILED"))?;
+    let F::HelloAck {
+        session_id,
+        connection_generation,
+        ..
+    } = frame(hello)?
+    else {
+        return Err(transport("HELLO_ACK_REQUIRED"));
+    };
+    let mut pending: HashMap<String, oneshot::Sender<okx_protocol::risk_authority::RiskResult>> =
+        HashMap::new();
+    let mut challenges: HashMap<String, Instant> = HashMap::new();
+    let mut active = HashSet::new();
+    let mut flights: FuturesUnordered<BoxFuture<'static, (String, okx_protocol::AgentResponse)>> =
+        FuturesUnordered::new();
+    let read_capacity = Arc::new(tokio::sync::Semaphore::new(8));
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_seen = Instant::now();
+    loop {
+        tokio::select! {
+        _=shutdown.changed()=>{
+        // Work already accepted by an account SQL owner remains awaited; graceful shutdown is bounded.
+        let deadline=tokio::time::sleep(Duration::from_secs(10));tokio::pin!(deadline);
+        while !flights.is_empty(){tokio::select!{_= &mut deadline=>break,_=flights.next()=>{}}}return Ok(());
+        },
+        _=heartbeat.tick()=>{if last_seen.elapsed()>Duration::from_secs(35){return Err(transport("HEARTBEAT_TIMEOUT"));}send(&mut sink,F::Ping{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,nonce:format!("native_ping_{:032x}",nonce())}).await?;},
+        Some(outbound)=risk.recv()=>{pending.retain(|_,s|!s.is_closed());if pending.len()>=32{drop(outbound);continue;}let id=outbound.command.command_id.clone();if pending.contains_key(&id){drop(outbound);continue;}pending.insert(id,outbound.return_to);send(&mut sink,F::RiskControl{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,command:outbound.command}).await?;},
+        Some((id,result))=flights.next(),if !flights.is_empty()=>{active.remove(&id);send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:result}).await?;},
+        message=source.next()=>{
+        let f=frame(message.ok_or_else(||transport("WS_CLOSED"))?.map_err(|_|transport("WS_READ_FAILED"))?)?;
+        let(s,g)=match &f{F::Ping{session_id,connection_generation,..}|F::Pong{session_id,connection_generation,..}|F::Request{session_id,connection_generation,..}|F::RiskControlResult{session_id,connection_generation,..}|F::PolicySnapshot{session_id,connection_generation,..}=>(session_id,*connection_generation),_=>return Err(transport("UNEXPECTED_FRAME"))};
+        if s!=&session_id||g!=connection_generation{return Err(transport("SESSION_GENERATION_MISMATCH"));}last_seen=Instant::now();
+        match f{
+        F::Ping{nonce,..}=>{challenges.retain(|_,t|t.elapsed()<Duration::from_secs(15));if challenges.len()<64{challenges.insert(nonce.clone(),Instant::now());}send(&mut sink,F::Pong{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,nonce}).await?;},
+        F::Pong{..}=>{},
+        F::PolicySnapshot{snapshot,..}=>{ctx.trade.update_governance(&snapshot).await.map_err(|_|transport("INVALID_POLICY_SNAPSHOT"))?;},
+        F::RiskControlResult{result,..}=>{pending.retain(|_,sender|!sender.is_closed());if let Some(sender)=pending.remove(&result.command_id){let _=sender.send(result);}},
+        F::Request{request,operator_governance,..}=>{
+        let id=request.request_id.clone();send(&mut sink,F::DeliveryAck{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,request_id:id.clone()}).await?;
+        if active.contains(&id){continue;}
+        if flights.len()>=64{send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:response(&id,Err("NATIVE_QUEUE_FULL".into()))}).await?;continue;}
+        let governance=operator_governance.filter(|g|g.valid()&&g.session_generation==connection_generation&&g.state.installation_id==ctx.accounts.installation_id()&&g.delivery_challenge.as_ref().and_then(|key|challenges.remove(key)).is_some_and(|t|t.elapsed()<Duration::from_secs(15)));
+        let context=ctx.clone();let reads=read_capacity.clone();active.insert(id.clone());
+        flights.push(async move{let _permit=if request.operation.direct_transport_read_only(){Some(reads.acquire_owned().await)}else{None};let result=dispatch_with_governance(&context,&request,governance.as_ref()).await;(id,result)}.boxed());
+        },_=>unreachable!()}
+        }
+        }
     }
 }

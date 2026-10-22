@@ -338,6 +338,27 @@ pub struct AccountStore {
     _lease: std::fs::File,
     maintenance_error: Option<String>,
 }
+impl AccountStore {
+    pub(crate) fn run_before_deadline<T>(
+        &mut self,
+        deadline: std::time::Instant,
+        operation: impl FnOnce(&mut Self) -> StoreResult<T>,
+    ) -> StoreResult<T> {
+        self.connection
+            .progress_handler(1000, Some(move || std::time::Instant::now() >= deadline))?;
+        let result = operation(self);
+        self.connection.progress_handler(0, None::<fn() -> bool>)?;
+        match result {
+            Err(StoreError::Sql(rusqlite::Error::SqliteFailure(e, _)))
+                if e.code == rusqlite::ErrorCode::OperationInterrupted
+                    && std::time::Instant::now() >= deadline =>
+            {
+                Err(StoreError::Invalid("ACCOUNT_STORAGE_DEADLINE"))
+            }
+            other => other,
+        }
+    }
+}
 pub fn exact(value: Decimal) -> String {
     value.normalize().to_string()
 }

@@ -1,5 +1,5 @@
 import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
-import { governanceRequest, enrollObservedAccount, stopNewRealRisk, setAccountPause, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
+import { initializeGovernance, setAccountLimits, governanceRequest, enrollObservedAccount, stopNewRealRisk, setAccountPause, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
 import {validGovernance,accessEnabled,validLimits} from "./account_governance.js";
 import { handleNativeRiskCommand } from "./risk_authority.js";
 import {
@@ -35,6 +35,17 @@ export class RuntimeSession {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
+    if(url.pathname==="/installation/initialize"&&request.method==="POST"){
+      let raw:any;try{raw=await request.json();}catch{return Response.json({reason:"INVALID_INSTALLATION"},{status:400});}
+      if(raw?.contract!==FRAME_SCHEMA||typeof raw.release_sha256!=="string"||!/^[0-9a-f]{64}$/.test(raw.release_sha256)||typeof raw.operation_id!=="string"||!/^[A-Za-z0-9_-]{8,128}$/.test(raw.operation_id)||raw.configuration?.campaign_loss_limit_usd!=="20")return Response.json({reason:"INVALID_INSTALLATION"},{status:400});
+      const result=await initializeGovernance(this.state.storage,raw.configuration,{operation_id:raw.operation_id,release_sha256:raw.release_sha256,contract:raw.contract});
+      if(result.status===200)await this.publishPolicy();
+      return Response.json(result.body,{status:result.status});
+    }
+    if(url.pathname==="/account-governance/limits"&&request.method==="POST"){
+      let raw:unknown;try{raw=await request.json();}catch{return Response.json({reason:"INVALID_REQUEST"},{status:400});}
+      const result=await setAccountLimits(this.state.storage,raw);if(result.status===200)await this.publishPolicy();return Response.json(result.body,{status:result.status});
+    }
     if (url.pathname === "/runtime") {
       return this.acceptRuntime(request);
     }
@@ -44,6 +55,7 @@ export class RuntimeSession {
     if(url.pathname==="/account-governance/stop"&&request.method==="POST"){
       let raw:any;try{raw=await request.json();}catch{return Response.json({reason:"INVALID_STOP_REQUEST"},{status:400});}
       const value=await stopNewRealRisk(this.state.storage,raw?.idempotency_key);
+      if(value.status===200)await this.publishPolicy();
       return Response.json(value.body,{status:value.status,headers:{"cache-control":"no-store"}});
     }
     if(url.pathname==="/account-governance/pause"&&request.method==="POST"){
@@ -51,6 +63,7 @@ export class RuntimeSession {
       if(text.length>1024)return Response.json({reason:"REQUEST_TOO_LARGE"},{status:413});
       let body:unknown;try{body=JSON.parse(text);}catch{return Response.json({reason:"INVALID_REQUEST"},{status:400});}
       const result=await setAccountPause(this.state.storage,body);
+      if(result.status===200)await this.publishPolicy();
       return Response.json(result.body,{status:result.status});
     }
     if(url.pathname==="/account-governance/enroll"&&request.method==="POST"){
@@ -72,6 +85,7 @@ export class RuntimeSession {
         uid_fingerprint:r.uid_fingerprint,venue:"okx",
         environment:r.environment as "real"|"demo",label:r.label,alias:r.alias,enabled:r.enabled,limits:r.limits,idempotency_key:r.idempotency_key,credential_ref:r.credential_ref,
       });
+      if(out.status===200)await this.publishPolicy();
       return Response.json(out.body,{status:out.status,headers:{"cache-control":"no-store"}});
     }
     if (url.pathname === "/account-governance") {
@@ -84,6 +98,7 @@ export class RuntimeSession {
         catch{return Response.json({status:"FAILED",reason:"INVALID_GOVERNANCE_REQUEST"},{status:400});}
       }
       const answer=await governanceRequest(this.state.storage,request.method,update);
+      if(request.method==="POST"&&answer.status===200)await this.publishPolicy();
       return Response.json(answer.body,{status:answer.status,headers:{"cache-control":"no-store"}});
     }
     if (url.pathname === "/dispatch" && request.method === "POST") {
@@ -91,6 +106,13 @@ export class RuntimeSession {
       return Response.json(await this.dispatch(body));
     }
     return new Response("not found", { status: 404 });
+  }
+
+  private async publishPolicy():Promise<void>{
+    const state=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);if(!validGovernance(state))return;
+    for(const ws of this.state.getWebSockets?.("runtime")??[]){const a=ws.deserializeAttachment() as SocketAttachment;if(!a.hello||a.runtimeProfile!=="engine")continue;
+      try{ws.send(JSON.stringify({type:"policy_snapshot",schema:FRAME_SCHEMA,session_id:a.sessionId,connection_generation:a.generation,snapshot:{state,issued_at_ms:Date.now(),session_generation:a.generation}}));}catch{try{ws.close(1011,"policy delivery failed");}catch{}}
+    }
   }
 
   private async acceptRuntime(request: Request): Promise<Response> {
@@ -160,6 +182,10 @@ export class RuntimeSession {
         ws.close(1008, "invalid runtime profile");
         return;
       }
+      const configuration=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);
+      if(!validGovernance(configuration)||frame.installation_id!==configuration.installation_id||frame.contract!=="okx.product/v1"||runtimeProfile!=="engine"){
+        ws.close(1008,"installation or contract mismatch");return;
+      }
       attachment.runtimeProfile = runtimeProfile;
       attachment.hello = true;
       ws.serializeAttachment(attachment);
@@ -169,6 +195,7 @@ export class RuntimeSession {
         session_id: attachment.sessionId,
         connection_generation: attachment.generation,
       }));
+      await this.publishPolicy();
       return;
     }
 
@@ -280,7 +307,7 @@ export class RuntimeSession {
     const active = this.activeSocket();
     if (!active) return transportFailure("RUNTIME_OFFLINE");
     // OAuth/profile only authorizes delivery of a narrowly typed action.
-    // Rust CONTROL/executor alone evaluates the durable live policy and
+    // The native Engine alone evaluates current account admission and
     // owns the actual exchange POST admission under the same ledger.
     if (!executionProfilePermitsOperation(
       active.attachment.runtimeProfile,
@@ -299,17 +326,17 @@ export class RuntimeSession {
       // Production writes and exact-intent terminal status both need the
       // current native governance cohort. The latter is ONLY for a proven
       // terminal RELEASE, not permission to introduce new exposure.
-      const tradeMutation = isExecutionMutation(request.operation?.type)&&request.operation?.type!=="connect_account";
-      const terminalStatus = request.operation?.type === "execution_status";
+      const tradeMutation = isExecutionMutation(request.operation?.type,request.operation?.request?.action)&&request.operation?.type!=="connect_account";
+      const terminalStatus = request.operation?.type === "trade";
       let operator_governance: Record<string, unknown> | undefined;
       if ((tradeMutation || terminalStatus) &&
-          (active.attachment.runtimeProfile === "production"||active.attachment.runtimeProfile === "engine")) {
+          active.attachment.runtimeProfile === "engine") {
         const current:unknown=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);
         if(current!==undefined){
           if(!validGovernance(current))
             return transportFailure("CENTRAL_GOVERNANCE_CORRUPT",false);
-          if(tradeMutation &&
-             !current.accounts.some(accessEnabled))
+          if(request.operation?.type==="trade"&&request.operation?.request?.action==="execute" && ["open","add","replace"].includes(request.operation?.request?.operation) &&
+             !current.accounts.some(a=>accessEnabled(a)&&(a.id===request.account||a.account_key===request.account)))
             return transportFailure("CENTRAL_NEW_RISK_STOPPED",false);
           // Typed fresh request-scoped delivery proof. This is NOT the POST
           // permit; the native executor still needs an exact DO reservation.
@@ -353,13 +380,7 @@ export class RuntimeSession {
       // even when this HTTP/WS envelope loses ACK or response. Returning a
       // retryable failure would tempt blind duplicate sends. Require an exact
       // read-only intent/ledger reconciliation, never auto-retry the mutation.
-      if (request.operation?.type === "prepare_execution") {
-        // A lost delivery/response may leave local PREPARED state, but this
-        // action never sends a venue order. It must be checked by intent ID,
-        // not retried and not reported as an unknown exchange fill.
-        return transportFailure("EXECUTION_PREPARE_OUTCOME_UNKNOWN_READ_EXACT_INTENT", false);
-      }
-      if (isExecutionMutation(request.operation?.type)) {
+      if (isExecutionMutation(request.operation?.type,request.operation?.request?.action)) {
         return transportFailure("MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT", false);
       }
       return transportFailure(error instanceof Error ? error.message : "TRANSPORT_FAILURE");

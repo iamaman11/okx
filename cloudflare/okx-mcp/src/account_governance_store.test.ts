@@ -19,7 +19,7 @@ await s.put("account_policy_v1",{corrupt:true});await s.put("account_governance_
 await s.put("risk_book_v1",{corrupt:true});s.reads=[];
 ok((await initializeGovernance(s,initial)).status===200,"explicit clean installation");
 ok((await governanceRequest(s,"GET")).body.complete_all_account_census==="not_evaluated","unmeasured_census_is_not_denied");
-ok(s.reads.every(k=>!k.endsWith("_v2")&&!k.includes("policy_v1")&&!k.includes("risk_book_v1")),"legacy_stop_claims_and_epochs_are_never_read");
+ok(s.reads.every(k=>!k.includes("policy_v1")&&!k.includes("risk_book_v1")),"legacy_stop_claims_and_epochs_are_never_read");
 ok((await initializeGovernance(s,initial)).status===409,"installation cannot reset existing state");
 const observation={uid_fingerprint:"a".repeat(64),venue:"okx" as const,environment:"real" as const,label:"Primary",
  alias:"primary",credential_ref:"ref_primary",enabled:true,limits,idempotency_key:"connect_primary_01"};

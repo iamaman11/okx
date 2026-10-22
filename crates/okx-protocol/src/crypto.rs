@@ -306,7 +306,7 @@ mod tests {
             account: None,
             schema: crate::AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: REQUEST_ID.to_owned(),
-            operation: crate::AgentOperation::MarketSnapshot {
+            operation: crate::AgentOperation::MarketOverview {
                 instrument: "DOGE-USDT-SWAP".to_owned(),
             },
         };
@@ -344,7 +344,7 @@ mod tests {
             account: None,
             schema: crate::AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: REQUEST_ID.to_owned(),
-            operation: crate::AgentOperation::MarketSnapshot {
+            operation: crate::AgentOperation::MarketOverview {
                 instrument: "DOGE-USDT-SWAP".to_owned(),
             },
         };
@@ -371,7 +371,7 @@ mod tests {
             account: None,
             schema: crate::AGENT_REQUEST_SCHEMA_V1.to_owned(),
             request_id: "req_aaaaaaaaaaaaaaaa".to_owned(),
-            operation: crate::AgentOperation::MarketSnapshot {
+            operation: crate::AgentOperation::MarketOverview {
                 instrument: "DOGE-USDT-SWAP".to_owned(),
             },
         };

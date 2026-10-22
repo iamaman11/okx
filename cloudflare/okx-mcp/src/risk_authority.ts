@@ -1,5 +1,5 @@
 import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
-import {beginRiskPost,readRiskBook,reserveRisk,transitionRisk,
+import {amount,units,beginRiskPost,readRiskBook,inspectRisk,reserveRisk,transitionRisk,
   type CompleteRiskCensus,type NativeSessionRiskProof,type RiskReservation,
   type TerminalRiskReleaseProof} from "./risk_book.js";
 
@@ -10,6 +10,7 @@ const SHA=/^[0-9a-f]{64}$/;
 type ResultStatus="DENIED"|"HELD"|"POST_AUTHORIZED"|"UPDATED"|"OBSERVED";
 interface Result {
   schema:typeof RESULT_SCHEMA;command_id:string;status:ResultStatus;
+  budget?:{campaign_limit_usd:string;consumed_loss_usd:string;reserved_loss_usd:string;remaining_loss_usd:string;occupied_modelled_loss_usdt:string;source_as_of_ms:number|null};
   reason:string|null;reservation_key:string|null;
   risk_book_sequence:number|null;policy_revision:number|null;
   existing_modelled_loss_usdt:string|null;
@@ -17,7 +18,7 @@ interface Result {
 }
 interface Session {
   connection_generation:number;
-  runtime_profile:"engine"|"production"|"demo_acceptance"|"unverified";
+  runtime_profile:string;
   hello:boolean;
 }
 function deny(id:string,reason:string):Result {
@@ -53,13 +54,22 @@ export async function handleNativeRiskCommand(
 ):Promise<Result>{
   const id=isObject(raw)&&typeof raw.command_id==="string"&&TOKEN.test(raw.command_id)
     ?raw.command_id:"invalid_risk_command";
-  if((session.runtime_profile!=="production"&&session.runtime_profile!=="engine")||!session.hello||
+  if(session.runtime_profile!=="engine"||!session.hello||
     !Number.isSafeInteger(session.connection_generation)||session.connection_generation<1)
     return deny(id,"NATIVE_PRODUCTION_SESSION_REQUIRED");
   if(!isObject(raw)||raw.schema!==COMMAND_SCHEMA||!TOKEN.test(id)
     ||!isObject(raw.action)||!Number.isSafeInteger(now_ms)||now_ms<=0)
     return deny(id,"INVALID_TYPED_RISK_COMMAND");
+  const installation=await storage.get(GOVERNANCE_STORAGE_KEY);
+  if(!validGovernance(installation)||raw.installation_id!==installation.installation_id)return deny(id,"INSTALLATION_ID_MISMATCH");
   const a=raw.action;
+  if(a.action==="SUMMARY"){
+    if(await storage.get("generation")!==session.connection_generation)return deny(id,"STALE_NATIVE_INSPECTION_SESSION");
+    const meta=await readRiskBook(storage);if(!meta)return deny(id,"RISK_BOOK_MISSING_OR_CORRUPT");
+    const remaining=units(meta.campaign_limit_usd)!-units(meta.consumed_loss_usd)!-units(meta.occupied_usd)!;
+    return {schema:RESULT_SCHEMA,command_id:id,status:"OBSERVED",reason:null,reservation_key:null,risk_book_sequence:meta.sequence,policy_revision:installation.revision,existing_modelled_loss_usdt:null,reservation_state:null,
+      budget:{campaign_limit_usd:meta.campaign_limit_usd,consumed_loss_usd:meta.consumed_loss_usd,reserved_loss_usd:meta.occupied_usd,remaining_loss_usd:amount(remaining<0n?0n:remaining),occupied_modelled_loss_usdt:meta.occupied_usdt,source_as_of_ms:meta.source_as_of_ms||null}};
+  }
   if(a.action==="INSPECT"){
     if(typeof a.reservation_key!=="string"||typeof a.plan_sha256!=="string"
       ||!SHA.test(a.plan_sha256)||a.reservation_key.length>512)
@@ -67,9 +77,9 @@ export async function handleNativeRiskCommand(
     const generation=await storage.get("generation");
     if(generation!==session.connection_generation)
       return deny(id,"STALE_NATIVE_INSPECTION_SESSION");
-    const book=await readRiskBook(storage);
-    const found=book?.entries.find(e=>e.key===a.reservation_key&&e.plan_hash===a.plan_sha256);
-    if(!found||!book)return deny(id,"RISK_RESERVATION_NOT_FOUND");
+    const observed=await inspectRisk(storage,a.reservation_key);
+    const book=observed?.meta,found=observed?.entry;
+    if(!found||found.plan_hash!==a.plan_sha256||!book)return deny(id,"RISK_RESERVATION_NOT_FOUND");
     return {schema:RESULT_SCHEMA,command_id:id,status:"OBSERVED",reason:null,
       reservation_key:found.key,risk_book_sequence:book.sequence,
       policy_revision:found.policy_revision,existing_modelled_loss_usdt:null,
@@ -102,7 +112,7 @@ export async function handleNativeRiskCommand(
     const input:RiskReservation={
       venue:a.venue,environment:"real",uid:a.account_uid,run_id:a.run_id,
       intent_id:a.intent_id,strategy_id:a.strategy_id,instrument_id:a.instrument_id,
-      plan_hash:a.plan_sha256,loss_usdt:a.requested_loss_usdt,
+      plan_hash:a.plan_sha256,loss_usdt:a.requested_loss_usdt,loss_usd:a.requested_loss_usd as string,usd_conversion:a.usd_conversion as RiskReservation["usd_conversion"],
       policy_revision:a.policy_revision as number,now_ms,
     };
     const decision=await reserveRisk(storage,policy,census,input,proof);
@@ -179,8 +189,8 @@ export async function handleNativeRiskCommand(
       {connection_generation:session.connection_generation,
        expected_book_sequence:a.expected_risk_book_sequence as number,terminal});
     if(status.status!=="UPDATED")return deny(id,status.reason??"RISK_RESOLUTION_DENIED");
-    const book=await readRiskBook(storage);
-    const entry=book?.entries.find(e=>e.key===a.reservation_key&&e.plan_hash===a.plan_sha256);
+    const observed=await inspectRisk(storage,a.reservation_key);
+    const book=observed?.meta,entry=observed?.entry;
     return entry&&book
       ?{schema:RESULT_SCHEMA,command_id:id,status:"UPDATED",reason:null,
         reservation_key:entry.key,risk_book_sequence:book.sequence,
