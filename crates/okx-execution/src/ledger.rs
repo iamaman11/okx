@@ -552,7 +552,8 @@ impl ExecutionLedgerStore {
         // An uncommitted schema-only DB is safe to finish after a crash.
         sqlite_store::initialize_account(native.path(), identity)?;
         sqlite_store::attest_published_owner(native.path(), &identity.uid_fingerprint)?;
-        let bound = native.bound_native_account_identity()?
+        let bound = native
+            .bound_native_account_identity()?
             .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
         if bound.venue != identity.venue
             || bound.environment != identity.environment
@@ -573,7 +574,9 @@ impl ExecutionLedgerStore {
             let old = root.join(name);
             if old.try_exists()? {
                 if !old.is_file() {
-                    return Err(ExecutionLedgerError::Corrupt("legacy ledger path not a file"));
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "legacy ledger path not a file",
+                    ));
                 }
                 fs::remove_file(old)?;
             }
@@ -581,7 +584,9 @@ impl ExecutionLedgerStore {
         let archived = root.join("execution-ledger.archive");
         if archived.try_exists()? {
             if !archived.is_dir() {
-                return Err(ExecutionLedgerError::Corrupt("legacy archive path not a directory"));
+                return Err(ExecutionLedgerError::Corrupt(
+                    "legacy archive path not a directory",
+                ));
             }
             fs::remove_dir_all(archived)?;
         }

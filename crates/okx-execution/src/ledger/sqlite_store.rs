@@ -1160,71 +1160,90 @@ pub(super) fn initialize_account(
     let existing: Option<(String, i64)> = tx
         .query_row(
             "SELECT uid_fingerprint,schema_version FROM account_identity WHERE singleton=1",
-            [], |row| Ok((row.get(0)?,row.get(1)?)),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional().map_err(io)?;
-    if let Some((uid,version)) = existing {
+        .optional()
+        .map_err(io)?;
+    if let Some((uid, version)) = existing {
         if uid != identity.uid_fingerprint || version != 2 {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        let row: (String,String,String,String) = tx.query_row(
-            "SELECT venue,environment,account_id,uid_fingerprint
+        let row: (String, String, String, String) = tx
+            .query_row(
+                "SELECT venue,environment,account_id,uid_fingerprint
              FROM account_identity WHERE singleton=1",
-            [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
-        ).map_err(io)?;
-        if row != (
-            identity.venue_key().to_owned(),
-            identity.environment_key().to_owned(),
-            identity.account_id.clone(),
-            identity.uid_fingerprint.clone(),
-        ) {
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(io)?;
+        if row
+            != (
+                identity.venue_key().to_owned(),
+                identity.environment_key().to_owned(),
+                identity.account_id.clone(),
+                identity.uid_fingerprint.clone(),
+            )
+        {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        let uid:String=tx.query_row(
-            "SELECT uid FROM ledger_state WHERE key=1",
-            [],|row|row.get(0),
-        ).map_err(io)?;
+        let uid: String = tx
+            .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |row| {
+                row.get(0)
+            })
+            .map_err(io)?;
         if uid != identity.uid_fingerprint {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
         tx.commit().map_err(io)?;
         return Ok(());
     }
-    let ledger_rows: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM ledger_state",[],|r|r.get(0),
-    ).map_err(io)?;
-    let intents:i64=tx.query_row(
-        "SELECT COUNT(*) FROM ledger_entries",[],|r|r.get(0),
-    ).map_err(io)?;
-    let sources:i64=tx.query_row(
-        "SELECT COUNT(*) FROM native_source_runs",[],|r|r.get(0),
-    ).map_err(io)?;
-    let epochs:i64=tx.query_row(
-        "SELECT COUNT(*) FROM capital_epochs",[],|r|r.get(0),
-    ).map_err(io)?;
-    let nav:i64=tx.query_row(
-        "SELECT COUNT(*) FROM nav_points",[],|r|r.get(0),
-    ).map_err(io)?;
-    if ledger_rows!=0 || intents!=0 || sources!=0 || epochs!=0 || nav!=0 {
+    let ledger_rows: i64 = tx
+        .query_row("SELECT COUNT(*) FROM ledger_state", [], |r| r.get(0))
+        .map_err(io)?;
+    let intents: i64 = tx
+        .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
+        .map_err(io)?;
+    let sources: i64 = tx
+        .query_row("SELECT COUNT(*) FROM native_source_runs", [], |r| r.get(0))
+        .map_err(io)?;
+    let epochs: i64 = tx
+        .query_row("SELECT COUNT(*) FROM capital_epochs", [], |r| r.get(0))
+        .map_err(io)?;
+    let nav: i64 = tx
+        .query_row("SELECT COUNT(*) FROM nav_points", [], |r| r.get(0))
+        .map_err(io)?;
+    if ledger_rows != 0 || intents != 0 || sources != 0 || epochs != 0 || nav != 0 {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
-    let state=StoredState {
-        version:1,stop:None,reservation:None,source_run_id:None,
-        periods:StrategyPeriodHistory::default(),leverage:Vec::new(),
+    let state = StoredState {
+        version: 1,
+        stop: None,
+        reservation: None,
+        source_run_id: None,
+        periods: StrategyPeriodHistory::default(),
+        leverage: Vec::new(),
     };
-    let bytes=encode(&state)?;
+    let bytes = encode(&state)?;
     tx.execute(
         "INSERT INTO ledger_state(key,format,uid,digest,bytes)
          VALUES(1,1,?1,?2,?3)",
-        params![&identity.uid_fingerprint,checksum(&bytes),bytes],
-    ).map_err(io)?;
+        params![&identity.uid_fingerprint, checksum(&bytes), bytes],
+    )
+    .map_err(io)?;
     tx.execute(
         "INSERT INTO account_identity
          (singleton,venue,environment,account_id,uid_fingerprint,created_at_ms,schema_version)
          VALUES(1,?1,?2,?3,?4,?5,2)",
-        params![identity.venue_key(),identity.environment_key(),
-            &identity.account_id,&identity.uid_fingerprint,identity.bound_at_ms],
-    ).map_err(io)?;
+        params![
+            identity.venue_key(),
+            identity.environment_key(),
+            &identity.account_id,
+            &identity.uid_fingerprint,
+            identity.bound_at_ms
+        ],
+    )
+    .map_err(io)?;
     tx.commit().map_err(io)?;
     Ok(())
 }
@@ -2691,22 +2710,28 @@ pub(super) fn attest_published_owner(
     expected_uid: &str,
 ) -> Result<(), ExecutionLedgerError> {
     attest_snapshot(path, None)?;
-    let c=connect_indexed_read(path)?;
-    let (uid,digest,bytes):(String,String,Vec<u8>)=c.query_row(
-        "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
-        [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-    ).map_err(io)?;
-    if uid!=expected_uid || checksum(&bytes)!=digest {
+    let c = connect_indexed_read(path)?;
+    let (uid, digest, bytes): (String, String, Vec<u8>) = c
+        .query_row(
+            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(io)?;
+    if uid != expected_uid || checksum(&bytes) != digest {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
-    let _:StoredState=decode(&bytes)?;
+    let _: StoredState = decode(&bytes)?;
     // v14-imported identities used schema_version 1. Production accepts
     // ONLY an explicitly initialized fresh account, with version 2.
-    let (account_uid,genesis_version):(String,i64)=c.query_row(
-        "SELECT uid_fingerprint,schema_version FROM account_identity WHERE singleton=1",
-        [],|row|Ok((row.get(0)?,row.get(1)?)),
-    ).map_err(io)?;
-    if account_uid!=expected_uid || genesis_version!=2 {
+    let (account_uid, genesis_version): (String, i64) = c
+        .query_row(
+            "SELECT uid_fingerprint,schema_version FROM account_identity WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(io)?;
+    if account_uid != expected_uid || genesis_version != 2 {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     Ok(())
@@ -5224,7 +5249,7 @@ mod tests {
     fn fresh_sqlite_owner_is_empty_uid_bound_and_retries_without_importing_v14() {
         let root = test_root("fresh-sql-genesis");
         let old = root.join("execution-ledger.json");
-        std::fs::write(&old,b"obsolete local v14 history").unwrap();
+        std::fs::write(&old, b"obsolete local v14 history").unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
         let identity = SqliteAccountIdentity {
             venue: LedgerVenue::Okx,
@@ -5233,48 +5258,63 @@ mod tests {
             uid_fingerprint: "7".repeat(64),
             bound_at_ms: 12345,
         };
-        let store = ExecutionLedgerStore::initialize_fresh_account(&root,&identity).unwrap();
+        let store = ExecutionLedgerStore::initialize_fresh_account(&root, &identity).unwrap();
         assert!(store.is_sqlite_native());
         assert!(!old.exists());
-        assert_eq!(store.bound_native_account_identity().unwrap(),Some(identity.clone()));
-        assert_eq!(store.attest_storage().unwrap().on_disk_schema,SCHEMA);
-        let active=ExecutionLedgerStore::select_published_owner(&root).unwrap();
-        let started=DurableExecutionLedger::open(active,15000).unwrap();
-        assert_eq!(started.total_intents().unwrap(),0);
+        assert_eq!(
+            store.bound_native_account_identity().unwrap(),
+            Some(identity.clone())
+        );
+        assert_eq!(store.attest_storage().unwrap().on_disk_schema, SCHEMA);
+        let active = ExecutionLedgerStore::select_published_owner(&root).unwrap();
+        let started = DurableExecutionLedger::open(active, 15000).unwrap();
+        assert_eq!(started.total_intents().unwrap(), 0);
         assert!(started.capital_reservation().is_none());
         assert!(started.finalized_run().is_none());
         drop(started);
         // A missing acknowledgement never creates another database or UID.
-        let previous_digest=store.attest_storage().unwrap().manifest_sha256;
-        let mut repeated=identity.clone();
-        repeated.bound_at_ms+=1;
-        let again=ExecutionLedgerStore::initialize_fresh_account(&root,&repeated).unwrap();
-        assert_eq!(again.attest_storage().unwrap().manifest_sha256,previous_digest);
-        assert_eq!(again.bound_native_account_identity().unwrap(),Some(identity.clone()));
-        let mut foreign=identity.clone();
-        foreign.uid_fingerprint="8".repeat(64);
-        assert!(ExecutionLedgerStore::initialize_fresh_account(&root,&foreign).is_err());
-        assert_eq!(again.bound_native_account_identity().unwrap(),Some(identity));
+        let previous_digest = store.attest_storage().unwrap().manifest_sha256;
+        let mut repeated = identity.clone();
+        repeated.bound_at_ms += 1;
+        let again = ExecutionLedgerStore::initialize_fresh_account(&root, &repeated).unwrap();
+        assert_eq!(
+            again.attest_storage().unwrap().manifest_sha256,
+            previous_digest
+        );
+        assert_eq!(
+            again.bound_native_account_identity().unwrap(),
+            Some(identity.clone())
+        );
+        let mut foreign = identity.clone();
+        foreign.uid_fingerprint = "8".repeat(64);
+        assert!(ExecutionLedgerStore::initialize_fresh_account(&root, &foreign).is_err());
+        assert_eq!(
+            again.bound_native_account_identity().unwrap(),
+            Some(identity)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn fresh_sqlite_owner_has_one_exclusive_cross_process_writer() {
-        let root=test_root("fresh-sql-exclusive-writer");
-        let identity=SqliteAccountIdentity {
-            venue:LedgerVenue::Okx,
-            environment:LedgerEnvironment::Demo,
-            account_id:"demo".to_owned(),
-            uid_fingerprint:"a".repeat(64),
-            bound_at_ms:3210,
+        let root = test_root("fresh-sql-exclusive-writer");
+        let identity = SqliteAccountIdentity {
+            venue: LedgerVenue::Okx,
+            environment: LedgerEnvironment::Demo,
+            account_id: "demo".to_owned(),
+            uid_fingerprint: "a".repeat(64),
+            bound_at_ms: 3210,
         };
-        ExecutionLedgerStore::initialize_fresh_account(&root,&identity).unwrap();
-        let mut lease=ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
+        ExecutionLedgerStore::initialize_fresh_account(&root, &identity).unwrap();
+        let mut lease = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
         assert!(ExecutionLedgerStore::acquire_writer_lease(&root).is_err());
-        let active=ExecutionLedgerStore::select_published_owner_under_writer_lease(
-            &root,&mut lease,
-        ).unwrap();
-        assert_eq!(active.bound_native_account_identity().unwrap(),Some(identity));
+        let active =
+            ExecutionLedgerStore::select_published_owner_under_writer_lease(&root, &mut lease)
+                .unwrap();
+        assert_eq!(
+            active.bound_native_account_identity().unwrap(),
+            Some(identity)
+        );
         drop(lease);
         assert!(ExecutionLedgerStore::acquire_writer_lease(&root).is_ok());
         std::fs::remove_dir_all(root).unwrap();

@@ -223,23 +223,25 @@ mod tests {
             uid_fingerprint: uid,
             bound_at_ms: 2000,
         };
-        let native = ExecutionLedgerStore::initialize_fresh_account(root,&identity)
+        let native = ExecutionLedgerStore::initialize_fresh_account(root, &identity)
             .expect("one immutable fresh SQL owner");
-        native.save(
-            &BTreeMap::from([(
-                intent_id.clone(),
-                ExecutionLedgerEntry {
-                    record,
-                    created_at_ms: 1000,
-                    updated_at_ms: 1001,
-                },
-            )]),
-            None,
-            None,
-            None,
-            &StrategyPeriodHistory::default(),
-            &[],
-        ).unwrap();
+        native
+            .save(
+                &BTreeMap::from([(
+                    intent_id.clone(),
+                    ExecutionLedgerEntry {
+                        record,
+                        created_at_ms: 1000,
+                        updated_at_ms: 1001,
+                    },
+                )]),
+                None,
+                None,
+                None,
+                &StrategyPeriodHistory::default(),
+                &[],
+            )
+            .unwrap();
         assert!(native.is_sqlite_native());
         (AccountKey::from(&identity), intent_id)
     }
