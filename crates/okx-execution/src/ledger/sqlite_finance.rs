@@ -799,6 +799,28 @@ pub(super) fn finance_window(
 
 /// Separate source coverage facts per stream. Every inserted interval is a
 /// POINT observation; it never fabricates continuity across missing history.
+/// A point REST receipt has exactly one canonical key, shared by its
+/// immutable source writer and SQL NAV projections. It does NOT certify an
+/// uninterrupted historical time interval.
+pub(super) fn source_point_receipt_key(
+    kind: &str,
+    account_uid: &str,
+    encoded_cursor: &[u8],
+) -> Result<String, ExecutionLedgerError> {
+    if !matches!(kind, "ORDERS" | "FILLS" | "BILLS")
+        || account_uid.is_empty()
+        || encoded_cursor.is_empty()
+    {
+        return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+    }
+    Ok(checksum(&encode(&(
+        "okx.source-point/v1",
+        kind,
+        account_uid,
+        encoded_cursor,
+    ))?))
+}
+
 pub(super) fn persist_source_receipt(
     tx: &Transaction<'_>,
     account_uid: &str,
@@ -847,7 +869,7 @@ pub(super) fn persist_source_receipt(
         ("FILLS", cursor.fill_complete),
         ("BILLS", cursor.bill_complete),
     ] {
-        let key = checksum(&encode(&("okx.source-point/v1", kind, account_uid, &body))?);
+        let key = source_point_receipt_key(kind, account_uid, &body)?;
         tx.execute(
             "INSERT INTO source_receipts
              (receipt_sha256,stream_kind,scope_key,interval_start_ms,interval_end_ms,

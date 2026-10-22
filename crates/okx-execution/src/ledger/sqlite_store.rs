@@ -2199,6 +2199,98 @@ fn sync_epoch_closure(
     Ok(())
 }
 
+/// One indexed SQL NAV point, written atomically with the local STOP and
+/// the authenticated source cursor. A single point is PARTIAL historical
+/// coverage; it never manufactures a financially closed period.
+fn persist_native_nav_point(
+    tx: &rusqlite::Transaction<'_>,
+    point: &StrategyNavPoint,
+    uid: &str,
+) -> Result<(), ExecutionLedgerError> {
+    point.validate()?;
+    let cursor = super::sqlite_source::indexed_cursor(
+        tx,
+        &point.run_id,
+        &point.source_cursor_key,
+    )?
+    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+    let cursor_sha = checksum(&serde_json::to_vec(&cursor)?);
+    if cursor_sha != point.source_cursor_sha256 {
+        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+    }
+    let receipt = super::sqlite_finance::source_point_receipt_key(
+        "BILLS",
+        uid,
+        &encode(&cursor)?,
+    )?;
+    let belongs: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM capital_epochs
+             WHERE epoch_id=?1 AND opening_at_ms<=?2",
+            params![
+                &point.run_id,
+                i64::try_from(point.account_as_of_ms)
+                    .map_err(|_| ExecutionLedgerError::InvalidTimestamp)?
+            ],
+            |row| row.get(0),
+        )
+        .map_err(io)?;
+    if belongs != 1 {
+        return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
+    }
+    let source_present: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM source_receipts
+             WHERE receipt_sha256=?1 AND stream_kind='BILLS'
+               AND scope_key=?2 AND evidence_sha256 IS NOT NULL",
+            params![&receipt, uid],
+            |row| row.get(0),
+        )
+        .map_err(io)?;
+    if source_present != 1 {
+        return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
+    }
+    let preceding: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT checkpoint_sha256,observed_at_ms FROM nav_points
+             ORDER BY observed_at_ms DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(io)?;
+    let observed = i64::try_from(point.observed_at_ms)
+        .map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    if preceding.as_ref().is_some_and(|(_, at)| observed <= *at)
+        || point.previous_sha256
+            != preceding.as_ref().map_or("", |(sha, _)| sha.as_str())
+    {
+        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+    }
+    tx.execute(
+        "INSERT INTO nav_points
+         (epoch_id,observed_at_ms,nav_decimal,high_water_decimal,
+          gross_daily_loss_decimal,currency,finance_completeness,
+          source_receipt_sha256,source_evidence_sha256,source_cursor_sha256,
+          previous_sha256,checkpoint_sha256)
+         VALUES(?1,?2,?3,?4,?5,'USDT','PARTIAL',?6,?7,?8,?9,?10)",
+        params![
+            &point.run_id,
+            observed,
+            &point.nav_usdt,
+            &point.high_water_usdt,
+            &point.daily_gross_loss_usdt,
+            &receipt,
+            &point.evidence_sha256,
+            &point.source_cursor_sha256,
+            &point.previous_sha256,
+            &point.checksum_sha256
+        ],
+    )
+    .map_err(io)?;
+    Ok(())
+}
+
 fn save_metadata_inner(
     path: &Path,
     stop: Option<&ExecutionRiskStop>,
@@ -2344,6 +2436,14 @@ fn save_metadata_inner(
     if let Some(opening) = opening {
         let run = reservation.ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
         persist_verified_capital_opening(&tx, run, opening)?;
+    }
+    if periods.nav_points.len() < old.periods.nav_points.len()
+        || !periods.nav_points.starts_with(&old.periods.nav_points)
+    {
+        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+    }
+    for point in periods.nav_points.iter().skip(old.periods.nav_points.len()) {
+        persist_native_nav_point(&tx, point, expected)?;
     }
     tx.commit().map_err(io)?;
     Ok(())

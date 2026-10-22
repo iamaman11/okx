@@ -241,8 +241,14 @@ CREATE TABLE IF NOT EXISTS nav_points (
     finance_completeness TEXT NOT NULL CHECK(finance_completeness IN
         ('COMPLETE','PARTIAL','UNVERIFIED')),
     source_receipt_sha256 TEXT NOT NULL REFERENCES source_receipts(receipt_sha256),
+    source_evidence_sha256 TEXT NOT NULL,
+    source_cursor_sha256 TEXT NOT NULL,
+    previous_sha256 TEXT NOT NULL,
+    checkpoint_sha256 TEXT NOT NULL UNIQUE,
     PRIMARY KEY(epoch_id, observed_at_ms)
 ) STRICT;
+CREATE INDEX IF NOT EXISTS idx_nav_chronological
+ ON nav_points(observed_at_ms DESC);
 
 -- Daily risk cannot be reset by closing/reopening a strategy epoch.
 CREATE TABLE IF NOT EXISTS account_daily_risk (
