@@ -1233,16 +1233,14 @@ pub(super) fn load_operational(path: &Path) -> Result<LoadedExecutionLedger, Exe
         .as_deref()
         .map(|run_id| super::sqlite_source::attest_indexed(&c, run_id, &uid))
         .transpose()?;
-    state.periods.validate_indexed(
-        state.reservation.as_ref(),
-        summary.as_ref(),
-        |key| {
+    state
+        .periods
+        .validate_indexed(state.reservation.as_ref(), summary.as_ref(), |key| {
             let Some(run_id) = state.source_run_id.as_deref() else {
                 return Ok(None);
             };
             super::sqlite_source::indexed_cursor(&c, run_id, key)
-        },
-    )?;
+        })?;
     validate_leverage_attempts(&state.leverage, state.reservation.as_ref())?;
 
     let mut statement = c
@@ -1305,7 +1303,9 @@ pub(super) fn current_source(
         .map_err(io)?;
     require_finance_read_scope(&c, &uid)?;
     if checksum(&bytes) != digest {
-        return Err(ExecutionLedgerError::Corrupt("native source pointer digest"));
+        return Err(ExecutionLedgerError::Corrupt(
+            "native source pointer digest",
+        ));
     }
     let state: StoredState = decode(&bytes)?;
     if state.version != 1 {
@@ -1314,9 +1314,11 @@ pub(super) fn current_source(
     let Some(run_id) = state.source_run_id.as_deref() else {
         return Ok(None);
     };
-    if state.reservation.as_ref().is_none_or(|run| {
-        run.allocation_id != run_id || run.account_uid_fingerprint != uid
-    }) {
+    if state
+        .reservation
+        .as_ref()
+        .is_none_or(|run| run.allocation_id != run_id || run.account_uid_fingerprint != uid)
+    {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     super::sqlite_source::read(&c, run_id, &uid).map(Some)
