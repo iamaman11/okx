@@ -3977,6 +3977,19 @@ mod tests {
                 allocation: "UNALLOCATED".to_owned(),
             },
         );
+        source.cursors.insert(
+            "complete:3000".to_owned(),
+            crate::exchange_evidence::ExchangeCoverageCursor {
+                source: "OKX_REST_COMPLETE".to_owned(),
+                source_received_at: "1970-01-01T00:00:03Z".to_owned(),
+                generation: "g1".to_owned(),
+                account_as_of_ms: 3000,
+                order_complete: true,
+                fill_complete: true,
+                bill_complete: true,
+                covered_ranges: serde_json::json!({}),
+            },
+        );
         source.checksum_sha256 = format!(
             "{:x}",
             Sha256::digest(
@@ -4013,6 +4026,38 @@ mod tests {
         );
         let before = ledger.exchange_evidence_summary().unwrap().unwrap();
         assert_eq!(before.events, 1);
+        let report = StrategyFinancialPeriod {
+            schema: crate::STRATEGY_FINANCIAL_PERIOD_SCHEMA_V1,
+            run_id: run.allocation_id.clone(),
+            state: "FLAT_RECONCILED",
+            evidence_sha256: source.checksum_sha256.clone(),
+            allocation_usdt: "100".to_owned(),
+            linked_fills: 0,
+            linked_bills: 0,
+            realized_usdt: "0".to_owned(),
+            fees_usdt: "0".to_owned(),
+            funding_usdt: Some("0".to_owned()),
+            unrealized_usdt: Some("0".to_owned()),
+            nav_usdt: Some("100".to_owned()),
+            positions: vec![],
+            usable_for_new_risk: false,
+            reasons: vec![],
+        };
+        let (key, cursor, receipt, loss) =
+            nav_cursor_and_daily_loss(&db, &run, &report, 0, 3000)
+                .unwrap()
+                .unwrap();
+        assert_eq!(key, "complete:3000");
+        assert_eq!(cursor.source_received_at, "1970-01-01T00:00:03Z");
+        assert_eq!(receipt, 3000);
+        assert_eq!(loss, Decimal::ZERO);
+        let mut forged = report.clone();
+        forged.evidence_sha256 = "f".repeat(64);
+        assert!(
+            nav_cursor_and_daily_loss(&db, &run, &forged, 0, 3000)
+                .unwrap()
+                .is_none(),
+        );
         ledger.stop_new_risk("OPERATOR_HALT", 3000).unwrap();
         assert!(ledger.exchange_evidence.is_none());
         assert_eq!(
