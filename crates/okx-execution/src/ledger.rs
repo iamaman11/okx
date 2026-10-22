@@ -2359,7 +2359,7 @@ impl DurableExecutionLedger {
         excluded_candidate: Option<&ExecutionPlan>,
     ) -> Result<StrategyFinancialPeriod, ExecutionLedgerError> {
         use crate::strategy_finance::FinanceSourceReader;
-        let reader=sqlite_finance::NativeFinanceReader::open(&self.store.path,run)?;
+        let reader = sqlite_finance::NativeFinanceReader::open(&self.store.path, run)?;
         let mut reasons = BTreeSet::new();
         let mut excluded_seen = false;
         let mut finance_error = None;
@@ -2368,14 +2368,16 @@ impl DurableExecutionLedger {
             &run.account_uid_fingerprint,
             run.started_at_ms,
             |entry| {
-                if excluded_candidate.is_some_and(|p| p.intent_id==entry.record.plan.intent_id) {
-                    excluded_seen=true;
+                if excluded_candidate.is_some_and(|p| p.intent_id == entry.record.plan.intent_id) {
+                    excluded_seen = true;
                     if !Self::inert_candidate_for_financial_projection(
                         &entry.record,
                         excluded_candidate.expect("checked candidate"),
                         &run.allocation_id,
                     ) {
-                        finance_error=Some(ExecutionLedgerError::Corrupt("non-inert financial new-risk candidate"));
+                        finance_error = Some(ExecutionLedgerError::Corrupt(
+                            "non-inert financial new-risk candidate",
+                        ));
                         return false;
                     }
                     return true;
@@ -2384,35 +2386,56 @@ impl DurableExecutionLedger {
                     reasons.insert("unresolved_managed_execution");
                 }
                 if entry.record.order_id.is_some() {
-                    if let Err(err)=reader.validate_entry(entry,run.started_at_ms,&mut reasons) {
-                        finance_error=Some(err);
+                    if let Err(err) = reader.validate_entry(entry, run.started_at_ms, &mut reasons)
+                    {
+                        finance_error = Some(err);
                         return false;
                     }
                 }
                 true
             },
         )?;
-        if let Some(err)=finance_error {return Err(err);}
-        if let Some(candidate)=excluded_candidate {
-            if !excluded_seen && self.read_intent(&candidate.intent_id)?.is_some_and(|entry|
-                !Self::inert_candidate_for_financial_projection(
-                    &entry.record,candidate,&run.allocation_id)) {
-                return Err(ExecutionLedgerError::Corrupt("non-inert financial new-risk candidate"));
+        if let Some(err) = finance_error {
+            return Err(err);
+        }
+        if let Some(candidate) = excluded_candidate {
+            if !excluded_seen
+                && self
+                    .read_intent(&candidate.intent_id)?
+                    .is_some_and(|entry| {
+                        !Self::inert_candidate_for_financial_projection(
+                            &entry.record,
+                            candidate,
+                            &run.allocation_id,
+                        )
+                    })
+            {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "non-inert financial new-risk candidate",
+                ));
             }
         }
-        let mut report=crate::strategy_finance::assess_persisted_financial_period_from_reader(
-            run,&reader,&[],facts,coherent,production_marks,captured,
+        let mut report = crate::strategy_finance::assess_persisted_financial_period_from_reader(
+            run,
+            &reader,
+            &[],
+            facts,
+            coherent,
+            production_marks,
+            captured,
         )?;
         for reason in reasons {
-            if !report.reasons.contains(&reason) {report.reasons.push(reason);}
+            if !report.reasons.contains(&reason) {
+                report.reasons.push(reason);
+            }
         }
         if !report.reasons.is_empty() {
             report.reasons.sort_unstable();
-            report.state="INCOMPLETE";
-            report.funding_usdt=None;
-            report.unrealized_usdt=None;
-            report.nav_usdt=None;
-            report.usable_for_new_risk=false;
+            report.state = "INCOMPLETE";
+            report.funding_usdt = None;
+            report.unrealized_usdt = None;
+            report.nav_usdt = None;
+            report.usable_for_new_risk = false;
         }
         Ok(report)
     }

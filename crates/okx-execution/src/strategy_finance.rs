@@ -192,12 +192,38 @@ pub(crate) struct FinanceSourceAudit {
 }
 pub(crate) trait FinanceSourceReader {
     fn audit(&self) -> Result<FinanceSourceAudit, ExecutionLedgerError>;
-    fn fills(&self) -> Result<Vec<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError>;
-    fn bill(&self, key: &str) -> Result<Option<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError>;
-    fn visit_bills(&self, visitor: &mut dyn FnMut(&str, &crate::exchange_evidence::StoredExchangeEvent) -> Result<(), ExecutionLedgerError>) -> Result<(), ExecutionLedgerError>;
-    fn entry(&self, id: &str, entries: &[ExecutionLedgerEntry]) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError>;
-    fn exact_order(&self, order: &str, client: &str, inst: &str, intent: &str) -> Result<bool, ExecutionLedgerError>;
-    fn validate_entry(&self, entry: &ExecutionLedgerEntry, since: u64, reasons: &mut BTreeSet<&'static str>) -> Result<(), ExecutionLedgerError>;
+    fn fills(
+        &self,
+    ) -> Result<Vec<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError>;
+    fn bill(
+        &self,
+        key: &str,
+    ) -> Result<Option<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError>;
+    fn visit_bills(
+        &self,
+        visitor: &mut dyn FnMut(
+            &str,
+            &crate::exchange_evidence::StoredExchangeEvent,
+        ) -> Result<(), ExecutionLedgerError>,
+    ) -> Result<(), ExecutionLedgerError>;
+    fn entry(
+        &self,
+        id: &str,
+        entries: &[ExecutionLedgerEntry],
+    ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError>;
+    fn exact_order(
+        &self,
+        order: &str,
+        client: &str,
+        inst: &str,
+        intent: &str,
+    ) -> Result<bool, ExecutionLedgerError>;
+    fn validate_entry(
+        &self,
+        entry: &ExecutionLedgerEntry,
+        since: u64,
+        reasons: &mut BTreeSet<&'static str>,
+    ) -> Result<(), ExecutionLedgerError>;
 }
 struct LegacyFinanceReader<'a> {
     source: &'a DurableExchangeEvidence,
@@ -206,37 +232,85 @@ struct LegacyFinanceReader<'a> {
 impl FinanceSourceReader for LegacyFinanceReader<'_> {
     fn audit(&self) -> Result<FinanceSourceAudit, ExecutionLedgerError> {
         self.source.validate()?;
-        let receipts = self.source.cursors.values().map(|c|
-            crate::exchange_evidence::source_receipt_ms(&c.source_received_at)
-                .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)
-        ).collect::<Result<Vec<_>, _>>()?;
+        let receipts = self
+            .source
+            .cursors
+            .values()
+            .map(|c| {
+                crate::exchange_evidence::source_receipt_ms(&c.source_received_at)
+                    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(FinanceSourceAudit {
             uid: self.source.account_uid.clone(),
             run_id: self.source.run_id.clone(),
             digest: self.source.checksum_sha256.clone(),
             latest_receipt: receipts.iter().max().copied(),
             receipt_times: receipts,
-            truncated: self.source.cursors.values().any(|c| !c.order_complete || !c.fill_complete || !c.bill_complete),
+            truncated: self
+                .source
+                .cursors
+                .values()
+                .any(|c| !c.order_complete || !c.fill_complete || !c.bill_complete),
         })
     }
-    fn fills(&self) -> Result<Vec<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError> {
-        Ok(self.source.events.values().filter(|e| e.payload["source"] == "OKX_REST_FILL").cloned().collect())
+    fn fills(
+        &self,
+    ) -> Result<Vec<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError> {
+        Ok(self
+            .source
+            .events
+            .values()
+            .filter(|e| e.payload["source"] == "OKX_REST_FILL")
+            .cloned()
+            .collect())
     }
-    fn bill(&self, key: &str) -> Result<Option<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError> {
+    fn bill(
+        &self,
+        key: &str,
+    ) -> Result<Option<crate::exchange_evidence::StoredExchangeEvent>, ExecutionLedgerError> {
         Ok(self.source.events.get(key).cloned())
     }
-    fn visit_bills(&self, visitor: &mut dyn FnMut(&str, &crate::exchange_evidence::StoredExchangeEvent) -> Result<(), ExecutionLedgerError>) -> Result<(), ExecutionLedgerError> {
-        for (key,event) in &self.source.events { if key.starts_with("bill:") { visitor(key,event)?; } }
+    fn visit_bills(
+        &self,
+        visitor: &mut dyn FnMut(
+            &str,
+            &crate::exchange_evidence::StoredExchangeEvent,
+        ) -> Result<(), ExecutionLedgerError>,
+    ) -> Result<(), ExecutionLedgerError> {
+        for (key, event) in &self.source.events {
+            if key.starts_with("bill:") {
+                visitor(key, event)?;
+            }
+        }
         Ok(())
     }
-    fn entry(&self, id: &str, entries: &[ExecutionLedgerEntry]) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
-        Ok(entries.iter().find(|entry| entry.record.plan.intent_id == id).cloned())
+    fn entry(
+        &self,
+        id: &str,
+        entries: &[ExecutionLedgerEntry],
+    ) -> Result<Option<ExecutionLedgerEntry>, ExecutionLedgerError> {
+        Ok(entries
+            .iter()
+            .find(|entry| entry.record.plan.intent_id == id)
+            .cloned())
     }
-    fn exact_order(&self, order: &str, client: &str, inst: &str, intent: &str) -> Result<bool, ExecutionLedgerError> {
-        Ok(self.index.contains_exact_order(order,client,inst,intent))
+    fn exact_order(
+        &self,
+        order: &str,
+        client: &str,
+        inst: &str,
+        intent: &str,
+    ) -> Result<bool, ExecutionLedgerError> {
+        Ok(self.index.contains_exact_order(order, client, inst, intent))
     }
-    fn validate_entry(&self, entry: &ExecutionLedgerEntry, since: u64, reasons: &mut BTreeSet<&'static str>) -> Result<(), ExecutionLedgerError> {
-        self.index.validate_entry(entry,since,reasons);
+    fn validate_entry(
+        &self,
+        entry: &ExecutionLedgerEntry,
+        since: u64,
+        reasons: &mut BTreeSet<&'static str>,
+    ) -> Result<(), ExecutionLedgerError> {
+        self.index.validate_entry(entry, since, reasons);
         Ok(())
     }
 }
@@ -647,18 +721,50 @@ pub(crate) fn assess_persisted_financial_period_with_index(
 ) -> StrategyFinancialPeriod {
     let (Some(evidence), Some(index)) = (evidence, source_index) else {
         let mut reasons = BTreeSet::new();
-        reasons.insert(if evidence.is_none() { "durable_exchange_evidence_absent" } else { "source_order_index_unavailable" });
-        return incomplete(run, Decimal::from_str(&run.allocated_usdt).unwrap_or(Decimal::ZERO),
-            evidence.map_or(String::new(), |e| e.checksum_sha256.clone()), 0, 0, Decimal::ZERO, Decimal::ZERO, Vec::new(), reasons);
+        reasons.insert(if evidence.is_none() {
+            "durable_exchange_evidence_absent"
+        } else {
+            "source_order_index_unavailable"
+        });
+        return incomplete(
+            run,
+            Decimal::from_str(&run.allocated_usdt).unwrap_or(Decimal::ZERO),
+            evidence.map_or(String::new(), |e| e.checksum_sha256.clone()),
+            0,
+            0,
+            Decimal::ZERO,
+            Decimal::ZERO,
+            Vec::new(),
+            reasons,
+        );
     };
-    let reader = LegacyFinanceReader { source: evidence, index };
+    let reader = LegacyFinanceReader {
+        source: evidence,
+        index,
+    };
     assess_persisted_financial_period_from_reader(
-        run, &reader, entries, facts, coherent, production_marks, current_source_captured
-    ).unwrap_or_else(|_| {
+        run,
+        &reader,
+        entries,
+        facts,
+        coherent,
+        production_marks,
+        current_source_captured,
+    )
+    .unwrap_or_else(|_| {
         let mut reasons = BTreeSet::new();
         reasons.insert("invalid_persisted_source_integrity");
-        incomplete(run, Decimal::from_str(&run.allocated_usdt).unwrap_or(Decimal::ZERO),
-            evidence.checksum_sha256.clone(), 0, 0, Decimal::ZERO, Decimal::ZERO, Vec::new(), reasons)
+        incomplete(
+            run,
+            Decimal::from_str(&run.allocated_usdt).unwrap_or(Decimal::ZERO),
+            evidence.checksum_sha256.clone(),
+            0,
+            0,
+            Decimal::ZERO,
+            Decimal::ZERO,
+            Vec::new(),
+            reasons,
+        )
     })
 }
 /// The ONE financial policy, not separate v14 and native FIFO/PnL engines.
@@ -689,26 +795,45 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
     }
     if audit.uid != run.account_uid_fingerprint || audit.run_id != run.allocation_id {
         reasons.insert("invalid_persisted_source_integrity");
-        return Ok(incomplete(run, allocation, evidence_sha256, 0, 0, realized, fees, Vec::new(), reasons));
+        return Ok(incomplete(
+            run,
+            allocation,
+            evidence_sha256,
+            0,
+            0,
+            realized,
+            fees,
+            Vec::new(),
+            reasons,
+        ));
     }
-    if audit.receipt_times.is_empty() { reasons.insert("source_coverage_missing"); }
+    if audit.receipt_times.is_empty() {
+        reasons.insert("source_coverage_missing");
+    }
     // Source coverage is measured by authenticated receipt times, NOT the
     // venue balance/position last-change uTime (which can be days old).
     let current_as_of =
         crate::exchange_evidence::source_receipt_ms(&facts.summary.source_received_at);
     let newest = audit.latest_receipt;
-    let coalesced_source_attested = current_source_captured && coherent
+    let coalesced_source_attested = current_source_captured
+        && coherent
         && DurableExchangeEvidence::complete_source_checkpoint(facts);
-    if !coalesced_source_attested && current_as_of.zip(newest)
-        .is_none_or(|(current,last)| current < last || current-last > 30_000)
-    { reasons.insert("financial_source_asof_not_current"); }
+    if !coalesced_source_attested
+        && current_as_of
+            .zip(newest)
+            .is_none_or(|(current, last)| current < last || current - last > 30_000)
+    {
+        reasons.insert("financial_source_asof_not_current");
+    }
     let mut cursor_times = audit.receipt_times;
     cursor_times.sort_unstable();
     cursor_times.dedup();
     if !source_continuity_attested(&cursor_times, run.started_at_ms, current_as_of) {
         reasons.insert("source_continuity_not_proven");
     }
-    if audit.truncated { reasons.insert("persisted_source_window_truncated"); }
+    if audit.truncated {
+        reasons.insert("persisted_source_window_truncated");
+    }
     if !facts.exchange_orders_history_complete
         || !facts.exchange_fills_history_complete
         || !facts.bills_history_complete
@@ -716,7 +841,9 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
         reasons.insert("current_source_window_truncated");
     }
 
-    for entry in entries { reader.validate_entry(entry, run.started_at_ms, &mut reasons)?; }
+    for entry in entries {
+        reader.validate_entry(entry, run.started_at_ms, &mut reasons)?;
+    }
     let mut fills = Vec::<FilledLeg>::new();
     let fill_events = reader.fills()?;
     for item in &fill_events {
