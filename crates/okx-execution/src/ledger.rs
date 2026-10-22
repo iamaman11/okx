@@ -2385,12 +2385,11 @@ impl DurableExecutionLedger {
                 if entry.created_at_ms > run.started_at_ms && !entry.record.state.is_terminal() {
                     reasons.insert("unresolved_managed_execution");
                 }
-                if entry.record.order_id.is_some() {
-                    if let Err(err) = reader.validate_entry(entry, run.started_at_ms, &mut reasons)
-                    {
-                        finance_error = Some(err);
-                        return false;
-                    }
+                if entry.record.order_id.is_some()
+                    && let Err(err) = reader.validate_entry(entry, run.started_at_ms, &mut reasons)
+                {
+                    finance_error = Some(err);
+                    return false;
                 }
                 true
             },
@@ -2398,22 +2397,19 @@ impl DurableExecutionLedger {
         if let Some(err) = finance_error {
             return Err(err);
         }
-        if let Some(candidate) = excluded_candidate {
-            if !excluded_seen
-                && self
-                    .read_intent(&candidate.intent_id)?
-                    .is_some_and(|entry| {
-                        !Self::inert_candidate_for_financial_projection(
-                            &entry.record,
-                            candidate,
-                            &run.allocation_id,
-                        )
-                    })
-            {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "non-inert financial new-risk candidate",
-                ));
-            }
+        if let Some(candidate) = excluded_candidate
+            && !excluded_seen
+            && self.read_intent(&candidate.intent_id)?.is_some_and(|entry| {
+                !Self::inert_candidate_for_financial_projection(
+                    &entry.record,
+                    candidate,
+                    &run.allocation_id,
+                )
+            })
+        {
+            return Err(ExecutionLedgerError::Corrupt(
+                "non-inert financial new-risk candidate",
+            ));
         }
         let mut report = crate::strategy_finance::assess_persisted_financial_period_from_reader(
             run,

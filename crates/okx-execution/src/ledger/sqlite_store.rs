@@ -680,6 +680,7 @@ pub(super) fn owner_intent(
 /// source, under ONE pinned account-scoped WAL snapshot. Unlike opening
 /// SQLite per fill/bill this has constant connection overhead and cannot
 /// accidentally sample mixed exchange-account owners.
+#[cfg(test)]
 pub(super) fn source_linked_intents(
     path: &Path,
     expected_uid: &str,
