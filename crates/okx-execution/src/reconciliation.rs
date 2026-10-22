@@ -629,9 +629,16 @@ fn reconcile_exchange_evidence(
     let mut unexpected_fills = 0usize;
     let mut identity_mismatches = 0usize;
 
+    let native = ledger
+        .native_reconciliation_inventory(
+            &observed_clients,
+            &observed_order_ids,
+            MAX_UNMATCHED_HISTORICAL_ROWS,
+        )
+        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
+    let mut skipped_submitted = 0usize;
     let mut duplicate_managed_client = None;
-    ledger
-        .visit_historical_entries(|entry| {
+    let mut visit_entry = |entry: &ExecutionLedgerEntry| {
             historical_count += 1;
             let plan = &entry.record.plan;
             if observed_clients.contains(plan.client_order_id.as_str()) {
@@ -652,12 +659,24 @@ fn reconcile_exchange_evidence(
             if let Some(order) = observed {
                 if order.instrument_id != plan.instrument_id {
                     identity_mismatches += 1;
+                    if !matches!(
+                        entry.record.state,
+                        ExecutionState::Prepared | ExecutionState::Rejected
+                    ) {
+                        skipped_submitted += 1;
+                    }
                     return true;
                 }
                 if let Some(expected_order_id) = entry.record.order_id.as_deref()
                     && order.order_id != expected_order_id
                 {
                     identity_mismatches += 1;
+                    if !matches!(
+                        entry.record.state,
+                        ExecutionState::Prepared | ExecutionState::Rejected
+                    ) {
+                        skipped_submitted += 1;
+                    }
                     return true;
                 }
             }
@@ -702,8 +721,46 @@ fn reconcile_exchange_evidence(
                 }
             }
             true
-        })
-        .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
+        };
+    if let Some(ref census) = native {
+        for entry in &census.candidates {
+            if !visit_entry(entry) {
+                break;
+            }
+        }
+    } else {
+        ledger
+            .visit_historical_entries(&mut visit_entry)
+            .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
+    }
+    drop(visit_entry);
+    if let Some(census) = native {
+        historical_count = census.total;
+        unresolved = census
+            .submitted
+            .checked_sub(matched)
+            .and_then(|count| count.checked_sub(skipped_submitted))
+            .ok_or(AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
+        unmatched_historical.clear();
+        for entry in census.historical_sample {
+            let plan = &entry.record.plan;
+            // Exact client matches were already processed in the bounded
+            // venue-side census; do not count them as historical gaps.
+            if by_client.contains_key(plan.client_order_id.as_str()) {
+                continue;
+            }
+            if unmatched_historical.len() == MAX_UNMATCHED_HISTORICAL_ROWS {
+                break;
+            }
+            unmatched_historical.push(ManagedIntentOutsideExchangeWindow {
+                intent_id: plan.intent_id.clone(),
+                state: entry.record.state,
+                ledger_terminal: entry.record.state.is_terminal(),
+                recorded_order_id: entry.record.order_id.clone(),
+                evidence_status: "NOT_OBSERVABLE_IN_BOUNDED_EXCHANGE_WINDOW",
+            });
+        }
+    }
     if let Some(client_order_id) = duplicate_managed_client {
         return Err(
             AccountLedgerReconciliationError::DuplicateManagedExchangeOrder { client_order_id },
