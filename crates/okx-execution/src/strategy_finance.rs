@@ -210,8 +210,7 @@ impl SourceReceiptCoverage {
     }
 
     pub(crate) fn attests(&self, run_started_at_ms: u64, current_as_of: Option<u64>) -> bool {
-        let (Some(first), Some(last), Some(current)) =
-            (self.first, self.last, current_as_of)
+        let (Some(first), Some(last), Some(current)) = (self.first, self.last, current_as_of)
         else {
             return false;
         };
@@ -1352,7 +1351,9 @@ mod tests {
             source_continuity_attested(&receipt_times, start, current)
         );
         assert!(stream.attests(start, current));
-        stream.observe(start + 20_000 * step + crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS + 1);
+        stream.observe(
+            start + 20_000 * step + crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS + 1,
+        );
         assert!(!stream.attests(start, stream.latest()));
         let mut out_of_order = SourceReceiptCoverage::default();
         out_of_order.observe(start + step);
