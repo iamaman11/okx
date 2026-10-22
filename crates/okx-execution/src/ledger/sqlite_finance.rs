@@ -271,6 +271,71 @@ fn insert_fill(
     Ok(())
 }
 
+/// A financial gap is resolved only by a later authenticated, exact bill
+/// fact with the SAME native bill identity. Both immutable source proofs
+/// remain present. A point receipt never grants continuous-history coverage.
+fn match_bill_gap(
+    tx: &Transaction<'_>,
+    bill: &str,
+    timestamp: i64,
+    resolution: Option<&str>,
+) -> Result<(), ExecutionLedgerError> {
+    let gap_id = format!("bill-financial-missing:{bill}");
+    let prior: Option<(String, String, i64, i64, String, String, Option<String>)> = tx
+        .query_row(
+            "SELECT stream_kind,scope_key,from_ms,through_ms,materiality,reason_code,
+                    resolution_evidence_sha256
+             FROM source_gaps WHERE gap_id=?1",
+            params![&gap_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(io)?;
+    let Some((stream, scope, from, through, materiality, reason, existing_resolution)) = prior else {
+        return Ok(());
+    };
+    if stream != "BILLS"
+        || scope != bill
+        || from != timestamp
+        || through != timestamp.checked_add(1).ok_or(ExecutionLedgerError::Corrupt("bill time overflow"))?
+        || materiality != "FINANCIAL"
+        || reason != "MISSING_EXACT_BALANCE_CHANGE"
+    {
+        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+    }
+    if let Some(proof) = resolution {
+        // Resolution is one-way. A duplicate later receipt with the same
+        // exact cash fact does not replace the first resolving evidence.
+        if existing_resolution.is_none() {
+            let changed = tx
+                .execute(
+                    "UPDATE source_gaps SET resolution_evidence_sha256=?1
+                     WHERE gap_id=?2 AND resolution_evidence_sha256 IS NULL",
+                    params![proof, gap_id],
+                )
+                .map_err(io)?;
+            if changed != 1 {
+                return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+            }
+        }
+    } else if existing_resolution.is_some() {
+        // A later incomplete REST observation cannot revoke a proven exact
+        // bill or resurrect an already resolved financial gap.
+        return Ok(());
+    }
+    Ok(())
+}
+
 fn insert_bill(tx: &Transaction<'_>, v: &Value, proof: &str) -> Result<(), ExecutionLedgerError> {
     let bill = field(v, "billId")?;
     let timestamp = ms(v)?;
@@ -280,21 +345,49 @@ fn insert_bill(tx: &Transaction<'_>, v: &Value, proof: &str) -> Result<(), Execu
     let bill_type = nullable(v, "type")?.unwrap_or("UNKNOWN_LEGACY");
     let subtype = nullable(v, "subType")?.unwrap_or("UNKNOWN_LEGACY");
     let kind = format!("{bill_type}/{subtype}");
-    let Some(delta) = optional_amount(v, "balChg")? else {
-        let from = timestamp;
+    let delta = optional_amount(v, "balChg")?;
+    let existing: Option<(Option<String>, Option<String>, i64, String, String, String)> = tx
+        .query_row(
+            "SELECT instrument_id,trade_id,exchange_time_ms,currency,bill_kind,delta_decimal
+             FROM bills WHERE bill_id=?1",
+            params![bill],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+        )
+        .optional()
+        .map_err(io)?;
+    // An incomplete duplicate must not reopen a financial gap after an
+    // earlier complete observation. Reused bill IDs with changed identity
+    // always fail closed, even when balChg is missing.
+    if let Some((prior_inst, prior_trade, prior_time, prior_ccy, prior_kind, prior_delta)) = existing.as_ref() {
+        if prior_inst.as_deref() != inst
+            || prior_trade.as_deref() != trade
+            || *prior_time != timestamp
+            || prior_ccy != currency
+            || prior_kind != &kind
+            || delta.is_some_and(|exact| prior_delta != exact)
+        {
+            return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+        }
+        if delta.is_none() {
+            match_bill_gap(tx, bill, timestamp, None)?;
+            return Ok(());
+        }
+    }
+    let Some(exact) = delta else {
+        let gap_id = format!("bill-financial-missing:{bill}");
         let through = timestamp
             .checked_add(1)
             .ok_or(ExecutionLedgerError::Corrupt("bill time overflow"))?;
-        let gap_id = format!("bill-financial-missing:{bill}");
         tx.execute(
             "INSERT INTO source_gaps
              (gap_id,stream_kind,scope_key,from_ms,through_ms,materiality,reason_code,
               opening_evidence_sha256,resolution_evidence_sha256)
              VALUES(?1,'BILLS',?2,?3,?4,'FINANCIAL','MISSING_EXACT_BALANCE_CHANGE',?5,NULL)
              ON CONFLICT(gap_id) DO NOTHING",
-            params![gap_id, bill, from, through, proof],
+            params![gap_id, bill, timestamp, through, proof],
         )
         .map_err(io)?;
+        match_bill_gap(tx, bill, timestamp, None)?;
         return Ok(());
     };
     tx.execute(
@@ -302,23 +395,14 @@ fn insert_bill(tx: &Transaction<'_>, v: &Value, proof: &str) -> Result<(), Execu
          (bill_id,instrument_id,trade_id,exchange_time_ms,currency,bill_kind,delta_decimal,source_evidence_sha256)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
          ON CONFLICT(bill_id) DO NOTHING",
-        params![bill,inst,trade,timestamp,currency,kind,delta,proof],
+        params![bill,inst,trade,timestamp,currency,kind,exact,proof],
     ).map_err(io)?;
     let stored: (Option<String>, Option<String>, i64, String, String, String) = tx
         .query_row(
             "SELECT instrument_id,trade_id,exchange_time_ms,currency,bill_kind,delta_decimal
-         FROM bills WHERE bill_id=?1",
+             FROM bills WHERE bill_id=?1",
             params![bill],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            },
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
         )
         .map_err(io)?;
     if stored.0.as_deref() != inst
@@ -326,10 +410,11 @@ fn insert_bill(tx: &Transaction<'_>, v: &Value, proof: &str) -> Result<(), Execu
         || stored.2 != timestamp
         || stored.3 != currency
         || stored.4 != kind
-        || stored.5 != delta
+        || stored.5 != exact
     {
         return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
     }
+    match_bill_gap(tx, bill, timestamp, Some(proof))?;
     Ok(())
 }
 
@@ -1099,6 +1184,82 @@ mod snapshot_tests {
     /// The same deferred read transaction used by finance_window must pin
     /// all constituent counts to one point, even when another owner commits
     /// a new bill after the first SELECT.
+    /// A previously incomplete bill is not permanently unaccountable when
+    /// fresh exchange evidence supplies the exact balance change. Original
+    /// and resolving proofs both survive; bad duplicates fail as one WAL tx.
+    #[test]
+    fn exact_later_bill_resolves_only_its_matching_financial_gap() {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        c.pragma_update(None, "foreign_keys", "ON").unwrap();
+        c.execute_batch(include_str!("../../schema/account-ledger-v1.sql"))
+            .unwrap();
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        let third = "c".repeat(64);
+        for (proof, location) in [
+            (&first, "source/initial"),
+            (&second, "source/resolution"),
+            (&third, "source/duplicate"),
+        ] {
+            c.execute(
+                "INSERT INTO evidence_objects
+                 (evidence_sha256,evidence_kind,codec,relative_path,size_bytes)
+                 VALUES(?1,'AUTHENTICATED_EXCHANGE_EVENT','sqlite-msgpack',?2,1)",
+                params![proof, location],
+            )
+            .unwrap();
+        }
+        let incomplete = serde_json::json!({
+            "billId":"bill-17","ts":"5000","ccy":"USDT",
+            "instId":"BTC-USDT-SWAP","tradeId":"trade-17",
+            "type":"2","subType":"1"
+        });
+        let mut exact = incomplete.clone();
+        exact["balChg"] = serde_json::json!("-0.25");
+        {
+            let tx = c.transaction().unwrap();
+            insert_bill(&tx, &incomplete, &first).unwrap();
+            tx.commit().unwrap();
+        }
+        let read = |conn: &rusqlite::Connection| -> (Option<String>, Option<String>, i64) {
+            let gap: (Option<String>, Option<String>) = conn.query_row(
+                "SELECT opening_evidence_sha256,resolution_evidence_sha256
+                 FROM source_gaps WHERE gap_id='bill-financial-missing:bill-17'",
+                [], |r| Ok((r.get(0).unwrap(),r.get(1).unwrap())),
+            ).unwrap();
+            let n: i64 = conn.query_row("SELECT COUNT(*) FROM bills", [], |r| r.get(0)).unwrap();
+            (gap.0, gap.1, n)
+        };
+        assert_eq!(read(&c), (Some(first.clone()), None, 0));
+        {
+            let tx = c.transaction().unwrap();
+            insert_bill(&tx, &exact, &second).unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(read(&c), (Some(first.clone()), Some(second.clone()), 1));
+        {
+            let tx = c.transaction().unwrap();
+            insert_bill(&tx, &exact, &third).unwrap();
+            insert_bill(&tx, &incomplete, &first).unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(read(&c), (Some(first.clone()), Some(second.clone()), 1));
+        let mut conflicting = exact.clone();
+        conflicting["balChg"] = serde_json::json!("-0.5");
+        {
+            let tx = c.transaction().unwrap();
+            assert!(insert_bill(&tx, &conflicting, &third).is_err());
+        }
+        assert_eq!(read(&c), (Some(first.clone()), Some(second.clone()), 1));
+        let mut wrong_identity = incomplete.clone();
+        wrong_identity["ts"] = serde_json::json!("6000");
+        {
+            let tx = c.transaction().unwrap();
+            assert!(insert_bill(&tx, &wrong_identity, &third).is_err());
+        }
+        assert_eq!(read(&c), (Some(first), Some(second), 1));
+    }
+
     #[test]
     fn finance_read_snapshot_does_not_mix_concurrent_commits() {
         let root = std::env::temp_dir().join(format!(
