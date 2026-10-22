@@ -2,7 +2,7 @@
 //! Projection is transactional and rebuildable from the single source ledger.
 //! UNKNOWN legacy cash changes become explicit material source gaps, never zero PnL.
 use super::sqlite_store::{
-    StoredState, INDEXED_INTENT_COLUMNS, checksum, connect_indexed_read, decode, encode, io,
+    INDEXED_INTENT_COLUMNS, StoredState, checksum, connect_indexed_read, decode, encode, io,
     require_finance_read_scope, verified_indexed_entry,
 };
 use super::*;

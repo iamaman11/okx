@@ -3859,9 +3859,10 @@ mod tests {
             usable_for_new_risk: false,
             reasons: vec![],
         };
-        let (key, cursor, receipt, loss) = super::super::sqlite_finance::nav_cursor_and_daily_loss(&db, &run, &report, 0, 3000)
-            .unwrap()
-            .unwrap();
+        let (key, cursor, receipt, loss) =
+            super::super::sqlite_finance::nav_cursor_and_daily_loss(&db, &run, &report, 0, 3000)
+                .unwrap()
+                .unwrap();
         assert_eq!(key, "complete:3000");
         assert_eq!(cursor.source_received_at, "1970-01-01T00:00:03Z");
         assert_eq!(receipt, 3000);
