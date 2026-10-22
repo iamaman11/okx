@@ -994,7 +994,7 @@ impl NativeFinanceReader {
 }
 impl crate::strategy_finance::FinanceSourceReader for NativeFinanceReader {
     fn audit(&self) -> Result<crate::strategy_finance::FinanceSourceAudit, ExecutionLedgerError> {
-        let mut times = Vec::new();
+        let mut coverage = crate::strategy_finance::SourceReceiptCoverage::default();
         let mut incomplete = false;
         let mut stmt = self
             .connection
@@ -1019,16 +1019,14 @@ impl crate::strategy_finance::FinanceSourceReader for NativeFinanceReader {
                     "finance source receipt mismatch",
                 ));
             }
-            times.push(received);
+            coverage.observe(received);
             incomplete |= !cursor.order_complete || !cursor.fill_complete || !cursor.bill_complete;
         }
-        let latest = times.iter().max().copied();
         Ok(crate::strategy_finance::FinanceSourceAudit {
             uid: self.identity.account_uid.clone(),
             run_id: self.identity.run_id.clone(),
             digest: self.identity.checksum_sha256.clone(),
-            receipt_times: times,
-            latest_receipt: latest,
+            coverage,
             truncated: incomplete,
         })
     }

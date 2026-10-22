@@ -180,13 +180,57 @@ pub struct StrategyFinancialPeriod {
 }
 
 /// Single financial source read contract for authenticated legacy evidence and SQLite.
+/// Proof of a sorted, authenticated source timeline. Retains only the
+/// first/last receipt and largest gap, not the entire historical receipt list.
+/// The same rule is used for in-memory test evidence and native SQL cursors.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SourceReceiptCoverage {
+    first: Option<u64>,
+    last: Option<u64>,
+    largest_gap_ms: u64,
+    out_of_order: bool,
+}
+
+impl SourceReceiptCoverage {
+    pub(crate) fn observe(&mut self, receipt: u64) {
+        if let Some(last) = self.last {
+            if receipt < last {
+                self.out_of_order = true;
+            } else {
+                self.largest_gap_ms = self.largest_gap_ms.max(receipt - last);
+            }
+        } else {
+            self.first = Some(receipt);
+        }
+        self.last = Some(receipt);
+    }
+
+    pub(crate) fn latest(&self) -> Option<u64> {
+        self.last
+    }
+
+    pub(crate) fn attests(&self, run_started_at_ms: u64, current_as_of: Option<u64>) -> bool {
+        let (Some(first), Some(last), Some(current)) =
+            (self.first, self.last, current_as_of)
+        else {
+            return false;
+        };
+        let window = crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS;
+        !self.out_of_order
+            && first >= run_started_at_ms
+            && first - run_started_at_ms <= window
+            && self.largest_gap_ms <= window
+            && current >= last
+            && current - last <= window
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct FinanceSourceAudit {
     pub uid: String,
     pub run_id: String,
     pub digest: String,
-    pub receipt_times: Vec<u64>,
-    pub latest_receipt: Option<u64>,
+    pub coverage: SourceReceiptCoverage,
     pub truncated: bool,
 }
 pub(crate) trait FinanceSourceReader {
@@ -243,12 +287,17 @@ impl FinanceSourceReader for LegacyFinanceReader<'_> {
                     .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut receipts = receipts;
+        receipts.sort_unstable();
+        let mut coverage = SourceReceiptCoverage::default();
+        for receipt in receipts {
+            coverage.observe(receipt);
+        }
         Ok(FinanceSourceAudit {
             uid: self.source.account_uid.clone(),
             run_id: self.source.run_id.clone(),
             digest: self.source.checksum_sha256.clone(),
-            latest_receipt: receipts.iter().max().copied(),
-            receipt_times: receipts,
+            coverage,
             truncated: self
                 .source
                 .cursors
@@ -634,23 +683,11 @@ fn source_continuity_attested(
     run_started_at_ms: u64,
     current_as_of_ms: Option<u64>,
 ) -> bool {
-    let Some(current) = current_as_of_ms else {
-        return false;
-    };
-    let Some(first) = sorted_cursor_times.first().copied() else {
-        return false;
-    };
-    let Some(last) = sorted_cursor_times.last().copied() else {
-        return false;
-    };
-    let window = crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS;
-    first >= run_started_at_ms
-        && first - run_started_at_ms <= window
-        && sorted_cursor_times
-            .windows(2)
-            .all(|pair| pair[1] >= pair[0] && pair[1] - pair[0] <= window)
-        && current >= last
-        && current - last <= window
+    let mut coverage = SourceReceiptCoverage::default();
+    for &receipt in sorted_cursor_times {
+        coverage.observe(receipt);
+    }
+    coverage.attests(run_started_at_ms, current_as_of_ms)
 }
 
 /// Conservative default used by settlement/finalization paths. It never
@@ -822,14 +859,14 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
             reasons,
         ));
     }
-    if audit.receipt_times.is_empty() {
+    if audit.coverage.latest().is_none() {
         reasons.insert("source_coverage_missing");
     }
     // Source coverage is measured by authenticated receipt times, NOT the
     // venue balance/position last-change uTime (which can be days old).
     let current_as_of =
         crate::exchange_evidence::source_receipt_ms(&facts.summary.source_received_at);
-    let newest = audit.latest_receipt;
+    let newest = audit.coverage.latest();
     let coalesced_source_attested = current_source_captured
         && coherent
         && DurableExchangeEvidence::complete_source_checkpoint(facts);
@@ -840,10 +877,7 @@ pub(crate) fn assess_persisted_financial_period_from_reader(
     {
         reasons.insert("financial_source_asof_not_current");
     }
-    let mut cursor_times = audit.receipt_times;
-    cursor_times.sort_unstable();
-    cursor_times.dedup();
-    if !source_continuity_attested(&cursor_times, run.started_at_ms, current_as_of) {
+    if !audit.coverage.attests(run.started_at_ms, current_as_of) {
         reasons.insert("source_continuity_not_proven");
     }
     if audit.truncated {
@@ -1298,6 +1332,31 @@ mod tests {
             run_start,
             Some(receipts[3] + 2 * hour + 1),
         ));
+    }
+
+    #[test]
+    fn source_coverage_streaming_matches_full_vector_for_long_history() {
+        let start = 1_000_000_u64;
+        let step = 1_000_u64;
+        let mut stream = SourceReceiptCoverage::default();
+        let mut receipt_times = Vec::new();
+        for i in 0..20_000_u64 {
+            let t = start + i * step;
+            stream.observe(t);
+            receipt_times.push(t);
+        }
+        let current = Some(start + 20_000 * step);
+        assert_eq!(
+            stream.attests(start, current),
+            source_continuity_attested(&receipt_times, start, current)
+        );
+        assert!(stream.attests(start, current));
+        stream.observe(start + 20_000 * step + crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS + 1);
+        assert!(!stream.attests(start, stream.latest()));
+        let mut out_of_order = SourceReceiptCoverage::default();
+        out_of_order.observe(start + step);
+        out_of_order.observe(start);
+        assert!(!out_of_order.attests(start, Some(start + step)));
     }
 
     #[test]
