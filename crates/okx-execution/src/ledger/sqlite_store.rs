@@ -1899,7 +1899,12 @@ pub(super) fn save_metadata(
     leverage: &[LeverageChangeAttempt],
 ) -> Result<(), ExecutionLedgerError> {
     save_metadata_inner(
-        path, stop, reservation, source, periods, leverage,
+        path,
+        stop,
+        reservation,
+        source,
+        periods,
+        leverage,
         NativeMetadataChange::default(),
     )
 }
@@ -2491,15 +2496,17 @@ pub(super) fn nav_watermark(
                 high_water_decimal,gross_daily_loss_decimal,previous_sha256,observed_at_ms
          FROM nav_points WHERE epoch_id=?1 ORDER BY observed_at_ms DESC LIMIT 1",
             params![epoch_id],
-            |r| Ok(IndexedNavPointRow {
-                payload: r.get(0)?,
-                digest: r.get(1)?,
-                nav: r.get(2)?,
-                peak: r.get(3)?,
-                loss: r.get(4)?,
-                previous: r.get(5)?,
-                observed_ms: r.get(6)?,
-            }),
+            |r| {
+                Ok(IndexedNavPointRow {
+                    payload: r.get(0)?,
+                    digest: r.get(1)?,
+                    nav: r.get(2)?,
+                    peak: r.get(3)?,
+                    loss: r.get(4)?,
+                    previous: r.get(5)?,
+                    observed_ms: r.get(6)?,
+                })
+            },
         )
         .optional()
         .map_err(io)?;
