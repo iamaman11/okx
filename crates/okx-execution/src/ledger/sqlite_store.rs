@@ -3416,7 +3416,10 @@ mod tests {
             native_reconciliation_inventory(&db, &source_clients, &BTreeSet::new(), 16).unwrap();
         assert_eq!((census.total, census.submitted), (1, 1));
         assert_eq!(census.candidates.len(), 1);
-        assert_eq!(census.candidates[0].record.state, ExecutionState::UnknownSubmission);
+        assert_eq!(
+            census.candidates[0].record.state,
+            ExecutionState::UnknownSubmission
+        );
         assert_eq!(census.historical_sample.len(), 1);
         assert!(reopened.begin_submission(id, 1004).is_err());
         // Windows keeps the SQLite file locked while any connection or
@@ -3492,15 +3495,16 @@ mod tests {
             ExecutionState::Prepared
         );
         let last = "bounded_historical_intent_000511";
-        let exact_client = entries.get(last).unwrap().record.plan.client_order_id.as_str();
+        let exact_client = entries
+            .get(last)
+            .unwrap()
+            .record
+            .plan
+            .client_order_id
+            .as_str();
         let observed_clients = BTreeSet::from([exact_client]);
-        let census = native_reconciliation_inventory(
-            &db,
-            &observed_clients,
-            &BTreeSet::new(),
-            16,
-        )
-        .unwrap();
+        let census =
+            native_reconciliation_inventory(&db, &observed_clients, &BTreeSet::new(), 16).unwrap();
         assert_eq!((census.total, census.submitted), (512, 0));
         assert_eq!(census.candidates.len(), 1);
         assert_eq!(census.candidates[0].record.plan.intent_id, last);
