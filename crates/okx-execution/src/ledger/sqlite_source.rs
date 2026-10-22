@@ -962,7 +962,6 @@ where
     };
     let mut stmt = connection.prepare(statement).map_err(io)?;
     let mut rows = stmt.query(params![run_id]).map_err(io)?;
-    let mut count = 0usize;
     while let Some(row) = rows.next().map_err(io)? {
         let key: String = row.get(0).map_err(io)?;
         let digest: String = row.get(1).map_err(io)?;
@@ -985,7 +984,6 @@ where
                 "indexed bill source kind mismatch",
             ));
         }
-        count += 1;
         visit(&key, &event)?;
     }
     Ok(())
