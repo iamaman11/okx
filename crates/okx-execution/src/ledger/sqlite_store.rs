@@ -2497,34 +2497,34 @@ fn attest_snapshot_with_indices(
         {
             let submitted_row =
                 submitted
-                        .next()
-                        .map_err(io)?
-                        .ok_or(ExecutionLedgerError::Corrupt(
-                            "missing native submitted intent",
-                        ))?;
-                let submitted_id: String = submitted_row.get(0).map_err(io)?;
-                if submitted_id != *id {
-                    return Err(ExecutionLedgerError::Corrupt(
-                        "native submitted intent projection mismatch",
-                    ));
-                }
+                    .next()
+                    .map_err(io)?
+                    .ok_or(ExecutionLedgerError::Corrupt(
+                        "missing native submitted intent",
+                    ))?;
+            let submitted_id: String = submitted_row.get(0).map_err(io)?;
+            if submitted_id != *id {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "native submitted intent projection mismatch",
+                ));
+            }
         }
         if let Some(order_id) = entry.record.order_id.as_deref()
             && let Some(links) = links.as_mut()
         {
             let link_row = links
-                    .next()
-                    .map_err(io)?
-                    .ok_or(ExecutionLedgerError::Corrupt(
-                        "missing native venue order identity",
-                    ))?;
-                let link_id: String = link_row.get(0).map_err(io)?;
-                let link_order: String = link_row.get(1).map_err(io)?;
-                if link_id != *id || link_order != order_id {
-                    return Err(ExecutionLedgerError::Corrupt(
-                        "native venue order identity projection mismatch",
-                    ));
-                }
+                .next()
+                .map_err(io)?
+                .ok_or(ExecutionLedgerError::Corrupt(
+                    "missing native venue order identity",
+                ))?;
+            let link_id: String = link_row.get(0).map_err(io)?;
+            let link_order: String = link_row.get(1).map_err(io)?;
+            if link_id != *id || link_order != order_id {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "native venue order identity projection mismatch",
+                ));
+            }
         }
         if needs_instrument_guard(&entry) {
             let guard = guards
