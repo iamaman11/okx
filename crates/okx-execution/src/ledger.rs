@@ -2894,13 +2894,43 @@ impl DurableExecutionLedger {
             .capital_reservation
             .as_ref()
             .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
-        let source = self
-            .current_source()?
-            .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
+        let native_source = if self.store.sqlite_native {
+            Some(sqlite_store::indexed_source_identity(
+                &self.store.path,
+                &run.account_uid_fingerprint,
+                &run.allocation_id,
+            )?)
+        } else {
+            None
+        };
+        let legacy_source = if self.store.sqlite_native {
+            None
+        } else {
+            self.current_source()?
+        };
         if let Some(closed) = self.strategy_periods.unverified_run.as_ref() {
-            closed.validate(run, &source)?;
+            if let Some(source) = native_source.as_ref() {
+                closed.validate_source_identity(run, source)?;
+            } else {
+                closed.validate(
+                    run,
+                    legacy_source.as_ref().ok_or(
+                        ExecutionLedgerError::StrategyRunNotQuarantinable,
+                    )?,
+                )?;
+            }
             return Ok(closed.clone());
         }
+        let source_gap = native_source.as_ref().map_or_else(
+            || legacy_source.as_ref().is_some_and(|s| s.summary().source_gap_over_two_hours),
+            |s| s.source_gap_over_two_hours,
+        );
+        let source_empty = if self.store.sqlite_native {
+            sqlite_store::source_summary(&self.store.path)?
+                .is_some_and(|summary| summary.events == 0)
+        } else {
+            legacy_source.as_ref().is_some_and(|s| s.events.is_empty())
+        };
         let as_of = crate::exchange_evidence::source_receipt_ms(&facts.summary.source_received_at)
             .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
         if self.strategy_periods.finalized_run.is_some()
@@ -2912,8 +2942,8 @@ impl DurableExecutionLedger {
             || facts.summary.pending_orders != 0
             || facts.summary.authority.account_uid_fingerprint != run.account_uid_fingerprint
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
-            || !source.summary().source_gap_over_two_hours
-            || !source.events.is_empty()
+            || !source_gap
+            || !source_empty
             || self.risk_stop.is_some()
             || (if self.store.sqlite_native {
                 self.any_entry_created_since(
@@ -2951,10 +2981,24 @@ impl DurableExecutionLedger {
         }
         // Source remains immutable and explicitly incomplete: no NAV, PnL,
         // or financial finalization is inferred from the current FLAT state.
-        let closed = StrategyUnverifiedClosure::new(run, &source, observed_at_ms)?;
+        let closed = if let Some(source) = native_source.as_ref() {
+            StrategyUnverifiedClosure::new_with_source_identity(run, source, observed_at_ms)?
+        } else {
+            StrategyUnverifiedClosure::new(
+                run,
+                legacy_source.as_ref().ok_or(
+                    ExecutionLedgerError::StrategyRunNotQuarantinable,
+                )?,
+                observed_at_ms,
+            )?
+        };
         let mut next = self.strategy_periods.clone();
         next.unverified_run = Some(closed.clone());
-        next.validate(self.capital_reservation.as_ref(), Some(&source))?;
+        if let Some(source) = legacy_source.as_ref() {
+            next.validate(self.capital_reservation.as_ref(), Some(source))?;
+        }
+        // Native persistence validates the same period against the SQL source
+        // identity and exact indexed cursor inside its WAL write transaction.
         self.store.save_metadata(
             &self.entries,
             self.risk_stop.as_ref(),
@@ -3041,10 +3085,24 @@ impl DurableExecutionLedger {
         let result = self
             .financial_period(facts, coherent)
             .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
-        let evidence = self
-            .current_source()?
-            .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
-        let closed = StrategyFinalization::new(reservation, &evidence, &result, observed_at_ms)?;
+        let closed = if self.store.sqlite_native {
+            let source = sqlite_store::indexed_source_identity(
+                &self.store.path,
+                &reservation.account_uid_fingerprint,
+                &reservation.allocation_id,
+            )?;
+            StrategyFinalization::new_with_source_identity(
+                reservation,
+                &source,
+                &result,
+                observed_at_ms,
+            )?
+        } else {
+            let evidence = self
+                .current_source()?
+                .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
+            StrategyFinalization::new(reservation, &evidence, &result, observed_at_ms)?
+        };
         let mut next = self.strategy_periods.clone();
         next.finalized_run = Some(closed.clone());
         self.store.save_metadata(

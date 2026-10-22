@@ -1203,6 +1203,40 @@ pub(super) fn source_summary(
     super::sqlite_source::summary(&c, &run_id, &uid).map(Some)
 }
 
+/// Read an exact, cryptographically verified native source identity from
+/// the same account WAL; never materialize a historical event/cursor map.
+pub(super) fn indexed_source_identity(
+    path: &Path,
+    expected_uid: &str,
+    run_id: &str,
+) -> Result<crate::strategy_lifecycle::SourceIdentity, ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    require_finance_read_scope(&c, expected_uid)?;
+    let (uid, digest, bytes): (String, String, Vec<u8>) = c
+        .query_row(
+            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(io)?;
+    if checksum(&bytes) != digest {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native indexed source state digest mismatch",
+        ));
+    }
+    let state: StoredState = decode(&bytes)?;
+    if state.version != 1
+        || uid != expected_uid
+        || state.source_run_id.as_deref() != Some(run_id)
+        || state.reservation.as_ref().is_none_or(|reservation| {
+            reservation.account_uid_fingerprint != uid || reservation.allocation_id != run_id
+        })
+    {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    super::sqlite_source::attest_indexed(&c, run_id, expected_uid)
+}
+
 pub(super) fn load_operational(path: &Path) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
     attest_snapshot(path, None)?;
     let c = connect(path, false)?;

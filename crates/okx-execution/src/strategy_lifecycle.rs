@@ -156,17 +156,31 @@ impl StrategyUnverifiedClosure {
         evidence: &DurableExchangeEvidence,
         closed_at_ms: u64,
     ) -> Result<Self, ExecutionLedgerError> {
+        evidence.validate()?;
+        Self::new_with_source_identity(
+            run,
+            &SourceIdentity::from_legacy(evidence),
+            closed_at_ms,
+        )
+    }
+
+    /// A fully authenticated SQL identity replaces the in-memory source map.
+    pub(crate) fn new_with_source_identity(
+        run: &StrategyCapitalReservation,
+        source: &SourceIdentity,
+        closed_at_ms: u64,
+    ) -> Result<Self, ExecutionLedgerError> {
         let mut value = Self {
             schema: STRATEGY_UNVERIFIED_CLOSURE_SCHEMA_V1.to_owned(),
             run_id: run.allocation_id.clone(),
             account_uid: run.account_uid_fingerprint.clone(),
             closed_at_ms,
-            evidence_sha256: evidence.checksum_sha256.clone(),
+            evidence_sha256: source.checksum_sha256.clone(),
             reason: "SOURCE_CONTINUITY_NOT_PROVEN".to_owned(),
             checksum_sha256: String::new(),
         };
         value.checksum_sha256 = value.hash()?;
-        value.validate(run, evidence)?;
+        value.validate_source_identity(run, source)?;
         Ok(value)
     }
 
@@ -193,7 +207,7 @@ impl StrategyUnverifiedClosure {
         self.validate_source_identity(run, &SourceIdentity::from_legacy(evidence))
     }
 
-    fn validate_source_identity(
+    pub(crate) fn validate_source_identity(
         &self,
         run: &StrategyCapitalReservation,
         source: &SourceIdentity,
@@ -282,14 +296,28 @@ impl StrategyFinalization {
         report: &StrategyFinancialPeriod,
         finalized_at_ms: u64,
     ) -> Result<Self, ExecutionLedgerError> {
+        evidence.validate()?;
+        Self::new_with_source_identity(
+            run,
+            &SourceIdentity::from_legacy(evidence),
+            report,
+            finalized_at_ms,
+        )
+    }
+
+    /// Native finalization uses an authenticated SQL source digest directly,
+    /// without materializing a historical DurableExchangeEvidence object.
+    pub(crate) fn new_with_source_identity(
+        run: &StrategyCapitalReservation,
+        source: &SourceIdentity,
+        report: &StrategyFinancialPeriod,
+        finalized_at_ms: u64,
+    ) -> Result<Self, ExecutionLedgerError> {
         if report.state != "FLAT_RECONCILED"
             || report.run_id != run.allocation_id
-            || report.evidence_sha256 != evidence.checksum_sha256
+            || report.evidence_sha256 != source.checksum_sha256
             || !report.reasons.is_empty()
             || report.linked_bills != report.linked_fills
-            // Source-complete financial assessment attests zero funding.
-            // Unknown/non-zero amounts cannot be finalized without exact
-            // native strategy attribution and a versioned finalization model.
             || report.funding_usdt.as_deref() != Some("0")
             || finalized_at_ms <= run.started_at_ms
         {
@@ -304,14 +332,14 @@ impl StrategyFinalization {
             run_id: run.allocation_id.clone(),
             account_uid: run.account_uid_fingerprint.clone(),
             finalized_at_ms,
-            evidence_sha256: evidence.checksum_sha256.clone(),
+            evidence_sha256: source.checksum_sha256.clone(),
             nav_usdt,
             realized_usdt: report.realized_usdt.clone(),
             fees_usdt: report.fees_usdt.clone(),
             checksum_sha256: String::new(),
         };
         value.checksum_sha256 = value.hash()?;
-        value.validate(run, evidence)?;
+        value.validate_source_identity(run, source)?;
         Ok(value)
     }
 
@@ -338,7 +366,7 @@ impl StrategyFinalization {
         self.validate_source_identity(run, &SourceIdentity::from_legacy(evidence))
     }
 
-    fn validate_source_identity(
+    pub(crate) fn validate_source_identity(
         &self,
         run: &StrategyCapitalReservation,
         source: &SourceIdentity,
@@ -1190,7 +1218,20 @@ mod tests {
             usable_for_new_risk: false,
             reasons: vec![],
         };
-        assert!(StrategyFinalization::new(&run, &evidence, &report, 2000).is_ok());
+        let legacy = StrategyFinalization::new(&run, &evidence, &report, 2000).unwrap();
+        let indexed = StrategyFinalization::new_with_source_identity(
+            &run,
+            &SourceIdentity::from_legacy(&evidence),
+            &report,
+            2000,
+        )
+        .unwrap();
+        assert_eq!(legacy, indexed, "native and legacy finalization proofs must match");
+        let mut tampered = SourceIdentity::from_legacy(&evidence);
+        tampered.checksum_sha256 = "0".repeat(64);
+        assert!(StrategyFinalization::new_with_source_identity(
+            &run, &tampered, &report, 2000
+        ).is_err());
         for funding in [None, Some("1"), Some("-0.01"), Some("invalid")] {
             report.funding_usdt = funding.map(str::to_owned);
             assert!(matches!(
