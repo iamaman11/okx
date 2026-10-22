@@ -163,6 +163,7 @@ where
          FROM native_source_finance_order i
          JOIN native_source_events e ON e.run_id=i.run_id AND e.event_key=i.event_key
          WHERE i.run_id=?1 AND i.event_kind=?2
+           AND (?2<>'BILL' OR (i.event_key>='bill:' AND i.event_key<'bill;'))
          ORDER BY i.exchange_time_ms,i.event_key",
         )
         .map_err(io)?;
@@ -193,6 +194,11 @@ where
                 "native ordered finance source identity",
             ));
         }
+        let event = if kind == "BILL" {
+            effective_bill_event(connection, run_id, &key, event)?
+        } else {
+            event
+        };
         visit(&key, &event)?;
     }
     Ok(())
@@ -373,6 +379,84 @@ pub(super) fn persist(
     Ok(())
 }
 
+/// A newer authenticated REST bill may add a previously unavailable exact
+/// balance change. The original source event never changes. Only the missing
+/// optional financial fields may be completed, and only once.
+fn additive_bill_detail(
+    original_key: &str,
+    prior: &StoredExchangeEvent,
+    latest: &StoredExchangeEvent,
+) -> bool {
+    let Some(bill_id) = original_key.strip_prefix("bill:") else {
+        return false;
+    };
+    if prior.payload["source"] != "OKX_REST_BILL"
+        || latest.payload["source"] != "OKX_REST_BILL"
+        || prior.payload["billId"].as_str() != Some(bill_id)
+        || latest.payload["billId"].as_str() != Some(bill_id)
+        || prior.payload["balChg"].as_str().is_some()
+        || latest.payload["balChg"]
+            .as_str()
+            .is_none_or(|s| s.parse::<rust_decimal::Decimal>().is_err())
+    {
+        return false;
+    }
+    let mut normalized = latest.clone();
+    let (Some(prior_fields), Some(current_fields)) =
+        (prior.payload.as_object(), normalized.payload.as_object_mut())
+    else {
+        return false;
+    };
+    if prior_fields.contains_key("balChg") {
+        current_fields.insert("balChg".to_owned(), serde_json::Value::Null);
+    } else {
+        current_fields.remove("balChg");
+    }
+    if !prior_fields.contains_key("type") {
+        current_fields.remove("type");
+    }
+    &normalized == prior
+}
+
+/// An indexed lookup of the only allowed additive financial witness.
+/// The original event and the new immutable bytes are independently hashed.
+pub(super) fn effective_bill_event(
+    connection: &Connection,
+    run_id: &str,
+    key: &str,
+    original: StoredExchangeEvent,
+) -> Result<StoredExchangeEvent, ExecutionLedgerError> {
+    let Some(id) = key.strip_prefix("bill:") else {
+        return Ok(original);
+    };
+    let proof_key = format!("bill-proof:{id}");
+    let proof: Option<(String, Vec<u8>)> = connection
+        .query_row(
+            "SELECT payload_digest,payload FROM native_source_events
+             WHERE run_id=?1 AND event_key=?2",
+            params![run_id, proof_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(io)?;
+    let Some((digest, bytes)) = proof else {
+        return Ok(original);
+    };
+    if bytes.is_empty()
+        || bytes.len() > crate::exchange_evidence::MAX_BYTES
+        || checksum(&bytes) != digest
+    {
+        return Err(ExecutionLedgerError::Corrupt(
+            "additive bill witness digest invalid",
+        ));
+    }
+    let latest: StoredExchangeEvent = decode(&bytes)?;
+    if !additive_bill_detail(key, &original, &latest) {
+        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+    }
+    Ok(latest)
+}
+
 /// Append ONLY facts observed in the current authenticated venue window.
 /// Previously sealed facts stay in SQLite and are never materialized into a
 /// Rust event map. Every insert, financial projection and source proof shares
@@ -420,10 +504,39 @@ pub(super) fn append_window_delta(
                 ));
             }
             let earlier: StoredExchangeEvent = decode(&body)?;
-            if earlier != *event
-                && !DurableExchangeEvidence::same_legacy_bill_source(&earlier, event)
-            {
-                return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+            if earlier != *event {
+                if !additive_bill_detail(key, &earlier, event) {
+                    return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+                }
+                // One canonical additive witness is enough. If the venue
+                // returns it again, compare exact bytes; a conflicting second
+                // observation cannot replace the first or silently change PnL.
+                let proof_key = format!(
+                    "bill-proof:{}",
+                    key.strip_prefix("bill:").ok_or(
+                        ExecutionLedgerError::ExchangeEvidenceConflict
+                    )?
+                );
+                let proof: Option<(String, Vec<u8>)> = tx.query_row(
+                    "SELECT payload_digest,payload FROM native_source_events
+                     WHERE run_id=?1 AND event_key=?2",
+                    params![&delta.run_id, &proof_key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                ).optional().map_err(io)?;
+                if let Some((digest, bytes)) = proof {
+                    if checksum(&bytes) != digest || decode::<StoredExchangeEvent>(&bytes)? != *event {
+                        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+                    }
+                } else {
+                    let enriched = encode(event)?;
+                    tx.execute(
+                        "INSERT INTO native_source_events VALUES(?1,?2,?3,?4)",
+                        params![&delta.run_id, &proof_key, checksum(&enriched), enriched],
+                    ).map_err(io)?;
+                    super::sqlite_finance::persist_event(tx, &delta.run_id, &proof_key, event)?;
+                    index_financial_source_event(tx, &delta.run_id, &proof_key, event)?;
+                    changed = true;
+                }
             }
             continue;
         }
@@ -948,6 +1061,11 @@ where
                 "indexed bill source kind mismatch",
             ));
         }
+        let event = if only_bills {
+            effective_bill_event(connection, run_id, &key, event)?
+        } else {
+            event
+        };
         visit(&key, &event)?;
     }
     Ok(())
@@ -1289,6 +1407,109 @@ mod tests {
         .unwrap();
         assert!(summary(&c, run_id, uid).is_err());
         assert!(attest_indexed(&c, run_id, uid).is_err());
+    }
+
+    #[test]
+    fn additive_native_bill_witness_closes_financial_gap_without_rewriting_source() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.pragma_update(None, "foreign_keys", "ON").unwrap();
+        c.execute_batch(include_str!("../../schema/account-ledger-v1.sql"))
+            .unwrap();
+        c.execute_batch(TABLES).unwrap();
+        let mut sample = DurableExchangeEvidence {
+            schema: crate::EXCHANGE_EVIDENCE_SCHEMA_V1.to_owned(),
+            account_uid: "a".repeat(64),
+            run_id: "native_additive_bill_001".to_owned(),
+            events: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            checksum_sha256: String::new(),
+        };
+        let original = StoredExchangeEvent {
+            payload: serde_json::json!({
+                "source":"OKX_REST_BILL", "billId":"bill-19",
+                "instId":"BTC-USDT-SWAP", "tradeId":null,
+                "ccy":"USDT", "type":"2", "subType":"5",
+                "balChg":null, "ts":2000
+            }),
+            source_intent_id: None,
+            strategy_run_id: None,
+            allocation: "UNALLOCATED".to_owned(),
+        };
+        let key = "bill:bill-19";
+        sample.events.insert(key.to_owned(), original.clone());
+        sample.seal().unwrap();
+        {
+            let tx = c.transaction().unwrap();
+            assert!(append_window_delta(&tx, &sample).unwrap());
+            tx.commit().unwrap();
+        }
+        let original_digest: String = c.query_row(
+            "SELECT payload_digest FROM native_source_events
+             WHERE run_id=?1 AND event_key=?2",
+            params![&sample.run_id,key],
+            |r| r.get(0),
+        ).unwrap();
+        let unresolved: i64 = c.query_row(
+            "SELECT COUNT(*) FROM source_gaps
+             WHERE gap_id='bill-financial-missing:bill-19'
+             AND resolution_evidence_sha256 IS NULL",[],|r|r.get(0)
+        ).unwrap();
+        assert_eq!(unresolved, 1);
+        let mut complete = original.clone();
+        complete.payload["balChg"] = serde_json::json!("-0.25");
+        let mut later = sample.clone();
+        later.events.insert(key.to_owned(), complete.clone());
+        later.seal().unwrap();
+        {
+            let tx = c.transaction().unwrap();
+            assert!(append_window_delta(&tx, &later).unwrap());
+            tx.commit().unwrap();
+        }
+        let preserved: String = c.query_row(
+            "SELECT payload_digest FROM native_source_events
+             WHERE run_id=?1 AND event_key=?2",
+            params![&sample.run_id,key],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(preserved, original_digest);
+        let updated: (String, String) = c.query_row(
+            "SELECT b.delta_decimal,g.resolution_evidence_sha256 FROM bills b
+             JOIN source_gaps g ON g.gap_id='bill-financial-missing:bill-19'
+             WHERE b.bill_id='bill-19'",[],|r|Ok((r.get(0)?,r.get(1)?))
+        ).unwrap();
+        assert_eq!(updated.0,"-0.25");
+        assert_eq!(updated.1.len(),64);
+        assert_ne!(updated.1,original_digest);
+        let mut observed = Vec::new();
+        visit_bill_events(&c,&sample.run_id,&sample.account_uid,|k,v|{
+            observed.push((k.to_owned(),v.payload["balChg"].as_str().unwrap_or("").to_owned()));
+            Ok(())
+        }).unwrap();
+        assert_eq!(observed, vec![(key.to_owned(),"-0.25".to_owned())]);
+        let mut from_finance = Vec::new();
+        visit_financial_kind(&c,&sample.run_id,&sample.account_uid,"BILL",|k,v|{
+            from_finance.push((k.to_owned(),v.payload["balChg"].as_str().unwrap_or("").to_owned()));
+            Ok(())
+        }).unwrap();
+        assert_eq!(from_finance, observed);
+        audit_financial_index_inventory(&c).unwrap();
+        assert!(attest_indexed(&c,&sample.run_id,&sample.account_uid).is_ok());
+        {
+            let tx = c.transaction().unwrap();
+            assert!(!append_window_delta(&tx, &later).unwrap());
+            tx.commit().unwrap();
+        }
+        let mut conflicting = later.clone();
+        conflicting.events.get_mut(key).unwrap().payload["balChg"] =
+            serde_json::json!("-0.5");
+        conflicting.seal().unwrap();
+        {
+            let tx = c.transaction().unwrap();
+            assert!(matches!(
+                append_window_delta(&tx,&conflicting),
+                Err(ExecutionLedgerError::ExchangeEvidenceConflict)
+            ));
+        }
     }
 
     #[test]

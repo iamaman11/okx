@@ -939,7 +939,17 @@ impl NativeFinanceReader {
                     "indexed financial event digest",
                 ));
             }
-            decode(&bytes)
+            let original = decode(&bytes)?;
+            if key.starts_with("bill:") {
+                super::sqlite_source::effective_bill_event(
+                    &self.connection,
+                    &self.run.allocation_id,
+                    key,
+                    original,
+                )
+            } else {
+                Ok(original)
+            }
         })
         .transpose()
     }
