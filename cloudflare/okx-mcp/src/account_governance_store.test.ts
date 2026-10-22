@@ -33,6 +33,7 @@ const status=(await governanceRequest(s,"GET")).body;
 ok((status.accounts as any[])[0].enabled&&!(status.accounts as any[])[0].explicit_pause,"enroll_b_does_not_disable_a");
 const restarted=new Storage();restarted.map=structuredClone(s.map);
 ok(((await governanceRequest(restarted,"GET")).body.accounts as any[])[0].enabled,"access_survives_restart");
+console.log("access_restart_and_account_registration PASS");
 const pause={account:"primary",expected_revision:status.revision,explicit_pause:true,idempotency_key:"pause_primary_001"};
 ok((await setAccountPause(s,pause)).status===200,"explicit pause saved");
 ok((await setAccountPause(s,pause)).status===200,"pause retry returns same revision");

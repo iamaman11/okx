@@ -63,6 +63,7 @@ const reported={...census,occupied:census.occupied.map(v=>({...v,cumulative_loss
 const campaign=await reserveRisk(sa,policy,reported,{...request,intent_id:"new_intent_001",loss_usdt:"4",loss_usd:"4"},native);
 check(campaign.status==="DENIED"&&campaign.reason==="CAMPAIGN_LOSS_BUDGET_EXHAUSTED","fresh losses charged before reserve even when admission denied");
 check((await readRiskBook(sa))?.consumed_loss_usd==="17","campaign losses remain charged without releasing any new reservation");
+console.log("risk_concurrent_accounts_campaign_limit PASS");
 census.occupied[0].cumulative_loss_usd="17";
 // One million terminal records must not be enumerated or decoded on the hot path.
 for(let i=0;i<1_000_000;i++)sa.map.set("risk_entry_v2:tombstone_"+i,{state:"RELEASED",key:i});
