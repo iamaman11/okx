@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS account_identity (
     account_id TEXT NOT NULL,
     uid_fingerprint TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms > 0),
-    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version IN (1,2)),
     UNIQUE(venue, environment, account_id, uid_fingerprint)
 ) STRICT;
 -- The first authenticated native binding is permanent. A runtime must

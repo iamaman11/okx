@@ -216,25 +216,6 @@ mod tests {
         let mut record = ExecutionRecord::new(plan);
         record.abandon_prepared().unwrap();
         assert_eq!(record.state, ExecutionState::Rejected);
-        let legacy = ExecutionLedgerStore::at(root.join("execution-ledger.json"));
-        legacy
-            .save(
-                &BTreeMap::from([(
-                    intent_id.clone(),
-                    ExecutionLedgerEntry {
-                        record,
-                        created_at_ms: 1000,
-                        updated_at_ms: 1001,
-                    },
-                )]),
-                None,
-                None,
-                None,
-                &StrategyPeriodHistory::default(),
-                &[],
-            )
-            .unwrap();
-        let proof = legacy.attest_storage().unwrap();
         let identity = SqliteAccountIdentity {
             venue: LedgerVenue::Okx,
             environment: LedgerEnvironment::Demo,
@@ -242,13 +223,23 @@ mod tests {
             uid_fingerprint: uid,
             bound_at_ms: 2000,
         };
-        let native = ExecutionLedgerStore::migrate_to_sqlite_offline_for_account(
-            root,
-            &identity.uid_fingerprint,
-            &proof.manifest_sha256,
-            &identity,
-        )
-        .expect("single owner v14 -> native cutover");
+        let native = ExecutionLedgerStore::initialize_fresh_account(root,&identity)
+            .expect("one immutable fresh SQL owner");
+        native.save(
+            &BTreeMap::from([(
+                intent_id.clone(),
+                ExecutionLedgerEntry {
+                    record,
+                    created_at_ms: 1000,
+                    updated_at_ms: 1001,
+                },
+            )]),
+            None,
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        ).unwrap();
         assert!(native.is_sqlite_native());
         (AccountKey::from(&identity), intent_id)
     }

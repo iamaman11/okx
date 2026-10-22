@@ -1144,6 +1144,91 @@ pub(super) fn bind_account_identity(
     Ok(())
 }
 
+/// Create the first authenticated account state with its immutable UID
+/// and genesis identity in ONE WAL transaction. No v14 snapshot is read.
+/// An uncommitted schema-only DB is safe to resume, but any account facts
+/// or foreign binding are a hard error (not a migration opportunity).
+pub(super) fn initialize_account(
+    path: &Path,
+    identity: &SqliteAccountIdentity,
+) -> Result<(), ExecutionLedgerError> {
+    identity.validate()?;
+    let mut connection = connect(path, true)?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io)?;
+    let existing: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT uid_fingerprint,schema_version FROM account_identity WHERE singleton=1",
+            [], |row| Ok((row.get(0)?,row.get(1)?)),
+        )
+        .optional().map_err(io)?;
+    if let Some((uid,version)) = existing {
+        if uid != identity.uid_fingerprint || version != 2 {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        let row: (String,String,String,String) = tx.query_row(
+            "SELECT venue,environment,account_id,uid_fingerprint
+             FROM account_identity WHERE singleton=1",
+            [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        ).map_err(io)?;
+        if row != (
+            identity.venue_key().to_owned(),
+            identity.environment_key().to_owned(),
+            identity.account_id.clone(),
+            identity.uid_fingerprint.clone(),
+        ) {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        let uid:String=tx.query_row(
+            "SELECT uid FROM ledger_state WHERE key=1",
+            [],|row|row.get(0),
+        ).map_err(io)?;
+        if uid != identity.uid_fingerprint {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        tx.commit().map_err(io)?;
+        return Ok(());
+    }
+    let ledger_rows: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM ledger_state",[],|r|r.get(0),
+    ).map_err(io)?;
+    let intents:i64=tx.query_row(
+        "SELECT COUNT(*) FROM ledger_entries",[],|r|r.get(0),
+    ).map_err(io)?;
+    let sources:i64=tx.query_row(
+        "SELECT COUNT(*) FROM native_source_runs",[],|r|r.get(0),
+    ).map_err(io)?;
+    let epochs:i64=tx.query_row(
+        "SELECT COUNT(*) FROM capital_epochs",[],|r|r.get(0),
+    ).map_err(io)?;
+    let nav:i64=tx.query_row(
+        "SELECT COUNT(*) FROM nav_points",[],|r|r.get(0),
+    ).map_err(io)?;
+    if ledger_rows!=0 || intents!=0 || sources!=0 || epochs!=0 || nav!=0 {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    let state=StoredState {
+        version:1,stop:None,reservation:None,source_run_id:None,
+        periods:StrategyPeriodHistory::default(),leverage:Vec::new(),
+    };
+    let bytes=encode(&state)?;
+    tx.execute(
+        "INSERT INTO ledger_state(key,format,uid,digest,bytes)
+         VALUES(1,1,?1,?2,?3)",
+        params![&identity.uid_fingerprint,checksum(&bytes),bytes],
+    ).map_err(io)?;
+    tx.execute(
+        "INSERT INTO account_identity
+         (singleton,venue,environment,account_id,uid_fingerprint,created_at_ms,schema_version)
+         VALUES(1,?1,?2,?3,?4,?5,2)",
+        params![identity.venue_key(),identity.environment_key(),
+            &identity.account_id,&identity.uid_fingerprint,identity.bound_at_ms],
+    ).map_err(io)?;
+    tx.commit().map_err(io)?;
+    Ok(())
+}
+
 /// An indexed, bounded identity read; does not load historical intents.
 pub(super) fn bound_account_identity(
     path: &Path,
@@ -2606,26 +2691,22 @@ pub(super) fn attest_published_owner(
     expected_uid: &str,
 ) -> Result<(), ExecutionLedgerError> {
     attest_snapshot(path, None)?;
-    let c = connect_indexed_read(path)?;
-    let (uid, digest, bytes): (String, String, Vec<u8>) = c
-        .query_row(
-            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .map_err(io)?;
-    if uid != expected_uid || checksum(&bytes) != digest {
+    let c=connect_indexed_read(path)?;
+    let (uid,digest,bytes):(String,String,Vec<u8>)=c.query_row(
+        "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
+        [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).map_err(io)?;
+    if uid!=expected_uid || checksum(&bytes)!=digest {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
-    let state: StoredState = decode(&bytes)?;
-    let present: i64 = c
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM ledger_entries LIMIT 1)",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(io)?;
-    if state.reservation.is_none() && state.source_run_id.is_none() && present == 0 {
+    let _:StoredState=decode(&bytes)?;
+    // v14-imported identities used schema_version 1. Production accepts
+    // ONLY an explicitly initialized fresh account, with version 2.
+    let (account_uid,genesis_version):(String,i64)=c.query_row(
+        "SELECT uid_fingerprint,schema_version FROM account_identity WHERE singleton=1",
+        [],|row|Ok((row.get(0)?,row.get(1)?)),
+    ).map_err(io)?;
+    if account_uid!=expected_uid || genesis_version!=2 {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     Ok(())
@@ -5140,354 +5221,62 @@ mod tests {
     }
 
     #[test]
-    fn native_cutover_publishes_only_after_full_v14_parity_and_is_idempotent() {
-        let root = test_root("cutover-commit");
-        let v14 = root.join("execution-ledger.json");
-        let sqlite = root.join("execution-ledger.sqlite");
-        let uid = "b".repeat(64);
-        let capital = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
-            allocation_id: "native_cutover_test_000001".to_owned(),
-            account_uid_fingerprint: uid.clone(),
-            origin_schema: "test/v1".to_owned(),
-            origin_version: "v1".to_owned(),
-            mandate_version: "1".to_owned(),
-            allocated_usdt: "100".to_owned(),
-            opening_account_usdt_equity: "127".to_owned(),
-            account_generation: "g1".to_owned(),
-            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
-            started_at_ms: 1,
-        };
-        let stop = ExecutionRiskStop {
-            schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
-            stopped_at_ms: 100,
-            reason: "test stop".to_owned(),
-        };
-        let source = ExecutionLedgerStore::at(&v14);
-        source
-            .save(
-                &BTreeMap::new(),
-                Some(&stop),
-                Some(&capital),
-                None,
-                &StrategyPeriodHistory::default(),
-                &[],
-            )
-            .unwrap();
-        let original = std::fs::read(&v14).unwrap();
-        let digest = checksum(&original);
-        source.prepare_sqlite_staging(&sqlite).unwrap();
+    fn fresh_sqlite_owner_is_empty_uid_bound_and_retries_without_importing_v14() {
+        let root = test_root("fresh-sql-genesis");
+        let old = root.join("execution-ledger.json");
+        std::fs::write(&old,b"obsolete local v14 history").unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        assert!(
-            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &"f".repeat(64), &digest)
-                .is_err()
-        );
-        assert!(
-            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &"0".repeat(64)).is_err()
-        );
-        assert!(!root.join("execution-ledger.owner").exists());
-        let scope = SqliteAccountIdentity {
+        let identity = SqliteAccountIdentity {
             venue: LedgerVenue::Okx,
             environment: LedgerEnvironment::Production,
             account_id: "real".to_owned(),
-            uid_fingerprint: uid.clone(),
-            bound_at_ms: 101,
+            uid_fingerprint: "7".repeat(64),
+            bound_at_ms: 12345,
         };
-        let chosen = ExecutionLedgerStore::migrate_to_sqlite_offline_for_account(
-            &root, &uid, &digest, &scope,
-        )
-        .unwrap();
-        assert_eq!(
-            chosen.bound_native_account_identity().unwrap(),
-            Some(scope.clone())
-        );
-        assert_eq!(chosen.path(), sqlite.as_path());
-        assert_eq!(
-            chosen.attest_storage().unwrap().integrity,
-            "VALIDATED_COLD_READ"
-        );
-        let duplicate = ExecutionLedgerStore::migrate_to_sqlite_offline_for_account(
-            &root, &uid, &digest, &scope,
-        )
-        .unwrap();
-        assert_eq!(duplicate.path(), sqlite.as_path());
-        assert_eq!(
-            duplicate.bound_native_account_identity().unwrap(),
-            Some(scope)
-        );
-        let sealed = root.join("execution-ledger.v14.sealed");
-        assert!(!v14.exists());
-        assert_eq!(std::fs::read(&sealed).unwrap(), original);
-        std::fs::remove_file(root.join("execution-ledger.owner")).unwrap();
-        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        std::fs::remove_file(&sqlite).unwrap();
-        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        // A sealed legacy source must never recreate a possibly newer
-        // missing SQLite file (and thereby lose legitimate recent trades).
-        assert!(ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).is_err());
-        // Even the total loss of archived body, receipt and SQLite does
-        // not turn this proven cutover account into a fresh JSON ledger.
-        std::fs::remove_file(&sealed).unwrap();
-        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        let store = ExecutionLedgerStore::initialize_fresh_account(&root,&identity).unwrap();
+        assert!(store.is_sqlite_native());
+        assert!(!old.exists());
+        assert_eq!(store.bound_native_account_identity().unwrap(),Some(identity.clone()));
+        assert_eq!(store.attest_storage().unwrap().on_disk_schema,SCHEMA);
+        let active=ExecutionLedgerStore::select_published_owner(&root).unwrap();
+        let started=DurableExecutionLedger::open(active,15000).unwrap();
+        assert_eq!(started.total_intents().unwrap(),0);
+        assert!(started.capital_reservation().is_none());
+        assert!(started.finalized_run().is_none());
+        drop(started);
+        // A missing acknowledgement never creates another database or UID.
+        let previous_digest=store.attest_storage().unwrap().manifest_sha256;
+        let mut repeated=identity.clone();
+        repeated.bound_at_ms+=1;
+        let again=ExecutionLedgerStore::initialize_fresh_account(&root,&repeated).unwrap();
+        assert_eq!(again.attest_storage().unwrap().manifest_sha256,previous_digest);
+        assert_eq!(again.bound_native_account_identity().unwrap(),Some(identity.clone()));
+        let mut foreign=identity.clone();
+        foreign.uid_fingerprint="8".repeat(64);
+        assert!(ExecutionLedgerStore::initialize_fresh_account(&root,&foreign).is_err());
+        assert_eq!(again.bound_native_account_identity().unwrap(),Some(identity));
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn owner_receipt_requires_sealed_source_and_never_falls_back_after_failure() {
-        let root = test_root("owner-proof");
-        let v14 = root.join("execution-ledger.json");
-        let sqlite = root.join("execution-ledger.sqlite");
-        let legacy = ExecutionLedgerStore::at(&v14);
-        legacy
-            .save(
-                &BTreeMap::new(),
-                None,
-                None,
-                None,
-                &StrategyPeriodHistory::default(),
-                &[],
-            )
-            .unwrap();
-        let witness_sha = checksum(&std::fs::read(&v14).unwrap());
-        let uid = "a".repeat(64);
-        assert_eq!(
-            ExecutionLedgerStore::select_published_owner(&root)
-                .unwrap()
-                .path(),
-            v14.as_path()
-        );
-        let capital = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
-            allocation_id: "sqlite_owner_test_000001".to_owned(),
-            account_uid_fingerprint: uid.clone(),
-            origin_schema: "test/v1".to_owned(),
-            origin_version: "v1".to_owned(),
-            mandate_version: "1".to_owned(),
-            allocated_usdt: "100".to_owned(),
-            opening_account_usdt_equity: "127".to_owned(),
-            account_generation: "g1".to_owned(),
-            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
-            started_at_ms: 1,
+    fn fresh_sqlite_owner_has_one_exclusive_cross_process_writer() {
+        let root=test_root("fresh-sql-exclusive-writer");
+        let identity=SqliteAccountIdentity {
+            venue:LedgerVenue::Okx,
+            environment:LedgerEnvironment::Demo,
+            account_id:"demo".to_owned(),
+            uid_fingerprint:"a".repeat(64),
+            bound_at_ms:3210,
         };
-        save(
-            &sqlite,
-            &BTreeMap::new(),
-            None,
-            Some(&capital),
-            None,
-            &StrategyPeriodHistory::default(),
-            &[],
-        )
-        .unwrap();
-        seal_staging_origin(&sqlite, &uid, &witness_sha).unwrap();
-        // A candidate in the canonical location without its owner receipt is
-        // ambiguous, not proof that the original v14 writer can resume.
-        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        // The published receipt is owned by CONTROL; tests simulate it only
-        // after source and target are independently materialized.
-        let receipt = root.join("execution-ledger.owner");
-        std::fs::write(
-            &receipt,
-            format!(
-                "okx.ledger-owner/v1\nSQLITE\n{}\n{}\n",
-                "0".repeat(64),
-                witness_sha
-            ),
-        )
-        .unwrap();
-        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        std::fs::write(
-            &receipt,
-            format!("okx.ledger-owner/v1\nSQLITE\n{}\n{}\n", uid, witness_sha),
-        )
-        .unwrap();
-        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        std::fs::rename(&v14, root.join("execution-ledger.v14.sealed")).unwrap();
-        // A forged receipt with exact historical parity is insufficient:
-        // CONTROL must have durably retired the previous writer.
-        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        let mut writer = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
-        ExecutionLedgerStore::mark_sqlite_cutover(&mut writer).unwrap();
-        drop(writer);
-        assert_eq!(
-            ExecutionLedgerStore::select_published_owner(&root)
-                .unwrap()
-                .path(),
-            sqlite.as_path()
-        );
-        // Losing the receipt after cutover cannot silently reactivate v14.
-        std::fs::remove_file(&receipt).unwrap();
-        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        std::fs::write(
-            &receipt,
-            format!("okx.ledger-owner/v1\nSQLITE\n{}\n{}\n", uid, witness_sha),
-        )
-        .unwrap();
-        assert_eq!(
-            ExecutionLedgerStore::select_published_owner(&root)
-                .unwrap()
-                .path(),
-            sqlite.as_path()
-        );
-        // Even if the SQLite target disappears after receipt publication,
-        // boot must fail and never reopen an independent v14 writer.
-        std::fs::remove_file(&sqlite).unwrap();
-        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn interrupted_v14_retirement_resumes_without_unsealing_or_replaying() {
-        let root = test_root("interrupted-retirement");
-        let v14 = root.join("execution-ledger.json");
-        let sqlite = root.join("execution-ledger.sqlite");
-        let sealed = root.join("execution-ledger.v14.sealed");
-        let uid = "c".repeat(64);
-        let capital = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
-            allocation_id: "native_cutover_resume_000001".to_owned(),
-            account_uid_fingerprint: uid.clone(),
-            origin_schema: "test/v1".to_owned(),
-            origin_version: "v1".to_owned(),
-            mandate_version: "1".to_owned(),
-            allocated_usdt: "100".to_owned(),
-            opening_account_usdt_equity: "127".to_owned(),
-            account_generation: "g1".to_owned(),
-            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
-            started_at_ms: 1,
-        };
-        let legacy = ExecutionLedgerStore::at(&v14);
-        legacy
-            .save(
-                &BTreeMap::new(),
-                None,
-                Some(&capital),
-                None,
-                &StrategyPeriodHistory::default(),
-                &[],
-            )
-            .unwrap();
-        let digest = checksum(&std::fs::read(&v14).unwrap());
-        legacy.prepare_sqlite_staging(&sqlite).unwrap();
-        // Crash after retiring the old writer but before receipt publication.
-        std::fs::rename(&v14, &sealed).unwrap();
-        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        let chosen = ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).unwrap();
-        assert_eq!(chosen.path(), sqlite.as_path());
-        assert!(!v14.exists());
-        assert!(sealed.exists());
-        assert_eq!(
-            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest)
-                .unwrap()
-                .path(),
-            sqlite.as_path()
-        );
-        // A resurrected legacy writer is never accepted.
-        std::fs::copy(&sealed, &v14).unwrap();
-        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
-        assert!(ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &digest).is_err());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn native_cutover_accepts_historical_intents_without_active_strategy() {
-        let root = test_root("intent-only-cutover");
-        let legacy = ExecutionLedgerStore::at(root.join("execution-ledger.json"));
-        let uid = "d".repeat(64);
-        let id = "historical_only_intent_000001";
-        let plan = ExecutionPlan {
-            schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
-            intent_id: id.to_owned(),
-            client_order_id: derive_client_order_id(id),
-            reference_generation: "sha256:reference".to_owned(),
-            account_generation: "sha256:account".to_owned(),
-            account_uid_fingerprint: uid.clone(),
-            instrument_id: "DOGE-USDT-SWAP".to_owned(),
-            trade_mode: crate::TradeMode::Cross,
-            side: crate::OrderSide::Buy,
-            position_side: PositionSide::Long,
-            action: ExecutionAction::Open,
-            order_type: crate::OrderType::Limit,
-            size: "1".to_owned(),
-            price: "0.1".to_owned(),
-            open_risk: None,
-            risk_binding: None,
-        };
-        let entries = BTreeMap::from([(
-            id.to_owned(),
-            ExecutionLedgerEntry {
-                record: ExecutionRecord::new(plan),
-                created_at_ms: 1000,
-                updated_at_ms: 1000,
-            },
-        )]);
-        legacy
-            .save(
-                &entries,
-                None,
-                None,
-                None,
-                &StrategyPeriodHistory::default(),
-                &[],
-            )
-            .unwrap();
-        let hash = checksum(&std::fs::read(legacy.path()).unwrap());
-        let sqlite = ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &hash).unwrap();
-        assert_eq!(sqlite.load().unwrap().0, entries);
-        assert_eq!(
-            ExecutionLedgerStore::select_published_owner(&root)
-                .unwrap()
-                .path(),
-            sqlite.path()
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn invalid_cutover_preflight_never_stages_or_disables_v14() {
-        let root = test_root("source-preflight");
-        let legacy = ExecutionLedgerStore::at(root.join("execution-ledger.json"));
-        let uid = "e".repeat(64);
-        let capital = StrategyCapitalReservation {
-            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V1.to_owned(),
-            allocation_id: "preflight_strategy_run_000001".to_owned(),
-            account_uid_fingerprint: uid.clone(),
-            origin_schema: "test/v1".to_owned(),
-            origin_version: "v1".to_owned(),
-            mandate_version: "1".to_owned(),
-            allocated_usdt: "100".to_owned(),
-            opening_account_usdt_equity: "127".to_owned(),
-            account_generation: "g1".to_owned(),
-            operator_authority_id: format!("sha256:{}", "a".repeat(64)),
-            started_at_ms: 1,
-        };
-        legacy
-            .save(
-                &BTreeMap::new(),
-                None,
-                Some(&capital),
-                None,
-                &StrategyPeriodHistory::default(),
-                &[],
-            )
-            .unwrap();
-        let digest = checksum(&std::fs::read(legacy.path()).unwrap());
-        assert!(
-            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &"f".repeat(64), &digest)
-                .is_err()
-        );
-        assert!(
-            ExecutionLedgerStore::migrate_to_sqlite_offline(&root, &uid, &"0".repeat(64)).is_err()
-        );
-        assert!(!root.join("execution-ledger.sqlite").exists());
-        assert!(!root.join("execution-ledger.owner").exists());
-        assert!(!root.join("execution-ledger.v14.sealed").exists());
-        assert_eq!(
-            ExecutionLedgerStore::select_published_owner(&root)
-                .unwrap()
-                .path(),
-            legacy.path()
-        );
+        ExecutionLedgerStore::initialize_fresh_account(&root,&identity).unwrap();
+        let mut lease=ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
+        assert!(ExecutionLedgerStore::acquire_writer_lease(&root).is_err());
+        let active=ExecutionLedgerStore::select_published_owner_under_writer_lease(
+            &root,&mut lease,
+        ).unwrap();
+        assert_eq!(active.bound_native_account_identity().unwrap(),Some(identity));
+        drop(lease);
+        assert!(ExecutionLedgerStore::acquire_writer_lease(&root).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5601,26 +5390,6 @@ mod tests {
             .unwrap();
         assert_eq!(post_count, 1);
         drop(after);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn native_writer_lease_excludes_concurrent_process_owners() {
-        let root = test_root("writer-lease");
-        let mut first = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
-        // The existing owner must read the marker from its locked handle.
-        // This is especially important on Windows, where a second open of
-        // the same locked file fails even from the same process.
-        assert_eq!(
-            ExecutionLedgerStore::select_published_owner_under_writer_lease(&root, &mut first)
-                .unwrap()
-                .path(),
-            root.join("execution-ledger.json").as_path()
-        );
-        assert!(ExecutionLedgerStore::acquire_writer_lease(&root).is_err());
-        drop(first);
-        let second = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
-        drop(second);
         std::fs::remove_dir_all(root).unwrap();
     }
 

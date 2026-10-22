@@ -548,35 +548,22 @@ impl ExecutionLedgerStore {
         identity.validate()?;
         let _lease = Self::acquire_writer_lease(root)?;
         let native = Self::sqlite_at(root.join("execution-ledger.sqlite"));
-        if native.path().exists() {
-            let bound = native
-                .bound_native_account_identity()?
-                .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
-            if bound != *identity {
-                return Err(ExecutionLedgerError::AccountScopeMismatch);
-            }
-            native.attest_storage()?;
-            return Ok(native);
-        }
-        sqlite_store::save(
-            native.path(),
-            &BTreeMap::new(),
-            None,
-            None,
-            None,
-            &StrategyPeriodHistory::default(),
-            &[],
-        )?;
-        native.bind_native_account_identity(identity)?;
-        let proof = native.attest_storage()?;
-        if proof.on_disk_schema != sqlite_store::SCHEMA || proof.integrity != "VALIDATED_COLD_READ"
+        // One transaction owns both the empty state and immutable identity.
+        // An uncommitted schema-only DB is safe to finish after a crash.
+        sqlite_store::initialize_account(native.path(), identity)?;
+        sqlite_store::attest_published_owner(native.path(), &identity.uid_fingerprint)?;
+        let bound = native.bound_native_account_identity()?
+            .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
+        if bound.venue != identity.venue
+            || bound.environment != identity.environment
+            || bound.account_id != identity.account_id
+            || bound.uid_fingerprint != identity.uid_fingerprint
         {
-            return Err(ExecutionLedgerError::Corrupt(
-                "fresh native account genesis attestation failed",
-            ));
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        // Old local JSON was never imported. Delete only known application-
-        // owned legacy source paths after the new owner has been attested.
+        // Local v14 evidence is not imported. Only application-owned legacy
+        // paths are discarded, and only AFTER cold attestation of the new
+        // immutable SQL owner. Retrying cleanup is idempotent.
         for name in [
             "execution-ledger.json",
             "execution-ledger.v14.sealed",
@@ -586,9 +573,7 @@ impl ExecutionLedgerStore {
             let old = root.join(name);
             if old.try_exists()? {
                 if !old.is_file() {
-                    return Err(ExecutionLedgerError::Corrupt(
-                        "legacy ledger path not a file",
-                    ));
+                    return Err(ExecutionLedgerError::Corrupt("legacy ledger path not a file"));
                 }
                 fs::remove_file(old)?;
             }
@@ -596,9 +581,7 @@ impl ExecutionLedgerStore {
         let archived = root.join("execution-ledger.archive");
         if archived.try_exists()? {
             if !archived.is_dir() {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "legacy archive path not a directory",
-                ));
+                return Err(ExecutionLedgerError::Corrupt("legacy archive path not a directory"));
             }
             fs::remove_dir_all(archived)?;
         }
