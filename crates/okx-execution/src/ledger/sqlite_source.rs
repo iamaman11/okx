@@ -402,9 +402,10 @@ fn additive_bill_detail(
         return false;
     }
     let mut normalized = latest.clone();
-    let (Some(prior_fields), Some(current_fields)) =
-        (prior.payload.as_object(), normalized.payload.as_object_mut())
-    else {
+    let (Some(prior_fields), Some(current_fields)) = (
+        prior.payload.as_object(),
+        normalized.payload.as_object_mut(),
+    ) else {
         return false;
     };
     if prior_fields.contains_key("balChg") {
@@ -513,18 +514,22 @@ pub(super) fn append_window_delta(
                 // observation cannot replace the first or silently change PnL.
                 let proof_key = format!(
                     "bill-proof:{}",
-                    key.strip_prefix("bill:").ok_or(
-                        ExecutionLedgerError::ExchangeEvidenceConflict
-                    )?
+                    key.strip_prefix("bill:")
+                        .ok_or(ExecutionLedgerError::ExchangeEvidenceConflict)?
                 );
-                let proof: Option<(String, Vec<u8>)> = tx.query_row(
-                    "SELECT payload_digest,payload FROM native_source_events
+                let proof: Option<(String, Vec<u8>)> = tx
+                    .query_row(
+                        "SELECT payload_digest,payload FROM native_source_events
                      WHERE run_id=?1 AND event_key=?2",
-                    params![&delta.run_id, &proof_key],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                ).optional().map_err(io)?;
+                        params![&delta.run_id, &proof_key],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(io)?;
                 if let Some((digest, bytes)) = proof {
-                    if checksum(&bytes) != digest || decode::<StoredExchangeEvent>(&bytes)? != *event {
+                    if checksum(&bytes) != digest
+                        || decode::<StoredExchangeEvent>(&bytes)? != *event
+                    {
                         return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
                     }
                 } else {
@@ -532,7 +537,8 @@ pub(super) fn append_window_delta(
                     tx.execute(
                         "INSERT INTO native_source_events VALUES(?1,?2,?3,?4)",
                         params![&delta.run_id, &proof_key, checksum(&enriched), enriched],
-                    ).map_err(io)?;
+                    )
+                    .map_err(io)?;
                     super::sqlite_finance::persist_event(tx, &delta.run_id, &proof_key, event)?;
                     index_financial_source_event(tx, &delta.run_id, &proof_key, event)?;
                     changed = true;
@@ -1443,17 +1449,23 @@ mod tests {
             assert!(append_window_delta(&tx, &sample).unwrap());
             tx.commit().unwrap();
         }
-        let original_digest: String = c.query_row(
-            "SELECT payload_digest FROM native_source_events
+        let original_digest: String = c
+            .query_row(
+                "SELECT payload_digest FROM native_source_events
              WHERE run_id=?1 AND event_key=?2",
-            params![&sample.run_id,key],
-            |r| r.get(0),
-        ).unwrap();
-        let unresolved: i64 = c.query_row(
-            "SELECT COUNT(*) FROM source_gaps
+                params![&sample.run_id, key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let unresolved: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM source_gaps
              WHERE gap_id='bill-financial-missing:bill-19'
-             AND resolution_evidence_sha256 IS NULL",[],|r|r.get(0)
-        ).unwrap();
+             AND resolution_evidence_sha256 IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(unresolved, 1);
         let mut complete = original.clone();
         complete.payload["balChg"] = serde_json::json!("-0.25");
@@ -1465,48 +1477,61 @@ mod tests {
             assert!(append_window_delta(&tx, &later).unwrap());
             tx.commit().unwrap();
         }
-        let preserved: String = c.query_row(
-            "SELECT payload_digest FROM native_source_events
+        let preserved: String = c
+            .query_row(
+                "SELECT payload_digest FROM native_source_events
              WHERE run_id=?1 AND event_key=?2",
-            params![&sample.run_id,key],
-            |r| r.get(0),
-        ).unwrap();
+                params![&sample.run_id, key],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(preserved, original_digest);
-        let updated: (String, String) = c.query_row(
-            "SELECT b.delta_decimal,g.resolution_evidence_sha256 FROM bills b
+        let updated: (String, String) = c
+            .query_row(
+                "SELECT b.delta_decimal,g.resolution_evidence_sha256 FROM bills b
              JOIN source_gaps g ON g.gap_id='bill-financial-missing:bill-19'
-             WHERE b.bill_id='bill-19'",[],|r|Ok((r.get(0)?,r.get(1)?))
-        ).unwrap();
-        assert_eq!(updated.0,"-0.25");
-        assert_eq!(updated.1.len(),64);
-        assert_ne!(updated.1,original_digest);
+             WHERE b.bill_id='bill-19'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(updated.0, "-0.25");
+        assert_eq!(updated.1.len(), 64);
+        assert_ne!(updated.1, original_digest);
         let mut observed = Vec::new();
-        visit_bill_events(&c,&sample.run_id,&sample.account_uid,|k,v|{
-            observed.push((k.to_owned(),v.payload["balChg"].as_str().unwrap_or("").to_owned()));
+        visit_bill_events(&c, &sample.run_id, &sample.account_uid, |k, v| {
+            observed.push((
+                k.to_owned(),
+                v.payload["balChg"].as_str().unwrap_or("").to_owned(),
+            ));
             Ok(())
-        }).unwrap();
-        assert_eq!(observed, vec![(key.to_owned(),"-0.25".to_owned())]);
+        })
+        .unwrap();
+        assert_eq!(observed, vec![(key.to_owned(), "-0.25".to_owned())]);
         let mut from_finance = Vec::new();
-        visit_financial_kind(&c,&sample.run_id,&sample.account_uid,"BILL",|k,v|{
-            from_finance.push((k.to_owned(),v.payload["balChg"].as_str().unwrap_or("").to_owned()));
+        visit_financial_kind(&c, &sample.run_id, &sample.account_uid, "BILL", |k, v| {
+            from_finance.push((
+                k.to_owned(),
+                v.payload["balChg"].as_str().unwrap_or("").to_owned(),
+            ));
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(from_finance, observed);
         audit_financial_index_inventory(&c).unwrap();
-        assert!(attest_indexed(&c,&sample.run_id,&sample.account_uid).is_ok());
+        assert!(attest_indexed(&c, &sample.run_id, &sample.account_uid).is_ok());
         {
             let tx = c.transaction().unwrap();
             assert!(!append_window_delta(&tx, &later).unwrap());
             tx.commit().unwrap();
         }
         let mut conflicting = later.clone();
-        conflicting.events.get_mut(key).unwrap().payload["balChg"] =
-            serde_json::json!("-0.5");
+        conflicting.events.get_mut(key).unwrap().payload["balChg"] = serde_json::json!("-0.5");
         conflicting.seal().unwrap();
         {
             let tx = c.transaction().unwrap();
             assert!(matches!(
-                append_window_delta(&tx,&conflicting),
+                append_window_delta(&tx, &conflicting),
                 Err(ExecutionLedgerError::ExchangeEvidenceConflict)
             ));
         }
