@@ -5268,13 +5268,15 @@ mod tests {
         );
         assert_eq!(store.attest_storage().unwrap().on_disk_schema, SCHEMA);
         let active = ExecutionLedgerStore::select_published_owner(&root).unwrap();
-        let started = DurableExecutionLedger::open(active, 15000).unwrap();
+        let mut started = DurableExecutionLedger::open(active, 15000).unwrap();
         assert_eq!(started.total_intents().unwrap(), 0);
         assert!(started.capital_reservation().is_none());
         assert!(started.finalized_run().is_none());
         // An operator STOP is persisted after genesis. A delayed duplicate
         // initialization must not reset it, even though the account is FLAT.
-        let stop = started.stop_new_risk("GENESIS_RETRY_TEST_STOP", 15001).unwrap();
+        let stop = started
+            .stop_new_risk("GENESIS_RETRY_TEST_STOP", 15001)
+            .unwrap();
         drop(started);
         // A missing acknowledgement never creates another database or UID.
         let previous_digest = store.attest_storage().unwrap().manifest_sha256;
