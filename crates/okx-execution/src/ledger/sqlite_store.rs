@@ -3776,7 +3776,37 @@ mod tests {
             operator_authority_id: format!("sha256:{}", "a".repeat(64)),
             started_at_ms: 1000,
         };
-        let source = DurableExchangeEvidence::new(&run).unwrap();
+        let mut source = DurableExchangeEvidence::new(&run).unwrap();
+        source.events.insert(
+            "order:SWAP:manual-source-001:2000".to_owned(),
+            crate::exchange_evidence::StoredExchangeEvent {
+                payload: serde_json::json!({
+                    "source":"OKX_REST_ORDER",
+                    "ordId":"manual-source-001",
+                    "clOrdId":"",
+                    "instId":"BTC-USDT-SWAP",
+                    "state":"live",
+                    "uTime":"2000"
+                }),
+                source_intent_id: None,
+                strategy_run_id: None,
+                allocation: "UNALLOCATED".to_owned(),
+            },
+        );
+        source.checksum_sha256 = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    &source.schema,
+                    &source.account_uid,
+                    &source.run_id,
+                    &source.events,
+                    &source.cursors,
+                ))
+                .unwrap()
+            )
+        );
+        source.validate().unwrap();
         save(
             &db,
             &BTreeMap::new(),
@@ -3798,6 +3828,7 @@ mod tests {
             source.checksum_sha256,
         );
         let before = ledger.exchange_evidence_summary().unwrap().unwrap();
+        assert_eq!(before.events, 1);
         ledger.stop_new_risk("OPERATOR_HALT", 3000).unwrap();
         assert!(ledger.exchange_evidence.is_none());
         assert_eq!(
