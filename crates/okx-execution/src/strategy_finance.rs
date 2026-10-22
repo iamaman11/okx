@@ -678,6 +678,7 @@ fn put_lot(
 /// used for this assessment, never inferred from the workstation clock.
 /// A fresh complete REST observation is evidence only if it closes the last
 /// <=2h interval; it cannot bridge a longer outage after restart.
+#[cfg(test)]
 fn source_continuity_attested(
     sorted_cursor_times: &[u64],
     run_started_at_ms: u64,
