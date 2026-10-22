@@ -271,6 +271,25 @@ fn insert_fill(
     Ok(())
 }
 
+struct IndexedFinancialGap {
+    stream: String,
+    scope: String,
+    from: i64,
+    through: i64,
+    materiality: String,
+    reason: String,
+    resolution: Option<String>,
+}
+
+struct IndexedBillFact {
+    instrument: Option<String>,
+    trade: Option<String>,
+    timestamp: i64,
+    currency: String,
+    kind: String,
+    delta: String,
+}
+
 /// A financial gap is resolved only by a later authenticated, exact bill
 /// fact with the SAME native bill identity. Both immutable source proofs
 /// remain present. A point receipt never grants continuous-history coverage.
@@ -281,46 +300,45 @@ fn match_bill_gap(
     resolution: Option<&str>,
 ) -> Result<(), ExecutionLedgerError> {
     let gap_id = format!("bill-financial-missing:{bill}");
-    let prior: Option<(String, String, i64, i64, String, String, Option<String>)> = tx
+    let prior: Option<IndexedFinancialGap> = tx
         .query_row(
             "SELECT stream_kind,scope_key,from_ms,through_ms,materiality,reason_code,
                     resolution_evidence_sha256
              FROM source_gaps WHERE gap_id=?1",
             params![&gap_id],
             |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
+                Ok(IndexedFinancialGap {
+                    stream: row.get(0)?,
+                    scope: row.get(1)?,
+                    from: row.get(2)?,
+                    through: row.get(3)?,
+                    materiality: row.get(4)?,
+                    reason: row.get(5)?,
+                    resolution: row.get(6)?,
+                })
             },
         )
         .optional()
         .map_err(io)?;
-    let Some((stream, scope, from, through, materiality, reason, existing_resolution)) = prior
-    else {
+    let Some(prior) = prior else {
         return Ok(());
     };
-    if stream != "BILLS"
-        || scope != bill
-        || from != timestamp
-        || through
+    if prior.stream != "BILLS"
+        || prior.scope != bill
+        || prior.from != timestamp
+        || prior.through
             != timestamp
                 .checked_add(1)
                 .ok_or(ExecutionLedgerError::Corrupt("bill time overflow"))?
-        || materiality != "FINANCIAL"
-        || reason != "MISSING_EXACT_BALANCE_CHANGE"
+        || prior.materiality != "FINANCIAL"
+        || prior.reason != "MISSING_EXACT_BALANCE_CHANGE"
     {
         return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
     }
     if let Some(proof) = resolution {
         // Resolution is one-way. A duplicate later receipt with the same
         // exact cash fact does not replace the first resolving evidence.
-        if existing_resolution.is_none() {
+        if prior.resolution.is_none() {
             let changed = tx
                 .execute(
                     "UPDATE source_gaps SET resolution_evidence_sha256=?1
@@ -332,7 +350,7 @@ fn match_bill_gap(
                 return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
             }
         }
-    } else if existing_resolution.is_some() {
+    } else if prior.resolution.is_some() {
         // A later incomplete REST observation cannot revoke a proven exact
         // bill or resurrect an already resolved financial gap.
         return Ok(());
@@ -350,20 +368,20 @@ fn insert_bill(tx: &Transaction<'_>, v: &Value, proof: &str) -> Result<(), Execu
     let subtype = nullable(v, "subType")?.unwrap_or("UNKNOWN_LEGACY");
     let kind = format!("{bill_type}/{subtype}");
     let delta = optional_amount(v, "balChg")?;
-    let existing: Option<(Option<String>, Option<String>, i64, String, String, String)> = tx
+    let existing: Option<IndexedBillFact> = tx
         .query_row(
             "SELECT instrument_id,trade_id,exchange_time_ms,currency,bill_kind,delta_decimal
              FROM bills WHERE bill_id=?1",
             params![bill],
             |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
+                Ok(IndexedBillFact {
+                    instrument: r.get(0)?,
+                    trade: r.get(1)?,
+                    timestamp: r.get(2)?,
+                    currency: r.get(3)?,
+                    kind: r.get(4)?,
+                    delta: r.get(5)?,
+                })
             },
         )
         .optional()
@@ -371,15 +389,13 @@ fn insert_bill(tx: &Transaction<'_>, v: &Value, proof: &str) -> Result<(), Execu
     // An incomplete duplicate must not reopen a financial gap after an
     // earlier complete observation. Reused bill IDs with changed identity
     // always fail closed, even when balChg is missing.
-    if let Some((prior_inst, prior_trade, prior_time, prior_ccy, prior_kind, prior_delta)) =
-        existing.as_ref()
-    {
-        if prior_inst.as_deref() != inst
-            || prior_trade.as_deref() != trade
-            || *prior_time != timestamp
-            || prior_ccy != currency
-            || prior_kind != &kind
-            || delta.is_some_and(|exact| prior_delta != exact)
+    if let Some(prior) = existing.as_ref() {
+        if prior.instrument.as_deref() != inst
+            || prior.trade.as_deref() != trade
+            || prior.timestamp != timestamp
+            || prior.currency != currency
+            || prior.kind != kind
+            || delta.is_some_and(|exact| prior.delta != exact)
         {
             return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
         }
@@ -412,29 +428,29 @@ fn insert_bill(tx: &Transaction<'_>, v: &Value, proof: &str) -> Result<(), Execu
          ON CONFLICT(bill_id) DO NOTHING",
         params![bill,inst,trade,timestamp,currency,kind,exact,proof],
     ).map_err(io)?;
-    let stored: (Option<String>, Option<String>, i64, String, String, String) = tx
+    let stored: IndexedBillFact = tx
         .query_row(
             "SELECT instrument_id,trade_id,exchange_time_ms,currency,bill_kind,delta_decimal
              FROM bills WHERE bill_id=?1",
             params![bill],
             |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
+                Ok(IndexedBillFact {
+                    instrument: r.get(0)?,
+                    trade: r.get(1)?,
+                    timestamp: r.get(2)?,
+                    currency: r.get(3)?,
+                    kind: r.get(4)?,
+                    delta: r.get(5)?,
+                })
             },
         )
         .map_err(io)?;
-    if stored.0.as_deref() != inst
-        || stored.1.as_deref() != trade
-        || stored.2 != timestamp
-        || stored.3 != currency
-        || stored.4 != kind
-        || stored.5 != exact
+    if stored.instrument.as_deref() != inst
+        || stored.trade.as_deref() != trade
+        || stored.timestamp != timestamp
+        || stored.currency != currency
+        || stored.kind != kind
+        || stored.delta != exact
     {
         return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
     }
