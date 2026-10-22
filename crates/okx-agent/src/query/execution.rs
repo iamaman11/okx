@@ -1867,15 +1867,15 @@ async fn reserve_native_risk_for_submit(
                 && a.uid_fingerprint == plan.account_uid_fingerprint
         })
         .ok_or("RISK_ACCOUNT_NOT_REGISTERED")?;
-    // Strategy identity is the persisted run mandate, not a name chosen by
-    // ChatGPT for this reservation. Unmapped mandates cannot mint a grant.
-    if !account
+    // Strategy identity comes from the immutable run binding. Mandate
+    // version is independent policy metadata and cannot impersonate a
+    // registered strategy or acquire its RiskBook reservation.
+    let strategy_id = account
         .strategies
         .iter()
-        .any(|strategy| strategy.enabled && strategy.id == run.mandate_version)
-    {
-        return Err("RISK_STRATEGY_NOT_REGISTERED");
-    }
+        .find(|strategy| strategy.enabled && strategy.id == run.strategy_id)
+        .map(|strategy| strategy.id.as_str())
+        .ok_or("RISK_STRATEGY_NOT_REGISTERED")?;
     let requested = plan
         .open_risk
         .as_ref()
@@ -1893,7 +1893,7 @@ async fn reserve_native_risk_for_submit(
             account_uid: plan.account_uid_fingerprint.clone(),
             run_id: run.allocation_id.clone(),
             intent_id: intent_id.to_owned(),
-            strategy_id: run.mandate_version.clone(),
+            strategy_id: strategy_id.to_owned(),
             instrument_id: plan.instrument_id.clone(),
             plan_sha256: plan_sha256.clone(),
             requested_loss_usdt: requested,
