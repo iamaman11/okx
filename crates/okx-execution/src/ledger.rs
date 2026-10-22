@@ -2399,13 +2399,15 @@ impl DurableExecutionLedger {
         }
         if let Some(candidate) = excluded_candidate
             && !excluded_seen
-            && self.read_intent(&candidate.intent_id)?.is_some_and(|entry| {
-                !Self::inert_candidate_for_financial_projection(
-                    &entry.record,
-                    candidate,
-                    &run.allocation_id,
-                )
-            })
+            && self
+                .read_intent(&candidate.intent_id)?
+                .is_some_and(|entry| {
+                    !Self::inert_candidate_for_financial_projection(
+                        &entry.record,
+                        candidate,
+                        &run.allocation_id,
+                    )
+                })
         {
             return Err(ExecutionLedgerError::Corrupt(
                 "non-inert financial new-risk candidate",
