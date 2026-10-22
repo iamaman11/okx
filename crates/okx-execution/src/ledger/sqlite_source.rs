@@ -169,7 +169,12 @@ where
     let from = i64::try_from(from_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
     let through = i64::try_from(through_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
     visit_financial_kind_internal(
-        connection, run_id, expected_uid, "BILL", Some((from, through)), visit,
+        connection,
+        run_id,
+        expected_uid,
+        "BILL",
+        Some((from, through)),
+        visit,
     )
 }
 
@@ -213,7 +218,8 @@ where
         .prepare(if window.is_some() { WINDOW } else { COLUMNS })
         .map_err(io)?;
     let mut rows = if let Some((from, through)) = window {
-        stmt.query(params![run_id, kind, from, through]).map_err(io)?
+        stmt.query(params![run_id, kind, from, through])
+            .map_err(io)?
     } else {
         stmt.query(params![run_id, kind]).map_err(io)?
     };
@@ -1568,18 +1574,47 @@ mod tests {
         .unwrap();
         assert_eq!(from_finance, observed);
         let mut bounded = Vec::new();
-        visit_bills_in_window(&c, &sample.run_id, &sample.account_uid, 2000, 2001, |key, event| {
-            bounded.push((key.to_owned(), event.payload["balChg"].as_str().unwrap().to_owned()));
-            Ok(())
-        }).unwrap();
+        visit_bills_in_window(
+            &c,
+            &sample.run_id,
+            &sample.account_uid,
+            2000,
+            2001,
+            |key, event| {
+                bounded.push((
+                    key.to_owned(),
+                    event.payload["balChg"].as_str().unwrap().to_owned(),
+                ));
+                Ok(())
+            },
+        )
+        .unwrap();
         assert_eq!(bounded, observed);
         bounded.clear();
-        visit_bills_in_window(&c, &sample.run_id, &sample.account_uid, 2001, 3000, |_, _| {
-            bounded.push(("unexpected".to_owned(), "unexpected".to_owned()));
-            Ok(())
-        }).unwrap();
+        visit_bills_in_window(
+            &c,
+            &sample.run_id,
+            &sample.account_uid,
+            2001,
+            3000,
+            |_, _| {
+                bounded.push(("unexpected".to_owned(), "unexpected".to_owned()));
+                Ok(())
+            },
+        )
+        .unwrap();
         assert!(bounded.is_empty());
-        assert!(visit_bills_in_window(&c, &sample.run_id, &sample.account_uid, 3000, 2000, |_, _| Ok(())).is_err());
+        assert!(
+            visit_bills_in_window(
+                &c,
+                &sample.run_id,
+                &sample.account_uid,
+                3000,
+                2000,
+                |_, _| Ok(())
+            )
+            .is_err()
+        );
         audit_financial_index_inventory(&c).unwrap();
         assert!(attest_indexed(&c, &sample.run_id, &sample.account_uid).is_ok());
         {

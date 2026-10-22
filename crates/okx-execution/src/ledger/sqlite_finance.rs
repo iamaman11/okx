@@ -621,42 +621,42 @@ pub(super) fn nav_cursor_and_daily_loss(
         day,
         through_ms,
         |_, event| {
-        if event.payload["source"] != "OKX_REST_BILL" {
-            return Ok(());
-        }
-        let Some(intent) = event.source_intent_id.as_deref() else {
-            return Ok(());
-        };
-        let entry = {
-            let mut rows = stmt.query(params![intent]).map_err(io)?;
-            let entry = rows
-                .next()
-                .map_err(io)?
-                .map(|row| verified_indexed_entry(row, &uid))
-                .transpose()?;
-            if rows.next().map_err(io)?.is_some() {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "duplicate NAV bill intent identity",
-                ));
+            if event.payload["source"] != "OKX_REST_BILL" {
+                return Ok(());
             }
-            entry
-        };
-        let Some(entry) = entry else {
-            return Ok(());
-        };
-        if entry.created_at_ms <= run.started_at_ms
-            || entry.record.plan.account_uid_fingerprint != uid
-        {
-            return Ok(());
-        }
-        let direct_run = event.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
-            && entry.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str());
-        let run_reducer = entry.record.plan.action.is_risk_reducing()
-            && event.strategy_run_id.is_none()
-            && entry.record.strategy_run_id.is_none();
-        if !direct_run && !run_reducer {
-            return Ok(());
-        }
+            let Some(intent) = event.source_intent_id.as_deref() else {
+                return Ok(());
+            };
+            let entry = {
+                let mut rows = stmt.query(params![intent]).map_err(io)?;
+                let entry = rows
+                    .next()
+                    .map_err(io)?
+                    .map(|row| verified_indexed_entry(row, &uid))
+                    .transpose()?;
+                if rows.next().map_err(io)?.is_some() {
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "duplicate NAV bill intent identity",
+                    ));
+                }
+                entry
+            };
+            let Some(entry) = entry else {
+                return Ok(());
+            };
+            if entry.created_at_ms <= run.started_at_ms
+                || entry.record.plan.account_uid_fingerprint != uid
+            {
+                return Ok(());
+            }
+            let direct_run = event.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
+                && entry.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str());
+            let run_reducer = entry.record.plan.action.is_risk_reducing()
+                && event.strategy_run_id.is_none()
+                && entry.record.strategy_run_id.is_none();
+            if !direct_run && !run_reducer {
+                return Ok(());
+            }
             loss.accept(&event.payload, run, day, as_of)?;
             Ok(())
         },
