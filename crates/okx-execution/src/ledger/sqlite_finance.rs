@@ -486,7 +486,7 @@ pub(super) fn nav_cursor_and_daily_loss(
     let sql = format!("{INDEXED_INTENT_COLUMNS} WHERE e.intent_id=?1");
     let mut stmt = c.prepare(&sql).map_err(io)?;
     let mut loss = crate::strategy_finance::DailyStrategyLossAccumulator::default();
-    super::sqlite_source::visit_events(&c, &run.allocation_id, &uid, |_, event| {
+    super::sqlite_source::visit_bill_events(&c, &run.allocation_id, &uid, |_, event| {
         if event.payload["source"] != "OKX_REST_BILL" {
             return Ok(());
         }

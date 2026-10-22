@@ -701,6 +701,34 @@ pub(super) fn visit_events<F>(
     connection: &Connection,
     run_id: &str,
     expected_uid: &str,
+    visit: F,
+) -> Result<(), ExecutionLedgerError>
+where
+    F: FnMut(&str, &StoredExchangeEvent) -> Result<(), ExecutionLedgerError>,
+{
+    visit_events_scoped(connection, run_id, expected_uid, false, visit)
+}
+
+/// NAV and daily STOP need exact native bills, not the complete historical
+/// order/fill source. The (run_id,event_key) primary key provides a bounded
+/// ordered seek by the canonical immutable "bill:" key namespace.
+pub(super) fn visit_bill_events<F>(
+    connection: &Connection,
+    run_id: &str,
+    expected_uid: &str,
+    visit: F,
+) -> Result<(), ExecutionLedgerError>
+where
+    F: FnMut(&str, &StoredExchangeEvent) -> Result<(), ExecutionLedgerError>,
+{
+    visit_events_scoped(connection, run_id, expected_uid, true, visit)
+}
+
+fn visit_events_scoped<F>(
+    connection: &Connection,
+    run_id: &str,
+    expected_uid: &str,
+    only_bills: bool,
     mut visit: F,
 ) -> Result<(), ExecutionLedgerError>
 where
@@ -720,12 +748,16 @@ where
     {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
-    let mut stmt = connection
-        .prepare(
-            "SELECT event_key,payload_digest,length(payload),payload
-             FROM native_source_events WHERE run_id=?1 ORDER BY event_key",
-        )
-        .map_err(io)?;
+    let statement = if only_bills {
+        "SELECT event_key,payload_digest,length(payload),payload
+         FROM native_source_events
+         WHERE run_id=?1 AND event_key>='bill:' AND event_key<'bill;'
+         ORDER BY event_key"
+    } else {
+        "SELECT event_key,payload_digest,length(payload),payload
+         FROM native_source_events WHERE run_id=?1 ORDER BY event_key"
+    };
+    let mut stmt = connection.prepare(statement).map_err(io)?;
     let mut rows = stmt.query(params![run_id]).map_err(io)?;
     let mut count = 0usize;
     while let Some(row) = rows.next().map_err(io)? {
@@ -738,6 +770,13 @@ where
             ));
         }
         let event: StoredExchangeEvent = decode(&bytes)?;
+        if only_bills
+            && (!key.starts_with("bill:")
+                || event.payload.get("source").and_then(serde_json::Value::as_str)
+                    != Some("OKX_REST_BILL"))
+        {
+            return Err(ExecutionLedgerError::Corrupt("indexed bill source kind mismatch"));
+        }
         count += 1;
         if count > crate::exchange_evidence::MAX_EVENTS {
             return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
@@ -923,6 +962,13 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM exchange_orders", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
+        let mut bills = 0usize;
+        visit_bill_events(&c, &empty.run_id, &empty.account_uid, |_, _| {
+            bills += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(bills, 0, "order events are excluded by the bill key index");
     }
 
     #[test]
