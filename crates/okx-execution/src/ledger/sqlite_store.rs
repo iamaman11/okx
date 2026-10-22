@@ -5272,6 +5272,9 @@ mod tests {
         assert_eq!(started.total_intents().unwrap(), 0);
         assert!(started.capital_reservation().is_none());
         assert!(started.finalized_run().is_none());
+        // An operator STOP is persisted after genesis. A delayed duplicate
+        // initialization must not reset it, even though the account is FLAT.
+        let stop = started.stop_new_risk("GENESIS_RETRY_TEST_STOP", 15001).unwrap();
         drop(started);
         // A missing acknowledgement never creates another database or UID.
         let previous_digest = store.attest_storage().unwrap().manifest_sha256;
@@ -5286,6 +5289,9 @@ mod tests {
             again.bound_native_account_identity().unwrap(),
             Some(identity.clone())
         );
+        let reopened = DurableExecutionLedger::open(again.clone(), 15500).unwrap();
+        assert_eq!(reopened.risk_stop(), Some(&stop));
+        drop(reopened);
         assert!(repeated.same_account_as(&identity));
         assert_ne!(repeated.bound_at_ms, identity.bound_at_ms);
         let mut foreign = identity.clone();
