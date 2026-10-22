@@ -5248,6 +5248,7 @@ mod tests {
     #[test]
     fn fresh_sqlite_owner_is_empty_uid_bound_and_retries_without_importing_v14() {
         let root = test_root("fresh-sql-genesis");
+        std::fs::create_dir_all(&root).unwrap();
         let old = root.join("execution-ledger.json");
         std::fs::write(&old, b"obsolete local v14 history").unwrap();
         assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());

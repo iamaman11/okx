@@ -1,6 +1,6 @@
 -- OKX account-ledger schema v1.
 -- One DB per natively verified (venue, environment, UID/account_id).
--- This schema is an INACTIVE migration target, NOT the current production store.
+-- Canonical native account schema. Fresh, UID-bound SQLite only; no v14 import.
 -- Connection owner MUST set/verify WAL, synchronous=FULL, foreign_keys=ON.
 -- All monetary/price/quantity values are exact decimal TEXT validated by Rust;
 -- NEVER store finance as SQLite REAL. No JSON columns or JSON-backed state.
