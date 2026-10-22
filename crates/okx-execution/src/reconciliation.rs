@@ -733,7 +733,6 @@ fn reconcile_exchange_evidence(
             .visit_historical_entries(&mut visit_entry)
             .map_err(|_| AccountLedgerReconciliationError::HistoricalCoverageUnattested)?;
     }
-    drop(visit_entry);
     if let Some(census) = native {
         historical_count = census.total;
         unresolved = census
