@@ -5299,7 +5299,9 @@ mod tests {
         let mut foreign_environment = identity.clone();
         foreign_environment.environment = LedgerEnvironment::Demo;
         assert!(!foreign_environment.same_account_as(&identity));
-        assert!(ExecutionLedgerStore::initialize_fresh_account(&root, &foreign_environment).is_err());
+        assert!(
+            ExecutionLedgerStore::initialize_fresh_account(&root, &foreign_environment).is_err()
+        );
         assert_eq!(
             again.bound_native_account_identity().unwrap(),
             Some(identity)
