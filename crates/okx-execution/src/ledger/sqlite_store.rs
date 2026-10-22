@@ -74,7 +74,7 @@ fn connect_with_integrity(
     let current_version: i64 = connection
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(io)?;
-    if !(0..=3).contains(&current_version) {
+    if current_version != 0 && current_version != 3 {
         return Err(ExecutionLedgerError::Corrupt(
             "unsupported SQLite account ledger schema",
         ));
@@ -134,7 +134,7 @@ fn connect_with_integrity(
     let foreign_keys: i64 = connection
         .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
         .map_err(io)?;
-    if !(1..=3).contains(&ver) || journal != "wal" || foreign_keys != 1 {
+    if ver != 3 || journal != "wal" || foreign_keys != 1 {
         return Err(ExecutionLedgerError::Corrupt(
             "SQLite schema/WAL/FK mismatch",
         ));
@@ -4886,6 +4886,31 @@ mod tests {
             again.bound_native_account_identity().unwrap(),
             Some(identity)
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retired_sqlite_schema_is_rejected_without_implicit_upgrade() {
+        let root = test_root("retired-schema-fails-closed");
+        let identity = SqliteAccountIdentity {
+            venue: LedgerVenue::Okx,
+            environment: LedgerEnvironment::Production,
+            account_id: "real".to_owned(),
+            uid_fingerprint: "a".repeat(64),
+            bound_at_ms: 1000,
+        };
+        let store = ExecutionLedgerStore::initialize_fresh_account(&root, &identity).unwrap();
+        let conn = Connection::open(store.path()).unwrap();
+        conn.execute_batch("PRAGMA user_version=2;").unwrap();
+        drop(conn);
+        assert!(ExecutionLedgerStore::select_published_owner(&root).is_err());
+        // A rejected old schema is never silently upgraded or reset.
+        let conn = Connection::open(store.path()).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        drop(conn);
         std::fs::remove_dir_all(root).unwrap();
     }
 
