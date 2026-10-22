@@ -2303,11 +2303,14 @@ impl DurableExecutionLedger {
             .capital_reservation
             .as_ref()
             .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
+        // Own the one authenticated source snapshot for this operation.
+        // Native SQL already read it once; cloning that full historical map
+        // again doubles peak RAM and introduces an O(history) copy per capture.
         let previous = self.current_source()?;
-        let mut next = if let Some(old) = previous.as_ref() {
-            old.clone()
-        } else {
-            DurableExchangeEvidence::new(run)?
+        let prior_proof = previous.as_ref().map(|value| value.checksum_sha256.clone());
+        let mut next = match previous {
+            Some(value) => value,
+            None => DurableExchangeEvidence::new(run)?,
         };
         if self.store.sqlite_native {
             // Keep one authenticated WAL read snapshot for every source fact:
@@ -2338,7 +2341,7 @@ impl DurableExecutionLedger {
             let owned = self.run_entries(run)?;
             next.capture(facts, &owned, run, require_fresh_cursor)?;
         }
-        if previous.as_ref() != Some(&next) {
+        if prior_proof.as_deref() != Some(next.checksum_sha256.as_str()) {
             self.store.save_metadata(
                 &self.entries,
                 self.risk_stop.as_ref(),
