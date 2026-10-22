@@ -8,11 +8,11 @@ pub(super) const SCHEMA: &str = "okx.execution-ledger.sqlite/v2";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredState {
-    version: u32,
+pub(super) struct StoredState {
+    pub(super) version: u32,
     stop: Option<ExecutionRiskStop>,
-    reservation: Option<StrategyCapitalReservation>,
-    source_run_id: Option<String>,
+    pub(super) reservation: Option<StrategyCapitalReservation>,
+    pub(super) source_run_id: Option<String>,
     periods: StrategyPeriodHistory,
     leverage: Vec<LeverageChangeAttempt>,
 }
@@ -37,7 +37,7 @@ fn connect(path: &Path, create: bool) -> Result<Connection, ExecutionLedgerError
 /// Indexed hot-path reads validate the selected rows and pinned account
 /// identity. Full PRAGMA integrity_check remains mandatory at cold owner
 /// attestation, not on each paginated UI/history query.
-fn connect_indexed_read(path: &Path) -> Result<Connection, ExecutionLedgerError> {
+pub(super) fn connect_indexed_read(path: &Path) -> Result<Connection, ExecutionLedgerError> {
     if !path.exists() {
         return Err(ExecutionLedgerError::Corrupt(
             "SQLite account ledger missing",
@@ -544,7 +544,7 @@ pub(super) fn indexed_source_owner(
 /// One exact persisted entry is checked against its BLOB digest, immutable
 /// plan, and indexed relational projection. The left join exposes missing
 /// projections as corruption rather than silently returning incomplete rows.
-fn verified_indexed_entry(
+pub(super) fn verified_indexed_entry(
     row: &rusqlite::Row<'_>,
     expected_uid: &str,
 ) -> Result<ExecutionLedgerEntry, ExecutionLedgerError> {
@@ -579,7 +579,7 @@ fn verified_indexed_entry(
     Ok(entry)
 }
 
-const INDEXED_INTENT_COLUMNS: &str = "
+pub(super) const INDEXED_INTENT_COLUMNS: &str = "
  SELECT e.intent_id,e.client_order_id,e.uid,e.digest,e.bytes,
         i.instrument_id,i.requested_action,i.plan_sha256,i.current_state,i.created_at_ms
  FROM ledger_entries e LEFT JOIN intents i ON i.intent_id=e.intent_id";
@@ -1322,190 +1322,6 @@ pub(super) fn current_source(
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     super::sqlite_source::read(&c, run_id, &uid).map(Some)
-}
-
-/// One WAL snapshot supplies the exact NAV receipt and all native bill facts.
-/// Unlike legacy NAV this never creates a historical DurableExchangeEvidence
-/// or an all-run map of intents. Every source row and referenced intent is
-/// authenticated, and the canonical source hash matches the financial report.
-/// An unattributed bill can never silently enter the run's daily loss.
-pub(super) fn nav_cursor_and_daily_loss(
-    path: &Path,
-    run: &StrategyCapitalReservation,
-    report: &StrategyFinancialPeriod,
-    day: u64,
-    as_of: u64,
-) -> Result<
-    Option<(
-        String,
-        crate::exchange_evidence::ExchangeCoverageCursor,
-        u64,
-        Decimal,
-    )>,
-    ExecutionLedgerError,
-> {
-    let c = connect_indexed_read(path)?;
-    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
-    let (uid, digest, bytes): (String, String, Vec<u8>) = c
-        .query_row(
-            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(io)?;
-    require_finance_read_scope(&c, &uid)?;
-    if checksum(&bytes) != digest {
-        return Err(ExecutionLedgerError::Corrupt("native NAV state digest"));
-    }
-    let state: StoredState = decode(&bytes)?;
-    if state.version != 1
-        || uid != run.account_uid_fingerprint
-        || state
-            .reservation
-            .as_ref()
-            .is_none_or(|active| active != run)
-        || state.source_run_id.as_deref() != Some(run.allocation_id.as_str())
-        || report.run_id != run.allocation_id
-    {
-        return Err(ExecutionLedgerError::AccountScopeMismatch);
-    }
-    let source = super::sqlite_source::attest_indexed(&c, &run.allocation_id, &uid)?;
-    if source.checksum_sha256 != report.evidence_sha256 {
-        return Ok(None);
-    }
-    let cursor: Option<(String, i64)> = c
-        .query_row(
-            "SELECT cursor_key,receipt_ms FROM native_source_cursors
-             WHERE run_id=?1 AND receipt_ms<=?2
-             ORDER BY receipt_ms DESC,cursor_key DESC LIMIT 1",
-            params![
-                run.allocation_id,
-                i64::try_from(as_of).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(io)?;
-    let Some((key, receipt_ms)) = cursor else {
-        return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-    };
-    let receipt_ms = u64::try_from(receipt_ms)
-        .map_err(|_| ExecutionLedgerError::Corrupt("invalid NAV receipt index"))?;
-    let proof = super::sqlite_source::indexed_cursor(&c, &run.allocation_id, &key)?
-        .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-    if crate::exchange_evidence::source_receipt_ms(&proof.source_received_at) != Some(receipt_ms) {
-        return Err(ExecutionLedgerError::Corrupt(
-            "native NAV cursor index mismatch",
-        ));
-    }
-    if as_of - receipt_ms > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS {
-        return Ok(None);
-    }
-
-    let sql = format!("{INDEXED_INTENT_COLUMNS} WHERE e.intent_id=?1");
-    let mut stmt = c.prepare(&sql).map_err(io)?;
-    let mut linked = 0usize;
-    let mut fees = Decimal::ZERO;
-    let mut realized = Decimal::ZERO;
-    let mut gross_loss = Decimal::ZERO;
-    let mut source_ahead = false;
-    super::sqlite_source::visit_events(&c, &run.allocation_id, &uid, |_, event| {
-        if event.payload["source"] != "OKX_REST_BILL" {
-            return Ok(());
-        }
-        let Some(intent) = event.source_intent_id.as_deref() else {
-            return Ok(());
-        };
-        let entry = {
-            let mut rows = stmt.query(params![intent]).map_err(io)?;
-            let entry = rows
-                .next()
-                .map_err(io)?
-                .map(|row| verified_indexed_entry(row, &uid))
-                .transpose()?;
-            if rows.next().map_err(io)?.is_some() {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "duplicate NAV bill intent identity",
-                ));
-            }
-            entry
-        };
-        let Some(entry) = entry else {
-            return Ok(());
-        };
-        if entry.created_at_ms <= run.started_at_ms
-            || entry.record.plan.account_uid_fingerprint != uid
-        {
-            return Ok(());
-        }
-        let direct_run = event.strategy_run_id.as_deref() == Some(run.allocation_id.as_str())
-            && entry.record.strategy_run_id.as_deref() == Some(run.allocation_id.as_str());
-        let run_reducer = entry.record.plan.action.is_risk_reducing()
-            && event.strategy_run_id.is_none()
-            && entry.record.strategy_run_id.is_none();
-        if !direct_run && !run_reducer {
-            return Ok(());
-        }
-        if event.payload["ccy"] != "USDT" {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-        let fee = event.payload["fee"]
-            .as_str()
-            .and_then(|v| Decimal::from_str(v).ok())
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        let pnl = event.payload["pnl"]
-            .as_str()
-            .and_then(|v| Decimal::from_str(v).ok())
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        let ts = event.payload["ts"]
-            .as_u64()
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if ts < run.started_at_ms {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-        if ts > as_of {
-            source_ahead = true;
-            return Ok(());
-        }
-        linked = linked
-            .checked_add(1)
-            .ok_or(ExecutionLedgerError::ExchangeEvidenceCapacity)?;
-        fees += fee;
-        realized += pnl;
-        if ts >= day {
-            if fee < Decimal::ZERO {
-                gross_loss -= fee;
-            }
-            if pnl < Decimal::ZERO {
-                gross_loss -= pnl;
-            }
-        }
-        Ok(())
-    })?;
-    if source_ahead {
-        return Ok(None);
-    }
-    if linked != report.linked_bills
-        || Decimal::from_str(&report.fees_usdt).ok() != Some(fees)
-        || Decimal::from_str(&report.realized_usdt).ok() != Some(realized)
-    {
-        return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-    }
-    if run.started_at_ms >= day && report.state == "FLAT_RECONCILED" {
-        let allocation = Decimal::from_str(&run.allocated_usdt)
-            .map_err(|_| ExecutionLedgerError::CapitalReservationUnattested)?;
-        let nav = Decimal::from_str(
-            report
-                .nav_usdt
-                .as_deref()
-                .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?,
-        )
-        .map_err(|_| ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if gross_loss < (allocation - nav).max(Decimal::ZERO) {
-            return Err(ExecutionLedgerError::ExchangeSourceIncomplete);
-        }
-    }
-    Ok(Some((key, proof, receipt_ms, gross_loss)))
 }
 
 pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
@@ -4043,7 +3859,7 @@ mod tests {
             usable_for_new_risk: false,
             reasons: vec![],
         };
-        let (key, cursor, receipt, loss) = nav_cursor_and_daily_loss(&db, &run, &report, 0, 3000)
+        let (key, cursor, receipt, loss) = super::super::sqlite_finance::nav_cursor_and_daily_loss(&db, &run, &report, 0, 3000)
             .unwrap()
             .unwrap();
         assert_eq!(key, "complete:3000");
@@ -4053,7 +3869,7 @@ mod tests {
         let mut forged = report.clone();
         forged.evidence_sha256 = "f".repeat(64);
         assert!(
-            nav_cursor_and_daily_loss(&db, &run, &forged, 0, 3000)
+            super::super::sqlite_finance::nav_cursor_and_daily_loss(&db, &run, &forged, 0, 3000)
                 .unwrap()
                 .is_none(),
         );

@@ -2773,7 +2773,7 @@ impl DurableExecutionLedger {
             .sqlite_native
         {
             let Some(proof) =
-                sqlite_store::nav_cursor_and_daily_loss(&self.store.path, run, report, day, as_of)?
+                sqlite_finance::nav_cursor_and_daily_loss(&self.store.path, run, report, day, as_of)?
             else {
                 return Ok(None);
             };
