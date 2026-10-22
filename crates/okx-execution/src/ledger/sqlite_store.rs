@@ -2081,6 +2081,124 @@ fn persist_verified_capital_opening(
     Ok(())
 }
 
+/// Close only a previously opened epoch using its authenticated and already
+/// validated native finalization. The same WAL transaction updates metadata,
+/// preserving unknown risk on an unverified close.
+fn persist_epoch_closure<T: Serialize>(
+    tx: &rusqlite::Transaction<'_>,
+    prior: &StrategyCapitalReservation,
+    kind: &str,
+    closed_at_ms: u64,
+    proof: &T,
+) -> Result<(), ExecutionLedgerError> {
+    if !matches!(kind, "FINANCIALLY_CLOSED" | "UNVERIFIED_CLOSED")
+        || closed_at_ms < prior.started_at_ms
+    {
+        return Err(ExecutionLedgerError::StrategyRunNotFinalizable);
+    }
+    let at = i64::try_from(closed_at_ms)
+        .map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    let body = encode(&("okx.native-epoch-closure/v1", &prior.allocation_id, kind, proof))?;
+    let digest = checksum(&body);
+    let locator = format!("ledger_state/closure/{}", prior.allocation_id);
+    tx.execute(
+        "INSERT INTO evidence_objects
+         (evidence_sha256,evidence_kind,codec,relative_path,size_bytes,native_source_time_ms)
+         VALUES(?1,'NATIVE_FINANCIAL_EPOCH_CLOSURE','sqlite-msgpack',?2,?3,?4)
+         ON CONFLICT(evidence_sha256) DO NOTHING",
+        params![&digest, &locator, body.len() as i64, at],
+    )
+    .map_err(io)?;
+    let exact_proof: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM evidence_objects
+             WHERE evidence_sha256=?1 AND evidence_kind='NATIVE_FINANCIAL_EPOCH_CLOSURE'
+               AND codec='sqlite-msgpack' AND relative_path=?2
+               AND size_bytes=?3 AND native_source_time_ms=?4",
+            params![&digest, &locator, body.len() as i64, at],
+            |row| row.get(0),
+        )
+        .map_err(io)?;
+    if exact_proof != 1 {
+        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+    }
+    tx.execute(
+        "UPDATE capital_epochs
+         SET state=?1,closing_at_ms=?2,closing_evidence_sha256=?3
+         WHERE epoch_id=?4 AND strategy_id=?5
+           AND state='ACTIVE' AND closing_at_ms IS NULL",
+        params![
+            kind,
+            at,
+            &digest,
+            &prior.allocation_id,
+            &prior.strategy_id
+        ],
+    )
+    .map_err(io)?;
+    let exact_epoch: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM capital_epochs
+             WHERE epoch_id=?1 AND strategy_id=?2
+               AND state=?3 AND closing_at_ms=?4
+               AND closing_evidence_sha256=?5",
+            params![&prior.allocation_id, &prior.strategy_id, kind, at, digest],
+            |row| row.get(0),
+        )
+        .map_err(io)?;
+    if exact_epoch != 1 {
+        return Err(ExecutionLedgerError::CapitalReservationConflict);
+    }
+    Ok(())
+}
+
+fn sync_epoch_closure(
+    tx: &rusqlite::Transaction<'_>,
+    prior: Option<&StrategyCapitalReservation>,
+    next: Option<&StrategyCapitalReservation>,
+    periods: &StrategyPeriodHistory,
+) -> Result<(), ExecutionLedgerError> {
+    let Some(prior) = prior else {
+        return Ok(());
+    };
+    let run = prior.allocation_id.as_str();
+    let changed_run = next.is_some_and(|n| n.allocation_id != run);
+    let finalized = if changed_run {
+        periods
+            .archived_runs
+            .iter()
+            .find(|r| r.reservation == *prior)
+            .map(|r| &r.finalization)
+    } else {
+        periods.finalized_run.as_ref().filter(|f| f.run_id == run)
+    };
+    if let Some(proof) = finalized {
+        if proof.run_id != run || proof.account_uid != prior.account_uid_fingerprint {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        return persist_epoch_closure(tx, prior, "FINANCIALLY_CLOSED", proof.finalized_at_ms, proof);
+    }
+    let unverified = if changed_run {
+        periods
+            .unverified_runs
+            .iter()
+            .find(|r| r.reservation == *prior)
+            .map(|r| &r.closure)
+    } else {
+        periods.unverified_run.as_ref().filter(|f| f.run_id == run)
+    };
+    if let Some(proof) = unverified {
+        if proof.run_id != run || proof.account_uid != prior.account_uid_fingerprint {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        return persist_epoch_closure(tx, prior, "UNVERIFIED_CLOSED", proof.closed_at_ms, proof);
+    }
+    if changed_run {
+        return Err(ExecutionLedgerError::CapitalReservationConflict);
+    }
+    Ok(())
+}
+
 fn save_metadata_inner(
     path: &Path,
     stop: Option<&ExecutionRiskStop>,
@@ -2222,6 +2340,7 @@ fn save_metadata_inner(
         };
         super::sqlite_source::indexed_cursor(&tx, run_id, key)
     })?;
+    sync_epoch_closure(&tx, old.reservation.as_ref(), reservation, periods)?;
     if let Some(opening) = opening {
         let run = reservation.ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
         persist_verified_capital_opening(&tx, run, opening)?;
