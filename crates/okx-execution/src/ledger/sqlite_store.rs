@@ -1950,8 +1950,8 @@ fn persist_verified_capital_opening(
     if bound_uid != run.account_uid_fingerprint {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
-    let opening_ms = i64::try_from(run.started_at_ms)
-        .map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    let opening_ms =
+        i64::try_from(run.started_at_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
     // This is a local, typed and replayable attestation of a VERIFIED
     // native opening. It is NOT a REST history coverage receipt. The body
     // is reconstructed from the immutable reservation fields and native
@@ -2054,7 +2054,17 @@ fn persist_verified_capital_opening(
         ],
     )
     .map_err(io)?;
-    let actual: (String, String, String, String, i64, String, String, String, String) = tx
+    let actual: (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        String,
+    ) = tx
         .query_row(
             "SELECT strategy_id,epoch_kind,origin_schema,origin_version,
                     opening_at_ms,opening_receipt_sha256,allocation_currency,
@@ -2063,8 +2073,15 @@ fn persist_verified_capital_opening(
             params![&run.allocation_id],
             |r| {
                 Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
-                    r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?,
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
                 ))
             },
         )

@@ -1326,14 +1326,7 @@ impl ExecutionLedgerStore {
                 leverage,
             )
         } else {
-            self.save(
-                entries,
-                stop,
-                Some(reservation),
-                None,
-                history,
-                leverage,
-            )
+            self.save(entries, stop, Some(reservation), None, history, leverage)
         }
     }
 
