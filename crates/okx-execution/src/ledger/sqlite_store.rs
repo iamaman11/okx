@@ -3638,13 +3638,10 @@ mod tests {
             ExecutionState::UnknownSubmission
         );
         assert!(engine.begin_submission(&id, 1004).is_err());
-        let census = native_reconciliation_inventory(
-            &db,
-            &BTreeSet::from([derive_client_order_id(&id)]).iter().map(String::as_str).collect(),
-            &BTreeSet::new(),
-            16,
-        )
-        .unwrap();
+        let client = derive_client_order_id(&id);
+        let observed_clients = BTreeSet::from([client.as_str()]);
+        let census =
+            native_reconciliation_inventory(&db, &observed_clients, &BTreeSet::new(), 16).unwrap();
         assert_eq!((census.total, census.submitted), (1, 1));
         drop(engine);
         drop(lease);
