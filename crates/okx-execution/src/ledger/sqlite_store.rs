@@ -2054,51 +2054,28 @@ fn persist_verified_capital_opening(
         ],
     )
     .map_err(io)?;
-    let actual: (
-        String,
-        String,
-        String,
-        String,
-        i64,
-        String,
-        String,
-        String,
-        String,
-    ) = tx
+    let exact: i64 = tx
         .query_row(
-            "SELECT strategy_id,epoch_kind,origin_schema,origin_version,
-                    opening_at_ms,opening_receipt_sha256,allocation_currency,
-                    allocation_decimal,state
-             FROM capital_epochs WHERE epoch_id=?1",
-            params![&run.allocation_id],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                ))
-            },
+            "SELECT COUNT(*) FROM capital_epochs
+             WHERE epoch_id=?1 AND strategy_id=?2 AND epoch_kind='STRATEGY_RUN'
+               AND origin_schema=?3 AND origin_version=?4
+               AND opening_at_ms=?5 AND opening_receipt_sha256=?6
+               AND allocation_currency='USDT' AND allocation_decimal=?7
+               AND state='ACTIVE' AND closing_at_ms IS NULL
+               AND closing_evidence_sha256 IS NULL",
+            params![
+                &run.allocation_id,
+                &run.strategy_id,
+                &run.origin_schema,
+                &run.origin_version,
+                opening_ms,
+                &receipt,
+                &allocation
+            ],
+            |row| row.get(0),
         )
         .map_err(io)?;
-    if actual
-        != (
-            run.strategy_id.clone(),
-            "STRATEGY_RUN".to_owned(),
-            run.origin_schema.clone(),
-            run.origin_version.clone(),
-            opening_ms,
-            receipt,
-            "USDT".to_owned(),
-            allocation,
-            "ACTIVE".to_owned(),
-        )
-    {
+    if exact != 1 {
         return Err(ExecutionLedgerError::CapitalReservationConflict);
     }
     Ok(())
