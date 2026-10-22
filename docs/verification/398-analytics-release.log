@@ -1,0 +1,20 @@
+
+running 13 tests
+test analytics::artifact_job_fixtures::immutable_result_pages_and_restart_catalog ... ok
+test analytics::cache::tests::cache_key_includes_range_and_version ... ok
+test analytics::cache::tests::combined_fields_share_source_fetch ... ok
+test analytics::executor::heavy_fixtures::two_heavy_research_jobs_ingestion_stop_and_cancel_latency ... ANALYTICS_PERF_JSON:{"two_heavy_stop":{"build":"release","cancel_max_ms":11.7414,"cancel_p95_ms":10.084299999999999,"max_ms":13.7011,"measurements":30,"p50_ms":4.9061,"p95_ms":10.0713,"stage":"two actual causal grid jobs on blocking workers plus simulated typed ingestion; no exchange HTTP","warmups":5}}
+ok
+test analytics::executor::tests::cancel_releases_queue_capacity ... ok
+test analytics::executor::tests::cpu_job_does_not_block_stop ... ok
+test analytics::jobs::tests::restart_marks_job_interrupted ... ok
+test analytics::market::performance_fixtures::prepared_screen_8x100_latency_and_response_budget ... ANALYTICS_PERF_JSON:{"screen_8x100":{"build":"release","max_ms":0.4128,"measurements":30,"p50_ms":0.20379999999999998,"p95_ms":0.40719999999999995,"stage":"native fixture compute/projection/serialization; HTTP and physical MCP separate","summary_bytes":3166,"warmups":5}}
+ok
+test analytics::market::tests::closed_candle_filter_preserves_quality ... ok
+test analytics::market::tests::missing_requested_source_is_partial_not_zero ... ok
+test analytics::market::tests::unused_missing_source_does_not_degrade ... ok
+test analytics::planner::tests::arbitrary_operator_is_rejected ... ok
+test analytics::planner::tests::plan_dependencies_exclude_unused_sources ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.75s
+

@@ -1,0 +1,75 @@
+{
+  "arch": "x86_64",
+  "build": "release",
+  "cpu": "Intel64 Family 6 Model 60 Stepping 3, GenuineIntel",
+  "ema_90d_15m": {
+    "bars": 8640,
+    "max_ms": 34.5614,
+    "measurements": 30,
+    "p50_ms": 21.8754,
+    "p95_ms": 28.780199999999997,
+    "result_hash": "sha256:9d3b598bda65c6b3619ec5fc4eed7ef7bc4b126094d72cdb5d9331fe01251d08",
+    "summary_bytes": 395,
+    "warmups": 5
+  },
+  "fixture_hash": "sha256:d3d20eaee154a27a8a031f7bd4b1d31d3a4b4d54d686d2593befdefb58a5893b",
+  "grid_100variants_100k": {
+    "bars": 100000,
+    "bars_per_second": 2408503.481660378,
+    "incremental_peak_bytes": 7966720,
+    "peak_working_set_bytes": 14761984,
+    "result_hash": "sha256:0f72725d37b9ad7968cc225e8f9b3a8a1039a64c4c5bca22a57605c65c56352d",
+    "runtime_seconds": 4.1519558,
+    "variants": 100
+  },
+  "logical_cpus": 8,
+  "platform": "windows",
+  "two_heavy_stop": {
+    "build": "release",
+    "cancel_max_ms": 11.7414,
+    "cancel_p95_ms": 10.084299999999999,
+    "max_ms": 13.7011,
+    "measurements": 30,
+    "p50_ms": 4.9061,
+    "p95_ms": 10.0713,
+    "stage": "two actual causal grid jobs on blocking workers plus simulated typed ingestion; no exchange HTTP",
+    "warmups": 5
+  },
+  "screen_8x100": {
+    "build": "release",
+    "max_ms": 0.4128,
+    "measurements": 30,
+    "p50_ms": 0.20379999999999998,
+    "p95_ms": 0.40719999999999995,
+    "stage": "native fixture compute/projection/serialization; HTTP and physical MCP separate",
+    "summary_bytes": 3166,
+    "warmups": 5
+  },
+  "provenance": {
+    "recorded_at_utc": "2026-10-22T22:56:36.794044+00:00",
+    "os_release": "Windows-11-10.0.26200-SP0",
+    "physical_ram_bytes": 34278834176,
+    "commands": [
+      "cargo run -p okx-research --release --example analytics_bench",
+      "cargo test -p okx-agent --release --lib analytics:: -- --nocapture",
+      "release agent fixture executable analytics:: --nocapture --test-threads=1"
+    ],
+    "agent_fixture_log": "docs/verification/398-analytics-release.log",
+    "agent_fixture_binary_sha256": "4bc4e5e243c65a54edcf337100dbfd362ee49a4e26d27805372014fa74afaa4f",
+    "benchmark_binary_sha256": "ac9549c7e161bd6781333a7e400b2579175f5d3cd6c1466155f439dfa81facc7",
+    "git_head_at_recording": "f25b48f6c0a5ad16ff8e22e7f738f9e5e98c1a72",
+    "note": "Working tree component evidence. Final ReleaseSet source_tree and installed binary parity are separate W10 checks; this is not a deployment claim.",
+    "source_file_sha256_at_recording": {
+      "crates/okx-analysis/src/operators.rs": "93ef168e8fdc8c9e90b338b59aad3d373aeab3988ad820e5cb384a263f698ecf",
+      "crates/okx-research/src/strategy_registry.rs": "efb8bb3d855e0d7f93fd0980479ef62da1dfc9e39f7dcfb273407c58be820c89",
+      "crates/okx-research/examples/analytics_bench.rs": "34218c159342a18880c6e635f627df581ea4aabb009aaa14c4844db442b5ac7a",
+      "crates/okx-agent/src/analytics/cache.rs": "73c2f161cd4e3eae79bc016ba6611875bd9902294f055381df71681acfef7fe8",
+      "crates/okx-agent/src/analytics/executor.rs": "c5bb7c55a033bb3267bc79a21561d25e3210535b5130da14f1b4d111c7e1259c",
+      "crates/okx-agent/src/analytics/jobs.rs": "65ebca66879b4c8a9f2d560b118dcf1d03e8864936752f5e0eee3160e818a35f",
+      "crates/okx-agent/src/analytics/market.rs": "1939afc8508a64c7156def5f5931b9a14491ef4b177f0364c41eb936a4a02224",
+      "crates/okx-agent/src/analytics/mod.rs": "7e4edc0f6c9de9a75c124525542b5d426a806f74d64852ce21d96b8238ef4759",
+      "crates/okx-agent/src/analytics/planner.rs": "cbda1e536f89fe1edd2a60602d80a635ca488159fdf9c5dbe77b5695a60877ac",
+      "crates/okx-agent/src/analytics/sources.rs": "dcce73dbb0cfc524d0eef84ffa8fe5d54a74cea900344ea9a3b37ed6d6ec5c64"
+    }
+  }
+}

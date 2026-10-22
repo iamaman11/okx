@@ -1,24 +1,22 @@
 # Implementation and acceptance: issue #398
 
-The only current plan is [#398](https://github.com/iamaman11/okx/issues/398). The source baseline is `1aacbc196db00b301e7eacb404d5db9b400c62e2` (merged PR #397). [The previous roadmap](history/ROADMAP-before-398.md) is historical evidence and does not prescribe migration, research or activation ceremonies.
+The canonical specification is [#398](https://github.com/iamaman11/okx/issues/398); integration is [PR #399](https://github.com/iamaman11/okx/pull/399). Baseline: `1aacbc196db00b301e7eacb404d5db9b400c62e2`. [The previous roadmap](history/ROADMAP-before-398.md) is historical evidence.
 
-| Work | Current state | Remaining acceptance |
+| Work | Published implementation | Remaining acceptance |
 | --- | --- | --- |
-| W01 | In progress: account-scoped persistent access storage, atomic CAS/idempotent outcomes, protocol DTOs and removal of old governance conversion/delivery | Native connect and complete end-to-end action-aware admission |
-| W02 | Account catalog, credential-reference verification and independent native account resources implemented | SQL-backed strategy instances are integrated in W03–W05 |
-| W03 | Not implemented in this branch | Addressed SQL facts/projections; remove blob and historical ledger; pin and verify SQLite |
-| W04 | Not implemented in this branch | Continuous finances, lots, campaign accounting and indexed central reservations |
-| W05 | Not implemented in this branch | One execution command; verified exits under STOP; fault matrix |
-| W06 | Not implemented in this branch | Shared sources/cache, bounded Rust operators and measured workloads |
-| W07 | Not implemented in this branch | Parameterized causal EMA/grid and durable analytical jobs |
-| W08 | Transport cleanup regression implemented alongside W01 | Complete public action surface, result pagination and diagnostics |
-| W09 | Not implemented in this branch | Native clean-install lifecycle, remove old execution/host paths and matched ReleaseSet |
-| W10 | Not run | Exact CI, Windows installation, analytics performance and Real exchange acceptance |
+| W01 | Persistent account access, action-aware admission, transactional CAS and idempotency | Installed MCP checks |
+| W02 | Independent account resources, verified UID and named credential references | Physical second-account routing |
+| W03 | Addressed SQLite facts/projections, bounded actor, immutable intents, indexed queries; old ledger removed | Repeat final million-row fixture after schema freeze |
+| W04 | Continuous source capture, lots, exact costs, NAV and indexed central reservations | Real exchange reconciliation and campaign costs |
+| W05 | Unified manual/automatic execution, protected exits, durable unknown-POST handling and fault fixtures | Real protected OPEN/CLOSE cycles |
+| W06 | Shared analytical sources, bounded CPU/cache, finite operators including downside volatility; recorded release benchmarks | Final release measurements and physical network workloads |
+| W07 | Causal EMA/replay/grid and durable jobs | Immutable strategy versions and multi-instrument research integration in progress |
+| W08 | Seven strict public tools, pagination, unified diagnostics and transport regression fixtures | Final wire and installed MCP verification |
+| W09 | Native Engine lifecycle, explicit clean initialization, backup/restore and obsolete host paths removed | Automatic restored-account reconciliation gate in progress; matched installed ReleaseSet |
+| W10 | Local workspace: 484 tests passed; Linux and Windows CI tests passed on W05 | Final exact CI, Windows installation and physical acceptance not completed |
 
-No row above is a release acceptance claim. Passing unit/fixture tests does not establish physical multi-account routing or Real cycles. Intermediate source changes must remain undeployed until W01–W09 form a coherent release.
+This table records implementation, not release acceptance. Intermediate checkpoints remain undeployed. Unit tests do not establish physical multi-account routing or Real exchange cycles. Physical results must remain NOT_RUN or BLOCKED until evidenced.
 
-The implemented account access owner uses `account_access_v1` with strict `okx.governance/v3`. It only initializes through the explicit installation function. Missing/corrupt state on a normal read is an error; old keys are never consulted. `enabled`, `explicit_pause`, limits and account policy revision survive storage reconstruction. Connecting another account retains the existing account grant. Configuration cannot remove a registered account from risk census. Access-operation keys retain a body hash and original transactional outcome.
+The native/Worker frame is `okx.direct-transport.frame/v2`; the public product contract is `okx.product/v1`. Account access uses strict `okx.governance/v3`. Missing/corrupt installation state fails closed and never reads old financial or policy state. Account registration preserves other grants and keeps every registered Real account in the central risk census.
 
-The new native/Worker frame is `okx.direct-transport.frame/v2`; the old central-policy delivery DTO and fallback were removed. The remaining native host/execution epoch paths are still present and must be removed in their assigned W steps before deployment. Native identity verification and account-context routing are now wired to `accounts.connect` through a named credential reference. The opening SQL model and its initializer are replaced in W03/W09; this intermediate commit is not deployable.
-
-Transport regression tests exercise actual RuntimeSession dispatch with simulated WebSocket delivery: disconnect before/after ACK, synchronous send failure, stale generation and duplicate request IDs. ACK and response share one observed completion and generation-scoped cleanup. These tests do not simulate an exchange POST and are not EXEC-01 acceptance.
+Evidence: [W05 integration](verification/398-w05.json), [SQL million-row measurements](verification/398-sql-million.json), [analytics measurements](verification/398-analytics.md). Analytics evidence identifies its component hashes and executable fixtures; it is not an installed ReleaseSet measurement. The new downside-volatility operator has targeted numerical, missing-data and existing-market-pipeline regressions, without adding DTOs, SQL, gateway or CONTROL operations.

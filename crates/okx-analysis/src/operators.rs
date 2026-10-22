@@ -59,6 +59,7 @@ pub enum Operator {
     Returns,
     LogReturns,
     RealizedVolatility,
+    DownsideVolatility,
     MaxDrawdown,
     PearsonCorrelation,
     Ema,
@@ -81,7 +82,7 @@ pub fn registry(op: Operator) -> OperatorInfo {
     use Operator::*;
     let (inputs, unit): (&[_], _) = match op {
         Returns | LogReturns | MaxDrawdown => (&["close"], "ratio"),
-        RealizedVolatility => (&["close"], "annualized_ratio"),
+        RealizedVolatility | DownsideVolatility => (&["close"], "annualized_ratio"),
         PearsonCorrelation => (&["close", "peer_close"], "coefficient"),
         Ema => (&["close"], "price"),
         Atr => (&["high", "low", "close"], "price"),
@@ -159,21 +160,25 @@ pub fn scalar(
     timeframe_ms: u64,
 ) -> Result<Option<f64>, String> {
     use Operator::*;
-    if close
-        .iter()
-        .chain(high)
-        .chain(low)
-        .chain(aux)
-        .any(|v| !v.is_finite())
-    {
+    let auxiliary = matches!(
+        op,
+        VolumeChange | OiChange | FundingSum | SpreadBps | PositionSize | CostEstimate
+    );
+    let invalid = if auxiliary {
+        aux.iter().any(|v| !v.is_finite())
+    } else {
+        close.iter().any(|v| !v.is_finite())
+            || (op == Atr && high.iter().chain(low).any(|v| !v.is_finite()))
+    };
+    if invalid {
         return Err("NONFINITE_INPUT".into());
     }
     let n = close.len();
-    if n == 0 {
+    if !auxiliary && (n == 0 || close.iter().any(|v| *v <= 0.0)) {
         return Ok(None);
     }
-    let last = close[n - 1];
-    let first = close[0];
+    let last = close.last().copied().unwrap_or(0.0);
+    let first = close.first().copied().unwrap_or(0.0);
     let result = match op {
         Returns => (first > 0.0).then_some(last / first - 1.0),
         LogReturns => (first > 0.0 && last > 0.0).then(|| (last / first).ln()),
@@ -191,6 +196,21 @@ pub fn scalar(
                         * annualization(timeframe_ms)?)
                     .sqrt(),
                 )
+            }
+        }
+        DownsideVolatility => {
+            if n < 3 || close.iter().any(|value| *value <= 0.0) {
+                None
+            } else {
+                let mut squares = 0.0;
+                for pair in close.windows(2) {
+                    let r = pair[1] / pair[0] - 1.0;
+                    if !r.is_finite() {
+                        return Ok(None);
+                    }
+                    squares += r.min(0.0).powi(2);
+                }
+                Some((squares / (n - 1) as f64 * annualization(timeframe_ms)?).sqrt())
             }
         }
         MaxDrawdown => {
@@ -434,5 +454,113 @@ mod numeric_fixtures {
         assert_eq!(c.get(1), None);
         assert_eq!(c.get(3), Some(0.0));
         assert_eq!(c.get(4), None);
+    }
+}
+#[cfg(test)]
+mod downside_fixtures {
+    use super::*;
+    #[test]
+    fn downside_volatility_closed_returns_and_crypto_annualization() {
+        let value = scalar(
+            Operator::DownsideVolatility,
+            &[100.0, 110.0, 99.0],
+            &[],
+            &[],
+            &[],
+            14,
+            86400000,
+        )
+        .unwrap()
+        .unwrap();
+        assert!((value - (0.005f64 * 365.0).sqrt()).abs() < 1e-12);
+        let info = registry(Operator::DownsideVolatility);
+        assert_eq!(info.inputs, &["close"]);
+        assert_eq!(info.unit, "annualized_ratio");
+    }
+    #[test]
+    fn downside_volatility_finite_gaps_are_not_zero() {
+        assert_eq!(
+            scalar(
+                Operator::DownsideVolatility,
+                &[100.0],
+                &[],
+                &[],
+                &[],
+                14,
+                60000
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            scalar(
+                Operator::DownsideVolatility,
+                &[100.0, 0.0, 90.0],
+                &[],
+                &[],
+                &[],
+                14,
+                60000
+            )
+            .unwrap(),
+            None
+        );
+        assert!(
+            scalar(
+                Operator::DownsideVolatility,
+                &[100.0, f64::NAN, 90.0],
+                &[],
+                &[],
+                &[],
+                14,
+                60000
+            )
+            .is_err()
+        );
+        assert_eq!(
+            scalar(
+                Operator::DownsideVolatility,
+                &[100.0, 110.0, 120.0],
+                &[],
+                &[],
+                &[],
+                14,
+                60000
+            )
+            .unwrap(),
+            Some(0.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod dependency_fixtures {
+    use super::*;
+    #[test]
+    fn unused_numeric_columns_do_not_degrade_downside() {
+        let value = scalar(
+            Operator::DownsideVolatility,
+            &[100.0, 110.0, 120.0],
+            &[f64::NAN],
+            &[f64::NAN],
+            &[],
+            14,
+            60000,
+        )
+        .unwrap();
+        assert_eq!(value, Some(0.0));
+        assert_eq!(
+            scalar(
+                Operator::FundingSum,
+                &[],
+                &[],
+                &[],
+                &[-0.01, 0.02],
+                14,
+                60000
+            )
+            .unwrap(),
+            Some(0.01)
+        );
     }
 }

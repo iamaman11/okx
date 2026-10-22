@@ -297,6 +297,22 @@ mod tests {
         }
     }
     #[test]
+    fn new_downside_operator_uses_existing_market_plan_and_projection() {
+        let query = request(vec!["downside_volatility"]);
+        assert!(query.valid());
+        let plan =
+            planner::AnalysisPlan::build(&query.fields, query.start_ms, query.end_ms).unwrap();
+        assert_eq!(plan.sources, std::collections::BTreeSet::from(["candles"]));
+        let output = compute_row(row(), &query, None).unwrap();
+        assert_eq!(output["metrics"]["downside_volatility"], 0.0);
+        assert_eq!(output["units"]["downside_volatility"], "annualized_ratio");
+        let mut missing = row();
+        missing.bars = Ok(Arc::new(Vec::new()));
+        let output = compute_row(missing, &query, None).unwrap();
+        assert_eq!(output["quality"], "partial");
+        assert!(output["metrics"]["downside_volatility"].is_null());
+    }
+    #[test]
     fn unused_missing_source_does_not_degrade() {
         let r = compute_row(row(), &request(vec!["returns"]), None).unwrap();
         assert_eq!(r["quality"], "complete");
