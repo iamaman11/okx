@@ -286,7 +286,10 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let bound = chosen
                 .bound_native_account_identity()?
                 .ok_or(okx_execution::ExecutionLedgerError::AccountScopeMismatch)?;
-            if bound != account_identity {
+            // The persistent genesis time belongs to the SQL owner. A
+            // second independently verified FLAT read after a lost receipt
+            // must return that same owner, not reject a later timestamp.
+            if !account_identity.same_account_as(&bound) {
                 return Err(okx_execution::ExecutionLedgerError::AccountScopeMismatch.into());
             }
             println!(

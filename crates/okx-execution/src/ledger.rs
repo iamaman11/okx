@@ -459,6 +459,17 @@ impl SqliteAccountIdentity {
         Ok(())
     }
 
+    /// Identity comparison for an idempotent fresh genesis. The original
+    /// creation timestamp is immutable metadata, NOT part of the account key.
+    /// A retried request may have a later observation time but can never
+    /// change venue, environment, account ID or authenticated UID.
+    pub fn same_account_as(&self, existing: &Self) -> bool {
+        self.venue == existing.venue
+            && self.environment == existing.environment
+            && self.account_id == existing.account_id
+            && self.uid_fingerprint == existing.uid_fingerprint
+    }
+
     fn venue_key(&self) -> &'static str {
         self.venue.as_str()
     }
@@ -555,11 +566,7 @@ impl ExecutionLedgerStore {
         let bound = native
             .bound_native_account_identity()?
             .ok_or(ExecutionLedgerError::AccountScopeMismatch)?;
-        if bound.venue != identity.venue
-            || bound.environment != identity.environment
-            || bound.account_id != identity.account_id
-            || bound.uid_fingerprint != identity.uid_fingerprint
-        {
+        if !identity.same_account_as(&bound) {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
         // Local v14 evidence is not imported. Only application-owned legacy

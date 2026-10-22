@@ -5286,9 +5286,20 @@ mod tests {
             again.bound_native_account_identity().unwrap(),
             Some(identity.clone())
         );
+        assert!(repeated.same_account_as(&identity));
+        assert_ne!(repeated.bound_at_ms, identity.bound_at_ms);
         let mut foreign = identity.clone();
         foreign.uid_fingerprint = "8".repeat(64);
+        assert!(!foreign.same_account_as(&identity));
         assert!(ExecutionLedgerStore::initialize_fresh_account(&root, &foreign).is_err());
+        let mut foreign_account = identity.clone();
+        foreign_account.account_id = "other".to_owned();
+        assert!(!foreign_account.same_account_as(&identity));
+        assert!(ExecutionLedgerStore::initialize_fresh_account(&root, &foreign_account).is_err());
+        let mut foreign_environment = identity.clone();
+        foreign_environment.environment = LedgerEnvironment::Demo;
+        assert!(!foreign_environment.same_account_as(&identity));
+        assert!(ExecutionLedgerStore::initialize_fresh_account(&root, &foreign_environment).is_err());
         assert_eq!(
             again.bound_native_account_identity().unwrap(),
             Some(identity)
