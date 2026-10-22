@@ -2096,9 +2096,13 @@ fn persist_epoch_closure<T: Serialize>(
     {
         return Err(ExecutionLedgerError::StrategyRunNotFinalizable);
     }
-    let at = i64::try_from(closed_at_ms)
-        .map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
-    let body = encode(&("okx.native-epoch-closure/v1", &prior.allocation_id, kind, proof))?;
+    let at = i64::try_from(closed_at_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    let body = encode(&(
+        "okx.native-epoch-closure/v1",
+        &prior.allocation_id,
+        kind,
+        proof,
+    ))?;
     let digest = checksum(&body);
     let locator = format!("ledger_state/closure/{}", prior.allocation_id);
     tx.execute(
@@ -2127,13 +2131,7 @@ fn persist_epoch_closure<T: Serialize>(
          SET state=?1,closing_at_ms=?2,closing_evidence_sha256=?3
          WHERE epoch_id=?4 AND strategy_id=?5
            AND state='ACTIVE' AND closing_at_ms IS NULL",
-        params![
-            kind,
-            at,
-            &digest,
-            &prior.allocation_id,
-            &prior.strategy_id
-        ],
+        params![kind, at, &digest, &prior.allocation_id, &prior.strategy_id],
     )
     .map_err(io)?;
     let exact_epoch: i64 = tx
@@ -2176,7 +2174,13 @@ fn sync_epoch_closure(
         if proof.run_id != run || proof.account_uid != prior.account_uid_fingerprint {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        return persist_epoch_closure(tx, prior, "FINANCIALLY_CLOSED", proof.finalized_at_ms, proof);
+        return persist_epoch_closure(
+            tx,
+            prior,
+            "FINANCIALLY_CLOSED",
+            proof.finalized_at_ms,
+            proof,
+        );
     }
     let unverified = if changed_run {
         periods
@@ -2208,21 +2212,13 @@ fn persist_native_nav_point(
     uid: &str,
 ) -> Result<(), ExecutionLedgerError> {
     point.validate()?;
-    let cursor = super::sqlite_source::indexed_cursor(
-        tx,
-        &point.run_id,
-        &point.source_cursor_key,
-    )?
-    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+    let cursor = super::sqlite_source::indexed_cursor(tx, &point.run_id, &point.source_cursor_key)?
+        .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
     let cursor_sha = checksum(&serde_json::to_vec(&cursor)?);
     if cursor_sha != point.source_cursor_sha256 {
         return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
     }
-    let receipt = super::sqlite_finance::source_point_receipt_key(
-        "BILLS",
-        uid,
-        &encode(&cursor)?,
-    )?;
+    let receipt = super::sqlite_finance::source_point_receipt_key("BILLS", uid, &encode(&cursor)?)?;
     let belongs: i64 = tx
         .query_row(
             "SELECT COUNT(*) FROM capital_epochs
@@ -2259,11 +2255,10 @@ fn persist_native_nav_point(
         )
         .optional()
         .map_err(io)?;
-    let observed = i64::try_from(point.observed_at_ms)
-        .map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    let observed =
+        i64::try_from(point.observed_at_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
     if preceding.as_ref().is_some_and(|(_, at)| observed <= *at)
-        || point.previous_sha256
-            != preceding.as_ref().map_or("", |(sha, _)| sha.as_str())
+        || point.previous_sha256 != preceding.as_ref().map_or("", |(sha, _)| sha.as_str())
     {
         return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
     }
@@ -3361,21 +3356,23 @@ mod tests {
         };
         let period = StrategyPeriodHistory::default();
         let state_digest = || -> String {
-            Connection::open(&path).unwrap().query_row(
-                "SELECT digest FROM ledger_state WHERE key=1", [], |r| r.get(0)
-            ).unwrap()
+            Connection::open(&path)
+                .unwrap()
+                .query_row("SELECT digest FROM ledger_state WHERE key=1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap()
         };
         let before = state_digest();
         let mut faulty = opening.clone();
         faulty.zero_native_protection = false;
-        assert!(save_opening_metadata(
-            &path, None, &reservation, &faulty, &period, &[]
-        ).is_err());
+        assert!(save_opening_metadata(&path, None, &reservation, &faulty, &period, &[]).is_err());
         assert_eq!(state_digest(), before);
         let count = |table: &str| -> i64 {
-            Connection::open(&path).unwrap().query_row(
-                &format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)
-            ).unwrap()
+            Connection::open(&path)
+                .unwrap()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
         };
         assert_eq!(count("capital_epochs"), 0);
         assert_eq!(count("source_receipts"), 0);
@@ -3384,21 +3381,26 @@ mod tests {
         assert_eq!(count("source_receipts"), 1);
         assert_eq!(count("evidence_objects"), 1);
         let c = Connection::open(&path).unwrap();
-        let saved: (String, String, i64, String, String) = c.query_row(
-            "SELECT strategy_id,state,opening_at_ms,allocation_decimal,opening_receipt_sha256
+        let saved: (String, String, i64, String, String) = c
+            .query_row(
+                "SELECT strategy_id,state,opening_at_ms,allocation_decimal,opening_receipt_sha256
              FROM capital_epochs WHERE epoch_id=?1",
-            params![&reservation.allocation_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        ).unwrap();
+                params![&reservation.allocation_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
         assert_eq!(saved.0, reservation.strategy_id);
         assert_eq!(saved.1, "ACTIVE");
         assert_eq!(saved.2, 2000);
         assert_eq!(saved.3, "100");
         assert_eq!(saved.4.len(), 64);
-        let receipt_kind: String = c.query_row(
-            "SELECT stream_kind FROM source_receipts WHERE receipt_sha256=?1",
-            params![&saved.4], |r| r.get(0)
-        ).unwrap();
+        let receipt_kind: String = c
+            .query_row(
+                "SELECT stream_kind FROM source_receipts WHERE receipt_sha256=?1",
+                params![&saved.4],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(receipt_kind, "ACCOUNT_OPENING");
         drop(c);
         // An identical retry is idempotent. A changed financial opening
@@ -3407,9 +3409,7 @@ mod tests {
         assert_eq!(count("capital_epochs"), 1);
         let mut relabelled = reservation.clone();
         relabelled.allocated_usdt = "101".to_owned();
-        assert!(save_opening_metadata(
-            &path, None, &relabelled, &opening, &period, &[]
-        ).is_err());
+        assert!(save_opening_metadata(&path, None, &relabelled, &opening, &period, &[]).is_err());
         assert_eq!(count("capital_epochs"), 1);
         assert_eq!(count("evidence_objects"), 1);
         std::fs::remove_dir_all(root).unwrap();
