@@ -2768,7 +2768,7 @@ impl DurableExecutionLedger {
         } else {
             Some(self.run_entries(run)?)
         };
-        let (source_cursor_key, source_cursor, source_receipt_ms, gross_loss) = if self
+        let (source_cursor_key, source_cursor, _source_receipt_ms, gross_loss) = if self
             .store
             .sqlite_native
         {
