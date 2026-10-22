@@ -12,7 +12,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    DurableExecutionLedger, ExecutionAction, ExecutionLedgerError, ExecutionState, PositionSide,
+    DurableExecutionLedger, ExecutionAction, ExecutionLedgerEntry, ExecutionLedgerError, ExecutionState, PositionSide,
     ProtectiveOrderStatus, StrategyCapitalReservation,
     account_cashflow::{AccountBillClass, AccountBillSource, classify_native_account_bill},
 };
