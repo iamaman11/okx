@@ -743,6 +743,164 @@ pub(super) fn persist_source_receipt(
     Ok(())
 }
 
+/// Native financial source is one pinned account WAL read transaction.
+/// Each intent, order and bill is looked up by exact immutable identity.
+pub(super) struct NativeFinanceReader {
+    connection: rusqlite::Connection,
+    run: StrategyCapitalReservation,
+    identity: crate::strategy_lifecycle::SourceIdentity,
+}
+impl NativeFinanceReader {
+    pub(super) fn open(path: &Path, run: &StrategyCapitalReservation) -> Result<Self, ExecutionLedgerError> {
+        let connection = connect_indexed_read(path)?;
+        connection.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
+        require_finance_read_scope(&connection, &run.account_uid_fingerprint)?;
+        let (uid,digest,payload):(String,String,Vec<u8>) = connection.query_row(
+            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+        ).map_err(io)?;
+        if uid != run.account_uid_fingerprint || checksum(&payload) != digest {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        let state: StoredState = decode(&payload)?;
+        if state.version != 1 || state.reservation.as_ref() != Some(run)
+            || state.source_run_id.as_deref() != Some(run.allocation_id.as_str()) {
+            return Err(ExecutionLedgerError::AccountScopeMismatch);
+        }
+        let identity = super::sqlite_source::attest_indexed(&connection,&run.allocation_id,&uid)?;
+        Ok(Self { connection, run: run.clone(), identity })
+    }
+    fn source_event(&self, key: &str) -> Result<Option<StoredExchangeEvent>, ExecutionLedgerError> {
+        let row:Option<(String,Vec<u8>)> = self.connection.query_row(
+            "SELECT payload_digest,payload FROM native_source_events WHERE run_id=?1 AND event_key=?2",
+            params![&self.run.allocation_id,key], |r| Ok((r.get(0)?,r.get(1)?))
+        ).optional().map_err(io)?;
+        row.map(|(digest,bytes)| {
+            if checksum(&bytes)!=digest { return Err(ExecutionLedgerError::Corrupt("indexed financial event digest")); }
+            decode(&bytes)
+        }).transpose()
+    }
+    fn original_orders(&self, order_id:&str) -> Result<Vec<(String,StoredExchangeEvent)>, ExecutionLedgerError> {
+        // The current execution venue supports SWAP; an unsupported
+        // source kind fails closed instead of searching by instrument alone.
+        let prefix=format!("order:SWAP:{order_id}:");
+        let limit=format!("order:SWAP:{order_id};");
+        let mut stmt=self.connection.prepare(
+            "SELECT event_key,payload_digest,payload FROM native_source_events
+             WHERE run_id=?1 AND event_key>=?2 AND event_key<?3 ORDER BY event_key"
+        ).map_err(io)?;
+        let mut rows=stmt.query(params![&self.run.allocation_id,prefix,limit]).map_err(io)?;
+        let mut out=Vec::new();
+        while let Some(row)=rows.next().map_err(io)? {
+            let key:String=row.get(0).map_err(io)?;
+            let digest:String=row.get(1).map_err(io)?;
+            let bytes:Vec<u8>=row.get(2).map_err(io)?;
+            if checksum(&bytes)!=digest {return Err(ExecutionLedgerError::Corrupt("native order source digest"));}
+            let event:StoredExchangeEvent=decode(&bytes)?;
+            if event.payload["source"]!="OKX_REST_ORDER"
+                || event.payload["ordId"].as_str()!=Some(order_id) {
+                return Err(ExecutionLedgerError::Corrupt("native order source identity"));
+            }
+            out.push((key,event));
+        }
+        Ok(out)
+    }
+}
+impl crate::strategy_finance::FinanceSourceReader for NativeFinanceReader {
+    fn audit(&self) -> Result<crate::strategy_finance::FinanceSourceAudit, ExecutionLedgerError> {
+        let mut times=Vec::new();
+        let mut incomplete=false;
+        let mut stmt=self.connection.prepare(
+            "SELECT receipt_ms,payload_digest,payload FROM native_source_cursors
+             WHERE run_id=?1 ORDER BY receipt_ms,cursor_key"
+        ).map_err(io)?;
+        let mut rows=stmt.query(params![&self.run.allocation_id]).map_err(io)?;
+        while let Some(row)=rows.next().map_err(io)? {
+            let timestamp:i64=row.get(0).map_err(io)?;
+            let hash:String=row.get(1).map_err(io)?;
+            let bytes:Vec<u8>=row.get(2).map_err(io)?;
+            if checksum(&bytes)!=hash {return Err(ExecutionLedgerError::Corrupt("native finance cursor hash"));}
+            let cursor:crate::exchange_evidence::ExchangeCoverageCursor=decode(&bytes)?;
+            let received=crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)
+                .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+            if i64::try_from(received).ok()!=Some(timestamp) {
+                return Err(ExecutionLedgerError::Corrupt("finance source receipt mismatch"));
+            }
+            times.push(received);
+            incomplete |= !cursor.order_complete || !cursor.fill_complete || !cursor.bill_complete;
+        }
+        let latest=times.iter().max().copied();
+        Ok(crate::strategy_finance::FinanceSourceAudit {
+            uid:self.identity.account_uid.clone(),
+            run_id:self.identity.run_id.clone(),
+            digest:self.identity.checksum_sha256.clone(),
+            receipt_times:times,latest_receipt:latest,truncated:incomplete,
+        })
+    }
+    fn fills(&self)->Result<Vec<StoredExchangeEvent>, ExecutionLedgerError> {
+        let mut result=Vec::new();
+        super::sqlite_source::visit_events(&self.connection,&self.run.allocation_id,
+            &self.run.account_uid_fingerprint, |key,event| {
+                if key.starts_with("fill:") {
+                    if event.payload["source"]!="OKX_REST_FILL" {
+                        return Err(ExecutionLedgerError::Corrupt("native indexed fill provenance"));
+                    }
+                    result.push(event.clone());
+                }
+                Ok(())
+            })?;
+        Ok(result)
+    }
+    fn bill(&self,key:&str)->Result<Option<StoredExchangeEvent>, ExecutionLedgerError> {
+        self.source_event(key)
+    }
+    fn visit_bills(&self,visitor:&mut dyn FnMut(&str,&StoredExchangeEvent)->Result<(),ExecutionLedgerError>)
+        ->Result<(),ExecutionLedgerError> {
+        super::sqlite_source::visit_bill_events(&self.connection,&self.run.allocation_id,
+            &self.run.account_uid_fingerprint,visitor)
+    }
+    fn entry(&self,id:&str,_entries:&[ExecutionLedgerEntry])->Result<Option<ExecutionLedgerEntry>,ExecutionLedgerError> {
+        if id.is_empty() || id.len()>128 {return Err(ExecutionLedgerError::Corrupt("bad native financial intent ID"));}
+        let sql=format!("{INDEXED_INTENT_COLUMNS} WHERE e.intent_id=?1");
+        let mut stmt=self.connection.prepare(&sql).map_err(io)?;
+        let mut rows=stmt.query(params![id]).map_err(io)?;
+        let entry=rows.next().map_err(io)?.map(|r| verified_indexed_entry(r,&self.run.account_uid_fingerprint)).transpose()?;
+        if rows.next().map_err(io)?.is_some(){return Err(ExecutionLedgerError::Corrupt("duplicate indexed financial intent"));}
+        Ok(entry)
+    }
+    fn exact_order(&self,order:&str,client:&str,inst:&str,intent:&str)->Result<bool,ExecutionLedgerError> {
+        Ok(self.original_orders(order)?.iter().any(|(_,e)|
+            e.payload["clOrdId"].as_str()==Some(client)
+                && e.payload["instId"].as_str()==Some(inst)
+                && e.source_intent_id.as_deref()==Some(intent)))
+    }
+    fn validate_entry(&self,entry:&ExecutionLedgerEntry,since:u64,reasons:&mut std::collections::BTreeSet<&'static str>)
+        ->Result<(),ExecutionLedgerError> {
+        if entry.created_at_ms<=since {return Ok(());}
+        let Some(order_id)=entry.record.order_id.as_deref() else {return Ok(());};
+        let mut source=DurableExchangeEvidence::new(&self.run)?;
+        for (key,order) in self.original_orders(order_id)? {
+            source.events.insert(key,order);
+        }
+        let mut stmt=self.connection.prepare(
+            "SELECT instrument_id,trade_id FROM fills WHERE intent_id=?1 AND venue_order_id=?2 ORDER BY exchange_time_ms,trade_id"
+        ).map_err(io)?;
+        let mut rows=stmt.query(params![&entry.record.plan.intent_id,order_id]).map_err(io)?;
+        while let Some(row)=rows.next().map_err(io)? {
+            let inst:String=row.get(0).map_err(io)?;
+            let trade:String=row.get(1).map_err(io)?;
+            let key=format!("fill:SWAP:{inst}:{trade}");
+            let fill=self.source_event(&key)?.ok_or(ExecutionLedgerError::Corrupt("missing source-indexed native fill"))?;
+            if fill.payload["ordId"].as_str()!=Some(order_id) {
+                return Err(ExecutionLedgerError::Corrupt("native financial fill/order mismatch"));
+            }
+            source.events.insert(key,fill);
+        }
+        let index=crate::strategy_finance::SourceOrderIndex::new(&source);
+        index.validate_entry(entry,since,reasons);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;

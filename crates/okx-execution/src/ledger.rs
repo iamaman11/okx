@@ -2311,16 +2311,6 @@ impl DurableExecutionLedger {
         )
     }
 
-    /// The active source proves a finite set of exact source-intent links.
-    /// NAV/bill reconciliation needs only these indexed originals, never
-    /// every unrelated historical prepared/rejected intent in the epoch.
-    fn native_source_linked_entries(
-        &self,
-        source: &DurableExchangeEvidence,
-    ) -> Result<BTreeMap<String, ExecutionLedgerEntry>, ExecutionLedgerError> {
-        sqlite_store::source_linked_intents(&self.store.path, &source.account_uid, &source.run_id)
-    }
-
     /// A run-specific mandate is checked on every original risk-increasing
     /// intent, including intents that never produced an exchange event.
     /// This is the exact same policy shared by native SQL streaming and v14.
@@ -2356,14 +2346,9 @@ impl DurableExecutionLedger {
         ))
     }
 
-    /// Native finance does not materialize all historical intents in an
-    /// epoch. The source is still an independently sealed exchange snapshot:
-    /// we load ONLY the exact persisted intent IDs named by those events.
-    /// Every OTHER managed order is checked by an authenticated streaming
-    /// SQL cursor, so absent native order/fill coverage still fails closed.
-    ///
-    /// This intentionally keeps source capture and NAV/day-loss on their old
-    /// bounded route until their separate SQL migration is accepted.
+    /// Native finance has exactly one SQL source reader. The same FIFO,
+    /// bill, ownership, funding and valuation policy is shared with legacy
+    /// import, but no full historical exchange BTreeMap is reconstructed.
     fn native_financial_period(
         &self,
         run: &StrategyCapitalReservation,
@@ -2373,101 +2358,61 @@ impl DurableExecutionLedger {
         captured: bool,
         excluded_candidate: Option<&ExecutionPlan>,
     ) -> Result<StrategyFinancialPeriod, ExecutionLedgerError> {
-        let source = self
-            .current_source()?
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if source.account_uid != run.account_uid_fingerprint || source.run_id != run.allocation_id {
-            return Err(ExecutionLedgerError::AccountScopeMismatch);
-        }
-        let linked = self.native_source_linked_entries(&source)?;
-        let mut entries = Vec::with_capacity(linked.len());
-        let mut extra_reasons = BTreeSet::new();
+        use crate::strategy_finance::FinanceSourceReader;
+        let reader=sqlite_finance::NativeFinanceReader::open(&self.store.path,run)?;
+        let mut reasons = BTreeSet::new();
         let mut excluded_seen = false;
-        for (intent_id, entry) in linked {
-            if excluded_candidate.is_some_and(|p| p.intent_id == intent_id) {
-                excluded_seen = true;
-                if !Self::inert_candidate_for_financial_projection(
-                    &entry.record,
-                    excluded_candidate.expect("checked candidate"),
-                    &run.allocation_id,
-                ) {
-                    return Err(ExecutionLedgerError::Corrupt(
-                        "non-inert financial new-risk candidate",
-                    ));
-                }
-                continue;
-            }
-            entries.push(entry);
-        }
-        // Index only the finite source observation once; every historical
-        // order still gets exact venue and quantity validation.
-        let source_index = crate::strategy_finance::SourceOrderIndex::new(&source);
+        let mut finance_error = None;
         sqlite_store::visit_entries_created_since(
             &self.store.path,
             &run.account_uid_fingerprint,
             run.started_at_ms,
             |entry| {
-                if excluded_candidate.is_some_and(|p| p.intent_id == entry.record.plan.intent_id) {
-                    excluded_seen = true;
+                if excluded_candidate.is_some_and(|p| p.intent_id==entry.record.plan.intent_id) {
+                    excluded_seen=true;
                     if !Self::inert_candidate_for_financial_projection(
                         &entry.record,
                         excluded_candidate.expect("checked candidate"),
                         &run.allocation_id,
                     ) {
-                        extra_reasons.insert("non_inert_candidate_in_financial_projection");
+                        finance_error=Some(ExecutionLedgerError::Corrupt("non-inert financial new-risk candidate"));
+                        return false;
                     }
                     return true;
                 }
                 if entry.created_at_ms > run.started_at_ms && !entry.record.state.is_terminal() {
-                    extra_reasons.insert("unresolved_managed_execution");
+                    reasons.insert("unresolved_managed_execution");
                 }
                 if entry.record.order_id.is_some() {
-                    source_index.validate_entry(entry, run.started_at_ms, &mut extra_reasons);
+                    if let Err(err)=reader.validate_entry(entry,run.started_at_ms,&mut reasons) {
+                        finance_error=Some(err);
+                        return false;
+                    }
                 }
                 true
             },
         )?;
-        if let Some(candidate) = excluded_candidate {
-            // Read an old candidate by ID even if it is absent from source.
-            // Only a proven unsent PREPARED may be excluded from finance.
-            if !excluded_seen
-                && self
-                    .read_intent(&candidate.intent_id)?
-                    .is_some_and(|entry| {
-                        !Self::inert_candidate_for_financial_projection(
-                            &entry.record,
-                            candidate,
-                            &run.allocation_id,
-                        )
-                    })
-            {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "non-inert financial new-risk candidate",
-                ));
+        if let Some(err)=finance_error {return Err(err);}
+        if let Some(candidate)=excluded_candidate {
+            if !excluded_seen && self.read_intent(&candidate.intent_id)?.is_some_and(|entry|
+                !Self::inert_candidate_for_financial_projection(
+                    &entry.record,candidate,&run.allocation_id)) {
+                return Err(ExecutionLedgerError::Corrupt("non-inert financial new-risk candidate"));
             }
         }
-        let mut report = crate::strategy_finance::assess_persisted_financial_period_with_index(
-            run,
-            Some(&source),
-            &entries,
-            facts,
-            coherent,
-            production_marks,
-            captured,
-            Some(&source_index),
-        );
-        for reason in extra_reasons {
-            if !report.reasons.contains(&reason) {
-                report.reasons.push(reason);
-            }
+        let mut report=crate::strategy_finance::assess_persisted_financial_period_from_reader(
+            run,&reader,&[],facts,coherent,production_marks,captured,
+        )?;
+        for reason in reasons {
+            if !report.reasons.contains(&reason) {report.reasons.push(reason);}
         }
         if !report.reasons.is_empty() {
             report.reasons.sort_unstable();
-            report.state = "INCOMPLETE";
-            report.funding_usdt = None;
-            report.unrealized_usdt = None;
-            report.nav_usdt = None;
-            report.usable_for_new_risk = false;
+            report.state="INCOMPLETE";
+            report.funding_usdt=None;
+            report.unrealized_usdt=None;
+            report.nav_usdt=None;
+            report.usable_for_new_risk=false;
         }
         Ok(report)
     }
