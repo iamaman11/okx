@@ -14,22 +14,21 @@ impl TradeService {
             request,
             StrategyRequest::List {} | StrategyRequest::Status { .. }
         ) {
-            let instances = r
+            let body = request.clone();
+            let result = r
                 .execution
                 .store
-                .call(deadline(), |s| s.instances())
+                .call(deadline(), move |s| match body {
+                    StrategyRequest::Status { instance_id } => {
+                        s.strategy_status(&instance_id, now())
+                    }
+                    _ => Ok(json!({"instances":s.instances()?})),
+                })
                 .await
                 .map_err(err)?;
-            return Ok(completed(match request {
-                StrategyRequest::Status { instance_id } => json!(
-                    instances
-                        .into_iter()
-                        .find(|i| &i.instance_id == instance_id)
-                        .ok_or("STRATEGY_INSTANCE_NOT_FOUND")?
-                ),
-                _ => json!({"instances":instances}),
-            }));
+            return Ok(completed(result));
         }
+
         let _capacity = r
             .mutation_capacity
             .try_acquire()
@@ -38,6 +37,8 @@ impl TradeService {
         let request_hash = digest(&(r.configuration.account_key.wire(), request))?;
         let body = request.clone();
         let result=r.execution.store.call(deadline(),move|s|{
+ let operation=match &body {StrategyRequest::Create{idempotency_key,..}|StrategyRequest::Update{idempotency_key,..}|StrategyRequest::Start{idempotency_key,..}|StrategyRequest::Stop{idempotency_key,..}=>idempotency_key,_=>return Err(okx_execution::StoreError::Invalid("STRATEGY_MUTATION_REQUIRED"))};
+ if let Some(old)=s.operation(operation)? {if old.request_hash!=request_hash {return Err(okx_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));}return serde_json::from_str::<StrategyInstance>(&old.result_ref).map_err(|_|okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"));}
  let mut instances=s.instances()?;
  let (operation,action,instance,expected)=match &body{
  StrategyRequest::Create{idempotency_key,instance_id,definition_id,version,parameters,instruments,timeframe_ms,budget_usd}=>{
@@ -50,10 +51,10 @@ impl TradeService {
  StrategyRequest::Start{idempotency_key,instance_id}|StrategyRequest::Stop{idempotency_key,instance_id}=>{let mut i=instances.iter().find(|i|&i.instance_id==instance_id).cloned().ok_or(okx_execution::StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;let expected=i.policy_revision;i.policy_revision+=1;i.enabled=matches!(&body,StrategyRequest::Start{..});(idempotency_key.clone(),if i.enabled{"start"}else{"stop"},i,Some(expected))},_=>return Err(okx_execution::StoreError::Invalid("STRATEGY_MUTATION_REQUIRED"))
  };
  if action=="start"&&!control.access_enabled(){return Err(okx_execution::StoreError::Invalid("ACCOUNT_NEW_RISK_PAUSED"));}
- instances.retain(|i|i.instance_id!=instance.instance_id);let allocated=instances.iter().fold(Decimal::ZERO,|sum,i|sum+i.budget)+instance.budget;
+ instances.retain(|i|i.instance_id!=instance.instance_id);let allocated=instances.iter().try_fold(instance.budget,|sum,i|sum.checked_add(i.budget).ok_or(okx_execution::StoreError::Invalid("MONEY_OVERFLOW")))?;
  if allocated>Decimal::from_str(&control.limits.max_notional_usdt.unwrap_or(control.limits.max_modelled_loss_usdt)).map_err(|_|okx_execution::StoreError::Invalid("INVALID_ACCOUNT_BUDGET"))?{return Err(okx_execution::StoreError::Invalid("INSTANCE_BUDGET_TOTAL_EXCEEDS_ACCOUNT_LIMIT"));}
- s.mutate_instance(&operation,&request_hash,action,&instance,expected,now())?;
- Ok(instance)
+ let receipt=s.mutate_instance(&operation,&request_hash,action,&instance,expected,now())?;
+ serde_json::from_str::<StrategyInstance>(&receipt.result_ref).map_err(|_|okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"))
  }).await.map_err(err)?;
         Ok(completed(json!({"instance":result})))
     }
@@ -114,12 +115,8 @@ impl TradeService {
             .clone()
             .ok_or("ANALYTICS_SOURCE_NOT_READY")?;
         let config: Value = serde_json::from_str(&instance.parameters).map_err(err)?;
-        let fast = config["parameters"]["fast"]
-            .as_u64()
-            .ok_or("STRATEGY_PARAMETERS_INVALID")? as usize;
-        let slow = config["parameters"]["slow"]
-            .as_u64()
-            .ok_or("STRATEGY_PARAMETERS_INVALID")? as usize;
+        let fast = config["parameters"]["fast"].as_u64().unwrap_or(10) as usize;
+        let slow = config["parameters"]["slow"].as_u64().unwrap_or(20) as usize;
         let timeframe = config["timeframe_ms"]
             .as_u64()
             .ok_or("STRATEGY_TIMEFRAME_INVALID")?;
@@ -137,6 +134,9 @@ impl TradeService {
                 &digest(&(
                     r.configuration.account_key.wire(),
                     &instance.instance_id,
+                    &instance.definition_id,
+                    &instance.definition_version,
+                    &instance.parameters,
                     instrument,
                     timeframe,
                     last
@@ -158,10 +158,16 @@ impl TradeService {
             let id = instance.instance_id.clone();
             let dk = decision_key.clone();
             let revision = state.state.revision as i64;
+            let expected_version = instance.definition_version.clone();
             let claimed = r
                 .execution
                 .store
                 .call(deadline(), move |s| {
+                    if s.strategy_definition(&id)?.version != expected_version {
+                        return Err(okx_execution::StoreError::Invalid(
+                            "STRATEGY_VERSION_CHANGED",
+                        ));
+                    }
                     s.claim_strategy_decision(&id, &dk, &decision_digest, revision, now())
                 })
                 .await
@@ -232,7 +238,14 @@ impl TradeService {
                 }),
                 expires_in_ms: 10000,
             };
-            let _ = self.execute(r, &command, Some(&state)).await?;
+            let _ = self
+                .execute_for_definition(
+                    r,
+                    &command,
+                    Some(&state),
+                    instance.definition_version.clone(),
+                )
+                .await?;
         }
         Ok(())
     }

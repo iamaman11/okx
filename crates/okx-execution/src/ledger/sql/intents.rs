@@ -107,6 +107,20 @@ impl AccountStore {
         {
             return Err(StoreError::Invalid("INVALID_INTENT_PLAN"));
         }
+        let definition = self.strategy_definition(&intent.plan.strategy_instance)?;
+        if definition.definition_id != intent.plan.strategy_definition_id
+            || definition.version != intent.plan.strategy_definition_version
+            || definition.parameters_digest != intent.plan.strategy_parameters_digest
+        {
+            return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
+        }
+        if decision
+            .instance_id
+            .as_ref()
+            .is_some_and(|id| id != &intent.plan.strategy_instance)
+        {
+            return Err(StoreError::Invalid("STRATEGY_OWNER_MISMATCH"));
+        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -123,7 +137,7 @@ impl AccountStore {
         )?;
         tx.execute("INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at) VALUES(?1,?2,?3,?4,'PREPARED',0,?5,?6,?7,?8,?9,?10,?11,?11)",params![intent.intent_id,intent.idempotency_key,intent.request_hash,decision.decision_id,intent.client_order_id,intent.deadline,intent.plan_hash,intent.policy_revision,intent.risk_increase,intent.instrument_id,decision.decision_at])?;
         tx.execute(
-            "INSERT INTO intent_plans VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            "INSERT INTO intent_plans VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![
                 intent.intent_id,
                 intent.plan.operation,
@@ -138,7 +152,8 @@ impl AccountStore {
                 intent.plan.private_source_generation,
                 exact(intent.plan.contract_value),
                 intent.plan.inverse,
-                intent.plan.settlement_currency
+                intent.plan.settlement_currency,
+                intent.plan.strategy_definition_id, intent.plan.strategy_definition_version,intent.plan.strategy_parameters_digest
             ],
         )?;
         tx.commit()?;
@@ -233,7 +248,7 @@ impl AccountStore {
         .transpose()
     }
     pub(super) fn plan(&self, id: &str) -> StoreResult<IntentPlan> {
-        let (mut p,q,price,stop,loss,cv)=self.connection.query_row("SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency FROM intent_plans WHERE intent_id=?1",[id],|r|Ok((IntentPlan{operation:r.get(0)?,side:r.get(1)?,strategy_instance:r.get(5)?,source_generation:r.get(7)?,position_side:r.get(8)?,private_source_generation:r.get(9)?,inverse:r.get(11)?,settlement_currency:r.get(12)?,..Default::default()},r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,String>(6)?,r.get::<_,String>(10)?)))?;
+        let (mut p,q,price,stop,loss,cv)=self.connection.query_row("SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency,strategy_definition_id,strategy_definition_version,strategy_parameters_digest FROM intent_plans WHERE intent_id=?1",[id],|r|Ok((IntentPlan{operation:r.get(0)?,side:r.get(1)?,strategy_instance:r.get(5)?,source_generation:r.get(7)?,position_side:r.get(8)?,private_source_generation:r.get(9)?,inverse:r.get(11)?,settlement_currency:r.get(12)?,strategy_definition_id:r.get(13)?,strategy_definition_version:r.get(14)?,strategy_parameters_digest:r.get(15)?,..Default::default()},r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,String>(6)?,r.get::<_,String>(10)?)))?;
         p.contract_value = decimal(cv)?;
         p.quantity = decimal(q)?;
         p.limit_price = decimal(price)?;
@@ -325,6 +340,10 @@ impl AccountStore {
             return Err(StoreError::Invalid("POLICY_CHANGED"));
         }
         if increase {
+            let same:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM intent_plans p JOIN strategy_instances i ON i.instance_id=p.strategy_instance WHERE p.intent_id=?1 AND i.definition_id=p.strategy_definition_id AND i.definition_version=p.strategy_definition_version AND i.parameters_digest=p.strategy_parameters_digest AND (i.enabled=1 OR i.instance_id='manual'))",[id],|r|r.get(0))?;
+            if !same {
+                return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
+            }
             let stops: i64 = tx.query_row(
                 "SELECT count(*) FROM risk_stops WHERE resolution IS NULL",
                 [],

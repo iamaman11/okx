@@ -9,3 +9,13 @@ fail(!validTool('trade',{...trade,expires_in_ms:30001}),'deadline bounded');
 fail(!validTool('trade',{...trade,protection:undefined}),'increase needs protection');
 fail(!matches({type:'object',properties:{x:{type:'integer'}},required:['x'],additionalProperties:false},{x:1,y:2}),'strict nested');
 console.log(`strict_action_fixtures PASS ${payloadFixtures.length} actions`);
+
+for(const action of ['backtest','grid']) {
+ const fixture=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!;
+ const two={...fixture.positive,instruments:['BTC-USDT-SWAP','ETH-USDT-SWAP']};
+ const tooMany={...two,instruments:Array.from({length:9},(_,i)=>`ASSET${i}-USDT-SWAP`)};
+ const duplicate={...two,instruments:['BTC-USDT-SWAP','BTC-USDT-SWAP']};
+ fail(validTool('research',JSON.parse(JSON.stringify(two))),'two-asset wire roundtrip');
+ for(const bad of [tooMany,duplicate,{...two,instruments:[]}])fail(!validTool('research',bad),'batch instrument bound');
+ payloadFixtures.push({tool:'research',action:action+'_batch',positive:two,negative:[tooMany,duplicate,{...two,instruments:[]}]});
+}

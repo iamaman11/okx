@@ -23,13 +23,14 @@ def main():
             tables = a.execute("PRAGMA table_list").fetchall()
             assert all(row[5] == 1 for row in tables if not row[1].startswith("sqlite_"))
             a.execute("INSERT INTO account_meta VALUES(1,'okx:real:uid','installation',2,1,'flat-source','initialize-op','release')")
-            a.execute("INSERT INTO strategy_instances VALUES('a','ema','1','{}',1,1,'100',NULL)")
-            a.execute("INSERT INTO strategy_instances VALUES('b','ema','1','{}',1,1,'100',NULL)")
+            a.execute("INSERT INTO strategy_definition_versions VALUES('ema','1','{}','digest',1)")
+            a.execute("INSERT INTO strategy_instances VALUES('a','ema','1','{}',1,1,'100',NULL,'digest')")
+            a.execute("INSERT INTO strategy_instances VALUES('b','ema','1','{}',1,1,'100',NULL,'digest')")
             a.execute("INSERT INTO decisions VALUES('decision','a',2,'input-digest',1,'code')")
             intent = "INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             values = ('intent', 'request', 'hash', 'decision', 'PREPARED', 0, 'client', 100, 'plan', 1, 1, 'BTC', 2, 2)
             a.execute(intent, values)
-            a.execute("INSERT INTO intent_plans VALUES('intent','open','buy','1','100','95','a','5',1,'long',1,'1',0,'USDT')")
+            a.execute("INSERT INTO intent_plans VALUES('intent','open','buy','1','100','95','a','5',1,'long',1,'1',0,'USDT','ema','1','digest')")
             a.execute("INSERT INTO fills VALUES('fill','BTC','trade','order','intent',3,'1','100','-0.1','USDT','buy')")
             a.execute("INSERT INTO bills VALUES('bill','FEE',3,'-0.1','USDT','trade-event')")
             a.execute("INSERT INTO finance_entries VALUES('fee-a','trade-event','FEE','a','-0.04','USDT','a','fill',3,NULL)")
@@ -49,6 +50,8 @@ def main():
             reject("INSERT INTO finance_entries VALUES('duplicate-fee','trade-event','FEE','a','-0.04','USDT','a','bill',3,NULL)")
             reject("INSERT INTO finance_entries VALUES('bad-fk','different','FEE','a','1','USDT','missing','bill',3,NULL)")
             reject("UPDATE account_meta SET account_key='other'")
+            reject("UPDATE strategy_definition_versions SET parameters='{changed}'")
+            reject("DELETE FROM strategy_definition_versions")
             reject("UPDATE intent_plans SET quantity='99'")
             reject("UPDATE fills SET price='99'")
             reject("DELETE FROM bills")
@@ -60,7 +63,7 @@ def main():
                 ("SELECT lot_id FROM position_lots WHERE instrument_id='BTC' AND side='long' AND instance_id='a' AND remaining_qty<>'0'", "idx_lots_active"),
             ]:
                 plan = a.execute("EXPLAIN QUERY PLAN " + query).fetchall()
-                assert any(index in row[3] for row in plan), plan
+                assert any(index in row[3] or (index == "idx_lots_active" and "idx_lots_instance_active" in row[3]) for row in plan), plan
             # Failure rolls back both facts and source watermark.
             a.execute("BEGIN IMMEDIATE")
             a.execute("INSERT INTO source_cursors VALUES('fills','BTC','next',10,1,'')")

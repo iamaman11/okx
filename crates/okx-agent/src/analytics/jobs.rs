@@ -161,7 +161,7 @@ impl Jobs {
             if let Some(c) = self.cancel.lock().unwrap().get(id) {
                 c.store(true, Ordering::Release)
             }
-            self.update(id, State::Cancelled, None, None)?;
+            self.update(id, State::Cancelled, job.artifact, None)?;
         }
         self.get(id)
     }

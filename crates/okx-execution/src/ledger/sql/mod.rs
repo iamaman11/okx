@@ -1,3 +1,4 @@
+mod definitions;
 mod finance;
 mod intents;
 mod orders;

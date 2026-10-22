@@ -16,8 +16,8 @@ const protection={oneOf:[object({stop_price:money}),object({stop_distance_bps:in
 const trade={operation:choice('open','add','reduce','close','replace'),strategy_instance:text(64),instrument:text(64),side:choice('long','short'),sizing,order:constraints,protection};
 const ema=object({fast:integer(1,10000),slow:integer(2,10000)});
 const costs=object({maker_fee_bps:{type:'number',minimum:0,maximum:1000},taker_fee_bps:{type:'number',minimum:0,maximum:1000},slippage_bps:{type:'number',minimum:0,maximum:1000},funding_mode:choice('observed','zero_assumption')});
-const range={instruments:array(text(64)),timeframe_ms:integer(1000,2678400000),start_ms:integer(1),end_ms:integer(1)};
-const research={...mutation,...range,strategy_id:choice('ema_cross_v1'),costs,data_mode:choice('historical_observed','counterfactual'),seed:integer()};
+const range={instruments:array(text(64),100),timeframe_ms:integer(1000,2678400000),start_ms:integer(1),end_ms:integer(1)};
+const research={...mutation,...range,instruments:{...array(text(64),8),minItems:1},strategy_id:choice('ema_cross_v1'),costs,data_mode:choice('historical_observed','counterfactual'),seed:integer()};
 const instance={instance_id:text(64)};
 const number=(minimum=0,maximum=Number.MAX_SAFE_INTEGER)=>({type:'number',minimum,maximum});
 const marketParameters=object({ema_period:integer(1,1000),atr_period:integer(1,1000),rsi_period:integer(1,1000),budget:number(0.000000001),price:number(0.000000001),stop_distance:number(0.000000001,0.999999999),notional:number(),fee_bps:number(0,10000),slippage_bps:number(0,10000)},[]);
@@ -44,7 +44,7 @@ export function matches(s:Schema,v:unknown):boolean {
  if(s.enum&&!s.enum.includes(v))return false;
  if(s.type==='null')return v===null;
  if(s.type==='object')return isObject(v)&&Object.keys(v).every(k=>k in s.properties)&&s.required.every((k:string)=>k in v)&&Object.entries(v).every(([k,x])=>matches(s.properties[k],x));
- if(s.type==='array')return Array.isArray(v)&&v.length<=(s.maxItems??100)&&(!s.uniqueItems||new Set(v.map(x=>JSON.stringify(x))).size===v.length)&&v.every(x=>matches(s.items,x));
+ if(s.type==='array')return Array.isArray(v)&&v.length>=(s.minItems??0)&&v.length<=(s.maxItems??100)&&(!s.uniqueItems||new Set(v.map(x=>JSON.stringify(x))).size===v.length)&&v.every(x=>matches(s.items,x));
  if(s.type==='string')return typeof v==='string'&&v.length>=(s.minLength??0)&&v.length<=(s.maxLength??Infinity)&&(!s.pattern||new RegExp(s.pattern).test(v));
  if(s.type==='integer'||s.type==='number')return typeof v==='number'&&Number.isFinite(v)&&(s.type!=='integer'||Number.isSafeInteger(v))&&v>=(s.minimum??-Infinity)&&v<=(s.maximum??Infinity);
  if(s.type==='boolean')return typeof v==='boolean';return true;

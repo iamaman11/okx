@@ -19,6 +19,27 @@ impl TradeService {
         supplied: Option<&CentralGovernanceSnapshot>,
         bound_hash: Option<String>,
     ) -> Result<Value, String> {
+        self.execute_inner(r, request, supplied, bound_hash, None)
+            .await
+    }
+    pub(super) async fn execute_for_definition(
+        &self,
+        r: &Arc<AccountResources>,
+        request: &TradeRequest,
+        supplied: Option<&CentralGovernanceSnapshot>,
+        version: String,
+    ) -> Result<Value, String> {
+        self.execute_inner(r, request, supplied, None, Some(version))
+            .await
+    }
+    async fn execute_inner(
+        &self,
+        r: &Arc<AccountResources>,
+        request: &TradeRequest,
+        supplied: Option<&CentralGovernanceSnapshot>,
+        bound_hash: Option<String>,
+        expected_definition: Option<String>,
+    ) -> Result<Value, String> {
         let TradeRequest::Execute {
             idempotency_key,
             operation,
@@ -125,6 +146,12 @@ impl TradeService {
             risk_increase: increase,
             instrument_id: instrument.clone(),
         };
+        if expected_definition
+            .as_ref()
+            .is_some_and(|version| version != &intent.plan.strategy_definition_version)
+        {
+            return Err("STRATEGY_VERSION_CHANGED".into());
+        }
         let manual_budget = dec(&state.state.campaign_loss_limit_usd)?;
         let owner_account = r.configuration.account_key.wire();
         let owner_uid = r.execution.uid().to_owned();
@@ -850,7 +877,14 @@ mod tests {
         .await
         .unwrap();
         let at = now();
+        let definition = store
+            .call(deadline(), |s| s.ensure_manual_instance(now()))
+            .await
+            .unwrap();
         let plan = IntentPlan {
+            strategy_definition_id: definition.definition_id,
+            strategy_definition_version: definition.version,
+            strategy_parameters_digest: definition.parameters_digest,
             operation: if increase { "open" } else { "close" }.into(),
             side: "buy".into(),
             position_side: "long".into(),
@@ -1149,7 +1183,9 @@ mod tests {
                     .call(deadline(), |s| s.instances())
                     .await
                     .unwrap()
-                    .len(),
+                    .into_iter()
+                    .filter(|instance| instance.instance_id != "manual")
+                    .count(),
                 2
             );
         }

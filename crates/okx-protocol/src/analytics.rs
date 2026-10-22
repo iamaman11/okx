@@ -194,8 +194,17 @@ impl ResearchRequest {
             } => {
                 !idempotency_key.is_empty()
                     && idempotency_key.len() <= 128
-                    && instruments.len() == 1
+                    && !instruments.is_empty()
+                    && instruments.len() <= 8
+                    && instruments.iter().all(|s| !s.is_empty() && s.len() <= 64)
+                    && instruments
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        == instruments.len()
                     && valid_range(*timeframe_ms, *start_ms, *end_ms)
+                    && ((end_ms - start_ms) / timeframe_ms).saturating_mul(instruments.len() as u64)
+                        <= 1_000_000
                     && matches!(
                         strategy_id.as_str(),
                         "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
@@ -216,8 +225,17 @@ impl ResearchRequest {
             } => {
                 !idempotency_key.is_empty()
                     && idempotency_key.len() <= 128
-                    && instruments.len() == 1
+                    && !instruments.is_empty()
+                    && instruments.len() <= 8
+                    && instruments.iter().all(|s| !s.is_empty() && s.len() <= 64)
+                    && instruments
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        == instruments.len()
                     && valid_range(*timeframe_ms, *start_ms, *end_ms)
+                    && ((end_ms - start_ms) / timeframe_ms).saturating_mul(instruments.len() as u64)
+                        <= 1_000_000
                     && matches!(
                         strategy_id.as_str(),
                         "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
@@ -238,4 +256,50 @@ impl ResearchRequest {
 }
 fn valid_job(id: &str) -> bool {
     id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    #[test]
+    fn research_batch_wire_roundtrip_and_total_bar_budget() {
+        let request = ResearchRequest::Backtest {
+            idempotency_key: "batch".into(),
+            instruments: vec!["BTC-USDT".into(), "ETH-USDT".into()],
+            timeframe_ms: 60000,
+            start_ms: 0,
+            end_ms: 30000000000,
+            strategy_id: "ema_cross_v1".into(),
+            parameters: EmaParameters { fast: 20, slow: 50 },
+            costs: ResearchCosts {
+                maker_fee_bps: 0.0,
+                taker_fee_bps: 0.0,
+                slippage_bps: 0.0,
+                funding_mode: FundingMode::ZeroAssumption,
+            },
+            data_mode: ResearchDataMode::Counterfactual,
+            seed: 1,
+        };
+        assert!(request.valid());
+        assert_eq!(
+            serde_json::from_value::<ResearchRequest>(serde_json::to_value(&request).unwrap())
+                .unwrap(),
+            request
+        );
+        let mut invalid = request.clone();
+        if let ResearchRequest::Backtest { instruments, .. } = &mut invalid {
+            instruments.push("SOL-USDT".into())
+        }
+        assert!(!invalid.valid());
+        let mut invalid = request.clone();
+        if let ResearchRequest::Backtest { instruments, .. } = &mut invalid {
+            instruments[1] = instruments[0].clone()
+        }
+        assert!(!invalid.valid());
+        let mut invalid = request;
+        if let ResearchRequest::Backtest { instruments, .. } = &mut invalid {
+            *instruments = (0..9).map(|i| format!("ASSET{i}-USDT")).collect()
+        }
+        assert!(!invalid.valid());
+    }
 }

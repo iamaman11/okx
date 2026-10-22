@@ -85,7 +85,7 @@ fn allocation_and_bar_claim_survive_retry_and_restart() {
         .unwrap();
     let amounts = s
         .connection
-        .prepare("SELECT delta FROM allocations ORDER BY time,event_id")
+        .prepare("SELECT delta FROM allocations WHERE instance_id='a' ORDER BY time,event_id")
         .unwrap()
         .query_map([], |r| r.get::<_, String>(0))
         .unwrap()
@@ -225,7 +225,11 @@ fn owned_fill(s: &mut AccountStore, instance: &str, id: &str, price: i64, side: 
     };
     s.mutate_instance(&format!("create:{instance}"), "hash", "create", &i, None, 2)
         .unwrap();
+    let definition = s.strategy_definition(instance).unwrap();
     let plan = IntentPlan {
+        strategy_definition_id: definition.definition_id,
+        strategy_definition_version: definition.version,
+        strategy_parameters_digest: definition.parameters_digest,
         operation: "open".into(),
         side: if side == "long" { "buy" } else { "sell" }.into(),
         position_side: side.into(),
@@ -544,7 +548,7 @@ fn sqlite_million_history_bounded_rss() {
     let mut s = store();
     intent(&mut s);
     let tx = s.connection.transaction().unwrap();
-    tx.execute_batch("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at) SELECT 'terminal-'||x,'key-'||x,'request-hash','decision','FILLED',4,'client-'||x,100,'plan',1,1,'BTC-USDT-SWAP',2,4 FROM n; INSERT INTO intent_plans SELECT intent_id,'open','buy','1','100','95','manual','5',1,'long',1,'1',0,'USDT' FROM intents WHERE state='FILLED';").unwrap();
+    tx.execute_batch("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at) SELECT 'terminal-'||x,'key-'||x,'request-hash','decision','FILLED',4,'client-'||x,100,'plan',1,1,'BTC-USDT-SWAP',2,4 FROM n; INSERT INTO intent_plans SELECT intent_id,'open','buy','1','100','95','manual','5',1,'long',1,'1',0,'USDT',i.definition_id,i.definition_version,i.parameters_digest FROM intents CROSS JOIN strategy_instances i WHERE state='FILLED' AND i.instance_id='manual';").unwrap();
     tx.commit().unwrap();
     s.checkpoint().unwrap();
     let path = s.path.clone();
@@ -642,9 +646,11 @@ fn store() -> AccountStore {
     let mut a = AccountStore::initialize_flat(p, m, &s).unwrap();
     a.apply_authority_policy(1, false, "campaign-20", Decimal::from(20))
         .unwrap();
+    a.ensure_manual_instance(1).unwrap();
     a
 }
 fn intent(s: &mut AccountStore) -> StoredIntent {
+    let definition = s.ensure_manual_instance(1).unwrap();
     let d = Decision {
         decision_id: "decision".into(),
         instance_id: None,
@@ -655,6 +661,9 @@ fn intent(s: &mut AccountStore) -> StoredIntent {
     };
     let i = NewIntent {
         plan: IntentPlan {
+            strategy_definition_id: definition.definition_id,
+            strategy_definition_version: definition.version,
+            strategy_parameters_digest: definition.parameters_digest,
             contract_value: Decimal::ONE,
             inverse: false,
             settlement_currency: "USDT".into(),
@@ -1242,4 +1251,120 @@ async fn writer_queue_backpressure_and_account_isolation() {
         }
     }
     assert!(rejected > 0);
+}
+
+#[test]
+fn immutable_strategy_versions_bind_old_intent_and_cas_start_stop() {
+    let mut s = store();
+    let old = intent(&mut s);
+    reserve(&mut s);
+    let mut instance = s.instance("manual").unwrap().unwrap();
+    let original = s.strategy_definition("manual").unwrap();
+    instance.parameters = "{\"kind\":\"manual\",\"threshold\":2}".into();
+    instance.policy_revision = 2;
+    let receipt = s
+        .mutate_instance(
+            "update-version",
+            "hash-update",
+            "update",
+            &instance,
+            Some(1),
+            4,
+        )
+        .unwrap();
+    let updated: StrategyInstance = serde_json::from_str(&receipt.result_ref).unwrap();
+    assert_ne!(updated.definition_version, original.version);
+    assert_eq!(
+        s.intent(&old.intent_id)
+            .unwrap()
+            .unwrap()
+            .plan
+            .strategy_definition_version,
+        original.version
+    );
+    assert_eq!(
+        s.definition_version(&original.definition_id, &original.version)
+            .unwrap()
+            .unwrap(),
+        original
+    );
+    assert!(matches!(
+        s.begin_post(&old.intent_id, 1, 5),
+        Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"))
+    ));
+    assert!(
+        s.connection
+            .execute(
+                "UPDATE strategy_definition_versions SET parameters='{}'",
+                []
+            )
+            .is_err()
+    );
+    let mut started = updated.clone();
+    started.policy_revision = 3;
+    started.enabled = true;
+    let start = s
+        .mutate_instance("start-version", "hash-start", "start", &started, Some(2), 6)
+        .unwrap();
+    assert_eq!(s.instance("manual").unwrap().unwrap().policy_revision, 3);
+    assert!(
+        s.mutate_instance(
+            "stale-update",
+            "hash-stale",
+            "update",
+            &instance,
+            Some(2),
+            7
+        )
+        .is_err()
+    );
+    assert_eq!(
+        s.mutate_instance("start-version", "hash-start", "start", &started, Some(2), 7)
+            .unwrap()
+            .result_ref,
+        start.result_ref
+    );
+    assert!(
+        s.claim_strategy_decision("manual", "same-bar", "input", 1, 7)
+            .unwrap()
+    );
+    let mut changed = s.instance("manual").unwrap().unwrap();
+    changed.parameters = "{\"kind\":\"manual\",\"threshold\":3}".into();
+    changed.policy_revision = 4;
+    s.mutate_instance(
+        "update-second",
+        "hash-second",
+        "update",
+        &changed,
+        Some(3),
+        8,
+    )
+    .unwrap();
+    assert!(
+        s.claim_strategy_decision("manual", "same-bar", "input", 1, 9)
+            .unwrap()
+    );
+    let mut stopped = s.instance("manual").unwrap().unwrap();
+    stopped.policy_revision = 5;
+    s.mutate_instance("stop-version", "hash-stop", "stop", &stopped, Some(4), 10)
+        .unwrap();
+    assert_eq!(s.instance("manual").unwrap().unwrap().policy_revision, 5);
+    assert!(!s.instance("manual").unwrap().unwrap().enabled);
+    let status = s.strategy_status("manual", 10).unwrap();
+    assert_eq!(status["limits"]["policy_revision"], 5);
+    assert!(status["positions"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn strategy_status_bounds_owned_positions_and_uses_instance_index() {
+    let s = store();
+    for n in 0..51 {
+        s.connection.execute("INSERT INTO position_lots VALUES(?1,'manual',NULL,NULL,'BTC-USDT-SWAP','long','1','100',?2)",params![format!("lot-{n:03}"),n]).unwrap();
+    }
+    let status = s.strategy_status("manual", 60).unwrap();
+    assert_eq!(status["positions"].as_array().unwrap().len(), 50);
+    assert_eq!(status["positions_partial"], true);
+    assert_eq!(status["positions"][0]["instance_id"], "manual");
+    let plan:String=s.connection.query_row("EXPLAIN QUERY PLAN SELECT lot_id FROM position_lots WHERE instance_id='manual' AND remaining_qty<>'0' ORDER BY instrument_id,side,opened_at,lot_id LIMIT 51",[],|r|r.get(3)).unwrap();
+    assert!(plan.contains("idx_lots_instance_active"));
 }

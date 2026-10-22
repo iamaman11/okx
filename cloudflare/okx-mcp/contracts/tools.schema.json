@@ -620,7 +620,7 @@
                   "minLength": 1,
                   "maxLength": 64
                 },
-                "maxItems": 32,
+                "maxItems": 100,
                 "uniqueItems": true
               },
               "timeframe_ms": {
@@ -782,7 +782,7 @@
                   "minLength": 1,
                   "maxLength": 64
                 },
-                "maxItems": 32,
+                "maxItems": 100,
                 "uniqueItems": true
               },
               "timeframe_ms": {
@@ -958,8 +958,9 @@
                   "minLength": 1,
                   "maxLength": 64
                 },
-                "maxItems": 32,
-                "uniqueItems": true
+                "maxItems": 8,
+                "uniqueItems": true,
+                "minItems": 1
               },
               "timeframe_ms": {
                 "type": "integer",
@@ -1082,8 +1083,9 @@
                   "minLength": 1,
                   "maxLength": 64
                 },
-                "maxItems": 32,
-                "uniqueItems": true
+                "maxItems": 8,
+                "uniqueItems": true,
+                "minItems": 1
               },
               "timeframe_ms": {
                 "type": "integer",

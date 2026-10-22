@@ -1,5 +1,60 @@
 use super::super::*;
 impl AccountStore {
+    pub fn recovery_snapshot(&self, now: i64) -> StoreResult<RecoverySnapshot> {
+        let (required, backup_at): (bool, Option<i64>) = self.connection.query_row(
+            "SELECT requires_reconcile,backup_at FROM storage_recovery",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let threshold = backup_at.unwrap_or(self.meta.initialized_at);
+        let generation = self
+            .cursor("account_snapshot", "account")?
+            .map(|c| c.generation);
+        let mut coverage_complete = generation.is_some();
+        for (source, part) in [
+            ("fills", "SPOT"),
+            ("fills", "SWAP"),
+            ("fills", "FUTURES"),
+            ("fills", "OPTION"),
+            ("bills", "account"),
+            ("orders", "account"),
+            ("account_snapshot", "account"),
+        ] {
+            let cursor = self.cursor(source, part)?;
+            coverage_complete &= cursor.is_some_and(|c| {
+                Some(c.generation) == generation
+                    && c.watermark >= threshold
+                    && c.coverage_gaps.is_empty()
+                    && c.cursor.is_empty()
+                    && now >= c.watermark
+                    && now - c.watermark <= 5000
+            });
+        }
+        let ids = {
+            let mut q=self.connection.prepare("SELECT intent_id FROM risk_receipts WHERE state IN('HELD','POSTED','UNKNOWN','OPEN','TERMINAL_PENDING_CENTRAL','UNSENT_PENDING_CENTRAL') ORDER BY state,intent_id LIMIT 257")?;
+            q.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if ids.len() > 256 {
+            return Err(StoreError::Invalid("STORAGE_RECOVERY_RECEIPT_LIMIT"));
+        }
+        let receipts = ids
+            .iter()
+            .map(|id| {
+                self.central_receipt(id)?
+                    .ok_or(StoreError::Invalid("CENTRAL_RECEIPT_MISSING"))
+            })
+            .collect::<StoreResult<Vec<_>>>()?;
+        let unresolved:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM intents WHERE state IN('PREPARED','RESERVED','POSTING','UNKNOWN','ACKNOWLEDGED','PARTIALLY_FILLED'))",[],|r|r.get(0))?;
+        Ok(RecoverySnapshot {
+            required,
+            backup_at,
+            coverage_complete,
+            active_receipts: receipts,
+            unresolved_intents: unresolved,
+            cumulative_loss_usd: self.policy()?.4,
+        })
+    }
     pub fn claim_strategy_decision(
         &mut self,
         instance_id: &str,
@@ -8,7 +63,8 @@ impl AccountStore {
         policy_revision: i64,
         now: i64,
     ) -> StoreResult<bool> {
-        let id = format!("strategy:{instance_id}:{decision_key}");
+        let version = self.strategy_definition(instance_id)?.version;
+        let id = format!("strategy:{instance_id}:{version}:{decision_key}");
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -79,52 +135,104 @@ impl AccountStore {
         {
             return Err(StoreError::Invalid("INVALID_INSTANCE_MUTATION"));
         }
+        let prior = self.instance(&instance.instance_id)?;
+        if action == "create" && prior.is_some() {
+            return Err(StoreError::Invalid("INSTANCE_ALREADY_EXISTS"));
+        }
+        if action != "create" && prior.is_none() {
+            return Err(StoreError::Invalid("INSTANCE_NOT_FOUND"));
+        }
+        if prior.as_ref().map(|i| i.policy_revision) != expected_revision {
+            return Err(StoreError::Invalid("INSTANCE_REVISION_CONFLICT"));
+        }
+        let next_revision = prior
+            .as_ref()
+            .map(|i| {
+                i.policy_revision
+                    .checked_add(1)
+                    .ok_or(StoreError::Invalid("INSTANCE_REVISION_OVERFLOW"))
+            })
+            .transpose()?
+            .unwrap_or(1);
+        if instance.policy_revision != next_revision {
+            return Err(StoreError::Invalid("INSTANCE_REVISION_CONFLICT"));
+        }
+        let mut committed = if matches!(action, "start" | "stop") {
+            prior
+                .clone()
+                .ok_or(StoreError::Invalid("INSTANCE_NOT_FOUND"))?
+        } else {
+            instance.clone()
+        };
+        committed.policy_revision = next_revision;
+        committed.last_decision_key = prior.as_ref().and_then(|i| i.last_decision_key.clone());
+        committed.enabled = match action {
+            "start" => true,
+            "stop" => false,
+            _ => committed.enabled,
+        };
+        let prior_definition = prior
+            .as_ref()
+            .map(|_| self.strategy_definition(&instance.instance_id))
+            .transpose()?;
+        let mut candidate = super::definitions::canonical_definition(&committed, 1, now)?;
+        let changed = prior_definition.as_ref().is_none_or(|d| {
+            d.definition_id != candidate.definition_id
+                || d.parameters_digest != candidate.parameters_digest
+        });
+        let definition = if changed {
+            let revision = if let Some(old) = &prior_definition {
+                old.version
+                    .split('-')
+                    .next()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .and_then(|v| v.checked_add(1))
+                    .ok_or(StoreError::Invalid("DEFINITION_VERSION_OVERFLOW"))?
+            } else {
+                instance
+                    .definition_version
+                    .split('-')
+                    .next()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|v| *v > 0)
+                    .ok_or(StoreError::Invalid("DEFINITION_VERSION_INVALID"))?
+            };
+            candidate = super::definitions::canonical_definition(&committed, revision, now)?;
+            candidate
+        } else {
+            prior_definition.ok_or(StoreError::Invalid("DEFINITION_VERSION_MISSING"))?
+        };
+        committed.definition_id = definition.definition_id.clone();
+        committed.definition_version = definition.version.clone();
+        committed.parameters = definition.parameters.clone();
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current: Option<i64> = tx
-            .query_row(
-                "SELECT policy_revision FROM strategy_instances WHERE instance_id=?1",
-                [&instance.instance_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if action == "create" && current.is_some() {
-            return Err(StoreError::Invalid("INSTANCE_ALREADY_EXISTS"));
-        }
-        if action != "create" && current.is_none() {
-            return Err(StoreError::Invalid("INSTANCE_NOT_FOUND"));
-        }
-        if current.is_some() && expected_revision != current {
+        super::definitions::persist_definition(&tx, &definition)?;
+        let changed = if action == "create" {
+            tx.execute(
+                "INSERT INTO strategy_instances VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    committed.instance_id,
+                    committed.definition_id,
+                    committed.definition_version,
+                    committed.parameters,
+                    committed.enabled,
+                    committed.policy_revision,
+                    exact(committed.budget),
+                    committed.last_decision_key,
+                    definition.parameters_digest
+                ],
+            )?
+        } else {
+            tx.execute("UPDATE strategy_instances SET definition_id=?2,definition_version=?3,parameters=?4,enabled=?5,policy_revision=?6,budget=?7,parameters_digest=?8 WHERE instance_id=?1 AND policy_revision=?9",params![committed.instance_id,committed.definition_id,committed.definition_version,committed.parameters,committed.enabled,committed.policy_revision,exact(committed.budget),definition.parameters_digest,expected_revision])?
+        };
+        if changed != 1 {
             return Err(StoreError::Invalid("INSTANCE_REVISION_CONFLICT"));
         }
-        let enabled = match action {
-            "start" => true,
-            "stop" => false,
-            _ => instance.enabled,
-        };
-        let prior_budget: Option<String> = tx
-            .query_row(
-                "SELECT budget FROM strategy_instances WHERE instance_id=?1",
-                [&instance.instance_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if matches!(action, "start" | "stop") {
-            tx.execute(
-                "UPDATE strategy_instances SET enabled=?2 WHERE instance_id=?1",
-                params![instance.instance_id, enabled],
-            )?;
-        } else {
-            tx.execute("INSERT INTO strategy_instances VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(instance_id) DO UPDATE SET definition_id=excluded.definition_id,definition_version=excluded.definition_version,parameters=excluded.parameters,enabled=excluded.enabled,policy_revision=excluded.policy_revision,budget=excluded.budget",params![instance.instance_id,instance.definition_id,instance.definition_version,instance.parameters,enabled,instance.policy_revision,exact(instance.budget),instance.last_decision_key])?;
-        }
-        let result=serde_json::to_string(&serde_json::json!({"instance_id":instance.instance_id,"enabled":enabled,"policy_revision":instance.policy_revision})).map_err(|_|StoreError::Invalid("INSTANCE_SERIALIZATION_FAILED"))?;
         if matches!(action, "create" | "update") {
-            let old = prior_budget
-                .map(decimal)
-                .transpose()?
-                .unwrap_or(Decimal::ZERO);
-            let delta = instance
+            let old = prior.as_ref().map_or(Decimal::ZERO, |i| i.budget);
+            let delta = committed
                 .budget
                 .checked_sub(old)
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
@@ -133,7 +241,7 @@ impl AccountStore {
                     "INSERT INTO allocations VALUES(?1,?2,?3,'USD',?4)",
                     params![
                         format!("allocation:{operation_id}"),
-                        instance.instance_id,
+                        committed.instance_id,
                         exact(delta),
                         now
                     ],
@@ -141,7 +249,7 @@ impl AccountStore {
             }
         }
         if action == "create" {
-            let scope = format!("strategy:{}", instance.instance_id);
+            let scope = format!("strategy:{}", committed.instance_id);
             tx.execute("INSERT INTO nav_scopes VALUES(?1,'USD')", [&scope])?;
             tx.execute(
                 "INSERT INTO nav_points VALUES(?1,?2,?3,?4,'0','0','USD','COMPLETE',?3)",
@@ -149,14 +257,16 @@ impl AccountStore {
                     scope,
                     now,
                     format!("allocation:{operation_id}"),
-                    exact(instance.budget)
+                    exact(committed.budget)
                 ],
             )?;
             tx.execute(
                 "INSERT INTO nav_watermarks VALUES(?1,?2,?2,?3,'COMPLETE')",
-                params![scope, exact(instance.budget), now],
+                params![scope, exact(committed.budget), now],
             )?;
         }
+        let result = serde_json::to_string(&committed)
+            .map_err(|_| StoreError::Invalid("INSTANCE_SERIALIZATION_FAILED"))?;
         tx.execute(
             "INSERT INTO operation_receipts VALUES(?1,?2,?3,?4,?5)",
             params![operation_id, kind, request_hash, result, now],
@@ -205,10 +315,33 @@ impl AccountStore {
         Ok((rev, paused, id, decimal(limit)?, decimal(loss)?))
     }
     pub fn put_instance(&mut self, instance: &StrategyInstance) -> StoreResult<()> {
-        if instance.budget < Decimal::ZERO || instance.instance_id.is_empty() {
-            return Err(StoreError::Invalid("INVALID_INSTANCE"));
-        }
-        self.connection.execute("INSERT INTO strategy_instances VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(instance_id) DO UPDATE SET definition_id=excluded.definition_id,definition_version=excluded.definition_version,parameters=excluded.parameters,enabled=excluded.enabled,policy_revision=excluded.policy_revision,budget=excluded.budget",params![instance.instance_id,instance.definition_id,instance.definition_version,instance.parameters,instance.enabled,instance.policy_revision,exact(instance.budget),instance.last_decision_key])?;
+        let prior = self.instance(&instance.instance_id)?;
+        let mut target = instance.clone();
+        target.policy_revision = prior
+            .as_ref()
+            .map(|i| {
+                i.policy_revision
+                    .checked_add(1)
+                    .ok_or(StoreError::Invalid("INSTANCE_REVISION_OVERFLOW"))
+            })
+            .transpose()?
+            .unwrap_or(1);
+        use sha2::{Digest, Sha256};
+        let hash = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&target)
+                    .map_err(|_| StoreError::Invalid("INSTANCE_SERIALIZATION_FAILED"))?
+            )
+        );
+        self.mutate_instance(
+            &format!("native-put:{}:{hash}", instance.instance_id),
+            &hash,
+            if prior.is_some() { "update" } else { "create" },
+            &target,
+            prior.map(|i| i.policy_revision),
+            wall_time_ms(),
+        )?;
         Ok(())
     }
     pub fn instances(&self) -> StoreResult<Vec<StrategyInstance>> {

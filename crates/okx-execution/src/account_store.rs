@@ -129,6 +129,9 @@ pub struct CentralReceipt {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IntentPlan {
+    pub strategy_definition_id: String,
+    pub strategy_definition_version: String,
+    pub strategy_parameters_digest: String,
     pub contract_value: Decimal,
     pub inverse: bool,
     pub settlement_currency: String,
@@ -183,6 +186,14 @@ pub struct StrategyInstance {
     pub policy_revision: i64,
     pub budget: Decimal,
     pub last_decision_key: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StrategyDefinitionVersion {
+    pub definition_id: String,
+    pub version: String,
+    pub parameters: String,
+    pub parameters_digest: String,
+    pub created_at: i64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinanceEntry {
@@ -315,6 +326,15 @@ pub struct FinancialRisk {
     pub drawdown_ratio: Decimal,
     pub nav_complete: bool,
     pub source_as_of: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoverySnapshot {
+    pub required: bool,
+    pub backup_at: Option<i64>,
+    pub coverage_complete: bool,
+    pub active_receipts: Vec<CentralReceipt>,
+    pub unresolved_intents: bool,
+    pub cumulative_loss_usd: Decimal,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NavWindow {

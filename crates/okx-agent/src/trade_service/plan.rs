@@ -299,7 +299,23 @@ impl TradeService {
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());
         }
+        let binding_id = instance_id.clone();
+        let definition = r
+            .execution
+            .store
+            .call(until, move |s| {
+                if binding_id == "manual" {
+                    s.ensure_manual_instance(now())
+                } else {
+                    s.strategy_definition(&binding_id)
+                }
+            })
+            .await
+            .map_err(err)?;
         Ok(IntentPlan {
+            strategy_definition_id: definition.definition_id,
+            strategy_definition_version: definition.version,
+            strategy_parameters_digest: definition.parameters_digest,
             operation: format!("{operation:?}").to_lowercase(),
             side: if buy { "buy" } else { "sell" }.into(),
             quantity: qty,
