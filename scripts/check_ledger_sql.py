@@ -29,7 +29,7 @@ def main():
             intent = "INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             values = ('intent', 'request', 'hash', 'decision', 'PREPARED', 0, 'client', 100, 'plan', 1, 1, 'BTC', 2, 2)
             a.execute(intent, values)
-            a.execute("INSERT INTO intent_plans VALUES('intent','open','buy','1','100','95','a','5',1)")
+            a.execute("INSERT INTO intent_plans VALUES('intent','open','buy','1','100','95','a','5',1,'long',1,'1',0,'USDT')")
             a.execute("INSERT INTO fills VALUES('fill','BTC','trade','order','intent',3,'1','100','-0.1','USDT','buy')")
             a.execute("INSERT INTO bills VALUES('bill','FEE',3,'-0.1','USDT','trade-event')")
             a.execute("INSERT INTO finance_entries VALUES('fee-a','trade-event','FEE','a','-0.04','USDT','a','fill',3,NULL)")
@@ -85,4 +85,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
 

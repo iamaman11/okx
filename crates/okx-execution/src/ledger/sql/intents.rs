@@ -1,5 +1,38 @@
 use super::super::*;
 impl AccountStore {
+    pub fn reconcilable_intents(&self, limit: usize) -> StoreResult<Vec<StoredIntent>> {
+        let ids = {
+            let mut q=self.connection.prepare("SELECT intent_id FROM risk_receipts WHERE state IN('HELD','POSTED','UNKNOWN','OPEN','TERMINAL_PENDING_CENTRAL','UNSENT_PENDING_CENTRAL') ORDER BY state,intent_id LIMIT ?1")?;
+            q.query_map([limit.min(1000) as i64], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        ids.iter()
+            .map(|id| {
+                self.intent(id)?
+                    .ok_or(StoreError::Invalid("INTENT_MISSING"))
+            })
+            .collect()
+    }
+    pub fn acknowledge_central_release(&mut self, key: &str, evidence: &str) -> StoreResult<()> {
+        if evidence.is_empty() {
+            return Err(StoreError::Invalid("CENTRAL_RELEASE_EVIDENCE_REQUIRED"));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let hash: String = tx.query_row(
+            "SELECT receipt_hash FROM risk_receipts WHERE reservation_key=?1",
+            [key],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "UPDATE risk_receipts SET state='RELEASED' WHERE reservation_key=?1",
+            [key],
+        )?;
+        tx.execute("INSERT INTO operation_receipts VALUES(?1,'CENTRAL_RELEASE',?2,?3,?4) ON CONFLICT(operation_id) DO NOTHING",params![format!("central-release:{key}"),hash,evidence,wall_time_ms()])?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn reject_unsent(&mut self, id: &str, reason: &str, now: i64) -> StoreResult<bool> {
         if reason.is_empty() {
             return Err(StoreError::Invalid("UNSENT_REASON_REQUIRED"));
@@ -49,6 +82,12 @@ impl AccountStore {
         decision: &Decision,
         intent: &NewIntent,
     ) -> StoreResult<StoredIntent> {
+        if intent.plan.contract_value <= Decimal::ZERO
+            || intent.plan.settlement_currency.is_empty()
+            || !matches!(intent.plan.position_side.as_str(), "long" | "short")
+        {
+            return Err(StoreError::Invalid("INVALID_CONTRACT_MECHANICS"));
+        }
         if let Some(existing) = self.by_idempotency(&intent.idempotency_key)? {
             if existing.request_hash != intent.request_hash {
                 return Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
@@ -84,7 +123,7 @@ impl AccountStore {
         )?;
         tx.execute("INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at) VALUES(?1,?2,?3,?4,'PREPARED',0,?5,?6,?7,?8,?9,?10,?11,?11)",params![intent.intent_id,intent.idempotency_key,intent.request_hash,decision.decision_id,intent.client_order_id,intent.deadline,intent.plan_hash,intent.policy_revision,intent.risk_increase,intent.instrument_id,decision.decision_at])?;
         tx.execute(
-            "INSERT INTO intent_plans VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            "INSERT INTO intent_plans VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 intent.intent_id,
                 intent.plan.operation,
@@ -94,7 +133,12 @@ impl AccountStore {
                 intent.plan.stop_price.map(exact),
                 intent.plan.strategy_instance,
                 exact(intent.plan.planned_loss_usd),
-                intent.plan.source_generation
+                intent.plan.source_generation,
+                intent.plan.position_side,
+                intent.plan.private_source_generation,
+                exact(intent.plan.contract_value),
+                intent.plan.inverse,
+                intent.plan.settlement_currency
             ],
         )?;
         tx.commit()?;
@@ -189,7 +233,8 @@ impl AccountStore {
         .transpose()
     }
     pub(super) fn plan(&self, id: &str) -> StoreResult<IntentPlan> {
-        let (mut p,q,price,stop,loss)=self.connection.query_row("SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation FROM intent_plans WHERE intent_id=?1",[id],|r|Ok((IntentPlan{operation:r.get(0)?,side:r.get(1)?,strategy_instance:r.get(5)?,source_generation:r.get(7)?,..Default::default()},r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,String>(6)?)))?;
+        let (mut p,q,price,stop,loss,cv)=self.connection.query_row("SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency FROM intent_plans WHERE intent_id=?1",[id],|r|Ok((IntentPlan{operation:r.get(0)?,side:r.get(1)?,strategy_instance:r.get(5)?,source_generation:r.get(7)?,position_side:r.get(8)?,private_source_generation:r.get(9)?,inverse:r.get(11)?,settlement_currency:r.get(12)?,..Default::default()},r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,String>(6)?,r.get::<_,String>(10)?)))?;
+        p.contract_value = decimal(cv)?;
         p.quantity = decimal(q)?;
         p.limit_price = decimal(price)?;
         p.stop_price = stop.map(decimal).transpose()?;

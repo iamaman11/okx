@@ -1,6 +1,49 @@
 use super::super::*;
 impl AccountStore {
-    pub fn claim_strategy_decision(&mut self,instance_id:&str,decision_key:&str,input_digest:&str,policy_revision:i64,now:i64)->StoreResult<bool>{let id=format!("strategy:{instance_id}:{decision_key}");let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;let prior:Option<String>=tx.query_row("SELECT input_digest FROM decisions WHERE decision_id=?1",[&id],|r|r.get(0)).optional()?;if let Some(prior)=prior{if prior!=input_digest{return Err(StoreError::Invalid("STRATEGY_DECISION_INPUT_CONFLICT"));}return Ok(false);}let enabled:bool=tx.query_row("SELECT enabled FROM strategy_instances WHERE instance_id=?1",[instance_id],|r|r.get(0))?;if !enabled{return Err(StoreError::Invalid("STRATEGY_STOPPED"));}tx.execute("INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,'strategy-bar/v1')",params![id,instance_id,now,input_digest,policy_revision])?;tx.execute("UPDATE strategy_instances SET last_decision_key=?2 WHERE instance_id=?1",params![instance_id,decision_key])?;tx.commit()?;Ok(true)}
+    pub fn claim_strategy_decision(
+        &mut self,
+        instance_id: &str,
+        decision_key: &str,
+        input_digest: &str,
+        policy_revision: i64,
+        now: i64,
+    ) -> StoreResult<bool> {
+        let id = format!("strategy:{instance_id}:{decision_key}");
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prior: Option<String> = tx
+            .query_row(
+                "SELECT input_digest FROM decisions WHERE decision_id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(prior) = prior {
+            if prior != input_digest {
+                return Err(StoreError::Invalid("STRATEGY_DECISION_INPUT_CONFLICT"));
+            }
+            return Ok(false);
+        }
+        let enabled: bool = tx.query_row(
+            "SELECT enabled FROM strategy_instances WHERE instance_id=?1",
+            [instance_id],
+            |r| r.get(0),
+        )?;
+        if !enabled {
+            return Err(StoreError::Invalid("STRATEGY_STOPPED"));
+        }
+        tx.execute(
+            "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,'strategy-bar/v1')",
+            params![id, instance_id, now, input_digest, policy_revision],
+        )?;
+        tx.execute(
+            "UPDATE strategy_instances SET last_decision_key=?2 WHERE instance_id=?1",
+            params![instance_id, decision_key],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
     pub fn account_summary(&self) -> StoreResult<serde_json::Value> {
         let mut s=self.connection.prepare("SELECT state,count(*) FROM intents WHERE state IN('PREPARED','RESERVED','POSTING','UNKNOWN','ACKNOWLEDGED','PARTIALLY_FILLED') GROUP BY state")?;
         let active = s
@@ -60,6 +103,13 @@ impl AccountStore {
             "stop" => false,
             _ => instance.enabled,
         };
+        let prior_budget: Option<String> = tx
+            .query_row(
+                "SELECT budget FROM strategy_instances WHERE instance_id=?1",
+                [&instance.instance_id],
+                |r| r.get(0),
+            )
+            .optional()?;
         if matches!(action, "start" | "stop") {
             tx.execute(
                 "UPDATE strategy_instances SET enabled=?2 WHERE instance_id=?1",
@@ -69,6 +119,44 @@ impl AccountStore {
             tx.execute("INSERT INTO strategy_instances VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(instance_id) DO UPDATE SET definition_id=excluded.definition_id,definition_version=excluded.definition_version,parameters=excluded.parameters,enabled=excluded.enabled,policy_revision=excluded.policy_revision,budget=excluded.budget",params![instance.instance_id,instance.definition_id,instance.definition_version,instance.parameters,enabled,instance.policy_revision,exact(instance.budget),instance.last_decision_key])?;
         }
         let result=serde_json::to_string(&serde_json::json!({"instance_id":instance.instance_id,"enabled":enabled,"policy_revision":instance.policy_revision})).map_err(|_|StoreError::Invalid("INSTANCE_SERIALIZATION_FAILED"))?;
+        if matches!(action, "create" | "update") {
+            let old = prior_budget
+                .map(decimal)
+                .transpose()?
+                .unwrap_or(Decimal::ZERO);
+            let delta = instance
+                .budget
+                .checked_sub(old)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            if delta != Decimal::ZERO {
+                tx.execute(
+                    "INSERT INTO allocations VALUES(?1,?2,?3,'USD',?4)",
+                    params![
+                        format!("allocation:{operation_id}"),
+                        instance.instance_id,
+                        exact(delta),
+                        now
+                    ],
+                )?;
+            }
+        }
+        if action == "create" {
+            let scope = format!("strategy:{}", instance.instance_id);
+            tx.execute("INSERT INTO nav_scopes VALUES(?1,'USD')", [&scope])?;
+            tx.execute(
+                "INSERT INTO nav_points VALUES(?1,?2,?3,?4,'0','0','USD','COMPLETE',?3)",
+                params![
+                    scope,
+                    now,
+                    format!("allocation:{operation_id}"),
+                    exact(instance.budget)
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO nav_watermarks VALUES(?1,?2,?2,?3,'COMPLETE')",
+                params![scope, exact(instance.budget), now],
+            )?;
+        }
         tx.execute(
             "INSERT INTO operation_receipts VALUES(?1,?2,?3,?4,?5)",
             params![operation_id, kind, request_hash, result, now],

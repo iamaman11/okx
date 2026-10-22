@@ -110,6 +110,36 @@ impl AccountStore {
             ],
         )?;
         tx.execute("INSERT INTO storage_recovery VALUES(1,0,NULL,NULL)", [])?;
+        tx.execute(
+            "INSERT INTO nav_points VALUES('account',?1,'opening',?2,'0','0','USD','COMPLETE',?3)",
+            params![
+                meta.initialized_at,
+                exact(snapshot.opening_equity_usd),
+                snapshot.source_ref
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO nav_watermarks VALUES('account',?1,?1,?2,'COMPLETE')",
+            params![exact(snapshot.opening_equity_usd), meta.initialized_at],
+        )?;
+        tx.execute("INSERT INTO nav_scopes VALUES('account','USD')", [])?;
+        for (currency, amount) in &snapshot.balances {
+            let scope = format!("account:{currency}");
+            tx.execute(
+                "INSERT INTO nav_points VALUES(?1,?2,'opening',?3,'0','0',?4,'COMPLETE',?5)",
+                params![
+                    scope,
+                    meta.initialized_at,
+                    exact(*amount),
+                    currency,
+                    snapshot.source_ref
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO nav_scopes VALUES(?1,?2)",
+                params![scope, currency],
+            )?;
+        }
         tx.commit()?;
         Ok(Self {
             connection: c,

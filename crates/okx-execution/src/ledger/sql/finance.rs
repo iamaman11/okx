@@ -1,5 +1,367 @@
 use super::super::*;
 impl AccountStore {
+    pub fn nav_summary(
+        &self,
+        from: i64,
+        through: i64,
+        instances: &[String],
+        currencies: &[String],
+    ) -> StoreResult<Vec<NavWindow>> {
+        if from > through || instances.len() > 32 || currencies.len() > 32 {
+            return Err(StoreError::Invalid("NAV_RANGE_FILTER_INVALID"));
+        }
+        let scopes = {
+            let mut q = self
+                .connection
+                .prepare("SELECT scope_id,currency FROM nav_scopes ORDER BY scope_id,currency")?;
+            q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .filter_map(|v| match v {
+                    Ok((scope, currency))
+                        if (instances.is_empty()
+                            || instances.iter().any(|i| scope == format!("strategy:{i}")))
+                            && (currencies.is_empty() || currencies.contains(&currency)) =>
+                    {
+                        Some(Ok((scope, currency)))
+                    }
+                    Err(e) => Some(Err(e)),
+                    _ => None,
+                })
+                .take(65)
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if scopes.len() > 64 {
+            return Err(StoreError::Invalid("NAV_SCOPE_LIMIT"));
+        }
+        let mut result = Vec::new();
+        for (scope, currency) in scopes {
+            let endpoint = |time: i64| -> StoreResult<Option<(Decimal, Decimal, i64, String)>> {
+                let row:Option<(String,String,i64,String)>=self.connection.query_row("SELECT equity,flows,time,coverage FROM nav_points WHERE scope_id=?1 AND time<=?2 ORDER BY time DESC,source_version DESC LIMIT 1",params![scope,time],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+                row.map(|(e, f, t, c)| Ok((decimal(e)?, decimal(f)?, t, c)))
+                    .transpose()
+            };
+            let opening = endpoint(from)?;
+            let current = endpoint(through)?;
+            let flows = opening
+                .as_ref()
+                .zip(current.as_ref())
+                .map(|(o, c)| {
+                    c.1.checked_sub(o.1)
+                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))
+                })
+                .transpose()?;
+            let pnl = opening
+                .as_ref()
+                .zip(current.as_ref())
+                .zip(flows)
+                .map(|((o, c), f)| {
+                    c.0.checked_sub(o.0)
+                        .and_then(|v| v.checked_sub(f))
+                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))
+                })
+                .transpose()?;
+            let complete = opening
+                .as_ref()
+                .is_some_and(|v| v.3 == "COMPLETE" && from - v.2 <= 5000)
+                && current
+                    .as_ref()
+                    .is_some_and(|v| v.3 == "COMPLETE" && through - v.2 <= 5000);
+            result.push(NavWindow {
+                scope_id: scope,
+                currency,
+                opening_equity: opening.as_ref().map(|v| v.0),
+                current_equity: current.as_ref().map(|v| v.0),
+                flows,
+                pnl,
+                opening_as_of: opening.as_ref().map(|v| v.2),
+                current_as_of: current.as_ref().map(|v| v.2),
+                coverage: if from < self.meta.initialized_at {
+                    "UNAVAILABLE_BEFORE_T0"
+                } else if complete {
+                    "COMPLETE"
+                } else {
+                    "PARTIAL"
+                }
+                .into(),
+            });
+        }
+        Ok(result)
+    }
+    pub fn opening_equity_usd(&self) -> StoreResult<Decimal> {
+        decimal(self.connection.query_row("SELECT equity FROM nav_points WHERE scope_id='account' AND time=?1 AND source_version='opening'",[self.meta.initialized_at],|r|r.get(0))?)
+    }
+    pub fn usd_component_total(&self, component: &str) -> StoreResult<Decimal> {
+        let v: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT amount FROM finance_totals WHERE currency='USD' AND component=?1",
+                [component],
+                |r| r.get(0),
+            )
+            .optional()?;
+        v.map(decimal)
+            .transpose()
+            .map(|v| v.unwrap_or(Decimal::ZERO))
+    }
+    pub fn record_instance_nav(
+        &mut self,
+        marks: &[VenueMark],
+        fx: &UsdConversionEvidence,
+        now: i64,
+    ) -> StoreResult<()> {
+        let mut page = IngestPage::default();
+        for instance in self.instances()? {
+            let mut pnl = Decimal::ZERO;
+            let mut complete = true;
+            {
+                let mut q=self.connection.prepare("SELECT currency,component,amount FROM instance_finance_totals WHERE instance_id=?1 AND component IN('REALIZED_PNL','FEE','FUNDING')")?;
+                let mut rows = q.query([&instance.instance_id])?;
+                while let Some(r) = rows.next()? {
+                    let currency: String = r.get(0)?;
+                    let amount = decimal(r.get(2)?)?;
+                    let rate = if currency == "USD" {
+                        Some(Decimal::ONE)
+                    } else {
+                        fx.usd_per_currency.get(&currency).copied()
+                    };
+                    if let Some(rate) = rate {
+                        pnl = pnl
+                            .checked_add(
+                                amount
+                                    .checked_mul(rate)
+                                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
+                            )
+                            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+                    } else {
+                        complete = false;
+                    }
+                }
+            }
+            {
+                let mut q=self.connection.prepare("SELECT l.instrument_id,l.side,l.remaining_qty,l.cost,p.contract_value,p.inverse,p.settlement_currency FROM position_lots l JOIN intent_plans p USING(intent_id) WHERE l.instance_id=?1 AND l.remaining_qty<>'0'")?;
+                let mut rows = q.query([&instance.instance_id])?;
+                while let Some(r) = rows.next()? {
+                    let instrument: String = r.get(0)?;
+                    let side: String = r.get(1)?;
+                    let q = decimal(r.get(2)?)?;
+                    let entry = decimal(r.get(3)?)?;
+                    let cv = decimal(r.get(4)?)?;
+                    let inverse: bool = r.get(5)?;
+                    let ccy: String = r.get(6)?;
+                    let Some(mark) = marks.iter().find(|m| m.instrument_id == instrument) else {
+                        complete = false;
+                        continue;
+                    };
+                    let rate = if ccy == "USD" {
+                        Some(Decimal::ONE)
+                    } else {
+                        fx.usd_per_currency.get(&ccy).copied()
+                    };
+                    let Some(rate) = rate else {
+                        complete = false;
+                        continue;
+                    };
+                    let upl = crate::finance::position_pnl(
+                        q,
+                        entry,
+                        mark.price,
+                        cv,
+                        inverse,
+                        if side == "long" {
+                            Decimal::ONE
+                        } else {
+                            -Decimal::ONE
+                        },
+                    )?;
+                    pnl = pnl
+                        .checked_add(
+                            upl.checked_mul(rate)
+                                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
+                        )
+                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+                }
+            }
+            let first:Option<String>=self.connection.query_row("SELECT delta FROM allocations WHERE instance_id=?1 AND currency='USD' ORDER BY time,event_id LIMIT 1",[&instance.instance_id],|r|r.get(0)).optional()?;
+            let opening = first.map(decimal).transpose()?.unwrap_or(instance.budget);
+            let flows = instance
+                .budget
+                .checked_sub(opening)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            page.nav.push(NavPoint {
+                scope_id: format!("strategy:{}", instance.instance_id),
+                time: now,
+                source_version: fx.source_digest.clone(),
+                equity: instance
+                    .budget
+                    .checked_add(pnl)
+                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
+                pnl,
+                flows,
+                currency: "USD".into(),
+                coverage: if complete { "COMPLETE" } else { "PARTIAL" }.into(),
+                mark_source: fx.source_digest.clone(),
+            });
+        }
+        self.ingest_page(&page)
+    }
+    pub fn financial_risk(&self, now: i64, instance: Option<&str>) -> StoreResult<FinancialRisk> {
+        let scope = instance
+            .map(|s| format!("strategy:{s}"))
+            .unwrap_or_else(|| "account".into());
+        let daily: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT loss_usd FROM daily_losses WHERE scope_id=?1 AND utc_day=?2",
+                params![scope, crate::risk::utc_day(now)],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let nav:Option<(String,String,i64,String)>=self.connection.query_row("SELECT highwater,adjusted_equity,time,coverage FROM nav_watermarks WHERE scope_id=?1",[&scope],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        let (drawdown, asof, complete) = if let Some((peak, equity, time, coverage)) = nav {
+            let peak = decimal(peak)?;
+            let equity = decimal(equity)?;
+            let dd = if peak > Decimal::ZERO {
+                peak.checked_sub(equity)
+                    .and_then(|v| v.max(Decimal::ZERO).checked_div(peak))
+                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?
+            } else {
+                Decimal::ZERO
+            };
+            (
+                dd,
+                time,
+                coverage == "COMPLETE" && now >= time && now - time <= 5000,
+            )
+        } else {
+            (Decimal::ZERO, 0, false)
+        };
+        Ok(FinancialRisk {
+            daily_loss_usd: daily.map(decimal).transpose()?.unwrap_or(Decimal::ZERO),
+            drawdown_ratio: drawdown,
+            nav_complete: complete,
+            source_as_of: asof,
+        })
+    }
+    pub fn attribute_pending_funding(
+        &mut self,
+        fx: &UsdConversionEvidence,
+        limit: usize,
+    ) -> StoreResult<usize> {
+        let rows = {
+            let mut q=self.connection.prepare("SELECT event_id,instrument_id,time,amount,currency FROM funding_projection_pending ORDER BY time,event_id LIMIT ?1")?;
+            q.query_map([limit.min(100) as i64], |r| {
+                Ok((
+                    FundingEvent {
+                        event_id: r.get(0)?,
+                        instrument_id: r.get(1)?,
+                        time: r.get(2)?,
+                        amount: Decimal::ZERO,
+                        currency: r.get(4)?,
+                    },
+                    r.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let count = rows.len();
+        for (mut event, amount) in rows {
+            event.amount = decimal(amount)?;
+            let mut exposures = std::collections::BTreeMap::<String, Decimal>::new();
+            {
+                let mut q=self.connection.prepare("SELECT d.instance_id,p.operation,p.position_side,f.side,f.qty FROM fills f LEFT JOIN intents i USING(intent_id) LEFT JOIN decisions d USING(decision_id) LEFT JOIN intent_plans p USING(intent_id) WHERE f.instrument_id=?1 AND f.time<=?2 ORDER BY f.time,f.fill_id")?;
+                let mut rows = q.query(params![event.instrument_id, event.time])?;
+                while let Some(r) = rows.next()? {
+                    let owner = r
+                        .get::<_, Option<String>>(0)?
+                        .unwrap_or_else(|| "unattributed".into());
+                    let operation = r.get::<_, Option<String>>(1)?;
+                    let position = r.get::<_, Option<String>>(2)?;
+                    let side: String = r.get(3)?;
+                    let q = decimal(r.get(4)?)?;
+                    let sign = match position.as_deref() {
+                        Some("long") => {
+                            if operation
+                                .as_deref()
+                                .is_some_and(|o| matches!(o, "close" | "reduce"))
+                            {
+                                -Decimal::ONE
+                            } else {
+                                Decimal::ONE
+                            }
+                        }
+                        Some("short") => {
+                            if operation
+                                .as_deref()
+                                .is_some_and(|o| matches!(o, "close" | "reduce"))
+                            {
+                                Decimal::ONE
+                            } else {
+                                -Decimal::ONE
+                            }
+                        }
+                        _ => {
+                            if side == "buy" {
+                                Decimal::ONE
+                            } else {
+                                -Decimal::ONE
+                            }
+                        }
+                    };
+                    let old = *exposures.get(&owner).unwrap_or(&Decimal::ZERO);
+                    exposures.insert(
+                        owner,
+                        old.checked_add(
+                            q.checked_mul(sign)
+                                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
+                        )
+                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
+                    );
+                }
+            }
+            let exposure = exposures
+                .into_iter()
+                .filter(|(_, q)| *q != Decimal::ZERO)
+                .collect::<Vec<_>>();
+            let allocations = crate::finance::allocate_funding(event.amount, &exposure, 18)?;
+            let unknown = allocations
+                .iter()
+                .any(|(owner, a)| owner == "unattributed" && *a != Decimal::ZERO);
+            let key = format!("bill:{}", event.event_id);
+            let mut page = IngestPage::default();
+            for (owner, amount) in allocations {
+                if amount == Decimal::ZERO {
+                    continue;
+                }
+                let instance = if owner == "unattributed" || owner == "rounding_residual" {
+                    None
+                } else {
+                    Some(owner.clone())
+                };
+                page.finance.push(FinanceEntry {
+                    entry_id: format!("{key}:funding:{owner}"),
+                    economic_event_key: key.clone(),
+                    component: "FUNDING".into(),
+                    allocation_leg: owner,
+                    amount,
+                    currency: event.currency.clone(),
+                    instance_id: instance,
+                    source_ref: key.clone(),
+                    time: event.time,
+                    reverses_entry_id: None,
+                });
+            }
+            page.attributed_funding_ids.push(event.event_id);
+            self.ingest_page_with_usd(&page, fx)?;
+            if unknown {
+                self.latch_stop(
+                    "funding-attribution-incomplete",
+                    "account",
+                    "FUNDING_ATTRIBUTION_INCOMPLETE",
+                    event.time,
+                )?;
+            }
+        }
+        Ok(count)
+    }
     pub fn ingest_page_with_usd(
         &mut self,
         page: &IngestPage,
@@ -9,6 +371,53 @@ impl AccountStore {
             return Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"));
         }
         let mut normalized = page.clone();
+        for flow in &page.cash_flows {
+            if flow.kind == "OPENING" {
+                continue;
+            }
+            let exists:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM finance_entries WHERE economic_event_key=?1 AND component='EXTERNAL_FLOW_USD' AND allocation_leg='account')",[&flow.event_id],|r|r.get(0))?;
+            if exists {
+                continue;
+            }
+            let rate = if flow.currency == "USD" {
+                Decimal::ONE
+            } else {
+                match fx.usd_per_currency.get(&flow.currency).copied() {
+                    Some(v) => v,
+                    None => {
+                        self.latch_stop(
+                            "usd-conversion-unavailable",
+                            "account",
+                            "USD_CONVERSION_SOURCE_UNAVAILABLE",
+                            fx.observed_at,
+                        )?;
+                        return Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"));
+                    }
+                }
+            };
+            let amount = flow
+                .amount
+                .checked_mul(rate)
+                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+            normalized.finance.push(FinanceEntry {
+                entry_id: format!("{}:usd-flow", flow.event_id),
+                economic_event_key: flow.event_id.clone(),
+                component: "EXTERNAL_FLOW_USD".into(),
+                allocation_leg: "account".into(),
+                amount,
+                currency: "USD".into(),
+                instance_id: None,
+                source_ref: format!(
+                    "{}|fx:{}|rate:{}|at:{}",
+                    flow.source_ref,
+                    fx.source_digest,
+                    exact(rate),
+                    fx.observed_at
+                ),
+                time: flow.time,
+                reverses_entry_id: None,
+            });
+        }
         for e in &page.finance {
             if e.amount >= Decimal::ZERO
                 || !matches!(
@@ -284,22 +693,43 @@ impl AccountStore {
                 let owner = instance.as_deref().ok_or(StoreError::Invalid(
                     "EXPLICIT_INSTANCE_REQUIRED_FOR_REDUCTION",
                 ))?;
-                let existing_lots = self.active_lots(&fill.instrument_id)?;
-                let mut lots = existing_lots
-                    .iter()
-                    .map(|l| crate::finance::PositionLot {
-                        lot_id: l.lot_id.clone(),
-                        instance_id: l.instance_id.clone(),
-                        instrument_id: l.instrument_id.clone(),
-                        signed_qty: if l.side == "long" {
-                            l.remaining_qty
-                        } else {
-                            -l.remaining_qty
-                        },
-                        unit_cost: l.cost,
-                        opened_at: l.opened_at,
+                let reduce_plan = self.plan(
+                    fill.intent_id
+                        .as_deref()
+                        .ok_or(StoreError::Invalid("REDUCTION_INTENT_REQUIRED"))?,
+                )?;
+                let existing_lots = self
+                    .active_lots(&fill.instrument_id)?
+                    .into_iter()
+                    .filter(|l| {
+                        l.side == reduce_plan.position_side
+                            && l.instance_id.as_deref() == Some(owner)
                     })
                     .collect::<Vec<_>>();
+                let mut lots = existing_lots
+                    .iter()
+                    .map(|l| {
+                        let p = self.plan(
+                            l.intent_id
+                                .as_deref()
+                                .ok_or(StoreError::Invalid("LOT_MECHANICS_UNAVAILABLE"))?,
+                        )?;
+                        Ok(crate::finance::PositionLot {
+                            contract_value: p.contract_value,
+                            inverse: p.inverse,
+                            lot_id: l.lot_id.clone(),
+                            instance_id: l.instance_id.clone(),
+                            instrument_id: l.instrument_id.clone(),
+                            signed_qty: if l.side == "long" {
+                                l.remaining_qty
+                            } else {
+                                -l.remaining_qty
+                            },
+                            unit_cost: l.cost,
+                            opened_at: l.opened_at,
+                        })
+                    })
+                    .collect::<StoreResult<Vec<_>>>()?;
                 let reductions = crate::finance::reduce_fifo(
                     &mut lots,
                     owner,
@@ -413,6 +843,16 @@ impl AccountStore {
                 return Err(StoreError::Invalid("IMMUTABLE_BILL_CONFLICT"));
             }
         }
+        for event in &page.funding_events {
+            let completed: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM operation_receipts WHERE operation_id=?1)",
+                [format!("funding:{}", event.event_id)],
+                |r| r.get(0),
+            )?;
+            if !completed {
+                tx.execute("INSERT INTO funding_projection_pending VALUES(?1,?2,?3,?4,?5) ON CONFLICT(event_id) DO NOTHING",params![event.event_id,event.instrument_id,event.time,exact(event.amount),event.currency])?;
+            }
+        }
         for f in &page.cash_flows {
             if f.currency.is_empty() || f.source_ref.is_empty() {
                 return Err(StoreError::Invalid("INVALID_CASH_FLOW"));
@@ -464,6 +904,18 @@ impl AccountStore {
             }
             let added=tx.execute("INSERT INTO finance_entries VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(economic_event_key,component,allocation_leg) DO NOTHING",params![e.entry_id,e.economic_event_key,e.component,e.allocation_leg,exact(e.amount),e.currency,e.instance_id,e.source_ref,e.time,e.reverses_entry_id])?;
             if added == 1 {
+                if let Some(instance) = &e.instance_id {
+                    let old:Option<String>=tx.query_row("SELECT amount FROM instance_finance_totals WHERE instance_id=?1 AND currency=?2 AND component=?3",params![instance,e.currency,e.component],|r|r.get(0)).optional()?;
+                    let total = old
+                        .map(decimal)
+                        .transpose()?
+                        .unwrap_or(Decimal::ZERO)
+                        .checked_add(e.amount)
+                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+                    tx.execute("INSERT INTO instance_finance_totals VALUES(?1,?2,?3,?4) ON CONFLICT(instance_id,currency,component) DO UPDATE SET amount=excluded.amount",params![instance,e.currency,e.component,exact(total)])?;
+                }
+            }
+            if added == 1 {
                 let prior: Option<String> = tx
                     .query_row(
                         "SELECT amount FROM finance_totals WHERE currency=?1 AND component=?2",
@@ -496,6 +948,27 @@ impl AccountStore {
                 added_loss = added_loss
                     .checked_add(e.amount)
                     .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+                let mut scopes = vec!["account".to_string()];
+                if let Some(instance) = &e.instance_id {
+                    scopes.push(format!("strategy:{instance}"));
+                }
+                for scope in scopes {
+                    let day = crate::risk::utc_day(e.time);
+                    let prior: Option<String> = tx
+                        .query_row(
+                            "SELECT loss_usd FROM daily_losses WHERE scope_id=?1 AND utc_day=?2",
+                            params![scope, day],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    let total = prior
+                        .map(decimal)
+                        .transpose()?
+                        .unwrap_or(Decimal::ZERO)
+                        .checked_add(e.amount)
+                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+                    tx.execute("INSERT INTO daily_losses VALUES(?1,?2,?3) ON CONFLICT(scope_id,utc_day) DO UPDATE SET loss_usd=excluded.loss_usd",params![scope,day,exact(total)])?;
+                }
             }
         }
         if added_loss > Decimal::ZERO {
@@ -527,10 +1000,35 @@ impl AccountStore {
             }
         }
         for n in &page.nav {
+            tx.execute(
+                "INSERT INTO nav_scopes VALUES(?1,?2) ON CONFLICT DO NOTHING",
+                params![n.scope_id, n.currency],
+            )?;
             if n.mark_source.is_empty() {
                 return Err(StoreError::Invalid("NAV_MARK_SOURCE_REQUIRED"));
             }
             tx.execute("INSERT INTO nav_points VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(scope_id,time,source_version) DO NOTHING",params![n.scope_id,n.time,n.source_version,exact(n.equity),exact(n.pnl),exact(n.flows),n.currency,n.coverage,n.mark_source])?;
+            if n.currency == "USD" {
+                let adjusted = n
+                    .equity
+                    .checked_sub(n.flows)
+                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+                let prior: Option<(String, i64)> = tx
+                    .query_row(
+                        "SELECT highwater,time FROM nav_watermarks WHERE scope_id=?1",
+                        [&n.scope_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                if prior.as_ref().is_none_or(|(_, time)| n.time >= *time) {
+                    let peak = prior
+                        .map(|(v, _)| decimal(v))
+                        .transpose()?
+                        .unwrap_or(adjusted)
+                        .max(adjusted);
+                    tx.execute("INSERT INTO nav_watermarks VALUES(?1,?2,?3,?4,?5) ON CONFLICT(scope_id) DO UPDATE SET highwater=excluded.highwater,adjusted_equity=excluded.adjusted_equity,time=excluded.time,coverage=excluded.coverage",params![n.scope_id,exact(peak),exact(adjusted),n.time,n.coverage])?;
+                }
+            }
         }
         if let Some(c) = &page.cursor {
             let prior:Option<(i64,i64)>=tx.query_row("SELECT generation,watermark FROM source_cursors WHERE source=?1 AND stream_partition=?2",params![c.source,c.stream_partition],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
@@ -543,6 +1041,13 @@ impl AccountStore {
         }
         for id in &page.projected_fill_ids {
             tx.execute("DELETE FROM fill_projection_pending WHERE fill_id=?1", [id])?;
+        }
+        for id in &page.attributed_funding_ids {
+            tx.execute(
+                "DELETE FROM funding_projection_pending WHERE event_id=?1",
+                [id],
+            )?;
+            tx.execute("INSERT INTO operation_receipts VALUES(?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(operation_id) DO NOTHING",params![format!("funding:{id}"),id,wall_time_ms()])?;
         }
         tx.commit()?;
         Ok(())

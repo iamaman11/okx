@@ -129,6 +129,11 @@ pub struct CentralReceipt {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IntentPlan {
+    pub contract_value: Decimal,
+    pub inverse: bool,
+    pub settlement_currency: String,
+    pub position_side: String,
+    pub private_source_generation: i64,
     pub operation: String,
     pub side: String,
     pub quantity: Decimal,
@@ -226,6 +231,8 @@ pub struct SourceCursor {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IngestPage {
+    pub funding_events: Vec<FundingEvent>,
+    pub attributed_funding_ids: Vec<String>,
     pub fills: Vec<Fill>,
     pub bills: Vec<Bill>,
     pub finance: Vec<FinanceEntry>,
@@ -235,6 +242,20 @@ pub struct IngestPage {
     pub nav: Vec<NavPoint>,
     pub projected_fill_ids: Vec<String>,
     pub cursor: Option<SourceCursor>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundingEvent {
+    pub event_id: String,
+    pub instrument_id: String,
+    pub time: i64,
+    pub amount: Decimal,
+    pub currency: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VenueMark {
+    pub instrument_id: String,
+    pub price: Decimal,
+    pub source_ref: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CashFlow {
@@ -279,6 +300,7 @@ pub struct NavPoint {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpeningSnapshot {
+    pub opening_equity_usd: Decimal,
     pub source_ref: String,
     pub observed_at: i64,
     pub positions: usize,
@@ -286,6 +308,25 @@ pub struct OpeningSnapshot {
     pub conditional_orders: usize,
     pub liabilities: Decimal,
     pub balances: Vec<(String, Decimal)>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinancialRisk {
+    pub daily_loss_usd: Decimal,
+    pub drawdown_ratio: Decimal,
+    pub nav_complete: bool,
+    pub source_as_of: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NavWindow {
+    pub scope_id: String,
+    pub currency: String,
+    pub opening_equity: Option<Decimal>,
+    pub current_equity: Option<Decimal>,
+    pub flows: Option<Decimal>,
+    pub pnl: Option<Decimal>,
+    pub opening_as_of: Option<i64>,
+    pub current_as_of: Option<i64>,
+    pub coverage: String,
 }
 
 /// Connection stays on its owning blocking worker. It is never a network transaction.

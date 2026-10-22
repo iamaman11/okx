@@ -3,12 +3,41 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionLot {
+    pub contract_value: Decimal,
+    pub inverse: bool,
     pub lot_id: String,
     pub instance_id: Option<String>,
     pub instrument_id: String,
     pub signed_qty: Decimal,
     pub unit_cost: Decimal,
     pub opened_at: i64,
+}
+pub fn position_pnl(
+    quantity: Decimal,
+    entry: Decimal,
+    exit: Decimal,
+    contract_value: Decimal,
+    inverse: bool,
+    direction: Decimal,
+) -> StoreResult<Decimal> {
+    if entry <= Decimal::ZERO || exit <= Decimal::ZERO || contract_value <= Decimal::ZERO {
+        return Err(StoreError::Invalid("INVALID_CONTRACT_MECHANICS"));
+    }
+    let delta = if inverse {
+        Decimal::ONE.checked_div(entry).and_then(|e| {
+            Decimal::ONE
+                .checked_div(exit)
+                .and_then(|x| e.checked_sub(x))
+        })
+    } else {
+        exit.checked_sub(entry)
+    }
+    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+    quantity
+        .checked_mul(contract_value)
+        .and_then(|q| q.checked_mul(delta))
+        .and_then(|v| v.checked_mul(direction))
+        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LotReduction {
@@ -61,11 +90,14 @@ pub fn reduce_fifo(
         } else {
             -Decimal::ONE
         };
-        let pnl = exit_price
-            .checked_sub(l.unit_cost)
-            .and_then(|v| v.checked_mul(qty))
-            .and_then(|v| v.checked_mul(direction))
-            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
+        let pnl = position_pnl(
+            qty,
+            l.unit_cost,
+            exit_price,
+            l.contract_value,
+            l.inverse,
+            direction,
+        )?;
         updates.push((
             i,
             l.signed_qty
@@ -128,6 +160,8 @@ mod tests {
     fn two_instances_same_instrument_lot_attribution() {
         let mut lots = vec![
             PositionLot {
+                contract_value: Decimal::ONE,
+                inverse: false,
                 lot_id: "b".into(),
                 instance_id: Some("b".into()),
                 instrument_id: "BTC".into(),
@@ -136,6 +170,8 @@ mod tests {
                 opened_at: 1,
             },
             PositionLot {
+                contract_value: Decimal::ONE,
+                inverse: false,
                 lot_id: "a".into(),
                 instance_id: Some("a".into()),
                 instrument_id: "BTC".into(),

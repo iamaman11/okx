@@ -2,6 +2,367 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 #[test]
+fn missing_fx_stops_risk_and_does_not_commit_zero_loss_or_cursor() {
+    let mut s = store();
+    let fx = UsdConversionEvidence {
+        observed_at: 5,
+        source_digest: "source".into(),
+        usd_per_currency: Default::default(),
+    };
+    let page = IngestPage {
+        finance: vec![fee("fee", "source")],
+        cursor: Some(SourceCursor {
+            source: "bills".into(),
+            stream_partition: "account".into(),
+            cursor: "done".into(),
+            watermark: 5,
+            generation: 1,
+            coverage_gaps: "".into(),
+        }),
+        ..Default::default()
+    };
+    assert!(s.ingest_page_with_usd(&page, &fx).is_err());
+    assert_eq!(s.stops().unwrap()[0].2, "USD_CONVERSION_SOURCE_UNAVAILABLE");
+    assert!(s.cursor("bills", "account").unwrap().is_none());
+    assert!(s.finance_history(1, 10, 0, "", 100).unwrap().is_empty());
+}
+#[test]
+fn allocation_and_bar_claim_survive_retry_and_restart() {
+    let mut s = store();
+    owned_fill(&mut s, "a", "a-order", 100, "long", 3);
+    assert!(
+        s.claim_strategy_decision("a", "bar-100", "inputs", 1, 5)
+            .unwrap()
+    );
+    assert!(
+        !s.claim_strategy_decision("a", "bar-100", "inputs", 1, 5)
+            .unwrap()
+    );
+    let mut a = s.instances().unwrap().remove(0);
+    a.budget = Decimal::from(15);
+    a.policy_revision = 2;
+    s.mutate_instance("allocation-update", "newbody", "update", &a, Some(1), 6)
+        .unwrap();
+    s.mutate_instance("allocation-update", "newbody", "update", &a, Some(1), 6)
+        .unwrap();
+    let amounts = s
+        .connection
+        .prepare("SELECT delta FROM allocations ORDER BY time,event_id")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(amounts, vec!["10", "5"]);
+    let p = s.path.clone();
+    let m = s.meta.clone();
+    drop(s);
+    let mut s = AccountStore::open_existing(p, &m.account_key, &m.installation_id).unwrap();
+    assert!(
+        !s.claim_strategy_decision("a", "bar-100", "inputs", 2, 7)
+            .unwrap()
+    );
+    assert_eq!(
+        s.instances().unwrap()[0].last_decision_key.as_deref(),
+        Some("bar-100")
+    );
+}
+#[test]
+fn nav_window_excludes_deposit_and_reports_pre_t0_unavailable() {
+    let mut s = store();
+    let fx = UsdConversionEvidence {
+        observed_at: 5,
+        source_digest: "fx".into(),
+        usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::ONE)]),
+    };
+    s.ingest_page_with_usd(
+        &IngestPage {
+            cash_flows: vec![CashFlow {
+                event_id: "deposit".into(),
+                kind: "DEPOSIT".into(),
+                currency: "USDT".into(),
+                amount: Decimal::from(50),
+                time: 5,
+                source_ref: "exchange".into(),
+            }],
+            ..Default::default()
+        },
+        &fx,
+    )
+    .unwrap();
+    assert_eq!(
+        s.usd_component_total("EXTERNAL_FLOW_USD").unwrap(),
+        Decimal::from(50)
+    );
+    s.ingest_page(&IngestPage {
+        nav: vec![NavPoint {
+            scope_id: "account".into(),
+            time: 6,
+            source_version: "source".into(),
+            equity: Decimal::from(155),
+            pnl: Decimal::from(5),
+            flows: Decimal::from(50),
+            currency: "USD".into(),
+            coverage: "COMPLETE".into(),
+            mark_source: "source".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let v = s.nav_summary(1, 6, &[], &["USD".into()]).unwrap();
+    assert_eq!(v[0].flows, Some(Decimal::from(50)));
+    assert_eq!(v[0].pnl, Some(Decimal::from(5)));
+    assert_eq!(
+        s.financial_risk(6, None).unwrap().drawdown_ratio,
+        Decimal::ZERO
+    );
+    let before = s.nav_summary(0, 6, &[], &["USD".into()]).unwrap();
+    assert!(before[0].opening_equity.is_none());
+    assert!(before[0].pnl.is_none());
+    assert_eq!(before[0].coverage, "UNAVAILABLE_BEFORE_T0");
+}
+#[test]
+fn funding_opposite_instances_conserves_account_and_keeps_residual_explicit() {
+    let mut s = store();
+    owned_fill(&mut s, "a", "a1", 100, "long", 3);
+    owned_fill(&mut s, "a", "a2", 100, "long", 4);
+    owned_fill(&mut s, "b", "b1", 100, "short", 5);
+    let fx = UsdConversionEvidence {
+        observed_at: 10,
+        source_digest: "fx".into(),
+        usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::ONE)]),
+    };
+    s.ingest_page(&IngestPage {
+        bills: vec![Bill {
+            bill_id: "f".into(),
+            kind: "FUNDING".into(),
+            time: 9,
+            amount: -Decimal::ONE,
+            currency: "USDT".into(),
+            economic_event_key: "bill:f".into(),
+        }],
+        funding_events: vec![FundingEvent {
+            event_id: "f".into(),
+            instrument_id: "BTC".into(),
+            time: 9,
+            amount: -Decimal::ONE,
+            currency: "USDT".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    s.attribute_pending_funding(&fx, 10).unwrap();
+    let f = s
+        .finance_history(1, 10, 0, "", 100)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.component == "FUNDING")
+        .collect::<Vec<_>>();
+    assert_eq!(f.iter().map(|e| e.amount).sum::<Decimal>(), -Decimal::ONE);
+    assert_eq!(
+        f.iter()
+            .find(|e| e.instance_id.as_deref() == Some("a"))
+            .unwrap()
+            .amount,
+        Decimal::from(-2)
+    );
+    assert_eq!(
+        f.iter()
+            .find(|e| e.instance_id.as_deref() == Some("b"))
+            .unwrap()
+            .amount,
+        Decimal::ONE
+    );
+}
+fn owned_fill(s: &mut AccountStore, instance: &str, id: &str, price: i64, side: &str, time: i64) {
+    let i = StrategyInstance {
+        instance_id: instance.into(),
+        definition_id: "fixture".into(),
+        definition_version: "1".into(),
+        parameters: "{}".into(),
+        enabled: true,
+        policy_revision: 1,
+        budget: Decimal::from(10),
+        last_decision_key: None,
+    };
+    s.mutate_instance(&format!("create:{instance}"), "hash", "create", &i, None, 2)
+        .unwrap();
+    let plan = IntentPlan {
+        operation: "open".into(),
+        side: if side == "long" { "buy" } else { "sell" }.into(),
+        position_side: side.into(),
+        quantity: Decimal::ONE,
+        limit_price: Decimal::from(price),
+        stop_price: None,
+        strategy_instance: instance.into(),
+        planned_loss_usd: Decimal::ONE,
+        source_generation: 1,
+        private_source_generation: 1,
+        contract_value: Decimal::new(1, 2),
+        inverse: false,
+        settlement_currency: "USDT".into(),
+    };
+    let decision = Decision {
+        decision_id: format!("d:{id}"),
+        instance_id: Some(instance.into()),
+        decision_at: 2,
+        input_digest: "input".into(),
+        policy_revision: 1,
+        code_version: "fixture".into(),
+    };
+    let intent = NewIntent {
+        plan,
+        intent_id: id.into(),
+        idempotency_key: id.into(),
+        request_hash: "body".into(),
+        client_order_id: id.into(),
+        deadline: 1000,
+        plan_hash: "plan".into(),
+        policy_revision: 1,
+        risk_increase: true,
+        instrument_id: "BTC".into(),
+    };
+    s.prepare(&decision, &intent).unwrap();
+    s.ingest_attributed_fill(
+        Fill {
+            side: if side == "long" { "buy" } else { "sell" }.into(),
+            fill_id: format!("f:{id}"),
+            instrument_id: "BTC".into(),
+            trade_id: id.into(),
+            exchange_order_id: format!("o:{id}"),
+            intent_id: Some(id.into()),
+            time,
+            qty: Decimal::ONE,
+            price: Decimal::from(price),
+            fee: Decimal::ZERO,
+            currency: "USDT".into(),
+        },
+        FillEffect::Open { side: side.into() },
+        None,
+    )
+    .unwrap();
+}
+#[test]
+fn instance_nav_uses_each_lot_cost_and_contract_value() {
+    let mut s = store();
+    owned_fill(&mut s, "a", "a-order", 100, "long", 3);
+    owned_fill(&mut s, "b", "b-order", 200, "long", 4);
+    let fx = UsdConversionEvidence {
+        observed_at: 5,
+        source_digest: "usd-mark".into(),
+        usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::ONE)]),
+    };
+    s.record_instance_nav(
+        &[VenueMark {
+            instrument_id: "BTC".into(),
+            price: Decimal::from(300),
+            source_ref: "mark".into(),
+        }],
+        &fx,
+        5,
+    )
+    .unwrap();
+    let a: String = s
+        .connection
+        .query_row(
+            "SELECT equity FROM nav_points WHERE scope_id='strategy:a' AND time=5",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let b: String = s
+        .connection
+        .query_row(
+            "SELECT equity FROM nav_points WHERE scope_id='strategy:b' AND time=5",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(a, "12");
+    assert_eq!(b, "11");
+    s.record_instance_nav(
+        &[VenueMark {
+            instrument_id: "BTC".into(),
+            price: Decimal::from(100),
+            source_ref: "mark".into(),
+        }],
+        &fx,
+        6,
+    )
+    .unwrap();
+    let risk = s.financial_risk(6, Some("b")).unwrap();
+    assert!(risk.nav_complete);
+    assert!(risk.drawdown_ratio > Decimal::ZERO);
+}
+#[test]
+fn funding_at_event_respects_opposite_instances_and_later_fills() {
+    let mut s = store();
+    owned_fill(&mut s, "a", "a-order", 100, "long", 3);
+    owned_fill(&mut s, "b", "b-order", 100, "short", 20);
+    let fx = UsdConversionEvidence {
+        observed_at: 30,
+        source_digest: "fx".into(),
+        usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::ONE)]),
+    };
+    s.ingest_page(&IngestPage {
+        bills: vec![Bill {
+            bill_id: "funding".into(),
+            kind: "FUNDING".into(),
+            time: 10,
+            amount: -Decimal::ONE,
+            currency: "USDT".into(),
+            economic_event_key: "bill:funding".into(),
+        }],
+        funding_events: vec![FundingEvent {
+            event_id: "funding".into(),
+            instrument_id: "BTC".into(),
+            time: 10,
+            amount: -Decimal::ONE,
+            currency: "USDT".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(s.attribute_pending_funding(&fx, 100).unwrap(), 1);
+    assert_eq!(s.attribute_pending_funding(&fx, 100).unwrap(), 0);
+    let rows = s.finance_history(1, 30, 0, "", 100).unwrap();
+    let funding = rows
+        .iter()
+        .filter(|e| e.component == "FUNDING")
+        .collect::<Vec<_>>();
+    assert_eq!(funding.len(), 1);
+    assert_eq!(funding[0].instance_id.as_deref(), Some("a"));
+    assert_eq!(s.policy().unwrap().4, Decimal::ONE);
+}
+#[test]
+fn utc_daily_risk_rolls_without_replenishing_campaign_or_clearing_stop() {
+    let mut s = store();
+    let fx = UsdConversionEvidence {
+        observed_at: 5,
+        source_digest: "fx".into(),
+        usd_per_currency: std::collections::BTreeMap::from([("USDT".into(), Decimal::ONE)]),
+    };
+    s.ingest_page_with_usd(
+        &IngestPage {
+            finance: vec![fee("fee", "source")],
+            ..Default::default()
+        },
+        &fx,
+    )
+    .unwrap();
+    assert_eq!(
+        s.financial_risk(5, None).unwrap().daily_loss_usd,
+        Decimal::new(25, 2)
+    );
+    s.latch_stop("drawdown", "account", "DRAWDOWN", 5).unwrap();
+    assert_eq!(
+        s.financial_risk(86_400_005, None).unwrap().daily_loss_usd,
+        Decimal::ZERO
+    );
+    assert_eq!(s.policy().unwrap().4, Decimal::new(25, 2));
+    assert_eq!(s.stops().unwrap().len(), 1);
+}
+#[test]
 fn campaign_conversion_is_attested_deduplicated_and_profit_never_refills() {
     let mut s = store();
     let e = fee("fee", "fill-source");
@@ -142,7 +503,7 @@ fn sqlite_million_history_bounded_rss() {
     let mut s = store();
     intent(&mut s);
     let tx = s.connection.transaction().unwrap();
-    tx.execute_batch("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at) SELECT 'terminal-'||x,'key-'||x,'request-hash','decision','FILLED',4,'client-'||x,100,'plan',1,1,'BTC-USDT-SWAP',2,4 FROM n; INSERT INTO intent_plans SELECT intent_id,'open','buy','1','100','95','manual','5',1 FROM intents WHERE state='FILLED';").unwrap();
+    tx.execute_batch("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at) SELECT 'terminal-'||x,'key-'||x,'request-hash','decision','FILLED',4,'client-'||x,100,'plan',1,1,'BTC-USDT-SWAP',2,4 FROM n; INSERT INTO intent_plans SELECT intent_id,'open','buy','1','100','95','manual','5',1,'long',1,'1',0,'USDT' FROM intents WHERE state='FILLED';").unwrap();
     tx.commit().unwrap();
     s.checkpoint().unwrap();
     let path = s.path.clone();
@@ -228,6 +589,7 @@ fn store() -> AccountStore {
         opening_source: "authenticated-flat".into(),
     };
     let s = OpeningSnapshot {
+        opening_equity_usd: Decimal::from(100),
         source_ref: m.opening_source.clone(),
         observed_at: 1,
         positions: 0,
@@ -252,6 +614,11 @@ fn intent(s: &mut AccountStore) -> StoredIntent {
     };
     let i = NewIntent {
         plan: IntentPlan {
+            contract_value: Decimal::ONE,
+            inverse: false,
+            settlement_currency: "USDT".into(),
+            position_side: "long".into(),
+            private_source_generation: 1,
             operation: "open".into(),
             side: "buy".into(),
             quantity: Decimal::ONE,
@@ -739,6 +1106,7 @@ fn initialize_retry_is_exact_and_never_reinitializes() {
     let m = s.meta.clone();
     drop(s);
     let fresh = OpeningSnapshot {
+        opening_equity_usd: Decimal::from(100),
         source_ref: "changed".into(),
         observed_at: 100,
         positions: 1,

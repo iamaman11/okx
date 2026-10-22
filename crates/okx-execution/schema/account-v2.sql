@@ -6,7 +6,7 @@ CREATE TABLE strategy_instances(instance_id TEXT PRIMARY KEY,definition_id TEXT 
 CREATE TABLE decisions(decision_id TEXT PRIMARY KEY,instance_id TEXT REFERENCES strategy_instances(instance_id),decision_at INTEGER NOT NULL,input_digest TEXT NOT NULL,policy_revision INTEGER NOT NULL,code_version TEXT NOT NULL) STRICT;
 CREATE TABLE intents(intent_id TEXT PRIMARY KEY,idempotency_key TEXT NOT NULL UNIQUE,request_hash TEXT NOT NULL,decision_id TEXT NOT NULL REFERENCES decisions(decision_id),state TEXT NOT NULL CHECK(state IN('PREPARED','RESERVED','POSTING','UNKNOWN','ACKNOWLEDGED','PARTIALLY_FILLED','FILLED','CANCELLED','REJECTED')),revision INTEGER NOT NULL,client_order_id TEXT NOT NULL UNIQUE,deadline INTEGER NOT NULL,plan_hash TEXT NOT NULL,policy_revision INTEGER NOT NULL,risk_increase INTEGER NOT NULL CHECK(risk_increase IN(0,1)),instrument_id TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,begin_post_at INTEGER,exchange_order_id TEXT,incident TEXT) STRICT;
 CREATE INDEX idx_intents_active ON intents(state,updated_at,intent_id);
-CREATE TABLE intent_plans(intent_id TEXT PRIMARY KEY REFERENCES intents(intent_id),operation TEXT NOT NULL,side TEXT NOT NULL,quantity TEXT NOT NULL,limit_price TEXT NOT NULL,stop_price TEXT,strategy_instance TEXT NOT NULL,planned_loss_usd TEXT NOT NULL,source_generation INTEGER NOT NULL) STRICT;
+CREATE TABLE intent_plans(intent_id TEXT PRIMARY KEY REFERENCES intents(intent_id),operation TEXT NOT NULL,side TEXT NOT NULL,quantity TEXT NOT NULL,limit_price TEXT NOT NULL,stop_price TEXT,strategy_instance TEXT NOT NULL,planned_loss_usd TEXT NOT NULL,source_generation INTEGER NOT NULL,position_side TEXT NOT NULL CHECK(position_side IN('long','short')),private_source_generation INTEGER NOT NULL,contract_value TEXT NOT NULL,inverse INTEGER NOT NULL CHECK(inverse IN(0,1)),settlement_currency TEXT NOT NULL) STRICT;
 CREATE TABLE protection_receipts(intent_id TEXT PRIMARY KEY REFERENCES intents(intent_id),algo_id TEXT NOT NULL UNIQUE,side TEXT NOT NULL,quantity TEXT NOT NULL,trigger_price TEXT NOT NULL,trigger_basis TEXT NOT NULL,verified_at INTEGER NOT NULL,source_digest TEXT NOT NULL) STRICT;
 CREATE TABLE orders(order_id TEXT PRIMARY KEY,exchange_order_id TEXT UNIQUE,intent_id TEXT REFERENCES intents(intent_id),client_order_id TEXT NOT NULL,protection_id TEXT,filled_qty TEXT NOT NULL,state TEXT NOT NULL) STRICT;
 CREATE INDEX idx_orders_intent ON orders(intent_id);
@@ -14,6 +14,7 @@ CREATE INDEX idx_orders_active ON orders(state,order_id);
 CREATE TABLE fills(fill_id TEXT PRIMARY KEY,instrument_id TEXT NOT NULL,trade_id TEXT NOT NULL,exchange_order_id TEXT NOT NULL,intent_id TEXT REFERENCES intents(intent_id),time INTEGER NOT NULL,qty TEXT NOT NULL,price TEXT NOT NULL,fee TEXT NOT NULL,currency TEXT NOT NULL,side TEXT NOT NULL CHECK(side IN('buy','sell')),UNIQUE(instrument_id,trade_id,exchange_order_id)) STRICT;
 CREATE INDEX idx_fills_time ON fills(time,fill_id);
 CREATE TABLE fill_projection_pending(fill_id TEXT PRIMARY KEY REFERENCES fills(fill_id),side TEXT NOT NULL) STRICT;
+CREATE TABLE funding_projection_pending(event_id TEXT PRIMARY KEY REFERENCES bills(bill_id),instrument_id TEXT NOT NULL,time INTEGER NOT NULL,amount TEXT NOT NULL,currency TEXT NOT NULL) STRICT;
 CREATE TABLE bills(bill_id TEXT PRIMARY KEY,kind TEXT NOT NULL,time INTEGER NOT NULL,amount TEXT NOT NULL,currency TEXT NOT NULL,economic_event_key TEXT NOT NULL) STRICT;
 CREATE INDEX idx_bills_time ON bills(time,bill_id);
 CREATE TABLE cash_flows(event_id TEXT PRIMARY KEY,kind TEXT NOT NULL,currency TEXT NOT NULL,amount TEXT NOT NULL,time INTEGER NOT NULL,source_ref TEXT NOT NULL) STRICT;
@@ -25,12 +26,17 @@ CREATE TABLE finance_entries(entry_id TEXT PRIMARY KEY,economic_event_key TEXT N
 CREATE INDEX idx_finance_time ON finance_entries(time,entry_id);
 CREATE INDEX idx_finance_instance ON finance_entries(instance_id,time,entry_id);
 CREATE TABLE finance_totals(currency TEXT NOT NULL,component TEXT NOT NULL,amount TEXT NOT NULL,PRIMARY KEY(currency,component)) STRICT;
+CREATE TABLE instance_finance_totals(instance_id TEXT NOT NULL REFERENCES strategy_instances(instance_id),currency TEXT NOT NULL,component TEXT NOT NULL,amount TEXT NOT NULL,PRIMARY KEY(instance_id,currency,component)) STRICT;
 CREATE TABLE finance_source_links(entry_id TEXT NOT NULL REFERENCES finance_entries(entry_id),source_ref TEXT NOT NULL,PRIMARY KEY(entry_id,source_ref)) STRICT;
 CREATE TABLE nav_points(scope_id TEXT NOT NULL,time INTEGER NOT NULL,source_version TEXT NOT NULL,equity TEXT NOT NULL,pnl TEXT NOT NULL,flows TEXT NOT NULL,currency TEXT NOT NULL,coverage TEXT NOT NULL,mark_source TEXT NOT NULL,PRIMARY KEY(scope_id,time,source_version)) STRICT;
+CREATE TABLE nav_watermarks(scope_id TEXT PRIMARY KEY,highwater TEXT NOT NULL,adjusted_equity TEXT NOT NULL,time INTEGER NOT NULL,coverage TEXT NOT NULL) STRICT;
+CREATE TABLE nav_scopes(scope_id TEXT NOT NULL,currency TEXT NOT NULL,PRIMARY KEY(scope_id,currency)) STRICT;
+CREATE TABLE daily_losses(scope_id TEXT NOT NULL,utc_day INTEGER NOT NULL,loss_usd TEXT NOT NULL,PRIMARY KEY(scope_id,utc_day)) STRICT;
 CREATE TABLE risk_stops(stop_id TEXT PRIMARY KEY,scope TEXT NOT NULL,reason TEXT NOT NULL,latched_at INTEGER NOT NULL,resolution TEXT) STRICT;
 CREATE INDEX idx_stops_unresolved ON risk_stops(scope,resolution);
 CREATE TABLE source_cursors(source TEXT NOT NULL,stream_partition TEXT NOT NULL,cursor TEXT NOT NULL,watermark INTEGER NOT NULL,generation INTEGER NOT NULL,coverage_gaps TEXT NOT NULL,PRIMARY KEY(source,stream_partition)) STRICT;
 CREATE TABLE risk_receipts(reservation_key TEXT PRIMARY KEY,intent_id TEXT NOT NULL UNIQUE REFERENCES intents(intent_id),account_key TEXT NOT NULL,installation_id TEXT NOT NULL,instance_id TEXT,plan_hash TEXT NOT NULL,policy_revision INTEGER NOT NULL,receipt_hash TEXT NOT NULL,requested_loss_usd TEXT NOT NULL,conversion_digest TEXT NOT NULL,state TEXT NOT NULL) STRICT;
+CREATE INDEX idx_risk_receipts_active ON risk_receipts(state,intent_id);
 CREATE TABLE operation_receipts(operation_id TEXT PRIMARY KEY,kind TEXT NOT NULL,request_hash TEXT NOT NULL,result_ref TEXT NOT NULL,committed_at INTEGER NOT NULL) STRICT;
 CREATE TABLE account_policy(singleton INTEGER PRIMARY KEY CHECK(singleton=1),revision INTEGER NOT NULL,paused INTEGER NOT NULL CHECK(paused IN(0,1)),campaign_id TEXT NOT NULL,campaign_limit TEXT NOT NULL,campaign_loss TEXT NOT NULL) STRICT;
 CREATE TABLE storage_recovery(singleton INTEGER PRIMARY KEY CHECK(singleton=1),requires_reconcile INTEGER NOT NULL CHECK(requires_reconcile IN(0,1)),backup_at INTEGER,reconciled_evidence TEXT) STRICT;
@@ -49,4 +55,5 @@ CREATE TRIGGER immutable_cashflow_update BEFORE UPDATE ON cash_flows BEGIN SELEC
 CREATE TRIGGER immutable_cashflow_delete BEFORE DELETE ON cash_flows BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CASH_FLOW'); END;
 CREATE TRIGGER immutable_allocation_update BEFORE UPDATE ON allocations BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ALLOCATION'); END;
 CREATE TRIGGER immutable_allocation_delete BEFORE DELETE ON allocations BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ALLOCATION'); END;
+
 
