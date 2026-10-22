@@ -3808,7 +3808,7 @@ mod tests {
             reopened.current_source().unwrap().unwrap().checksum_sha256,
             source.checksum_sha256,
         );
-        assert_eq!(reopened.risk_stop.unwrap().reason, "OPERATOR_HALT");
+        assert_eq!(reopened.risk_stop.as_ref().unwrap().reason, "OPERATOR_HALT");
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
