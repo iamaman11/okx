@@ -611,7 +611,16 @@ pub(super) fn nav_cursor_and_daily_loss(
     let sql = format!("{INDEXED_INTENT_COLUMNS} WHERE e.intent_id=?1");
     let mut stmt = c.prepare(&sql).map_err(io)?;
     let mut loss = crate::strategy_finance::DailyStrategyLossAccumulator::default();
-    super::sqlite_source::visit_bill_events(&c, &run.allocation_id, &uid, |_, event| {
+    let through_ms = as_of
+        .checked_add(1)
+        .ok_or(ExecutionLedgerError::InvalidTimestamp)?;
+    super::sqlite_source::visit_bills_in_window(
+        &c,
+        &run.allocation_id,
+        &uid,
+        day,
+        through_ms,
+        |_, event| {
         if event.payload["source"] != "OKX_REST_BILL" {
             return Ok(());
         }
@@ -648,9 +657,10 @@ pub(super) fn nav_cursor_and_daily_loss(
         if !direct_run && !run_reducer {
             return Ok(());
         }
-        loss.accept(&event.payload, run, day, as_of)?;
-        Ok(())
-    })?;
+            loss.accept(&event.payload, run, day, as_of)?;
+            Ok(())
+        },
+    )?;
     let Some(gross_loss) = loss.finish(run, report, day)? else {
         return Ok(None);
     };

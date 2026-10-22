@@ -135,12 +135,50 @@ fn index_financial_source_event(
 }
 
 /// Every active finance read consumes ordered, typed SQL rows. Historical
-/// events remain sealed on disk; the callback never stores a full source map.
+/// events remain sealed on disk; the callback never builds a source map.
 pub(super) fn visit_financial_kind<F>(
     connection: &Connection,
     run_id: &str,
     expected_uid: &str,
     kind: &str,
+    visit: F,
+) -> Result<(), ExecutionLedgerError>
+where
+    F: FnMut(&str, &StoredExchangeEvent) -> Result<(), ExecutionLedgerError>,
+{
+    visit_financial_kind_internal(connection, run_id, expected_uid, kind, None, visit)
+}
+
+/// Hot-path daily NAV/STOP reads only exact BILLS inside the authenticated
+/// UTC-day window. The unique financial chronology index bounds the scan;
+/// all selected source bytes and their additive witnesses remain verified.
+pub(super) fn visit_bills_in_window<F>(
+    connection: &Connection,
+    run_id: &str,
+    expected_uid: &str,
+    from_ms: u64,
+    through_ms: u64,
+    visit: F,
+) -> Result<(), ExecutionLedgerError>
+where
+    F: FnMut(&str, &StoredExchangeEvent) -> Result<(), ExecutionLedgerError>,
+{
+    if through_ms <= from_ms {
+        return Err(ExecutionLedgerError::InvalidTimestamp);
+    }
+    let from = i64::try_from(from_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    let through = i64::try_from(through_ms).map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    visit_financial_kind_internal(
+        connection, run_id, expected_uid, "BILL", Some((from, through)), visit,
+    )
+}
+
+fn visit_financial_kind_internal<F>(
+    connection: &Connection,
+    run_id: &str,
+    expected_uid: &str,
+    kind: &str,
+    window: Option<(i64, i64)>,
     mut visit: F,
 ) -> Result<(), ExecutionLedgerError>
 where
@@ -156,18 +194,29 @@ where
     if uid != expected_uid || !matches!(kind, "FILL" | "BILL") {
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
-    let mut stmt = connection
-        .prepare(
-            "SELECT e.event_key,e.payload_digest,length(e.payload),e.payload,
+    const COLUMNS: &str = "SELECT e.event_key,e.payload_digest,length(e.payload),e.payload,
                 i.payload_digest,i.exchange_time_ms
          FROM native_source_finance_order i
          JOIN native_source_events e ON e.run_id=i.run_id AND e.event_key=i.event_key
          WHERE i.run_id=?1 AND i.event_kind=?2
            AND (?2<>'BILL' OR (i.event_key>='bill:' AND i.event_key<'bill;'))
-         ORDER BY i.exchange_time_ms,i.event_key",
-        )
+         ORDER BY i.exchange_time_ms,i.event_key";
+    const WINDOW: &str = "SELECT e.event_key,e.payload_digest,length(e.payload),e.payload,
+                i.payload_digest,i.exchange_time_ms
+         FROM native_source_finance_order i INDEXED BY idx_native_financial_chrono
+         JOIN native_source_events e ON e.run_id=i.run_id AND e.event_key=i.event_key
+         WHERE i.run_id=?1 AND i.event_kind=?2
+           AND i.exchange_time_ms>=?3 AND i.exchange_time_ms<?4
+           AND i.event_key>='bill:' AND i.event_key<'bill;'
+         ORDER BY i.exchange_time_ms,i.event_key";
+    let mut stmt = connection
+        .prepare(if window.is_some() { WINDOW } else { COLUMNS })
         .map_err(io)?;
-    let mut rows = stmt.query(params![run_id, kind]).map_err(io)?;
+    let mut rows = if let Some((from, through)) = window {
+        stmt.query(params![run_id, kind, from, through]).map_err(io)?
+    } else {
+        stmt.query(params![run_id, kind]).map_err(io)?
+    };
     while let Some(row) = rows.next().map_err(io)? {
         let key: String = row.get(0).map_err(io)?;
         let digest: String = row.get(1).map_err(io)?;
@@ -1518,6 +1567,19 @@ mod tests {
         })
         .unwrap();
         assert_eq!(from_finance, observed);
+        let mut bounded = Vec::new();
+        visit_bills_in_window(&c, &sample.run_id, &sample.account_uid, 2000, 2001, |key, event| {
+            bounded.push((key.to_owned(), event.payload["balChg"].as_str().unwrap().to_owned()));
+            Ok(())
+        }).unwrap();
+        assert_eq!(bounded, observed);
+        bounded.clear();
+        visit_bills_in_window(&c, &sample.run_id, &sample.account_uid, 2001, 3000, |_, _| {
+            bounded.push(("unexpected".to_owned(), "unexpected".to_owned()));
+            Ok(())
+        }).unwrap();
+        assert!(bounded.is_empty());
+        assert!(visit_bills_in_window(&c, &sample.run_id, &sample.account_uid, 3000, 2000, |_, _| Ok(())).is_err());
         audit_financial_index_inventory(&c).unwrap();
         assert!(attest_indexed(&c, &sample.run_id, &sample.account_uid).is_ok());
         {
