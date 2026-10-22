@@ -3937,7 +3937,7 @@ mod tests {
             .unwrap();
         assert_eq!(counts, (2, 3));
         let (latest, n) = nav_watermark(&path, &uid, &second.run_id).unwrap();
-        assert_eq!(latest, Some(later));
+        assert_eq!(latest, Some(later.clone()));
         assert_eq!(n, 2);
         let per_strategy: String = c
             .query_row(
