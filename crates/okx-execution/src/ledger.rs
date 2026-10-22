@@ -609,7 +609,7 @@ impl ExecutionLedgerStore {
         // A published v1 native owner is upgraded only while the same
         // exclusive writer lease is held. Read-only inspections never mutate
         // the DB or silently resurrect a legacy account.
-        if let Some(lease) = writer_lease.as_deref_mut() {
+        if let Some(lease) = writer_lease {
             sqlite_store::upgrade_reconciliation_indices_offline(&chosen.path, lease)?;
         }
         // One streaming cold check, no temporary full historical BTreeMap.

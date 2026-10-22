@@ -2493,10 +2493,10 @@ fn attest_snapshot_with_indices(
         if !matches!(
             entry.record.state,
             ExecutionState::Prepared | ExecutionState::Rejected
-        ) {
-            if let Some(submitted) = submitted.as_mut() {
-                let submitted_row =
-                    submitted
+        ) && let Some(submitted) = submitted.as_mut()
+        {
+            let submitted_row =
+                submitted
                         .next()
                         .map_err(io)?
                         .ok_or(ExecutionLedgerError::Corrupt(
@@ -2508,11 +2508,11 @@ fn attest_snapshot_with_indices(
                         "native submitted intent projection mismatch",
                     ));
                 }
-            }
         }
-        if let Some(order_id) = entry.record.order_id.as_deref() {
-            if let Some(links) = links.as_mut() {
-                let link_row = links
+        if let Some(order_id) = entry.record.order_id.as_deref()
+            && let Some(links) = links.as_mut()
+        {
+            let link_row = links
                     .next()
                     .map_err(io)?
                     .ok_or(ExecutionLedgerError::Corrupt(
@@ -2525,7 +2525,6 @@ fn attest_snapshot_with_indices(
                         "native venue order identity projection mismatch",
                     ));
                 }
-            }
         }
         if needs_instrument_guard(&entry) {
             let guard = guards
