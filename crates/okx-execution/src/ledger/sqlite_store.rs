@@ -3125,6 +3125,101 @@ mod tests {
     }
 
     #[test]
+    fn verified_capital_epoch_and_metadata_commit_or_rollback_together() {
+        let root = test_root("native-capital-epoch");
+        let path = root.join("account.sqlite");
+        let uid = "a".repeat(64);
+        let identity = SqliteAccountIdentity {
+            venue: LedgerVenue::Okx,
+            environment: LedgerEnvironment::Demo,
+            account_id: "demo".to_owned(),
+            uid_fingerprint: uid.clone(),
+            bound_at_ms: 1_000,
+        };
+        initialize_account(&path, &identity).unwrap();
+        let reservation = StrategyCapitalReservation {
+            schema: STRATEGY_CAPITAL_RESERVATION_SCHEMA_V2.to_owned(),
+            strategy_id: "test_strategy_v1".to_owned(),
+            allocation_id: "capital_epoch_verified_0001".to_owned(),
+            account_uid_fingerprint: uid.clone(),
+            origin_schema: "okx.research.decision/v1".to_owned(),
+            origin_version: "2026.10".to_owned(),
+            mandate_version: "native_mandate_v1".to_owned(),
+            allocated_usdt: "100".to_owned(),
+            opening_account_usdt_equity: "1000".to_owned(),
+            account_generation: format!("sha256:{}", "c".repeat(64)),
+            operator_authority_id: format!("sha256:{}", "b".repeat(64)),
+            started_at_ms: 2_000,
+        };
+        let opening = StrategyAllocationOpening {
+            account_uid_fingerprint: uid.clone(),
+            strategy_id: reservation.strategy_id.clone(),
+            account_generation: reservation.account_generation.clone(),
+            observed_usdt_equity: reservation.opening_account_usdt_equity.clone(),
+            observed_at_ms: reservation.started_at_ms,
+            source_history_complete: true,
+            zero_positions: true,
+            zero_pending_orders: true,
+            zero_native_protection: true,
+            operator_authority_id: reservation.operator_authority_id.clone(),
+        };
+        let period = StrategyPeriodHistory::default();
+        let state_digest = || -> String {
+            Connection::open(&path).unwrap().query_row(
+                "SELECT digest FROM ledger_state WHERE key=1", [], |r| r.get(0)
+            ).unwrap()
+        };
+        let before = state_digest();
+        let mut faulty = opening.clone();
+        faulty.zero_native_protection = false;
+        assert!(save_opening_metadata(
+            &path, None, &reservation, &faulty, &period, &[]
+        ).is_err());
+        assert_eq!(state_digest(), before);
+        let count = |table: &str| -> i64 {
+            Connection::open(&path).unwrap().query_row(
+                &format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)
+            ).unwrap()
+        };
+        assert_eq!(count("capital_epochs"), 0);
+        assert_eq!(count("source_receipts"), 0);
+        save_opening_metadata(&path, None, &reservation, &opening, &period, &[]).unwrap();
+        assert_eq!(count("capital_epochs"), 1);
+        assert_eq!(count("source_receipts"), 1);
+        assert_eq!(count("evidence_objects"), 1);
+        let c = Connection::open(&path).unwrap();
+        let saved: (String, String, i64, String, String) = c.query_row(
+            "SELECT strategy_id,state,opening_at_ms,allocation_decimal,opening_receipt_sha256
+             FROM capital_epochs WHERE epoch_id=?1",
+            params![&reservation.allocation_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).unwrap();
+        assert_eq!(saved.0, reservation.strategy_id);
+        assert_eq!(saved.1, "ACTIVE");
+        assert_eq!(saved.2, 2000);
+        assert_eq!(saved.3, "100");
+        assert_eq!(saved.4.len(), 64);
+        let receipt_kind: String = c.query_row(
+            "SELECT stream_kind FROM source_receipts WHERE receipt_sha256=?1",
+            params![&saved.4], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(receipt_kind, "ACCOUNT_OPENING");
+        drop(c);
+        // An identical retry is idempotent. A changed financial opening
+        // cannot relabel existing capital or the immutable account owner.
+        save_opening_metadata(&path, None, &reservation, &opening, &period, &[]).unwrap();
+        assert_eq!(count("capital_epochs"), 1);
+        let mut relabelled = reservation.clone();
+        relabelled.allocated_usdt = "101".to_owned();
+        assert!(save_opening_metadata(
+            &path, None, &relabelled, &opening, &period, &[]
+        ).is_err());
+        assert_eq!(count("capital_epochs"), 1);
+        assert_eq!(count("evidence_objects"), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn streaming_attestation_matches_canonical_full_history_manifest() {
         let root = test_root("streaming-attestation");
         let path = root.join("account.sqlite");
