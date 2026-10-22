@@ -2252,7 +2252,8 @@ impl DurableExecutionLedger {
                 (key.clone(), cursor.clone(), received, loss)
             };
         let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&source_cursor)?));
-        let prior = self.strategy_periods.nav_points.last();
+        let prior = self.strategy_periods.nav_points.iter().rev()
+            .find(|p| p.run_id == run.allocation_id);
         if prior.is_some_and(|p| p.observed_at_ms >= now) {
             return Ok(None);
         }

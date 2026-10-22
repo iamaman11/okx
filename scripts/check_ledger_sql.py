@@ -44,6 +44,9 @@ def main():
                 VALUES ('post-a','BEGIN_POST',1,'INTENT','intent-a',6,6,'hash-a')""")
             a.execute("""INSERT INTO post_attempts
                 VALUES ('intent-a','client-a','post-a',6,'UNKNOWN')""")
+            a.execute("""INSERT INTO epoch_daily_risk
+                VALUES('epoch-a','1970-01-01','0.1',0,'post-a')""")
+            assert a.execute("SELECT COUNT(*) FROM epoch_daily_risk").fetchone()[0] == 1
             a.execute("""INSERT INTO fills
                 (instrument_id,trade_id,intent_id,exchange_time_ms,side,
                  position_side,price_decimal,contracts_decimal,source_evidence_sha256)

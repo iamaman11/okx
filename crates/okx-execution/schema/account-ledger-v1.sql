@@ -249,6 +249,22 @@ CREATE TABLE IF NOT EXISTS nav_points (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_nav_chronological
  ON nav_points(observed_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_nav_epoch_time
+ ON nav_points(epoch_id, observed_at_ms DESC);
+
+-- Immutable NAV observations project independently into a per-epoch/day
+-- accumulator. Account and strategy totals below are derived from these
+-- distinct epochs; closing/reopening one epoch cannot reset an entire day.
+CREATE TABLE IF NOT EXISTS epoch_daily_risk (
+    epoch_id TEXT NOT NULL REFERENCES capital_epochs(epoch_id),
+    utc_day TEXT NOT NULL,
+    gross_loss_decimal TEXT NOT NULL,
+    stop_latched INTEGER NOT NULL CHECK(stop_latched IN (0,1)),
+    last_event_id TEXT NOT NULL REFERENCES domain_events(event_id),
+    PRIMARY KEY(epoch_id, utc_day)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_epoch_daily_risk_day
+ ON epoch_daily_risk(utc_day, epoch_id);
 
 -- Daily risk cannot be reset by closing/reopening a strategy epoch.
 CREATE TABLE IF NOT EXISTS account_daily_risk (

@@ -2206,10 +2206,133 @@ fn sync_epoch_closure(
 /// One indexed SQL NAV point, written atomically with the local STOP and
 /// the authenticated source cursor. A single point is PARTIAL historical
 /// coverage; it never manufactures a financially closed period.
+/// NAV and the complete daily-risk projection share the SAME immediate WAL
+/// transaction. The immutable per-epoch contributions prevent double counting
+/// repeated checkpoints and permit multiple strategies on one account.
+fn persist_native_daily_risk(
+    tx: &rusqlite::Transaction<'_>,
+    point: &StrategyNavPoint,
+    strategy_id: &str,
+    stop: Option<&ExecutionRiskStop>,
+) -> Result<(), ExecutionLedgerError> {
+    let day_ms = i64::try_from(point.utc_day_start_ms)
+        .map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    if point.utc_day_start_ms != point.account_as_of_ms / 86_400_000 * 86_400_000 {
+        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+    }
+    let utc_day = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(day_ms)
+        .ok_or(ExecutionLedgerError::InvalidTimestamp)?
+        .format("%Y-%m-%d")
+        .to_string();
+    let loss = Decimal::from_str(&point.daily_gross_loss_usdt).map_err(io)?;
+    if loss < Decimal::ZERO {
+        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+    }
+    let latched = i64::from(stop.is_some_and(|s|
+        s.reason == "STRATEGY_UTC_DAILY_GROSS_LOSS"
+        && s.stopped_at_ms / 86_400_000 == point.utc_day_start_ms / 86_400_000
+    ));
+    let existing: Option<(String, i64)> = tx.query_row(
+        "SELECT gross_loss_decimal,stop_latched FROM epoch_daily_risk
+         WHERE epoch_id=?1 AND utc_day=?2",
+        params![&point.run_id, &utc_day],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(io)?;
+    let previous_loss = existing.as_ref().map(|(v,_)| Decimal::from_str(v).map_err(io))
+        .transpose()?;
+    if previous_loss.is_some_and(|v| loss < v) {
+        return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+    }
+    let epoch_latched = latched.max(existing.map_or(0, |(_,v)| v));
+
+    // Use the same append-only event chain as exchange mutations. Every
+    // projection row references the immutable NAV-point event, never a
+    // second independent source of financial truth.
+    let previous_event: Option<String> = tx.query_row(
+        "SELECT event_sha256 FROM domain_events ORDER BY seq DESC LIMIT 1",
+        [], |row| row.get(0)
+    ).optional().map_err(io)?;
+    let event_id = format!("nav-daily-risk:{}", point.checksum_sha256);
+    let event_hash = checksum(&encode(&(
+        "okx.nav-daily-risk/v1", &event_id, &point.run_id,
+        &point.checksum_sha256, &previous_event,
+    ))?);
+    let observed_ms = i64::try_from(point.observed_at_ms)
+        .map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    tx.execute(
+        "INSERT INTO domain_events
+         (event_id,event_type,event_version,subject_kind,subject_id,
+          effective_at_ms,recorded_at_ms,previous_event_sha256,event_sha256)
+         VALUES (?1,'NAV_DAILY_RISK',1,'CAPITAL_EPOCH',?2,?3,?3,?4,?5)",
+        params![&event_id,&point.run_id,observed_ms,previous_event,event_hash],
+    ).map_err(io)?;
+    tx.execute(
+        "INSERT INTO epoch_daily_risk
+         (epoch_id,utc_day,gross_loss_decimal,stop_latched,last_event_id)
+         VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(epoch_id,utc_day) DO UPDATE SET
+          gross_loss_decimal=excluded.gross_loss_decimal,
+          stop_latched=excluded.stop_latched,last_event_id=excluded.last_event_id",
+        params![&point.run_id,&utc_day,loss.normalize().to_string(),epoch_latched,&event_id],
+    ).map_err(io)?;
+
+    // Decimal amounts are summed in Rust, NEVER using SQLite REAL/float.
+    // This reads just one UTC-day index, not the entire financial history.
+    let mut stmt = tx.prepare(
+        "SELECT ce.strategy_id,r.gross_loss_decimal,r.stop_latched
+         FROM epoch_daily_risk r JOIN capital_epochs ce ON ce.epoch_id=r.epoch_id
+         WHERE r.utc_day=?1 ORDER BY ce.strategy_id,r.epoch_id"
+    ).map_err(io)?;
+    let mut rows = stmt.query(params![&utc_day]).map_err(io)?;
+    let mut account_loss = Decimal::ZERO;
+    let mut strategy_loss = Decimal::ZERO;
+    let mut account_latched = 0_i64;
+    let mut strategy_latched = 0_i64;
+    while let Some(row) = rows.next().map_err(io)? {
+        let owner: String = row.get(0).map_err(io)?;
+        let decimal: String = row.get(1).map_err(io)?;
+        let saved_latched: i64 = row.get(2).map_err(io)?;
+        let amount = Decimal::from_str(&decimal).map_err(io)?;
+        if amount < Decimal::ZERO || !matches!(saved_latched, 0 | 1) {
+            return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+        }
+        account_loss = account_loss.checked_add(amount)
+            .ok_or(ExecutionLedgerError::ExchangeEvidenceConflict)?;
+        account_latched = account_latched.max(saved_latched);
+        if owner == strategy_id {
+            strategy_loss = strategy_loss.checked_add(amount)
+                .ok_or(ExecutionLedgerError::ExchangeEvidenceConflict)?;
+            strategy_latched = strategy_latched.max(saved_latched);
+        }
+    }
+    drop(rows);
+    drop(stmt);
+    tx.execute(
+        "INSERT INTO strategy_daily_risk
+         (strategy_id,utc_day,gross_loss_decimal,stop_latched,last_event_id)
+         VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(strategy_id,utc_day) DO UPDATE SET
+          gross_loss_decimal=excluded.gross_loss_decimal,
+          stop_latched=excluded.stop_latched,last_event_id=excluded.last_event_id",
+        params![strategy_id,&utc_day,strategy_loss.normalize().to_string(),strategy_latched,&event_id],
+    ).map_err(io)?;
+    tx.execute(
+        "INSERT INTO account_daily_risk
+         (utc_day,gross_loss_decimal,stop_latched,last_event_id)
+         VALUES(?1,?2,?3,?4)
+         ON CONFLICT(utc_day) DO UPDATE SET
+          gross_loss_decimal=excluded.gross_loss_decimal,
+          stop_latched=excluded.stop_latched,last_event_id=excluded.last_event_id",
+        params![&utc_day,account_loss.normalize().to_string(),account_latched,&event_id],
+    ).map_err(io)?;
+    Ok(())
+}
+
 fn persist_native_nav_point(
     tx: &rusqlite::Transaction<'_>,
     point: &StrategyNavPoint,
     uid: &str,
+    stop: Option<&ExecutionRiskStop>,
 ) -> Result<(), ExecutionLedgerError> {
     point.validate()?;
     let cursor = super::sqlite_source::indexed_cursor(tx, &point.run_id, &point.source_cursor_key)?
@@ -2219,10 +2342,10 @@ fn persist_native_nav_point(
         return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
     }
     let receipt = super::sqlite_finance::source_point_receipt_key("BILLS", uid, &encode(&cursor)?)?;
-    let belongs: i64 = tx
+    let strategy_id: String = tx
         .query_row(
-            "SELECT COUNT(*) FROM capital_epochs
-             WHERE epoch_id=?1 AND opening_at_ms<=?2",
+            "SELECT strategy_id FROM capital_epochs
+             WHERE epoch_id=?1 AND opening_at_ms<=?2 AND state='ACTIVE'",
             params![
                 &point.run_id,
                 i64::try_from(point.account_as_of_ms)
@@ -2230,10 +2353,9 @@ fn persist_native_nav_point(
             ],
             |row| row.get(0),
         )
-        .map_err(io)?;
-    if belongs != 1 {
-        return Err(ExecutionLedgerError::CapitalReservationScopeMismatch);
-    }
+        .optional()
+        .map_err(io)?
+        .ok_or(ExecutionLedgerError::CapitalReservationScopeMismatch)?;
     let source_present: i64 = tx
         .query_row(
             "SELECT COUNT(*) FROM source_receipts
@@ -2249,8 +2371,8 @@ fn persist_native_nav_point(
     let preceding: Option<(String, i64)> = tx
         .query_row(
             "SELECT checkpoint_sha256,observed_at_ms FROM nav_points
-             ORDER BY observed_at_ms DESC LIMIT 1",
-            [],
+             WHERE epoch_id=?1 ORDER BY observed_at_ms DESC LIMIT 1",
+            params![&point.run_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
@@ -2283,6 +2405,7 @@ fn persist_native_nav_point(
         ],
     )
     .map_err(io)?;
+    persist_native_daily_risk(tx, point, &strategy_id, stop)?;
     Ok(())
 }
 
@@ -2438,7 +2561,7 @@ fn save_metadata_inner(
         return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
     }
     for point in periods.nav_points.iter().skip(old.periods.nav_points.len()) {
-        persist_native_nav_point(&tx, point, expected)?;
+        persist_native_nav_point(&tx, point, expected, stop)?;
     }
     tx.commit().map_err(io)?;
     Ok(())
@@ -3480,8 +3603,8 @@ mod tests {
             let mut absent = point.clone();
             absent.source_cursor_key = "nonexistent".to_owned();
             absent.checksum_sha256 = absent.hash().unwrap();
-            assert!(persist_native_nav_point(&tx, &absent, &uid).is_err());
-            persist_native_nav_point(&tx, &point, &uid).unwrap();
+            assert!(persist_native_nav_point(&tx, &absent, &uid, None).is_err());
+            persist_native_nav_point(&tx, &point, &uid, None).unwrap();
             tx.commit().unwrap();
         }
         let c = Connection::open(&path).unwrap();
@@ -3496,6 +3619,72 @@ mod tests {
         assert_eq!(nav.0, "100");
         assert_eq!(nav.1, "PARTIAL");
         assert_eq!(nav.2, point.checksum_sha256);
+        drop(c);
+        // Two independent strategy epochs may report at the exact same
+        // timestamp; their predecessor hashes and daily loss are separate.
+        // Repeated NAV points on one epoch update rather than double-count.
+        let mut second = point.clone();
+        second.run_id = "native_parallel_strategy_epoch_002".to_owned();
+        second.daily_gross_loss_usdt = "0.5".to_owned();
+        second.previous_sha256.clear();
+        second.checksum_sha256 = second.hash().unwrap();
+        {
+            let mut c = Connection::open(&path).unwrap();
+            c.pragma_update(None, "foreign_keys", "ON").unwrap();
+            let tx = c.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO capital_epochs
+                 SELECT ?1,'second_strategy',epoch_kind,origin_schema,origin_version,
+                        opening_at_ms,opening_receipt_sha256,allocation_currency,
+                        allocation_decimal,state,closing_at_ms,closing_evidence_sha256
+                 FROM capital_epochs WHERE epoch_id=?2",
+                params![&second.run_id,&point.run_id],
+            ).unwrap();
+            tx.execute(
+                "INSERT INTO native_source_runs(run_id,uid,source_schema,proof_digest)
+                 SELECT ?1,uid,source_schema,proof_digest FROM native_source_runs
+                 WHERE run_id=?2",
+                params![&second.run_id,&point.run_id],
+            ).unwrap();
+            tx.execute(
+                "INSERT INTO native_source_cursors(run_id,cursor_key,receipt_ms,payload_digest,payload)
+                 SELECT ?1,cursor_key,receipt_ms,payload_digest,payload
+                 FROM native_source_cursors WHERE run_id=?2",
+                params![&second.run_id,&point.run_id],
+            ).unwrap();
+            persist_native_nav_point(&tx, &second, &uid, None).unwrap();
+            tx.commit().unwrap();
+        }
+        let mut later = second.clone();
+        later.observed_at_ms += 1000;
+        later.previous_sha256 = second.checksum_sha256.clone();
+        later.daily_gross_loss_usdt = "1.25".to_owned();
+        later.checksum_sha256 = later.hash().unwrap();
+        {
+            let mut c = Connection::open(&path).unwrap();
+            c.pragma_update(None, "foreign_keys", "ON").unwrap();
+            let tx = c.transaction().unwrap();
+            persist_native_nav_point(&tx, &later, &uid, None).unwrap();
+            assert!(persist_native_nav_point(&tx, &later, &uid, None).is_err());
+            tx.commit().unwrap();
+        }
+        let c = Connection::open(&path).unwrap();
+        let counts: (i64, i64) = c.query_row(
+            "SELECT COUNT(DISTINCT epoch_id),COUNT(*) FROM nav_points",
+            [], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(counts, (2,3));
+        let per_strategy: String = c.query_row(
+            "SELECT gross_loss_decimal FROM strategy_daily_risk
+             WHERE strategy_id='second_strategy'",
+            [], |r| r.get(0),
+        ).unwrap();
+        let account: (String, i64) = c.query_row(
+            "SELECT gross_loss_decimal,stop_latched FROM account_daily_risk",
+            [], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(per_strategy, "1.25");
+        assert_eq!(account, ("1.25".to_owned(),0));
         drop(c);
         std::fs::remove_dir_all(root).unwrap();
     }
