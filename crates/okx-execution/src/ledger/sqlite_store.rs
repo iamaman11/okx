@@ -116,6 +116,9 @@ fn connect_with_integrity(
              CREATE TABLE IF NOT EXISTS native_intent_order_link (
                 intent_id TEXT PRIMARY KEY REFERENCES ledger_entries(intent_id),
                 venue_order_id TEXT NOT NULL UNIQUE
+             ) STRICT;
+             CREATE TABLE IF NOT EXISTS native_submitted_intents (
+                intent_id TEXT PRIMARY KEY REFERENCES ledger_entries(intent_id)
              ) STRICT;",
         )
         .map_err(io)?;
@@ -736,39 +739,25 @@ pub(super) fn native_reconciliation_inventory(
         .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |r| r.get(0))
         .map_err(io)?;
     require_account_read_scope(&c, &uid, false)?;
-    let mut total = 0usize;
-    let mut submitted = 0usize;
-    let mut stmt = c
-        .prepare("SELECT current_state,COUNT(*) FROM intents GROUP BY current_state")
+    // Indexed membership is transactionally derived from every exact native
+    // state transition and exhaustively verified on cold owner attestation.
+    // A routine account reconciliation never groups the full intent history.
+    let counts: (i64, i64, i64) = c
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM ledger_entries),
+                    (SELECT COUNT(*) FROM intents),
+                    (SELECT COUNT(*) FROM native_submitted_intents)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
         .map_err(io)?;
-    let mut rows = stmt.query([]).map_err(io)?;
-    while let Some(row) = rows.next().map_err(io)? {
-        let state: String = row.get(0).map_err(io)?;
-        let count: i64 = row.get(1).map_err(io)?;
-        let count = usize::try_from(count)
-            .map_err(|_| ExecutionLedgerError::Corrupt("negative intent count"))?;
-        total = total
-            .checked_add(count)
-            .ok_or(ExecutionLedgerError::Corrupt("intent census overflow"))?;
-        match state.as_str() {
-            "Prepared" | "Rejected" => {}
-            "Submitting" | "Acknowledged" | "UnknownSubmission" | "Live" | "PartiallyFilled"
-            | "Filled" | "Canceled" => {
-                submitted = submitted
-                    .checked_add(count)
-                    .ok_or(ExecutionLedgerError::Corrupt("submitted census overflow"))?;
-            }
-            _ => return Err(ExecutionLedgerError::Corrupt("unknown SQL intent state")),
-        }
-    }
-    drop(rows);
-    drop(stmt);
-    let rows: i64 = c
-        .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
-        .map_err(io)?;
-    if usize::try_from(rows).ok() != Some(total) {
+    let total = usize::try_from(counts.0)
+        .map_err(|_| ExecutionLedgerError::Corrupt("invalid intent inventory"))?;
+    let submitted = usize::try_from(counts.2)
+        .map_err(|_| ExecutionLedgerError::Corrupt("invalid submitted inventory"))?;
+    if counts.0 != counts.1 || submitted > total {
         return Err(ExecutionLedgerError::Corrupt(
-            "reconciliation census missing entries",
+            "native submitted/indexed intent inventory mismatch",
         ));
     }
 
@@ -822,8 +811,8 @@ pub(super) fn native_reconciliation_inventory(
             ))?;
     let query = format!(
         "{INDEXED_INTENT_COLUMNS}
-         WHERE i.current_state NOT IN ('Prepared','Rejected')
-         ORDER BY e.intent_id LIMIT ?1"
+         JOIN native_submitted_intents submitted ON submitted.intent_id=e.intent_id
+         ORDER BY submitted.intent_id LIMIT ?1"
     );
     let mut historical_sample = Vec::new();
     if scan_bound != 0 {
@@ -1963,6 +1952,23 @@ fn save_snapshot(
                     return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
                 }
             }
+            // The native state census is a derived index, not a competing
+            // order authority. A known REJECTED/unsent PREPARED does not
+            // count as exchange-submitted risk; UNKNOWN always does.
+            if matches!(e.record.state, ExecutionState::Prepared | ExecutionState::Rejected) {
+                tx.execute(
+                    "DELETE FROM native_submitted_intents WHERE intent_id=?1",
+                    params![id],
+                )
+                .map_err(io)?;
+            } else {
+                tx.execute(
+                    "INSERT INTO native_submitted_intents(intent_id) VALUES(?1)
+                     ON CONFLICT(intent_id) DO NOTHING",
+                    params![id],
+                )
+                .map_err(io)?;
+            }
             // Same WAL transaction as the authoritative intent and its
             // relational plan projection. A terminal historical intent
             // immediately leaves this active-only indexed inventory.
@@ -2287,6 +2293,14 @@ fn attest_snapshot(
         )
         .map_err(io)?;
     let mut guards = guards_stmt.query([]).map_err(io)?;
+    let mut submitted_stmt = c
+        .prepare("SELECT intent_id FROM native_submitted_intents ORDER BY intent_id")
+        .map_err(io)?;
+    let mut submitted = submitted_stmt.query([]).map_err(io)?;
+    let mut links_stmt = c
+        .prepare("SELECT intent_id,venue_order_id FROM native_intent_order_link ORDER BY intent_id")
+        .map_err(io)?;
+    let mut links = links_stmt.query([]).map_err(io)?;
     let mut count: i64 = 0;
     // [total, nonterminal, unresolved mutation, unresolved protection].
     // No second SQL pass and no BTreeMap allocation for the same account.
@@ -2331,6 +2345,31 @@ fn attest_snapshot(
         }
         let id = &entry.record.plan.intent_id;
         let payload = encode(&entry)?;
+        // Ordered simultaneous cursors prove completeness, not merely
+        // presence, of every native derived trading identity projection.
+        if !matches!(entry.record.state, ExecutionState::Prepared | ExecutionState::Rejected) {
+            let submitted_row = submitted.next().map_err(io)?.ok_or(
+                ExecutionLedgerError::Corrupt("missing native submitted intent"),
+            )?;
+            let submitted_id: String = submitted_row.get(0).map_err(io)?;
+            if submitted_id != *id {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "native submitted intent projection mismatch",
+                ));
+            }
+        }
+        if let Some(order_id) = entry.record.order_id.as_deref() {
+            let link_row = links.next().map_err(io)?.ok_or(
+                ExecutionLedgerError::Corrupt("missing native venue order identity"),
+            )?;
+            let link_id: String = link_row.get(0).map_err(io)?;
+            let link_order: String = link_row.get(1).map_err(io)?;
+            if link_id != *id || link_order != order_id {
+                return Err(ExecutionLedgerError::Corrupt(
+                    "native venue order identity projection mismatch",
+                ));
+            }
+        }
         if needs_instrument_guard(&entry) {
             let guard = guards
                 .next()
@@ -2363,6 +2402,15 @@ fn attest_snapshot(
             "extra native instrument guard",
         ));
     }
+    if submitted.next().map_err(io)?.is_some() || links.next().map_err(io)?.is_some() {
+        return Err(ExecutionLedgerError::Corrupt(
+            "extra native submitted/order identity projection",
+        ));
+    }
+    drop(submitted);
+    drop(submitted_stmt);
+    drop(links);
+    drop(links_stmt);
     drop(guards);
     drop(guards_stmt);
     drop(rows);
