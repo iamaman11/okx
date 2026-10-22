@@ -2544,6 +2544,76 @@ struct NativeMetadataChange<'a> {
     nav_point: Option<&'a StrategyNavPoint>,
 }
 
+/// Single-snapshot account/strategy daily-loss admission. Source facts were
+/// committed with NAV: no risk may be added when a previous epoch has already
+/// consumed this strategy's UTC-day budget or any account STOP is latched.
+pub(super) fn daily_risk_allows_new_risk(
+    path: &Path,
+    uid: &str,
+    strategy_id: &str,
+    point: &StrategyNavPoint,
+    limit: &str,
+) -> Result<bool, ExecutionLedgerError> {
+    point.validate()?;
+    let ceiling = Decimal::from_str(limit)
+        .map_err(|_| ExecutionLedgerError::ExchangeEvidenceConflict)?;
+    if ceiling <= Decimal::ZERO {
+        return Ok(false);
+    }
+    let day_ms = i64::try_from(point.utc_day_start_ms)
+        .map_err(|_| ExecutionLedgerError::InvalidTimestamp)?;
+    let day = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(day_ms)
+        .ok_or(ExecutionLedgerError::InvalidTimestamp)?
+        .format("%Y-%m-%d").to_string();
+    let c = connect_indexed_read(path)?;
+    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(io)?;
+    require_account_read_scope(&c, uid, false)?;
+    let current: Option<String> = c.query_row(
+        "SELECT checkpoint_sha256 FROM nav_points
+         WHERE epoch_id=?1 ORDER BY observed_at_ms DESC LIMIT 1",
+        params![&point.run_id], |r| r.get(0)
+    ).optional().map_err(io)?;
+    if current.as_deref() != Some(point.checksum_sha256.as_str()) {
+        return Ok(false);
+    }
+    let epoch: Option<(String, String)> = c.query_row(
+        "SELECT e.strategy_id,r.gross_loss_decimal FROM epoch_daily_risk r
+         JOIN capital_epochs e ON e.epoch_id=r.epoch_id
+         WHERE r.epoch_id=?1 AND r.utc_day=?2",
+        params![&point.run_id,&day],
+        |r| Ok((r.get(0)?,r.get(1)?))
+    ).optional().map_err(io)?;
+    let Some((owner, epoch_loss)) = epoch else {
+        return Ok(false);
+    };
+    if owner != strategy_id || epoch_loss != point.daily_gross_loss_usdt {
+        return Ok(false);
+    }
+    let strategy: Option<(String,i64)> = c.query_row(
+        "SELECT gross_loss_decimal,stop_latched FROM strategy_daily_risk
+         WHERE strategy_id=?1 AND utc_day=?2",
+        params![strategy_id,&day],
+        |r| Ok((r.get(0)?,r.get(1)?))
+    ).optional().map_err(io)?;
+    let account: Option<(String,i64)> = c.query_row(
+        "SELECT gross_loss_decimal,stop_latched FROM account_daily_risk WHERE utc_day=?1",
+        params![&day],
+        |r| Ok((r.get(0)?,r.get(1)?))
+    ).optional().map_err(io)?;
+    let (Some((strategy_loss,strategy_latched)),Some((account_loss,account_latched))) =
+        (strategy,account) else { return Ok(false) };
+    let owned = Decimal::from_str(&epoch_loss)
+        .map_err(|_| ExecutionLedgerError::ExchangeEvidenceConflict)?;
+    let strategy_total = Decimal::from_str(&strategy_loss)
+        .map_err(|_| ExecutionLedgerError::ExchangeEvidenceConflict)?;
+    let account_total = Decimal::from_str(&account_loss)
+        .map_err(|_| ExecutionLedgerError::ExchangeEvidenceConflict)?;
+    Ok(owned >= Decimal::ZERO && strategy_total >= owned
+        && account_total >= strategy_total
+        && strategy_latched == 0 && account_latched == 0
+        && strategy_total < ceiling)
+}
+
 /// The STOP, NAV, source receipt and daily risk remain ONE WAL commit.
 pub(super) fn save_nav_metadata(
     path: &Path,
@@ -3867,6 +3937,10 @@ mod tests {
             .unwrap();
         assert_eq!(per_strategy, "1.25");
         assert_eq!(account, ("1.25".to_owned(), 0));
+        assert!(daily_risk_allows_new_risk(&path,&uid,"second_strategy",&later,"2").unwrap());
+        assert!(!daily_risk_allows_new_risk(&path,&uid,"second_strategy",&later,"1").unwrap());
+        assert!(!daily_risk_allows_new_risk(&path,&uid,"unrelated",&later,"2").unwrap());
+        assert!(!daily_risk_allows_new_risk(&path,&uid,"second_strategy",&point,"2").unwrap());
         drop(c);
         std::fs::remove_dir_all(root).unwrap();
     }

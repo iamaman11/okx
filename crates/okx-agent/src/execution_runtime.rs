@@ -922,6 +922,11 @@ impl ExecutionRuntime {
             return None;
         }
         let point = ledger.strategy_nav_watermark()?;
+        if !ledger.daily_risk_allows_new_risk(
+            point, &binding.policy.max_daily_realized_loss_usd,
+        ).ok()? {
+            return None;
+        }
         attested_flat_nav_for_new_risk(&run, &projection, point, current_equity, asof)
     }
 
@@ -1518,6 +1523,12 @@ impl ExecutionRuntime {
                     .zip(ledger.financial_period_for_new_risk(facts, true, plan))
                     .zip(ledger.strategy_nav_watermark())
                     .and_then(|((run, period), point)| {
+                        let policy = plan.risk_binding.as_ref()?;
+                        if !ledger.daily_risk_allows_new_risk(
+                            point, &policy.policy.max_daily_realized_loss_usd,
+                        ).ok()? {
+                            return None;
+                        }
                         let asof = facts
                             .summary
                             .current_account_as_of_ms
