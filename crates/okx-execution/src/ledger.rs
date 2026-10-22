@@ -536,7 +536,7 @@ impl ExecutionLedgerStore {
 
     fn select_published_owner_impl(
         root: &Path,
-        writer_lease: Option<&mut File>,
+        mut writer_lease: Option<&mut File>,
     ) -> Result<Self, ExecutionLedgerError> {
         let legacy = root.join("execution-ledger.json");
         let sealed = root.join("execution-ledger.v14.sealed");
@@ -545,7 +545,7 @@ impl ExecutionLedgerStore {
         // The same permanent file that fences concurrent writers also keeps
         // an irreversible cutover watermark. Even loss of both SQLite and its
         // owner receipt must not resurrect a blank pre-cutover JSON writer.
-        let marked = match writer_lease {
+        let marked = match writer_lease.as_deref_mut() {
             Some(handle) => Self::read_writer_watermark(handle)?,
             None => Self::has_sqlite_cutover_watermark(root)?,
         };
@@ -606,6 +606,12 @@ impl ExecutionLedgerStore {
         if uid != parts[2] || origin != parts[3] {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
+        // A published v1 native owner is upgraded only while the same
+        // exclusive writer lease is held. Read-only inspections never mutate
+        // the DB or silently resurrect a legacy account.
+        if let Some(lease) = writer_lease.as_deref_mut() {
+            sqlite_store::upgrade_reconciliation_indices_offline(&chosen.path, lease)?;
+        }
         // One streaming cold check, no temporary full historical BTreeMap.
         sqlite_store::attest_published_owner(&chosen.path, &uid)?;
         Ok(chosen)
@@ -645,6 +651,7 @@ impl ExecutionLedgerStore {
         } else {
             &original
         });
+        sqlite_store::upgrade_reconciliation_indices_offline(native.path(), writer_lease)?;
         let (origin_uid, origin_hash) = sqlite_store::read_staging_origin(native.path())?;
         if origin_uid != expected_uid || origin_hash != expected_v14_sha256 {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
@@ -900,6 +907,7 @@ impl ExecutionLedgerStore {
             }
             source.prepare_sqlite_staging(&native)?;
         }
+        sqlite_store::upgrade_reconciliation_indices_offline(&native, &writer_lease)?;
         let (uid, origin) = sqlite_store::read_staging_origin(&native)?;
         if uid != expected_uid
             || origin != expected_v14_sha256

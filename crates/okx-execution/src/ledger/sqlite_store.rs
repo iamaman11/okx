@@ -4,7 +4,7 @@ use super::*;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 
-pub(super) const SCHEMA: &str = "okx.execution-ledger.sqlite/v1";
+pub(super) const SCHEMA: &str = "okx.execution-ledger.sqlite/v2";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,7 +74,7 @@ fn connect_with_integrity(
     let current_version: i64 = connection
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(io)?;
-    if current_version != 0 && current_version != 1 {
+    if current_version != 0 && current_version != 1 && current_version != 2 {
         return Err(ExecutionLedgerError::Corrupt(
             "unsupported SQLite account ledger schema",
         ));
@@ -119,7 +119,8 @@ fn connect_with_integrity(
              ) STRICT;
              CREATE TABLE IF NOT EXISTS native_submitted_intents (
                 intent_id TEXT PRIMARY KEY REFERENCES ledger_entries(intent_id)
-             ) STRICT;",
+             ) STRICT;
+             PRAGMA user_version=2;",
         )
         .map_err(io)?;
         tx.commit().map_err(io)?;
@@ -133,7 +134,7 @@ fn connect_with_integrity(
     let foreign_keys: i64 = connection
         .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
         .map_err(io)?;
-    if ver != 1 || journal != "wal" || foreign_keys != 1 {
+    if !(1..=2).contains(&ver) || journal != "wal" || foreign_keys != 1 {
         return Err(ExecutionLedgerError::Corrupt(
             "SQLite schema/WAL/FK mismatch",
         ));
@@ -2158,6 +2159,106 @@ pub(super) fn read_staging_origin(path: &Path) -> Result<(String, String), Execu
     Ok((uid, source))
 }
 
+/// One explicit WAL-transaction upgrade of previously published SQLite/v1
+/// databases to the indexed v2 schema. The existing CONTROL/Agent holds
+/// the canonical cross-process account writer lease throughout this call.
+/// Old rows are individually authenticated on a streaming cold preflight;
+/// no historical BTreeMap is constructed and NO order or STOP is replayed.
+pub(super) fn upgrade_reconciliation_indices_offline(
+    path: &Path,
+    _writer_lease: &File,
+) -> Result<(), ExecutionLedgerError> {
+    let conn = connect(path, false)?;
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(io)?;
+    if version == 2 {
+        return Ok(());
+    }
+    if version != 1 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "unsupported native reconciliation schema upgrade",
+        ));
+    }
+    let existing: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+               AND name IN ('native_intent_order_link','native_submitted_intents')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(io)?;
+    drop(conn);
+    if existing != 0 && existing != 2 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "partially initialized native reconciliation indices",
+        ));
+    }
+    // Validate the WHOLE previously authoritative history, STOP, source
+    // checksum and POST fences before opening an upgrade write transaction.
+    // A v1 with both new tables (early preview build) must also prove them.
+    attest_snapshot_with_indices(path, None, existing == 2)?;
+
+    let mut conn = connect(path, true)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io)?;
+    let current: i64 = tx
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(io)?;
+    if current != 1 {
+        return Err(ExecutionLedgerError::Corrupt(
+            "native reconciliation schema changed during upgrade",
+        ));
+    }
+    if existing == 0 {
+        tx.execute_batch(
+            "CREATE TABLE native_intent_order_link (
+               intent_id TEXT PRIMARY KEY REFERENCES ledger_entries(intent_id),
+               venue_order_id TEXT NOT NULL UNIQUE
+             ) STRICT;
+             CREATE TABLE native_submitted_intents (
+               intent_id TEXT PRIMARY KEY REFERENCES ledger_entries(intent_id)
+             ) STRICT;",
+        )
+        .map_err(io)?;
+        let uid: String = tx
+            .query_row("SELECT uid FROM ledger_state WHERE key=1", [], |r| r.get(0))
+            .map_err(io)?;
+        let query = format!("{INDEXED_INTENT_COLUMNS} ORDER BY e.intent_id");
+        let mut stmt = tx.prepare(&query).map_err(io)?;
+        let mut rows = stmt.query([]).map_err(io)?;
+        while let Some(row) = rows.next().map_err(io)? {
+            let entry = verified_indexed_entry(row, &uid)?;
+            let intent = entry.record.plan.intent_id.as_str();
+            if !matches!(entry.record.state, ExecutionState::Prepared | ExecutionState::Rejected) {
+                tx.execute(
+                    "INSERT INTO native_submitted_intents(intent_id) VALUES(?1)",
+                    params![intent],
+                )
+                .map_err(io)?;
+            }
+            if let Some(order) = entry.record.order_id.as_deref() {
+                if order.is_empty() {
+                    return Err(ExecutionLedgerError::ExchangeEvidenceConflict);
+                }
+                tx.execute(
+                    "INSERT INTO native_intent_order_link(intent_id,venue_order_id)
+                     VALUES(?1,?2)",
+                    params![intent, order],
+                )
+                .map_err(io)?;
+            }
+        }
+    }
+    tx.execute_batch("PRAGMA user_version=2;").map_err(io)?;
+    tx.commit().map_err(io)?;
+    // No implicit repair after publication: one exact cold proof decides
+    // whether the upgraded file is eligible to become the native owner.
+    attest_snapshot(path, None)?;
+    Ok(())
+}
+
 /// One consistent WAL snapshot feeds both independent read-only
 /// attestation and CONTROL handoff inventory. Never pair counts from a
 /// newer SQL transaction with an older account digest.
@@ -2213,6 +2314,22 @@ pub(super) fn attest(path: &Path) -> Result<LedgerStorageAttestation, ExecutionL
 fn attest_snapshot(
     path: &Path,
     expected_uid: Option<&str>,
+) -> Result<
+    (
+        LedgerStorageAttestation,
+        Option<ProfileHandoffLedgerAssessment>,
+    ),
+    ExecutionLedgerError,
+> {
+    attest_snapshot_with_indices(path, expected_uid, true)
+}
+
+/// Streaming pre-v2 attestation is permitted ONLY inside the exclusive offline
+/// upgrade. Runtime cold reads always require every v2 projection.
+fn attest_snapshot_with_indices(
+    path: &Path,
+    expected_uid: Option<&str>,
+    require_new_indices: bool,
 ) -> Result<
     (
         LedgerStorageAttestation,
@@ -2296,14 +2413,34 @@ fn attest_snapshot(
         )
         .map_err(io)?;
     let mut guards = guards_stmt.query([]).map_err(io)?;
-    let mut submitted_stmt = c
-        .prepare("SELECT intent_id FROM native_submitted_intents ORDER BY intent_id")
+    let mut submitted_stmt = if require_new_indices {
+        Some(
+            c.prepare("SELECT intent_id FROM native_submitted_intents ORDER BY intent_id")
+                .map_err(io)?,
+        )
+    } else {
+        None
+    };
+    let mut submitted = submitted_stmt
+        .as_mut()
+        .map(|stmt| stmt.query([]))
+        .transpose()
         .map_err(io)?;
-    let mut submitted = submitted_stmt.query([]).map_err(io)?;
-    let mut links_stmt = c
-        .prepare("SELECT intent_id,venue_order_id FROM native_intent_order_link ORDER BY intent_id")
+    let mut links_stmt = if require_new_indices {
+        Some(
+            c.prepare(
+                "SELECT intent_id,venue_order_id FROM native_intent_order_link ORDER BY intent_id",
+            )
+            .map_err(io)?,
+        )
+    } else {
+        None
+    };
+    let mut links = links_stmt
+        .as_mut()
+        .map(|stmt| stmt.query([]))
+        .transpose()
         .map_err(io)?;
-    let mut links = links_stmt.query([]).map_err(io)?;
     let mut count: i64 = 0;
     // [total, nonterminal, unresolved mutation, unresolved protection].
     // No second SQL pass and no BTreeMap allocation for the same account.
@@ -2354,33 +2491,31 @@ fn attest_snapshot(
             entry.record.state,
             ExecutionState::Prepared | ExecutionState::Rejected
         ) {
-            let submitted_row =
-                submitted
-                    .next()
-                    .map_err(io)?
-                    .ok_or(ExecutionLedgerError::Corrupt(
+            if let Some(submitted) = submitted.as_mut() {
+                let submitted_row =
+                    submitted.next().map_err(io)?.ok_or(ExecutionLedgerError::Corrupt(
                         "missing native submitted intent",
                     ))?;
-            let submitted_id: String = submitted_row.get(0).map_err(io)?;
-            if submitted_id != *id {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "native submitted intent projection mismatch",
-                ));
+                let submitted_id: String = submitted_row.get(0).map_err(io)?;
+                if submitted_id != *id {
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "native submitted intent projection mismatch",
+                    ));
+                }
             }
         }
         if let Some(order_id) = entry.record.order_id.as_deref() {
-            let link_row = links
-                .next()
-                .map_err(io)?
-                .ok_or(ExecutionLedgerError::Corrupt(
-                    "missing native venue order identity",
-                ))?;
-            let link_id: String = link_row.get(0).map_err(io)?;
-            let link_order: String = link_row.get(1).map_err(io)?;
-            if link_id != *id || link_order != order_id {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "native venue order identity projection mismatch",
-                ));
+            if let Some(links) = links.as_mut() {
+                let link_row = links.next().map_err(io)?.ok_or(
+                    ExecutionLedgerError::Corrupt("missing native venue order identity"),
+                )?;
+                let link_id: String = link_row.get(0).map_err(io)?;
+                let link_order: String = link_row.get(1).map_err(io)?;
+                if link_id != *id || link_order != order_id {
+                    return Err(ExecutionLedgerError::Corrupt(
+                        "native venue order identity projection mismatch",
+                    ));
+                }
             }
         }
         if needs_instrument_guard(&entry) {
@@ -2415,9 +2550,18 @@ fn attest_snapshot(
             "extra native instrument guard",
         ));
     }
-    if submitted.next().map_err(io)?.is_some() || links.next().map_err(io)?.is_some() {
+    if let Some(submitted) = submitted.as_mut()
+        && submitted.next().map_err(io)?.is_some()
+    {
         return Err(ExecutionLedgerError::Corrupt(
-            "extra native submitted/order identity projection",
+            "extra native submitted intent projection",
+        ));
+    }
+    if let Some(links) = links.as_mut()
+        && links.next().map_err(io)?.is_some()
+    {
+        return Err(ExecutionLedgerError::Corrupt(
+            "extra native venue order identity projection",
         ));
     }
     drop(submitted);
