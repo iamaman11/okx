@@ -1228,14 +1228,21 @@ pub(super) fn load_operational(path: &Path) -> Result<LoadedExecutionLedger, Exe
         return Err(ExecutionLedgerError::AccountScopeMismatch);
     }
     require_account_read_scope(&c, &uid, false)?;
-    let source = state
+    let summary = state
         .source_run_id
         .as_deref()
-        .map(|run_id| super::sqlite_source::read(&c, run_id, &uid))
+        .map(|run_id| super::sqlite_source::attest_indexed(&c, run_id, &uid))
         .transpose()?;
-    state
-        .periods
-        .validate(state.reservation.as_ref(), source.as_ref())?;
+    state.periods.validate_indexed(
+        state.reservation.as_ref(),
+        summary.as_ref(),
+        |key| {
+            let Some(run_id) = state.source_run_id.as_deref() else {
+                return Ok(None);
+            };
+            super::sqlite_source::indexed_cursor(&c, run_id, key)
+        },
+    )?;
     validate_leverage_attempts(&state.leverage, state.reservation.as_ref())?;
 
     let mut statement = c
@@ -1276,10 +1283,43 @@ pub(super) fn load_operational(path: &Path) -> Result<LoadedExecutionLedger, Exe
         active,
         state.stop,
         state.reservation,
-        source,
+        None, // The historical source is SQL-owned, never resident at startup.
         state.periods,
         state.leverage,
     ))
+}
+
+/// Source read for ONE bounded execution operation. Caller drops the
+/// authenticated historical snapshot immediately. SQL remains the sole
+/// owner; no in-memory cache survives a trading command or restart.
+pub(super) fn current_source(
+    path: &Path,
+) -> Result<Option<DurableExchangeEvidence>, ExecutionLedgerError> {
+    let c = connect_indexed_read(path)?;
+    let (uid, digest, bytes): (String, String, Vec<u8>) = c
+        .query_row(
+            "SELECT uid,digest,bytes FROM ledger_state WHERE key=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(io)?;
+    require_finance_read_scope(&c, &uid)?;
+    if checksum(&bytes) != digest {
+        return Err(ExecutionLedgerError::Corrupt("native source pointer digest"));
+    }
+    let state: StoredState = decode(&bytes)?;
+    if state.version != 1 {
+        return Err(ExecutionLedgerError::Corrupt("native source state version"));
+    }
+    let Some(run_id) = state.source_run_id.as_deref() else {
+        return Ok(None);
+    };
+    if state.reservation.as_ref().is_none_or(|run| {
+        run.allocation_id != run_id || run.account_uid_fingerprint != uid
+    }) {
+        return Err(ExecutionLedgerError::AccountScopeMismatch);
+    }
+    super::sqlite_source::read(&c, run_id, &uid).map(Some)
 }
 
 pub(super) fn load(path: &Path, max: usize) -> Result<LoadedExecutionLedger, ExecutionLedgerError> {
@@ -1555,7 +1595,12 @@ pub(super) fn save_metadata(
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
     }
-    periods.validate(reservation, source)?;
+    // The original legacy object validates only when its full history is
+    // provided. Native stores keep this history in SQL and validate its
+    // authenticated cursor index after opening the WAL transaction.
+    if source.is_some() {
+        periods.validate(reservation, source)?;
+    }
     validate_leverage_attempts(leverage, reservation)?;
     let mut c = connect(path, true)?;
     let tx = c
@@ -1579,6 +1624,20 @@ pub(super) fn save_metadata(
             "native metadata schema mismatch",
         ));
     }
+    let retained_run_id = if source.is_some() {
+        source.map(|value| value.run_id.clone())
+    } else if reservation.is_some_and(|next| {
+        old.reservation.as_ref().is_some_and(|prior| {
+            prior.allocation_id == next.allocation_id
+                && prior.account_uid_fingerprint == next.account_uid_fingerprint
+        })
+    }) {
+        old.source_run_id.clone()
+    } else {
+        // An epoch change deliberately severs the active source pointer,
+        // preserving its immutable rows for archival proofs only.
+        None
+    };
     // Account identity never changes when rotating a strategy epoch or
     // temporarily having no current source/capital reservation.
     let expected = reservation
@@ -1620,7 +1679,7 @@ pub(super) fn save_metadata(
         version: 1,
         stop: stop.cloned(),
         reservation: reservation.cloned(),
-        source_run_id: source.map(|s| s.run_id.clone()),
+        source_run_id: retained_run_id.clone(),
         periods: periods.clone(),
         leverage: leverage.to_vec(),
     })?;
@@ -1639,6 +1698,16 @@ pub(super) fn save_metadata(
     if let Some(evidence) = source {
         super::sqlite_source::persist(&tx, evidence)?;
     }
+    let summary = retained_run_id
+        .as_deref()
+        .map(|run_id| super::sqlite_source::attest_indexed(&tx, run_id, &uid))
+        .transpose()?;
+    periods.validate_indexed(reservation, summary.as_ref(), |key| {
+        let Some(run_id) = retained_run_id.as_deref() else {
+            return Ok(None);
+        };
+        super::sqlite_source::indexed_cursor(&tx, run_id, key)
+    })?;
     tx.commit().map_err(io)?;
     Ok(())
 }

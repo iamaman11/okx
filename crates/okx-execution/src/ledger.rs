@@ -2260,6 +2260,17 @@ impl DurableExecutionLedger {
         Ok(stop)
     }
 
+    /// Load the authenticated source only for the duration of one financial
+    /// operation. Native engine cold start deliberately keeps no historical
+    /// source events in RAM. Legacy v14 retains its original snapshot model.
+    fn current_source(&self) -> Result<Option<DurableExchangeEvidence>, ExecutionLedgerError> {
+        if self.store.sqlite_native {
+            sqlite_store::current_source(&self.store.path)
+        } else {
+            Ok(self.exchange_evidence.clone())
+        }
+    }
+
     /// Append exact account-sourced events to the existing atomic ledger.
     /// The caller must first independently prove source coherence.
     pub fn capture_exchange_evidence(
@@ -2285,16 +2296,15 @@ impl DurableExecutionLedger {
     ) -> Result<ExchangeEvidenceSummary, ExecutionLedgerError> {
         if self.strategy_periods.finalized_run.is_some() {
             return self
-                .exchange_evidence
-                .as_ref()
-                .map(DurableExchangeEvidence::summary)
+                .exchange_evidence_summary()?
                 .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable);
         }
         let run = self
             .capital_reservation
             .as_ref()
             .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
-        let mut next = if let Some(old) = &self.exchange_evidence {
+        let previous = self.current_source()?;
+        let mut next = if let Some(old) = previous.as_ref() {
             old.clone()
         } else {
             DurableExchangeEvidence::new(run)?
@@ -2328,7 +2338,7 @@ impl DurableExecutionLedger {
             let owned = self.run_entries(run)?;
             next.capture(facts, &owned, run, require_fresh_cursor)?;
         }
-        if self.exchange_evidence.as_ref() != Some(&next) {
+        if previous.as_ref() != Some(&next) {
             self.store.save_metadata(
                 &self.entries,
                 self.risk_stop.as_ref(),
@@ -2337,13 +2347,11 @@ impl DurableExecutionLedger {
                 &self.strategy_periods,
                 &self.leverage_attempts,
             )?;
-            self.exchange_evidence = Some(next);
+            if !self.store.sqlite_native {
+                self.exchange_evidence = Some(next.clone());
+            }
         }
-        Ok(self
-            .exchange_evidence
-            .as_ref()
-            .expect("persisted")
-            .summary())
+        Ok(next.summary())
     }
 
     /// Recompute the run from immutable source events after restart.
@@ -2446,13 +2454,12 @@ impl DurableExecutionLedger {
         excluded_candidate: Option<&ExecutionPlan>,
     ) -> Result<StrategyFinancialPeriod, ExecutionLedgerError> {
         let source = self
-            .exchange_evidence
-            .as_ref()
+            .current_source()?
             .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
         if source.account_uid != run.account_uid_fingerprint || source.run_id != run.allocation_id {
             return Err(ExecutionLedgerError::AccountScopeMismatch);
         }
-        let linked = self.native_source_linked_entries(source)?;
+        let linked = self.native_source_linked_entries(&source)?;
         let mut entries = Vec::with_capacity(linked.len());
         let mut extra_reasons = BTreeSet::new();
         let mut excluded_seen = false;
@@ -2474,7 +2481,7 @@ impl DurableExecutionLedger {
         }
         // Index only the finite source observation once; every historical
         // order still gets exact venue and quantity validation.
-        let source_index = crate::strategy_finance::SourceOrderIndex::new(source);
+        let source_index = crate::strategy_finance::SourceOrderIndex::new(&source);
         sqlite_store::visit_entries_created_since(
             &self.store.path,
             &run.account_uid_fingerprint,
@@ -2521,7 +2528,7 @@ impl DurableExecutionLedger {
         }
         let mut report = crate::strategy_finance::assess_persisted_financial_period_with_index(
             run,
-            Some(source),
+            Some(&source),
             &entries,
             facts,
             coherent,
@@ -2718,11 +2725,13 @@ impl DurableExecutionLedger {
             || report.usable_for_new_risk
             || facts.summary.authority.account_uid_fingerprint != run.account_uid_fingerprint
             || !DurableExchangeEvidence::complete_source_checkpoint(facts)
-            || self
-                .exchange_evidence
-                .as_ref()
-                .is_none_or(|e| e.checksum_sha256 != report.evidence_sha256)
         {
+            return Ok(None);
+        }
+        let current_source = self
+            .current_source()?
+            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        if current_source.checksum_sha256 != report.evidence_sha256 {
             return Ok(None);
         }
         let Some(nav) = report
@@ -2741,10 +2750,7 @@ impl DurableExecutionLedger {
         }
         // A depleted or negative NAV is an auditable terminal observation:
         // persist both the value and the irreversible STOP in one file.
-        let evidence = self
-            .exchange_evidence
-            .as_ref()
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+        let evidence = &current_source;
         let (source_cursor_key, source_cursor, source_receipt_ms) = evidence
             .cursors
             .iter()
@@ -2856,10 +2862,7 @@ impl DurableExecutionLedger {
         }
         let mut next = self.strategy_periods.clone();
         next.nav_points.push(point.clone());
-        next.validate(
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-        )?;
+        next.validate(self.capital_reservation.as_ref(), Some(evidence))?;
         let new_stop = if self.risk_stop.is_none() {
             reason.map(|value| ExecutionRiskStop {
                 schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
@@ -2920,11 +2923,10 @@ impl DurableExecutionLedger {
             .as_ref()
             .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
         let source = self
-            .exchange_evidence
-            .as_ref()
+            .current_source()?
             .ok_or(ExecutionLedgerError::StrategyRunNotQuarantinable)?;
         if let Some(closed) = self.strategy_periods.unverified_run.as_ref() {
-            closed.validate(run, source)?;
+            closed.validate(run, &source)?;
             return Ok(closed.clone());
         }
         let as_of = crate::exchange_evidence::source_receipt_ms(&facts.summary.source_received_at)
@@ -2977,13 +2979,10 @@ impl DurableExecutionLedger {
         }
         // Source remains immutable and explicitly incomplete: no NAV, PnL,
         // or financial finalization is inferred from the current FLAT state.
-        let closed = StrategyUnverifiedClosure::new(run, source, observed_at_ms)?;
+        let closed = StrategyUnverifiedClosure::new(run, &source, observed_at_ms)?;
         let mut next = self.strategy_periods.clone();
         next.unverified_run = Some(closed.clone());
-        next.validate(
-            self.capital_reservation.as_ref(),
-            self.exchange_evidence.as_ref(),
-        )?;
+        next.validate(self.capital_reservation.as_ref(), Some(&source))?;
         self.store.save_metadata(
             &self.entries,
             self.risk_stop.as_ref(),
@@ -3065,13 +3064,12 @@ impl DurableExecutionLedger {
             return Ok(done.clone());
         }
         let evidence = self
-            .exchange_evidence
-            .as_ref()
+            .current_source()?
             .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
         let result = self
             .financial_period(facts, coherent)
             .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
-        let closed = StrategyFinalization::new(reservation, evidence, &result, observed_at_ms)?;
+        let closed = StrategyFinalization::new(reservation, &evidence, &result, observed_at_ms)?;
         let mut next = self.strategy_periods.clone();
         next.finalized_run = Some(closed.clone());
         self.store.save_metadata(
@@ -3094,20 +3092,8 @@ impl DurableExecutionLedger {
     ) -> Result<Option<ExchangeEvidenceSummary>, ExecutionLedgerError> {
         if self.store.sqlite_native {
             let summary = sqlite_store::source_summary(&self.store.path)?;
-            // Until the financial source migrates away from its historical
-            // Rust representation, compare both owner proofs. Divergent
-            // state must not supply a positive risk/coverage witness.
-            let cached = self
-                .exchange_evidence
-                .as_ref()
-                .map(DurableExchangeEvidence::summary);
-            if summary.as_ref().map(|s| (&s.run_id, &s.checksum_sha256))
-                != cached.as_ref().map(|s| (&s.run_id, &s.checksum_sha256))
-            {
-                return Err(ExecutionLedgerError::Corrupt(
-                    "native source SQL/Rust owner proof mismatch",
-                ));
-            }
+            // SQLite is the only source owner. Its authenticated summary
+            // cannot be contradicted by a separate Rust history cache.
             Ok(summary)
         } else {
             Ok(self
@@ -3345,8 +3331,7 @@ impl DurableExecutionLedger {
                 return Err(ExecutionLedgerError::ExchangeEvidenceCapacity);
             }
             let old_source = self
-                .exchange_evidence
-                .clone()
+                .current_source()?
                 .ok_or(ExecutionLedgerError::StrategyRunNotFinalizable)?;
             if let Some(finalized) = next.finalized_run.take() {
                 next.archived_runs.push(ArchivedStrategyRun {
