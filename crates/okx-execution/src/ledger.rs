@@ -2443,14 +2443,19 @@ impl DurableExecutionLedger {
         if !self.store.sqlite_native {
             return Ok(true);
         }
-        let run = self.capital_reservation.as_ref()
+        let run = self
+            .capital_reservation
+            .as_ref()
             .ok_or(ExecutionLedgerError::CapitalReservationUnattested)?;
         if run.allocation_id != point.run_id {
             return Ok(false);
         }
         sqlite_store::daily_risk_allows_new_risk(
-            &self.store.path, &run.account_uid_fingerprint,
-            &run.strategy_id, point, policy_daily_limit_usd,
+            &self.store.path,
+            &run.account_uid_fingerprint,
+            &run.strategy_id,
+            point,
+            policy_daily_limit_usd,
         )
     }
 
