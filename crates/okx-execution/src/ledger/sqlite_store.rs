@@ -3412,6 +3412,91 @@ mod tests {
         assert!(save_opening_metadata(&path, None, &relabelled, &opening, &period, &[]).is_err());
         assert_eq!(count("capital_epochs"), 1);
         assert_eq!(count("evidence_objects"), 1);
+
+        // The first NAV checkpoint must resolve a real indexed BILLS receipt
+        // from the SAME account and source run. An invented cursor is rejected.
+        let received = "2026-10-22T12:00:00Z";
+        let at = crate::exchange_evidence::source_receipt_ms(received).unwrap();
+        let cursor = crate::exchange_evidence::ExchangeCoverageCursor {
+            source: "OKX_REST_ACCOUNT_HISTORY".to_owned(),
+            source_received_at: received.to_owned(),
+            generation: "native-checkpoint".to_owned(),
+            account_as_of_ms: at,
+            order_complete: true,
+            fill_complete: true,
+            bill_complete: true,
+            covered_ranges: serde_json::json!({}),
+        };
+        let mut point = StrategyNavPoint {
+            schema: STRATEGY_NAV_POINT_SCHEMA_V1.to_owned(),
+            run_id: reservation.allocation_id.clone(),
+            observed_at_ms: at,
+            account_as_of_ms: at,
+            evidence_sha256: "f".repeat(64),
+            source_cursor_key: "account-receipt-1".to_owned(),
+            source_cursor_sha256: checksum(&serde_json::to_vec(&cursor).unwrap()),
+            nav_usdt: "100".to_owned(),
+            high_water_usdt: "100".to_owned(),
+            daily_gross_loss_usdt: "0".to_owned(),
+            utc_day_start_ms: at / 86_400_000 * 86_400_000,
+            previous_sha256: String::new(),
+            checksum_sha256: String::new(),
+        };
+        point.checksum_sha256 = point.hash().unwrap();
+        {
+            let mut c = Connection::open(&path).unwrap();
+            c.pragma_update(None, "foreign_keys", "ON").unwrap();
+            let tx = c.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO native_source_runs VALUES(?1,?2,?3,?4)",
+                params![
+                    &reservation.allocation_id,
+                    &uid,
+                    crate::EXCHANGE_EVIDENCE_SCHEMA_V1,
+                    "e".repeat(64)
+                ],
+            )
+            .unwrap();
+            let payload = encode(&cursor).unwrap();
+            tx.execute(
+                "INSERT INTO native_source_cursors VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    &reservation.allocation_id,
+                    &point.source_cursor_key,
+                    i64::try_from(at).unwrap(),
+                    checksum(&payload),
+                    payload
+                ],
+            )
+            .unwrap();
+            crate::ledger::sqlite_finance::persist_source_receipt(
+                &tx,
+                &uid,
+                &reservation.allocation_id,
+                &point.source_cursor_key,
+                &cursor,
+            )
+            .unwrap();
+            let mut absent = point.clone();
+            absent.source_cursor_key = "nonexistent".to_owned();
+            absent.checksum_sha256 = absent.hash().unwrap();
+            assert!(persist_native_nav_point(&tx, &absent, &uid).is_err());
+            persist_native_nav_point(&tx, &point, &uid).unwrap();
+            tx.commit().unwrap();
+        }
+        let c = Connection::open(&path).unwrap();
+        let nav: (String, String, String) = c
+            .query_row(
+                "SELECT nav_decimal,finance_completeness,checkpoint_sha256
+                 FROM nav_points WHERE epoch_id=?1",
+                params![&reservation.allocation_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(nav.0, "100");
+        assert_eq!(nav.1, "PARTIAL");
+        assert_eq!(nav.2, point.checksum_sha256);
+        drop(c);
         std::fs::remove_dir_all(root).unwrap();
     }
 
