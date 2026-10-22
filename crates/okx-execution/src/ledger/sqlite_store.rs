@@ -2231,7 +2231,10 @@ pub(super) fn upgrade_reconciliation_indices_offline(
         while let Some(row) = rows.next().map_err(io)? {
             let entry = verified_indexed_entry(row, &uid)?;
             let intent = entry.record.plan.intent_id.as_str();
-            if !matches!(entry.record.state, ExecutionState::Prepared | ExecutionState::Rejected) {
+            if !matches!(
+                entry.record.state,
+                ExecutionState::Prepared | ExecutionState::Rejected
+            ) {
                 tx.execute(
                     "INSERT INTO native_submitted_intents(intent_id) VALUES(?1)",
                     params![intent],
@@ -2493,9 +2496,12 @@ fn attest_snapshot_with_indices(
         ) {
             if let Some(submitted) = submitted.as_mut() {
                 let submitted_row =
-                    submitted.next().map_err(io)?.ok_or(ExecutionLedgerError::Corrupt(
-                        "missing native submitted intent",
-                    ))?;
+                    submitted
+                        .next()
+                        .map_err(io)?
+                        .ok_or(ExecutionLedgerError::Corrupt(
+                            "missing native submitted intent",
+                        ))?;
                 let submitted_id: String = submitted_row.get(0).map_err(io)?;
                 if submitted_id != *id {
                     return Err(ExecutionLedgerError::Corrupt(
@@ -2506,9 +2512,12 @@ fn attest_snapshot_with_indices(
         }
         if let Some(order_id) = entry.record.order_id.as_deref() {
             if let Some(links) = links.as_mut() {
-                let link_row = links.next().map_err(io)?.ok_or(
-                    ExecutionLedgerError::Corrupt("missing native venue order identity"),
-                )?;
+                let link_row = links
+                    .next()
+                    .map_err(io)?
+                    .ok_or(ExecutionLedgerError::Corrupt(
+                        "missing native venue order identity",
+                    ))?;
                 let link_id: String = link_row.get(0).map_err(io)?;
                 let link_order: String = link_row.get(1).map_err(io)?;
                 if link_id != *id || link_order != order_id {
