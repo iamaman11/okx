@@ -3789,7 +3789,10 @@ mod tests {
         .unwrap();
         let store = ExecutionLedgerStore::sqlite_at(&db);
         let mut ledger = DurableExecutionLedger::open(store.clone(), 2000).unwrap();
-        assert!(ledger.exchange_evidence.is_none(), "native source must not stay resident");
+        assert!(
+            ledger.exchange_evidence.is_none(),
+            "native source must not stay resident"
+        );
         assert_eq!(
             ledger.current_source().unwrap().unwrap().checksum_sha256,
             source.checksum_sha256,
@@ -3798,7 +3801,11 @@ mod tests {
         ledger.stop_new_risk("OPERATOR_HALT", 3000).unwrap();
         assert!(ledger.exchange_evidence.is_none());
         assert_eq!(
-            ledger.exchange_evidence_summary().unwrap().unwrap().checksum_sha256,
+            ledger
+                .exchange_evidence_summary()
+                .unwrap()
+                .unwrap()
+                .checksum_sha256,
             before.checksum_sha256,
         );
         drop(ledger);
