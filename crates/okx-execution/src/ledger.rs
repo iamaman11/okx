@@ -2731,10 +2731,19 @@ impl DurableExecutionLedger {
         {
             return Ok(None);
         }
-        let current_source = self
-            .current_source()?
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if current_source.checksum_sha256 != report.evidence_sha256 {
+        // The native branch uses one authenticated SQL snapshot below,
+        // not the historical Rust source map. The legacy import path keeps
+        // the established source validation until offline cutover.
+        let legacy_source = if self.store.sqlite_native {
+            None
+        } else {
+            self.current_source()?
+        };
+        if !self.store.sqlite_native
+            && legacy_source.as_ref().is_none_or(|source| {
+                source.checksum_sha256 != report.evidence_sha256
+            })
+        {
             return Ok(None);
         }
         let Some(nav) = report
@@ -2752,43 +2761,57 @@ impl DurableExecutionLedger {
             return Ok(None);
         }
         // A depleted or negative NAV is an auditable terminal observation:
-        // persist both the value and the irreversible STOP in one file.
-        let evidence = &current_source;
-        let (source_cursor_key, source_cursor, source_receipt_ms) = evidence
-            .cursors
-            .iter()
-            .filter_map(|(key, cursor)| {
-                let received =
-                    crate::exchange_evidence::source_receipt_ms(&cursor.source_received_at)?;
-                (received <= as_of).then_some((key, cursor, received))
-            })
-            .max_by_key(|(_, _, received)| *received)
-            .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
-        if as_of - source_receipt_ms > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS {
-            return Ok(None);
-        }
-        let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(source_cursor)?));
+        // persist both the value and the irreversible STOP in one transaction.
         let day = as_of / 86_400_000 * 86_400_000;
         let run_history = if self.store.sqlite_native {
             None
         } else {
             Some(self.run_entries(run)?)
         };
-        let owned: BTreeMap<_, _> = if self.store.sqlite_native {
-            self.native_source_linked_entries(evidence)?
-        } else {
-            run_history
-                .as_ref()
-                .expect("legacy run history")
-                .iter()
-                .map(|entry| (entry.record.plan.intent_id.clone(), entry.clone()))
-                .collect()
-        };
-        let Some(gross_loss) =
-            verified_daily_strategy_bill_loss(evidence, &owned, run, report, day, as_of)?
-        else {
-            return Ok(None);
-        };
+        let (source_cursor_key, source_cursor, source_receipt_ms, gross_loss) =
+            if self.store.sqlite_native {
+                let Some(proof) = sqlite_store::nav_cursor_and_daily_loss(
+                    &self.store.path,
+                    run,
+                    report,
+                    day,
+                    as_of,
+                )? else {
+                    return Ok(None);
+                };
+                proof
+            } else {
+                let evidence = legacy_source
+                    .as_ref()
+                    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+                let (key, cursor, received) = evidence
+                    .cursors
+                    .iter()
+                    .filter_map(|(key, cursor)| {
+                        let received = crate::exchange_evidence::source_receipt_ms(
+                            &cursor.source_received_at,
+                        )?;
+                        (received <= as_of).then_some((key, cursor, received))
+                    })
+                    .max_by_key(|(_, _, received)| *received)
+                    .ok_or(ExecutionLedgerError::ExchangeSourceIncomplete)?;
+                if as_of - received > crate::exchange_evidence::MAX_SOURCE_COVERAGE_GAP_MS {
+                    return Ok(None);
+                }
+                let owned = run_history
+                    .as_ref()
+                    .expect("legacy run history")
+                    .iter()
+                    .map(|entry| (entry.record.plan.intent_id.clone(), entry.clone()))
+                    .collect();
+                let Some(loss) = verified_daily_strategy_bill_loss(
+                    evidence, &owned, run, report, day, as_of,
+                )? else {
+                    return Ok(None);
+                };
+                (key.clone(), cursor.clone(), received, loss)
+            };
+        let cursor_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&source_cursor)?));
         let prior = self.strategy_periods.nav_points.last();
         if prior.is_some_and(|p| p.observed_at_ms >= now) {
             return Ok(None);
@@ -2818,7 +2841,7 @@ impl DurableExecutionLedger {
             observed_at_ms: now,
             account_as_of_ms: as_of,
             evidence_sha256: report.evidence_sha256.clone(),
-            source_cursor_key: source_cursor_key.clone(),
+            source_cursor_key,
             source_cursor_sha256: cursor_sha256,
             nav_usdt: nav.normalize().to_string(),
             high_water_usdt: peak.normalize().to_string(),
@@ -2865,7 +2888,12 @@ impl DurableExecutionLedger {
         }
         let mut next = self.strategy_periods.clone();
         next.nav_points.push(point.clone());
-        next.validate(self.capital_reservation.as_ref(), Some(evidence))?;
+        // Native save_metadata() checks this point against the indexed
+        // source cursor under the same WAL transaction. The old source
+        // object is required only for the legacy v14 branch.
+        if let Some(evidence) = legacy_source.as_ref() {
+            next.validate(self.capital_reservation.as_ref(), Some(evidence))?;
+        }
         let new_stop = if self.risk_stop.is_none() {
             reason.map(|value| ExecutionRiskStop {
                 schema: EXECUTION_RISK_STOP_SCHEMA_V1.to_owned(),
