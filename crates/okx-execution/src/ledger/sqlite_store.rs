@@ -3554,6 +3554,134 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Construct a real pre-upgrade v1 WAL with a durable BEGIN_POST and no
+    /// v2 reconciliation indices. No hand-written fake execution records.
+    fn prior_v1_with_begin_post(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, String) {
+        let root = test_root(tag);
+        let db = root.join("account.sqlite");
+        let id = format!("{tag}_intent_000001");
+        let plan = ExecutionPlan {
+            schema: EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+            intent_id: id.clone(),
+            client_order_id: derive_client_order_id(&id),
+            reference_generation: "sha256:reference".to_owned(),
+            account_generation: "sha256:account".to_owned(),
+            account_uid_fingerprint: "a".repeat(64),
+            instrument_id: "BTC-USDT-SWAP".to_owned(),
+            trade_mode: crate::TradeMode::Cross,
+            side: crate::OrderSide::Buy,
+            position_side: PositionSide::Long,
+            action: ExecutionAction::Open,
+            order_type: crate::OrderType::Limit,
+            size: "1".to_owned(),
+            price: "0.1".to_owned(),
+            open_risk: None,
+            risk_binding: None,
+        };
+        let entry = ExecutionLedgerEntry {
+            record: ExecutionRecord::new(plan),
+            created_at_ms: 1000,
+            updated_at_ms: 1000,
+        };
+        save(
+            &db,
+            &BTreeMap::from([(id.clone(), entry)]),
+            None,
+            None,
+            None,
+            &StrategyPeriodHistory::default(),
+            &[],
+        )
+        .unwrap();
+        let store = ExecutionLedgerStore::sqlite_at(&db);
+        let mut engine = DurableExecutionLedger::open(store, 1001).unwrap();
+        assert_eq!(
+            engine.begin_submission(&id, 1002).unwrap().record.state,
+            ExecutionState::Submitting
+        );
+        drop(engine);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "DROP TABLE native_intent_order_link;
+             DROP TABLE native_submitted_intents;
+             PRAGMA user_version=1;",
+        )
+        .unwrap();
+        drop(conn);
+        (root, db, id)
+    }
+
+    #[test]
+    fn native_v1_upgrade_retains_begin_post_and_recovers_unknown_exactly_once() {
+        let (root, db, id) = prior_v1_with_begin_post("native-v1-upgrade");
+        assert!(attest(&db).is_err());
+        let lease = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
+        upgrade_reconciliation_indices_offline(&db, &lease).unwrap();
+        // The existing exclusive owner may retry this operation, but an
+        // accepted v2 owner never backfills or mutates a second time.
+        upgrade_reconciliation_indices_offline(&db, &lease).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        let post_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM post_attempts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(post_count, 1);
+        drop(conn);
+        attest(&db).unwrap();
+        let store = ExecutionLedgerStore::sqlite_at(&db);
+        let mut engine = DurableExecutionLedger::open(store, 1003).unwrap();
+        assert_eq!(
+            engine.read_intent(&id).unwrap().unwrap().record.state,
+            ExecutionState::UnknownSubmission
+        );
+        assert!(engine.begin_submission(&id, 1004).is_err());
+        let census = native_reconciliation_inventory(
+            &db,
+            &BTreeSet::from([derive_client_order_id(&id)]).iter().map(String::as_str).collect(),
+            &BTreeSet::new(),
+            16,
+        )
+        .unwrap();
+        assert_eq!((census.total, census.submitted), (1, 1));
+        drop(engine);
+        drop(lease);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_v1_upgrade_rejects_forged_projections_without_any_schema_mutation() {
+        let (root, db, id) = prior_v1_with_begin_post("native-v1-tamper");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE intents SET current_state='Rejected' WHERE intent_id=?1",
+            params![&id],
+        )
+        .unwrap();
+        drop(conn);
+        let lease = ExecutionLedgerStore::acquire_writer_lease(&root).unwrap();
+        assert!(upgrade_reconciliation_indices_offline(&db, &lease).is_err());
+        let conn = Connection::open(&db).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let new_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN
+                 ('native_intent_order_link','native_submitted_intents')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_tables, 0);
+        drop(conn);
+        drop(lease);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn native_sqlite_transition_survives_evicted_memory_without_replaying_post() {
         let root = test_root("native-cached-intent-eviction");
